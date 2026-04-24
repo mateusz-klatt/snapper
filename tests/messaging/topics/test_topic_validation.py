@@ -33,6 +33,7 @@ from snapper.messaging.topics.validation import _validate_market_source
 from snapper.messaging.topics.validation import _validate_market_topic
 from snapper.messaging.topics.validation import _validate_orders_commands_topic
 from snapper.messaging.topics.validation import _validate_orders_events_topic
+from snapper.messaging.topics.validation import _validate_plans_decisions_topic
 from snapper.messaging.topics.validation import _validate_prefix_pattern
 from snapper.messaging.topics.validation import _validate_replay_source
 from snapper.messaging.topics.validation import _validate_signal_topic
@@ -3872,6 +3873,64 @@ class TestAlertsTopicValidation:
     def test_subscribe_to_prefix_accepted(self) -> None:
         """``alerts.`` prefix subscription is accepted by the dispatcher."""
         valid, err = validate_subscription_pattern("alerts.")
+
+        assert valid, err
+
+
+class TestPlansDecisionsTopicValidation:
+    """Tests for ``_validate_plans_decisions_topic`` (§D6.2 — BE-3b)."""
+
+    _PLAN = "019dbb34-f439-77bd-afa8-ee5321d60307"
+
+    def test_valid_plan_decisions_topic(self) -> None:
+        """Happy path: 3-segment UUID7 tail is accepted."""
+        valid, err = _validate_plans_decisions_topic(f"plans.decisions.{self._PLAN}")
+
+        assert valid
+        assert err == ""
+
+    def test_wrong_segment_count_rejected(self) -> None:
+        """Segment counts other than 3 are rejected."""
+        for bad in (
+            "plans.decisions",
+            f"plans.decisions.{self._PLAN}.extra",
+            "plans.decisions.",
+        ):
+            valid, err = _validate_plans_decisions_topic(bad)
+
+            assert not valid, f"{bad!r} should be invalid"
+            assert "3 segments" in err
+
+    def test_wrong_prefix_rejected(self) -> None:
+        """The first two segments must be ``plans.decisions``."""
+        valid, err = _validate_plans_decisions_topic(f"plans.rollouts.{self._PLAN}")
+
+        assert not valid
+        assert "plans.decisions" in err
+
+    def test_non_uuid7_plan_id_rejected(self) -> None:
+        """Segment 3 must be a UUID7 per project-wide public_id convention."""
+        valid, err = _validate_plans_decisions_topic("plans.decisions.not-a-uuid")
+
+        assert not valid
+        assert "UUID7" in err
+
+    def test_via_validate_topic(self) -> None:
+        """Dispatcher ``validate_topic`` routes plans.decisions.* topics correctly."""
+        valid, err = validate_topic(f"plans.decisions.{self._PLAN}")
+
+        assert valid, err
+
+    def test_subscribe_to_prefix_accepted(self) -> None:
+        """``plans.decisions.`` prefix subscription is accepted (closes R10.B-1).
+
+        The sidecar's stop-loss rule calls
+        ``subscriber.subscribe("plans.decisions.")`` at start-up; the
+        validator-side allowlist must include ``"plans"`` as a valid
+        category (Plan 2 v1.12 R10.B-1 closure) or this subscription
+        fails before the first frame is even received.
+        """
+        valid, err = validate_subscription_pattern("plans.decisions.")
 
         assert valid, err
 

@@ -159,6 +159,22 @@ export const ExecutionPlanDataSchema = z
   })
   .strict()
 
+export const ExecutionPlanDecisionEventDataSchema = z
+  .object({
+    type: z.literal('execution_plan_decision_event'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    decision_public_id: z.string(),
+    plan_public_id: z.string(),
+    decision_type: z.string(),
+    trigger_type: z.string(),
+    reason: z.string(),
+    triggered_at: z.iso.datetime(),
+  })
+  .strict()
+
 export const FrontMonthDataSchema = z
   .object({
     type: z.literal('front_month'),

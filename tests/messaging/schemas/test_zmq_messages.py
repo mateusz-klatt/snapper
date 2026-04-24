@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from snapper.messaging.schemas.data import AlertEventData
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import ExecutionPlanDecisionEventData
 from snapper.messaging.schemas.data import FundingAccrualData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderCancelData
@@ -812,3 +813,54 @@ class TestAlertEventDataSchema:
                 title="Filled",
                 body="body",
             )
+
+
+class TestExecutionPlanDecisionEventDataSchema:
+    """BE-3b §D6.2 — ``ExecutionPlanDecisionEventData`` schema + dispatch."""
+
+    def _minimal(self) -> ExecutionPlanDecisionEventData:
+        """Return a fully-valid minimal decision event fixture."""
+        return ExecutionPlanDecisionEventData(
+            session_id="s1",
+            sequence_id=7,
+            public_id="019dbb34-f439-77bd-afa8-ee5321d60308",
+            timestamp=datetime(2026, 4, 23, 12, tzinfo=UTC),
+            decision_public_id="019dbb34-f439-77bd-afa8-ee5321d60309",
+            plan_public_id="019dbb34-f439-77bd-afa8-ee5321d60307",
+            decision_type="evaluator",
+            trigger_type="tick",
+            reason="sl_hit",
+            triggered_at=datetime(2026, 4, 23, 12, tzinfo=UTC),
+        )
+
+    def test_roundtrip_through_parse_message(self) -> None:
+        """Serialize + deserialize through ``parse_message`` preserves fields."""
+        original = self._minimal()
+
+        parsed = parse_message(original.to_json())
+
+        assert isinstance(parsed, ExecutionPlanDecisionEventData)
+        assert parsed.reason == "sl_hit"
+        assert parsed.plan_public_id == "019dbb34-f439-77bd-afa8-ee5321d60307"
+        assert parsed.decision_type == "evaluator"
+        assert parsed.trigger_type == "tick"
+
+    def test_free_form_reason_accepted(self) -> None:
+        """``reason`` is free-form ``str`` (Plan v1.12 R10.B-3 closure)."""
+        event = ExecutionPlanDecisionEventData(
+            session_id="s1",
+            sequence_id=7,
+            public_id="019dbb34-f439-77bd-afa8-ee5321d60308",
+            timestamp=datetime(2026, 4, 23, 12, tzinfo=UTC),
+            decision_public_id="019dbb34-f439-77bd-afa8-ee5321d6030a",
+            plan_public_id="019dbb34-f439-77bd-afa8-ee5321d60307",
+            decision_type="lifecycle",
+            trigger_type="execution",
+            reason="Cycle 42 closed before command dispatch",
+            triggered_at=datetime(2026, 4, 23, 12, tzinfo=UTC),
+        )
+
+        parsed = parse_message(event.to_json())
+
+        assert isinstance(parsed, ExecutionPlanDecisionEventData)
+        assert parsed.reason == "Cycle 42 closed before command dispatch"

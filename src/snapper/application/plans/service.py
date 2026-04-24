@@ -46,13 +46,16 @@ from snapper.data.repository_types import ExecutionPlanRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_ORDER_FLOW
+from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import ExecutionPlanDecisionEventData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import TickData
 from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.schemas.messages import parse_message
+from snapper.messaging.topics.builders import plans_decisions_topic
 
 _EVALUATOR_REGISTRY: dict[str, type[PlanEvaluator]] = {
     "manual_once": ManualOnceEvaluator,
@@ -124,6 +127,7 @@ class PlanExecutorService(RegisterableProcess):
         self._running = False
         self._zmq_context: zmq.asyncio.Context | None = None
         self._subscriber: ValidatedSubscriber | None = None
+        self._publisher: ValidatedPublisher | None = None
         self._caps_enforcer = caps_enforcer
 
     async def start(self) -> None:
@@ -142,6 +146,7 @@ class PlanExecutorService(RegisterableProcess):
             pricing = USDConverter(repository=self.repository)
             self._caps_enforcer = TradingCapsEnforcer(repository=self.repository, pricing=pricing)
         self._setup_subscriber()
+        self._setup_publisher()
         if self._subscriber is not None:
             await asyncio.sleep(_SLOW_JOINER_STABILIZATION_S)
         await self._recover_plans()
@@ -159,6 +164,7 @@ class PlanExecutorService(RegisterableProcess):
             with contextlib.suppress(Exception):
                 self._subscriber.close()
             self._subscriber = None
+        self._publisher = None
         if self._zmq_context is not None:
             with contextlib.suppress(Exception):
                 self._zmq_context.term()
@@ -189,6 +195,39 @@ class PlanExecutorService(RegisterableProcess):
         self._subscriber.subscribe("orders.events.")
         self._subscriber.subscribe("market.")
         logger.info("PlanExecutorService: subscribed to orders.events. and market.")
+
+    def _setup_publisher(self) -> None:
+        """Create ZMQ publisher for the ``plans.decisions.*`` topic family (§D6.2).
+
+        Self-bootstrapped from ``settings.zmq_broker_xsub`` following
+        the ``TraderCoordinator`` / ``BalanceService`` / ``SettingsService``
+        pattern (see ``application/engine/trader.py:2428-2432`` and
+        ``application/services/settings.py:232-236``). ``PlanExecutorService``
+        does not receive a DI-injected publisher because
+        ``process_manager/launcher.py:291`` instantiates processes via
+        ``process_class(**validated_params)`` without a DI container
+        (Plan 2 v1.12 R10.B-4 closure).
+
+        Short-circuits when ``zmq_broker_xsub`` is not a real string
+        (MagicMock in unit tests), leaving ``self._publisher = None``.
+        ``_log_decision`` tolerates this by skipping the publish step —
+        the DB insert remains the source of truth (best-effort emit
+        per §D6.2 fail-closed semantics).
+        """
+        broker_addr = getattr(self.settings, "zmq_broker_xsub", None)
+        if not isinstance(broker_addr, str) or not broker_addr:
+            logger.info(
+                "PlanExecutorService: no broker XSUB endpoint configured, "
+                "skipping plans.decisions.* publisher setup"
+            )
+            return
+        if self._zmq_context is None:
+            self._zmq_context = zmq.asyncio.Context()
+        raw_pub_socket = self._zmq_context.socket(zmq.PUB)
+        apply_hwm(raw_pub_socket, sndhwm=HWM_ORDER_FLOW)
+        raw_pub_socket.connect(broker_addr)
+        self._publisher = ValidatedPublisher(raw_pub_socket)
+        logger.info("PlanExecutorService: connected publisher to broker {}", broker_addr)
 
     async def _recover_plans(self) -> None:
         """Load all actionable plans from DB and instantiate evaluators.
@@ -722,7 +761,7 @@ class PlanExecutorService(RegisterableProcess):
             source_surface="strategy",
         )
         try:
-            await self.repository.insert_execution_plan_decision(
+            decision_public_id = await self.repository.insert_execution_plan_decision(
                 row=row,
                 bus_time=now,
                 session_id=self.tracker.session_id,
@@ -730,6 +769,64 @@ class PlanExecutorService(RegisterableProcess):
             )
         except Exception as exc:
             logger.error("Failed to log decision for plan {}: {}", plan_public_id, exc)
+            return
+        await self._publish_decision_event(
+            decision_public_id=decision_public_id,
+            plan_public_id=plan_public_id,
+            decision_type=decision_type,
+            trigger_type=trigger_type,
+            reason=reason,
+            triggered_at=now,
+        )
+
+    async def _publish_decision_event(
+        self,
+        *,
+        decision_public_id: str,
+        plan_public_id: str,
+        decision_type: str,
+        trigger_type: str,
+        reason: str,
+        triggered_at: datetime,
+    ) -> None:
+        """Best-effort publish of the ``plans.decisions.{plan_public_id}`` event (§D6.2).
+
+        DB insert is the source of truth — publish failure logs
+        ``logger.warning`` and returns without raising so the caller
+        (bracket / trailing-stop firing paths) completes normally.
+        Durable replay of missed publishes is deferred to BE-3c.
+
+        Short-circuits when ``self._publisher is None`` (unit-test
+        harness that never called ``_setup_publisher`` or environments
+        where the broker XSUB endpoint isn't configured).
+        """
+        if self._publisher is None:
+            return
+        try:
+            event = ExecutionPlanDecisionEventData(
+                decision_public_id=decision_public_id,
+                plan_public_id=plan_public_id,
+                decision_type=decision_type,
+                trigger_type=trigger_type,
+                reason=reason,
+                triggered_at=triggered_at,
+                session_id=self.tracker.session_id,
+                sequence_id=self.tracker.next_sequence("plan_decisions"),
+                public_id=str(uuid7()),
+                timestamp=triggered_at,
+            )
+            await self._publisher.send_multipart(
+                topic=plans_decisions_topic(plan_public_id),
+                payload=event.to_json().encode("utf-8"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "failed to publish plans.decisions event"
+                " plan_public_id={plan} decision_public_id={dec} err={err}",
+                plan=plan_public_id,
+                dec=decision_public_id,
+                err=exc,
+            )
 
     async def _check_capabilities(
         self,

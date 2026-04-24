@@ -16,6 +16,7 @@ from snapper.api.schemas.base import StrictDataSchema
 from snapper.messaging.schemas.data import AlertEventData
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import ExecutionPlanDecisionEventData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderCancelData
 from snapper.messaging.schemas.data import OrderData
@@ -83,6 +84,7 @@ MESSAGE_TYPE_MAP: dict[str, type[StrictDataSchema[Any]]] = {
     "replay_start": ReplayStartData,
     "replay_end": ReplayEndData,
     "alert_event": AlertEventData,
+    "execution_plan_decision_event": ExecutionPlanDecisionEventData,
 }
 """Mapping from message type string to Data class for deserialization."""
 

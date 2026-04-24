@@ -474,6 +474,78 @@ class TestAlertEventRepo:
 
         assert row is None
 
+    @pytest.mark.asyncio
+    async def test_list_alert_events_with_dedup_key_window(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Only events matching (user, dedup_key, timestamp >= since) return.
+
+        Drives the BE-3b rule-side suppression helper: a 2-event
+        fixture — one inside the window, one outside — verifies the
+        since-bound is inclusive on the lower edge + exact key match
+        on dedup_key.
+        """
+        inside = await repo.insert_alert_event(
+            AlertEventInsertRow(
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(5),
+                user_public_id="user-dedup",
+                alert_type="order_fill_full",
+                priority="medium",
+                title="Filled",
+                body="BTC-USD 0.1 filled",
+                dedup_key="order_fill_full.coid-1",
+            )
+        )
+        await repo.insert_alert_event(
+            AlertEventInsertRow(
+                session_id="s1",
+                sequence_id=2,
+                timestamp=_ts(1),
+                user_public_id="user-dedup",
+                alert_type="order_fill_full",
+                priority="medium",
+                title="Filled",
+                body="BTC-USD 0.1 filled",
+                dedup_key="order_fill_full.coid-1",
+            )
+        )
+        await repo.insert_alert_event(
+            AlertEventInsertRow(
+                session_id="s1",
+                sequence_id=3,
+                timestamp=_ts(5),
+                user_public_id="user-dedup",
+                alert_type="order_fill_full",
+                priority="medium",
+                title="Filled",
+                body="other coid",
+                dedup_key="order_fill_full.coid-2",
+            )
+        )
+
+        within_window = await repo.list_alert_events_with_dedup_key(
+            "user-dedup", "order_fill_full.coid-1", since=_ts(3)
+        )
+        different_user = await repo.list_alert_events_with_dedup_key(
+            "user-other", "order_fill_full.coid-1", since=_ts(0)
+        )
+
+        assert len(within_window) == 1
+        assert within_window[0]["public_id"] == inside
+        assert different_user == []
+
+    @pytest.mark.asyncio
+    async def test_list_alert_events_with_dedup_key_empty_when_no_match(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Unknown (user, dedup_key) pair returns an empty list, not None."""
+        result = await repo.list_alert_events_with_dedup_key(
+            "ghost-user", "order_fill_full.no-such-key", since=_ts(0)
+        )
+        assert result == []
+
 
 class TestAlertDeliveryRepo:
     """SCD2 behaviour of the seven delivery methods."""
@@ -582,6 +654,54 @@ class TestAlertDeliveryRepo:
 
         ready_ids = {r["public_id"] for r in ready}
         assert ready_ids == {ready_pid, immediate_pid}
+
+
+class TestListUsersWithPermission:
+    """BE-3b §D6.1 Rule 4 fan-out helper."""
+
+    @pytest.mark.asyncio
+    async def test_returns_users_with_matching_role(self, repo: SQLAlchemyRepository) -> None:
+        """Only active users whose role grants the permission are returned."""
+        async with repo.session() as s:
+            s.add_all(
+                [
+                    User(
+                        public_id="admin-user",
+                        username="admin",
+                        email="admin@example.test",
+                        password_hash="x",
+                        role="admin",
+                        created_at=_ts(),
+                        session_id="seed",
+                        sequence_id=1,
+                        timestamp=_ts(),
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                    User(
+                        public_id="viewer-user",
+                        username="viewer",
+                        email="viewer@example.test",
+                        password_hash="x",
+                        role="viewer",
+                        created_at=_ts(),
+                        session_id="seed",
+                        sequence_id=2,
+                        timestamp=_ts(),
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                ]
+            )
+            await s.commit()
+
+        result = await repo.list_users_with_permission("read:system_status")
+
+        assert set(result) == {"admin-user", "viewer-user"}
+
+    @pytest.mark.asyncio
+    async def test_unknown_permission_returns_empty(self, repo: SQLAlchemyRepository) -> None:
+        """A permission no role grants yields an empty list (no error)."""
+        result = await repo.list_users_with_permission("unknown:permission")
+        assert result == []
 
 
 class TestScopeHelpers:

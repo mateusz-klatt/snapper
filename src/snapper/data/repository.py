@@ -76,6 +76,7 @@ from sqlalchemy.orm import sessionmaker as sync_sessionmaker
 from sqlalchemy.pool import NullPool
 from sqlalchemy.pool import StaticPool
 
+from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.core.json_types import JsonObject
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
@@ -2793,6 +2794,60 @@ class Repository(ABC):
     @abstractmethod
     async def get_alert_event_by_public_id(self, public_id: str) -> AlertEventRow | None:
         """Active alert_event by public_id; None when missing or SCD2-closed."""
+        ...
+
+    @abstractmethod
+    async def list_alert_events_with_dedup_key(
+        self,
+        user_public_id: str,
+        dedup_key: str,
+        since: datetime,
+    ) -> list[AlertEventRow]:
+        """Active ``alert_events`` matching user+dedup_key emitted at/after ``since``.
+
+        Used by the notify sidecar's rule-side dedup helper (§D6.1) to
+        suppress duplicate alerts within a per-rule
+        ``suppression_window_seconds`` — the table's
+        ``ix_alert_events_dedup`` composite index
+        (``user_public_id, dedup_key, timestamp``) drives this query.
+
+        Empty list when no matching events exist. ``since = now`` of
+        the rule evaluation minus the configured window; a window of
+        0 always yields an empty list (rules that set
+        ``suppression_window_seconds = 0`` rely on index-side
+        defence-in-depth rather than rule-side pre-check).
+
+        Args:
+            user_public_id: Recipient user UUID7 — scope cut per the
+                index's leading column.
+            dedup_key: Rule-minted suppression key
+                (``f"{alert_type}.{logical_entity_id}"``).
+            since: Lower bound on ``timestamp`` (inclusive). Rows
+                older than ``since`` are excluded.
+        """
+        ...
+
+    @abstractmethod
+    async def list_users_with_permission(self, permission: str) -> list[str]:
+        """Active user ``public_id``s whose role grants ``permission``.
+
+        Used by the notify sidecar's ``critical_system_error`` rule
+        (§D6.1 Rule 4) to fan the alert out to every admin — the
+        rule emits one ``AlertEventInsertRow`` per returned user_id.
+        Membership is derived from ``auth.domain.permissions.ROLE_PERMISSIONS``
+        so the calling rule doesn't hard-code which roles count as
+        "admin" (adding / removing roles remains a pure permissions
+        change, no sidecar re-plumbing).
+
+        Args:
+            permission: ``snapper.auth.domain.permissions.Permission``
+                value (string form — ``Permission.READ_SYSTEM_STATUS``
+                serializes to ``"read:system_status"``).
+
+        Returns:
+            Newest-first list of user public_ids. Empty list when no
+            active user holds a role granting the permission.
+        """
         ...
 
     @abstractmethod
@@ -8417,6 +8472,50 @@ class SQLAlchemyRepository(Repository):
             if event_row is None:
                 return None
             return self._alert_event_row_from(event_row)
+
+    async def list_alert_events_with_dedup_key(
+        self,
+        user_public_id: str,
+        dedup_key: str,
+        since: datetime,
+    ) -> list[AlertEventRow]:
+        """Dedup-window read: active AlertEvents for (user, dedup_key, >= since)."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertEvent).where(
+                    AlertEvent.user_public_id == user_public_id,
+                    AlertEvent.dedup_key == dedup_key,
+                    AlertEvent.timestamp >= since,
+                    AlertEvent.known_to == KNOWN_TO_MAX,
+                )
+            )
+            return [self._alert_event_row_from(row) for row in result.scalars().all()]
+
+    async def list_users_with_permission(self, permission: str) -> list[str]:
+        """Active user public_ids whose role grants ``permission``.
+
+        Role → permissions mapping is read from
+        ``snapper.auth.domain.permissions.ROLE_PERMISSIONS``; the
+        matched role names are then used to filter the ``users`` SCD2
+        table on its ``role`` column.
+        """
+        matching_roles: list[str] = [
+            role.value
+            for role, perms in ROLE_PERMISSIONS.items()
+            if permission in {p.value for p in perms}
+        ]
+        if not matching_roles:
+            return []
+        async with self.session() as s:
+            result = await s.execute(
+                select(User.public_id)
+                .where(
+                    User.role.in_(matching_roles),
+                    User.known_to == KNOWN_TO_MAX,
+                )
+                .order_by(User.timestamp.desc())
+            )
+            return list(result.scalars().all())
 
     async def insert_alert_delivery(self, row: AlertDeliveryInsertRow) -> str:
         """Insert a new SCD2 active version of an alert_delivery row.

@@ -36,13 +36,15 @@ import contextlib
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
-from typing import cast
 from uuid import uuid7
 
 from loguru import logger
 
 from snapper.application.notify.apns_client import ApnsClientPool
 from snapper.application.notify.apns_client import ApnsSendResult
+from snapper.application.notify.routing import route_alert_to_devices
+from snapper.application.notify.rules.base import RuleRegistry
+from snapper.application.notify.rules.registry_factory import load_default_registry
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.core.json_types import JsonObject
 from snapper.data.repository import Repository
@@ -53,11 +55,6 @@ from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import NotificationDeviceRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
-from snapper.messaging.schemas.data import AlertEventData
-from snapper.messaging.schemas.data import AlertPriority
-from snapper.messaging.schemas.data import AlertType
-from snapper.messaging.schemas.messages import MessageParseError
-from snapper.messaging.schemas.messages import parse_message
 
 _RETRY_LOOP_INTERVAL_S = 30.0
 _RETRY_GIVE_UP_AFTER_ATTEMPTS = 3
@@ -113,8 +110,9 @@ class NotifySidecar(RegisterableProcess):
         apns: ApnsClientPool,
         apns_topic: str,
         tracker: SequenceTracker,
+        registry: RuleRegistry | None = None,
     ) -> None:
-        """Wire the sidecar with its three injected collaborators.
+        """Wire the sidecar with its collaborators + rule registry.
 
         Args:
             subscriber: Pre-configured validated ZMQ SUB socket.
@@ -127,6 +125,9 @@ class NotifySidecar(RegisterableProcess):
             tracker: ``SequenceTracker`` used to stamp provenance on
                 every ``alert_events`` / ``alert_deliveries`` row
                 the sidecar writes.
+            registry: Alert rule registry — defaults to
+                ``load_default_registry()`` (the 4 P0 rules per §D6).
+                Injected for tests that want a narrower rule set.
         """
         self._subscriber = subscriber
         self._repo = repo
@@ -135,19 +136,21 @@ class NotifySidecar(RegisterableProcess):
         self._tracker = tracker
         self._stop_event = asyncio.Event()
         self._retry_task: asyncio.Task[None] | None = None
+        self._registry = registry or load_default_registry()
 
     async def start(self) -> None:
         """Run the sidecar main loop until ``stop()`` is signalled.
 
-        Subscribes to the ``alerts.`` prefix, drains the outbox
-        (crash recovery), spawns the background retry loop, and
-        consumes the receive loop until ``_stop_event`` is set.
-        Each entry boundary mints one ``now`` timestamp (per
-        ``feedback_timestamp_discipline.md``) which is threaded
-        through every helper and repository call — so one logical
-        sidecar operation writes at most one distinct timestamp.
+        Subscribes to every prefix the rule registry aggregates (§D6 —
+        ``orders.events.`` + ``plans.decisions.`` + ``system.heartbeats.``
+        for the v1.11 default set), drains the outbox (crash recovery),
+        spawns the background retry loop, and consumes the receive loop
+        until ``_stop_event`` is set. Each entry boundary mints one
+        ``now`` timestamp (per ``feedback_timestamp_discipline.md``)
+        which is threaded through every helper and repository call.
         """
-        self._subscriber.subscribe("alerts.")
+        for prefix in self._registry.all_subscribe_prefixes():
+            self._subscriber.subscribe(prefix)
         await self._drain_outbox(datetime.now(UTC))
         self._retry_task = asyncio.create_task(self._process_retry_queue_loop())
         try:
@@ -162,7 +165,7 @@ class NotifySidecar(RegisterableProcess):
                 if recv_task not in done:
                     break
                 topic, payload = recv_task.result()
-                await self._handle(topic, payload, datetime.now(UTC))
+                await self._dispatch(topic, payload, datetime.now(UTC))
         finally:
             if self._retry_task is not None and not self._retry_task.done():
                 self._retry_task.cancel()
@@ -171,93 +174,104 @@ class NotifySidecar(RegisterableProcess):
         """Signal the main loop + retry loop to exit on the next tick."""
         self._stop_event.set()
 
-    async def _handle(self, topic: str, payload: bytes, now: datetime) -> None:
-        """Parse one ``alerts.*`` bus message and route it into the outbox.
+    async def _dispatch(self, topic: str, payload: bytes, now: datetime) -> None:
+        """Route one received bus frame through the rule registry (§D6).
+
+        Matches ``topic`` against the registry's longest-prefix
+        dispatch, runs every matching rule's ``evaluate``, and persists
+        + fans out each ``AlertEventInsertRow`` the rules produce.
+        Rule exceptions are caught per-rule so a misbehaving rule
+        does not poison the whole receive loop; the sidecar keeps
+        consuming.
 
         Args:
-            topic: ZMQ topic string (``alerts.{user}.{type}``).
-            payload: Raw JSON bytes.
-            now: Entry-boundary timestamp — one ``now`` per received
-                bus message, reused for every SCD2 write performed
-                while handling it.
+            topic: ZMQ topic string the frame arrived on.
+            payload: Raw JSON payload bytes.
+            now: Entry-boundary timestamp (one ``now`` per received
+                frame, reused for every SCD2 write performed while
+                handling it).
         """
-        try:
-            data = parse_message(payload.decode("utf-8"))
-        except (UnicodeDecodeError, MessageParseError) as exc:
-            logger.warning(
-                "sidecar: drop malformed alerts payload on topic={topic}: {err}",
-                topic=topic,
-                err=exc,
-            )
+        matching = self._registry.get_longest_match(topic)
+        if not matching:
             return
-        if not isinstance(data, AlertEventData):
-            logger.warning(
-                "sidecar: drop non-AlertEventData payload on topic={topic} (got type={kind})",
-                topic=topic,
-                kind=type(data).__name__,
-            )
-            return
-        topic_segments = topic.split(".", maxsplit=2)
-        if len(topic_segments) != 3 or topic_segments[1] != data.user_public_id:
-            logger.warning(
-                "sidecar: drop alert — topic user segment != payload"
-                " user_public_id (topic={topic}, payload={pid})",
-                topic=topic,
-                pid=data.user_public_id,
-            )
-            return
-        await self._persist_and_fanout(data, now)
+        for rule in matching:
+            try:
+                alert_rows = await rule.evaluate(topic, payload, self._repo, now)
+            except Exception as exc:
+                logger.warning(
+                    "sidecar: rule {rule} raised on topic={topic}: {err}",
+                    rule=type(rule).__name__,
+                    topic=topic,
+                    err=exc,
+                )
+                continue
+            for alert_row in alert_rows:
+                await self._persist_and_fanout_row(alert_row, now)
 
-    async def _persist_and_fanout(self, data: AlertEventData, now: datetime) -> None:
-        """Insert the alert_event row + fan out to the user's devices.
+    async def _persist_and_fanout_row(
+        self,
+        alert_row: AlertEventInsertRow,
+        now: datetime,
+    ) -> None:
+        """Insert the alert row + fan out via policy routing.
 
         Args:
-            data: Parsed bus payload.
-            now: Entry-boundary timestamp (threaded from ``_handle``).
+            alert_row: Row minted by an ``AlertRule.evaluate`` call.
+            now: Entry-boundary timestamp (threaded from ``_dispatch``).
         """
-        event_public_id = await self._insert_alert_event(data, now)
-        devices = await self._repo.list_active_notification_devices_for_user(data.user_public_id)
-        if not devices:
-            logger.info(
-                "sidecar: no active devices for user={user}; alert_event"
-                " {pid} persisted without fanout",
-                user=data.user_public_id,
+        event_public_id = await self._insert_alert_event(alert_row, now)
+        event = await self._repo.get_alert_event_by_public_id(event_public_id)
+        if event is None:
+            logger.warning(
+                "sidecar: freshly inserted alert_event {pid} missing on read-back —"
+                " skipping fanout",
                 pid=event_public_id,
             )
             return
-        for device in devices:
-            delivery_pid = await self._insert_delivery(data, event_public_id, device, now)
-            await self._attempt_once(delivery_pid, device, data, now)
+        recipients = await route_alert_to_devices(alert=event, repo=self._repo, now=now)
+        if not recipients:
+            logger.info(
+                "sidecar: routing cascade suppressed all devices for alert_event {pid}"
+                " (user={user}, alert_type={at})",
+                pid=event_public_id,
+                user=alert_row.get("user_public_id"),
+                at=alert_row.get("alert_type"),
+            )
+            return
+        for device in recipients:
+            delivery_pid = await self._insert_delivery_for_event(
+                event=event, device=device, now=now
+            )
+            await self._attempt_once(delivery_pid, device, event, now)
 
-    async def _insert_alert_event(self, data: AlertEventData, now: datetime) -> str:
+    async def _insert_alert_event(self, alert_row: AlertEventInsertRow, now: datetime) -> str:
         """Write the SCD2 ``alert_events`` row and return its public_id."""
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
-        return await self._repo.insert_alert_event(
-            AlertEventInsertRow(
-                public_id=str(uuid7()),
-                session_id=sid,
-                sequence_id=seq,
-                timestamp=now,
-                user_public_id=data.user_public_id,
-                operator_public_id=data.operator_public_id,
-                wallet_public_id=data.wallet_public_id,
-                alert_type=data.alert_type,
-                priority=data.priority,
-                is_safety_critical=data.is_safety_critical,
-                title=data.title,
-                body=data.body,
-                payload=data.payload,
-                dedup_key=data.dedup_key,
-                thread_key=data.thread_key,
-                source_topic=data.source_topic,
-            )
+        enriched = AlertEventInsertRow(
+            public_id=alert_row.get("public_id") or str(uuid7()),
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=now,
+            user_public_id=alert_row["user_public_id"],
+            operator_public_id=alert_row.get("operator_public_id"),
+            wallet_public_id=alert_row.get("wallet_public_id"),
+            alert_type=alert_row["alert_type"],
+            priority=alert_row["priority"],
+            is_safety_critical=alert_row.get("is_safety_critical", False),
+            title=alert_row["title"],
+            body=alert_row["body"],
+            payload=alert_row.get("payload"),
+            dedup_key=alert_row.get("dedup_key"),
+            thread_key=alert_row.get("thread_key"),
+            source_topic=alert_row.get("source_topic"),
         )
+        return await self._repo.insert_alert_event(enriched)
 
-    async def _insert_delivery(
+    async def _insert_delivery_for_event(
         self,
-        data: AlertEventData,
-        event_public_id: str,
+        *,
+        event: AlertEventRow,
         device: NotificationDeviceRow,
         now: datetime,
     ) -> str:
@@ -270,11 +284,11 @@ class NotifySidecar(RegisterableProcess):
                 session_id=sid,
                 sequence_id=seq,
                 timestamp=now,
-                alert_event_public_id=event_public_id,
+                alert_event_public_id=event["public_id"],
                 device_public_id=device["public_id"],
-                user_public_id=data.user_public_id,
-                operator_public_id=data.operator_public_id,
-                wallet_public_id=data.wallet_public_id,
+                user_public_id=event["user_public_id"],
+                operator_public_id=event.get("operator_public_id"),
+                wallet_public_id=event.get("wallet_public_id"),
                 status="queued",
                 attempt_count=0,
                 last_attempt_at=None,
@@ -289,7 +303,7 @@ class NotifySidecar(RegisterableProcess):
         self,
         delivery_public_id: str,
         device: NotificationDeviceRow,
-        data: AlertEventData,
+        event: AlertEventRow,
         now: datetime,
     ) -> None:
         """Run exactly one APNs send attempt on a queued delivery row.
@@ -299,16 +313,16 @@ class NotifySidecar(RegisterableProcess):
         and maps the result to the SCD2 terminal / retry schedule.
         """
         current_attempt = await self._bump_attempt(delivery_public_id, now)
-        payload = _build_apns_payload(data)
+        payload = _build_apns_payload(event)
         try:
             result = await self._apns.send(
                 env=device["env"],
                 device_token=device["device_token"],
                 payload=payload,
                 apns_topic=self._apns_topic,
-                priority=_priority_to_apns(data.priority),
+                priority=_priority_to_apns(event["priority"]),
                 push_type="alert",
-                collapse_id=data.thread_key,
+                collapse_id=event.get("thread_key"),
             )
         except Exception as exc:
             logger.warning(
@@ -492,7 +506,7 @@ class NotifySidecar(RegisterableProcess):
         await self._attempt_once(
             row["public_id"],
             device,
-            _event_row_to_alert_data(event),
+            event,
             now,
         )
 
@@ -554,60 +568,35 @@ def _priority_to_apns(priority: str) -> int:
     return 10 if priority == "high" else 5
 
 
-def _build_apns_payload(data: AlertEventData) -> JsonObject:
-    """Assemble the APNs payload dict from an ``AlertEventData`` instance.
+def _build_apns_payload(event: AlertEventRow) -> JsonObject:
+    """Assemble the APNs payload dict from a persisted ``AlertEventRow``.
 
     Keeps the ``aps.alert.title`` / ``aps.alert.body`` mapping
-    explicit rather than leaking the Pydantic shape through.
+    explicit rather than leaking row shape through.
     Optional ``thread-id`` and custom context only appear when the
-    source event actually carried them, minimising the 4KB APNs
+    source row actually carried them, minimising the 4KB APNs
     payload budget.
 
     Args:
-        data: Parsed bus payload.
+        event: Persisted ``AlertEventRow`` as returned by
+            ``get_alert_event_by_public_id``.
 
     Returns:
         JSON-ready dict to hand to ``ApnsClientPool.send``.
     """
     aps: JsonObject = {
-        "alert": {"title": data.title, "body": data.body},
+        "alert": {"title": event["title"], "body": event["body"]},
     }
-    if data.thread_key is not None:
-        aps["thread-id"] = data.thread_key
+    thread_key = event.get("thread_key")
+    if thread_key is not None:
+        aps["thread-id"] = thread_key
     payload: JsonObject = {"aps": aps}
-    if data.payload is not None:
-        for key, value in data.payload.items():
+    extra = event.get("payload")
+    if extra is not None:
+        for key, value in extra.items():
             if key == "aps":
                 continue
             payload[key] = value
-    payload["alert_type"] = data.alert_type
-    payload["priority"] = data.priority
+    payload["alert_type"] = event["alert_type"]
+    payload["priority"] = event["priority"]
     return payload
-
-
-def _event_row_to_alert_data(event: AlertEventRow) -> AlertEventData:
-    """Rehydrate an ``AlertEventData`` from a persisted ``AlertEventRow``.
-
-    Used by ``_drain_outbox`` / ``_process_retry_queue`` when the
-    source bus event is long gone and we only have the SCD2 row.
-    Non-optional fields round-trip by key; optional fields use
-    ``.get(...)`` so missing columns stay None rather than raising.
-    """
-    return AlertEventData(
-        session_id=event["session_id"],
-        sequence_id=event["sequence_id"],
-        public_id=event["public_id"],
-        timestamp=event["timestamp"],
-        user_public_id=event["user_public_id"],
-        operator_public_id=event["operator_public_id"],
-        wallet_public_id=event["wallet_public_id"],
-        alert_type=cast(AlertType, event["alert_type"]),
-        priority=cast(AlertPriority, event["priority"]),
-        is_safety_critical=event["is_safety_critical"],
-        title=event["title"],
-        body=event["body"],
-        payload=event["payload"],
-        dedup_key=event["dedup_key"],
-        thread_key=event["thread_key"],
-        source_topic=event["source_topic"],
-    )

@@ -1103,3 +1103,51 @@ class AlertEventData(StrictDataSchema[Literal["alert_event"]]):
     dedup_key: str | None = Field(default=None, max_length=128)
     thread_key: str | None = Field(default=None, max_length=64)
     source_topic: str | None = None
+
+
+class ExecutionPlanDecisionEventData(StrictDataSchema[Literal["execution_plan_decision_event"]]):
+    """Published on ``plans.decisions.{plan_public_id}`` right after insert (§D6.2).
+
+    Emitted by ``PlanExecutorService`` immediately after every
+    ``ExecutionPlanDecision`` row commits. Minimal shape — carries
+    only fields available on ``ExecutionPlanDecisionInsertRow`` + the
+    returned ``decision_public_id``. Consumers (notify sidecar's
+    stop-loss rule) enrich via repository reads.
+
+    ``reason`` is free-form ``str`` (not a Literal) because
+    ``_log_decision`` writes varied strings like
+    ``"evaluator emitted command"`` or
+    ``"Cycle <x> closed before command dispatch"`` alongside the
+    well-known ``"sl_hit"`` / ``"tp_hit"`` / ``"trailing_stop_hit"``
+    values. The stop-loss rule filters on known-loss reasons at
+    evaluation time rather than at the schema layer (Plan v1.12
+    R10.B-3 closure).
+
+    Attributes:
+        type: Payload discriminator (always
+            ``execution_plan_decision_event``).
+        decision_public_id: The row's stable UUID7 returned by
+            ``insert_execution_plan_decision``.
+        plan_public_id: Parent ``ExecutionPlan`` UUID7 — mirrored
+            into the topic segment so subscribers can filter at the
+            ZMQ layer without parsing the payload (Plan v1.12 R10.B-2
+            closure: real field name is ``plan_public_id``, not
+            ``execution_plan_public_id``).
+        decision_type: Free-form discriminator —
+            ``"evaluator"`` / ``"lifecycle"`` / similar. Preserved
+            verbatim from ``ExecutionPlanDecisionInsertRow``.
+        trigger_type: Free-form trigger discriminator —
+            ``"tick"`` / ``"clock"`` / ``"execution"`` / etc.
+        reason: Free-form diagnostic string. Well-known values
+            (``"sl_hit"`` / ``"trailing_stop_hit"``) are the trigger
+            set for the stop-loss rule.
+        triggered_at: Bus-time the decision was logged.
+    """
+
+    type: Literal["execution_plan_decision_event"] = "execution_plan_decision_event"
+    decision_public_id: str
+    plan_public_id: str
+    decision_type: str
+    trigger_type: str
+    reason: str
+    triggered_at: datetime

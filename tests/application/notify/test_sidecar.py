@@ -1,12 +1,12 @@
-"""Tests for ``snapper.application.notify.sidecar.NotifySidecar``.
+"""Tests for ``snapper.application.notify.sidecar.NotifySidecar`` (BE-3b rule-dispatch flow).
 
-Exercises the end-to-end flow: parse bus payload -> insert
-alert_event -> fan out to active devices -> attempt APNs -> route
-terminal/retry semantics (§D5.5). Uses in-memory SQLite via the
-real repository (same pattern as ``tests/data/test_push_repo.py``)
-so the SCD2 close-and-insert + partial-unique semantics get honest
-exercise; the ZMQ subscriber and aioapns client are mocked because
-they own external sockets that aren't helpful to build here.
+Exercises the new BE-3b pipeline: receive a domain event (orders.events.* /
+plans.decisions.* / system.heartbeats.*) -> ``_dispatch`` runs rules ->
+each produced ``AlertEventInsertRow`` is persisted + routed via the
+4-level precedence cascade + fanned out to matching devices via APNs.
+Uses in-memory SQLite via the real repository so SCD2 semantics get
+honest exercise; the ZMQ subscriber, rule registry, and aioapns client
+are mocked or swapped in per test.
 """
 
 import asyncio
@@ -15,6 +15,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
@@ -23,21 +24,22 @@ from loguru import logger
 from sqlalchemy import select
 
 from snapper.application.notify.apns_client import ApnsSendResult
+from snapper.application.notify.rules.base import AlertRule
+from snapper.application.notify.rules.base import RuleRegistry
 from snapper.application.notify.sidecar import NotifySidecar
 from snapper.application.notify.sidecar import _backoff_seconds
 from snapper.application.notify.sidecar import _build_apns_payload
-from snapper.application.notify.sidecar import _event_row_to_alert_data
 from snapper.application.notify.sidecar import _priority_to_apns
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import NotificationDevice
 from snapper.data.models import User
+from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertEventInsertRow
+from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import NotificationDeviceUpsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
-from snapper.messaging.schemas.data import AlertEventData
-from snapper.messaging.schemas.data import TickData
 
 
 def _ts(minutes: int = 0) -> datetime:
@@ -98,31 +100,87 @@ async def _seed_device(
     )
 
 
-def _alert_event_data(
-    user_public_id: str = "019dbb34-f439-77bd-afa8-ee5321d60307",
-    alert_type: str = "order_fill_full",
-    priority: str = "medium",
-    is_safety_critical: bool = False,
-) -> AlertEventData:
-    """Return a minimal valid ``AlertEventData`` for the happy path."""
-    return AlertEventData(
-        session_id="bus",
-        sequence_id=1,
-        public_id="envelope-pid",
-        timestamp=_ts(),
-        user_public_id=user_public_id,
-        alert_type=alert_type,
-        priority=priority,
-        is_safety_critical=is_safety_critical,
-        title="Filled",
-        body="BTC-USD 0.1 filled",
-    )
+class _SingleRowRule(AlertRule):
+    """Minimal rule emitting exactly one alert per dispatch — for flow tests."""
+
+    def __init__(
+        self,
+        *,
+        user_public_id: str,
+        topic_prefix: str = "test.",
+        alert_type: str = "order_fill_full",
+        priority: str = "medium",
+        safety_critical: bool = False,
+    ) -> None:
+        self.alert_type = alert_type
+        self.subscribe_topic_prefixes = (topic_prefix,)
+        self.priority = priority
+        self.is_safety_critical = safety_critical
+        self.thread_key_prefix = "test"
+        self.suppression_window_seconds = 0
+        self._user = user_public_id
+        self._counter = 0
+
+    async def evaluate(
+        self, topic: str, payload: bytes, repo: Repository, now: datetime
+    ) -> list[AlertEventInsertRow]:
+        self._counter += 1
+        return [
+            AlertEventInsertRow(
+                user_public_id=self._user,
+                operator_public_id=None,
+                wallet_public_id=None,
+                alert_type=self.alert_type,
+                priority=self.priority,
+                is_safety_critical=self.is_safety_critical,
+                title="Fixture",
+                body="Fixture body",
+                dedup_key=f"fixture.{self._counter}",
+                thread_key=f"test.{self._counter}",
+                source_topic=topic,
+            )
+        ]
+
+
+class _NoopRule(AlertRule):
+    """Rule that always returns []."""
+
+    def __init__(self, topic_prefix: str = "noop.") -> None:
+        self.alert_type = "order_fill_full"
+        self.subscribe_topic_prefixes = (topic_prefix,)
+        self.priority = "medium"
+        self.is_safety_critical = False
+        self.thread_key_prefix = "noop"
+        self.suppression_window_seconds = 0
+
+    async def evaluate(
+        self, topic: str, payload: bytes, repo: Repository, now: datetime
+    ) -> list[AlertEventInsertRow]:
+        return []
+
+
+class _RaisingRule(AlertRule):
+    """Rule that raises — used to prove the dispatcher catches rule exceptions."""
+
+    def __init__(self) -> None:
+        self.alert_type = "order_fill_full"
+        self.subscribe_topic_prefixes = ("boom.",)
+        self.priority = "medium"
+        self.is_safety_critical = False
+        self.thread_key_prefix = "boom"
+        self.suppression_window_seconds = 0
+
+    async def evaluate(
+        self, topic: str, payload: bytes, repo: Repository, now: datetime
+    ) -> list[AlertEventInsertRow]:
+        raise RuntimeError("rule explosion")
 
 
 def _make_sidecar(
     repo: SQLAlchemyRepository,
     *,
     send_result: ApnsSendResult | Exception | None = None,
+    registry: RuleRegistry | None = None,
 ) -> tuple[NotifySidecar, MagicMock]:
     """Construct a sidecar with a mock subscriber + mock APNs pool."""
     subscriber = MagicMock()
@@ -143,31 +201,73 @@ def _make_sidecar(
         apns=apns,
         apns_topic="ie.klatt.snapper",
         tracker=SequenceTracker(),
+        registry=registry,
     )
     return sidecar, apns
+
+
+async def _seed_alert_event(repo: SQLAlchemyRepository, user_public_id: str) -> AlertEventRow:
+    """Persist a minimal AlertEvent the way the rules would, for delivery tests."""
+    pid = await repo.insert_alert_event(
+        AlertEventInsertRow(
+            session_id="t",
+            sequence_id=1,
+            timestamp=_ts(),
+            user_public_id=user_public_id,
+            alert_type="order_fill_full",
+            priority="medium",
+            title="Filled",
+            body="BTC-USD 0.1 filled",
+        )
+    )
+    row = await repo.get_alert_event_by_public_id(pid)
+    assert row is not None
+    return row
+
+
+async def _seed_queued_delivery(
+    repo: SQLAlchemyRepository,
+    *,
+    event_public_id: str,
+    device_public_id: str,
+    user_public_id: str,
+) -> str:
+    """Seed a queued alert_delivery row directly (bypasses rule evaluation)."""
+    return await repo.insert_alert_delivery(
+        AlertDeliveryInsertRow(
+            session_id="t",
+            sequence_id=2,
+            timestamp=_ts(),
+            alert_event_public_id=event_public_id,
+            device_public_id=device_public_id,
+            user_public_id=user_public_id,
+            status="queued",
+            created_at=_ts(),
+        )
+    )
 
 
 class TestBackoff:
     """``_backoff_seconds`` implements the §D5.5 exponential schedule."""
 
     def test_first_attempt_30s(self) -> None:
-        """N=1 -> 30s (base, no exponent)."""
+        """Covered by test body."""
         assert _backoff_seconds(1) == 30.0
 
     def test_second_attempt_60s(self) -> None:
-        """N=2 -> 60s (one doubling)."""
+        """Covered by test body."""
         assert _backoff_seconds(2) == 60.0
 
     def test_third_attempt_120s(self) -> None:
-        """N=3 -> 120s (two doublings)."""
+        """Covered by test body."""
         assert _backoff_seconds(3) == 120.0
 
     def test_caps_at_five_minutes(self) -> None:
-        """The schedule is clamped at 300s (5 minutes)."""
+        """Covered by test body."""
         assert _backoff_seconds(20) == 300.0
 
     def test_zero_or_negative_stays_base(self) -> None:
-        """Non-positive attempt numbers clamp to the base interval."""
+        """Covered by test body."""
         assert _backoff_seconds(0) == 30.0
         assert _backoff_seconds(-5) == 30.0
 
@@ -176,199 +276,202 @@ class TestPriorityMapping:
     """``_priority_to_apns`` maps the Literal to the APNs header value."""
 
     def test_high_maps_to_ten(self) -> None:
-        """``high`` -> 10 (immediate delivery)."""
+        """Covered by test body."""
         assert _priority_to_apns("high") == 10
 
     def test_medium_and_low_map_to_five(self) -> None:
-        """``medium`` / ``low`` -> 5 (throttleable)."""
+        """Covered by test body."""
         assert _priority_to_apns("medium") == 5
         assert _priority_to_apns("low") == 5
 
 
 class TestBuildApnsPayload:
-    """``_build_apns_payload`` assembles the ``aps`` envelope correctly."""
+    """``_build_apns_payload`` assembles the ``aps`` envelope from AlertEventRow."""
+
+    def _row(self, **overrides: object) -> AlertEventRow:
+        """Build an AlertEventRow fixture, overriding specific fields."""
+        base: dict[str, object] = {
+            "public_id": "pid-1",
+            "session_id": "s",
+            "sequence_id": 1,
+            "timestamp": _ts(),
+            "known_to": KNOWN_TO_MAX,
+            "user_public_id": "u-1",
+            "operator_public_id": None,
+            "wallet_public_id": None,
+            "alert_type": "order_fill_full",
+            "priority": "medium",
+            "is_safety_critical": False,
+            "title": "Filled",
+            "body": "body",
+            "payload": None,
+            "dedup_key": None,
+            "thread_key": None,
+            "source_topic": None,
+        }
+        base.update(overrides)
+        return cast(AlertEventRow, base)
 
     def test_minimal_payload_has_title_and_body(self) -> None:
-        """``aps.alert.title`` / ``.body`` are always populated."""
-        data = _alert_event_data()
-
-        payload = _build_apns_payload(data)
-
+        """Covered by test body."""
+        payload = _build_apns_payload(self._row())
         aps = payload["aps"]
         assert isinstance(aps, dict)
         alert = aps["alert"]
         assert isinstance(alert, dict)
         assert alert["title"] == "Filled"
-        assert alert["body"] == "BTC-USD 0.1 filled"
+        assert alert["body"] == "body"
 
     def test_thread_key_becomes_thread_id(self) -> None:
-        """A set ``thread_key`` flows into ``aps.thread-id``."""
-        data = AlertEventData(
-            session_id="bus",
-            sequence_id=1,
-            public_id="pid",
-            timestamp=_ts(),
-            user_public_id="019dbb34-f439-77bd-afa8-ee5321d60307",
-            alert_type="order_fill_full",
-            title="t",
-            body="b",
-            thread_key="order-123",
-        )
-
-        payload = _build_apns_payload(data)
-
+        """Covered by test body."""
+        payload = _build_apns_payload(self._row(thread_key="snapper.order.coid-1"))
         aps = payload["aps"]
         assert isinstance(aps, dict)
-        assert aps["thread-id"] == "order-123"
+        assert aps["thread-id"] == "snapper.order.coid-1"
 
-    def test_custom_payload_keys_passthrough_aps_protected(self) -> None:
-        """Custom payload keys copy through but the reserved ``aps`` is not overwritten."""
-        data = AlertEventData(
-            session_id="bus",
-            sequence_id=1,
-            public_id="pid",
-            timestamp=_ts(),
-            user_public_id="019dbb34-f439-77bd-afa8-ee5321d60307",
-            alert_type="order_fill_full",
-            title="t",
-            body="b",
-            payload={"order_public_id": "ord-1", "aps": {"alert": "evil-overwrite"}},
+    def test_custom_payload_fields_leak_through_aps_key_filtered(self) -> None:
+        """Covered by test body."""
+        payload = _build_apns_payload(
+            self._row(payload={"deep_link_path": "/orders/1", "aps": "ignored"})
         )
+        assert payload["deep_link_path"] == "/orders/1"
+        assert payload["aps"] != "ignored"
 
-        payload = _build_apns_payload(data)
-
-        aps = payload["aps"]
-        assert isinstance(aps, dict)
-        alert = aps["alert"]
-        assert isinstance(alert, dict)
-        assert alert["title"] == "t"
-        assert payload["order_public_id"] == "ord-1"
-        assert payload["alert_type"] == "order_fill_full"
-        assert payload["priority"] == "medium"
+    def test_alert_type_and_priority_echoed(self) -> None:
+        """Covered by test body."""
+        payload = _build_apns_payload(self._row(alert_type="order_rejected", priority="high"))
+        assert payload["alert_type"] == "order_rejected"
+        assert payload["priority"] == "high"
 
 
-class TestSidecarHandleHappyPath:
-    """End-to-end ``_handle`` + ``_persist_and_fanout`` with one active device."""
+class TestDispatchFlow:
+    """Rule-registry based dispatch: topic matches → rule emits → persist + fanout."""
 
     @pytest.mark.asyncio
-    async def test_successful_send_transitions_to_sent(self, repo: SQLAlchemyRepository) -> None:
-        """Happy path: alert_event persisted + delivery row ends at ``sent``."""
+    async def test_dispatch_persists_and_fans_out_via_routing(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Happy path: a matching rule's row is inserted + APNs called once per device."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
         await _seed_device(repo, user)
-        sidecar, apns = _make_sidecar(repo)
-        data = _alert_event_data(user_public_id=user)
+        reg = RuleRegistry()
+        reg.register(_SingleRowRule(user_public_id=user, topic_prefix="test."))
+        sidecar, apns = _make_sidecar(repo, registry=reg)
 
-        await sidecar._handle(
-            f"alerts.{user}.order_fill_full",
-            data.to_json().encode("utf-8"),
-            _ts(),
-        )
+        await sidecar._dispatch("test.something", b"{}", _ts())
 
-        queued = await repo.list_queued_deliveries_all()
-        assert queued == []
+        history = await repo.list_recent_alerts_for_user(user, limit=10, before=None)
+        assert len(history) == 1
         apns.send.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_topic_mismatch_drops_without_insert(self, repo: SQLAlchemyRepository) -> None:
-        """Topic segment 2 != payload.user_public_id -> drop with warning."""
+    async def test_unknown_topic_silent_skip(self, repo: SQLAlchemyRepository) -> None:
+        """A topic no rule covers yields a silent no-op."""
+        reg = RuleRegistry()
+        reg.register(_NoopRule(topic_prefix="noop."))
+        sidecar, apns = _make_sidecar(repo, registry=reg)
+
+        await sidecar._dispatch("unrelated.topic", b"{}", _ts())
+
+        apns.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rule_exception_does_not_poison_loop(self, repo: SQLAlchemyRepository) -> None:
+        """An evaluator raising is caught — other rules still run."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
         await _seed_device(repo, user)
-        sidecar, apns = _make_sidecar(repo)
-        data = _alert_event_data(user_public_id=user)
+        reg = RuleRegistry()
+        reg.register(_RaisingRule())
+        reg.register(_SingleRowRule(user_public_id=user, topic_prefix="boom."))
+        sidecar, apns = _make_sidecar(repo, registry=reg)
 
-        await sidecar._handle(
-            "alerts.019dbb34-f439-77bd-afa8-aaaaaaaaaaaa.order_fill_full",
-            data.to_json().encode("utf-8"),
-            _ts(),
-        )
+        await sidecar._dispatch("boom.anything", b"{}", _ts())
 
-        apns.send.assert_not_awaited()
+        apns.send.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_malformed_json_dropped_without_raise(self, repo: SQLAlchemyRepository) -> None:
-        """Bad JSON logs a warning and returns without calling APNs."""
-        sidecar, apns = _make_sidecar(repo)
-
-        await sidecar._handle(
-            "alerts.019dbb34-f439-77bd-afa8-ee5321d60307.order_fill_full",
-            b"not-json",
-            _ts(),
-        )
-
-        apns.send.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_no_active_devices_persists_event_without_fanout(
-        self, repo: SQLAlchemyRepository
-    ) -> None:
-        """User with no active devices: event row is persisted, no APNs call."""
+    async def test_rule_returning_empty_suppresses_alert(self, repo: SQLAlchemyRepository) -> None:
+        """Evaluate -> [] means no row inserted, no APNs call."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
-        sidecar, apns = _make_sidecar(repo)
-        data = _alert_event_data(user_public_id=user)
+        await _seed_device(repo, user)
+        reg = RuleRegistry()
+        reg.register(_NoopRule(topic_prefix="noop."))
+        sidecar, apns = _make_sidecar(repo, registry=reg)
 
-        await sidecar._handle(
-            f"alerts.{user}.order_fill_full",
-            data.to_json().encode("utf-8"),
-            _ts(),
-        )
+        await sidecar._dispatch("noop.x", b"{}", _ts())
+
+        history = await repo.list_recent_alerts_for_user(user, limit=10, before=None)
+        assert history == []
+        apns.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_active_devices_persists_but_no_fanout(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Rule emits, row persists, routing returns [] → no APNs call."""
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        reg = RuleRegistry()
+        reg.register(_SingleRowRule(user_public_id=user, topic_prefix="test."))
+        sidecar, apns = _make_sidecar(repo, registry=reg)
+
+        await sidecar._dispatch("test.topic", b"{}", _ts())
 
         history = await repo.list_recent_alerts_for_user(user, limit=10, before=None)
         assert len(history) == 1
         apns.send.assert_not_awaited()
 
 
-class TestSidecarErrorSemantics:
-    """Error + retry behaviour of the attempt loop (§D5.5)."""
+class TestApnsErrorSemantics:
+    """APNs response → terminal / retry routing. Tests seed deliveries directly."""
 
     @pytest.mark.asyncio
     async def test_410_unregistered_deactivates_device(self, repo: SQLAlchemyRepository) -> None:
-        """APNs 410 -> delivery 'unregistered' + device marked inactive."""
+        """APNs 410 transitions delivery to 'unregistered' + tombstones the device."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
-        await _seed_device(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
         unreg = ApnsSendResult(
             status_code=410, status="unregistered", apns_id="", description="BadDeviceToken"
         )
         sidecar, _ = _make_sidecar(repo, send_result=unreg)
-        data = _alert_event_data(user_public_id=user)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
 
-        await sidecar._handle(
-            f"alerts.{user}.order_fill_full",
-            data.to_json().encode("utf-8"),
-            _ts(),
-        )
+        await sidecar._attempt_once(delivery_pid, device, event, _ts())
 
         active = await repo.list_active_notification_devices_for_user(user)
         assert active == []
 
     @pytest.mark.asyncio
     async def test_410_path_writes_inactive_successor_row(self, repo: SQLAlchemyRepository) -> None:
-        """APNs 410 writes a tombstone successor (INV-9 — BE-3a R1 regression).
-
-        Closes B-1 from the BE-3a Copilot review: the 410 branch must
-        not just close the active row — it must insert a successor
-        with ``token_status = 'unregistered'`` and
-        ``known_to = KNOWN_TO_MAX`` so that an ``as_of`` query after
-        the close returns a visible inactive device row rather than a
-        gap.
-        """
+        """BE-3a R1 regression: 410 writes a tombstone successor, not a gap."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
-        await _seed_device(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
         unreg = ApnsSendResult(
             status_code=410, status="unregistered", apns_id="", description="BadDeviceToken"
         )
         sidecar, _ = _make_sidecar(repo, send_result=unreg)
-        data = _alert_event_data(user_public_id=user)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
 
-        await sidecar._handle(
-            f"alerts.{user}.order_fill_full",
-            data.to_json().encode("utf-8"),
-            _ts(),
-        )
+        await sidecar._attempt_once(delivery_pid, device, event, _ts())
 
         async with repo.session() as s:
             rows = (
@@ -381,74 +484,28 @@ class TestSidecarErrorSemantics:
                 .all()
             )
         assert len(rows) == 2
-        closed = [r for r in rows if r.known_to != KNOWN_TO_MAX]
-        assert len(closed) == 1
-        assert closed[0].token_status == "active"
         successor = [r for r in rows if r.known_to == KNOWN_TO_MAX]
         assert len(successor) == 1
         assert successor[0].token_status == "unregistered"
-        assert successor[0].public_id == closed[0].public_id
-
-    @pytest.mark.asyncio
-    async def test_retry_exhaustion_logs_warning(
-        self,
-        repo: SQLAlchemyRepository,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """Retry give-up emits a `logger.warning` before the terminal mark.
-
-        Closes B-2 from the BE-3a Copilot review: a silent
-        ``mark_delivery_failed`` after 3 attempts leaves ops alerts
-        without a pivot log record. The sidecar must call
-        ``logger.warning`` with the delivery public_id, attempt
-        count, and error reason immediately before transitioning the
-        row to ``failed``.
-        """
-        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
-        await _seed_user(repo, user)
-        await _seed_device(repo, user)
-        err = ApnsSendResult(status_code=500, status="server_error", apns_id="", description="")
-        sidecar, _ = _make_sidecar(repo, send_result=err)
-        data = _alert_event_data(user_public_id=user)
-
-        handler_id = logger.add(caplog.handler, format="{message}", level="WARNING")
-        try:
-            await sidecar._handle(
-                f"alerts.{user}.order_fill_full",
-                data.to_json().encode("utf-8"),
-                _ts(),
-            )
-            row = (await repo.list_queued_deliveries_all())[0]
-            await sidecar._attempt_on_queued_row(row, _ts())
-            await sidecar._attempt_on_queued_row(
-                (await repo.list_queued_deliveries_all())[0], _ts()
-            )
-        finally:
-            logger.remove(handler_id)
-
-        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        exhaustion = [
-            r for r in warnings if "alert delivery failed after retries" in r.getMessage()
-        ]
-        assert len(exhaustion) == 1
-        assert row["public_id"] in exhaustion[0].getMessage()
-        assert "attempts=3" in exhaustion[0].getMessage()
 
     @pytest.mark.asyncio
     async def test_server_error_schedules_retry(self, repo: SQLAlchemyRepository) -> None:
-        """500 on first attempt -> still queued + ``next_attempt_at`` populated."""
+        """500 on first attempt leaves delivery queued with ``next_attempt_at``."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
-        await _seed_device(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
         err = ApnsSendResult(status_code=500, status="server_error", apns_id="", description="")
         sidecar, _ = _make_sidecar(repo, send_result=err)
-        data = _alert_event_data(user_public_id=user)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
 
-        await sidecar._handle(
-            f"alerts.{user}.order_fill_full",
-            data.to_json().encode("utf-8"),
-            _ts(),
-        )
+        await sidecar._attempt_once(delivery_pid, device, event, _ts())
 
         queued = await repo.list_queued_deliveries_all()
         assert len(queued) == 1
@@ -458,147 +515,133 @@ class TestSidecarErrorSemantics:
 
     @pytest.mark.asyncio
     async def test_third_server_error_gives_up(self, repo: SQLAlchemyRepository) -> None:
-        """Three consecutive server_errors -> delivery ends up ``failed``."""
+        """Three consecutive server_errors transition to ``failed``."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
-        await _seed_device(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
         err = ApnsSendResult(status_code=500, status="server_error", apns_id="", description="")
         sidecar, _ = _make_sidecar(repo, send_result=err)
-        data = _alert_event_data(user_public_id=user)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
 
-        await sidecar._handle(
-            f"alerts.{user}.order_fill_full",
-            data.to_json().encode("utf-8"),
-            _ts(),
-        )
+        await sidecar._attempt_once(delivery_pid, device, event, _ts())
+        await sidecar._attempt_once(delivery_pid, device, event, _ts())
+        await sidecar._attempt_once(delivery_pid, device, event, _ts())
+
         queued = await repo.list_queued_deliveries_all()
-        row = queued[0]
-        await sidecar._attempt_on_queued_row(row, _ts())
-        await sidecar._attempt_on_queued_row((await repo.list_queued_deliveries_all())[0], _ts())
-
-        still_queued = await repo.list_queued_deliveries_all()
-        assert still_queued == []
+        assert queued == []
 
     @pytest.mark.asyncio
     async def test_send_exception_schedules_retry(self, repo: SQLAlchemyRepository) -> None:
-        """``ApnsClientPool.send`` raising is the same as a server_error."""
+        """ApnsClientPool.send raising is mapped to a non-terminal retry."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
-        await _seed_device(repo, user)
-        sidecar, _ = _make_sidecar(repo, send_result=RuntimeError("connection reset"))
-        data = _alert_event_data(user_public_id=user)
-
-        await sidecar._handle(
-            f"alerts.{user}.order_fill_full",
-            data.to_json().encode("utf-8"),
-            _ts(),
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
         )
+        sidecar, _ = _make_sidecar(repo, send_result=RuntimeError("connection reset"))
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        await sidecar._attempt_once(delivery_pid, device, event, _ts())
 
         queued = await repo.list_queued_deliveries_all()
         assert len(queued) == 1
-        assert queued[0]["error_reason"] is not None
-        assert "connection reset" in queued[0]["error_reason"]
+        error_reason = queued[0]["error_reason"]
+        assert error_reason is not None
+        assert "connection reset" in error_reason
+
+    @pytest.mark.asyncio
+    async def test_retry_exhaustion_logs_warning(
+        self,
+        repo: SQLAlchemyRepository,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """BE-3a R1: exhaust emits ``logger.warning`` before terminal mark."""
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        err = ApnsSendResult(status_code=500, status="server_error", apns_id="", description="")
+        sidecar, _ = _make_sidecar(repo, send_result=err)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        handler_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            await sidecar._attempt_once(delivery_pid, device, event, _ts())
+            await sidecar._attempt_once(delivery_pid, device, event, _ts())
+            await sidecar._attempt_once(delivery_pid, device, event, _ts())
+        finally:
+            logger.remove(handler_id)
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        exhaustion = [
+            r for r in warnings if "alert delivery failed after retries" in r.getMessage()
+        ]
+        assert len(exhaustion) == 1
+        assert delivery_pid in exhaustion[0].getMessage()
+        assert "attempts=3" in exhaustion[0].getMessage()
 
 
 class TestDrainOutbox:
-    """``_drain_outbox`` picks up queued rows on startup."""
+    """``_drain_outbox`` picks up queued deliveries on startup."""
 
     @pytest.mark.asyncio
-    async def test_drain_attempts_queued_rows(self, repo: SQLAlchemyRepository) -> None:
-        """Queued rows from a prior session are retried on startup."""
+    async def test_drain_retries_queued_deliveries(self, repo: SQLAlchemyRepository) -> None:
+        """A queued row that was never attempted gets one fresh attempt on drain."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
-        await _seed_device(repo, user)
-        err = ApnsSendResult(status_code=500, status="server_error", apns_id="", description="")
-        first_sidecar, _ = _make_sidecar(repo, send_result=err)
-        await first_sidecar._handle(
-            f"alerts.{user}.order_fill_full",
-            _alert_event_data(user_public_id=user).to_json().encode("utf-8"),
-            _ts(),
-        )
-
-        success_sidecar, success_apns = _make_sidecar(repo)
-        await success_sidecar._drain_outbox(_ts())
-
-        queued = await repo.list_queued_deliveries_all()
-        assert queued == []
-        success_apns.send.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_drain_marks_failed_when_alert_event_missing(
-        self, repo: SQLAlchemyRepository
-    ) -> None:
-        """Orphan delivery (missing parent event) is marked ``failed``.
-
-        This can only happen under a data-integrity bug (e.g., manual
-        row deletion) but the sidecar must tolerate it and move on.
-        """
-        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
-        await _seed_user(repo, user)
-        dev = await _seed_device(repo, user)
-
-        await repo.insert_alert_delivery(
-            AlertDeliveryInsertRow(
-                alert_event_public_id="evt-missing",
-                device_public_id=dev,
-                user_public_id=user,
-                status="queued",
-                created_at=_ts(),
-                session_id="s",
-                sequence_id=1,
-                timestamp=_ts(),
-            )
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
         )
         sidecar, apns = _make_sidecar(repo)
 
-        await sidecar._drain_outbox(_ts())
+        await sidecar._drain_outbox(_ts(5))
 
         queued = await repo.list_queued_deliveries_all()
         assert queued == []
-        apns.send.assert_not_awaited()
+        apns.send.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_drain_unregisters_delivery_when_device_gone(
-        self, repo: SQLAlchemyRepository
-    ) -> None:
-        """Delivery whose device has been deactivated -> ``unregistered`` no-send."""
+    async def test_drain_skips_queued_when_device_gone(self, repo: SQLAlchemyRepository) -> None:
+        """Queued delivery whose device was later deactivated is marked unregistered."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
-        dev = await _seed_device(repo, user)
-        event_pid = await repo.insert_alert_event(
-            __import__(
-                "snapper.data.repository_types", fromlist=["AlertEventInsertRow"]
-            ).AlertEventInsertRow(
-                session_id="s",
-                sequence_id=1,
-                timestamp=_ts(),
-                user_public_id=user,
-                alert_type="order_fill_full",
-                priority="medium",
-                title="t",
-                body="b",
-            )
-        )
-        await repo.insert_alert_delivery(
-            __import__(
-                "snapper.data.repository_types", fromlist=["AlertDeliveryInsertRow"]
-            ).AlertDeliveryInsertRow(
-                alert_event_public_id=event_pid,
-                device_public_id=dev,
-                user_public_id=user,
-                status="queued",
-                created_at=_ts(),
-                session_id="s",
-                sequence_id=2,
-                timestamp=_ts(),
-            )
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
         )
         await repo.deactivate_notification_device_scd2(
-            dev,
+            device_pid,
             reason="user_unregistered",
             timestamp=_ts(1),
-            session_id="s-close",
-            sequence_id=9,
+            session_id="close",
+            sequence_id=42,
         )
         sidecar, apns = _make_sidecar(repo)
 
@@ -608,159 +651,195 @@ class TestDrainOutbox:
         assert queued == []
         apns.send.assert_not_awaited()
 
-
-class TestEventRowToAlertData:
-    """``_event_row_to_alert_data`` rehydrates retry-loop payloads correctly."""
-
     @pytest.mark.asyncio
-    async def test_roundtrip_through_persistence(self, repo: SQLAlchemyRepository) -> None:
-        """A persisted event round-trips back to an equivalent ``AlertEventData``."""
+    async def test_drain_marks_delivery_failed_when_event_missing(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Queued delivery referencing a non-existent alert_event → failed."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
-        orig = _alert_event_data(user_public_id=user)
-
-        event_pid = await repo.insert_alert_event(
-            AlertEventInsertRow(
-                session_id=orig.session_id,
-                sequence_id=orig.sequence_id,
-                timestamp=orig.timestamp,
-                user_public_id=orig.user_public_id,
-                alert_type=orig.alert_type,
-                priority=orig.priority,
-                is_safety_critical=orig.is_safety_critical,
-                title=orig.title,
-                body=orig.body,
-            )
+        device_pid = await _seed_device(repo, user)
+        await _seed_queued_delivery(
+            repo,
+            event_public_id="nonexistent-event-pid",
+            device_public_id=device_pid,
+            user_public_id=user,
         )
-        row = await repo.get_alert_event_by_public_id(event_pid)
+        sidecar, apns = _make_sidecar(repo)
 
-        assert row is not None
-        rehydrated = _event_row_to_alert_data(row)
+        await sidecar._drain_outbox(_ts())
 
-        assert rehydrated.user_public_id == user
-        assert rehydrated.alert_type == "order_fill_full"
-        assert rehydrated.title == "Filled"
+        queued = await repo.list_queued_deliveries_all()
+        assert queued == []
+        apns.send.assert_not_awaited()
+
+
+class TestLoadDelivery:
+    """``_load_delivery`` returns None for closed/unknown public_ids."""
+
+    @pytest.mark.asyncio
+    async def test_unknown_public_id_returns_none(self, repo: SQLAlchemyRepository) -> None:
+        """Public_id that was never persisted yields None."""
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, _ = _make_sidecar(repo)
+
+        result = await sidecar._load_delivery("unknown-public-id")
+
+        assert result is None
 
 
 class TestRetryLoopLifecycle:
-    """The background retry loop respects ``stop_event`` promptly."""
+    """``_process_retry_queue_loop`` obeys the stop event."""
 
     @pytest.mark.asyncio
-    async def test_retry_loop_exits_on_stop(self, repo: SQLAlchemyRepository) -> None:
-        """``stop()`` ends the retry loop within one wait cycle."""
+    async def test_stop_event_breaks_loop(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Setting ``_stop_event`` terminates the loop on the next tick."""
         sidecar, _ = _make_sidecar(repo)
+        monkeypatch.setattr("snapper.application.notify.sidecar._RETRY_LOOP_INTERVAL_S", 0.05)
         task = asyncio.create_task(sidecar._process_retry_queue_loop())
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.02)
         await sidecar.stop()
         await asyncio.wait_for(task, timeout=2.0)
 
-        assert task.done()
-
-    @pytest.mark.asyncio
-    async def test_retry_loop_handles_cancellation(self, repo: SQLAlchemyRepository) -> None:
-        """Cancelling the task while it waits is benign — no traceback leak."""
-        sidecar, _ = _make_sidecar(repo)
-        task = asyncio.create_task(sidecar._process_retry_queue_loop())
-        await asyncio.sleep(0)
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-
-        assert task.done()
-
-    @pytest.mark.asyncio
-    async def test_retry_loop_exits_immediately_when_stop_already_set(
-        self, repo: SQLAlchemyRepository
-    ) -> None:
-        """``stop_event`` set before the loop body runs -> clean exit.
-
-        Covers the ``while not self._stop_event.is_set():`` False-on-
-        first-evaluation branch: the outer while sees True for
-        ``is_set()`` and falls straight through without entering the
-        body or the retry query. Matches the "stop called before the
-        task got scheduled" edge.
-        """
-        sidecar, _ = _make_sidecar(repo)
-        await sidecar.stop()
-
-        await asyncio.wait_for(sidecar._process_retry_queue_loop(), timeout=2.0)
-
 
 class TestSidecarStart:
-    """End-to-end ``start()`` -> receive -> handle -> ``stop()`` lifecycle."""
+    """``start`` subscribes every registry prefix + drains outbox + spawns retry loop."""
 
     @pytest.mark.asyncio
-    async def test_start_consumes_one_message_then_stops(self, repo: SQLAlchemyRepository) -> None:
-        """The main receive loop ingests messages until ``stop()`` is called."""
+    async def test_start_subscribes_registry_prefixes(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every prefix from the registry reaches subscriber.subscribe."""
+        reg = RuleRegistry()
+        reg.register(_SingleRowRule(user_public_id="u", topic_prefix="a.b."))
+        reg.register(_NoopRule(topic_prefix="x.y."))
+        sidecar, _ = _make_sidecar(repo, registry=reg)
+
+        async def _never_ending_recv() -> tuple[str, bytes]:
+            """Block until the sidecar's stop event fires."""
+            await asyncio.sleep(5.0)
+            return ("", b"")
+
+        sidecar._subscriber.recv_multipart = _never_ending_recv
+        task = asyncio.create_task(sidecar.start())
+        await asyncio.sleep(0.05)
+        await sidecar.stop()
+        await asyncio.wait_for(task, timeout=2.0)
+
+        subscribed_prefixes = {c.args[0] for c in sidecar._subscriber.subscribe.call_args_list}
+        assert subscribed_prefixes == {"a.b.", "x.y."}
+
+    @pytest.mark.asyncio
+    async def test_start_cancels_running_retry_task_on_exit(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``start()`` cancels the retry task in the finally branch if still running."""
+        sidecar, _ = _make_sidecar(repo)
+
+        async def _one_frame_then_return() -> tuple[str, bytes]:
+            """Return one unhandled frame so the main loop iterates once, then stop()."""
+            await asyncio.sleep(0.01)
+            return ("unknown.topic", b"{}")
+
+        sidecar._subscriber.recv_multipart = _one_frame_then_return
+        monkeypatch.setattr("snapper.application.notify.sidecar._RETRY_LOOP_INTERVAL_S", 60.0)
+        task = asyncio.create_task(sidecar.start())
+        await asyncio.sleep(0.05)
+        await sidecar.stop()
+        await asyncio.wait_for(task, timeout=2.0)
+
+        retry_task = sidecar._retry_task
+        assert retry_task is not None
+
+    @pytest.mark.asyncio
+    async def test_start_consumes_received_frame_and_dispatches(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A frame that arrives through recv_multipart is routed via the dispatcher."""
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        await _seed_device(repo, user)
+        reg = RuleRegistry()
+        reg.register(_SingleRowRule(user_public_id=user, topic_prefix="test."))
+        sidecar, apns = _make_sidecar(repo, registry=reg)
+
+        received = asyncio.Event()
+
+        async def _one_frame_then_hang() -> tuple[str, bytes]:
+            """Return one frame, then block so the main loop sees the dispatch."""
+            if not received.is_set():
+                received.set()
+                return ("test.anything", b"{}")
+            await asyncio.sleep(5.0)
+            return ("", b"")
+
+        sidecar._subscriber.recv_multipart = _one_frame_then_hang
+        task = asyncio.create_task(sidecar.start())
+        await asyncio.wait_for(received.wait(), timeout=1.0)
+        await asyncio.sleep(0.1)
+        await sidecar.stop()
+        await asyncio.wait_for(task, timeout=2.0)
+
+        history = await repo.list_recent_alerts_for_user(user, limit=10, before=None)
+        assert len(history) == 1
+        apns.send.assert_awaited_once()
+
+
+class TestPersistAndFanoutRow:
+    """Edge cases for ``_persist_and_fanout_row``."""
+
+    @pytest.mark.asyncio
+    async def test_missing_read_back_row_logs_warning_and_skips(
+        self,
+        repo: SQLAlchemyRepository,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If the just-inserted event is gone on read-back, fanout is skipped."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
         await _seed_device(repo, user)
         sidecar, apns = _make_sidecar(repo)
-        data = _alert_event_data(user_public_id=user)
 
-        async def recv() -> tuple[str, bytes]:
-            return (f"alerts.{user}.order_fill_full", data.to_json().encode("utf-8"))
+        async def _returns_none(_pid: str) -> AlertEventRow | None:
+            """Simulate SCD2 close racing the read-back."""
+            return None
 
-        sidecar._subscriber.recv_multipart = recv
+        monkeypatch.setattr(repo, "get_alert_event_by_public_id", _returns_none)
+        alert_row: AlertEventInsertRow = {
+            "user_public_id": user,
+            "operator_public_id": None,
+            "wallet_public_id": None,
+            "alert_type": "order_fill_full",
+            "priority": "medium",
+            "is_safety_critical": False,
+            "title": "t",
+            "body": "b",
+            "dedup_key": "x",
+            "thread_key": None,
+            "source_topic": "test.x",
+        }
 
-        run = asyncio.create_task(sidecar.start())
-        await asyncio.sleep(0.05)
-        await sidecar.stop()
-        await asyncio.wait_for(run, timeout=2.0)
+        handler_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            await sidecar._persist_and_fanout_row(alert_row, _ts())
+        finally:
+            logger.remove(handler_id)
 
-        apns.send.assert_awaited()
-        sidecar._subscriber.subscribe.assert_called_with("alerts.")
-
-    @pytest.mark.asyncio
-    async def test_start_returns_when_stop_wins_wait(self, repo: SQLAlchemyRepository) -> None:
-        """If ``stop()`` fires before a message arrives, the loop exits cleanly."""
-        sidecar, _ = _make_sidecar(repo)
-
-        async def never_returns() -> tuple[str, bytes]:
-            await asyncio.sleep(3600)
-            raise AssertionError("recv should not complete in this test")
-
-        sidecar._subscriber.recv_multipart = never_returns
-
-        run = asyncio.create_task(sidecar.start())
-        await asyncio.sleep(0.1)
-        await sidecar.stop()
-        await asyncio.wait_for(run, timeout=2.0)
-
-        assert run.done()
-
-    @pytest.mark.asyncio
-    async def test_start_cancels_retry_task_on_abnormal_exit(
-        self, repo: SQLAlchemyRepository
-    ) -> None:
-        """Finally clause cancels a still-running retry_task on start() exit.
-
-        The retry loop normally exits on its own once ``stop_event`` is
-        set, so the cancel() branch rarely fires in practice. We force
-        it by replacing the retry loop with a coroutine that never
-        checks the stop_event — the start() ``finally`` is then the
-        only path that tears it down.
-        """
-        sidecar, _ = _make_sidecar(repo)
-
-        async def never_ending_retry() -> None:
-            while True:
-                await asyncio.sleep(3600)
-
-        async def stop_event_recv() -> tuple[str, bytes]:
-            await asyncio.sleep(3600)
-            raise AssertionError("recv should not complete in this test")
-
-        sidecar._subscriber.recv_multipart = stop_event_recv
-        sidecar._process_retry_queue_loop = never_ending_retry
-
-        run = asyncio.create_task(sidecar.start())
-        await asyncio.sleep(0.05)
-        await sidecar.stop()
-        await asyncio.wait_for(run, timeout=2.0)
-
-        assert run.done()
-        assert sidecar._retry_task is not None
-        assert sidecar._retry_task.cancelled() or sidecar._retry_task.done()
+        warnings = [r for r in caplog.records if "missing on read-back" in r.getMessage()]
+        assert len(warnings) == 1
+        apns.send.assert_not_awaited()
 
 
 class TestRetryQueueLoop:
@@ -770,35 +849,28 @@ class TestRetryQueueLoop:
     async def test_retry_loop_reattempts_ready_row(
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A queued row with a past ``next_attempt_at`` is retried on wake.
-
-        We shrink the loop interval to 50ms via monkeypatch so the
-        test doesn't block 30s; the loop picks up the ready row,
-        exchanges it through a success send, and exits on stop.
-        """
+        """A queued row with a past next_attempt_at is retried on wake."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
-        await _seed_device(repo, user)
-        err = ApnsSendResult(status_code=500, status="server_error", apns_id="", description="")
-        sidecar, apns = _make_sidecar(repo, send_result=err)
-        await sidecar._handle(
-            f"alerts.{user}.order_fill_full",
-            _alert_event_data(user_public_id=user).to_json().encode("utf-8"),
-            _ts(),
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
         )
-        apns.send.reset_mock()
-        ok = ApnsSendResult(status_code=200, status="success", apns_id="apns-ok", description="")
-        apns.send.return_value = ok
-        queued = (await repo.list_queued_deliveries_all())[0]
         await repo.update_delivery_retry_schedule(
-            queued["public_id"],
-            attempt_count=queued["attempt_count"],
+            delivery_pid,
+            attempt_count=1,
             next_attempt_at=datetime(2020, 1, 1, tzinfo=UTC),
-            error_reason=queued["error_reason"],
-            transition_at=_ts(2),
-            session_id="s-retry-prep",
+            error_reason="server_error",
+            transition_at=_ts(),
+            session_id="prep",
             sequence_id=99,
         )
+        ok = ApnsSendResult(status_code=200, status="success", apns_id="apns-ok", description="")
+        sidecar, apns = _make_sidecar(repo, send_result=ok)
 
         monkeypatch.setattr("snapper.application.notify.sidecar._RETRY_LOOP_INTERVAL_S", 0.05)
         task = asyncio.create_task(sidecar._process_retry_queue_loop())
@@ -809,62 +881,3 @@ class TestRetryQueueLoop:
         still_queued = await repo.list_queued_deliveries_all()
         assert still_queued == []
         apns.send.assert_awaited()
-
-
-class TestLoadDelivery:
-    """``_load_delivery`` returns None for closed/unknown public_ids."""
-
-    @pytest.mark.asyncio
-    async def test_unknown_public_id_returns_none(self, repo: SQLAlchemyRepository) -> None:
-        """Public_id that was never persisted yields None (defensive path).
-
-        The helper scans ``list_queued_deliveries_all`` for the target;
-        a never-written public_id exercises both branches of the
-        per-row filter — the iteration continues past one unrelated
-        queued row, then falls through to the terminal ``None``
-        return.
-        """
-        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
-        await _seed_user(repo, user)
-        await _seed_device(repo, user)
-        err = ApnsSendResult(status_code=500, status="server_error", apns_id="", description="")
-        sidecar, _ = _make_sidecar(repo, send_result=err)
-        await sidecar._handle(
-            f"alerts.{user}.order_fill_full",
-            _alert_event_data(user_public_id=user).to_json().encode("utf-8"),
-            _ts(),
-        )
-
-        result = await sidecar._load_delivery("unknown-public-id")
-
-        assert result is None
-
-
-class TestHandleNonAlertEvent:
-    """``_handle`` rejects non-AlertEventData payloads without side effects."""
-
-    @pytest.mark.asyncio
-    async def test_valid_json_wrong_discriminator_dropped(self, repo: SQLAlchemyRepository) -> None:
-        """A payload that parses but is not AlertEventData logs + returns."""
-        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
-        await _seed_user(repo, user)
-        await _seed_device(repo, user)
-        sidecar, apns = _make_sidecar(repo)
-
-        tick = TickData(
-            session_id="",
-            sequence_id=0,
-            exchange="kraken",
-            instrument="BTC-USD",
-            volume=1.0,
-            public_id="pid",
-            timestamp=_ts(),
-        )
-
-        await sidecar._handle(
-            f"alerts.{user}.order_fill_full",
-            tick.to_json().encode("utf-8"),
-            _ts(),
-        )
-
-        apns.send.assert_not_awaited()

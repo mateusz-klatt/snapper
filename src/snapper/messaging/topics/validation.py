@@ -116,6 +116,7 @@ def _get_topic_prefix_validators() -> list[tuple[str, Callable[[str], tuple[bool
         ("accruals.", _validate_accruals_topic),
         ("backtest.", _validate_backtest_topic),
         ("alerts.", _validate_alerts_topic),
+        ("plans.decisions.", _validate_plans_decisions_topic),
     ]
 
 
@@ -738,6 +739,36 @@ def _validate_alerts_topic(topic: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _validate_plans_decisions_topic(topic: str) -> tuple[bool, str]:
+    """Validate a ``plans.decisions.{plan_public_id}`` topic (§D6.2).
+
+    Published by ``PlanExecutorService`` immediately after every
+    ``ExecutionPlanDecision`` row insert. Subscribed by the notify
+    sidecar's stop-loss rule to turn bracket / trailing-stop fires
+    into iOS push notifications. Best-effort delivery — see Plan 2
+    §D6.2 for fail-closed semantics.
+
+    Args:
+        topic: Topic string starting with ``plans.decisions.``.
+
+    Returns:
+        Tuple of (is_valid, error_message). Empty error_message when
+        valid; dense diagnostic string when not.
+    """
+    segments = topic.split(".")
+    if topic.endswith(".") or len(segments) != 3:
+        return False, (
+            f"plans.decisions.* requires 3 segments (plans.decisions.<plan_public_id>),"
+            f" got '{topic}'"
+        )
+    if segments[0] != "plans" or segments[1] != "decisions":
+        return False, f"Expected 'plans.decisions' prefix, got '{segments[0]}.{segments[1]}'"
+    plan_public_id = segments[2]
+    if not is_uuid7(plan_public_id):
+        return False, f"plans.decisions.* segment 3 must be UUID7, got '{plan_public_id}'"
+    return True, ""
+
+
 _ExchangeValidatorType = Callable[[str], tuple[bool, str]]
 
 
@@ -852,6 +883,7 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
         "accruals",
         "backtest",
         "alerts",
+        "plans",
     }
     if category not in valid_categories:
         return False, f"Unknown topic category: {category}"

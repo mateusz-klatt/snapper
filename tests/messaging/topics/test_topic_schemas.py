@@ -83,7 +83,12 @@ class TestTopicRegistry:
         Then: All trade topics have throttle_ms=0.
         """
         trade = [s for s in TOPIC_REGISTRY if s.category == "trade"]
-        assert len(trade) == 2
+        assert len(trade) == 3
+        assert {s.pattern for s in trade} == {
+            "orders.commands.",
+            "orders.events.",
+            "plans.decisions.",
+        }
         assert all(s.throttle_ms == 0 for s in trade)
 
 

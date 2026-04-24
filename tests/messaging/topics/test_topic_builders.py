@@ -18,6 +18,7 @@ from snapper.messaging.topics.builders import parse_market_topic
 from snapper.messaging.topics.builders import parse_order_command_topic
 from snapper.messaging.topics.builders import parse_order_event_topic
 from snapper.messaging.topics.builders import parse_signal_topic
+from snapper.messaging.topics.builders import plans_decisions_topic
 from snapper.messaging.topics.builders import signal_topic
 from snapper.messaging.topics.builders import system_topic
 
@@ -774,3 +775,23 @@ class TestAlertsTopicBuilder:
         result = alerts_topic(self._USER, "critical_system_error")
 
         assert result == f"alerts.{self._USER}.critical_system_error"
+
+
+class TestPlansDecisionsTopicBuilder:
+    """Tests for ``plans_decisions_topic`` builder (Plan 2 §D6.2)."""
+
+    _PLAN = "019dbb34-f439-77bd-afa8-ee5321d60307"
+
+    def test_topic_shape(self) -> None:
+        """Builder produces ``plans.decisions.{plan_public_id}`` 3-segment form."""
+        result = plans_decisions_topic(self._PLAN)
+
+        assert result == f"plans.decisions.{self._PLAN}"
+
+    def test_topic_round_trips_through_validator(self) -> None:
+        """Output topic is accepted by ``_validate_plans_decisions_topic``."""
+        from snapper.messaging.topics.validation import _validate_plans_decisions_topic
+
+        valid, err = _validate_plans_decisions_topic(plans_decisions_topic(self._PLAN))
+
+        assert valid, err

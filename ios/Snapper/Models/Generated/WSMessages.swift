@@ -284,6 +284,34 @@ struct CandleData: Codable, Sendable {
     }
 }
 
+struct ExecutionPlanDecisionEventData: Codable, Sendable {
+    let type: String
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let decisionPublicId: String
+    let planPublicId: String
+    let decisionType: String
+    let triggerType: String
+    let reason: String
+    let triggeredAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case decisionPublicId = "decision_public_id"
+        case planPublicId = "plan_public_id"
+        case decisionType = "decision_type"
+        case triggerType = "trigger_type"
+        case reason
+        case triggeredAt = "triggered_at"
+    }
+}
+
 struct FundingAccrualData: Codable, Sendable {
     let type: String
     let sequenceId: Int

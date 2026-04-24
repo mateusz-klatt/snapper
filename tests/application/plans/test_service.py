@@ -3,6 +3,7 @@
 import asyncio
 from datetime import UTC
 from datetime import datetime
+from types import SimpleNamespace
 from typing import cast as _cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -2183,6 +2184,180 @@ class TestLogDecisionError:
             decision_type="test",
             trigger_type="tick",
             reason="test reason",
+            importance="action",
+        )
+
+
+class TestSetupPublisher:
+    """BE-3b §D6.2 self-bootstrap publisher covers both no-broker + reuse-context paths."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_setup_publisher_skips_when_no_broker_xsub(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """No broker XSUB endpoint → publisher stays None (no-op)."""
+        mock_settings.return_value = SimpleNamespace(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xsub=None,
+            zmq_broker_xpub=None,
+        )
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+
+        service._setup_publisher()
+
+        assert service._publisher is None
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_setup_publisher_reuses_existing_zmq_context(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """When subscriber already created a context, publisher reuses it."""
+        mock_settings.return_value = SimpleNamespace(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
+            zmq_broker_xpub="tcp://127.0.0.1:7501",
+        )
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        pre_existing_ctx = MagicMock()
+        pre_existing_ctx.socket = MagicMock(return_value=MagicMock())
+        service._zmq_context = pre_existing_ctx
+
+        service._setup_publisher()
+
+        assert service._zmq_context is pre_existing_ctx
+        pre_existing_ctx.socket.assert_called_once()
+        assert service._publisher is not None
+
+
+class TestLogDecisionPublishesEvent:
+    """BE-3b §D6.2: ``_log_decision`` publishes ``plans.decisions.*`` after insert."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_publishes_on_sl_hit(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """``sl_hit`` reason triggers a ``plans.decisions.*`` publish."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="decision-pid-1")
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        fake_publisher = AsyncMock()
+        service._publisher = fake_publisher
+
+        await service._log_decision(
+            plan_public_id="019dbb34-f439-77bd-afa8-ee5321d60307",
+            decision_type="evaluator",
+            trigger_type="tick",
+            reason="sl_hit",
+            importance="action",
+        )
+
+        fake_publisher.send_multipart.assert_awaited_once()
+        call_kwargs = fake_publisher.send_multipart.await_args.kwargs
+        assert call_kwargs["topic"] == "plans.decisions.019dbb34-f439-77bd-afa8-ee5321d60307"
+        assert b'"reason":"sl_hit"' in call_kwargs["payload"]
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_publishes_on_trailing_stop_hit(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """``trailing_stop_hit`` also fires the publish hook identically."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="decision-pid-2")
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        fake_publisher = AsyncMock()
+        service._publisher = fake_publisher
+
+        await service._log_decision(
+            plan_public_id="019dbb34-f439-77bd-afa8-ee5321d60308",
+            decision_type="evaluator",
+            trigger_type="tick",
+            reason="trailing_stop_hit",
+            importance="action",
+        )
+
+        fake_publisher.send_multipart.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_publishes_with_correct_plan_public_id_field(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Published payload uses ``plan_public_id`` (Plan v1.12 R10.B-2)."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="decision-pid-3")
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        fake_publisher = AsyncMock()
+        service._publisher = fake_publisher
+
+        await service._log_decision(
+            plan_public_id="019dbb34-f439-77bd-afa8-ee5321d60309",
+            decision_type="lifecycle",
+            trigger_type="execution",
+            reason="Cycle 42 closed before command dispatch",
+            importance="transition",
+        )
+
+        payload = fake_publisher.send_multipart.await_args.kwargs["payload"]
+        assert b'"plan_public_id":"019dbb34-f439-77bd-afa8-ee5321d60309"' in payload
+        assert b"execution_plan_public_id" not in payload
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_publish_failure_logs_warning_does_not_raise(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Publisher exceptions are caught — DB insert is the source of truth."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="decision-pid-4")
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        fake_publisher = AsyncMock()
+        fake_publisher.send_multipart = AsyncMock(side_effect=RuntimeError("broker down"))
+        service._publisher = fake_publisher
+
+        await service._log_decision(
+            plan_public_id="019dbb34-f439-77bd-afa8-ee5321d6030a",
+            decision_type="evaluator",
+            trigger_type="tick",
+            reason="sl_hit",
+            importance="action",
+        )
+
+        fake_publisher.send_multipart.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_no_publish_when_publisher_unconfigured(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """``_publisher = None`` short-circuits the publish path."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="decision-pid-5")
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        assert service._publisher is None
+
+        await service._log_decision(
+            plan_public_id="plan-x",
+            decision_type="evaluator",
+            trigger_type="tick",
+            reason="sl_hit",
             importance="action",
         )
 

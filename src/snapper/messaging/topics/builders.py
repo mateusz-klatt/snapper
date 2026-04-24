@@ -290,6 +290,27 @@ def alerts_topic(user_public_id: str, alert_type: str) -> str:
     return f"alerts.{user_public_id}.{alert_type}"
 
 
+def plans_decisions_topic(plan_public_id: str) -> str:
+    """Build a ``plans.decisions.{plan_public_id}`` topic string (§D6.2).
+
+    Published by ``PlanExecutorService`` immediately after each
+    ``ExecutionPlanDecision`` row commits. Subscribed by the notify
+    sidecar's stop-loss rule.
+
+    Args:
+        plan_public_id: UUID7 of the parent ``ExecutionPlan`` row.
+
+    Returns:
+        Formatted topic string ``plans.decisions.{plan_public_id}``
+        validated by ``_validate_plans_decisions_topic`` before publish.
+
+    Examples:
+        >>> plans_decisions_topic("019dbb34-f439-77bd-afa8-ee5321d60307")
+        'plans.decisions.019dbb34-f439-77bd-afa8-ee5321d60307'
+    """
+    return f"plans.decisions.{plan_public_id}"
+
+
 def order_commands_prefix(exchange: OrderExchange) -> str:
     """Build subscription prefix for all order commands for an exchange.
 

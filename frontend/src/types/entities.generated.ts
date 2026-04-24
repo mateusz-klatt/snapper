@@ -184,6 +184,23 @@ export interface ExecutionPlan {
 }
 
 /**
+ * Canonical ExecutionPlanDecisionEvent entity.
+ * From WebSocket ExecutionPlanDecisionEventData.
+ */
+export interface ExecutionPlanDecisionEvent {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  decisionPublicId: string
+  planPublicId: string
+  decisionType: string
+  triggerType: string
+  reason: string
+  triggeredAt: Date
+}
+
+/**
  * Canonical FrontMonth entity.
  * From WebSocket FrontMonthData.
  */
