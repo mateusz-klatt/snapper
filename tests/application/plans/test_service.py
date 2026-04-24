@@ -2234,6 +2234,38 @@ class TestSetupPublisher:
         pre_existing_ctx.socket.assert_called_once()
         assert service._publisher is not None
 
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_setup_publisher_closes_raw_socket_on_failure(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """A connect failure in ``_setup_publisher`` closes the raw socket.
+
+        BE-3b R1 recommendation #1: if ``raw_pub_socket.connect`` raises
+        (e.g. bad broker address), the socket is explicitly closed
+        before the exception propagates so the context is not left
+        holding a dangling socket.
+        """
+        mock_settings.return_value = SimpleNamespace(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xsub="tcp://invalid-broker:9999",
+            zmq_broker_xpub="tcp://invalid-broker:9998",
+        )
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        bad_ctx = MagicMock()
+        bad_socket = MagicMock()
+        bad_socket.connect = MagicMock(side_effect=RuntimeError("connect boom"))
+        bad_ctx.socket = MagicMock(return_value=bad_socket)
+        service._zmq_context = bad_ctx
+
+        with pytest.raises(RuntimeError, match="connect boom"):
+            service._setup_publisher()
+
+        bad_socket.close.assert_called_once()
+        assert service._publisher is None
+
 
 class TestLogDecisionPublishesEvent:
     """BE-3b §D6.2: ``_log_decision`` publishes ``plans.decisions.*`` after insert."""

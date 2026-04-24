@@ -744,23 +744,42 @@ class TestSidecarStart:
     async def test_start_cancels_running_retry_task_on_exit(
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``start()`` cancels the retry task in the finally branch if still running."""
+        """``start()`` cancels the retry task in the finally branch if still running.
+
+        Uses a custom ``_process_retry_queue_loop`` replacement that
+        ignores the stop event so the task stays running when ``start()``
+        exits; the ``if not done()`` branch in the finally block then
+        cancels it. Without the override, the retry loop notices the
+        stop event on its next tick and exits cleanly, taking the
+        "already done" branch.
+        """
         sidecar, _ = _make_sidecar(repo)
+        cancelled = asyncio.Event()
 
-        async def _one_frame_then_return() -> tuple[str, bytes]:
-            """Return one unhandled frame so the main loop iterates once, then stop()."""
-            await asyncio.sleep(0.01)
-            return ("unknown.topic", b"{}")
+        async def _unstoppable_retry_loop() -> None:
+            """Sleep indefinitely; only a direct task.cancel() ends us."""
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
 
-        sidecar._subscriber.recv_multipart = _one_frame_then_return
-        monkeypatch.setattr("snapper.application.notify.sidecar._RETRY_LOOP_INTERVAL_S", 60.0)
+        monkeypatch.setattr(sidecar, "_process_retry_queue_loop", _unstoppable_retry_loop)
+
+        async def _blocks_forever() -> tuple[str, bytes]:
+            """Block so the main loop's asyncio.wait hands off to stop_task."""
+            await asyncio.sleep(3600)
+            return ("", b"")
+
+        sidecar._subscriber.recv_multipart = _blocks_forever
         task = asyncio.create_task(sidecar.start())
         await asyncio.sleep(0.05)
         await sidecar.stop()
         await asyncio.wait_for(task, timeout=2.0)
 
-        retry_task = sidecar._retry_task
-        assert retry_task is not None
+        assert sidecar._retry_task is not None
+        await asyncio.sleep(0)
+        assert cancelled.is_set()
 
     @pytest.mark.asyncio
     async def test_start_consumes_received_frame_and_dispatches(

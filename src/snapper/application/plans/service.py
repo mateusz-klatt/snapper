@@ -224,8 +224,13 @@ class PlanExecutorService(RegisterableProcess):
         if self._zmq_context is None:
             self._zmq_context = zmq.asyncio.Context()
         raw_pub_socket = self._zmq_context.socket(zmq.PUB)
-        apply_hwm(raw_pub_socket, sndhwm=HWM_ORDER_FLOW)
-        raw_pub_socket.connect(broker_addr)
+        try:
+            apply_hwm(raw_pub_socket, sndhwm=HWM_ORDER_FLOW)
+            raw_pub_socket.connect(broker_addr)
+        except Exception:
+            with contextlib.suppress(Exception):
+                raw_pub_socket.close()
+            raise
         self._publisher = ValidatedPublisher(raw_pub_socket)
         logger.info("PlanExecutorService: connected publisher to broker {}", broker_addr)
 

@@ -93,6 +93,7 @@ def _pref(
     quiet_start: int | None = None,
     quiet_end: int | None = None,
     mute_until: datetime | None = None,
+    timezone: str = "UTC",
 ) -> DeviceAlertPrefRow:
     """Build a DeviceAlertPrefRow fixture."""
     return cast(
@@ -112,7 +113,7 @@ def _pref(
             "quiet_hours_start_min": quiet_start,
             "quiet_hours_end_min": quiet_end,
             "mute_until": mute_until,
-            "timezone": "UTC",
+            "timezone": timezone,
         },
     )
 
@@ -351,6 +352,28 @@ class TestQuietHours:
         assert _in_quiet_hours(pref, early_morning) is True
         assert _in_quiet_hours(pref, evening) is True
         assert _in_quiet_hours(pref, noon) is False
+
+    def test_non_utc_timezone_converts_before_compare(self) -> None:
+        """Local-time quiet hours are respected — ``now`` is converted to the pref's tz.
+
+        BE-3b R1 regression closure: a pref set to
+        ``America/New_York`` with quiet hours 22:00-07:00 local must
+        match against local wall-clock time, not against UTC. Copilot
+        review flagged the original implementation for reading
+        ``now.hour`` / ``now.minute`` directly against UTC.
+        """
+        pref = _pref(quiet_start=22 * 60, quiet_end=7 * 60, timezone="America/New_York")
+        ny_midnight_as_utc = datetime(2026, 4, 24, 4, 0, tzinfo=UTC)
+        ny_noon_as_utc = datetime(2026, 4, 24, 16, 0, tzinfo=UTC)
+
+        assert _in_quiet_hours(pref, ny_midnight_as_utc) is True
+        assert _in_quiet_hours(pref, ny_noon_as_utc) is False
+
+    def test_unknown_timezone_falls_back_to_utc(self) -> None:
+        """An unknown zone does not raise — falls back to UTC comparison."""
+        pref = _pref(quiet_start=11 * 60, quiet_end=13 * 60, timezone="Mars/Olympus_Mons")
+
+        assert _in_quiet_hours(pref, _now()) is True
 
 
 class TestRouteAlertToDevices:

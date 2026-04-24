@@ -21,6 +21,10 @@ we just refuse to silently shove them behind a quiet-hour wall.
 """
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfoNotFoundError
+
+from loguru import logger
 
 from snapper.data.repository import Repository
 from snapper.data.repository_types import AlertEventRow
@@ -146,7 +150,13 @@ def _priority_rank(priority: str) -> int:
 def _in_quiet_hours(pref: DeviceAlertPrefRow, now: datetime) -> bool:
     """Return True when ``now`` falls inside the pref's quiet-hours window.
 
-    The window is a minutes-of-day interval in the pref's ``timezone``.
+    The window is a minutes-of-day interval in the pref's ``timezone``
+    — quiet hours are a user-facing local-time feature, so the
+    comparison happens after converting ``now`` to that zone. The
+    default zone on fresh preference rows is ``"UTC"``, which is a
+    no-op conversion; users who configure ``"America/New_York"`` or
+    similar get suppression tied to local clock minutes.
+
     ``quiet_hours_start_min`` / ``quiet_hours_end_min`` are both None
     when the feature is disabled. A wrap-around window (start > end)
     is interpreted as overnight, e.g. 22:00–07:00.
@@ -155,9 +165,19 @@ def _in_quiet_hours(pref: DeviceAlertPrefRow, now: datetime) -> bool:
     end = pref.get("quiet_hours_end_min")
     if start is None or end is None:
         return False
-    current_min = now.hour * 60 + now.minute
     if start == end:
         return False
+    tz_name = pref.get("timezone") or "UTC"
+    try:
+        zone = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            "routing: unknown device-alert pref timezone={tz} — falling back to UTC",
+            tz=tz_name,
+        )
+        zone = ZoneInfo("UTC")
+    local_now = now.astimezone(zone)
+    current_min = local_now.hour * 60 + local_now.minute
     if start < end:
         return start <= current_min < end
     return current_min >= start or current_min < end
