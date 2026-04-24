@@ -37,8 +37,6 @@ final class NavigationCoordinator: ObservableObject {
     /// path and ignores the id.
     @Published private(set) var pendingAlertPublicId: String?
 
-    init() {}
-
     /// Extract deep-link metadata from the tapped notification response.
     ///
     /// The APNs payload minted server-side carries:

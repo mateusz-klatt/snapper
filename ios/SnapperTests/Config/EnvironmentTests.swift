@@ -41,5 +41,7 @@ final class EnvironmentTests: XCTestCase {
         XCTAssertEqual(AppConfig.Endpoints.executions, "/executions")
         XCTAssertEqual(AppConfig.Endpoints.status, "/status")
         XCTAssertEqual(AppConfig.Endpoints.health, "/health")
+        XCTAssertEqual(AppConfig.Endpoints.alerts, "/alerts")
+        XCTAssertEqual(AppConfig.Endpoints.system, "/system")
     }
 }

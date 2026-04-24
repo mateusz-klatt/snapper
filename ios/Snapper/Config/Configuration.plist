@@ -40,6 +40,8 @@
 		<string>/devices</string>
 		<key>Alerts</key>
 		<string>/alerts</string>
+		<key>System</key>
+		<string>/system</string>
 	</dict>
 </dict>
 </plist>

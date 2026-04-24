@@ -14,7 +14,7 @@ import os
 /// inside `pendingToken` until login flips the guard; a login that
 /// happens before the token arrives waits for the token.
 ///
-/// ``APIClient`` is `@MainActor`-annotated, so `_register()` uses an
+/// ``APIClient`` is `@MainActor`-annotated, so `register()` uses an
 /// explicit `await` hop when it invokes `apiClient.registerDevice` —
 /// this is Swift 6 strict-concurrency clean because the actor and
 /// `@MainActor` are distinct isolation domains.
@@ -54,13 +54,13 @@ actor DeviceRegistrationService {
     /// Store an incoming APNs token; register immediately if logged-in.
     ///
     /// Called from `AppDelegate.didRegisterForRemoteNotificationsWithDeviceToken`.
-    /// The token arrives as raw `Data`; `_register()` hex-encodes it
+    /// The token arrives as raw `Data`; `register()` hex-encodes it
     /// before sending so the backend gets the canonical device-token
     /// string APNs itself expects as a URL segment on provider API.
     func onTokenReceived(_ token: Data) async {
         pendingToken = token
         if isLoggedIn {
-            await _register()
+            await register()
         }
     }
 
@@ -73,7 +73,7 @@ actor DeviceRegistrationService {
     func onLogin() async {
         isLoggedIn = true
         if pendingToken != nil {
-            await _register()
+            await register()
         }
     }
 
@@ -97,7 +97,7 @@ actor DeviceRegistrationService {
         lastRegisteredDevicePublicId
     }
 
-    private func _register() async {
+    private func register() async {
         guard let token = pendingToken else {
             return
         }
@@ -109,7 +109,7 @@ actor DeviceRegistrationService {
         let body = RegisterDeviceBody(
             deviceToken: hex,
             deviceId: deviceId,
-            env: _currentEnv(),
+            env: currentEnv(),
             appVersion: appVersion ?? "unknown",
             previewsMode: nil
         )
@@ -130,7 +130,7 @@ actor DeviceRegistrationService {
         }
     }
 
-    private func _currentEnv() -> String {
+    private func currentEnv() -> String {
         #if DEBUG
         return "sandbox"
         #else

@@ -113,18 +113,15 @@ def _read_config(config_path: Path) -> tuple[Path, list[str]]:
     return resolved, resolved.read_text(encoding="utf-8").splitlines()
 
 
-def _write_config(config_path: Path, content: str) -> None:
-    """Validate path and write content to .pre-commit-config.yaml.
+def _write_config(content: str) -> None:
+    """Write content to the fixed root .pre-commit-config.yaml file.
 
     Args:
-        config_path: Path to the .pre-commit-config.yaml file.
         content: Full file content to write.
 
     Raises:
         FileNotFoundError: If config file does not exist.
-        ValueError: If path contains traversal or targets wrong filename.
     """
-    _validate_config_path(config_path)
     _precommit_config_path().write_text(content, encoding="utf-8")
 
 
@@ -164,7 +161,7 @@ def update_config(
             active_repo = None
         else:
             updated_lines.append(line)
-    _write_config(config_path, "\n".join(updated_lines) + "\n")
+    _write_config("\n".join(updated_lines) + "\n")
 
 
 def main() -> int:

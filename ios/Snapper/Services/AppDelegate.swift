@@ -31,8 +31,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, @preconcurrency UNUser
     )
 
     nonisolated func application(
-        _ application: UIApplication,
-        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+        _ _: UIApplication,
+        didFinishLaunchingWithOptions _: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
         Task { @MainActor in
             UNUserNotificationCenter.current().delegate = self
@@ -41,7 +41,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, @preconcurrency UNUser
     }
 
     nonisolated func application(
-        _ application: UIApplication,
+        _ _: UIApplication,
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
     ) {
         Task { @MainActor in
@@ -50,7 +50,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, @preconcurrency UNUser
     }
 
     nonisolated func application(
-        _ application: UIApplication,
+        _ _: UIApplication,
         didFailToRegisterForRemoteNotificationsWithError error: Error
     ) {
         Task { @MainActor in
@@ -61,8 +61,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, @preconcurrency UNUser
     // MARK: - UNUserNotificationCenterDelegate
 
     func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification,
+        _ _: UNUserNotificationCenter,
+        willPresent _: UNNotification,
         withCompletionHandler completionHandler: @escaping @Sendable (UNNotificationPresentationOptions) -> Void
     ) {
         if case .connected = WebSocketManager.shared.connectionState {
@@ -73,7 +73,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, @preconcurrency UNUser
     }
 
     func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
+        _ _: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping @Sendable () -> Void
     ) {

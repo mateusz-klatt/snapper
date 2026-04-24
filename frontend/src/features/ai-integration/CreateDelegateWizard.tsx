@@ -366,26 +366,26 @@ function ScopeAndCapsStep({
             className='w-full px-3 py-2 rounded-lg border border-dark-600 bg-alpine-50 font-mono text-xs'
           />
         </div>
-        <div className='pt-2'>
-          <label htmlFor='wizard-long-lived' className='flex items-start gap-2 cursor-pointer'>
-            <input
-              id='wizard-long-lived'
-              type='checkbox'
-              checked={longLived}
-              onChange={e => onLongLivedChange(e.target.checked)}
-              disabled={readOnly}
-              className='mt-1'
-            />
-            <span className='text-sm'>
-              <span className='font-medium'>Long-lived token (PAT-style)</span>
-              <span className='block text-muted-700 text-xs mt-0.5'>
-                Issues a single access token with ~10-year expiry and no refresh token. Recommended
-                for local MCP clients where refresh-token rotation is friction. Revoke by
-                deactivating this delegate. Default: off (rotating 15-min access + 7-day refresh
-                pair).
-              </span>
-            </span>
-          </label>
+        <div className='pt-2 flex items-start gap-2'>
+          <input
+            id='wizard-long-lived'
+            type='checkbox'
+            checked={longLived}
+            onChange={e => onLongLivedChange(e.target.checked)}
+            disabled={readOnly}
+            aria-describedby='wizard-long-lived-description'
+            className='mt-1'
+          />
+          <div className='text-sm'>
+            <label htmlFor='wizard-long-lived' className='font-medium cursor-pointer'>
+              Long-lived token (PAT-style)
+            </label>
+            <p id='wizard-long-lived-description' className='text-muted-700 text-xs mt-0.5'>
+              Issues a single access token with ~10-year expiry and no refresh token. Recommended
+              for local MCP clients where refresh-token rotation is friction. Revoke by deactivating
+              this delegate. Default: off (rotating 15-min access + 7-day refresh pair).
+            </p>
+          </div>
         </div>
       </section>
 

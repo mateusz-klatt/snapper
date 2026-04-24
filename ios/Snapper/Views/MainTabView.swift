@@ -64,11 +64,13 @@ struct MainTabView: View {
     /// fires after the scroll lands.
     private func handleDeepLink(path: String?) {
         guard let path else { return }
-        if path.hasPrefix("/alerts") {
+        if path.hasPrefix(AppConfig.Endpoints.alerts) {
             selectedTab = "alerts"
-        } else if path.hasPrefix("/orders") {
+        } else if path.hasPrefix(AppConfig.Endpoints.orders) {
             selectedTab = "trading"
-        } else if path.hasPrefix("/positions") || path.hasPrefix("/system") {
+        } else if path.hasPrefix(AppConfig.Endpoints.positions)
+            || path.hasPrefix(AppConfig.Endpoints.system)
+        {
             selectedTab = "dashboard"
         }
     }
