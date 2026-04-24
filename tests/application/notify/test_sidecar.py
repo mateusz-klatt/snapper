@@ -854,6 +854,25 @@ class TestSidecarStart:
     """``start`` subscribes every registry prefix + drains outbox + spawns retry loop."""
 
     @pytest.mark.asyncio
+    async def test_start_with_pre_set_stop_event_skips_receive_loop(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sidecar stopped before start exits without opening a receive wait."""
+        sidecar, _ = _make_sidecar(repo)
+
+        async def _instant_retry_loop() -> None:
+            """Complete immediately so start can reach its finally branch."""
+            return None
+
+        monkeypatch.setattr(sidecar, "_process_retry_queue_loop", _instant_retry_loop)
+        sidecar._subscriber.recv_multipart = AsyncMock()
+
+        await sidecar.stop()
+        await asyncio.wait_for(sidecar.start(), timeout=1.0)
+
+        sidecar._subscriber.recv_multipart.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_start_subscribes_registry_prefixes(
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
