@@ -3266,8 +3266,8 @@ packages:
     resolution: {integrity: sha512-TeTSQ6H5YHvpqVwBRcnLDCBnDOHWYu7IvGbHT6N8AOymcr9PJGjc1GTtiWZTYg0NCgYwvnYWEkVChQAr9bjfwA==}
     engines: {node: '>=16'}
 
-  typed-query-selector@2.12.1:
-    resolution: {integrity: sha512-uzR+FzI8qrUEIu96oaeBJmd9E7CFEiQ3goA5qCVgc4s5llSubcfGHq9yUstZx/k4s9dXHVKsE35YWoFyvEqEHA==}
+  typed-query-selector@2.12.2:
+    resolution: {integrity: sha512-EOPFbyIub4ngnEdqi2yOcNeDLaX/0jcE1JoAXQDDMIthap7FoN795lc/SHfIq2d416VufXpM8z/lD+WRm2gfOQ==}
 
   typescript-eslint@8.59.0:
     resolution: {integrity: sha512-BU3ONW9X+v90EcCH9ZS6LMackcVtxRLlI3XrYyqZIwVSHIk7Qf7bFw1z0M9Q0IUxhTMZCf8piY9hTYaNEIASrw==}
@@ -6313,7 +6313,7 @@ snapshots:
       chromium-bidi: 14.0.0(devtools-protocol@0.0.1595872)
       debug: 4.4.3(supports-color@10.2.2)
       devtools-protocol: 0.0.1595872
-      typed-query-selector: 2.12.1
+      typed-query-selector: 2.12.2
       webdriver-bidi-protocol: 0.4.1
       ws: 8.20.0
     transitivePeerDependencies:
@@ -6331,7 +6331,7 @@ snapshots:
       cosmiconfig: 9.0.1(typescript@6.0.3)
       devtools-protocol: 0.0.1595872
       puppeteer-core: 24.42.0
-      typed-query-selector: 2.12.1
+      typed-query-selector: 2.12.2
     transitivePeerDependencies:
       - bare-abort-controller
       - bare-buffer
@@ -6734,7 +6734,7 @@ snapshots:
 
   type-fest@4.41.0: {}
 
-  typed-query-selector@2.12.1: {}
+  typed-query-selector@2.12.2: {}
 
   typescript-eslint@8.59.0(eslint@10.2.1(jiti@1.21.7))(typescript@6.0.3):
     dependencies:
