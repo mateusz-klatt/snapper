@@ -8013,7 +8013,17 @@ class SQLAlchemyRepository(Repository):
     async def list_device_alert_prefs_for_user(
         self, user_public_id: str
     ) -> list[DeviceAlertPrefRow]:
-        """Active per-device prefs for user's active devices."""
+        """Active per-device prefs for user's active devices.
+
+        The device-side join filters by ``token_status = 'active'`` in
+        addition to ``known_to = KNOWN_TO_MAX`` because BE-3a R1 added
+        tombstone successor rows
+        (``token_status IN ('unregistered', 'user_unregistered')``)
+        that also remain at ``known_to = KNOWN_TO_MAX``. Without the
+        status filter, prefs attached to a 410'd or user-unregistered
+        device would leak back into this listing (BE-3a R1.1
+        regression closure).
+        """
         async with self.session() as s:
             result = await s.execute(
                 select(DeviceAlertPref)
@@ -8024,6 +8034,7 @@ class SQLAlchemyRepository(Repository):
                 .where(
                     NotificationDevice.user_public_id == user_public_id,
                     NotificationDevice.known_to == KNOWN_TO_MAX,
+                    NotificationDevice.token_status == "active",
                     DeviceAlertPref.known_to == KNOWN_TO_MAX,
                 )
             )

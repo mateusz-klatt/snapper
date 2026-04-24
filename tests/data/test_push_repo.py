@@ -217,6 +217,48 @@ class TestNotificationDeviceRepo:
         assert inserted is False
 
     @pytest.mark.asyncio
+    async def test_list_device_alert_prefs_excludes_tombstoned_device(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Prefs attached to a 410'd device must not leak back (BE-3a R1.1).
+
+        Tombstone successor rows remain at ``known_to = KNOWN_TO_MAX``,
+        so a pre-R1.1 join filtering only on ``known_to`` would return
+        prefs owned by an unregistered device. The join must also
+        require ``token_status = 'active'``.
+        """
+        device_pid = await _seed_user_and_device(
+            repo,
+            user_public_id="user-tombstone-prefs",
+            device_token="tombstoned-token",
+            sequence_id=1,
+        )
+        await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                device_public_id=device_pid,
+                alert_type="order_fill_full",
+                enabled=True,
+                min_priority="medium",
+                session_id="s1",
+                sequence_id=2,
+                timestamp=_ts(1),
+            )
+        )
+        pre_deactivate = await repo.list_device_alert_prefs_for_user("user-tombstone-prefs")
+        assert len(pre_deactivate) == 1
+
+        await repo.deactivate_notification_device_scd2(
+            device_pid,
+            reason="unregistered",
+            timestamp=_ts(5),
+            session_id="s-410",
+            sequence_id=99,
+        )
+
+        post_deactivate = await repo.list_device_alert_prefs_for_user("user-tombstone-prefs")
+        assert post_deactivate == []
+
+    @pytest.mark.asyncio
     async def test_upsert_device_alert_pref_scope_partitioning(
         self, repo: SQLAlchemyRepository
     ) -> None:
