@@ -1,11 +1,13 @@
 """Tests for ``GET /api/metrics/notifications`` (BE-3c §D11)."""
 
+import inspect
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import Request
 
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -98,10 +100,6 @@ class TestNotificationMetrics:
         covered by the auth-dependency test suite. This guards
         against a silent removal of the guard in a future refactor.
         """
-        import inspect
-
-        from snapper.auth.domain.permissions import Permission
-
         signature = inspect.signature(get_notification_metrics)
         principal_annotation = signature.parameters["_principal"].annotation
         metadata = principal_annotation.__metadata__

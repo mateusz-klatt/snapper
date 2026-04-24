@@ -9,6 +9,7 @@ import pytest
 
 from snapper.application.notify.rules.position_stop_loss_fired import PositionStopLossFiredRule
 from snapper.messaging.schemas.data import ExecutionPlanDecisionEventData
+from snapper.messaging.schemas.data import TickData
 
 
 def _now() -> datetime:
@@ -186,8 +187,6 @@ class TestPositionStopLossFiredRule:
     @pytest.mark.asyncio
     async def test_non_decision_payload_dropped(self) -> None:
         """Well-formed non-ExecutionPlanDecisionEventData yields []."""
-        from snapper.messaging.schemas.data import TickData
-
         tick = TickData(
             session_id="s",
             sequence_id=1,

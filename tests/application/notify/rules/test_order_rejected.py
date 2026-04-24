@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from snapper.application.notify.rules.order_rejected import OrderRejectedRule
+from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
 
 
@@ -131,8 +132,6 @@ class TestOrderRejectedRule:
     @pytest.mark.asyncio
     async def test_non_order_payload_dropped(self) -> None:
         """Well-formed non-OrderData (e.g. ExecutionData) yields []."""
-        from snapper.messaging.schemas.data import ExecutionData
-
         ex = ExecutionData(
             session_id="s",
             sequence_id=1,

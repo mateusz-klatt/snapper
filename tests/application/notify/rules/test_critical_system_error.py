@@ -10,6 +10,7 @@ import pytest
 
 from snapper.application.notify.rules.critical_system_error import CriticalSystemErrorRule
 from snapper.messaging.schemas.data import HeartbeatData
+from snapper.messaging.schemas.data import TickData
 
 
 def _base_now() -> datetime:
@@ -203,8 +204,6 @@ class TestCriticalSystemErrorRule:
     @pytest.mark.asyncio
     async def test_non_heartbeat_schema_dropped(self) -> None:
         """Well-formed non-HeartbeatData (e.g. TickData) yields []."""
-        from snapper.messaging.schemas.data import TickData
-
         tick = TickData(
             session_id="s",
             sequence_id=1,

@@ -9,6 +9,7 @@ import pytest
 
 from snapper.application.notify.rules.order_fill_full import OrderFillFullRule
 from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import TickData
 
 
 def _now() -> datetime:
@@ -127,8 +128,6 @@ class TestOrderFillFullRule:
     @pytest.mark.asyncio
     async def test_non_execution_payload_dropped(self) -> None:
         """A well-formed non-ExecutionData message (e.g. tick) yields []."""
-        from snapper.messaging.schemas.data import TickData
-
         tick = TickData(
             session_id="s",
             sequence_id=1,

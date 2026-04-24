@@ -3,6 +3,8 @@
 from datetime import UTC
 from datetime import datetime
 from typing import cast
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -123,9 +125,6 @@ class TestLoadDefaultRegistry:
     @pytest.mark.asyncio
     async def test_default_rules_do_not_raise_on_unrelated_topic(self) -> None:
         """Every rule handles an unrelated / malformed topic gracefully."""
-        from unittest.mock import AsyncMock
-        from unittest.mock import MagicMock
-
         reg = load_default_registry()
         now = datetime(2026, 4, 24, 12, tzinfo=UTC)
         fake_repo = MagicMock()
