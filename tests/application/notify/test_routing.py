@@ -358,16 +358,25 @@ class TestQuietHours:
 
         BE-3b R1 regression closure: a pref set to
         ``America/New_York`` with quiet hours 22:00-07:00 local must
-        match against local wall-clock time, not against UTC. Copilot
-        review flagged the original implementation for reading
-        ``now.hour`` / ``now.minute`` directly against UTC.
+        match against local wall-clock time, not against UTC. Chosen
+        timestamps deliberately cross the UTC/local boundary so a
+        pre-fix implementation reading ``now.hour``/``now.minute``
+        directly returns a different verdict:
+
+        - **06:30 NY (EDT, UTC-4) → 10:30 UTC**: inside NY's
+          22:00-07:00 window, outside the same window interpreted in
+          UTC. Pre-fix would have returned False; post-fix returns
+          True.
+        - **19:30 NY (EDT) → 23:30 UTC**: outside NY's 22:00-07:00,
+          inside the same window interpreted in UTC. Pre-fix would
+          have returned True; post-fix returns False.
         """
         pref = _pref(quiet_start=22 * 60, quiet_end=7 * 60, timezone="America/New_York")
-        ny_midnight_as_utc = datetime(2026, 4, 24, 4, 0, tzinfo=UTC)
-        ny_noon_as_utc = datetime(2026, 4, 24, 16, 0, tzinfo=UTC)
+        ny_before_wakeup = datetime(2026, 4, 24, 10, 30, tzinfo=UTC)
+        ny_evening = datetime(2026, 4, 24, 23, 30, tzinfo=UTC)
 
-        assert _in_quiet_hours(pref, ny_midnight_as_utc) is True
-        assert _in_quiet_hours(pref, ny_noon_as_utc) is False
+        assert _in_quiet_hours(pref, ny_before_wakeup) is True
+        assert _in_quiet_hours(pref, ny_evening) is False
 
     def test_unknown_timezone_falls_back_to_utc(self) -> None:
         """An unknown zone does not raise — falls back to UTC comparison."""
