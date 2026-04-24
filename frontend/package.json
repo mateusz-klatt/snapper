@@ -29,7 +29,7 @@
     "@tanstack/react-query": "^5.100.1",
     "clsx": "^2.1.1",
     "lightweight-charts": "^5.1.0",
-    "lucide-react": "^1.9.0",
+    "lucide-react": "^1.11.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-hot-toast": "^2.6.0",
