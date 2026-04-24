@@ -88,7 +88,7 @@ def _device_info_from_row(row: NotificationDeviceRow) -> NotificationDeviceInfo:
     )
 
 
-@router.post("", response_model=NotificationDeviceResponse)
+@router.post("")
 async def register_device(
     request: Request,
     command: RegisterDeviceCommand,
@@ -151,7 +151,7 @@ async def register_device(
     )
 
 
-@router.get("", response_model=NotificationDeviceListResponse)
+@router.get("")
 async def list_devices(
     request: Request,
     principal: Annotated[AuthPrincipal, Depends(require_authentication)],
@@ -181,7 +181,7 @@ async def list_devices(
     )
 
 
-@router.delete("/{device_public_id}", response_model=MessageResponse)
+@router.delete("/{device_public_id}")
 async def delete_device(
     request: Request,
     device_public_id: str,
@@ -226,7 +226,7 @@ async def delete_device(
     )
 
 
-@router.patch("/{device_public_id}/prefs", response_model=DeviceAlertPrefResponse)
+@router.patch("/{device_public_id}/prefs")
 async def update_device_pref(
     request: Request,
     device_public_id: str,

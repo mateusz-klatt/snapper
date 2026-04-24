@@ -33,10 +33,10 @@ limiter = Limiter(key_func=get_remote_address)
 LOGIN_RATE_LIMIT = "5/15minutes"
 """Maximum failed login attempts per username and IP within a 15-minute window."""
 
-PASSWORD_CHANGE_RATE_LIMIT = "5/hour"
+ACCOUNT_CHANGE_RATE_LIMIT = "5/hour"
 """Maximum password change attempts per IP within one hour."""
 
-PASSWORD_RESET_RATE_LIMIT = "10/hour"
+ACCOUNT_RESET_RATE_LIMIT = "10/hour"
 """Maximum admin password reset attempts per IP within one hour."""
 
 _LOGIN_RATE_LIMIT_ITEM: RateLimitItem = parse(LOGIN_RATE_LIMIT)

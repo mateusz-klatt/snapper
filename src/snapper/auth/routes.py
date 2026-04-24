@@ -50,8 +50,8 @@ from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
 from snapper.server.json_body import optional_json_body
-from snapper.server.rate_limiting import PASSWORD_CHANGE_RATE_LIMIT
-from snapper.server.rate_limiting import PASSWORD_RESET_RATE_LIMIT
+from snapper.server.rate_limiting import ACCOUNT_CHANGE_RATE_LIMIT
+from snapper.server.rate_limiting import ACCOUNT_RESET_RATE_LIMIT
 from snapper.server.rate_limiting import clear_failed_login_attempts
 from snapper.server.rate_limiting import enforce_failed_login_rate_limit
 from snapper.server.rate_limiting import limiter
@@ -748,7 +748,7 @@ async def deactivate_user(
 @router.post(
     "/users/{user_id}/change-password", openapi_extra=openapi_schema(ChangePasswordRequest)
 )
-@limiter.limit(PASSWORD_CHANGE_RATE_LIMIT)
+@limiter.limit(ACCOUNT_CHANGE_RATE_LIMIT)
 async def change_user_password(
     request: Request,
     user_id: str,
@@ -796,7 +796,7 @@ async def change_user_password(
 @router.post(
     "/users/{user_id}/admin-reset-password", openapi_extra=openapi_schema(AdminResetPasswordRequest)
 )
-@limiter.limit(PASSWORD_RESET_RATE_LIMIT)
+@limiter.limit(ACCOUNT_RESET_RATE_LIMIT)
 async def admin_reset_user_password(
     request: Request,
     user_id: str,

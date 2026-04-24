@@ -97,7 +97,7 @@ def load_apns_config(settings: SettingsService) -> ApnsConfig:
     key_b64 = cast(str, settings.get_setting("apns_private_key_p8_base64"))
     try:
         pem = base64.b64decode(key_b64.encode("ascii")).decode("ascii")
-    except (ValueError, UnicodeDecodeError) as exc:
+    except ValueError as exc:
         raise ValueError(
             f"apns_private_key_p8_base64 failed to decode as base64-encoded PEM: {exc}"
         ) from exc

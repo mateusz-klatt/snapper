@@ -511,7 +511,7 @@ class NotifySidecar(RegisterableProcess):
                 for row in rows:
                     await self._attempt_on_queued_row(row)
         except asyncio.CancelledError:
-            return
+            raise
 
 
 def _priority_to_apns(priority: str) -> int:

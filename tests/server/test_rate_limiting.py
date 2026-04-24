@@ -12,9 +12,9 @@ from slowapi import Limiter
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from snapper.server.app import handle_rate_limit_exceeded
+from snapper.server.rate_limiting import ACCOUNT_CHANGE_RATE_LIMIT
+from snapper.server.rate_limiting import ACCOUNT_RESET_RATE_LIMIT
 from snapper.server.rate_limiting import LOGIN_RATE_LIMIT
-from snapper.server.rate_limiting import PASSWORD_CHANGE_RATE_LIMIT
-from snapper.server.rate_limiting import PASSWORD_RESET_RATE_LIMIT
 from snapper.server.rate_limiting import clear_failed_login_attempts
 from snapper.server.rate_limiting import enforce_failed_login_rate_limit
 from snapper.server.rate_limiting import limiter
@@ -45,20 +45,20 @@ class TestRateLimitingConfig:
     def test_password_change_rate_limit_format(self) -> None:
         """Verify password change rate limit has correct format.
 
-        Given: The PASSWORD_CHANGE_RATE_LIMIT constant,
+        Given: The ACCOUNT_CHANGE_RATE_LIMIT constant,
         When: Checking its value,
         Then: It follows the slowapi rate format.
         """
-        assert PASSWORD_CHANGE_RATE_LIMIT == "5/hour"
+        assert ACCOUNT_CHANGE_RATE_LIMIT == "5/hour"
 
     def test_password_reset_rate_limit_format(self) -> None:
         """Verify password reset rate limit has correct format.
 
-        Given: The PASSWORD_RESET_RATE_LIMIT constant,
+        Given: The ACCOUNT_RESET_RATE_LIMIT constant,
         When: Checking its value,
         Then: It follows the slowapi rate format.
         """
-        assert PASSWORD_RESET_RATE_LIMIT == "10/hour"
+        assert ACCOUNT_RESET_RATE_LIMIT == "10/hour"
 
 
 class TestHandleRateLimitExceeded:

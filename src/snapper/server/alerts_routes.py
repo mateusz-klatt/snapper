@@ -97,7 +97,7 @@ def _decode_cursor(token: str | None) -> AlertListCursor | None:
             logger.debug("alert cursor rejected — missing or wrong-type t/p fields")
             return None
         ts = datetime.fromisoformat(ts_raw)
-    except (binascii.Error, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (binascii.Error, ValueError) as exc:
         logger.debug(
             "alert cursor rejected — decode failed ({kind}: {err})",
             kind=type(exc).__name__,
@@ -131,7 +131,7 @@ def _alert_info_from_row(row: AlertEventRow) -> AlertEventInfo:
     )
 
 
-@router.get("/history", response_model=AlertHistoryResponse)
+@router.get("/history")
 async def list_alert_history(
     request: Request,
     principal: Annotated[AuthPrincipal, Depends(require_authentication)],
@@ -186,7 +186,7 @@ async def list_alert_history(
     )
 
 
-@router.get("/{alert_public_id}", response_model=AlertEventResponse)
+@router.get("/{alert_public_id}")
 async def get_alert_event(
     request: Request,
     alert_public_id: str,

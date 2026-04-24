@@ -115,7 +115,7 @@ def _write_config(config_path: Path, content: str) -> None:
         ValueError: If path contains traversal or targets wrong filename.
     """
     resolved = _resolve_config(config_path)
-    (resolved.parent / PRECOMMIT_CONFIG_FILENAME).write_text(content, encoding="utf-8")
+    resolved.write_text(content, encoding="utf-8")
 
 
 def update_config(

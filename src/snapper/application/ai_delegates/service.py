@@ -566,7 +566,7 @@ class DelegateService:
 
          Bounds the blast radius of a leaked
         operator session. Counts ONLY active (``is_active=True``)
-        SCD2-current delegate Users; deactivated rows don't count
+        open-ended delegate Users; deactivated rows don't count
         so rotations remain unbounded. Fails-closed with
         class:`DelegateProliferationError` so the route can map
         to 409 before the atomic create transaction opens.
@@ -611,8 +611,7 @@ class DelegateService:
                 User.created_by_user_public_id == owner_public_id,
                 User.role == UserRole.AI_DELEGATE.value,
                 User.is_active,
-                user_ts,
-                user_known_to,
+                User.known_to > now,
             )
         )
         current_count = (await session.execute(count_stmt)).scalar_one()
