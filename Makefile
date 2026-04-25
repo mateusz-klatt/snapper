@@ -476,12 +476,12 @@ ios-test:
 ios-archive:
 	$(info Archiving iOS app [Release]...)
 	rm -rf "$(IOS_ARCHIVE_PATH)"
-	xcodebuild -project "$(IOS_PROJECT)" -scheme "$(IOS_SCHEME)" -configuration Release -destination 'generic/platform=iOS' -archivePath "$(IOS_ARCHIVE_PATH)" archive
+	xcodebuild -project "$(IOS_PROJECT)" -scheme "$(IOS_SCHEME)" -configuration Release -destination 'generic/platform=iOS' -archivePath "$(IOS_ARCHIVE_PATH)" -allowProvisioningUpdates archive
 
 ios-export:
 	$(info Exporting IPA from archive...)
 	rm -rf "$(IOS_EXPORT_PATH)"
-	xcodebuild -exportArchive -archivePath "$(IOS_ARCHIVE_PATH)" -exportPath "$(IOS_EXPORT_PATH)" -exportOptionsPlist "$(IOS_EXPORT_OPTIONS)"
+	xcodebuild -exportArchive -archivePath "$(IOS_ARCHIVE_PATH)" -exportPath "$(IOS_EXPORT_PATH)" -exportOptionsPlist "$(IOS_EXPORT_OPTIONS)" -allowProvisioningUpdates
 
 ios-ipa: ios-archive ios-export
 	$(info IPA exported to $(IOS_EXPORT_PATH))
