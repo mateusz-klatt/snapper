@@ -1,12 +1,14 @@
 import SwiftUI
 import os
 
-struct DashboardView: View {
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Snapper", category: "Dashboard")
+struct HomeView: View {
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Snapper", category: "Home")
     @EnvironmentObject var webSocketManager: WebSocketManager
+    @Environment(AppState.self) private var appState
     @State private var systemStatus: SystemStatus?
     @State private var positions: [PositionSnapshot] = []
     @State private var orders: [OrderStatus] = []
+    @State private var latestAlert: AlertEventInfo?
     @State private var isLoading = true
     @State private var errorMessage: String?
 
@@ -14,6 +16,12 @@ struct DashboardView: View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 20) {
+                    HStack {
+                        WalletPicker()
+                        Spacer()
+                    }
+
+                    LatestAlertCard(alert: latestAlert)
 
                     connectionStatusView
 
@@ -39,13 +47,34 @@ struct DashboardView: View {
                 .padding()
             }
             .background(Color.bgBase)
-            .navigationTitle("Dashboard")
+            .navigationTitle("Home")
             .refreshable {
                 await loadData()
+                await loadLatestAlert()
             }
         }
         .task {
             await loadData()
+        }
+        .task(id: appState.selectedWalletPublicId) {
+            await loadLatestAlert()
+        }
+    }
+
+    /// Pure helper extracted for unit testing — returns the first
+    /// element of an alert history page, or ``nil`` for an empty
+    /// page. The card collapses to ``EmptyView`` on ``nil`` so the
+    /// Home layout stays compact when the user has no alerts yet.
+    static func firstAlert(from history: AlertHistoryResponse) -> AlertEventInfo? {
+        return history.payload.first
+    }
+
+    private func loadLatestAlert() async {
+        do {
+            let history = try await APIClient.shared.fetchAlertHistory(limit: 1)
+            latestAlert = Self.firstAlert(from: history)
+        } catch {
+            logger.error("Failed to fetch latest alert: \(error)")
         }
     }
 
@@ -295,9 +324,10 @@ struct DashboardView: View {
     }
 }
 
-struct DashboardView_Previews: PreviewProvider {
+struct HomeView_Previews: PreviewProvider {
     static var previews: some View {
-        DashboardView()
+        HomeView()
             .environmentObject(WebSocketManager.shared)
+            .environment(AppState.shared)
     }
 }

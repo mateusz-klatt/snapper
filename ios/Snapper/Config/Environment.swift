@@ -98,6 +98,10 @@ enum AppConfig {
         static var system: String {
             return configuration.endpoints.system
         }
+
+        static var wallets: String {
+            return configuration.endpoints.wallets
+        }
     }
 
     private struct AppConfiguration {
@@ -120,6 +124,7 @@ enum AppConfig {
             let devices: String
             let alerts: String
             let system: String
+            let wallets: String
         }
 
         static func load() -> AppConfiguration {
@@ -151,7 +156,8 @@ enum AppConfig {
                     health: endpoints["Health"] as? String ?? "",
                     devices: endpoints["Devices"] as? String ?? "",
                     alerts: endpoints["Alerts"] as? String ?? "",
-                    system: endpoints["System"] as? String ?? ""
+                    system: endpoints["System"] as? String ?? "",
+                    wallets: endpoints["Wallets"] as? String ?? ""
                 )
             )
         }
@@ -174,7 +180,8 @@ enum AppConfig {
                     health: "",
                     devices: "",
                     alerts: "",
-                    system: ""
+                    system: "",
+                    wallets: ""
                 )
             )
         }

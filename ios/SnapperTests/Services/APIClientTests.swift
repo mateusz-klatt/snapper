@@ -103,6 +103,54 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(logoutCalls, 1, "logout must fire when refresh returns nil")
     }
 
+    /// Asserts that ``fetchWallets`` decodes the canonical
+    /// ``WalletListResponse`` envelope and returns the inner
+    /// ``WalletInfo`` payload preserving ``label`` + ``isPaper``.
+    func testFetchWalletsParsesResponse() async throws {
+        let fakeAuth = FakeAuthService(nextToken: "token")
+        let client = APIClient(session: mockSession, authService: fakeAuth)
+
+        MockURLProtocol.requestHandler = { _ in
+            return MockURLProtocol.jsonResponse(statusCode: 200, json: Self.walletListEnvelope())
+        }
+
+        let wallets = try await client.fetchWallets()
+
+        XCTAssertEqual(wallets.count, 2)
+        XCTAssertEqual(wallets[0].label, "default")
+        XCTAssertEqual(wallets[0].isPaper, false)
+        XCTAssertEqual(wallets[1].label, "default-paper")
+        XCTAssertEqual(wallets[1].isPaper, true)
+    }
+
+    private static func walletListEnvelope() -> [String: Any] {
+        return [
+            "sequence_id": 1,
+            "public_id": "01961234-5678-7000-8000-000000000a00",
+            "timestamp": "2025-11-22T10:00:00Z",
+            "session_id": "session-wallets",
+            "count": 2,
+            "payload": [
+                [
+                    "sequence_id": 1,
+                    "public_id": "01961234-5678-7000-8000-000000000a01",
+                    "timestamp": "2025-11-22T10:00:00Z",
+                    "session_id": "session-wallets",
+                    "label": "default",
+                    "is_paper": false
+                ],
+                [
+                    "sequence_id": 2,
+                    "public_id": "01961234-5678-7000-8000-000000000a02",
+                    "timestamp": "2025-11-22T10:00:00Z",
+                    "session_id": "session-wallets",
+                    "label": "default-paper",
+                    "is_paper": true
+                ]
+            ]
+        ]
+    }
+
     private static func orderListEnvelope() -> [String: Any] {
         return [
             "sequence_id": 1,

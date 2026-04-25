@@ -10,7 +10,7 @@ struct MainTabView: View {
     var body: some View {
         TabView(selection: $selectedTab) {
             if authService.canAccess("overview") {
-                DashboardView()
+                HomeView()
                     .tabItem {
                         Label("Dashboard", systemImage: "chart.bar.fill")
                     }

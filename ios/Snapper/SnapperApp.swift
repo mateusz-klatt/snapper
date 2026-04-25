@@ -23,6 +23,7 @@ struct SnapperApp: App {
                         .environmentObject(authService)
                 }
             }
+            .environment(AppState.shared)
             .tint(.brandGreen)
             .onChange(of: scenePhase) { _, newPhase in
                 handleScenePhase(newPhase)

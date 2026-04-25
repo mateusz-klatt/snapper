@@ -85,6 +85,18 @@ final class APIClient: Sendable {
         return envelope.payload
     }
 
+    /// Fetch wallets visible to the current user (iOS-2 / Phase A
+    /// backend ``GET /api/wallets``).
+    ///
+    /// Powers ``WalletPicker``. Returns the full list; the picker
+    /// caches it on ``AppState.availableWallets`` and surfaces every
+    /// row in the menu — backend already filters to the wallets the
+    /// user has access to via SCD2 grants.
+    func fetchWallets() async throws -> [WalletInfo] {
+        let envelope: WalletListResponse = try await request(endpoint: AppConfig.Endpoints.wallets)
+        return envelope.payload
+    }
+
     func fetchSystemStatus() async throws -> SystemStatus {
         let envelope: SystemStatusResponse = try await request(endpoint: AppConfig.Endpoints.status)
         return envelope.payload

@@ -5,7 +5,7 @@ import Combine
 ///
 /// The dispatcher inside `WebSocketManager` updates these `@Published`
 /// properties when typed frames arrive. Views observe the properties
-/// they care about (e.g. `DashboardView` watches `lastHeartbeatAt` to
+/// they care about (e.g. `HomeView` watches `lastHeartbeatAt` to
 /// drive the connection-dot color). Remaining types fall back to the
 /// dispatcher's `.debug` log passthrough — bindings for them land in
 /// Plan 2 alongside the push-notification work.

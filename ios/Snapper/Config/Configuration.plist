@@ -42,6 +42,8 @@
 		<string>/alerts</string>
 		<key>System</key>
 		<string>/system</string>
+		<key>Wallets</key>
+		<string>/wallets</string>
 	</dict>
 </dict>
 </plist>
