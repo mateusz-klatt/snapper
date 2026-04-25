@@ -6,15 +6,14 @@ import os
 /// Reduce / close mutations are deferred to a follow-up plan per the
 /// plan v1.15 §S4 lock — this surface is read-only.
 ///
-/// Wallet scoping note: ``PositionData`` (the read projection)
-/// currently does not expose ``wallet_public_id`` — positions are
-/// linked to wallets via ``positionCyclePublicId`` / position cycles
-/// rather than directly. Until that delta is plumbed end-to-end the
-/// list shows every position the API returns, ignoring
-/// ``AppState.selectedWalletPublicId``. ``WalletPicker`` still
-/// renders in the toolbar so the user can change the global selection
-/// for the Home and Orders tabs without losing context.
+/// Wallet scoping: backend now exposes ``wallet_public_id`` on the
+/// ``PositionData`` projection, so the list narrows to
+/// ``AppState.selectedWalletPublicId`` whenever a wallet is picked.
+/// Rows whose ``walletPublicId`` is ``nil`` (legacy / pre-projection
+/// rows) pass through so the UI never silently drops data — mirrors
+/// the policy ``OrdersView.walletMatches`` uses for the same edge.
 struct PositionsView: View {
+    @Environment(AppState.self) private var appState
     @State private var positions: [PositionSnapshot] = []
     @State private var isLoading = false
     @State private var loadError: APIError?
@@ -27,16 +26,16 @@ struct PositionsView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if isLoading && positions.isEmpty {
+                if isLoading && filteredPositions.isEmpty {
                     ProgressView("Loading positions…")
-                } else if positions.isEmpty {
+                } else if filteredPositions.isEmpty {
                     ContentUnavailableView(
                         "No positions",
                         systemImage: "chart.line.flattrend.xyaxis",
                         description: Text("Open positions will appear here.")
                     )
                 } else {
-                    List(positions, id: \.publicId) { position in
+                    List(filteredPositions, id: \.publicId) { position in
                         PositionCard(position: position)
                     }
                     .listStyle(.insetGrouped)
@@ -52,8 +51,37 @@ struct PositionsView: View {
                 }
             }
         }
-        .task {
+        .task(id: appState.selectedWalletPublicId) {
             await load()
+        }
+    }
+
+    var filteredPositions: [PositionSnapshot] {
+        return Self.filter(
+            positions: positions,
+            selectedWalletPublicId: appState.selectedWalletPublicId
+        )
+    }
+
+    /// Pure wallet-match helper extracted for unit testing — mirrors
+    /// the policy in ``OrdersView.walletMatches``: ``nil`` selection
+    /// passes through every row, and ``nil`` row-side wallet passes
+    /// through so legacy / system rows are never silently dropped.
+    static func walletMatches(rowWalletId: String?, selected: String?) -> Bool {
+        guard let selected else { return true }
+        guard let rowWalletId else { return true }
+        return rowWalletId == selected
+    }
+
+    static func filter(
+        positions: [PositionSnapshot],
+        selectedWalletPublicId: String?
+    ) -> [PositionSnapshot] {
+        return positions.filter { position in
+            walletMatches(
+                rowWalletId: position.walletPublicId,
+                selected: selectedWalletPublicId
+            )
         }
     }
 

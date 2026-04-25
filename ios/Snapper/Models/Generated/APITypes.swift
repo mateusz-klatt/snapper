@@ -2251,6 +2251,7 @@ struct PositionData: Codable, Sendable {
     let unrealizedPnl: Double
     let realizedPnl: Double
     let positionCyclePublicId: String?
+    let walletPublicId: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -2266,6 +2267,7 @@ struct PositionData: Codable, Sendable {
         case unrealizedPnl = "unrealized_pnl"
         case realizedPnl = "realized_pnl"
         case positionCyclePublicId = "position_cycle_public_id"
+        case walletPublicId = "wallet_public_id"
     }
 }
 

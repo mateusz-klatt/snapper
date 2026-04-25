@@ -304,6 +304,10 @@ class PositionData(StrictDataSchema[Literal["position"]]):
         unrealized_pnl: Unrealized profit/loss.
         realized_pnl: Realized profit/loss.
         position_cycle_public_id: Public ID of the open position cycle, if any.
+        wallet_public_id: Owning wallet UUID7 — non-null on the ORM
+            so always present in projection. Surfaces here so iOS /
+            UI clients can wallet-scope the position list without an
+            extra position-cycle join (Plan iOS-NP backlog item 4).
     """
 
     type: Literal["position"] = "position"
@@ -315,6 +319,7 @@ class PositionData(StrictDataSchema[Literal["position"]]):
     unrealized_pnl: float
     realized_pnl: float
     position_cycle_public_id: str | None = None
+    wallet_public_id: str = ""
 
 
 class OrderRequestData(StrictDataSchema[Literal["order_request"]]):

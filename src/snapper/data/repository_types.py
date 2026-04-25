@@ -279,6 +279,7 @@ class PositionRow(TypedDict):
     unrealized_pnl: float | None
     realized_pnl: float | None
     position_cycle_public_id: str | None
+    wallet_public_id: str
 
 
 class SettingRow(TypedDict):

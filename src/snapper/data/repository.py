@@ -4724,6 +4724,7 @@ class SQLAlchemyRepository(Repository):
                     "unrealized_pnl": pos.unrealized_pnl,
                     "realized_pnl": pos.realized_pnl,
                     "position_cycle_public_id": cycle_pid,
+                    "wallet_public_id": pos.wallet_public_id,
                 }
                 for pos, inst, sym, cycle_pid in result.all()
             ]
