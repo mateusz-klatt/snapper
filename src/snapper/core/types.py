@@ -225,6 +225,84 @@ class ExecutionPlanStatusEnum(StrEnum):
     EXPIRED = "expired"
 
 
+class AiReviewStatusEnum(StrEnum):
+    """Lifecycle state of an AI delegate review (CONSULT pattern, Plan A v1.4 Q9).
+
+    Covers the full state machine for an :class:`AiReview` row: created
+    with ``PENDING``; transitions to ``FANOUT_DISPATCHED`` when the
+    selected delegate goes offline (Q17 hysteresis) and the review is
+    broadcast to fanout-eligible delegates; terminal at
+    ``RESOLVED_APPROVED``/``RESOLVED_REJECTED`` on first decision,
+    ``TIMEOUT`` if deadline passes, or ``SUPERSEDED`` if the strategy
+    abandons (e.g. signal expired before deadline).
+
+    All terminal states are FINAL — no further transitions. Audit row
+    persists indefinitely in :class:`AiReview`; transition events
+    captured in append-only :class:`AiReviewEvent` table per Plan A
+    Q13.
+    """
+
+    PENDING = "pending"
+    FANOUT_DISPATCHED = "fanout_dispatched"
+    RESOLVED_APPROVED = "resolved_approved"
+    RESOLVED_REJECTED = "resolved_rejected"
+    TIMEOUT = "timeout"
+    SUPERSEDED = "superseded"
+
+
+class AiReviewDecisionEnum(StrEnum):
+    """AI delegate decision outcome (Plan A Q9).
+
+    APPROVE: agent approved the trade; strategy proceeds.
+    REJECT: agent vetoed the trade per Plan A Q12 lock — strategy
+    ABORTS, no fall-through to baseline.
+    """
+
+    APPROVE = "approve"
+    REJECT = "reject"
+
+
+class AiReviewResolutionModeEnum(StrEnum):
+    """How an :class:`AiReview` reached its terminal state (Plan A Q4).
+
+    PICK_ONE_PRIMARY: selected delegate (immutable from review
+    creation) responded directly. Most common case.
+    SECONDARY_AFTER_FANOUT: selected delegate went offline; fanout
+    fired; a different delegate (with scope grant) responded.
+    FANOUT_FIRST_RESPONDER: review was created in fanout-dispatched
+    state at INSERT time (selected delegate already offline >
+    heartbeat window); first eligible responder wins.
+    TIMEOUT_NO_RESPONSE: deadline passed; reaper transitioned to
+    TIMEOUT status.
+    SUPERSEDED_BY_STRATEGY: strategy abandoned the review (e.g.
+    signal expired before deadline); status SUPERSEDED.
+    """
+
+    PICK_ONE_PRIMARY = "pick_one_primary"
+    SECONDARY_AFTER_FANOUT = "secondary_after_fanout"
+    FANOUT_FIRST_RESPONDER = "fanout_first_responder"
+    TIMEOUT_NO_RESPONSE = "timeout_no_response"
+    SUPERSEDED_BY_STRATEGY = "superseded_by_strategy"
+
+
+class AiReviewEventTypeEnum(StrEnum):
+    """Event type for append-only :class:`AiReviewEvent` audit log (Plan A Q13).
+
+    Each transition of an :class:`AiReview` row appends ONE event
+    row. Event types fully discriminate the audit trail without
+    needing previous_status (Sonnet m1 fix v1.3 / v1.4): rows are
+    immutable; queries filter by event_type.
+    """
+
+    CREATED = "created"
+    FANOUT_DISPATCHED = "fanout_dispatched"
+    DECISION_RECORDED = "decision_recorded"
+    TIMEOUT_MARKED = "timeout_marked"
+    SUPERSEDED = "superseded"
+    COUNTER_DECREMENTED = "counter_decremented"
+    COUNTER_ADJUSTED = "counter_adjusted"
+
+
 class ComponentStatusEnum(StrEnum):
     """Infrastructure component status for ZMQ and WebSocket health checks."""
 

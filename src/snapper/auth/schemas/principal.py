@@ -53,6 +53,17 @@ class AuthPrincipal(StrictBody):
         operator_public_ids: Operators this user may act AS.
         primary_operator_public_id: Default operator at login.
         active_wallet_public_id: Last-selected wallet UI state.
+        delegate_public_id: For ``role=AI_DELEGATE`` principals only,
+            the ``ai_delegates.public_id`` UUID7 (operational
+            side-table FK to ``users.public_id``). Plan A v1.4 Q19
+            lock — used by Q17 reconnect hysteresis (``on_disconnect``
+            / ``on_authenticate`` keying), per-frame scope filter
+            (``enforce_ai_review_scope``), and admission control
+            (``ai_delegates.active_reviews_count``). For non-delegate
+            principals (operator, viewer, admin) this is ``None``.
+            WS authenticate handler populates via
+            ``SELECT public_id FROM ai_delegates WHERE
+            user_public_id = :caller.user_public_id`` lookup.
     """
 
     username: str
@@ -63,3 +74,4 @@ class AuthPrincipal(StrictBody):
     operator_public_ids: list[str] = Field(default_factory=list)
     primary_operator_public_id: str = ""
     active_wallet_public_id: str | None = None
+    delegate_public_id: str | None = None
