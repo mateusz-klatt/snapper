@@ -485,12 +485,14 @@ describe('Position Transformers', () => {
       timestamp: '2026-01-15T10:30:00Z',
       session_id: 'test-sid',
       instrument: 'BTC/USD',
+      instrument_public_id: 'inst-uuid-1',
       exchange: 'kraken',
       mode: 'live',
       quantity: 1.5,
       average_price: 48000,
       unrealized_pnl: 3000,
       realized_pnl: 500,
+      wallet_public_id: 'wal-uuid-1',
     }
     const result = positionFromAPI(apiPosition)
 
@@ -512,12 +514,14 @@ describe('Position Transformers', () => {
       timestamp: '2026-01-15T10:30:00Z',
       session_id: 'test-sid',
       instrument: 'BTC/USD',
+      instrument_public_id: 'inst-uuid-2',
       exchange: 'kraken',
       mode: 'paper',
       quantity: -1,
       average_price: 48000,
       unrealized_pnl: 0,
       realized_pnl: 0,
+      wallet_public_id: 'wal-uuid-2',
     }
     const result = positionFromAPI(apiPosition)
 
@@ -935,12 +939,14 @@ describe('Batch Transformers', () => {
         timestamp: '2026-01-15T10:30:00Z',
         session_id: 'test-sid',
         instrument: 'BTC/USD',
+        instrument_public_id: 'inst-test-pid',
         exchange: 'kraken',
         mode: 'live',
         quantity: 1.5,
         average_price: 48000,
         unrealized_pnl: 3000,
         realized_pnl: 500,
+        wallet_public_id: 'wal-test-pid',
       },
     ]
     const result = positionsFromAPI(apiPositions)
