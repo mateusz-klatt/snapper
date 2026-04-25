@@ -85,6 +85,9 @@ from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.archive_symbols import resolve_archive_symbols
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AccrualLedger
+from snapper.data.models import AiDelegate
+from snapper.data.models import AiReview
+from snapper.data.models import AiReviewEvent
 from snapper.data.models import AlertDelivery
 from snapper.data.models import AlertEvent
 from snapper.data.models import Base
@@ -127,6 +130,10 @@ from snapper.data.models import WalletCredential
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import AccrualLedgerRow
+from snapper.data.repository_types import AiDelegateRow
+from snapper.data.repository_types import AiReviewEventInsertRow
+from snapper.data.repository_types import AiReviewInsertRow
+from snapper.data.repository_types import AiReviewRow
 from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertDeliveryRow
 from snapper.data.repository_types import AlertEventInsertRow
@@ -3088,6 +3095,96 @@ class Repository(ABC):
         ``failed`` / ``unregistered`` / ``cancelled_scope``). Status
         values absent from the DB are also absent from the returned
         dict; callers use ``.get(status, 0)`` for a zero-default.
+        """
+        ...
+
+    # ------------------------------------------------------------------
+    # AI Integration Phase B+C+D (Plan A v1.4 + Plan D v1.1) — CRUD primitives
+    # ------------------------------------------------------------------
+    # These are the foundational reads + inserts needed by AiReviewService
+    # (Plan D §3). Atomic state transitions (Q9 step 4 writable-CTE counter)
+    # + reaper UPDATE + offline scanner CAS live as service-layer methods
+    # that compose these primitives plus raw SQL via session().
+
+    @abstractmethod
+    async def get_ai_review(self, review_public_id: str) -> AiReviewRow | None:
+        """Fetch a single :class:`AiReview` row by public_id.
+
+        Returns ``None`` if no row exists. Used by:
+        - Plan D §3.2 ``submit_decision`` step 2 (load + scope check).
+        - Plan D §7.1 ``await_ai_review`` poll fallback (DB-backed
+          terminal status check on bus-loss / restart).
+        - Plan D §7 ``GET /api/ai-reviews/pending`` REST endpoint.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_ai_review(self, row: AiReviewInsertRow) -> str:
+        """INSERT new :class:`AiReview` row; returns ``public_id``.
+
+        Used by Plan D §3.1 ``AiReviewService.create_review`` step
+        2e (ATOMIC transaction with Q10 counter increment +
+        ``ai_review_events`` append).
+        """
+        ...
+
+    @abstractmethod
+    async def insert_ai_review_event(self, row: AiReviewEventInsertRow) -> str:
+        """APPEND :class:`AiReviewEvent` row; returns ``public_id``.
+
+        Append-only — never UPDATE. Used by every state transition
+        in :class:`AiReviewService`: ``created`` /
+        ``fanout_dispatched`` / ``decision_recorded`` /
+        ``timeout_marked`` / ``superseded`` / ``counter_*``.
+        """
+        ...
+
+    @abstractmethod
+    async def get_ai_delegate_by_user_public_id(self, user_public_id: str) -> AiDelegateRow | None:
+        """Lookup operational :class:`AiDelegate` row by FK to users.
+
+        Used by:
+        - Plan D §5 WS authenticate handler (populate
+          ``AuthPrincipal.delegate_public_id`` for AI_DELEGATE
+          users; Q19 lock).
+        - Plan D §3.2 Q9 step 1 caller delegate resolution.
+
+        Returns ``None`` if no operational row exists. Strategy
+        layer creates the row when the AI_DELEGATE user is minted
+        (per :class:`UserService.create_ai_delegate` extension in
+        Plan D §14 risk register migration).
+        """
+        ...
+
+    @abstractmethod
+    async def insert_ai_delegate(
+        self,
+        *,
+        public_id: str,
+        user_public_id: str,
+        as_of: datetime,
+    ) -> str:
+        """INSERT new :class:`AiDelegate` operational row; returns ``public_id``.
+
+        Called by ``UserService.create_ai_delegate`` in same DB
+        transaction as the new ``users`` row insert. Existing
+        AI_DELEGATE users (pre-Plan-D) get backfilled by data
+        migration step in 0001_init.py at next prod cutover (Plan D
+        §12 file matrix Sonnet M4 fix).
+        """
+        ...
+
+    @abstractmethod
+    async def update_delegate_last_seen(
+        self, delegate_public_id: str, last_seen_at: datetime
+    ) -> None:
+        """Update ``ai_delegates.last_seen_at`` for Q17 hysteresis.
+
+        Called by :class:`WebSocketAuthManager` on:
+        - WS connection upgrade (initial).
+        - ``authenticate`` frame (post-reauth).
+        - ``system.heartbeat.client`` frame (cross-plan lock per
+          Q17 v1.4: ``heartbeat_interval ≤ window/2``, default 7s).
         """
         ...
 
@@ -9213,6 +9310,119 @@ class SQLAlchemyRepository(Repository):
                 .group_by(AlertDelivery.status)
             )
             return {status: int(count) for status, count in result.all()}
+
+    # ------------------------------------------------------------------
+    # AI Integration Phase B+C+D — Plan A v1.4 + Plan D v1.1 CRUD impls
+    # ------------------------------------------------------------------
+
+    async def get_ai_review(self, review_public_id: str) -> AiReviewRow | None:
+        """Fetch :class:`AiReview` row by public_id."""
+        async with self.session() as s:
+            row = (
+                await s.execute(select(AiReview).where(AiReview.public_id == review_public_id))
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            return cast(
+                AiReviewRow,
+                {
+                    "public_id": row.public_id,
+                    "session_id": row.session_id,
+                    "sequence_id": row.sequence_id,
+                    "user_public_id": row.user_public_id,
+                    "operator_public_id": row.operator_public_id,
+                    "wallet_public_id": row.wallet_public_id,
+                    "instrument_public_id": row.instrument_public_id,
+                    "strategy_public_id": row.strategy_public_id,
+                    "selected_delegate_public_id": row.selected_delegate_public_id,
+                    "responding_delegate_public_id": row.responding_delegate_public_id,
+                    "resolution_mode": row.resolution_mode,
+                    "status": row.status,
+                    "signal_envelope": row.signal_envelope,
+                    "signal_snapshot_hash": row.signal_snapshot_hash,
+                    "instrument_metadata": row.instrument_metadata,
+                    "deadline": row.deadline,
+                    "fanout_after": row.fanout_after,
+                    "decision": row.decision,
+                    "rationale": row.rationale,
+                    "dispatch_version": row.dispatch_version,
+                    "counter_decremented_at": row.counter_decremented_at,
+                    "created_at": row.created_at,
+                    "updated_at": row.updated_at,
+                    "resolved_at": row.resolved_at,
+                },
+            )
+
+    async def insert_ai_review(self, row: AiReviewInsertRow) -> str:
+        """INSERT new :class:`AiReview` row; returns ``public_id``."""
+        async with self.session() as s:
+            review = AiReview(**row)
+            s.add(review)
+            await s.commit()
+            return review.public_id
+
+    async def insert_ai_review_event(self, row: AiReviewEventInsertRow) -> str:
+        """APPEND :class:`AiReviewEvent` row; returns ``public_id``."""
+        async with self.session() as s:
+            event = AiReviewEvent(**row)
+            s.add(event)
+            await s.commit()
+            return event.public_id
+
+    async def get_ai_delegate_by_user_public_id(self, user_public_id: str) -> AiDelegateRow | None:
+        """Lookup operational :class:`AiDelegate` row by user_public_id."""
+        async with self.session() as s:
+            row = (
+                await s.execute(
+                    select(AiDelegate).where(AiDelegate.user_public_id == user_public_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            return cast(
+                AiDelegateRow,
+                {
+                    "public_id": row.public_id,
+                    "user_public_id": row.user_public_id,
+                    "last_seen_at": row.last_seen_at,
+                    "active_reviews_count": row.active_reviews_count,
+                    "created_at": row.created_at,
+                    "updated_at": row.updated_at,
+                },
+            )
+
+    async def insert_ai_delegate(
+        self,
+        *,
+        public_id: str,
+        user_public_id: str,
+        as_of: datetime,
+    ) -> str:
+        """INSERT new :class:`AiDelegate` operational row; returns ``public_id``."""
+        async with self.session() as s:
+            delegate = AiDelegate(
+                public_id=public_id,
+                user_public_id=user_public_id,
+                last_seen_at=None,
+                active_reviews_count=0,
+                created_at=as_of,
+                updated_at=as_of,
+            )
+            s.add(delegate)
+            await s.commit()
+            return delegate.public_id
+
+    async def update_delegate_last_seen(
+        self, delegate_public_id: str, last_seen_at: datetime
+    ) -> None:
+        """Update ``ai_delegates.last_seen_at`` for Q17 hysteresis."""
+        async with self.session() as s:
+            await s.execute(
+                update(AiDelegate)
+                .where(AiDelegate.public_id == delegate_public_id)
+                .values(last_seen_at=last_seen_at, updated_at=last_seen_at)
+            )
+            await s.commit()
 
 
 _repository_cache: dict[str, Repository] = {}
