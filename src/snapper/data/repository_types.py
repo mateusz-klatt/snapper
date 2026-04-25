@@ -1720,3 +1720,111 @@ class AlertDeliveryRow(TypedDict):
     apns_id: str | None
     error_reason: str | None
     created_at: datetime
+
+
+class AiDelegateRow(TypedDict):
+    """Row dict for :class:`snapper.data.models.AiDelegate`.
+
+    Plan A v1.4 §3.4 + Plan D §2.3 — operational side-table FK to
+    ``users.role=AI_DELEGATE``; holds Q10 admission counter +
+    Q17 ``last_seen_at`` for reconnect hysteresis.
+    """
+
+    public_id: str
+    user_public_id: str
+    last_seen_at: datetime | None
+    active_reviews_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class AiReviewRow(TypedDict):
+    """Row dict for :class:`snapper.data.models.AiReview`.
+
+    Plan A v1.4 §3.1 + Plan D §2.1 — full state machine fields.
+    Mutable status row (Q13 lock); audit trail in append-only
+    ``ai_review_events``.
+    """
+
+    public_id: str
+    session_id: str
+    sequence_id: int
+    user_public_id: str
+    operator_public_id: str
+    wallet_public_id: str
+    instrument_public_id: str
+    strategy_public_id: str
+    selected_delegate_public_id: str
+    responding_delegate_public_id: str | None
+    resolution_mode: str | None
+    status: str
+    signal_envelope: JsonObject
+    signal_snapshot_hash: str
+    instrument_metadata: JsonObject
+    deadline: datetime
+    fanout_after: datetime
+    decision: str | None
+    rationale: str | None
+    dispatch_version: int
+    counter_decremented_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    resolved_at: datetime | None
+
+
+class AiReviewEventRow(TypedDict):
+    """Row dict for :class:`snapper.data.models.AiReviewEvent`.
+
+    Plan A v1.4 §3.2 + Plan D §2.2 — append-only audit log.
+    """
+
+    public_id: str
+    review_public_id: str
+    event_type: str
+    actor_delegate_public_id: str | None
+    previous_status: str | None
+    new_status: str
+    payload: JsonObject
+    occurred_at: datetime
+
+
+class AiReviewInsertRow(TypedDict, total=False):
+    """Insert payload for :class:`snapper.data.models.AiReview` create.
+
+    Plan D §3.1 — used by ``AiReviewService.create_review``. All
+    non-NULL fields required; nullable terminal fields (decision,
+    rationale, responding_delegate_public_id, resolution_mode,
+    resolved_at, counter_decremented_at) defaulted by service layer.
+    """
+
+    public_id: str
+    session_id: str
+    sequence_id: int
+    user_public_id: str
+    operator_public_id: str
+    wallet_public_id: str
+    instrument_public_id: str
+    strategy_public_id: str
+    selected_delegate_public_id: str
+    status: str
+    signal_envelope: JsonObject
+    signal_snapshot_hash: str
+    instrument_metadata: JsonObject
+    deadline: datetime
+    fanout_after: datetime
+    dispatch_version: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class AiReviewEventInsertRow(TypedDict, total=False):
+    """Insert payload for :class:`snapper.data.models.AiReviewEvent` append."""
+
+    public_id: str
+    review_public_id: str
+    event_type: str
+    actor_delegate_public_id: str | None
+    previous_status: str | None
+    new_status: str
+    payload: JsonObject
+    occurred_at: datetime
