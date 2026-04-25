@@ -33,6 +33,7 @@ under concurrent retry workers, closes Copilot R3 MAJOR-3).
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -42,6 +43,7 @@ from loguru import logger
 
 from snapper.application.notify.apns_client import ApnsClientPool
 from snapper.application.notify.apns_client import ApnsSendResult
+from snapper.application.notify.push_beta import PushBetaConfig
 from snapper.application.notify.routing import route_alert_to_devices
 from snapper.application.notify.rules.base import RuleRegistry
 from snapper.application.notify.rules.registry_factory import load_default_registry
@@ -113,6 +115,7 @@ class NotifySidecar(RegisterableProcess):
         tracker: SequenceTracker,
         registry: RuleRegistry | None = None,
         scope_revalidator: ScopeRevalidator | None = None,
+        push_beta_provider: Callable[[], PushBetaConfig] | None = None,
     ) -> None:
         """Wire the sidecar with its collaborators + rule registry.
 
@@ -128,12 +131,21 @@ class NotifySidecar(RegisterableProcess):
                 every ``alert_events`` / ``alert_deliveries`` row
                 the sidecar writes.
             registry: Alert rule registry — defaults to
-                ``load_default_registry()`` (the 4 P0 rules per §D6).
-                Injected for tests that want a narrower rule set.
+                ``load_default_registry()`` (the 5 P0 rules per §D6
+                + ``margin_warning``). Injected for tests that want a
+                narrower rule set.
             scope_revalidator: Scope-revocation helper — defaults to
                 a fresh ``ScopeRevalidator`` seeded with the shared
                 ``SequenceTracker`` so provenance on cancel writes is
                 consistent with the rest of the sidecar's SCD2 writes.
+            push_beta_provider: Callable returning the current
+                ``PushBetaConfig`` rollout gate. ``None`` (the
+                default) is treated as "gate disabled" so legacy /
+                test call sites that pre-date the gate behave as
+                before. The CLI wire-up resolves the callable to a
+                ``SettingsService.get_setting`` read so the gate
+                honours live admin POSTs to
+                ``/api/settings/push-beta/users``.
         """
         self._subscriber = subscriber
         self._repo = repo
@@ -144,6 +156,7 @@ class NotifySidecar(RegisterableProcess):
         self._retry_task: asyncio.Task[None] | None = None
         self._registry = registry or load_default_registry()
         self._scope_revalidator = scope_revalidator or ScopeRevalidator(tracker=tracker)
+        self._push_beta_provider = push_beta_provider
 
     async def start(self) -> None:
         """Run the sidecar main loop until ``stop()`` is signalled.
@@ -255,7 +268,13 @@ class NotifySidecar(RegisterableProcess):
                 pid=event_public_id,
             )
             return
-        recipients = await route_alert_to_devices(alert=event, repo=self._repo, now=now)
+        push_beta = self._push_beta_provider() if self._push_beta_provider is not None else None
+        recipients = await route_alert_to_devices(
+            alert=event,
+            repo=self._repo,
+            now=now,
+            push_beta=push_beta,
+        )
         if not recipients:
             logger.info(
                 "sidecar: routing cascade suppressed all devices for alert_event {pid}"

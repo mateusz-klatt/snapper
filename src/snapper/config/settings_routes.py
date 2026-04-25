@@ -41,11 +41,18 @@ from snapper.api.schemas.base import MessageResponse
 from snapper.api.schemas.health import SettingCategoriesResponse
 from snapper.api.schemas.settings import FeatureFlagsPayload
 from snapper.api.schemas.settings import FeatureFlagsResponse
+from snapper.api.schemas.settings import PushBetaConfigRead
+from snapper.api.schemas.settings import PushBetaConfigResponse
 from snapper.api.schemas.settings import RemoveSettingRequest
 from snapper.api.schemas.settings import SettingListResponse
 from snapper.api.schemas.settings import SettingRead
 from snapper.api.schemas.settings import SettingResponse
 from snapper.api.schemas.settings import SettingUpdate
+from snapper.api.schemas.settings import UpdatePushBetaUsersCommand
+from snapper.application.notify.push_beta import PUSH_BETA_SETTING_KEY
+from snapper.application.notify.push_beta import PushBetaConfig
+from snapper.application.notify.push_beta import parse_push_beta_config
+from snapper.application.notify.push_beta import serialize_push_beta_config
 from snapper.application.services.settings import get_settings_service
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
@@ -269,6 +276,132 @@ async def set_setting(
             timestamp=ts,
             payload=setting_read,
         )
+
+
+@router.get("/push-beta/users")
+async def get_push_beta_users(
+    request: Request,
+    user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
+) -> PushBetaConfigResponse:
+    """Return the active push-beta gate configuration.
+
+    Admin-only (CONFIGURE_SYSTEM). Returns the decoded
+    ``PushBetaConfig`` — when the underlying setting is absent or
+    malformed, the default (gate disabled, empty allowlist) is
+    surfaced so the admin can see exactly what the routing layer is
+    enforcing.
+
+    Args:
+        request: FastAPI request (provides REST tracker).
+        user: Authenticated admin caller.
+
+    Returns:
+        ``PushBetaConfigResponse`` with ``enabled`` + sorted
+        ``user_public_ids``.
+    """
+    settings = get_settings()
+    settings_service = await get_settings_service(
+        settings.db_url,
+        settings.zmq_broker_xsub,
+    )
+    raw = settings_service.get_setting(PUSH_BETA_SETTING_KEY)
+    config = parse_push_beta_config(raw)
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_STREAM)
+    ts = datetime.now(UTC)
+    pid = str(uuid7())
+    return PushBetaConfigResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=PushBetaConfigRead(
+            session_id=sid,
+            sequence_id=seq,
+            public_id=pid,
+            timestamp=ts,
+            enabled=config.enabled,
+            user_public_ids=sorted(set(config.user_public_ids)),
+        ),
+    )
+
+
+@router.post(
+    "/push-beta/users",
+    openapi_extra=openapi_schema(UpdatePushBetaUsersCommand),
+)
+async def set_push_beta_users(
+    request: Request,
+    user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    body: Annotated[
+        UpdatePushBetaUsersCommand,
+        Depends(json_body(UpdatePushBetaUsersCommand)),
+    ],
+) -> PushBetaConfigResponse:
+    """Replace the push-beta gate configuration in one call.
+
+    The endpoint is REPLACEMENT-style (not merge): the body's
+    ``user_public_ids`` becomes the complete allowlist after the
+    write. Admins managing multi-step rollouts must read the current
+    list (``GET``), edit locally, then ``POST`` the full intended set.
+
+    The setting is stored as a JSON-encoded string under the
+    ``push_beta_config`` key with category ``notifications``. The
+    SCD2 close+insert in ``SettingsService.update_setting`` keeps
+    history so the rollout timeline is auditable. The cached value
+    propagates to the sidecar's routing layer on the next pub/sub
+    refresh (settings publish on the bus).
+
+    Args:
+        request: FastAPI request (provides REST tracker).
+        user: Authenticated admin caller — also stamps
+            ``Setting.updated_by`` for audit.
+        body: Typed request envelope with the replacement config.
+
+    Returns:
+        ``PushBetaConfigResponse`` echoing the now-active config.
+    """
+    payload = body.payload
+    serialised = serialize_push_beta_config(
+        PushBetaConfig(
+            enabled=payload.enabled,
+            user_public_ids=tuple(payload.user_public_ids),
+        )
+    )
+    settings = get_settings()
+    settings_service = await get_settings_service(
+        settings.db_url,
+        settings.zmq_broker_xsub,
+    )
+    await settings_service.update_setting(
+        key=PUSH_BETA_SETTING_KEY,
+        value=serialised,
+        category="notifications",
+        description="Push-beta rollout gate (allowlist + enabled flag).",
+        updated_by=user.username,
+    )
+    config = parse_push_beta_config(serialised)
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_STREAM)
+    ts = datetime.now(UTC)
+    pid = str(uuid7())
+    return PushBetaConfigResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=PushBetaConfigRead(
+            session_id=sid,
+            sequence_id=seq,
+            public_id=pid,
+            timestamp=ts,
+            enabled=config.enabled,
+            user_public_ids=sorted(set(config.user_public_ids)),
+        ),
+    )
 
 
 @router.post(

@@ -9,17 +9,22 @@ from unittest.mock import patch
 import pytest
 from fastapi import HTTPException
 
+from snapper.api.schemas.settings import PushBetaUsersBody
 from snapper.api.schemas.settings import RemoveSettingBody
 from snapper.api.schemas.settings import RemoveSettingRequest
 from snapper.api.schemas.settings import SettingRead
 from snapper.api.schemas.settings import SettingUpdate
 from snapper.api.schemas.settings import SettingUpdateBody
+from snapper.api.schemas.settings import UpdatePushBetaUsersCommand
+from snapper.application.notify.push_beta import PUSH_BETA_SETTING_KEY
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings_routes import get_all_settings
 from snapper.config.settings_routes import get_public_feature_flags
+from snapper.config.settings_routes import get_push_beta_users
 from snapper.config.settings_routes import get_setting_categories
 from snapper.config.settings_routes import remove_setting
+from snapper.config.settings_routes import set_push_beta_users
 from snapper.config.settings_routes import set_setting
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
@@ -548,3 +553,152 @@ class TestPublicFeatureFlags:
         mock_request.app.state.rest_tracker = SequenceTracker()
         response = await get_public_feature_flags(request=mock_request)
         assert response.payload.ai_integration_enabled is True
+
+
+class TestPushBetaUsersRoutes:
+    """Tests for ``/settings/push-beta/users`` admin endpoints."""
+
+    @staticmethod
+    def _make_user(role: UserRole = UserRole.ADMIN) -> AuthPrincipal:
+        return AuthPrincipal(
+            username="admin_user",
+            email="admin@example.com",
+            role=role,
+            is_active=True,
+        )
+
+    @staticmethod
+    def _make_request() -> MagicMock:
+        mock_request = MagicMock()
+        mock_request.app.state.rest_tracker = SequenceTracker()
+        return mock_request
+
+    @pytest.mark.asyncio
+    async def test_get_returns_disabled_default_when_setting_absent(self) -> None:
+        """Setting absent → response surfaces enabled=False + empty list.
+
+        A fresh install must see the gate as disabled so push delivery
+        proceeds for every authenticated user (legacy default).
+        """
+        mock_settings = MagicMock()
+        mock_settings.db_url = "sqlite:///:memory:"
+        mock_settings.zmq_broker_xsub = "tcp://localhost:5555"
+        mock_settings_service = MagicMock()
+        mock_settings_service.get_setting.return_value = None
+        with (
+            patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
+            patch(
+                "snapper.config.settings_routes.get_settings_service",
+                AsyncMock(return_value=mock_settings_service),
+            ),
+        ):
+            response = await get_push_beta_users(
+                request=self._make_request(), user=self._make_user()
+            )
+        assert response.payload.enabled is False
+        assert response.payload.user_public_ids == []
+        mock_settings_service.get_setting.assert_called_once_with(PUSH_BETA_SETTING_KEY)
+
+    @pytest.mark.asyncio
+    async def test_get_returns_decoded_setting(self) -> None:
+        """Setting present → response surfaces the decoded JSON config."""
+        mock_settings = MagicMock()
+        mock_settings.db_url = "sqlite:///:memory:"
+        mock_settings.zmq_broker_xsub = "tcp://localhost:5555"
+        mock_settings_service = MagicMock()
+        mock_settings_service.get_setting.return_value = (
+            '{"enabled": true, "user_public_ids": ["user-a", "user-b"]}'
+        )
+        with (
+            patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
+            patch(
+                "snapper.config.settings_routes.get_settings_service",
+                AsyncMock(return_value=mock_settings_service),
+            ),
+        ):
+            response = await get_push_beta_users(
+                request=self._make_request(), user=self._make_user()
+            )
+        assert response.payload.enabled is True
+        assert response.payload.user_public_ids == ["user-a", "user-b"]
+
+    @pytest.mark.asyncio
+    async def test_post_writes_canonical_json_to_settings_service(self) -> None:
+        """POST replaces the entire allowlist via canonical JSON.
+
+        The serialised value sorts + dedups user ids so re-POSTing
+        the same logical set does not churn the SCD2 history.
+        """
+        mock_settings = MagicMock()
+        mock_settings.db_url = "sqlite:///:memory:"
+        mock_settings.zmq_broker_xsub = "tcp://localhost:5555"
+        mock_settings_service = AsyncMock()
+        command = UpdatePushBetaUsersCommand(
+            session_id="client-sid",
+            sequence_id=1,
+            public_id="client-pid",
+            timestamp=datetime(2026, 4, 25, tzinfo=UTC),
+            payload=PushBetaUsersBody(
+                enabled=True,
+                user_public_ids=["user-b", "user-a", "user-a"],
+            ),
+        )
+        with (
+            patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
+            patch(
+                "snapper.config.settings_routes.get_settings_service",
+                AsyncMock(return_value=mock_settings_service),
+            ),
+        ):
+            response = await set_push_beta_users(
+                request=self._make_request(),
+                user=self._make_user(),
+                _csrf=None,
+                body=command,
+            )
+        update_call = mock_settings_service.update_setting.await_args
+        assert update_call.kwargs["key"] == PUSH_BETA_SETTING_KEY
+        assert update_call.kwargs["value"] == (
+            '{"enabled":true,"user_public_ids":["user-a","user-b"]}'
+        )
+        assert update_call.kwargs["category"] == "notifications"
+        assert update_call.kwargs["updated_by"] == "admin_user"
+        assert response.payload.enabled is True
+        assert response.payload.user_public_ids == ["user-a", "user-b"]
+
+    @pytest.mark.asyncio
+    async def test_post_with_empty_allowlist_serialises_empty_list(self) -> None:
+        """``enabled=True`` with an empty allowlist silences every push.
+
+        The admin contract: explicit empty list = "nobody is in the
+        beta yet" — used during a phased rollout where the gate is
+        flipped on before users are added.
+        """
+        mock_settings = MagicMock()
+        mock_settings.db_url = "sqlite:///:memory:"
+        mock_settings.zmq_broker_xsub = "tcp://localhost:5555"
+        mock_settings_service = AsyncMock()
+        command = UpdatePushBetaUsersCommand(
+            session_id="client-sid",
+            sequence_id=1,
+            public_id="client-pid",
+            timestamp=datetime(2026, 4, 25, tzinfo=UTC),
+            payload=PushBetaUsersBody(enabled=True, user_public_ids=[]),
+        )
+        with (
+            patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
+            patch(
+                "snapper.config.settings_routes.get_settings_service",
+                AsyncMock(return_value=mock_settings_service),
+            ),
+        ):
+            response = await set_push_beta_users(
+                request=self._make_request(),
+                user=self._make_user(),
+                _csrf=None,
+                body=command,
+            )
+        update_call = mock_settings_service.update_setting.await_args
+        assert update_call.kwargs["value"] == '{"enabled":true,"user_public_ids":[]}'
+        assert response.payload.enabled is True
+        assert response.payload.user_public_ids == []

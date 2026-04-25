@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfoNotFoundError
 
 from loguru import logger
 
+from snapper.application.notify.push_beta import PushBetaConfig
 from snapper.data.repository import Repository
 from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import DeviceAlertPrefRow
@@ -34,12 +35,19 @@ from snapper.data.repository_types import UserAlertDefaultRow
 
 _PRIORITY_RANK: dict[str, int] = {"low": 1, "medium": 2, "high": 3}
 
+_DISABLED_PUSH_BETA = PushBetaConfig()
+"""Default gate state when the sidecar has not loaded the setting
+cache yet — open by default so a missing cache cannot silence the
+entire push system on cold start.
+"""
+
 
 async def route_alert_to_devices(
     *,
     alert: AlertEventRow,
     repo: Repository,
     now: datetime,
+    push_beta: PushBetaConfig | None = None,
 ) -> list[NotificationDeviceRow]:
     """Return the subset of the alert's user's active devices that receive it.
 
@@ -47,12 +55,29 @@ async def route_alert_to_devices(
         alert: Persisted ``AlertEventRow`` to route.
         repo: Repository handle for device + pref + user-default reads.
         now: Entry-boundary timestamp threaded from the sidecar.
+        push_beta: Active push-beta gate config (rollout allowlist).
+            ``None`` (the default — preserved for the existing
+            sidecar call sites that pre-date the gate) is treated as
+            "gate disabled" so legacy callers behave exactly as
+            before. The sidecar is expected to inject a freshly-read
+            ``PushBetaConfig`` once per dispatch so the gate honours
+            live admin updates.
 
     Returns:
         Active ``NotificationDeviceRow`` entries that pass the
-        precedence cascade. Empty list when the user has no active
-        devices or every device was suppressed by prefs / defaults.
+        precedence cascade and the rollout gate. Empty list when
+        the user has no active devices, every device was suppressed
+        by prefs / defaults, or the rollout gate is enabled and the
+        alert's user is NOT on the allowlist.
     """
+    gate = push_beta or _DISABLED_PUSH_BETA
+    if not gate.includes(alert["user_public_id"]):
+        logger.info(
+            "push_beta gate suppressed alert {pid} for user {uid}",
+            pid=alert["public_id"],
+            uid=alert["user_public_id"],
+        )
+        return []
     devices = await repo.list_active_notification_devices_for_user(alert["user_public_id"])
     if not devices:
         return []

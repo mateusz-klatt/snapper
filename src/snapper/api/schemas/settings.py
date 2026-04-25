@@ -174,14 +174,73 @@ class RemoveSettingRequest(PayloadRequest[Literal["remove_setting_request"], Rem
     type: Literal["remove_setting_request"] = "remove_setting_request"
 
 
+class PushBetaConfigRead(StrictDataSchema[Literal["push_beta_config_read"]]):
+    """Read projection of the active ``push_beta_config`` setting.
+
+    Drives the rollout gate in ``application/notify/routing.py``:
+    when ``enabled`` is true, only ``user_public_ids`` receive APNs
+    pushes; everyone else is suppressed at the routing layer
+    regardless of their per-device prefs. When ``enabled`` is false
+    every authenticated user receives pushes (the legacy default
+    pre-iOS-5).
+
+    Attributes:
+        type: Payload item type discriminator.
+        enabled: Whether the beta gate is active.
+        user_public_ids: Allowlist of UUID7 user identifiers when
+            ``enabled`` is true. Empty list with ``enabled`` true
+            silently drops every push — the admin contract.
+    """
+
+    type: Literal["push_beta_config_read"] = "push_beta_config_read"
+    enabled: bool
+    user_public_ids: list[str]
+
+
+class PushBetaUsersBody(StrictBody):
+    """Replace the entire push-beta allowlist + enabled flag.
+
+    Attributes:
+        enabled: New value of the gate flag.
+        user_public_ids: Full replacement allowlist (the route does
+            not merge — pass the complete intended list each call).
+            Each id MUST be a non-empty string; the route validates
+            without enforcing UUID7 format so the test fixture
+            tooling is not coupled to the canonical generator.
+    """
+
+    enabled: bool
+    user_public_ids: list[str] = Field(default_factory=list)
+
+
+class UpdatePushBetaUsersCommand(
+    PayloadRequest[Literal["update_push_beta_users_command"], PushBetaUsersBody]
+):
+    """Request envelope for ``POST /api/settings/push-beta/users``."""
+
+    type: Literal["update_push_beta_users_command"] = "update_push_beta_users_command"
+
+
+class PushBetaConfigResponse(
+    PayloadResponse[Literal["push_beta_config_response"], PushBetaConfigRead]
+):
+    """Singleton wrapper returned by GET + POST ``/push-beta/users``."""
+
+    type: Literal["push_beta_config_response"] = "push_beta_config_response"
+
+
 __all__ = [
     "FeatureFlagsPayload",
     "FeatureFlagsResponse",
+    "PushBetaConfigRead",
+    "PushBetaConfigResponse",
+    "PushBetaUsersBody",
     "RemoveSettingBody",
     "RemoveSettingRequest",
-    "SettingRead",
-    "SettingUpdate",
     "SettingCreate",
-    "SettingResponse",
     "SettingListResponse",
+    "SettingRead",
+    "SettingResponse",
+    "SettingUpdate",
+    "UpdatePushBetaUsersCommand",
 ]

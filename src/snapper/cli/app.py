@@ -75,6 +75,8 @@ from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.notify.apns_client import build_apns_client_pool
 from snapper.application.notify.apns_config import load_apns_config
+from snapper.application.notify.push_beta import PUSH_BETA_SETTING_KEY
+from snapper.application.notify.push_beta import parse_push_beta_config
 from snapper.application.notify.sidecar import NotifySidecar
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.services.settings import get_settings_service
@@ -1995,6 +1997,9 @@ def notify() -> None:
             apns=apns_pool,
             apns_topic=apns_config.topic,
             tracker=SequenceTracker(),
+            push_beta_provider=lambda: parse_push_beta_config(
+                settings_svc.get_setting(PUSH_BETA_SETTING_KEY)
+            ),
         )
         typer.echo(
             f"snapper-notify: connected to {broker_addr}; topic={apns_config.topic}"

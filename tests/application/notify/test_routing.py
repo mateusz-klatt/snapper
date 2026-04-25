@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from snapper.application.notify.push_beta import PushBetaConfig
 from snapper.application.notify.routing import _in_quiet_hours
 from snapper.application.notify.routing import _narrowest_matches
 from snapper.application.notify.routing import _policy_allows
@@ -426,3 +427,62 @@ class TestRouteAlertToDevices:
         )
 
         assert recipients == []
+
+    @pytest.mark.asyncio
+    async def test_push_beta_gate_disabled_lets_user_through(self) -> None:
+        """Default ``push_beta=None`` (or disabled) preserves legacy behaviour."""
+        repo = MagicMock()
+        repo.list_active_notification_devices_for_user = AsyncMock(return_value=[_device()])
+        repo.list_device_alert_prefs_for_user = AsyncMock(return_value=[])
+        repo.list_user_alert_defaults = AsyncMock(return_value=[])
+
+        recipients = await route_alert_to_devices(
+            alert=_alert(priority="medium"),
+            repo=repo,
+            now=_now(),
+            push_beta=PushBetaConfig(),
+        )
+
+        assert len(recipients) == 1
+
+    @pytest.mark.asyncio
+    async def test_push_beta_gate_blocks_user_not_on_allowlist(self) -> None:
+        """Enabled gate with empty / mismatched allowlist suppresses pre-cascade.
+
+        Repo reads MUST short-circuit when the gate denies — the
+        sidecar should not waste a device + pref + default round
+        trip when the rollout has already excluded the user.
+        """
+        repo = MagicMock()
+        repo.list_active_notification_devices_for_user = AsyncMock(return_value=[_device()])
+        repo.list_device_alert_prefs_for_user = AsyncMock(return_value=[])
+        repo.list_user_alert_defaults = AsyncMock(return_value=[])
+
+        recipients = await route_alert_to_devices(
+            alert=_alert(priority="high"),
+            repo=repo,
+            now=_now(),
+            push_beta=PushBetaConfig(enabled=True, user_public_ids=("user-other",)),
+        )
+
+        assert recipients == []
+        repo.list_active_notification_devices_for_user.assert_not_called()
+        repo.list_device_alert_prefs_for_user.assert_not_called()
+        repo.list_user_alert_defaults.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_push_beta_gate_admits_listed_user(self) -> None:
+        """Enabled gate with the alert's user on the allowlist runs the cascade."""
+        repo = MagicMock()
+        repo.list_active_notification_devices_for_user = AsyncMock(return_value=[_device()])
+        repo.list_device_alert_prefs_for_user = AsyncMock(return_value=[])
+        repo.list_user_alert_defaults = AsyncMock(return_value=[])
+
+        recipients = await route_alert_to_devices(
+            alert=_alert(priority="high"),
+            repo=repo,
+            now=_now(),
+            push_beta=PushBetaConfig(enabled=True, user_public_ids=("user-1",)),
+        )
+
+        assert len(recipients) == 1
