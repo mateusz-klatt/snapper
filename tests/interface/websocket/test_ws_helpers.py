@@ -165,15 +165,17 @@ class TestRoleCategorySecurityMatrix:
         assert categories == {"market", "system", "backtest"}
 
     def test_operator_gets_market_trade_signals_strategy_system_backtest(self) -> None:
-        """OPERATOR receives market, trade, signals, strategy, system, and backtest.
+        """OPERATOR receives market, trade, signals, strategy, system, backtest, ai_reviews.
 
         Given: An OPERATOR role,
         When: Getting allowed categories,
-        Then: market, trade, signals, strategy, system, backtest allowed but NOT admin.
-            The ``signals`` category is separate from ``strategy`` so
-            AI_DELEGATE (READ_SIGNALS only, no START_STRATEGIES) can
-            subscribe to ``signals.*`` without the operator-level
-            strategy-management surface.
+        Then: market, trade, signals, strategy, system, backtest, ai_reviews
+            allowed but NOT admin. The ``signals`` category is separate from
+            ``strategy`` so AI_DELEGATE (READ_SIGNALS only, no
+            START_STRATEGIES) can subscribe to ``signals.*`` without the
+            operator-level strategy-management surface. ``ai_reviews`` is
+            the Plan A v1.4 CONSULT-pattern category — AI_DELEGATE delivers
+            review requests + receives decisions over it.
         """
         categories = role_allowed_categories(UserRole.OPERATOR)
         assert categories == {
@@ -188,12 +190,13 @@ class TestRoleCategorySecurityMatrix:
         assert "admin" not in categories
 
     def test_admin_gets_all_categories_including_admin(self) -> None:
-        """ADMIN role receives all categories including admin + backtest.
+        """ADMIN role receives all categories including admin + backtest + ai_reviews.
 
         Given: An ADMIN role,
         When: Getting allowed categories,
-        Then: All seven categories are allowed
-            (market, trade, signals, strategy, system, admin, backtest).
+        Then: All eight categories are allowed
+            (market, trade, signals, strategy, system, admin, backtest,
+            ai_reviews — Plan A v1.4 CONSULT-pattern surface).
         """
         categories = role_allowed_categories(UserRole.ADMIN)
         assert categories == {

@@ -1726,7 +1726,7 @@ class AiDelegateRow(TypedDict):
     """Row dict for :class:`snapper.data.models.AiDelegate`.
 
     Plan A v1.4 §3.4 + Plan D §2.3 — operational side-table FK to
-    ``users.role=AI_DELEGATE``; holds Q10 admission counter +
+    AI_DELEGATE-role users; holds Q10 admission counter +
     Q17 ``last_seen_at`` for reconnect hysteresis.
     """
 
