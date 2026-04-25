@@ -169,8 +169,89 @@ final class EditDevicePrefViewTests: XCTestCase {
         )
         XCTAssertTrue(
             view.canSave,
-            "Scope is locked at device-global today, so Save is enabled out of the gate."
+            "Default scope is device-global; canSave starts true regardless of operator/wallet selection."
         )
+    }
+
+    func testScopeKindFromExistingClassifiesEveryShape() {
+        XCTAssertEqual(
+            EditDevicePrefView.scopeKindFromExisting(operatorPublicId: nil, walletPublicId: nil),
+            EditDevicePrefView.ScopeKind.deviceGlobal
+        )
+        XCTAssertEqual(
+            EditDevicePrefView.scopeKindFromExisting(
+                operatorPublicId: "op-1", walletPublicId: nil
+            ),
+            EditDevicePrefView.ScopeKind.operator_
+        )
+        XCTAssertEqual(
+            EditDevicePrefView.scopeKindFromExisting(
+                operatorPublicId: "op-1", walletPublicId: "w-1"
+            ),
+            EditDevicePrefView.ScopeKind.wallet
+        )
+        XCTAssertEqual(
+            EditDevicePrefView.scopeKindFromExisting(
+                operatorPublicId: nil, walletPublicId: "w-1"
+            ),
+            EditDevicePrefView.ScopeKind.wallet,
+            "Wallet without operator is illegal at the backend, but the classifier surfaces wallet so the editor can render the read-only display correctly for any pre-existing row."
+        )
+    }
+
+    func testResolveScopeTupleInEditModeAlwaysHonoursLockedTuple() {
+        let scope = EditDevicePrefView.resolveScopeTuple(
+            isAlertTypeLocked: true,
+            lockedOperatorPublicId: "op-locked",
+            lockedWalletPublicId: "w-locked",
+            scopeKind: .deviceGlobal,
+            selectedOperatorId: "op-other",
+            selectedWalletId: "w-other"
+        )
+        XCTAssertEqual(scope.operatorPublicId, "op-locked")
+        XCTAssertEqual(scope.walletPublicId, "w-locked")
+    }
+
+    func testResolveScopeTupleCreateModePicksDeviceGlobal() {
+        let scope = EditDevicePrefView.resolveScopeTuple(
+            isAlertTypeLocked: false,
+            lockedOperatorPublicId: nil,
+            lockedWalletPublicId: nil,
+            scopeKind: .deviceGlobal,
+            selectedOperatorId: "op-1",
+            selectedWalletId: "w-1"
+        )
+        XCTAssertNil(scope.operatorPublicId)
+        XCTAssertNil(scope.walletPublicId)
+    }
+
+    func testResolveScopeTupleCreateModePicksOperatorOnly() {
+        let scope = EditDevicePrefView.resolveScopeTuple(
+            isAlertTypeLocked: false,
+            lockedOperatorPublicId: nil,
+            lockedWalletPublicId: nil,
+            scopeKind: .operator_,
+            selectedOperatorId: "op-1",
+            selectedWalletId: "w-stale"
+        )
+        XCTAssertEqual(scope.operatorPublicId, "op-1")
+        XCTAssertNil(
+            scope.walletPublicId,
+            "Operator scope must drop any stale wallet selection so the SCD2 row stores a clean operator-only tuple."
+        )
+    }
+
+    func testResolveScopeTupleCreateModePicksWalletWithOperator() {
+        let scope = EditDevicePrefView.resolveScopeTuple(
+            isAlertTypeLocked: false,
+            lockedOperatorPublicId: nil,
+            lockedWalletPublicId: nil,
+            scopeKind: .wallet,
+            selectedOperatorId: "op-1",
+            selectedWalletId: "w-1"
+        )
+        XCTAssertEqual(scope.operatorPublicId, "op-1")
+        XCTAssertEqual(scope.walletPublicId, "w-1")
     }
 
     func testApplySavedPrefReplacesByPublicId() {

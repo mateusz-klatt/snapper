@@ -35,6 +35,13 @@ final class AppState {
 
     var availableWallets: [WalletInfo] = []
 
+    /// Operators the caller may act AS, populated by
+    /// ``EditDevicePrefView`` on appearance via
+    /// ``APIClient.fetchOperators``. Treated as a read-through
+    /// cache — the editor refetches every time the sheet opens so
+    /// stale catalogs do not narrow the scope picker.
+    var availableOperators: [OperatorInfo] = []
+
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
         self.selectedWalletPublicId = userDefaults.string(forKey: Self.walletKey)

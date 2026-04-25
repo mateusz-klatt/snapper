@@ -102,6 +102,21 @@ final class APIClient: Sendable {
         return envelope.payload
     }
 
+    /// Fetch operators the caller may act AS (iOS-NP-A4 / multi-tenant).
+    ///
+    /// Powers ``EditDevicePrefView``'s scope picker — operator scope
+    /// AND wallet scope (the latter requires an accompanying
+    /// operator per the backend ``ck_device_alert_valid_scope``
+    /// CHECK constraint). Backend filters by
+    /// ``principal.operator_public_ids`` for non-admin roles; admins
+    /// get every active operator.
+    func fetchOperators() async throws -> [OperatorInfo] {
+        let envelope: OperatorListResponse = try await request(
+            endpoint: AppConfig.Endpoints.operators
+        )
+        return envelope.payload
+    }
+
     func fetchSystemStatus() async throws -> SystemStatus {
         let envelope: SystemStatusResponse = try await request(endpoint: AppConfig.Endpoints.status)
         return envelope.payload

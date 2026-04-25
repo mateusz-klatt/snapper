@@ -46,6 +46,8 @@
 		<string>/wallets</string>
 		<key>AlertDefaults</key>
 		<string>/alert_defaults</string>
+		<key>Operators</key>
+		<string>/operators</string>
 	</dict>
 </dict>
 </plist>

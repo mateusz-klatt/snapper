@@ -106,6 +106,10 @@ enum AppConfig {
         static var alertDefaults: String {
             return configuration.endpoints.alertDefaults
         }
+
+        static var operators: String {
+            return configuration.endpoints.operators
+        }
     }
 
     private struct AppConfiguration {
@@ -130,6 +134,7 @@ enum AppConfig {
             let system: String
             let wallets: String
             let alertDefaults: String
+            let operators: String
         }
 
         static func load() -> AppConfiguration {
@@ -163,7 +168,8 @@ enum AppConfig {
                     alerts: endpoints["Alerts"] as? String ?? "",
                     system: endpoints["System"] as? String ?? "",
                     wallets: endpoints["Wallets"] as? String ?? "",
-                    alertDefaults: endpoints["AlertDefaults"] as? String ?? ""
+                    alertDefaults: endpoints["AlertDefaults"] as? String ?? "",
+                    operators: endpoints["Operators"] as? String ?? ""
                 )
             )
         }
@@ -188,7 +194,8 @@ enum AppConfig {
                     alerts: "",
                     system: "",
                     wallets: "",
-                    alertDefaults: ""
+                    alertDefaults: "",
+                    operators: ""
                 )
             )
         }
