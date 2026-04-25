@@ -297,7 +297,14 @@ class PositionData(StrictDataSchema[Literal["position"]]):
     The inherited ``timestamp`` field carries the last-update time.
 
     Attributes:
-        instrument: Trading pair symbol.
+        instrument: Trading pair native symbol (e.g. "BTC-USD").
+        instrument_public_id: UUID7 of the underlying ``instruments``
+            row. Surfaces here so iOS reduce/close mutations can
+            target the position with a single
+            ``CreateOrderCommand`` payload (which requires
+            ``instrument_public_id`` per
+            ``CreateOrderBody``) without an extra symbol -> id
+            lookup round-trip.
         exchange: Exchange where the position is held.
         quantity: Position size (positive for long, negative for short).
         average_price: Average entry price.
@@ -312,6 +319,7 @@ class PositionData(StrictDataSchema[Literal["position"]]):
 
     type: Literal["position"] = "position"
     instrument: str
+    instrument_public_id: str = ""
     exchange: OrderExchange
     mode: ExecutionMode = ExecutionModeEnum.LIVE
     quantity: float

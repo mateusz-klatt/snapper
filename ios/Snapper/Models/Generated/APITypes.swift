@@ -2244,6 +2244,7 @@ struct PositionData: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let instrument: String
+    let instrumentPublicId: String?
     let exchange: String
     let mode: String?
     let quantity: Double
@@ -2260,6 +2261,7 @@ struct PositionData: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case instrument
+        case instrumentPublicId = "instrument_public_id"
         case exchange
         case mode
         case quantity
@@ -2576,6 +2578,44 @@ struct ProcessSummaryResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: ProcessSummaryData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct PushBetaConfigRead: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let enabled: Bool
+    let userPublicIds: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case enabled
+        case userPublicIds = "user_public_ids"
+    }
+}
+
+struct PushBetaConfigResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: PushBetaConfigRead
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -3909,6 +3949,34 @@ struct SettingUpdateBody: Codable, Sendable {
     let value: String
     let category: String?
     let description: String?
+}
+
+struct UpdatePushBetaUsersCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: PushBetaUsersBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct PushBetaUsersBody: Codable, Sendable {
+    let enabled: Bool
+    let userPublicIds: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case userPublicIds = "user_public_ids"
+    }
 }
 
 struct RemoveSettingRequest: Codable, Sendable {

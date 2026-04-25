@@ -4717,6 +4717,7 @@ class SQLAlchemyRepository(Repository):
                     "session_id": pos.session_id,
                     "sequence_id": pos.sequence_id,
                     "instrument": sym.native_symbol,
+                    "instrument_public_id": inst.public_id,
                     "exchange": inst.exchange,
                     "mode": pos.mode,
                     "quantity": pos.quantity,

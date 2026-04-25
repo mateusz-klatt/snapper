@@ -117,6 +117,24 @@ final class APIClient: Sendable {
         return envelope.payload
     }
 
+    /// Submit a manual order via the existing ``POST /api/orders``
+    /// route (iOS-Position-Mutations).
+    ///
+    /// Used by ``PositionsView`` to fire reduce / close actions —
+    /// the caller builds a ``CreateOrderCommand`` with
+    /// ``reduceOnly=true`` and the opposite side of the position to
+    /// liquidate. Backend handles routing into the existing
+    /// trade-command machinery; the response carries the spawned
+    /// ``ExecutionPlanData`` so the UI can confirm the submission
+    /// succeeded.
+    func createOrder(command: CreateOrderCommand) async throws -> ExecutionPlanResponse {
+        return try await request(
+            endpoint: AppConfig.Endpoints.orders,
+            method: "POST",
+            body: command
+        )
+    }
+
     func fetchSystemStatus() async throws -> SystemStatus {
         let envelope: SystemStatusResponse = try await request(endpoint: AppConfig.Endpoints.status)
         return envelope.payload

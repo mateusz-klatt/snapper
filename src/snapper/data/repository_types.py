@@ -272,6 +272,7 @@ class PositionRow(TypedDict):
     session_id: str
     sequence_id: int
     instrument: str
+    instrument_public_id: str
     exchange: str
     mode: str
     quantity: float

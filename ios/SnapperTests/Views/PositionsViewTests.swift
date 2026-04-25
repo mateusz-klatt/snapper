@@ -18,6 +18,7 @@ final class PositionsViewTests: XCTestCase {
             timestamp: Self.baseTimestamp,
             sessionId: "session-test",
             instrument: "BTC-USD",
+            instrumentPublicId: "inst-1",
             exchange: "kraken",
             mode: nil,
             quantity: quantity,
@@ -75,5 +76,48 @@ final class PositionsViewTests: XCTestCase {
         XCTAssertTrue(PositionsView.walletMatches(rowWalletId: "wallet-a", selected: nil))
         XCTAssertTrue(PositionsView.walletMatches(rowWalletId: "wallet-a", selected: "wallet-a"))
         XCTAssertFalse(PositionsView.walletMatches(rowWalletId: "wallet-b", selected: "wallet-a"))
+    }
+
+    func testMakeReduceCommandLongPositionFiresSell() {
+        let position = makePosition(publicId: "p-1", walletPublicId: "wallet-a", quantity: 0.5)
+        let command = PositionsView.makeReduceCommand(
+            position: position,
+            quantity: 0.25,
+            timestamp: Self.baseTimestamp
+        )
+        XCTAssertEqual(command.payload.side, "sell")
+        XCTAssertEqual(command.payload.orderType, "market")
+        XCTAssertEqual(command.payload.quantity, 0.25)
+        XCTAssertEqual(command.payload.reduceOnly, true)
+        XCTAssertEqual(command.payload.instrument, "BTC-USD")
+        XCTAssertEqual(command.payload.instrumentPublicId, "inst-1")
+        XCTAssertEqual(command.payload.walletPublicId, "wallet-a")
+        XCTAssertEqual(command.type, "create_order_command")
+    }
+
+    func testMakeReduceCommandShortPositionFiresBuy() {
+        let position = makePosition(publicId: "p-2", walletPublicId: "wallet-a", quantity: -1.0)
+        let command = PositionsView.makeReduceCommand(
+            position: position,
+            quantity: 1.0,
+            timestamp: Self.baseTimestamp
+        )
+        XCTAssertEqual(
+            command.payload.side,
+            "buy",
+            "Short positions liquidate via the buy side."
+        )
+        XCTAssertEqual(command.payload.reduceOnly, true)
+    }
+
+    func testMakeReduceCommandFullCloseHandlesNegativeQuantityAbsolutely() {
+        let position = makePosition(publicId: "p-3", walletPublicId: "wallet-a", quantity: -2.5)
+        let command = PositionsView.makeReduceCommand(
+            position: position,
+            quantity: 2.5,
+            timestamp: Self.baseTimestamp
+        )
+        XCTAssertEqual(command.payload.quantity, 2.5)
+        XCTAssertEqual(command.payload.side, "buy")
     }
 }
