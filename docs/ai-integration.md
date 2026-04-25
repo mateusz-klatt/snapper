@@ -218,6 +218,34 @@ snippet generator emits the correct env block automatically.
 
 ## Client configuration examples
 
+### Claude Code plugin (recommended, since `snapper-mcp` v0.2.1)
+
+In any Claude Code session:
+
+```text
+/plugin marketplace add mateusz-klatt/snapper-mcp
+/plugin install snapper-mcp@mateusz-klatt-snapper-mcp
+/reload-plugins
+```
+
+Claude Code prompts for two required values plus one optional value
+at install time:
+
+- **Snapper API URL** -- your backend's `/api/mcp` endpoint.
+- **Access token** -- the `access_token` from the `delegate_created`
+  response (or paste from the Settings -> AI Delegates config-snippet
+  generator).
+- **Refresh token** *(optional)* -- the `refresh_token` for rotating
+  delegates; **leave blank** for long-lived PAT delegates.
+
+Run `/mcp list` to confirm the `snapper` server is connected. The
+plugin pins the runtime to a specific `@mateusz-klatt/snapper-mcp`
+version (`v0.2.1` -> `@0.2.0`, `v0.2.2` -> `@0.2.2`, etc.) so future
+runtime publishes do not silently upgrade existing installs;
+`/plugin update snapper-mcp` opts in. Sensitive values land in the OS
+keychain (with `~/.claude/.credentials.json` fallback) -- never in
+`settings.json` or the plugin manifest.
+
 ### Claude Desktop
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
@@ -227,9 +255,9 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "snapper": {
       "command": "npx",
-      "args": ["-y", "snapper-mcp"],
+      "args": ["-y", "@mateusz-klatt/snapper-mcp"],
       "env": {
-        "SNAPPER_MCP_BASE_URL": "https://snapper.example.com/api/mcp",
+        "SNAPPER_BASE_URL": "https://snapper.example.com/api/mcp",
         "SNAPPER_ACCESS_TOKEN": "<copied-from-create-response>",
         "SNAPPER_REFRESH_TOKEN": "<copied-from-create-response>"
       }
@@ -238,9 +266,11 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-The `snapper-mcp` npm wrapper (Phase B) handles access-token refresh
-via `POST /api/auth/refresh` on 401 so the agent session doesn't
-interrupt mid-conversation.
+For long-lived PAT delegates, omit `SNAPPER_REFRESH_TOKEN` or set it
+to `""`. The `@mateusz-klatt/snapper-mcp` npm wrapper handles
+access-token refresh via `POST /api/auth/refresh` on 401 so the
+agent session doesn't interrupt mid-conversation when running with
+a rotating delegate.
 
 ### Cursor
 
