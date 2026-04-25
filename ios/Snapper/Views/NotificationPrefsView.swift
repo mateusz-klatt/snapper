@@ -119,7 +119,6 @@ struct NotificationPrefsView: View {
                 EditDevicePrefView(
                     mode: identifier.mode,
                     devicePublicId: id,
-                    availableWallets: appState.availableWallets,
                     onSaved: { saved in
                         Self.applySavedPref(saved, into: &devicePrefs)
                     }
@@ -338,7 +337,10 @@ private struct AlertDefaultRow: View {
                 }
             }
             Toggle("Enabled", isOn: $enabled)
+                .disabled(isInflight)
                 .onChange(of: enabled) { _, newValue in
+                    let baseline = existing?.enabled ?? true
+                    guard newValue != baseline else { return }
                     Task { await onChange(newValue, minPriority) }
                 }
             Picker("Minimum priority", selection: $minPriority) {
@@ -347,11 +349,26 @@ private struct AlertDefaultRow: View {
                 }
             }
             .pickerStyle(.segmented)
+            .disabled(isInflight)
             .onChange(of: minPriority) { _, newValue in
+                let baseline = existing?.minPriority ?? "medium"
+                guard newValue != baseline else { return }
                 Task { await onChange(enabled, newValue) }
             }
         }
         .padding(.vertical, 4)
+        // Sync local @State when the async load (or a server response)
+        // updates the existing row underneath us. The guard inside the
+        // .onChange-of-enabled / -minPriority handlers above bails when
+        // the new local value matches the new baseline, so this sync
+        // does not recurse into an extra PATCH (Codex gpt-5.5 final
+        // gate finding).
+        .onChange(of: existing?.publicId) { _, _ in
+            if let existing {
+                if enabled != existing.enabled { enabled = existing.enabled }
+                if minPriority != existing.minPriority { minPriority = existing.minPriority }
+            }
+        }
     }
 }
 

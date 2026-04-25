@@ -28,6 +28,11 @@ final class APIClient: Sendable {
         if let body = body {
             let encoder = JSONEncoder()
             encoder.keyEncodingStrategy = .convertToSnakeCase
+            // ISO-8601 mirrors the response decoder set below at line ~63;
+            // Codable Date fields (e.g. DeviceAlertPrefBody.mute_until)
+            // would otherwise serialize as numeric Unix timestamps and
+            // decode to a wrong instant on the backend.
+            encoder.dateEncodingStrategy = .iso8601
             request.httpBody = try encoder.encode(body)
         }
 

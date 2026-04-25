@@ -13,31 +13,29 @@ import os
 /// - "Add override" button: opens in new mode with the alert_type
 ///   picker enabled.
 ///
-/// Scope picker surfaces ``Device-global`` plus every wallet the
-/// caller has loaded in ``AppState.availableWallets``. Operator
-/// scope is deferred to a future plan — the iOS surface has no
-/// operator catalog today, and the backend SCD2 row's
-/// ``operator_public_id`` column stays ``None`` until we add one.
+/// Scope is locked at ``Device-global`` for now. Wallet- and
+/// operator-narrowed scope is deferred until iOS exposes an
+/// operator catalog: the backend
+/// ``ck_device_alert_valid_scope`` CHECK constraint forbids
+/// ``wallet_public_id`` without an accompanying
+/// ``operator_public_id`` (`src/snapper/data/models.py:2358`), so
+/// scoping by wallet alone would deterministically violate the
+/// constraint at write time. ``DeviceAlertPrefInfo`` rows that
+/// arrive with non-null operator/wallet (created via the API
+/// directly) are still rendered + editable — only the scope tuple
+/// is preserved across the upsert.
 struct EditDevicePrefView: View {
     enum Mode {
         case create
         case edit(existing: DeviceAlertPrefInfo)
     }
 
-    enum ScopeKind: String, Hashable {
-        case deviceGlobal
-        case wallet
-    }
-
     let mode: Mode
     let devicePublicId: String
     let onSaved: (DeviceAlertPrefInfo) -> Void
-    let availableWallets: [WalletInfo]
 
     @Environment(\.dismiss) private var dismiss
     @State private var alertType: String
-    @State private var scopeKind: ScopeKind
-    @State private var selectedWalletId: String?
     @State private var enabled: Bool
     @State private var minPriority: String
     @State private var quietHoursEnabled: Bool
@@ -48,6 +46,13 @@ struct EditDevicePrefView: View {
     @State private var isSaving = false
     @State private var saveError: String?
 
+    /// Preserved across save when editing — the SCD2 key on the row
+    /// includes the operator+wallet tuple, so changing scope mid-edit
+    /// would silently create a sibling row instead of mutating the
+    /// tapped one (Codex gpt-5.5 final gate finding).
+    private let lockedOperatorPublicId: String?
+    private let lockedWalletPublicId: String?
+
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Snapper",
         category: "EditDevicePrefView"
@@ -56,12 +61,10 @@ struct EditDevicePrefView: View {
     init(
         mode: Mode,
         devicePublicId: String,
-        availableWallets: [WalletInfo],
         onSaved: @escaping (DeviceAlertPrefInfo) -> Void
     ) {
         self.mode = mode
         self.devicePublicId = devicePublicId
-        self.availableWallets = availableWallets
         self.onSaved = onSaved
 
         let calendar = Calendar(identifier: .gregorian)
@@ -70,8 +73,6 @@ struct EditDevicePrefView: View {
         switch mode {
         case .create:
             _alertType = State(initialValue: NotificationPrefsView.alertTypes[0])
-            _scopeKind = State(initialValue: .deviceGlobal)
-            _selectedWalletId = State(initialValue: nil)
             _enabled = State(initialValue: true)
             _minPriority = State(initialValue: "medium")
             _quietHoursEnabled = State(initialValue: false)
@@ -79,11 +80,10 @@ struct EditDevicePrefView: View {
             _quietHoursEnd = State(initialValue: midnight)
             _muteEnabled = State(initialValue: false)
             _muteUntil = State(initialValue: Date())
+            self.lockedOperatorPublicId = nil
+            self.lockedWalletPublicId = nil
         case .edit(let pref):
             _alertType = State(initialValue: pref.alertType)
-            let kind: ScopeKind = pref.walletPublicId != nil ? .wallet : .deviceGlobal
-            _scopeKind = State(initialValue: kind)
-            _selectedWalletId = State(initialValue: pref.walletPublicId)
             _enabled = State(initialValue: pref.enabled)
             _minPriority = State(initialValue: pref.minPriority)
             let quietActive = pref.quietHoursStartMin != nil && pref.quietHoursEndMin != nil
@@ -97,6 +97,8 @@ struct EditDevicePrefView: View {
             let muteActive = (pref.muteUntil ?? Date.distantPast) > Date()
             _muteEnabled = State(initialValue: muteActive)
             _muteUntil = State(initialValue: pref.muteUntil ?? Date())
+            self.lockedOperatorPublicId = pref.operatorPublicId
+            self.lockedWalletPublicId = pref.walletPublicId
         }
     }
 
@@ -122,33 +124,21 @@ struct EditDevicePrefView: View {
                 }
 
                 Section {
-                    Picker("Apply to", selection: $scopeKind) {
-                        Text("Device-global").tag(ScopeKind.deviceGlobal)
-                        if !availableWallets.isEmpty {
-                            Text("Specific wallet").tag(ScopeKind.wallet)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-
-                    if scopeKind == .wallet {
-                        Picker("Wallet", selection: $selectedWalletId) {
-                            Text("Select…").tag(Optional<String>.none)
-                            ForEach(availableWallets, id: \.publicId) { wallet in
-                                Text(WalletPicker.walletDisplayName(wallet))
-                                    .tag(Optional(wallet.publicId))
-                            }
-                        }
+                    HStack {
+                        Text("Apply to")
+                        Spacer()
+                        Text(Self.scopeDescription(
+                            operatorPublicId: lockedOperatorPublicId,
+                            walletPublicId: lockedWalletPublicId
+                        ))
+                        .foregroundStyle(.secondary)
                     }
                 } header: {
                     Text("Scope")
                 } footer: {
-                    if availableWallets.isEmpty {
-                        Text("Open the Home tab once to load your wallets, then come back to scope this preference.")
-                    } else {
-                        Text(
-                            "Wallet-narrowed preferences override the device-global default for that wallet's alerts."
-                        )
-                    }
+                    Text(
+                        "Wallet- and operator-narrowed scope is deferred until iOS exposes an operator catalog (the SCD2 row requires a parent operator alongside any wallet)."
+                    )
                 }
 
                 Section {
@@ -241,8 +231,25 @@ struct EditDevicePrefView: View {
     }
 
     var canSave: Bool {
-        if scopeKind == .wallet, selectedWalletId == nil { return false }
-        return true
+        return !isSaving
+    }
+
+    /// Format the locked scope tuple for the read-only "Apply to"
+    /// row. Wallet/operator narrowed rows surface their truncated
+    /// public_ids so the user can correlate with the
+    /// ``DevicePrefRow`` summary on the parent screen.
+    static func scopeDescription(
+        operatorPublicId: String?,
+        walletPublicId: String?
+    ) -> String {
+        if let walletId = walletPublicId {
+            let suffix = operatorPublicId.map { " · op \(String($0.prefix(6)))…" } ?? ""
+            return "Wallet \(String(walletId.prefix(8)))…\(suffix)"
+        }
+        if let operatorId = operatorPublicId {
+            return "Operator \(String(operatorId.prefix(8)))…"
+        }
+        return "Device-global"
     }
 
     /// Convert a ``DatePicker`` Date to the minutes-since-midnight
@@ -264,8 +271,12 @@ struct EditDevicePrefView: View {
     }
 
     /// Build the iOS-side envelope for ``PATCH /api/devices/{id}/prefs``.
-    /// Provenance fields are placeholders — the backend handler
-    /// strips and re-mints them per request.
+    /// Provenance fields (sequenceId, publicId, sessionId) are
+    /// placeholders — the backend strips and re-mints them per
+    /// request. ``timezone`` is sourced from the device locale so
+    /// the backend's quiet-hours interpreter at
+    /// ``application/notify/routing.py`` evaluates the window in
+    /// the user's wall-clock time, not UTC.
     static func makeDeviceCommand(
         alertType: String,
         operatorPublicId: String? = nil,
@@ -275,6 +286,7 @@ struct EditDevicePrefView: View {
         quietHoursStartMin: Int? = nil,
         quietHoursEndMin: Int? = nil,
         muteUntil: Date? = nil,
+        timezone: String = TimeZone.current.identifier,
         timestamp: Date = Date()
     ) -> UpdateDevicePrefCommand {
         return UpdateDevicePrefCommand(
@@ -292,7 +304,7 @@ struct EditDevicePrefView: View {
                 quietHoursStartMin: quietHoursStartMin,
                 quietHoursEndMin: quietHoursEndMin,
                 muteUntil: muteUntil,
-                timezone: "UTC"
+                timezone: timezone
             )
         )
     }
@@ -306,7 +318,8 @@ struct EditDevicePrefView: View {
 
         let command = Self.makeDeviceCommand(
             alertType: alertType,
-            walletPublicId: scopeKind == .wallet ? selectedWalletId : nil,
+            operatorPublicId: lockedOperatorPublicId,
+            walletPublicId: lockedWalletPublicId,
             enabled: enabled,
             minPriority: minPriority,
             quietHoursStartMin: quietHoursEnabled

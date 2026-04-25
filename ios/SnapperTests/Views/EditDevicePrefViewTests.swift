@@ -54,7 +54,6 @@ final class EditDevicePrefViewTests: XCTestCase {
         let view = EditDevicePrefView(
             mode: .edit(existing: pref),
             devicePublicId: "dev-1",
-            availableWallets: [],
             onSaved: { _ in }
         )
         XCTAssertTrue(view.isAlertTypeLocked)
@@ -65,11 +64,35 @@ final class EditDevicePrefViewTests: XCTestCase {
         let view = EditDevicePrefView(
             mode: .create,
             devicePublicId: "dev-1",
-            availableWallets: [],
             onSaved: { _ in }
         )
         XCTAssertFalse(view.isAlertTypeLocked)
         XCTAssertEqual(view.navigationTitle, "New override")
+    }
+
+    func testScopeDescriptionCoversEveryShape() {
+        XCTAssertEqual(
+            EditDevicePrefView.scopeDescription(operatorPublicId: nil, walletPublicId: nil),
+            "Device-global"
+        )
+        XCTAssertTrue(
+            EditDevicePrefView.scopeDescription(
+                operatorPublicId: "op-1234567890",
+                walletPublicId: nil
+            ).hasPrefix("Operator ")
+        )
+        XCTAssertTrue(
+            EditDevicePrefView.scopeDescription(
+                operatorPublicId: nil,
+                walletPublicId: "wallet-abcdef0123"
+            ).hasPrefix("Wallet ")
+        )
+        let combined = EditDevicePrefView.scopeDescription(
+            operatorPublicId: "op-1234567890",
+            walletPublicId: "wallet-abcdef0123"
+        )
+        XCTAssertTrue(combined.hasPrefix("Wallet "))
+        XCTAssertTrue(combined.contains("op "))
     }
 
     /// Use a UTC calendar so the round-trip is timezone-independent.
@@ -102,37 +125,51 @@ final class EditDevicePrefViewTests: XCTestCase {
         let mute = Date(timeIntervalSince1970: 1_800_000_000)
         let command = EditDevicePrefView.makeDeviceCommand(
             alertType: "margin_warning",
-            operatorPublicId: nil,
+            operatorPublicId: "op-1",
             walletPublicId: "wallet-abc",
             enabled: false,
             minPriority: "high",
             quietHoursStartMin: 22 * 60,
             quietHoursEndMin: 7 * 60,
             muteUntil: mute,
+            timezone: "Europe/Warsaw",
             timestamp: Self.baseTimestamp
         )
         XCTAssertEqual(command.payload.alertType, "margin_warning")
         XCTAssertEqual(command.payload.walletPublicId, "wallet-abc")
-        XCTAssertNil(command.payload.operatorPublicId)
+        XCTAssertEqual(command.payload.operatorPublicId, "op-1")
         XCTAssertEqual(command.payload.enabled, false)
         XCTAssertEqual(command.payload.minPriority, "high")
         XCTAssertEqual(command.payload.quietHoursStartMin, 22 * 60)
         XCTAssertEqual(command.payload.quietHoursEndMin, 7 * 60)
         XCTAssertEqual(command.payload.muteUntil, mute)
-        XCTAssertEqual(command.payload.timezone, "UTC")
+        XCTAssertEqual(command.payload.timezone, "Europe/Warsaw")
         XCTAssertEqual(command.type, "update_device_pref_command")
     }
 
-    func testCanSaveBlocksWalletScopeWithoutWalletSelected() {
+    /// The default ``timezone`` argument is sourced from
+    /// ``TimeZone.current.identifier`` so the backend's quiet-hours
+    /// interpreter at ``application/notify/routing.py`` evaluates the
+    /// window in the user's wall-clock time, not UTC (Codex gpt-5.5
+    /// final gate finding).
+    func testMakeDeviceCommandDefaultTimezoneTracksDeviceLocale() {
+        let command = EditDevicePrefView.makeDeviceCommand(
+            alertType: "order_fill_full",
+            enabled: true,
+            minPriority: "medium"
+        )
+        XCTAssertEqual(command.payload.timezone, TimeZone.current.identifier)
+    }
+
+    func testCanSaveStaysTrueByDefault() {
         let view = EditDevicePrefView(
             mode: .create,
             devicePublicId: "dev-1",
-            availableWallets: [makeWallet(publicId: "w-1", label: "default", isPaper: false)],
             onSaved: { _ in }
         )
         XCTAssertTrue(
             view.canSave,
-            "Default scope is device-global; canSave starts true regardless of wallet picker state."
+            "Scope is locked at device-global today, so Save is enabled out of the gate."
         )
     }
 
