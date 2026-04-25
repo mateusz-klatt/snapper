@@ -22,13 +22,14 @@
 		3B5F692F8C98407F76E6F09E /* TypeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C69A0BFD6B16B0BD652D904F /* TypeBridge.swift */; };
 		3B9060A9B55885A03C1316D0 /* SnapperApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB34EE347C68EC93D009F7F4 /* SnapperApp.swift */; };
 		4903E053BC2B9E8FC22EC62A /* WebSocketManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1499AF1C8B116093A1A9426D /* WebSocketManager.swift */; };
+		56F3E6E370F0017D26D4DE52 /* OrdersView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6535894EE04ECF4410862D9 /* OrdersView.swift */; };
 		744C6DC56C03FBBCF9651D96 /* DeviceRegistrationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B312129A11E7B3A9371A79C5 /* DeviceRegistrationService.swift */; };
 		7A8AC6E7C86070E41475CF8F /* Environment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10C33334091D91D43D43B1C3 /* Environment.swift */; };
 		7AD9A1C58498FCB2B7883463 /* Configuration.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3AFFCD485E4541E995FC91CB /* Configuration.plist */; };
-		81189414878D69E0A0DC0601 /* TradingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 569FFBB46A52B74686A202D0 /* TradingView.swift */; };
 		8DB5E916777E3B48A477E414 /* AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C866C094E8868C0EF03F6809 /* AuthService.swift */; };
 		9A375BEDC217E05D46F4F4E7 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A987AAE53C2CBDE34AE70BD /* NotificationService.swift */; };
 		A35D23705FCF8BC6B9E3E64C /* Permissions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 039FE3D502C2D2EB294EB4AA /* Permissions.swift */; };
+		A39C851ACE12BC9628340437 /* PositionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77B5AF96CD39F790EE5DFFE3 /* PositionsView.swift */; };
 		B0B776140121A53C950E09F7 /* AnyCodable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34DDD4FA9EE84A8FF431E110 /* AnyCodable.swift */; };
 		BBB8164DA1ACDEF80598BF46 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 6B649B56E9F5DB1981C9D47E /* PrivacyInfo.xcprivacy */; };
 		D339ECEBC32C9FE4E3040546 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6605FA90A650CA70270A857 /* SettingsView.swift */; };
@@ -62,12 +63,12 @@
 		40BE9EE10BEF49D1DCA0F3C5 /* Snapper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Snapper.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		442D4323A9B7C8B7A02A5B08 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
 		4A453B3AED6CC7374A032D39 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
-		569FFBB46A52B74686A202D0 /* TradingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradingView.swift; sourceTree = "<group>"; };
 		578078843FA532A83EBA1C53 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		5A50EF856475775A1EEA07E0 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
 		653637C037B012795FE84600 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		6798D055E36E2A96D2575882 /* LoginViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginViewModel.swift; sourceTree = "<group>"; };
 		6B649B56E9F5DB1981C9D47E /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		77B5AF96CD39F790EE5DFFE3 /* PositionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PositionsView.swift; sourceTree = "<group>"; };
 		7A987AAE53C2CBDE34AE70BD /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
 		7DC7293CDEE72AC8C8C5341C /* NavigationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationCoordinator.swift; sourceTree = "<group>"; };
 		7FBB6040DB0E53FB9C4060D1 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
@@ -84,6 +85,7 @@
 		E4646B48A09BA542FF6ABECD /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		E6605FA90A650CA70270A857 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		F12F4A22AA39A55870A72C7B /* AlertsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlertsView.swift; sourceTree = "<group>"; };
+		F6535894EE04ECF4410862D9 /* OrdersView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrdersView.swift; sourceTree = "<group>"; };
 		F7849605786039354D6A6590 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		FB34EE347C68EC93D009F7F4 /* SnapperApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapperApp.swift; sourceTree = "<group>"; };
 		FFDC45C942B7417CFE70011C /* Snapper.Release.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Snapper.Release.entitlements; sourceTree = "<group>"; };
@@ -156,8 +158,9 @@
 				653637C037B012795FE84600 /* HomeView.swift */,
 				A9948BCE1220922C26E1E5D5 /* LoginView.swift */,
 				5A50EF856475775A1EEA07E0 /* MainTabView.swift */,
+				F6535894EE04ECF4410862D9 /* OrdersView.swift */,
+				77B5AF96CD39F790EE5DFFE3 /* PositionsView.swift */,
 				E6605FA90A650CA70270A857 /* SettingsView.swift */,
-				569FFBB46A52B74686A202D0 /* TradingView.swift */,
 				BEE4C7FE45A0551944CE9006 /* Components */,
 			);
 			path = Views;
@@ -344,12 +347,13 @@
 				3847E72F3248A41EA8DCD9F2 /* MainTabView.swift in Sources */,
 				3A812C6207ED5A34EA4890E4 /* NavigationCoordinator.swift in Sources */,
 				9A375BEDC217E05D46F4F4E7 /* NotificationService.swift in Sources */,
+				56F3E6E370F0017D26D4DE52 /* OrdersView.swift in Sources */,
 				A35D23705FCF8BC6B9E3E64C /* Permissions.swift in Sources */,
+				A39C851ACE12BC9628340437 /* PositionsView.swift in Sources */,
 				398C326321946F6554E4F5C3 /* Protocols.swift in Sources */,
 				D339ECEBC32C9FE4E3040546 /* SettingsView.swift in Sources */,
 				3B9060A9B55885A03C1316D0 /* SnapperApp.swift in Sources */,
 				FC31D3C744C65776E28C570D /* Theme.swift in Sources */,
-				81189414878D69E0A0DC0601 /* TradingView.swift in Sources */,
 				3B5F692F8C98407F76E6F09E /* TypeBridge.swift in Sources */,
 				E00A59F35D84C52F5B093C9A /* WSMessages.swift in Sources */,
 				E26F0CF3DFE246A9C9E7F1CA /* WSState.swift in Sources */,
