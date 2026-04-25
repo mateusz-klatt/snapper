@@ -20,12 +20,14 @@ import os
 /// ``async let``. Empty list is the legitimate "no overrides" state
 /// — the routing layer falls through to the in-app defaults.
 struct NotificationPrefsView: View {
+    @Environment(AppState.self) private var appState
     @State private var defaults: [String: UserAlertDefaultInfo] = [:]
     @State private var devicePrefs: [DeviceAlertPrefInfo] = []
     @State private var devicePublicId: String?
     @State private var isLoading = false
     @State private var loadError: String?
     @State private var inflightAlertTypes: Set<String> = []
+    @State private var sheetMode: EditDevicePrefView.Mode?
 
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Snapper",
@@ -74,18 +76,28 @@ struct NotificationPrefsView: View {
                             "Enable push notifications in Settings → Notifications to register this device."
                         )
                     )
-                } else if devicePrefs.isEmpty {
-                    ContentUnavailableView(
-                        "No overrides yet",
-                        systemImage: "bell.badge",
-                        description: Text(
-                            "Once iOS-NP-1b ships you'll be able to configure per-wallet quiet hours and mute windows here."
-                        )
-                    )
                 } else {
-                    ForEach(devicePrefs, id: \.publicId) { pref in
-                        DevicePrefRow(pref: pref)
+                    if devicePrefs.isEmpty {
+                        Text("No overrides yet — defaults apply to every alert.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(devicePrefs, id: \.publicId) { pref in
+                            Button {
+                                sheetMode = .edit(existing: pref)
+                            } label: {
+                                DevicePrefRow(pref: pref)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
+
+                    Button {
+                        sheetMode = .create
+                    } label: {
+                        Label("Add override", systemImage: "plus.circle")
+                    }
+                    .disabled(devicePublicId == nil)
                 }
             } header: {
                 Text("Device overrides")
@@ -98,6 +110,21 @@ struct NotificationPrefsView: View {
         }
         .refreshable {
             await load()
+        }
+        .sheet(item: Binding(
+            get: { sheetMode.map { SheetIdentifier(mode: $0) } },
+            set: { newValue in sheetMode = newValue?.mode }
+        )) { identifier in
+            if let id = devicePublicId {
+                EditDevicePrefView(
+                    mode: identifier.mode,
+                    devicePublicId: id,
+                    availableWallets: appState.availableWallets,
+                    onSaved: { saved in
+                        Self.applySavedPref(saved, into: &devicePrefs)
+                    }
+                )
+            }
         }
     }
 
@@ -170,6 +197,28 @@ struct NotificationPrefsView: View {
         let h = totalMinutes / 60
         let m = totalMinutes % 60
         return String(format: "%02d:%02d", h, m)
+    }
+
+    /// Merge a saved ``DeviceAlertPrefInfo`` into the local cache.
+    /// Replaces an existing row that shares the same scope tuple
+    /// (alert_type, operator_public_id, wallet_public_id) — the SCD2
+    /// upsert preserves the same ``public_id`` so a bare publicId
+    /// match suffices on the happy path. New scopes append.
+    static func applySavedPref(
+        _ saved: DeviceAlertPrefInfo,
+        into prefs: inout [DeviceAlertPrefInfo]
+    ) {
+        if let index = prefs.firstIndex(where: { $0.publicId == saved.publicId }) {
+            prefs[index] = saved
+        } else if let scopeIndex = prefs.firstIndex(where: {
+            $0.alertType == saved.alertType
+                && $0.operatorPublicId == saved.operatorPublicId
+                && $0.walletPublicId == saved.walletPublicId
+        }) {
+            prefs[scopeIndex] = saved
+        } else {
+            prefs.append(saved)
+        }
     }
 
     /// Build the iOS-side envelope for ``PATCH /api/alert_defaults``.
@@ -324,10 +373,27 @@ private struct DevicePrefRow: View {
     }
 }
 
+/// Identifier wrapper so SwiftUI's ``sheet(item:)`` can drive the
+/// edit/create sheet from an enum without forcing the caller to
+/// manage Identifiable conformance on the enum itself.
+private struct SheetIdentifier: Identifiable {
+    let mode: EditDevicePrefView.Mode
+
+    var id: String {
+        switch mode {
+        case .create:
+            return "create"
+        case .edit(let pref):
+            return "edit-\(pref.publicId)"
+        }
+    }
+}
+
 struct NotificationPrefsView_Previews: PreviewProvider {
     static var previews: some View {
         NavigationStack {
             NotificationPrefsView()
+                .environment(AppState.shared)
         }
     }
 }

@@ -15,6 +15,7 @@
 		1FB7DA9DCC9A41F35A486136 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 653637C037B012795FE84600 /* HomeView.swift */; };
 		22A2FE8937BA167E5605A9F5 /* LatestAlertCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 152DF48318E7846A33D574CF /* LatestAlertCard.swift */; };
 		2BB79204F7F83445708B92C4 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FBB6040DB0E53FB9C4060D1 /* AppState.swift */; };
+		2DBDD476BC339FFB12CEC0BF /* EditDevicePrefView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3F609F3E2355B212C12F18B /* EditDevicePrefView.swift */; };
 		375D6E54819C76EB85DF2E97 /* AlertsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F12F4A22AA39A55870A72C7B /* AlertsView.swift */; };
 		3847E72F3248A41EA8DCD9F2 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A50EF856475775A1EEA07E0 /* MainTabView.swift */; };
 		398C326321946F6554E4F5C3 /* Protocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = D203FD7280A91512EE623EE1 /* Protocols.swift */; };
@@ -74,6 +75,7 @@
 		7DC7293CDEE72AC8C8C5341C /* NavigationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationCoordinator.swift; sourceTree = "<group>"; };
 		7FBB6040DB0E53FB9C4060D1 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		9A0B22DD35B1534E9A1AFFA3 /* WSState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WSState.swift; sourceTree = "<group>"; };
+		A3F609F3E2355B212C12F18B /* EditDevicePrefView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditDevicePrefView.swift; sourceTree = "<group>"; };
 		A9948BCE1220922C26E1E5D5 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
 		AA3A1CC61B90950DA6A44D16 /* Snapper.Debug.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Snapper.Debug.entitlements; sourceTree = "<group>"; };
 		B312129A11E7B3A9371A79C5 /* DeviceRegistrationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceRegistrationService.swift; sourceTree = "<group>"; };
@@ -157,6 +159,7 @@
 			isa = PBXGroup;
 			children = (
 				F12F4A22AA39A55870A72C7B /* AlertsView.swift */,
+				A3F609F3E2355B212C12F18B /* EditDevicePrefView.swift */,
 				653637C037B012795FE84600 /* HomeView.swift */,
 				A9948BCE1220922C26E1E5D5 /* LoginView.swift */,
 				5A50EF856475775A1EEA07E0 /* MainTabView.swift */,
@@ -342,6 +345,7 @@
 				2BB79204F7F83445708B92C4 /* AppState.swift in Sources */,
 				8DB5E916777E3B48A477E414 /* AuthService.swift in Sources */,
 				744C6DC56C03FBBCF9651D96 /* DeviceRegistrationService.swift in Sources */,
+				2DBDD476BC339FFB12CEC0BF /* EditDevicePrefView.swift in Sources */,
 				7A8AC6E7C86070E41475CF8F /* Environment.swift in Sources */,
 				1FB7DA9DCC9A41F35A486136 /* HomeView.swift in Sources */,
 				22A2FE8937BA167E5605A9F5 /* LatestAlertCard.swift in Sources */,
