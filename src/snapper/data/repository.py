@@ -9173,9 +9173,6 @@ class SQLAlchemyRepository(Repository):
         ``scope_kind='underlying'`` expanded via
         ``InstrumentUnderlyingMapping``.
         """
-        from snapper.data.models import AiDelegate
-        from snapper.data.models import InstrumentUnderlyingMapping
-
         async with self.session() as s:
             # Step 1: resolve delegate -> user_public_id (operational
             # side-table; not SCD2, simple PK lookup).

@@ -591,6 +591,7 @@ export interface PositionData {
   timestamp: string;
   session_id: string;
   instrument: string;
+  instrument_public_id?: string;
   exchange: Exchange8;
   mode?: Mode3;
   quantity: number;
@@ -598,6 +599,7 @@ export interface PositionData {
   unrealized_pnl: number;
   realized_pnl: number;
   position_cycle_public_id?: PositionCyclePublicId1;
+  wallet_public_id?: string;
 }
 export interface ReplayEndData {
   type: Type19;

@@ -212,6 +212,22 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/settings/push-beta/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: Operations["get_push_beta_users_api_settings_push_beta_users_get"];
+        put?: never;
+        post: Operations["set_push_beta_users_api_settings_push_beta_users_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/settings/{key}/remove": {
         parameters: {
             query?: never;
@@ -2270,6 +2286,7 @@ export type Components = {
             timestamp: string;
             session_id: string;
             instrument: string;
+            instrument_public_id: string;
             exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
             mode: "live" | "paper";
             quantity: number;
@@ -2277,6 +2294,7 @@ export type Components = {
             unrealized_pnl: number;
             realized_pnl: number;
             position_cycle_public_id?: string | null;
+            wallet_public_id: string;
         };
         PositionListResponse: {
             type: "position_list";
@@ -2424,6 +2442,23 @@ export type Components = {
             timestamp: string;
             session_id: string;
             payload: Components["schemas"]["ProcessSummaryData"];
+        };
+        PushBetaConfigRead: {
+            type: "push_beta_config_read";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            enabled: boolean;
+            user_public_ids: string[];
+        };
+        PushBetaConfigResponse: {
+            type: "push_beta_config_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["PushBetaConfigRead"];
         };
         RefreshData: {
             type: "refresh";
@@ -3040,6 +3075,18 @@ export type Components = {
             value: string;
             category?: string;
             description?: string | null;
+        };
+        UpdatePushBetaUsersCommand: {
+            type?: "update_push_beta_users_command";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["PushBetaUsersBody"];
+        };
+        PushBetaUsersBody: {
+            enabled: boolean;
+            user_public_ids?: string[];
         };
         RemoveSettingRequest: {
             type?: "remove_setting_request";
@@ -3723,6 +3770,48 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_push_beta_users_api_settings_push_beta_users_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["PushBetaConfigResponse"];
+                };
+            };
+        };
+    };
+    set_push_beta_users_api_settings_push_beta_users_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["UpdatePushBetaUsersCommand"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["PushBetaConfigResponse"];
                 };
             };
         };

@@ -430,6 +430,7 @@ export interface Position {
   timestamp: Date
   sessionId: string
   instrument: string
+  instrumentPublicId?: string
   exchange: Exchange2
   mode?: Mode
   quantity: number
@@ -437,6 +438,7 @@ export interface Position {
   unrealizedPnl: number
   realizedPnl: number
   positionCyclePublicId?: string | null
+  walletPublicId?: string
 }
 
 /**

@@ -10,9 +10,13 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import Any as _Any
 from uuid import uuid7
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.dml import Update
+from sqlalchemy.sql.expression import Select  # local import; only used here
 
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AiDelegate
@@ -622,8 +626,6 @@ async def test_atomic_resolve_with_for_update_falls_back_on_not_implemented(
     When ``atomic_resolve_ai_review`` is called,
     Then it retries without the lock and still wins the transition.
     """
-    from sqlalchemy.sql.expression import Select  # local import; only used here
-
     repo = await _build_repo(tmp_path, "atomic_for_update_fallback.db")
     now = datetime.now(UTC)
     review_pid, delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
@@ -666,15 +668,10 @@ async def test_atomic_resolve_rowcount_zero_returns_none(
     now = datetime.now(UTC)
     review_pid, delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
 
-    from typing import Any as _Any
-
-    from sqlalchemy.ext.asyncio import AsyncSession
-
     original_execute = AsyncSession.execute
 
     async def _stub_execute(self: _Any, statement: _Any, *a: _Any, **kw: _Any) -> _Any:
         result = await original_execute(self, statement, *a, **kw)
-        from sqlalchemy.sql.dml import Update
 
         if isinstance(statement, Update):
 
@@ -793,15 +790,10 @@ async def test_atomic_timeout_rowcount_zero_returns_none(
     now = datetime.now(UTC)
     review_pid, _ = await _seed_pending_for_atomic(repo, as_of=now)
 
-    from typing import Any as _Any
-
-    from sqlalchemy.ext.asyncio import AsyncSession
-
     original_execute = AsyncSession.execute
 
     async def _stub(self: _Any, statement: _Any, *a: _Any, **kw: _Any) -> _Any:
         result = await original_execute(self, statement, *a, **kw)
-        from sqlalchemy.sql.dml import Update
 
         if isinstance(statement, Update):
 

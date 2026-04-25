@@ -469,6 +469,7 @@ export const PositionDataSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     instrument: z.string(),
+    instrument_public_id: z.string(),
     exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
     mode: z.enum(['live', 'paper']),
     quantity: z.number(),
@@ -476,6 +477,7 @@ export const PositionDataSchema = z
     unrealized_pnl: z.number(),
     realized_pnl: z.number(),
     position_cycle_public_id: z.string().nullable().optional(),
+    wallet_public_id: z.string(),
   })
   .strict()
 
@@ -528,6 +530,18 @@ export const ProcessStopDataSchema = z
     status: z.enum(['success', 'not_running', 'error']),
     name: z.string(),
     message: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const PushBetaConfigReadSchema = z
+  .object({
+    type: z.literal('push_beta_config_read'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    enabled: z.boolean(),
+    user_public_ids: z.array(z.string()),
   })
   .strict()
 
@@ -866,6 +880,13 @@ export const SettingUpdateBodySchema = z
     value: z.string(),
     category: z.string().optional(),
     description: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const PushBetaUsersBodySchema = z
+  .object({
+    enabled: z.boolean(),
+    user_public_ids: z.array(z.string()).optional(),
   })
   .strict()
 
@@ -1358,6 +1379,17 @@ export const ProcessStopResponseSchema = z
   })
   .strict()
 
+export const PushBetaConfigResponseSchema = z
+  .object({
+    type: z.literal('push_beta_config_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: PushBetaConfigReadSchema,
+  })
+  .strict()
+
 export const RegisterDeviceCommandSchema = z
   .object({
     type: z.literal('register_device_command'),
@@ -1711,6 +1743,17 @@ export const SettingUpdateSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: SettingUpdateBodySchema,
+  })
+  .strict()
+
+export const UpdatePushBetaUsersCommandSchema = z
+  .object({
+    type: z.literal('update_push_beta_users_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: PushBetaUsersBodySchema,
   })
   .strict()
 
@@ -2646,6 +2689,7 @@ export type ProcessCreatedInfo = z.infer<typeof ProcessCreatedInfoSchema>
 export type ProcessStartData = z.infer<typeof ProcessStartDataSchema>
 export type ProcessStatus = z.infer<typeof ProcessStatusSchema>
 export type ProcessStopData = z.infer<typeof ProcessStopDataSchema>
+export type PushBetaConfigRead = z.infer<typeof PushBetaConfigReadSchema>
 export type RegisterDeviceBody = z.infer<typeof RegisterDeviceBodySchema>
 export type RelationshipTypeEnum = z.infer<typeof RelationshipTypeEnumSchema>
 export type RestRateExchangeStats = z.infer<typeof RestRateExchangeStatsSchema>
@@ -2678,6 +2722,7 @@ export type DeactivateUserBody = z.infer<typeof DeactivateUserBodySchema>
 export type ChangePasswordBody = z.infer<typeof ChangePasswordBodySchema>
 export type AdminResetPasswordBody = z.infer<typeof AdminResetPasswordBodySchema>
 export type SettingUpdateBody = z.infer<typeof SettingUpdateBodySchema>
+export type PushBetaUsersBody = z.infer<typeof PushBetaUsersBodySchema>
 export type RemoveSettingBody = z.infer<typeof RemoveSettingBodySchema>
 export type DelegateDeactivateBody = z.infer<typeof DelegateDeactivateBodySchema>
 export type BacktestCompareBody = z.infer<typeof BacktestCompareBodySchema>
@@ -2726,6 +2771,7 @@ export type ProcessSummaryData = z.infer<typeof ProcessSummaryDataSchema>
 export type ProcessCreateData = z.infer<typeof ProcessCreateDataSchema>
 export type ProcessStartResponse = z.infer<typeof ProcessStartResponseSchema>
 export type ProcessStopResponse = z.infer<typeof ProcessStopResponseSchema>
+export type PushBetaConfigResponse = z.infer<typeof PushBetaConfigResponseSchema>
 export type RegisterDeviceCommand = z.infer<typeof RegisterDeviceCommandSchema>
 export type RestRateData = z.infer<typeof RestRateDataSchema>
 export type ContinuousSeriesPartialResponse = z.infer<typeof ContinuousSeriesPartialResponseSchema>
@@ -2759,6 +2805,7 @@ export type DeactivateUserRequest = z.infer<typeof DeactivateUserRequestSchema>
 export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>
 export type AdminResetPasswordRequest = z.infer<typeof AdminResetPasswordRequestSchema>
 export type SettingUpdate = z.infer<typeof SettingUpdateSchema>
+export type UpdatePushBetaUsersCommand = z.infer<typeof UpdatePushBetaUsersCommandSchema>
 export type RemoveSettingRequest = z.infer<typeof RemoveSettingRequestSchema>
 export type DelegateDeactivateRequest = z.infer<typeof DelegateDeactivateRequestSchema>
 export type BacktestCompareRequest = z.infer<typeof BacktestCompareRequestSchema>

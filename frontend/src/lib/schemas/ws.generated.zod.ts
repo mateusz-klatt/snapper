@@ -378,6 +378,7 @@ export const PositionDataSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     instrument: z.string(),
+    instrument_public_id: z.string(),
     exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
     mode: z.enum(['live', 'paper']),
     quantity: z.number(),
@@ -385,6 +386,7 @@ export const PositionDataSchema = z
     unrealized_pnl: z.number(),
     realized_pnl: z.number(),
     position_cycle_public_id: z.string().nullable(),
+    wallet_public_id: z.string(),
   })
   .strict()
 
