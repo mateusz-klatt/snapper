@@ -192,3 +192,97 @@ class DeviceAlertPrefResponse(
     """Singleton wrapper returned by ``PATCH /api/devices/{public_id}/prefs``."""
 
     type: Literal["device_alert_pref_response"] = "device_alert_pref_response"
+
+
+class DeviceAlertPrefListResponse(
+    PayloadListResponse[Literal["device_alert_pref_list_response"], DeviceAlertPrefInfo]
+):
+    """List wrapper for ``GET /api/devices/{public_id}/prefs``.
+
+    Returns every active per-(alert_type, scope) preference row tied
+    to the addressed device. Wallet/operator-narrowed rows surface
+    alongside device-global rows; the iOS UI is responsible for
+    grouping by ``alert_type`` and rendering the scope picker.
+    """
+
+    type: Literal["device_alert_pref_list_response"] = "device_alert_pref_list_response"
+
+
+class UserAlertDefaultBody(StrictBody):
+    """Per-(user, alert_type) fallback preference upsert body.
+
+    Consulted by the alert-routing layer when no device-scoped
+    override exists for the (alert_type, scope) tuple — the
+    ``application/notify/routing`` rules pick the narrowest scope
+    first (wallet → operator → device → user-default → built-in).
+
+    Attributes:
+        alert_type: One of the enumerated alert types
+            (``order_fill_full``, ``order_rejected``,
+            ``position_stop_loss_fired``, ``margin_warning``,
+            ``critical_system_error``).
+        enabled: Whether to deliver this alert_type at all when no
+            device override matches.
+        min_priority: Minimum priority required to deliver
+            (``low``, ``medium``, ``high``).
+    """
+
+    alert_type: Literal[
+        "order_fill_full",
+        "order_rejected",
+        "position_stop_loss_fired",
+        "margin_warning",
+        "critical_system_error",
+    ]
+    enabled: bool = True
+    min_priority: Literal["low", "medium", "high"] = "medium"
+
+
+class UpdateUserAlertDefaultCommand(
+    PayloadRequest[Literal["update_user_alert_default_command"], UserAlertDefaultBody]
+):
+    """Request envelope for ``PATCH /api/alert_defaults``."""
+
+    type: Literal["update_user_alert_default_command"] = "update_user_alert_default_command"
+
+
+class UserAlertDefaultInfo(StrictDataSchema[Literal["user_alert_default_info"]]):
+    """Read projection of a single active ``user_alert_defaults`` SCD2 row.
+
+    Attributes:
+        type: Payload item type discriminator.
+        user_public_id: Owner — the caller's own UUID7 on these
+            routes (scoped server-side).
+        alert_type: One of the five enumerated alert types.
+        enabled: Whether this fallback default delivers the alert.
+        min_priority: Lower-bound priority filter applied when this
+            fallback fires.
+    """
+
+    type: Literal["user_alert_default_info"] = "user_alert_default_info"
+    user_public_id: str
+    alert_type: str
+    enabled: bool
+    min_priority: str
+
+
+class UserAlertDefaultResponse(
+    PayloadResponse[Literal["user_alert_default_response"], UserAlertDefaultInfo]
+):
+    """Singleton wrapper returned by ``PATCH /api/alert_defaults``."""
+
+    type: Literal["user_alert_default_response"] = "user_alert_default_response"
+
+
+class UserAlertDefaultListResponse(
+    PayloadListResponse[Literal["user_alert_default_list_response"], UserAlertDefaultInfo]
+):
+    """List wrapper for ``GET /api/alert_defaults``.
+
+    Surfaces every active per-(user, alert_type) fallback row for the
+    caller. Empty list is the legitimate "no overrides yet" state —
+    the alert-routing layer falls through to the built-in defaults
+    documented in ``application/notify/routing.py``.
+    """
+
+    type: Literal["user_alert_default_list_response"] = "user_alert_default_list_response"

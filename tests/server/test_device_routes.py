@@ -27,6 +27,7 @@ from snapper.data.repository_types import DeviceAlertPrefRow
 from snapper.data.repository_types import NotificationDeviceRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.device_routes import delete_device
+from snapper.server.device_routes import list_device_prefs
 from snapper.server.device_routes import list_devices
 from snapper.server.device_routes import register_device
 from snapper.server.device_routes import update_device_pref
@@ -341,3 +342,82 @@ class TestUpdateDevicePref:
         assert response.payload.public_id == "pref-op"
         assert response.payload.operator_public_id == "op-1"
         assert response.payload.wallet_public_id is None
+
+
+class TestListDevicePrefs:
+    """Behaviour of ``GET /api/devices/{public_id}/prefs``."""
+
+    @pytest.mark.asyncio
+    async def test_returns_only_prefs_for_target_owned_device(self) -> None:
+        """Foreign-device prefs are filtered out before projection.
+
+        ``list_device_alert_prefs_for_user`` returns prefs across the
+        caller's full device fleet. The route must narrow to the
+        addressed device so an iOS notifications screen does not
+        leak prefs from another device the user happens to own.
+        """
+        repo = AsyncMock()
+        repo.list_active_notification_devices_for_user = AsyncMock(
+            return_value=[_device_row("dev-own"), _device_row("dev-other")]
+        )
+        repo.list_device_alert_prefs_for_user = AsyncMock(
+            return_value=[
+                _pref_row("pref-own-1", device_public_id="dev-own", alert_type="order_fill_full"),
+                _pref_row("pref-own-2", device_public_id="dev-own", alert_type="order_rejected"),
+                _pref_row(
+                    "pref-other-1",
+                    device_public_id="dev-other",
+                    alert_type="order_fill_full",
+                ),
+            ]
+        )
+
+        response = await list_device_prefs(
+            request=_make_request(),
+            device_public_id="dev-own",
+            principal=_principal(),
+            repo=repo,
+        )
+
+        assert response.count == 2
+        assert {p.public_id for p in response.payload} == {"pref-own-1", "pref-own-2"}
+        repo.list_device_alert_prefs_for_user.assert_awaited_once_with("user-alpha")
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_envelope_when_device_has_no_prefs(self) -> None:
+        """Owned device with no prefs yet returns count=0 (not 404)."""
+        repo = AsyncMock()
+        repo.list_active_notification_devices_for_user = AsyncMock(
+            return_value=[_device_row("dev-own")]
+        )
+        repo.list_device_alert_prefs_for_user = AsyncMock(return_value=[])
+
+        response = await list_device_prefs(
+            request=_make_request(),
+            device_public_id="dev-own",
+            principal=_principal(),
+            repo=repo,
+        )
+
+        assert response.count == 0
+        assert response.payload == []
+
+    @pytest.mark.asyncio
+    async def test_returns_404_when_device_not_owned(self) -> None:
+        """Foreign or unknown ``public_id`` yields 404 to prevent existence probing."""
+        repo = AsyncMock()
+        repo.list_active_notification_devices_for_user = AsyncMock(
+            return_value=[_device_row("dev-own")]
+        )
+        repo.list_device_alert_prefs_for_user = AsyncMock()
+
+        with pytest.raises(HTTPException) as exc:
+            await list_device_prefs(
+                request=_make_request(),
+                device_public_id="dev-other",
+                principal=_principal(),
+                repo=repo,
+            )
+
+        assert exc.value.status_code == 404
+        repo.list_device_alert_prefs_for_user.assert_not_awaited()

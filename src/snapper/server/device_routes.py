@@ -8,6 +8,8 @@ ownership-checked on ``user_public_id``:
 - ``DELETE /api/devices/{public_id}`` — soft-delete via SCD2 close.
 - ``PATCH /api/devices/{public_id}/prefs`` — per-(device, alert_type,
   scope) preference upsert.
+- ``GET /api/devices/{public_id}/prefs`` — list active per-(alert_type,
+  scope) preferences attached to the device.
 
 All mutations use ``Repository.upsert_notification_device`` /
 ``upsert_device_alert_pref`` / ``deactivate_notification_device_scd2``,
@@ -29,6 +31,7 @@ from fastapi import status
 
 from snapper.api.schemas.base import MessageResponse
 from snapper.api.schemas.devices import DeviceAlertPrefInfo
+from snapper.api.schemas.devices import DeviceAlertPrefListResponse
 from snapper.api.schemas.devices import DeviceAlertPrefResponse
 from snapper.api.schemas.devices import NotificationDeviceInfo
 from snapper.api.schemas.devices import NotificationDeviceListResponse
@@ -38,6 +41,7 @@ from snapper.api.schemas.devices import UpdateDevicePrefCommand
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
+from snapper.data.repository_types import DeviceAlertPrefRow
 from snapper.data.repository_types import DeviceAlertPrefUpsertRow
 from snapper.data.repository_types import NotificationDeviceRow
 from snapper.data.repository_types import NotificationDeviceUpsertRow
@@ -67,6 +71,32 @@ def _next_provenance(request: Request) -> tuple[str, int, datetime, str]:
     ts = dt.datetime.now(dt.UTC)
     pid = str(uuid7())
     return sid, seq, ts, pid
+
+
+def _device_alert_pref_info_from_row(row: DeviceAlertPrefRow) -> DeviceAlertPrefInfo:
+    """Project a ``DeviceAlertPrefRow`` TypedDict into the wire schema.
+
+    Drops SCD2-internal fields (``known_to``) so callers see only
+    the active projection. Scope columns flow through as-is —
+    ``None`` means the row applies device-globally for the
+    ``alert_type``.
+    """
+    return DeviceAlertPrefInfo(
+        session_id=row["session_id"],
+        sequence_id=row["sequence_id"],
+        public_id=row["public_id"],
+        timestamp=row["timestamp"],
+        device_public_id=row["device_public_id"],
+        alert_type=row["alert_type"],
+        operator_public_id=row["operator_public_id"],
+        wallet_public_id=row["wallet_public_id"],
+        enabled=row["enabled"],
+        min_priority=row["min_priority"],
+        quiet_hours_start_min=row["quiet_hours_start_min"],
+        quiet_hours_end_min=row["quiet_hours_end_min"],
+        mute_until=row["mute_until"],
+        timezone=row["timezone"],
+    )
 
 
 def _device_info_from_row(row: NotificationDeviceRow) -> NotificationDeviceInfo:
@@ -310,4 +340,58 @@ async def update_device_pref(
             mute_until=body.mute_until,
             timezone=body.timezone,
         ),
+    )
+
+
+@router.get("/{device_public_id}/prefs")
+async def list_device_prefs(
+    request: Request,
+    device_public_id: str,
+    principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+) -> DeviceAlertPrefListResponse:
+    """List active per-(alert_type, scope) prefs for a caller-owned device.
+
+    Reads ``Repository.list_device_alert_prefs_for_user`` (which
+    server-side joins to ``notification_devices`` and filters by
+    ``token_status = 'active'`` so tombstoned device prefs do not
+    leak), then narrows the projection to ``device_public_id`` so the
+    iOS notifications surface only sees prefs for the addressed
+    device. Ownership is enforced separately by checking that the
+    target device is among the caller's active devices — a foreign
+    or unknown ``public_id`` returns 404 to prevent existence probing.
+
+    Args:
+        request: FastAPI request (provides REST tracker).
+        device_public_id: Target device (must be owned by caller).
+        principal: Authenticated caller.
+        repo: Repository dependency.
+
+    Returns:
+        ``DeviceAlertPrefListResponse`` with zero-or-more active
+        ``DeviceAlertPrefInfo`` rows tied to the device.
+
+    Raises:
+        HTTPException: 404 when the device is not owned by caller.
+    """
+    owned = await repo.list_active_notification_devices_for_user(principal.user_public_id)
+    if not any(d["public_id"] == device_public_id for d in owned):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Device {device_public_id} not found or not owned by caller.",
+        )
+    rows = await repo.list_device_alert_prefs_for_user(principal.user_public_id)
+    items = [
+        _device_alert_pref_info_from_row(r)
+        for r in rows
+        if r["device_public_id"] == device_public_id
+    ]
+    sid, seq, ts, pid = _next_provenance(request)
+    return DeviceAlertPrefListResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=items,
+        count=len(items),
     )

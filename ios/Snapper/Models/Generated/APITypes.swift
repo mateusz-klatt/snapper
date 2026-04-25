@@ -220,6 +220,20 @@ enum TradeDiffEntryLeg: String, Codable, Sendable {
     case common
 }
 
+enum UserAlertDefaultBodyAlertType: String, Codable, Sendable {
+    case orderFillFull = "order_fill_full"
+    case orderRejected = "order_rejected"
+    case positionStopLossFired = "position_stop_loss_fired"
+    case marginWarning = "margin_warning"
+    case criticalSystemError = "critical_system_error"
+}
+
+enum UserAlertDefaultBodyMinPriority: String, Codable, Sendable {
+    case low
+    case medium
+    case high
+}
+
 enum ZmqComponentsZmqContext: String, Codable, Sendable {
     case ok
     case error
@@ -1345,6 +1359,26 @@ struct DeviceAlertPrefInfo: Codable, Sendable {
         case quietHoursEndMin = "quiet_hours_end_min"
         case muteUntil = "mute_until"
         case timezone
+    }
+}
+
+struct DeviceAlertPrefListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [DeviceAlertPrefInfo]
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
     }
 }
 
@@ -3266,6 +3300,98 @@ struct UpdateDevicePrefCommand: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: DeviceAlertPrefBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct UpdateUserAlertDefaultCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: UserAlertDefaultBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct UserAlertDefaultBody: Codable, Sendable {
+    let alertType: String
+    let enabled: Bool?
+    let minPriority: String?
+
+    enum CodingKeys: String, CodingKey {
+        case alertType = "alert_type"
+        case enabled
+        case minPriority = "min_priority"
+    }
+}
+
+struct UserAlertDefaultInfo: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let userPublicId: String
+    let alertType: String
+    let enabled: Bool
+    let minPriority: String
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case userPublicId = "user_public_id"
+        case alertType = "alert_type"
+        case enabled
+        case minPriority = "min_priority"
+    }
+}
+
+struct UserAlertDefaultListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [UserAlertDefaultInfo]
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
+struct UserAlertDefaultResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: UserAlertDefaultInfo
 
     enum CodingKeys: String, CodingKey {
         case type

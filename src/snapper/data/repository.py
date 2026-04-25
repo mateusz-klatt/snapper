@@ -325,6 +325,20 @@ class _DeviceAlertPrefAttemptResult:
     error: Exception | None
 
 
+@dataclass(frozen=True, slots=True)
+class _UserAlertDefaultAttemptResult:
+    """Result of a single retryable user-level default write attempt.
+
+    Mirrors ``_DeviceAlertPrefAttemptResult`` so the retry-loop in
+    ``upsert_user_alert_default`` can short-circuit on ``error is
+    None`` and return ``public_id`` directly without an extra
+    not-None guard.
+    """
+
+    public_id: str
+    error: Exception | None
+
+
 _TRADE_COMMAND_TERMINAL_STATUSES: tuple[str, ...] = (
     TradeCommandStatusEnum.FILLED,
     TradeCommandStatusEnum.CANCELLED,
@@ -2754,8 +2768,14 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def upsert_user_alert_default(self, row: UserAlertDefaultUpsertRow) -> None:
-        """SCD2 close + insert on (user, alert_type) default pref."""
+    async def upsert_user_alert_default(self, row: UserAlertDefaultUpsertRow) -> str:
+        """SCD2 close + insert on (user, alert_type) default pref.
+
+        Returns the stable ``public_id`` (preserved across SCD2
+        versions) so the caller can synthesize a response without an
+        extra read that races against other writers on the same
+        (user, alert_type) key.
+        """
         ...
 
     @abstractmethod
@@ -8391,7 +8411,7 @@ class SQLAlchemyRepository(Repository):
     async def _try_upsert_user_alert_default(
         self,
         row: UserAlertDefaultUpsertRow,
-    ) -> Exception | None:
+    ) -> _UserAlertDefaultAttemptResult:
         """Run one retryable user default upsert attempt."""
         async with self.session() as s:
             existing = (
@@ -8404,24 +8424,33 @@ class SQLAlchemyRepository(Repository):
                 row["timestamp"],
             )
             if close_error is not None:
-                return close_error
+                return _UserAlertDefaultAttemptResult(public_id=values.public_id, error=close_error)
             s.add(self._build_user_alert_default(row, values))
-            return await self._commit_write_attempt(s)
+            return _UserAlertDefaultAttemptResult(
+                public_id=values.public_id,
+                error=await self._commit_write_attempt(s),
+            )
 
-    async def upsert_user_alert_default(self, row: UserAlertDefaultUpsertRow) -> None:
+    async def upsert_user_alert_default(self, row: UserAlertDefaultUpsertRow) -> str:
         """Atomic SCD2 close + insert on (user, alert_type) default.
 
         Concurrent same-key upserts converge idempotently via the same
         atomic-close + IntegrityError-retry pattern as
         ``upsert_notification_device`` (closes Copilot R2 new HIGH).
+
+        Returns:
+            The stable ``public_id`` of the now-active row. Reused
+            across SCD2 versions when an active row already existed
+            for this ``(user, alert_type)`` tuple; freshly minted on
+            the first write.
         """
         max_attempts = 20
         last_error: Exception = RuntimeError("upsert_user_alert_default: retry budget exhausted.")
         for _attempt in range(max_attempts):
-            error = await self._try_upsert_user_alert_default(row)
-            if error is None:
-                return
-            last_error = error
+            result = await self._try_upsert_user_alert_default(row)
+            if result.error is None:
+                return result.public_id
+            last_error = result.error
         logger.warning(
             "upsert_user_alert_default: sustained contention exhausted"
             " {max_attempts}-attempt retry budget on"
