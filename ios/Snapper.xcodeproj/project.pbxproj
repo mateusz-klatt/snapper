@@ -26,6 +26,7 @@
 		744C6DC56C03FBBCF9651D96 /* DeviceRegistrationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B312129A11E7B3A9371A79C5 /* DeviceRegistrationService.swift */; };
 		7A8AC6E7C86070E41475CF8F /* Environment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10C33334091D91D43D43B1C3 /* Environment.swift */; };
 		7AD9A1C58498FCB2B7883463 /* Configuration.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3AFFCD485E4541E995FC91CB /* Configuration.plist */; };
+		7FC94DE9822D377C7FE520DF /* NotificationPrefsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2862D7D7B1A4BC6B1BAE0FD /* NotificationPrefsView.swift */; };
 		8DB5E916777E3B48A477E414 /* AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C866C094E8868C0EF03F6809 /* AuthService.swift */; };
 		9A375BEDC217E05D46F4F4E7 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A987AAE53C2CBDE34AE70BD /* NotificationService.swift */; };
 		A35D23705FCF8BC6B9E3E64C /* Permissions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 039FE3D502C2D2EB294EB4AA /* Permissions.swift */; };
@@ -82,6 +83,7 @@
 		CB3EEEA02ED3924700201EC3 /* SnapperTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SnapperTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D203FD7280A91512EE623EE1 /* Protocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocols.swift; sourceTree = "<group>"; };
 		D839E5FB00056E88B45C4D34 /* WalletPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletPicker.swift; sourceTree = "<group>"; };
+		E2862D7D7B1A4BC6B1BAE0FD /* NotificationPrefsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationPrefsView.swift; sourceTree = "<group>"; };
 		E4646B48A09BA542FF6ABECD /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		E6605FA90A650CA70270A857 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		F12F4A22AA39A55870A72C7B /* AlertsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlertsView.swift; sourceTree = "<group>"; };
@@ -158,6 +160,7 @@
 				653637C037B012795FE84600 /* HomeView.swift */,
 				A9948BCE1220922C26E1E5D5 /* LoginView.swift */,
 				5A50EF856475775A1EEA07E0 /* MainTabView.swift */,
+				E2862D7D7B1A4BC6B1BAE0FD /* NotificationPrefsView.swift */,
 				F6535894EE04ECF4410862D9 /* OrdersView.swift */,
 				77B5AF96CD39F790EE5DFFE3 /* PositionsView.swift */,
 				E6605FA90A650CA70270A857 /* SettingsView.swift */,
@@ -346,6 +349,7 @@
 				D5A6C18290A3F9154ED7E741 /* LoginViewModel.swift in Sources */,
 				3847E72F3248A41EA8DCD9F2 /* MainTabView.swift in Sources */,
 				3A812C6207ED5A34EA4890E4 /* NavigationCoordinator.swift in Sources */,
+				7FC94DE9822D377C7FE520DF /* NotificationPrefsView.swift in Sources */,
 				9A375BEDC217E05D46F4F4E7 /* NotificationService.swift in Sources */,
 				56F3E6E370F0017D26D4DE52 /* OrdersView.swift in Sources */,
 				A35D23705FCF8BC6B9E3E64C /* Permissions.swift in Sources */,

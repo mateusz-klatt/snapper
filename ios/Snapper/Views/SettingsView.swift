@@ -95,6 +95,10 @@ struct SettingsView: View {
                                 .foregroundColor(.secondary)
                         }
                     }
+
+                    NavigationLink("Manage preferences") {
+                        NotificationPrefsView()
+                    }
                 }
 
                 Section("App Information") {

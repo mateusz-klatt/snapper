@@ -158,6 +158,65 @@ final class APIClient: Sendable {
     func fetchAlert(publicId: String) async throws -> AlertEventResponse {
         return try await request(endpoint: "\(AppConfig.Endpoints.alerts)/\(publicId)")
     }
+
+    /// Fetch active per-(alert_type, scope) prefs for the addressed
+    /// device (BE-NP-1).
+    ///
+    /// Caller-scoped server-side: the backend filters by
+    /// ``principal.user_public_id`` and 404s when the device is not
+    /// owned. ``DeviceRegistrationService.currentDevicePublicId`` is
+    /// the right input — never pass a foreign or stale id.
+    ///
+    /// Returns:
+    ///   ``DeviceAlertPrefListResponse`` with zero-or-more prefs.
+    func fetchDevicePrefs(devicePublicId: String) async throws -> DeviceAlertPrefListResponse {
+        return try await request(
+            endpoint: "\(AppConfig.Endpoints.devices)/\(devicePublicId)/prefs"
+        )
+    }
+
+    /// Upsert one per-(device, alert_type, scope) preference
+    /// (BE-NP-1 / iOS-NP-1).
+    ///
+    /// Sends ``PATCH /api/devices/{public_id}/prefs`` with a full
+    /// ``UpdateDevicePrefCommand`` envelope. The handler strips and
+    /// re-mints provenance, so the iOS-side envelope fields are
+    /// placeholder values (mirrors ``registerDevice``).
+    func updateDevicePref(
+        devicePublicId: String,
+        command: UpdateDevicePrefCommand
+    ) async throws -> DeviceAlertPrefResponse {
+        return try await request(
+            endpoint: "\(AppConfig.Endpoints.devices)/\(devicePublicId)/prefs",
+            method: "PATCH",
+            body: command
+        )
+    }
+
+    /// Fetch the caller's user-level alert default fallbacks
+    /// (BE-NP-1).
+    ///
+    /// Empty list is the legitimate "no overrides" state — the
+    /// alert-routing layer falls through to the in-app defaults.
+    func fetchAlertDefaults() async throws -> UserAlertDefaultListResponse {
+        return try await request(endpoint: AppConfig.Endpoints.alertDefaults)
+    }
+
+    /// Upsert one ``(user, alert_type)`` fallback default
+    /// (BE-NP-1 / iOS-NP-1).
+    ///
+    /// Sends ``PATCH /api/alert_defaults``. ``user_public_id`` is
+    /// sourced server-side from the principal; the
+    /// ``UserAlertDefaultBody`` deliberately omits the field.
+    func updateAlertDefault(
+        command: UpdateUserAlertDefaultCommand
+    ) async throws -> UserAlertDefaultResponse {
+        return try await request(
+            endpoint: AppConfig.Endpoints.alertDefaults,
+            method: "PATCH",
+            body: command
+        )
+    }
 }
 
 enum APIError: LocalizedError {
