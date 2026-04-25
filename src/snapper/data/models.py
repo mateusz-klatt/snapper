@@ -195,6 +195,17 @@ class Instrument(TemporalMixin, Base):
     )
     symbol_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     exchange: Mapped[str] = mapped_column(String(20))
+    requires_ai_review: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    """Plan A v1.4 Q6 — instrument-level default for AI review opt-in.
+
+    Strategies with ``ai_review_policy="instrument_default"`` consult
+    AI delegate before submitting trades on instruments where this
+    flag is TRUE. Set via curation for less-liquid instruments (low
+    volume, wide spread) where AI judgment justifies +5-30s latency.
+    Default FALSE — opt-in only.
+    """
 
 
 class Candle(TemporalMixin, Base):
@@ -1644,6 +1655,18 @@ class ExecutionPlan(TemporalMixin, Base):
             ),
         ),
         Index(
+            "uq_ep_active_cancel_idempotency_key",
+            "operator_public_id",
+            "cancel_idempotency_key",
+            unique=True,
+            sqlite_where=text(
+                "cancel_idempotency_key IS NOT NULL AND known_to = '9999-12-31 23:59:59.000000'"
+            ),
+            postgresql_where=text(
+                "cancel_idempotency_key IS NOT NULL AND known_to = '9999-12-31T23:59:59+00:00'"
+            ),
+        ),
+        Index(
             "ix_ep_public_id",
             "public_id",
             unique=True,
@@ -1733,6 +1756,19 @@ class ExecutionPlan(TemporalMixin, Base):
     last_evaluated_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cancel_idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    """Plan B v1.2 §1.4 + Plan A v1.4 cancel idempotency.
+
+    Caller-supplied dedup key for ``PlansCancelService.cancel_by_plan_public_id``
+    (extracts existing ``_cancel_plan`` helper from
+    ``order_routes.py:707`` for MCP-side reuse without HTTP/CSRF
+    coupling). Same key on second call returns terminal state without
+    re-executing the cancel — idempotent replay. Different key for
+    same plan -> ``idempotency_key_conflict`` error_code via partial
+    unique index ``uq_ep_active_cancel_idempotency_key`` on
+    ``(operator_public_id, cancel_idempotency_key)`` WHERE
+    ``cancel_idempotency_key IS NOT NULL AND known_to=KNOWN_TO_MAX``.
+    """
 
 
 class ExecutionPlanCheckpoint(TemporalMixin, Base):
@@ -2544,3 +2580,261 @@ class AlertDelivery(TemporalMixin, Base):
     apns_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+
+
+class AiDelegate(Base):
+    """Runtime state for AI delegates (Plan A v1.4 §3.4 + Plan D §2.3).
+
+    Logical 1-to-1 with ``users`` rows where ``role=AI_DELEGATE``.
+    Created by ``UserService.create_ai_delegate`` AFTER the user
+    row is committed. Stores fields that change frequently (liveness
+    timestamp, in-flight review counter) and are NOT bitemporal —
+    keeping them off the SCD2 ``users`` table avoids spamming
+    history rows for routine WS heartbeats.
+
+    The ``ai_reviews.selected_delegate_public_id`` /
+    ``responding_delegate_public_id`` FKs reference
+    ``ai_delegates.public_id`` (NOT ``users.public_id``). Service
+    layer translates between the two as needed.
+
+    Attributes:
+        public_id: UUID7 — used as ``selected_delegate_public_id``
+            on :class:`AiReview`.
+        user_public_id: Logical FK to ``users.public_id`` (the user
+            row with ``role=AI_DELEGATE``).
+        last_seen_at: Most recent WS connection / heartbeat /
+            authenticate frame. Updated by
+            ``WebSocketAuthManager``. Used by Q17 Layer 2 scanner +
+            Q10 admission control.
+        active_reviews_count: In-flight review counter. Q10 v1.2
+            lock — incremented exactly once per review at creation,
+            decremented exactly once at terminal transition via
+            ``ai_reviews.counter_decremented_at`` writable-CTE
+            primitive.
+        created_at: Row creation timestamp.
+        updated_at: Last mutation timestamp.
+    """
+
+    __tablename__ = "ai_delegates"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_ai_delegates_public_id"),
+        UniqueConstraint("user_public_id", name="uq_ai_delegates_user_public_id"),
+        CheckConstraint(
+            "active_reviews_count >= 0",
+            name="ck_ai_delegates_active_reviews_nonneg",
+        ),
+        Index("ix_ai_delegates_last_seen_at", "last_seen_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, default=_public_id)
+    user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    active_reviews_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+
+
+class AiReview(Base):
+    """A CONSULT review request issued by a strategy to an AI delegate.
+
+    Plan A v1.4 §3.1 + Plan D v1.1 §2.1. Mutable status row (Q13
+    drops SCD2 for ``ai_reviews``); audit trail via append-only
+    :class:`AiReviewEvent` rows. Status transitions via atomic
+    UPDATE per Q9 step 4 (writable-CTE counter primitive).
+
+    Lifecycle: created with ``status=pending`` -> optional
+    ``fanout_dispatched`` -> terminal ``resolved_approved`` /
+    ``resolved_rejected`` / ``timeout`` / ``superseded``. All
+    terminal states are FINAL.
+
+    The state machine + bus pub/sub + WS fanout + reaper + offline
+    scanner + admission control are owned by ``AiReviewService``
+    (Plan D §3, separate commit).
+
+    Attributes (full Plan A v1.4 spec):
+        public_id: UUID7 review correlation ID — used as
+            ``review_id`` in MCP ``submit_ai_review_decision``.
+        user_public_id: Owner of the strategy. DISTINCT from
+            delegate users (Q9 step 1 v1.4 fix).
+        operator_public_id: Operator scope.
+        wallet_public_id: Wallet for caps + scope grants.
+        instrument_public_id: Instrument for scope grants
+            (BLOCKER fix v1.3: grants are wallet+instrument).
+        strategy_public_id: Origin strategy.
+        selected_delegate_public_id: AI delegate originally chosen
+            at creation. IMMUTABLE.
+        responding_delegate_public_id: Delegate that submitted the
+            resolving decision. NULL until terminal.
+        resolution_mode: How resolution happened (see
+            :class:`AiReviewResolutionModeEnum`).
+        status: Current state (see
+            :class:`AiReviewStatusEnum`).
+        signal_envelope: Full signal payload (JSON). Persisted for
+            restart-time reconstruction of pending review lists
+            (Plan A §7.2 startup_recovery).
+        signal_snapshot_hash: SHA-256 hex of canonical-encoded
+            signal_envelope. Audit/forensics — NOT used for replay
+            protection.
+        instrument_metadata: JSON — spread, recent volume, last
+            price — context for AI decision.
+        deadline: Wall-clock deadline (TZ-aware UTC). Reaper
+            transitions to ``timeout`` when ``deadline < NOW()``
+            on rows still in ``pending``/``fanout_dispatched``.
+        fanout_after: When fanout fires if selected delegate stays
+            offline. Default = ``created_at + 30s``.
+        decision: ``approve`` / ``reject`` / NULL. Set at terminal.
+        rationale: Free text. Bounded 4096 chars at insert.
+        dispatch_version: Q18 v1.2 lock — monotonically incremented
+            on every fanout-related UPDATE. Bridge dedupes by
+            ``(public_id, dispatch_version)``. Initial value 0.
+        counter_decremented_at: Q10 v1.2 lock — set NON-NULL when
+            ``ai_delegates.active_reviews_count`` has been
+            decremented for this review. Idempotency primitive:
+            writable-CTE `WHERE counter_decremented_at IS NULL`
+            ensures exactly-once decrement under concurrent
+            reaper/decision/supersede races.
+        created_at: Row creation timestamp.
+        updated_at: Last status mutation timestamp.
+        resolved_at: Wall-clock when review reached terminal
+            state. NULL while ``pending``/``fanout_dispatched``.
+        session_id: Strategy's bus session UUID at creation (Sonnet
+            N4 v1.3 fix — strategy passes via
+            ``StrategyContext.create_ai_review``).
+        sequence_id: Strategy's monotonic sequence at creation.
+    """
+
+    __tablename__ = "ai_reviews"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_ai_reviews_public_id"),
+        Index("ix_ai_reviews_public_id_lookup", "public_id"),
+        Index(
+            "ix_ai_reviews_pending_per_delegate",
+            "selected_delegate_public_id",
+            "status",
+        ),
+        Index("ix_ai_reviews_deadline_pending", "deadline", "status"),
+        Index(
+            "ix_ai_reviews_strategy_pending",
+            "strategy_public_id",
+            "status",
+        ),
+        Index("ix_ai_reviews_user_public_id", "user_public_id"),
+        Index("ix_ai_reviews_operator_public_id", "operator_public_id"),
+        Index("ix_ai_reviews_wallet_public_id", "wallet_public_id"),
+        Index("ix_ai_reviews_instrument_public_id", "instrument_public_id"),
+        # Sonnet N6 v1.3 fix: status consistency CHECK enforces resolution_mode
+        # IS NULL for non-terminal AND IS NOT NULL for resolved_*/timeout/superseded.
+        CheckConstraint(
+            "(status IN ('pending', 'fanout_dispatched') AND decision IS NULL "
+            " AND responding_delegate_public_id IS NULL AND resolution_mode IS NULL "
+            " AND resolved_at IS NULL)"
+            " OR "
+            "(status IN ('resolved_approved', 'resolved_rejected') AND decision IS NOT NULL "
+            " AND responding_delegate_public_id IS NOT NULL AND resolution_mode IS NOT NULL "
+            " AND resolved_at IS NOT NULL)"
+            " OR "
+            "(status = 'timeout' AND decision IS NULL "
+            " AND resolution_mode = 'timeout_no_response' AND resolved_at IS NOT NULL)"
+            " OR "
+            "(status = 'superseded' AND decision IS NULL "
+            " AND resolution_mode = 'superseded_by_strategy' AND resolved_at IS NOT NULL)",
+            name="ck_ai_reviews_status_consistency",
+        ),
+        CheckConstraint("deadline > created_at", name="ck_ai_reviews_deadline_future"),
+        CheckConstraint("dispatch_version >= 0", name="ck_ai_reviews_dispatch_version_nonneg"),
+        CheckConstraint(
+            "status IN ('pending', 'fanout_dispatched', 'resolved_approved', "
+            "'resolved_rejected', 'timeout', 'superseded')",
+            name="ck_ai_reviews_status_enum",
+        ),
+        CheckConstraint(
+            "decision IS NULL OR decision IN ('approve', 'reject')",
+            name="ck_ai_reviews_decision_enum",
+        ),
+        CheckConstraint(
+            "resolution_mode IS NULL OR resolution_mode IN ("
+            "'pick_one_primary', 'secondary_after_fanout', 'fanout_first_responder', "
+            "'timeout_no_response', 'superseded_by_strategy')",
+            name="ck_ai_reviews_resolution_mode_enum",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, default=_public_id)
+    session_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    sequence_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    operator_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    strategy_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    selected_delegate_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    responding_delegate_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    resolution_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, server_default="pending")
+    signal_envelope: Mapped[JsonObject] = mapped_column(JSON(), nullable=False)
+    signal_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    instrument_metadata: Mapped[JsonObject] = mapped_column(JSON(), nullable=False)
+    deadline: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    fanout_after: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    decision: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    rationale: Mapped[str | None] = mapped_column(String(4096), nullable=True)
+    dispatch_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    counter_decremented_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+
+
+class AiReviewEvent(Base):
+    """Append-only audit log for every :class:`AiReview` transition.
+
+    Per Plan A v1.4 Q13: replaces SCD2 history that
+    ``TemporalMixin`` would have provided. Each transition (created,
+    fanout_dispatched, decision_recorded, timeout_marked,
+    superseded, counter_decremented, counter_adjusted) appends ONE
+    row. Rows are immutable — no UPDATE allowed.
+
+    Read patterns:
+    - Audit trail for review X: ``SELECT * FROM ai_review_events
+      WHERE review_public_id = :pid ORDER BY occurred_at``.
+    - Operator dashboard: ``SELECT event_type, COUNT(*) FROM
+      ai_review_events WHERE occurred_at > :since GROUP BY``.
+
+    Attributes:
+        public_id: UUID7 event ID.
+        review_public_id: Logical FK to :class:`AiReview` `.public_id`.
+        event_type: Transition name (see
+            :class:`AiReviewEventTypeEnum`).
+        actor_delegate_public_id: Which delegate triggered the
+            event. NULL for reaper / strategy-supersede events
+            (Sonnet m1 v1.3 — event_type fully discriminates).
+        previous_status: ``ai_reviews.status`` before this event.
+            NULL acceptable for reaper-driven transitions.
+        new_status: ``ai_reviews.status`` after this event.
+        payload: Event-specific JSON data.
+        occurred_at: Wall-clock when event was appended.
+    """
+
+    __tablename__ = "ai_review_events"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_ai_review_events_public_id"),
+        Index("ix_ai_review_events_review_chrono", "review_public_id", "occurred_at"),
+        Index("ix_ai_review_events_type_chrono", "event_type", "occurred_at"),
+        CheckConstraint(
+            "event_type IN ('created', 'fanout_dispatched', 'decision_recorded', "
+            "'timeout_marked', 'superseded', 'counter_decremented', 'counter_adjusted')",
+            name="ck_ai_review_events_type_enum",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, default=_public_id)
+    review_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor_delegate_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    previous_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    new_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    payload: Mapped[JsonObject] = mapped_column(JSON(), nullable=False, server_default="{}")
+    occurred_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)

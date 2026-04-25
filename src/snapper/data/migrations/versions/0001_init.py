@@ -277,6 +277,12 @@ def upgrade() -> None:
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("symbol_public_id", sa.String(36), nullable=False),
         sa.Column("exchange", sa.String(20), nullable=False),
+        sa.Column(
+            "requires_ai_review",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.text("false"),
+        ),
         sa.Column("session_id", sa.String(36), nullable=False),
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
@@ -2030,6 +2036,7 @@ def upgrade() -> None:
         sa.Column("last_evaluated_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_error", sa.String(1024), nullable=True),
         sa.Column("idempotency_key", sa.String(64), nullable=True),
+        sa.Column("cancel_idempotency_key", sa.String(64), nullable=True),
         sa.Column("session_id", sa.String(36), nullable=False),
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
@@ -2585,10 +2592,172 @@ def upgrade() -> None:
         postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
 
+    # ---------------------------------------------------------------------
+    # AI Integration Phase B+C+D — Plan A v1.4 architecture seed tables
+    # ---------------------------------------------------------------------
+    # ai_delegates: operational side-table for AI delegate runtime state
+    # (Plan A §3.4). Logical 1-to-1 with users.role=AI_DELEGATE; FK via
+    # user_public_id. Stores last_seen_at + active_reviews_count for Q10
+    # admission control + Q17 reconnect hysteresis.
+    op.create_table(
+        "ai_delegates",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("user_public_id", sa.String(36), nullable=False),
+        sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
+            "active_reviews_count",
+            sa.Integer(),
+            nullable=False,
+            server_default="0",
+        ),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("public_id", name="uq_ai_delegates_public_id"),
+        sa.UniqueConstraint("user_public_id", name="uq_ai_delegates_user_public_id"),
+        sa.CheckConstraint(
+            "active_reviews_count >= 0",
+            name="ck_ai_delegates_active_reviews_nonneg",
+        ),
+    )
+    op.create_index("ix_ai_delegates_last_seen_at", "ai_delegates", ["last_seen_at"])
+
+    # ai_reviews: mutable status row for CONSULT pattern state machine
+    # (Plan A §3.1, Q9 + Q13). NOT TemporalMixin — Q13 drops SCD2 for
+    # operational queue; audit trail via append-only ai_review_events.
+    # Q18 dispatch_version + Q10 counter_decremented_at for protocol-level
+    # dedup + idempotent counter primitive.
+    op.create_table(
+        "ai_reviews",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("user_public_id", sa.String(36), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=False),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
+        sa.Column("strategy_public_id", sa.String(36), nullable=False),
+        sa.Column("selected_delegate_public_id", sa.String(36), nullable=False),
+        sa.Column("responding_delegate_public_id", sa.String(36), nullable=True),
+        sa.Column("resolution_mode", sa.String(32), nullable=True),
+        sa.Column("status", sa.String(24), nullable=False, server_default="pending"),
+        sa.Column("signal_envelope", sa.JSON(), nullable=False),
+        sa.Column("signal_snapshot_hash", sa.String(64), nullable=False),
+        sa.Column("instrument_metadata", sa.JSON(), nullable=False),
+        sa.Column("deadline", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("fanout_after", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("decision", sa.String(8), nullable=True),
+        sa.Column("rationale", sa.String(4096), nullable=True),
+        sa.Column(
+            "dispatch_version",
+            sa.Integer(),
+            nullable=False,
+            server_default="0",
+        ),
+        sa.Column("counter_decremented_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("public_id", name="uq_ai_reviews_public_id"),
+        sa.CheckConstraint(
+            "(status IN ('pending', 'fanout_dispatched') AND decision IS NULL "
+            " AND responding_delegate_public_id IS NULL AND resolution_mode IS NULL "
+            " AND resolved_at IS NULL)"
+            " OR "
+            "(status IN ('resolved_approved', 'resolved_rejected') AND decision IS NOT NULL "
+            " AND responding_delegate_public_id IS NOT NULL AND resolution_mode IS NOT NULL "
+            " AND resolved_at IS NOT NULL)"
+            " OR "
+            "(status = 'timeout' AND decision IS NULL "
+            " AND resolution_mode = 'timeout_no_response' AND resolved_at IS NOT NULL)"
+            " OR "
+            "(status = 'superseded' AND decision IS NULL "
+            " AND resolution_mode = 'superseded_by_strategy' AND resolved_at IS NOT NULL)",
+            name="ck_ai_reviews_status_consistency",
+        ),
+        sa.CheckConstraint("deadline > created_at", name="ck_ai_reviews_deadline_future"),
+        sa.CheckConstraint("dispatch_version >= 0", name="ck_ai_reviews_dispatch_version_nonneg"),
+        sa.CheckConstraint(
+            "status IN ('pending', 'fanout_dispatched', 'resolved_approved', "
+            "'resolved_rejected', 'timeout', 'superseded')",
+            name="ck_ai_reviews_status_enum",
+        ),
+        sa.CheckConstraint(
+            "decision IS NULL OR decision IN ('approve', 'reject')",
+            name="ck_ai_reviews_decision_enum",
+        ),
+        sa.CheckConstraint(
+            "resolution_mode IS NULL OR resolution_mode IN ("
+            "'pick_one_primary', 'secondary_after_fanout', 'fanout_first_responder', "
+            "'timeout_no_response', 'superseded_by_strategy')",
+            name="ck_ai_reviews_resolution_mode_enum",
+        ),
+    )
+    op.create_index("ix_ai_reviews_public_id_lookup", "ai_reviews", ["public_id"])
+    op.create_index(
+        "ix_ai_reviews_pending_per_delegate",
+        "ai_reviews",
+        ["selected_delegate_public_id", "status"],
+    )
+    op.create_index("ix_ai_reviews_deadline_pending", "ai_reviews", ["deadline", "status"])
+    op.create_index(
+        "ix_ai_reviews_strategy_pending", "ai_reviews", ["strategy_public_id", "status"]
+    )
+    op.create_index("ix_ai_reviews_user_public_id", "ai_reviews", ["user_public_id"])
+    op.create_index("ix_ai_reviews_operator_public_id", "ai_reviews", ["operator_public_id"])
+    op.create_index("ix_ai_reviews_wallet_public_id", "ai_reviews", ["wallet_public_id"])
+    op.create_index("ix_ai_reviews_instrument_public_id", "ai_reviews", ["instrument_public_id"])
+
+    # ai_review_events: append-only audit log per Plan A §3.2 + Q13
+    op.create_table(
+        "ai_review_events",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("review_public_id", sa.String(36), nullable=False),
+        sa.Column("event_type", sa.String(32), nullable=False),
+        sa.Column("actor_delegate_public_id", sa.String(36), nullable=True),
+        sa.Column("previous_status", sa.String(24), nullable=True),
+        sa.Column("new_status", sa.String(24), nullable=False),
+        sa.Column("payload", sa.JSON(), nullable=False, server_default="{}"),
+        sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("public_id", name="uq_ai_review_events_public_id"),
+        sa.CheckConstraint(
+            "event_type IN ('created', 'fanout_dispatched', 'decision_recorded', "
+            "'timeout_marked', 'superseded', 'counter_decremented', 'counter_adjusted')",
+            name="ck_ai_review_events_type_enum",
+        ),
+    )
+    op.create_index(
+        "ix_ai_review_events_review_chrono",
+        "ai_review_events",
+        ["review_public_id", "occurred_at"],
+    )
+    op.create_index(
+        "ix_ai_review_events_type_chrono",
+        "ai_review_events",
+        ["event_type", "occurred_at"],
+    )
+
+    # Plan B v1.2 cancel idempotency partial unique index on execution_plans
+    # (uses cancel_idempotency_key column added earlier in this migration).
+    with op.get_context().autocommit_block():
+        op.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_ep_active_cancel_idempotency_key "
+                "ON execution_plans (operator_public_id, cancel_idempotency_key) "
+                f"WHERE cancel_idempotency_key IS NOT NULL AND {active_filter}"
+            )
+        )
+
 
 def downgrade() -> None:
     """Drop all tables in reverse order of creation."""
     with op.get_context().autocommit_block():
+        op.execute(text("DROP INDEX IF EXISTS uq_ep_active_cancel_idempotency_key"))
         op.execute(text("DROP INDEX IF EXISTS uq_pc_shard_open_active"))
         op.execute(text("DROP INDEX IF EXISTS ix_pc_public_id"))
         op.execute(text("DROP INDEX IF EXISTS ix_epd_public_id"))
@@ -2604,6 +2773,9 @@ def downgrade() -> None:
         op.execute(text("DROP INDEX IF EXISTS uq_device_alert_wallet_scope"))
         op.execute(text("DROP INDEX IF EXISTS uq_device_alert_operator_scope"))
         op.execute(text("DROP INDEX IF EXISTS uq_device_alert_device_scope"))
+    op.drop_table("ai_review_events")
+    op.drop_table("ai_reviews")
+    op.drop_table("ai_delegates")
     op.drop_table("alert_deliveries")
     op.drop_table("alert_events")
     op.drop_table("user_alert_defaults")

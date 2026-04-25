@@ -2991,6 +2991,50 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def has_grant_for_delegate(
+        self,
+        *,
+        delegate_public_id: str,
+        wallet_public_id: str,
+        instrument_public_id: str,
+        as_of: datetime,
+    ) -> bool:
+        """Plan A v1.4 §1.1 + Plan D §10 — AI delegate scope check with underlying expansion.
+
+        Resolves ``ai_delegates.public_id -> user_public_id``, then
+        looks up the delegate's operator memberships
+        (``UserOperatorMembership``), and finally checks whether ANY
+        active ``wallet_operator_scope_grants`` row covers the
+        requested ``(wallet_public_id, instrument_public_id)`` pair —
+        including ``scope_kind='underlying'`` grants expanded via
+        ``instrument_underlying_mappings`` to match the requested
+        instrument's underlying.
+
+        Used by:
+        - Plan D §6 ``submit_ai_review_decision`` MCP tool (Q9 step
+          2 auth load + scope check).
+        - Plan D §9 per-frame ``enforce_ai_review_scope`` filter for
+          ``ai_reviews.*`` WS topic family (Q15).
+        - Plan D §3 ``AiReviewService.create_review`` for delegate
+          eligibility query (Q10 admission control candidate list).
+
+        Args:
+            delegate_public_id: ``ai_delegates.public_id`` (NOT the
+                delegate's ``users.public_id``; the operational table
+                holds its own UUID7 per Plan A §3.4 v1.3 lock).
+            wallet_public_id: Wallet to check.
+            instrument_public_id: Instrument to check (matched
+                directly for ``scope_kind='instrument'`` grants OR
+                via underlying mapping for ``scope_kind='underlying'``).
+            as_of: Point-in-time temporal query.
+
+        Returns:
+            True iff some operator member of the delegate's user
+            holds an active grant covering the (wallet, instrument).
+        """
+        ...
+
+    @abstractmethod
     async def cancel_pending_deliveries_for_scope(
         self,
         user_public_id: str,
@@ -8898,6 +8942,96 @@ class SQLAlchemyRepository(Repository):
                 )
             ).scalar_one_or_none()
             return membership_exists is not None
+
+    async def has_grant_for_delegate(
+        self,
+        *,
+        delegate_public_id: str,
+        wallet_public_id: str,
+        instrument_public_id: str,
+        as_of: datetime,
+    ) -> bool:
+        """Plan A v1.4 §1.1 + Plan D §10 — AI delegate scope check with underlying expansion.
+
+        Resolves ``ai_delegates.public_id -> users.public_id``,
+        joins on ``UserOperatorMembership`` for operator memberships,
+        then checks ``WalletOperatorScopeGrant`` for matching
+        ``scope_kind='instrument'`` (direct match) OR
+        ``scope_kind='underlying'`` expanded via
+        ``InstrumentUnderlyingMapping``.
+        """
+        from snapper.data.models import AiDelegate
+        from snapper.data.models import InstrumentUnderlyingMapping
+
+        async with self.session() as s:
+            # Step 1: resolve delegate -> user_public_id (operational
+            # side-table; not SCD2, simple PK lookup).
+            delegate_user_id = (
+                await s.execute(
+                    select(AiDelegate.user_public_id).where(
+                        AiDelegate.public_id == delegate_public_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if delegate_user_id is None:
+                return False
+
+            # Step 2: candidate operator_public_ids via active memberships.
+            operator_ids = (
+                (
+                    await s.execute(
+                        select(UserOperatorMembership.operator_public_id).where(
+                            UserOperatorMembership.user_public_id == delegate_user_id,
+                            *where_active(UserOperatorMembership, as_of),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not operator_ids:
+                return False
+
+            # Step 3: instrument-direct grant?
+            direct_grant = (
+                await s.execute(
+                    select(WalletOperatorScopeGrant.id)
+                    .where(
+                        WalletOperatorScopeGrant.operator_public_id.in_(operator_ids),
+                        WalletOperatorScopeGrant.wallet_public_id == wallet_public_id,
+                        WalletOperatorScopeGrant.scope_kind == "instrument",
+                        WalletOperatorScopeGrant.instrument_public_id == instrument_public_id,
+                        *where_active(WalletOperatorScopeGrant, as_of),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if direct_grant is not None:
+                return True
+
+            # Step 4: underlying-kind grant + instrument_underlying_mappings JOIN.
+            # Match active grants where scope_kind='underlying' AND the requested
+            # instrument's underlying maps to the granted underlying_public_id.
+            underlying_grant = (
+                await s.execute(
+                    select(WalletOperatorScopeGrant.id)
+                    .join(
+                        InstrumentUnderlyingMapping,
+                        InstrumentUnderlyingMapping.underlying_public_id
+                        == WalletOperatorScopeGrant.underlying_public_id,
+                    )
+                    .where(
+                        WalletOperatorScopeGrant.operator_public_id.in_(operator_ids),
+                        WalletOperatorScopeGrant.wallet_public_id == wallet_public_id,
+                        WalletOperatorScopeGrant.scope_kind == "underlying",
+                        InstrumentUnderlyingMapping.instrument_public_id == instrument_public_id,
+                        *where_active(WalletOperatorScopeGrant, as_of),
+                        *where_active(InstrumentUnderlyingMapping, as_of),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            return underlying_grant is not None
 
     async def cancel_pending_deliveries_for_scope(
         self,
