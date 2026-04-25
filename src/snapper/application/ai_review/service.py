@@ -32,8 +32,80 @@ hang on a future the listener can't see. Tests reset the singleton via
 """
 
 import asyncio
+from dataclasses import dataclass
+from datetime import UTC
+from datetime import datetime
+from uuid import uuid7
 
+from loguru import logger
+
+from snapper.auth.scope_grant_service import ScopeGrantService
+from snapper.core.json_types import JsonValue
+from snapper.core.types import AiReviewDecisionEnum
+from snapper.core.types import AiReviewEventTypeEnum
+from snapper.core.types import AiReviewResolutionModeEnum
+from snapper.core.types import AiReviewStatusEnum
+from snapper.data.repository import Repository
+from snapper.data.repository_types import AiReviewRow
 from snapper.messaging.infrastructure.publisher import MessagePublisher
+
+ERROR_REVIEW_NOT_FOUND = "review_not_found"
+"""Plan A Q14 envelope error code — caller passed an unknown review_id."""
+
+ERROR_NOT_AUTHORIZED = "not_authorized"
+"""Plan A Q14 — caller's delegate has no scope grant for the review's wallet+instrument."""
+
+ERROR_PEER_RESOLVED = "review_already_resolved_by_peer"
+"""Plan A Q14 — terminal status reached by another decision (or reaper) before us."""
+
+ERROR_REVIEW_EXPIRED = "review_id_expired"
+"""Plan A Q14 — Q9 step 3.5 inline timeout: deadline elapsed before the decision arrived."""
+
+ERROR_DECISION_ALREADY_RECORDED = "decision_already_recorded"
+"""Plan A Q14 — idempotent retry: same delegate, same decision, already-resolved row.
+
+Returned with ``error_code`` set so the client surfaces the duplicate as success
+(success=True per the Plan A Q14 envelope), while still flagging the no-op for
+audit and metrics dashboards.
+"""
+
+
+@dataclass(slots=True)
+class AiReviewDecisionResult:
+    """Envelope returned by :meth:`AiReviewService.submit_decision`.
+
+    Plan A Q14 contract — ``error_code`` is the load-bearing discriminator:
+
+    - ``None`` -> first valid decision; the row transitioned and the
+      decision was recorded for the first time.
+    - :data:`ERROR_DECISION_ALREADY_RECORDED` -> idempotent retry; the
+      caller is the responding delegate and the decision matches what we
+      already have. Treated as success at the MCP layer.
+    - Any other code -> hard error; the MCP layer flips ``success=False``.
+
+    ``status`` and ``resolution_mode`` reflect the row's current state
+    AFTER any transition this call performed (or simply observed). For
+    ``ERROR_REVIEW_NOT_FOUND`` they are ``None`` since there is no row to
+    report on.
+    """
+
+    error_code: str | None
+    message: str
+    status: AiReviewStatusEnum | None
+    resolution_mode: AiReviewResolutionModeEnum | None
+    dispatch_version: int | None
+    details: dict[str, JsonValue]
+
+
+_TERMINAL_STATUSES = frozenset(
+    {
+        AiReviewStatusEnum.RESOLVED_APPROVED.value,
+        AiReviewStatusEnum.RESOLVED_REJECTED.value,
+        AiReviewStatusEnum.TIMEOUT.value,
+        AiReviewStatusEnum.SUPERSEDED.value,
+    }
+)
+"""Plan A Q9 — terminal statuses that block further transitions."""
 
 
 class NoLiveDelegateError(Exception):
@@ -148,6 +220,260 @@ class AiReviewService:
             The registered future or ``None`` if the id is unknown.
         """
         return self._futures.get(review_public_id)
+
+    async def submit_decision(
+        self,
+        *,
+        review_public_id: str,
+        caller_user_public_id: str,
+        decision: AiReviewDecisionEnum,
+        rationale: str | None,
+        repo: Repository,
+        scope_grant_service: ScopeGrantService,
+        now: datetime | None = None,
+    ) -> AiReviewDecisionResult:
+        """Submit an AI delegate's decision; Plan D §3.2 nine-step transaction.
+
+        Resolves the caller's ``ai_delegates`` row, confirms the review
+        exists and is within the caller's scope grant, branches on
+        terminal-state shortcuts (idempotent retry vs peer-won),
+        runs the Q9 step 3.5 inline timeout when the deadline has
+        already elapsed, then performs the atomic CAS resolve + audit
+        event append + Q10 counter decrement.
+
+        Args:
+            review_public_id: UUID7 of the ``ai_reviews`` row.
+            caller_user_public_id: ``users.public_id`` of the AI delegate
+                user submitting the decision; resolved to
+                ``ai_delegates.public_id`` via the operational side-table.
+            decision: ``APPROVE`` or ``REJECT``.
+            rationale: Optional free-text (≤4096 chars; caller validates
+                before reaching this method).
+            repo: Repository handle. Passed in so the MCP tool keeps the
+                caller's transactional context.
+            scope_grant_service: Scope-check service. Passed in so the
+                MCP tool's ``Depends`` wiring is the source of truth.
+            now: Optional override for the transaction wall-clock; tests
+                inject a fixed value so the late-decision shortcut and
+                resolved_at columns are deterministic.
+
+        Returns:
+            :class:`AiReviewDecisionResult` envelope.
+        """
+        wall_clock = now if now is not None else datetime.now(UTC)
+        delegate_row = await repo.get_ai_delegate_by_user_public_id(caller_user_public_id)
+        if delegate_row is None:
+            return AiReviewDecisionResult(
+                error_code=ERROR_NOT_AUTHORIZED,
+                message="Caller is not registered as an AI delegate.",
+                status=None,
+                resolution_mode=None,
+                dispatch_version=None,
+                details={"caller_user_public_id": caller_user_public_id},
+            )
+        delegate_public_id = delegate_row["public_id"]
+
+        review = await repo.get_ai_review(review_public_id)
+        if review is None:
+            return AiReviewDecisionResult(
+                error_code=ERROR_REVIEW_NOT_FOUND,
+                message="No review with that id.",
+                status=None,
+                resolution_mode=None,
+                dispatch_version=None,
+                details={"review_public_id": review_public_id},
+            )
+
+        scope_ok = await scope_grant_service.has_grant_for_delegate(
+            delegate_public_id=delegate_public_id,
+            wallet_public_id=review["wallet_public_id"],
+            instrument_public_id=review["instrument_public_id"],
+            as_of=wall_clock,
+        )
+        if not scope_ok:
+            return AiReviewDecisionResult(
+                error_code=ERROR_NOT_AUTHORIZED,
+                message="Delegate has no scope grant for this review.",
+                status=AiReviewStatusEnum(review["status"]),
+                resolution_mode=(
+                    AiReviewResolutionModeEnum(review["resolution_mode"])
+                    if review["resolution_mode"] is not None
+                    else None
+                ),
+                dispatch_version=int(review["dispatch_version"]),
+                details={
+                    "wallet_public_id": review["wallet_public_id"],
+                    "instrument_public_id": review["instrument_public_id"],
+                },
+            )
+
+        if review["status"] in _TERMINAL_STATUSES:
+            return self._terminal_state_envelope(
+                review=review,
+                delegate_public_id=delegate_public_id,
+                decision=decision,
+            )
+
+        if review["deadline"] <= wall_clock:
+            timeout_result = await repo.atomic_timeout_ai_review(
+                review_public_id=review_public_id,
+                now=wall_clock,
+            )
+            if timeout_result is not None:
+                await repo.insert_ai_review_event(
+                    {
+                        "public_id": str(uuid7()),
+                        "review_public_id": review_public_id,
+                        "event_type": AiReviewEventTypeEnum.TIMEOUT_MARKED.value,
+                        "actor_delegate_public_id": None,
+                        "previous_status": timeout_result["previous_status"],
+                        "new_status": AiReviewStatusEnum.TIMEOUT.value,
+                        "payload": {"trigger": "submit_decision_late"},
+                        "occurred_at": wall_clock,
+                    }
+                )
+                await repo.decrement_delegate_active_count_for_review(
+                    review_public_id=review_public_id,
+                    selected_delegate_public_id=timeout_result["selected_delegate_public_id"],
+                    now=wall_clock,
+                )
+            return AiReviewDecisionResult(
+                error_code=ERROR_REVIEW_EXPIRED,
+                message="Deadline elapsed before the decision arrived.",
+                status=AiReviewStatusEnum.TIMEOUT,
+                resolution_mode=AiReviewResolutionModeEnum.TIMEOUT_NO_RESPONSE,
+                dispatch_version=int(review["dispatch_version"]),
+                details={"deadline": review["deadline"].isoformat()},
+            )
+
+        new_status = (
+            AiReviewStatusEnum.RESOLVED_APPROVED
+            if decision == AiReviewDecisionEnum.APPROVE
+            else AiReviewStatusEnum.RESOLVED_REJECTED
+        )
+        resolution_mode = self._resolution_mode_for(
+            previous_status=review["status"],
+            selected_delegate_public_id=review["selected_delegate_public_id"],
+            responding_delegate_public_id=delegate_public_id,
+        )
+        atomic = await repo.atomic_resolve_ai_review(
+            review_public_id=review_public_id,
+            decision=decision.value,
+            responding_delegate_public_id=delegate_public_id,
+            rationale=rationale,
+            resolution_mode=resolution_mode.value,
+            new_status=new_status.value,
+            now=wall_clock,
+        )
+        if atomic is None:
+            fresh = await repo.get_ai_review(review_public_id)
+            return self._terminal_state_envelope(
+                review=fresh if fresh is not None else review,
+                delegate_public_id=delegate_public_id,
+                decision=decision,
+            )
+
+        await repo.insert_ai_review_event(
+            {
+                "public_id": str(uuid7()),
+                "review_public_id": review_public_id,
+                "event_type": AiReviewEventTypeEnum.DECISION_RECORDED.value,
+                "actor_delegate_public_id": delegate_public_id,
+                "previous_status": atomic["previous_status"],
+                "new_status": new_status.value,
+                "payload": {
+                    "decision": decision.value,
+                    "rationale": rationale,
+                },
+                "occurred_at": wall_clock,
+            }
+        )
+        await repo.decrement_delegate_active_count_for_review(
+            review_public_id=review_public_id,
+            selected_delegate_public_id=atomic["selected_delegate_public_id"],
+            now=wall_clock,
+        )
+        logger.info(
+            "ai_review decision recorded",
+            review_public_id=review_public_id,
+            decision=decision.value,
+            resolution_mode=resolution_mode.value,
+        )
+        return AiReviewDecisionResult(
+            error_code=None,
+            message="Decision recorded.",
+            status=new_status,
+            resolution_mode=resolution_mode,
+            dispatch_version=int(atomic["dispatch_version"]),
+            details={"previous_status": atomic["previous_status"]},
+        )
+
+    def _terminal_state_envelope(
+        self,
+        *,
+        review: AiReviewRow,
+        delegate_public_id: str,
+        decision: AiReviewDecisionEnum,
+    ) -> AiReviewDecisionResult:
+        """Build the envelope returned when the row is already terminal.
+
+        Disambiguates idempotent-retry (same delegate, same decision)
+        from peer-resolved, so the caller can tell the difference between
+        "your previous request landed" and "someone else got there first".
+        """
+        status_enum = AiReviewStatusEnum(review["status"])
+        resolution_mode_value = review["resolution_mode"]
+        resolution_mode = (
+            AiReviewResolutionModeEnum(resolution_mode_value)
+            if resolution_mode_value is not None
+            else None
+        )
+        dispatch_version = int(review["dispatch_version"])
+        recorded_decision = review["decision"]
+        responding = review["responding_delegate_public_id"]
+        same_caller = responding == delegate_public_id
+        same_decision = recorded_decision is not None and recorded_decision == decision.value
+        if same_caller and same_decision:
+            return AiReviewDecisionResult(
+                error_code=ERROR_DECISION_ALREADY_RECORDED,
+                message="Decision already recorded; idempotent retry.",
+                status=status_enum,
+                resolution_mode=resolution_mode,
+                dispatch_version=dispatch_version,
+                details={"decision": decision.value},
+            )
+        return AiReviewDecisionResult(
+            error_code=ERROR_PEER_RESOLVED,
+            message="Review already resolved by another decision or the reaper.",
+            status=status_enum,
+            resolution_mode=resolution_mode,
+            dispatch_version=dispatch_version,
+            details={
+                "responding_delegate_public_id": responding,
+                "recorded_decision": recorded_decision,
+            },
+        )
+
+    @staticmethod
+    def _resolution_mode_for(
+        *,
+        previous_status: str,
+        selected_delegate_public_id: str,
+        responding_delegate_public_id: str,
+    ) -> AiReviewResolutionModeEnum:
+        """Plan A Q4 — pick the resolution_mode the row's transition implies.
+
+        - ``pending`` + selected==responding -> PICK_ONE_PRIMARY (most common).
+        - ``fanout_dispatched`` + selected==responding -> SECONDARY_AFTER_FANOUT
+          (selected delegate came back online after fanout fired).
+        - ``fanout_dispatched`` + selected!=responding -> FANOUT_FIRST_RESPONDER
+          (different eligible delegate won the fanout race).
+        """
+        if previous_status == AiReviewStatusEnum.PENDING.value:
+            return AiReviewResolutionModeEnum.PICK_ONE_PRIMARY
+        if responding_delegate_public_id == selected_delegate_public_id:
+            return AiReviewResolutionModeEnum.SECONDARY_AFTER_FANOUT
+        return AiReviewResolutionModeEnum.FANOUT_FIRST_RESPONDER
 
     @classmethod
     def get_instance(cls) -> AiReviewService:

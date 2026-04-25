@@ -488,3 +488,369 @@ async def test_models_imports_are_load_bearing() -> None:
     assert AiReviewEvent.__tablename__ == "ai_review_events"
     assert AiDelegate.__tablename__ == "ai_delegates"
     assert KNOWN_TO_MAX is not None
+
+
+async def _seed_pending_for_atomic(
+    repo: SQLAlchemyRepository,
+    *,
+    as_of: datetime,
+    deadline_offset: int = 60,
+    initial_status: str = "pending",
+) -> tuple[str, str]:
+    """Seed a delegate + pending review row; return (review_public_id, delegate_public_id)."""
+    user_pid = str(uuid7())
+    delegate_pid = str(uuid7())
+    review_pid = str(uuid7())
+    await repo.insert_ai_delegate(public_id=delegate_pid, user_public_id=user_pid, as_of=as_of)
+    await repo.insert_ai_review(
+        {
+            "public_id": review_pid,
+            "session_id": str(uuid7()),
+            "sequence_id": 1,
+            "user_public_id": str(uuid7()),
+            "operator_public_id": str(uuid7()),
+            "wallet_public_id": str(uuid7()),
+            "instrument_public_id": str(uuid7()),
+            "strategy_public_id": str(uuid7()),
+            "selected_delegate_public_id": delegate_pid,
+            "status": initial_status,
+            "signal_envelope": {"side": "buy"},
+            "signal_snapshot_hash": "h",
+            "instrument_metadata": {},
+            "deadline": as_of + timedelta(seconds=deadline_offset),
+            "fanout_after": as_of + timedelta(seconds=30),
+            "dispatch_version": 0,
+            "created_at": as_of,
+            "updated_at": as_of,
+        }
+    )
+    return review_pid, delegate_pid
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_atomic_resolve_returns_none_for_unknown_review(tmp_path: Path) -> None:
+    """Atomic resolve with an unknown id returns None.
+
+    Given a fresh repository with no reviews,
+    When ``atomic_resolve_ai_review`` is called for an unknown id,
+    Then it returns ``None`` (Step 1 short-circuit).
+    """
+    repo = await _build_repo(tmp_path, "atomic_unknown.db")
+    result = await repo.atomic_resolve_ai_review(
+        review_public_id="ghost",
+        decision="approve",
+        responding_delegate_public_id=str(uuid7()),
+        rationale=None,
+        resolution_mode="pick_one_primary",
+        new_status="resolved_approved",
+        now=datetime.now(UTC),
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_atomic_resolve_returns_none_when_already_terminal(tmp_path: Path) -> None:
+    """Atomic resolve returns None when status already terminal.
+
+    Given a review row resolved in a prior call,
+    When ``atomic_resolve_ai_review`` is called again,
+    Then it returns ``None`` (the already-terminal status guard fires).
+    """
+    repo = await _build_repo(tmp_path, "atomic_terminal.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
+    first = await repo.atomic_resolve_ai_review(
+        review_public_id=review_pid,
+        decision="approve",
+        responding_delegate_public_id=delegate_pid,
+        rationale=None,
+        resolution_mode="pick_one_primary",
+        new_status="resolved_approved",
+        now=now,
+    )
+    assert first is not None
+    second = await repo.atomic_resolve_ai_review(
+        review_public_id=review_pid,
+        decision="approve",
+        responding_delegate_public_id=delegate_pid,
+        rationale=None,
+        resolution_mode="pick_one_primary",
+        new_status="resolved_approved",
+        now=now,
+    )
+    assert second is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_atomic_resolve_returns_none_when_deadline_elapsed(tmp_path: Path) -> None:
+    """Atomic resolve returns None when deadline has already elapsed.
+
+    Given a pending review whose deadline is in the past,
+    When ``atomic_resolve_ai_review`` is called,
+    Then it returns ``None`` (the deadline-gate guard fires).
+    """
+    repo = await _build_repo(tmp_path, "atomic_late.db")
+    seed_at = datetime.now(UTC) - timedelta(seconds=120)
+    review_pid, delegate_pid = await _seed_pending_for_atomic(
+        repo, as_of=seed_at, deadline_offset=60
+    )
+    result = await repo.atomic_resolve_ai_review(
+        review_public_id=review_pid,
+        decision="approve",
+        responding_delegate_public_id=delegate_pid,
+        rationale=None,
+        resolution_mode="pick_one_primary",
+        new_status="resolved_approved",
+        now=datetime.now(UTC),
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_atomic_resolve_with_for_update_falls_back_on_not_implemented(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SQLite without ``SELECT FOR UPDATE`` falls back to plain SELECT.
+
+    Given a session executor that raises NotImplementedError on the
+        with_for_update path,
+    When ``atomic_resolve_ai_review`` is called,
+    Then it retries without the lock and still wins the transition.
+    """
+    from sqlalchemy.sql.expression import Select  # local import; only used here
+
+    repo = await _build_repo(tmp_path, "atomic_for_update_fallback.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
+
+    original_with_for_update = Select.with_for_update
+
+    def _raise_not_implemented(self: Select) -> Select:
+        raise NotImplementedError("test fallback")
+
+    monkeypatch.setattr(Select, "with_for_update", _raise_not_implemented)
+    try:
+        result = await repo.atomic_resolve_ai_review(
+            review_public_id=review_pid,
+            decision="approve",
+            responding_delegate_public_id=delegate_pid,
+            rationale=None,
+            resolution_mode="pick_one_primary",
+            new_status="resolved_approved",
+            now=now,
+        )
+    finally:
+        monkeypatch.setattr(Select, "with_for_update", original_with_for_update)
+    assert result is not None
+    assert result["previous_status"] == "pending"
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_atomic_resolve_rowcount_zero_returns_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Atomic resolve returns None when the UPDATE rowcount is 0.
+
+    Given a stub session.execute that returns a result with rowcount=0,
+    When ``atomic_resolve_ai_review`` runs the UPDATE step,
+    Then it returns ``None`` even though the pre-snapshot looked eligible.
+    """
+    repo = await _build_repo(tmp_path, "atomic_rowcount0.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
+
+    from typing import Any as _Any
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    original_execute = AsyncSession.execute
+
+    async def _stub_execute(self: _Any, statement: _Any, *a: _Any, **kw: _Any) -> _Any:
+        result = await original_execute(self, statement, *a, **kw)
+        from sqlalchemy.sql.dml import Update
+
+        if isinstance(statement, Update):
+
+            class _Wrap:
+                rowcount = 0
+
+                def __init__(self, inner: _Any) -> None:
+                    self._inner = inner
+
+                def __getattr__(self, name: str) -> _Any:
+                    return getattr(self._inner, name)
+
+            return _Wrap(result)
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", _stub_execute)
+    try:
+        result = await repo.atomic_resolve_ai_review(
+            review_public_id=review_pid,
+            decision="approve",
+            responding_delegate_public_id=delegate_pid,
+            rationale=None,
+            resolution_mode="pick_one_primary",
+            new_status="resolved_approved",
+            now=now,
+        )
+    finally:
+        monkeypatch.setattr(AsyncSession, "execute", original_execute)
+    assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_atomic_timeout_returns_none_for_unknown_review(tmp_path: Path) -> None:
+    """Timeout for an unknown id is a no-op.
+
+    Given a fresh repository,
+    When ``atomic_timeout_ai_review`` is called for an unknown id,
+    Then it returns ``None``.
+    """
+    repo = await _build_repo(tmp_path, "timeout_unknown.db")
+    result = await repo.atomic_timeout_ai_review(
+        review_public_id="ghost",
+        now=datetime.now(UTC),
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_atomic_timeout_returns_none_when_already_terminal(tmp_path: Path) -> None:
+    """Timeout returns None when row already terminal.
+
+    Given a row already resolved by atomic_resolve,
+    When ``atomic_timeout_ai_review`` runs,
+    Then it returns ``None``.
+    """
+    repo = await _build_repo(tmp_path, "timeout_terminal.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
+    await repo.atomic_resolve_ai_review(
+        review_public_id=review_pid,
+        decision="approve",
+        responding_delegate_public_id=delegate_pid,
+        rationale=None,
+        resolution_mode="pick_one_primary",
+        new_status="resolved_approved",
+        now=now,
+    )
+    result = await repo.atomic_timeout_ai_review(
+        review_public_id=review_pid,
+        now=now,
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_atomic_timeout_wins_for_pending_row(tmp_path: Path) -> None:
+    """Atomic timeout flips a pending row to ``timeout``.
+
+    Given a pending review row,
+    When ``atomic_timeout_ai_review`` is called,
+    Then the row's status becomes ``timeout`` and the result returns
+        the captured selected_delegate_public_id + dispatch_version.
+    """
+    repo = await _build_repo(tmp_path, "timeout_win.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
+    result = await repo.atomic_timeout_ai_review(
+        review_public_id=review_pid,
+        now=now,
+    )
+    assert result is not None
+    assert result["selected_delegate_public_id"] == delegate_pid
+    assert result["previous_status"] == "pending"
+    row = await repo.get_ai_review(review_pid)
+    assert row is not None
+    assert row["status"] == "timeout"
+    assert row["resolution_mode"] == "timeout_no_response"
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_atomic_timeout_rowcount_zero_returns_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Atomic timeout returns None on UPDATE rowcount=0.
+
+    Given a stub that forces UPDATE rowcount=0,
+    When ``atomic_timeout_ai_review`` is called,
+    Then it returns ``None`` rather than raising.
+    """
+    repo = await _build_repo(tmp_path, "timeout_rowcount0.db")
+    now = datetime.now(UTC)
+    review_pid, _ = await _seed_pending_for_atomic(repo, as_of=now)
+
+    from typing import Any as _Any
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    original_execute = AsyncSession.execute
+
+    async def _stub(self: _Any, statement: _Any, *a: _Any, **kw: _Any) -> _Any:
+        result = await original_execute(self, statement, *a, **kw)
+        from sqlalchemy.sql.dml import Update
+
+        if isinstance(statement, Update):
+
+            class _Wrap:
+                rowcount = 0
+
+                def __init__(self, inner: _Any) -> None:
+                    self._inner = inner
+
+                def __getattr__(self, name: str) -> _Any:
+                    return getattr(self._inner, name)
+
+            return _Wrap(result)
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", _stub)
+    try:
+        result = await repo.atomic_timeout_ai_review(
+            review_public_id=review_pid,
+            now=now,
+        )
+    finally:
+        monkeypatch.setattr(AsyncSession, "execute", original_execute)
+    assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_decrement_counter_returns_false_when_already_decremented(
+    tmp_path: Path,
+) -> None:
+    """Decrement returns False on the second call.
+
+    Given a review whose counter slot was claimed by a prior decrement,
+    When ``decrement_delegate_active_count_for_review`` is called again,
+    Then it returns ``False`` (the CAS predicate misses).
+    """
+    repo = await _build_repo(tmp_path, "decrement_idempotent.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
+    first = await repo.decrement_delegate_active_count_for_review(
+        review_public_id=review_pid,
+        selected_delegate_public_id=delegate_pid,
+        now=now,
+    )
+    assert first is True
+    second = await repo.decrement_delegate_active_count_for_review(
+        review_public_id=review_pid,
+        selected_delegate_public_id=delegate_pid,
+        now=now,
+    )
+    assert second is False

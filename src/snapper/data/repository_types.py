@@ -1828,3 +1828,18 @@ class AiReviewEventInsertRow(TypedDict, total=False):
     new_status: str
     payload: JsonObject
     occurred_at: datetime
+
+
+class AtomicResolveResult(TypedDict):
+    """Return shape for :meth:`Repository.atomic_resolve_ai_review`.
+
+    Plan D §3.2 step 5 — atomic UPDATE of ``ai_reviews`` from non-terminal to
+    a resolved/terminal state. ``previous_status`` is captured BEFORE the
+    UPDATE so the audit-event row records the actual transition the caller
+    won; ``selected_delegate_public_id`` + ``dispatch_version`` are needed
+    for the post-commit bus event + Q10 counter decrement.
+    """
+
+    selected_delegate_public_id: str
+    dispatch_version: int
+    previous_status: str

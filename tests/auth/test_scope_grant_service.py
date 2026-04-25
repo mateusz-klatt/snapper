@@ -266,6 +266,51 @@ class TestSingleton:
         service.set_msg_publisher(None)
         assert service._msg_publisher is None
 
+
+class TestHasGrantForDelegate:
+    """Tests for ``ScopeGrantService.has_grant_for_delegate`` forwarder."""
+
+    @pytest.mark.asyncio
+    async def test_has_grant_for_delegate_forwards_to_repository(self) -> None:
+        """Service forwards args + verdict from the repository.
+
+        Given a service with a stubbed repository,
+        When has_grant_for_delegate is called,
+        Then the repository receives the kwargs verbatim and the verdict
+            propagates back unchanged.
+        """
+        service = ScopeGrantService()
+        as_of = datetime(2026, 4, 25, 12, 0, 0, tzinfo=UTC)
+        captured: dict[str, object] = {}
+
+        async def _repo_call(
+            *,
+            delegate_public_id: str,
+            wallet_public_id: str,
+            instrument_public_id: str,
+            as_of: datetime,
+        ) -> bool:
+            captured["delegate"] = delegate_public_id
+            captured["wallet"] = wallet_public_id
+            captured["instrument"] = instrument_public_id
+            captured["as_of"] = as_of
+            return True
+
+        service.repository.has_grant_for_delegate = AsyncMock(side_effect=_repo_call)
+        verdict = await service.has_grant_for_delegate(
+            delegate_public_id="del-1",
+            wallet_public_id="wal-1",
+            instrument_public_id="inst-1",
+            as_of=as_of,
+        )
+        assert verdict is True
+        assert captured == {
+            "delegate": "del-1",
+            "wallet": "wal-1",
+            "instrument": "inst-1",
+            "as_of": as_of,
+        }
+
     def test_direct_constructor_is_idempotent(self) -> None:
         """Calling ``ScopeGrantService()`` twice returns the same singleton.
 

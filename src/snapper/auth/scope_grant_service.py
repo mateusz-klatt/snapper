@@ -181,6 +181,42 @@ class ScopeGrantService:
                 exc,
             )
 
+    async def has_grant_for_delegate(
+        self,
+        *,
+        delegate_public_id: str,
+        wallet_public_id: str,
+        instrument_public_id: str,
+        as_of: datetime,
+    ) -> bool:
+        """Plan A v1.4 + Plan D §10 — AI delegate scope check forwarder.
+
+        Wraps :meth:`Repository.has_grant_for_delegate` so the service stays
+        the single SOLE owner of the delegate-scope contract. The repo
+        implementation does the four-step resolve (delegate -> user ->
+        operator memberships -> instrument-direct or underlying-kind grant);
+        this method exists so call sites that already hold the service
+        ``Depends`` don't need a separate Repository handle.
+
+        Args:
+            delegate_public_id: ``ai_delegates.public_id`` of the AI
+                delegate whose scope is being checked.
+            wallet_public_id: Target wallet for the scope check.
+            instrument_public_id: Target instrument for the scope check.
+            as_of: Wall-clock used for SCD2-active filtering on
+                memberships and grants.
+
+        Returns:
+            ``True`` when the delegate has at least one active grant
+            covering ``(wallet, instrument)``; ``False`` otherwise.
+        """
+        return await self.repository.has_grant_for_delegate(
+            delegate_public_id=delegate_public_id,
+            wallet_public_id=wallet_public_id,
+            instrument_public_id=instrument_public_id,
+            as_of=as_of,
+        )
+
     @classmethod
     def get_instance(cls) -> ScopeGrantService:
         """Get singleton instance.

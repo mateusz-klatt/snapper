@@ -139,6 +139,7 @@ from snapper.data.repository_types import AlertDeliveryRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import AlertListCursor
+from snapper.data.repository_types import AtomicResolveResult
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CheckpointUpsertRow
@@ -3185,6 +3186,119 @@ class Repository(ABC):
         - ``authenticate`` frame (post-reauth).
         - ``system.heartbeat.client`` frame (cross-plan lock per
           Q17 v1.4: ``heartbeat_interval ≤ window/2``, default 7s).
+        """
+        ...
+
+    @abstractmethod
+    async def atomic_resolve_ai_review(
+        self,
+        *,
+        review_public_id: str,
+        decision: str,
+        responding_delegate_public_id: str,
+        rationale: str | None,
+        resolution_mode: str,
+        new_status: str,
+        now: datetime,
+    ) -> AtomicResolveResult | None:
+        """Atomic CAS UPDATE pending/fanout_dispatched -> resolved.
+
+        Plan D §3.2 step 5 — single UPDATE with the CAS predicate
+        ``status IN ('pending', 'fanout_dispatched') AND deadline > NOW()``.
+        Returns the captured ``selected_delegate_public_id`` +
+        ``dispatch_version`` + ``previous_status`` when the caller wins the
+        transition; ``None`` when a peer beat them OR the deadline already
+        elapsed (in which case the caller falls through to the inline
+        timeout shortcut at Q9 step 3.5).
+
+        The terminal-state CHECK constraint
+        ``ck_ai_reviews_status_consistency`` enforces non-NULL
+        ``decision`` + ``responding_delegate_public_id`` +
+        ``resolution_mode`` + ``resolved_at`` on the new row, so the
+        caller must supply all four — there is no partial transition.
+
+        Args:
+            review_public_id: UUID7 of the ``ai_reviews`` row.
+            decision: ``"approve"`` or ``"reject"``.
+            responding_delegate_public_id: ``ai_delegates.public_id`` of the
+                delegate whose decision wins.
+            rationale: Optional free-text (≤4096 chars; caller validates).
+            resolution_mode: One of
+                :class:`snapper.core.types.AiReviewResolutionModeEnum`
+                values.
+            new_status: ``"resolved_approved"`` or ``"resolved_rejected"`` —
+                must match the ``decision`` per the status-consistency
+                CHECK constraint.
+            now: Wall-clock used for both the deadline comparison and the
+                ``resolved_at`` / ``updated_at`` columns.
+
+        Returns:
+            :class:`AtomicResolveResult` on a winning transition; ``None``
+            when status is already terminal OR ``deadline <= now``.
+        """
+        ...
+
+    @abstractmethod
+    async def atomic_timeout_ai_review(
+        self,
+        *,
+        review_public_id: str,
+        now: datetime,
+    ) -> AtomicResolveResult | None:
+        """Atomic CAS UPDATE pending/fanout_dispatched -> timeout.
+
+        Plan D §3.3 — used both by the reaper loop AND by the inline
+        late-decision shortcut in :meth:`AiReviewService.submit_decision`
+        (Q9 step 3.5). The CAS predicate is identical to
+        :meth:`atomic_resolve_ai_review` minus the ``deadline > now`` clause:
+        a row is eligible for timeout regardless of its deadline (the reaper
+        only fires for rows whose ``deadline < now``, but the predicate is
+        not enforced at the SQL level so the inline shortcut works too).
+
+        Args:
+            review_public_id: UUID7 of the ``ai_reviews`` row.
+            now: Wall-clock for ``resolved_at`` / ``updated_at``.
+
+        Returns:
+            :class:`AtomicResolveResult` on a winning transition; ``None``
+            when the row was already terminal.
+        """
+        ...
+
+    @abstractmethod
+    async def decrement_delegate_active_count_for_review(
+        self,
+        *,
+        review_public_id: str,
+        selected_delegate_public_id: str,
+        now: datetime,
+    ) -> bool:
+        """Q10 v1.2 writable-CTE counter primitive.
+
+        Decrements ``ai_delegates.active_reviews_count`` exactly once per
+        review by claiming the ``ai_reviews.counter_decremented_at`` slot
+        first. Returns ``True`` when this caller won the claim and the
+        decrement was applied; ``False`` when a peer (concurrent decision /
+        reaper / supersede) had already decremented for the same review.
+
+        Implemented as two statements within one transaction so SQLite (no
+        UPDATE-FROM-CTE before 3.33) and Postgres (writable CTE) both work.
+        The claim UPDATE is single-row CAS (``WHERE counter_decremented_at
+        IS NULL``); the delegate UPDATE wraps the decrement in
+        ``GREATEST(... - 1, 0)`` so the counter floors at zero even if
+        bookkeeping has drifted.
+
+        Args:
+            review_public_id: UUID7 of the ``ai_reviews`` row whose
+                ``counter_decremented_at`` slot we are trying to claim.
+            selected_delegate_public_id: ``ai_delegates.public_id`` to
+                decrement on a successful claim.
+            now: Wall-clock for ``counter_decremented_at`` /
+                ``updated_at``.
+
+        Returns:
+            ``True`` if this call won the claim and the decrement was
+            applied; ``False`` if a peer already decremented.
         """
         ...
 
@@ -9423,6 +9537,173 @@ class SQLAlchemyRepository(Repository):
                 .values(last_seen_at=last_seen_at, updated_at=last_seen_at)
             )
             await s.commit()
+
+    async def atomic_resolve_ai_review(
+        self,
+        *,
+        review_public_id: str,
+        decision: str,
+        responding_delegate_public_id: str,
+        rationale: str | None,
+        resolution_mode: str,
+        new_status: str,
+        now: datetime,
+    ) -> AtomicResolveResult | None:
+        """Atomic CAS UPDATE pending/fanout_dispatched -> resolved.
+
+        Captures ``previous_status`` BEFORE the UPDATE in the same
+        transaction so the row's pre-state is recorded in the audit-event
+        row the caller writes next. SELECT-FOR-UPDATE on the candidate row
+        is used on engines that support it (Postgres) to serialise the
+        read-then-CAS over concurrent peers.
+        """
+        async with self.session() as s:
+            select_stmt = select(
+                AiReview.status, AiReview.deadline, AiReview.dispatch_version
+            ).where(AiReview.public_id == review_public_id)
+            try:
+                pre_row = (await s.execute(select_stmt.with_for_update())).first()
+            except NotImplementedError:
+                pre_row = (await s.execute(select_stmt)).first()
+            if pre_row is None:
+                return None
+            previous_status, deadline, dispatch_version = pre_row
+            if previous_status not in (
+                "pending",
+                "fanout_dispatched",
+            ):
+                return None
+            if deadline <= now:
+                return None
+            update_stmt = (
+                update(AiReview)
+                .where(
+                    AiReview.public_id == review_public_id,
+                    AiReview.status.in_(("pending", "fanout_dispatched")),
+                    AiReview.deadline > now,
+                )
+                .values(
+                    status=new_status,
+                    decision=decision,
+                    responding_delegate_public_id=responding_delegate_public_id,
+                    rationale=rationale,
+                    resolution_mode=resolution_mode,
+                    resolved_at=now,
+                    updated_at=now,
+                )
+            )
+            result = await s.execute(update_stmt)
+            await s.commit()
+            if int(cast(Any, result).rowcount or 0) == 0:
+                return None
+            selected = (
+                await s.execute(
+                    select(AiReview.selected_delegate_public_id).where(
+                        AiReview.public_id == review_public_id
+                    )
+                )
+            ).scalar_one()
+            return AtomicResolveResult(
+                selected_delegate_public_id=selected,
+                dispatch_version=int(dispatch_version),
+                previous_status=str(previous_status),
+            )
+
+    async def atomic_timeout_ai_review(
+        self,
+        *,
+        review_public_id: str,
+        now: datetime,
+    ) -> AtomicResolveResult | None:
+        """Atomic CAS UPDATE pending/fanout_dispatched -> timeout.
+
+        Mirrors :meth:`atomic_resolve_ai_review` minus the deadline gate
+        and the decision/responding-delegate fields. Returns ``None`` when
+        the row was already terminal (lost race against a peer decision).
+        """
+        async with self.session() as s:
+            pre_row = (
+                await s.execute(
+                    select(AiReview.status, AiReview.dispatch_version).where(
+                        AiReview.public_id == review_public_id
+                    )
+                )
+            ).first()
+            if pre_row is None:
+                return None
+            previous_status, dispatch_version = pre_row
+            if previous_status not in ("pending", "fanout_dispatched"):
+                return None
+            update_stmt = (
+                update(AiReview)
+                .where(
+                    AiReview.public_id == review_public_id,
+                    AiReview.status.in_(("pending", "fanout_dispatched")),
+                )
+                .values(
+                    status="timeout",
+                    resolution_mode="timeout_no_response",
+                    resolved_at=now,
+                    updated_at=now,
+                )
+            )
+            result = await s.execute(update_stmt)
+            await s.commit()
+            if int(cast(Any, result).rowcount or 0) == 0:
+                return None
+            selected = (
+                await s.execute(
+                    select(AiReview.selected_delegate_public_id).where(
+                        AiReview.public_id == review_public_id
+                    )
+                )
+            ).scalar_one()
+            return AtomicResolveResult(
+                selected_delegate_public_id=selected,
+                dispatch_version=int(dispatch_version),
+                previous_status=str(previous_status),
+            )
+
+    async def decrement_delegate_active_count_for_review(
+        self,
+        *,
+        review_public_id: str,
+        selected_delegate_public_id: str,
+        now: datetime,
+    ) -> bool:
+        """Q10 v1.2 writable-CTE counter primitive (two-statement form).
+
+        Single transaction wraps both statements so the claim + decrement
+        are atomic relative to other peers. The claim UPDATE uses a CAS
+        predicate (``counter_decremented_at IS NULL``) so only one caller
+        wins; subsequent callers see ``rowcount == 0`` and return early.
+        ``GREATEST(... - 1, 0)`` is portable to SQLite via ``MAX`` — the
+        local helper composes both via SQLAlchemy's ``func.max``.
+        """
+        async with self.session() as s:
+            claim_stmt = (
+                update(AiReview)
+                .where(
+                    AiReview.public_id == review_public_id,
+                    AiReview.counter_decremented_at.is_(None),
+                )
+                .values(counter_decremented_at=now, updated_at=now)
+            )
+            claim_result = await s.execute(claim_stmt)
+            if int(cast(Any, claim_result).rowcount or 0) == 0:
+                await s.commit()
+                return False
+            decrement_stmt = (
+                update(AiDelegate)
+                .where(AiDelegate.public_id == selected_delegate_public_id)
+                .values(
+                    active_reviews_count=func.max(AiDelegate.active_reviews_count - 1, 0),
+                    updated_at=now,
+                )
+            )
+            await s.execute(decrement_stmt)
+            await s.commit()
+            return True
 
 
 _repository_cache: dict[str, Repository] = {}
