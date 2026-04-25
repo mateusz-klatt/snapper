@@ -737,6 +737,34 @@ export const UnderlyingInstrumentDataSchema = z
   })
   .strict()
 
+export const UserAlertDefaultBodySchema = z
+  .object({
+    alert_type: z.enum([
+      'order_fill_full',
+      'order_rejected',
+      'position_stop_loss_fired',
+      'margin_warning',
+      'critical_system_error',
+    ]),
+    enabled: z.boolean(),
+    min_priority: z.enum(['low', 'medium', 'high']),
+  })
+  .strict()
+
+export const UserAlertDefaultInfoSchema = z
+  .object({
+    type: z.literal('user_alert_default_info'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    user_public_id: z.string(),
+    alert_type: z.string(),
+    enabled: z.boolean(),
+    min_priority: z.string(),
+  })
+  .strict()
+
 export const UserRoleSchema = z.enum(['ai_delegate', 'viewer', 'operator', 'admin'])
 
 export const ValidationErrorSchema = z
@@ -1097,6 +1125,18 @@ export const UpdateDevicePrefCommandSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: DeviceAlertPrefBodySchema,
+  })
+  .strict()
+
+export const DeviceAlertPrefListResponseSchema = z
+  .object({
+    type: z.literal('device_alert_pref_list_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(DeviceAlertPrefInfoSchema),
+    count: z.number().int(),
   })
   .strict()
 
@@ -1474,6 +1514,40 @@ export const UnderlyingInstrumentListResponseSchema = z
     session_id: z.string(),
     payload: z.array(UnderlyingInstrumentDataSchema),
     count: z.number().int(),
+  })
+  .strict()
+
+export const UpdateUserAlertDefaultCommandSchema = z
+  .object({
+    type: z.literal('update_user_alert_default_command'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: UserAlertDefaultBodySchema,
+  })
+  .strict()
+
+export const UserAlertDefaultListResponseSchema = z
+  .object({
+    type: z.literal('user_alert_default_list_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(UserAlertDefaultInfoSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const UserAlertDefaultResponseSchema = z
+  .object({
+    type: z.literal('user_alert_default_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: UserAlertDefaultInfoSchema,
   })
   .strict()
 
@@ -2588,6 +2662,8 @@ export type TradeDiffEntry = z.infer<typeof TradeDiffEntrySchema>
 export type TrailingStopStateData = z.infer<typeof TrailingStopStateDataSchema>
 export type UnderlyingAssetData = z.infer<typeof UnderlyingAssetDataSchema>
 export type UnderlyingInstrumentData = z.infer<typeof UnderlyingInstrumentDataSchema>
+export type UserAlertDefaultBody = z.infer<typeof UserAlertDefaultBodySchema>
+export type UserAlertDefaultInfo = z.infer<typeof UserAlertDefaultInfoSchema>
 export type UserRole = z.infer<typeof UserRoleSchema>
 export type ValidationError = z.infer<typeof ValidationErrorSchema>
 export type WalletInfo = z.infer<typeof WalletInfoSchema>
@@ -2629,6 +2705,7 @@ export type ContractListResponse = z.infer<typeof ContractListResponseSchema>
 export type CredentialListResponse = z.infer<typeof CredentialListResponseSchema>
 export type CredentialResponse = z.infer<typeof CredentialResponseSchema>
 export type UpdateDevicePrefCommand = z.infer<typeof UpdateDevicePrefCommandSchema>
+export type DeviceAlertPrefListResponse = z.infer<typeof DeviceAlertPrefListResponseSchema>
 export type DeviceAlertPrefResponse = z.infer<typeof DeviceAlertPrefResponseSchema>
 export type ExecutionListResponse = z.infer<typeof ExecutionListResponseSchema>
 export type ExecutionPlanResponse = z.infer<typeof ExecutionPlanResponseSchema>
@@ -2665,6 +2742,9 @@ export type UnderlyingAssetListResponse = z.infer<typeof UnderlyingAssetListResp
 export type UnderlyingInstrumentListResponse = z.infer<
   typeof UnderlyingInstrumentListResponseSchema
 >
+export type UpdateUserAlertDefaultCommand = z.infer<typeof UpdateUserAlertDefaultCommandSchema>
+export type UserAlertDefaultListResponse = z.infer<typeof UserAlertDefaultListResponseSchema>
+export type UserAlertDefaultResponse = z.infer<typeof UserAlertDefaultResponseSchema>
 export type UserProfile = z.infer<typeof UserProfileSchema>
 export type CreateUserBody = z.infer<typeof CreateUserBodySchema>
 export type UpdateUserBody = z.infer<typeof UpdateUserBodySchema>

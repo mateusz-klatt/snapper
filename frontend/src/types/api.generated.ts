@@ -971,13 +971,29 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        get: Operations["list_device_prefs_api_devices__device_public_id__prefs_get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
         head?: never;
         patch: Operations["update_device_pref_api_devices__device_public_id__prefs_patch"];
+        trace?: never;
+    };
+    "/api/alert_defaults": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: Operations["list_alert_defaults_api_alert_defaults_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: Operations["update_alert_default_api_alert_defaults_patch"];
         trace?: never;
     };
     "/api/metrics/notifications": {
@@ -1835,6 +1851,15 @@ export type Components = {
             quiet_hours_end_min?: number | null;
             mute_until?: string | null;
             timezone: string;
+        };
+        DeviceAlertPrefListResponse: {
+            type: "device_alert_pref_list_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["DeviceAlertPrefInfo"][];
+            count: number;
         };
         DeviceAlertPrefResponse: {
             type: "device_alert_pref_response";
@@ -2737,6 +2762,47 @@ export type Components = {
             timestamp: string;
             session_id: string;
             payload: Components["schemas"]["DeviceAlertPrefBody"];
+        };
+        UpdateUserAlertDefaultCommand: {
+            type: "update_user_alert_default_command";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["UserAlertDefaultBody"];
+        };
+        UserAlertDefaultBody: {
+            alert_type: "order_fill_full" | "order_rejected" | "position_stop_loss_fired" | "margin_warning" | "critical_system_error";
+            enabled: boolean;
+            min_priority: "low" | "medium" | "high";
+        };
+        UserAlertDefaultInfo: {
+            type: "user_alert_default_info";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            user_public_id: string;
+            alert_type: string;
+            enabled: boolean;
+            min_priority: string;
+        };
+        UserAlertDefaultListResponse: {
+            type: "user_alert_default_list_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["UserAlertDefaultInfo"][];
+            count: number;
+        };
+        UserAlertDefaultResponse: {
+            type: "user_alert_default_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["UserAlertDefaultInfo"];
         };
         UserListResponse: {
             type: "user_list";
@@ -5482,6 +5548,35 @@ export interface Operations {
             };
         };
     };
+    list_device_prefs_api_devices__device_public_id__prefs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                device_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["DeviceAlertPrefListResponse"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     update_device_pref_api_devices__device_public_id__prefs_patch: {
         parameters: {
             query?: never;
@@ -5503,6 +5598,56 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["DeviceAlertPrefResponse"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_alert_defaults_api_alert_defaults_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["UserAlertDefaultListResponse"];
+                };
+            };
+        };
+    };
+    update_alert_default_api_alert_defaults_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["UpdateUserAlertDefaultCommand"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["UserAlertDefaultResponse"];
                 };
             };
             422: {
