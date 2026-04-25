@@ -176,7 +176,15 @@ class TestRoleCategorySecurityMatrix:
             strategy-management surface.
         """
         categories = role_allowed_categories(UserRole.OPERATOR)
-        assert categories == {"market", "trade", "signals", "strategy", "system", "backtest"}
+        assert categories == {
+            "market",
+            "trade",
+            "signals",
+            "strategy",
+            "system",
+            "backtest",
+            "ai_reviews",
+        }
         assert "admin" not in categories
 
     def test_admin_gets_all_categories_including_admin(self) -> None:
@@ -196,6 +204,7 @@ class TestRoleCategorySecurityMatrix:
             "system",
             "admin",
             "backtest",
+            "ai_reviews",
         }
 
     def test_admin_available_topics_include_admin_prefix(self) -> None:

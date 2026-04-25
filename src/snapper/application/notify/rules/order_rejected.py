@@ -6,6 +6,7 @@ from loguru import logger
 
 from snapper.application.notify.rules.base import AlertRule
 from snapper.application.notify.rules.dedup import check_dedup_window
+from snapper.application.notify.rules.margin_warning import is_margin_related_rejection
 from snapper.data.repository import Repository
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.messaging.schemas.data import OrderData
@@ -14,7 +15,14 @@ from snapper.messaging.schemas.messages import parse_message
 
 
 class OrderRejectedRule(AlertRule):
-    """Safety-critical rejection alert — user wanted a trade, it didn't happen."""
+    """Safety-critical rejection alert — user wanted a trade, it didn't happen.
+
+    Skips margin-related rejections so ``MarginWarningRule`` is the
+    sole alert source for that subset (avoids two pushes for the
+    same event). The shared predicate
+    ``is_margin_related_rejection`` lives in
+    ``rules/margin_warning.py`` to keep the partition explicit.
+    """
 
     alert_type = "order_rejected"
     subscribe_topic_prefixes = ("orders.events.",)
@@ -50,6 +58,8 @@ class OrderRejectedRule(AlertRule):
         except (UnicodeDecodeError, MessageParseError):
             return []
         if not isinstance(data, OrderData):
+            return []
+        if is_margin_related_rejection(data.reason, data.error):
             return []
         user_public_id = data.user_public_id
         if not user_public_id:

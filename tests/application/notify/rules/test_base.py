@@ -100,8 +100,8 @@ class TestRuleRegistry:
 class TestLoadDefaultRegistry:
     """Verifies the default v1.11 registry contract."""
 
-    def test_default_registry_has_four_rules(self) -> None:
-        """load_default_registry wires all 4 P0 rules (margin_warning deferred)."""
+    def test_default_registry_has_five_rules(self) -> None:
+        """load_default_registry wires all 5 P0 rules (incl. margin_warning)."""
         reg = load_default_registry()
 
         alert_types = {rule.alert_type for rule in reg._rules}
@@ -110,6 +110,7 @@ class TestLoadDefaultRegistry:
             "order_rejected",
             "position_stop_loss_fired",
             "critical_system_error",
+            "margin_warning",
         }
 
     def test_default_prefixes_cover_all_three_topic_families(self) -> None:

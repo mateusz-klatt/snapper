@@ -178,3 +178,26 @@ class TestOrderRejectedRule:
         )
 
         assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_skips_margin_keyword_rejections(self) -> None:
+        """Margin-keyword rejections are partitioned out to ``MarginWarningRule``.
+
+        Both rules subscribe to ``orders.events.`` so the registry
+        dispatches every ``.rejected`` event to both. The shared
+        ``is_margin_related_rejection`` predicate keeps each rule's
+        emission set disjoint so the user gets one alert per event,
+        not two.
+        """
+        rule = OrderRejectedRule()
+        repo = MagicMock()
+        repo.list_alert_events_with_dedup_key = AsyncMock(return_value=[])
+
+        rows = await rule.evaluate(
+            "orders.events.kraken.BTC-USD.rejected",
+            _order(reason="Margin requirement not met"),
+            repo,
+            _now(),
+        )
+
+        assert rows == []

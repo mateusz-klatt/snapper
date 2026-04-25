@@ -25,10 +25,10 @@ class AlertRule(ABC):
     """Observes upstream ZMQ event topic(s) and produces alert rows.
 
     Attributes:
-        alert_type: One of the 4 enumerated v1.11 P0 alert types —
+        alert_type: One of the 5 enumerated P0 alert types —
             ``"order_fill_full"`` / ``"order_rejected"`` /
-            ``"position_stop_loss_fired"`` / ``"critical_system_error"``.
-            ``"margin_warning"`` is deferred to a future plan.
+            ``"position_stop_loss_fired"`` / ``"critical_system_error"``
+            / ``"margin_warning"``.
         subscribe_topic_prefixes: Tuple of ZMQ topic prefix strings
             the sidecar subscribes on behalf of this rule. Tuple
             (rather than a single string) is required by Rule 4's
