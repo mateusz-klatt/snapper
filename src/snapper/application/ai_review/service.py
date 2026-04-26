@@ -32,22 +32,43 @@ hang on a future the listener can't see. Tests reset the singleton via
 """
 
 import asyncio
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from uuid import uuid7
 
 from loguru import logger
 
 from snapper.auth.scope_grant_service import ScopeGrantService
+from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
 from snapper.core.types import AiReviewDecisionEnum
 from snapper.core.types import AiReviewEventTypeEnum
 from snapper.core.types import AiReviewResolutionModeEnum
 from snapper.core.types import AiReviewStatusEnum
 from snapper.data.repository import Repository
+from snapper.data.repository_types import AiReviewEventInsertRow
+from snapper.data.repository_types import AiReviewInsertRow
 from snapper.data.repository_types import AiReviewRow
 from snapper.messaging.infrastructure.publisher import MessagePublisher
+
+DEFAULT_HEARTBEAT_WINDOW_SECONDS = 15
+"""Plan A Q10 v1.3 + Q17 cross-plan lock — liveness threshold for admission control.
+
+Plan C client-side heartbeat MUST send at ``heartbeat_interval ≤ window/2``
+(default 7s) so a healthy delegate never appears offline mid-cycle.
+"""
+
+DEFAULT_FANOUT_AFTER_SECONDS = 30
+"""Plan A Q4 v1.4 — when fanout fires if the selected delegate stays silent.
+
+Cross-plan invariant: fanout_after MUST be > heartbeat_window so the offline
+scanner has at least one window's worth of evidence the delegate is gone
+before re-dispatch fires.
+"""
 
 ERROR_REVIEW_NOT_FOUND = "review_not_found"
 """Plan A Q14 envelope error code — caller passed an unknown review_id."""
@@ -128,6 +149,104 @@ class DelegateBusyError(Exception):
     retry against, distinct from :class:`NoLiveDelegateError` (which means
     there is nobody to wait for).
     """
+
+
+@dataclass(slots=True, frozen=True)
+class AiReviewCreateRequest:
+    """Strategy-side payload for :meth:`AiReviewService.create_review`.
+
+    Bundles the scope identifiers (user/operator/wallet/instrument/strategy)
+    with the data fields (signal envelope, instrument metadata, deadline,
+    bus origin) so the service signature stays short. The strategy
+    primitive (Plan D §8 ``StrategyContext.create_ai_review``) builds this
+    request from the live ``SignalData`` envelope and the resolved scope
+    of the strategy's run-time context.
+
+    Attributes:
+        user_public_id: Owner of the strategy issuing the CONSULT
+            (Q9 step 1 v1.4 fix — DISTINCT from delegate users).
+        operator_public_id: Operator scope under which the strategy
+            is consulting; admission control filters delegates to this
+            operator's members.
+        wallet_public_id: Wallet the resulting trade would settle on;
+            used by the scope-grant pre-check.
+        instrument_public_id: Instrument the strategy is signalling on.
+        strategy_public_id: Origin strategy public_id stored on the
+            review row for operator-dashboard filtering.
+        signal_envelope: Strategy-side signal payload persisted as JSON.
+        instrument_metadata: Instrument snapshot persisted as JSON for
+            the delegate's offline reasoning (``requires_ai_review``,
+            liquidity hints, ...).
+        deadline_seconds: How long the strategy will wait for a decision
+            before falling through. Plan A Q4 typical range 5-30s.
+        session_id: Strategy's bus session UUID at creation.
+        sequence_id: Strategy's monotonic sequence at creation.
+    """
+
+    user_public_id: str
+    operator_public_id: str
+    wallet_public_id: str
+    instrument_public_id: str
+    strategy_public_id: str
+    signal_envelope: JsonObject
+    instrument_metadata: JsonObject
+    deadline_seconds: int
+    session_id: str
+    sequence_id: int
+
+
+@dataclass(slots=True, frozen=True)
+class AiReviewAdmissionPolicy:
+    """Liveness + fanout windows for admission control.
+
+    Cross-plan invariant: ``fanout_after_seconds`` MUST exceed
+    ``heartbeat_window_seconds`` so the offline scanner has at least one
+    window's worth of evidence the delegate is gone before re-dispatch
+    fires. Tests override these for fast-clock liveness scenarios; the
+    defaults match the Plan A v1.4 cross-plan locks.
+    """
+
+    heartbeat_window_seconds: int = DEFAULT_HEARTBEAT_WINDOW_SECONDS
+    fanout_after_seconds: int = DEFAULT_FANOUT_AFTER_SECONDS
+
+
+_DEFAULT_AI_REVIEW_ADMISSION_POLICY = AiReviewAdmissionPolicy()
+
+
+@dataclass(slots=True)
+class AiReviewCreated:
+    """Result envelope for a successful :meth:`AiReviewService.create_review`.
+
+    The strategy primitive (Plan D §8 ``StrategyContext.create_ai_review``)
+    forwards ``review_public_id`` to its await loop and registers a future
+    keyed on it. ``selected_delegate_public_id`` lets the caller log which
+    delegate received the dispatch — useful for operator dashboards and for
+    correlating the eventual ``ai_review_decision`` bus message back to the
+    candidate that won admission.
+
+    Attributes:
+        review_public_id: UUID7 of the freshly inserted ``ai_reviews`` row.
+        selected_delegate_public_id: ``ai_delegates.public_id`` whose
+            ``active_reviews_count`` was incremented as part of the
+            atomic claim.
+    """
+
+    review_public_id: str
+    selected_delegate_public_id: str
+
+
+def _signal_envelope_hash(envelope: JsonObject) -> str:
+    """Canonical SHA-256 hex digest of the signal envelope.
+
+    Stored in the ``ai_reviews.signal_snapshot_hash`` column AND on the
+    ``ai_review_events.created`` payload so a consumer reconstructing the
+    audit trail can confirm the envelope it sees matches the one the
+    review was created from. ``sort_keys=True`` makes the hash stable
+    against dict-ordering differences across Python versions or libraries
+    that build the envelope.
+    """
+    canonical = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class AiReviewService:
@@ -220,6 +339,139 @@ class AiReviewService:
             The registered future or ``None`` if the id is unknown.
         """
         return self._futures.get(review_public_id)
+
+    async def create_review(
+        self,
+        request: AiReviewCreateRequest,
+        *,
+        repo: Repository,
+        now: datetime | None = None,
+        policy: AiReviewAdmissionPolicy = _DEFAULT_AI_REVIEW_ADMISSION_POLICY,
+    ) -> AiReviewCreated:
+        """Plan A v1.4 Q10 admission control + Plan D §3.1 INSERT.
+
+        Composes :meth:`Repository.list_eligible_delegates_for_ai_review`
+        (operator + scope + liveness filter) with
+        :meth:`Repository.claim_and_insert_ai_review` (atomic CAS claim
+        on ``ai_delegates.active_reviews_count`` + INSERT of the review
+        row + ``created`` audit event in one transaction). The
+        ``signal_snapshot_hash`` is computed from ``request.signal_envelope``
+        so the audit trail can verify the envelope a downstream consumer
+        sees matches the one admission control resolved on.
+
+        Bus publish of ``bus.ai_review_request`` is intentionally NOT
+        performed here — the publisher slot exists on the singleton but
+        the listener side lands in the next chunk (Plan D Phase 1
+        item 2 ``supersede_review`` + reaper + scanner). Until the
+        listener exists the publish would be a noisy no-op against the
+        empty bus topology.
+
+        Args:
+            request: Strategy-side payload bundling scope identifiers
+                + signal envelope + instrument metadata + deadline +
+                bus origin (session_id / sequence_id).
+            repo: Repository handle (single-transaction caller context).
+            now: Optional override for the wall-clock; tests inject a
+                fixed value so the deadline + audit timestamps are
+                deterministic.
+            policy: Liveness + fanout windows. Defaults to the Plan A
+                v1.4 cross-plan locks (15s heartbeat / 30s fanout);
+                tests override for fast-clock scenarios.
+
+        Returns:
+            :class:`AiReviewCreated` with the freshly inserted
+            ``review_public_id`` and the
+            ``selected_delegate_public_id`` admission control
+            picked.
+
+        Raises:
+            NoLiveDelegateError: No eligible AI delegate is live within
+                the heartbeat window for the operator + wallet +
+                instrument scope.
+            DelegateBusyError: Eligible delegates exist but every one
+                already has an in-flight review (Q10 caps each at one).
+        """
+        wall_clock = now if now is not None else datetime.now(UTC)
+        candidates = await repo.list_eligible_delegates_for_ai_review(
+            operator_public_id=request.operator_public_id,
+            wallet_public_id=request.wallet_public_id,
+            instrument_public_id=request.instrument_public_id,
+            heartbeat_window_seconds=policy.heartbeat_window_seconds,
+            as_of=wall_clock,
+        )
+        if not candidates:
+            raise NoLiveDelegateError(
+                f"No live AI delegate eligible for "
+                f"operator={request.operator_public_id} "
+                f"wallet={request.wallet_public_id} "
+                f"instrument={request.instrument_public_id} "
+                f"within {policy.heartbeat_window_seconds}s heartbeat window."
+            )
+
+        review_public_id = str(uuid7())
+        event_public_id = str(uuid7())
+        envelope_hash = _signal_envelope_hash(request.signal_envelope)
+        deadline = wall_clock + timedelta(seconds=request.deadline_seconds)
+        fanout_after = wall_clock + timedelta(seconds=policy.fanout_after_seconds)
+        candidate_ids = [candidate["public_id"] for candidate in candidates]
+
+        review_data: AiReviewInsertRow = {
+            "public_id": review_public_id,
+            "session_id": request.session_id,
+            "sequence_id": request.sequence_id,
+            "user_public_id": request.user_public_id,
+            "operator_public_id": request.operator_public_id,
+            "wallet_public_id": request.wallet_public_id,
+            "instrument_public_id": request.instrument_public_id,
+            "strategy_public_id": request.strategy_public_id,
+            "selected_delegate_public_id": candidate_ids[0],
+            "status": AiReviewStatusEnum.PENDING.value,
+            "signal_envelope": request.signal_envelope,
+            "signal_snapshot_hash": envelope_hash,
+            "instrument_metadata": request.instrument_metadata,
+            "deadline": deadline,
+            "fanout_after": fanout_after,
+            "dispatch_version": 0,
+            "created_at": wall_clock,
+            "updated_at": wall_clock,
+        }
+        event_data: AiReviewEventInsertRow = {
+            "public_id": event_public_id,
+            "review_public_id": review_public_id,
+            "event_type": AiReviewEventTypeEnum.CREATED.value,
+            "actor_delegate_public_id": None,
+            "previous_status": None,
+            "new_status": AiReviewStatusEnum.PENDING.value,
+            "payload": {
+                "signal_snapshot_hash": envelope_hash,
+                "dispatch_version": 0,
+            },
+            "occurred_at": wall_clock,
+        }
+
+        selected = await repo.claim_and_insert_ai_review(
+            candidate_delegate_public_ids=candidate_ids,
+            review_data=review_data,
+            event_data=event_data,
+            now=wall_clock,
+        )
+        if selected is None:
+            raise DelegateBusyError(
+                f"All {len(candidate_ids)} eligible delegate(s) busy for "
+                f"operator={request.operator_public_id} "
+                f"wallet={request.wallet_public_id} "
+                f"instrument={request.instrument_public_id}."
+            )
+        logger.info(
+            "ai_review created",
+            review_public_id=review_public_id,
+            selected_delegate_public_id=selected,
+            candidate_count=len(candidate_ids),
+        )
+        return AiReviewCreated(
+            review_public_id=review_public_id,
+            selected_delegate_public_id=selected,
+        )
 
     async def submit_decision(
         self,

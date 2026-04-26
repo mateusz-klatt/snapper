@@ -77,6 +77,7 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.pool import StaticPool
 
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
+from snapper.auth.domain.roles import UserRole
 from snapper.core.json_types import JsonObject
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
@@ -3299,6 +3300,99 @@ class Repository(ABC):
         Returns:
             ``True`` if this call won the claim and the decrement was
             applied; ``False`` if a peer already decremented.
+        """
+        ...
+
+    @abstractmethod
+    async def list_eligible_delegates_for_ai_review(
+        self,
+        *,
+        operator_public_id: str,
+        wallet_public_id: str,
+        instrument_public_id: str,
+        heartbeat_window_seconds: int,
+        as_of: datetime,
+    ) -> list[AiDelegateRow]:
+        """Plan A v1.4 Q10 + Plan D §3.1.a — eligible AI-delegate candidates.
+
+        Returns the ``ai_delegates`` rows whose users are members of
+        ``operator_public_id`` and whose ``last_seen_at`` falls inside the
+        heartbeat window (``as_of - heartbeat_window_seconds``, ``as_of``],
+        ordered by ``last_seen_at DESC``. Pre-checks that the operator
+        actually holds a matching active scope grant (instrument-direct OR
+        underlying-expanded via ``InstrumentUnderlyingMapping``) for the
+        ``(wallet, instrument)`` tuple — when no grant exists the list is
+        empty regardless of how many delegates are live.
+
+        Used by :meth:`AiReviewService.create_review` admission control to
+        compose the candidate list passed to
+        :meth:`claim_and_insert_ai_review`. The order returned is the order
+        the service tries to claim — most-recently-seen first, matching the
+        Plan A v1.4 §3.4 freshness preference.
+
+        Args:
+            operator_public_id: Operator the strategy is consulting under.
+                Delegates must have an active ``UserOperatorMembership`` to
+                this operator AND that operator must hold the scope grant.
+            wallet_public_id: Wallet the eventual trade would settle on.
+            instrument_public_id: Instrument the strategy is signalling on.
+            heartbeat_window_seconds: Liveness threshold (Plan A Q10 v1.3
+                lock — default 15s; the service passes the configured
+                value through).
+            as_of: Wall-clock used for SCD2-active filtering on users,
+                memberships, grants, and underlying mappings.
+
+        Returns:
+            Eligible :class:`AiDelegateRow` rows ordered by
+            ``last_seen_at DESC``. Empty when the operator has no matching
+            grant, no AI_DELEGATE members, or no live members.
+        """
+        ...
+
+    @abstractmethod
+    async def claim_and_insert_ai_review(
+        self,
+        *,
+        candidate_delegate_public_ids: list[str],
+        review_data: AiReviewInsertRow,
+        event_data: AiReviewEventInsertRow,
+        now: datetime,
+    ) -> str | None:
+        """Plan A v1.4 Q10 + Plan D §3.1.d-e — atomic claim + INSERT.
+
+        Iterates ``candidate_delegate_public_ids`` in order. For each, runs
+        a CAS UPDATE on ``ai_delegates`` setting
+        ``active_reviews_count = active_reviews_count + 1`` with predicate
+        ``active_reviews_count = 0``. The first candidate whose UPDATE
+        affects a row is the claim winner: the same transaction then
+        INSERTs the ``ai_reviews`` row (with ``selected_delegate_public_id``
+        rewritten to the claimed candidate) plus the ``ai_review_events``
+        ``created`` audit row, and COMMITs.
+
+        Single-transaction semantics: an INSERT failure rolls the whole
+        transaction back including the claim, so the counter never leaks.
+        Earlier candidates that lost the CAS (rowcount=0) made no data
+        change so there is nothing to roll back for them either.
+
+        Args:
+            candidate_delegate_public_ids: Ordered candidates from
+                :meth:`list_eligible_delegates_for_ai_review`. The caller
+                MUST handle the empty-list case (no live delegate) by
+                raising before invoking this method — passing an empty list
+                here returns ``None`` and is indistinguishable from the
+                all-busy outcome.
+            review_data: :class:`AiReviewInsertRow`. The
+                ``selected_delegate_public_id`` field is overwritten with
+                the actually-claimed candidate before INSERT.
+            event_data: :class:`AiReviewEventInsertRow` for the matching
+                ``created`` audit row. ``review_public_id`` MUST already
+                point to ``review_data["public_id"]``.
+            now: Wall-clock used for ``ai_delegates.updated_at`` on the
+                winning claim.
+
+        Returns:
+            The claimed ``ai_delegates.public_id`` on success; ``None``
+            when every candidate's CAS lost (all busy).
         """
         ...
 
@@ -9703,6 +9797,140 @@ class SQLAlchemyRepository(Repository):
             await s.execute(decrement_stmt)
             await s.commit()
             return True
+
+    async def list_eligible_delegates_for_ai_review(
+        self,
+        *,
+        operator_public_id: str,
+        wallet_public_id: str,
+        instrument_public_id: str,
+        heartbeat_window_seconds: int,
+        as_of: datetime,
+    ) -> list[AiDelegateRow]:
+        """Plan A v1.4 Q10 + Plan D §3.1.a admission-control candidate list.
+
+        Two-step query: first confirm the operator holds a matching
+        scope grant (cheap LIMIT 1 lookup over instrument-direct then
+        underlying-expanded shapes), then list live delegates whose
+        users are members of that operator. Splitting the grant check
+        from the delegate query keeps the JOIN trees shallow on
+        SQLite (which optimises poorly for >3-way JOINs) while still
+        producing a single answer per call.
+        """
+        async with self.session() as s:
+            grant_id = (
+                await s.execute(
+                    select(WalletOperatorScopeGrant.id)
+                    .where(
+                        WalletOperatorScopeGrant.operator_public_id == operator_public_id,
+                        WalletOperatorScopeGrant.wallet_public_id == wallet_public_id,
+                        WalletOperatorScopeGrant.scope_kind == "instrument",
+                        WalletOperatorScopeGrant.instrument_public_id == instrument_public_id,
+                        *where_active(WalletOperatorScopeGrant, as_of),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if grant_id is None:
+                grant_id = (
+                    await s.execute(
+                        select(WalletOperatorScopeGrant.id)
+                        .join(
+                            InstrumentUnderlyingMapping,
+                            InstrumentUnderlyingMapping.underlying_public_id
+                            == WalletOperatorScopeGrant.underlying_public_id,
+                        )
+                        .where(
+                            WalletOperatorScopeGrant.operator_public_id == operator_public_id,
+                            WalletOperatorScopeGrant.wallet_public_id == wallet_public_id,
+                            WalletOperatorScopeGrant.scope_kind == "underlying",
+                            InstrumentUnderlyingMapping.instrument_public_id
+                            == instrument_public_id,
+                            *where_active(WalletOperatorScopeGrant, as_of),
+                            *where_active(InstrumentUnderlyingMapping, as_of),
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+            if grant_id is None:
+                return []
+            threshold = as_of - timedelta(seconds=heartbeat_window_seconds)
+            delegates = (
+                (
+                    await s.execute(
+                        select(AiDelegate)
+                        .join(User, User.public_id == AiDelegate.user_public_id)
+                        .join(
+                            UserOperatorMembership,
+                            UserOperatorMembership.user_public_id == AiDelegate.user_public_id,
+                        )
+                        .where(
+                            User.role == UserRole.AI_DELEGATE.value,
+                            UserOperatorMembership.operator_public_id == operator_public_id,
+                            AiDelegate.last_seen_at.is_not(None),
+                            AiDelegate.last_seen_at > threshold,
+                            *where_active(User, as_of),
+                            *where_active(UserOperatorMembership, as_of),
+                        )
+                        .order_by(AiDelegate.last_seen_at.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [
+                cast(
+                    AiDelegateRow,
+                    {
+                        "public_id": d.public_id,
+                        "user_public_id": d.user_public_id,
+                        "last_seen_at": d.last_seen_at,
+                        "active_reviews_count": d.active_reviews_count,
+                        "created_at": d.created_at,
+                        "updated_at": d.updated_at,
+                    },
+                )
+                for d in delegates
+            ]
+
+    async def claim_and_insert_ai_review(
+        self,
+        *,
+        candidate_delegate_public_ids: list[str],
+        review_data: AiReviewInsertRow,
+        event_data: AiReviewEventInsertRow,
+        now: datetime,
+    ) -> str | None:
+        """Plan A v1.4 Q10 + Plan D §3.1.d-e atomic claim + INSERT.
+
+        Iterates candidates in order; first one whose CAS UPDATE wins
+        also gets INSERTed against. INSERT failure rolls the whole
+        transaction back so no counter leaks; earlier CAS losers
+        produced no data change and need no rollback.
+        """
+        async with self.session() as s:
+            for candidate_id in candidate_delegate_public_ids:
+                claim_stmt = (
+                    update(AiDelegate)
+                    .where(
+                        AiDelegate.public_id == candidate_id,
+                        AiDelegate.active_reviews_count == 0,
+                    )
+                    .values(
+                        active_reviews_count=AiDelegate.active_reviews_count + 1,
+                        updated_at=now,
+                    )
+                )
+                claim_result = await s.execute(claim_stmt)
+                if int(cast(Any, claim_result).rowcount or 0) == 0:
+                    continue
+                review_payload = dict(review_data)
+                review_payload["selected_delegate_public_id"] = candidate_id
+                s.add(AiReview(**review_payload))
+                s.add(AiReviewEvent(**event_data))
+                await s.commit()
+                return candidate_id
+            return None
 
 
 _repository_cache: dict[str, Repository] = {}
