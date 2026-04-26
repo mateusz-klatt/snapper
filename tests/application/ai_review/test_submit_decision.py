@@ -35,6 +35,7 @@ from snapper.core.types import AiReviewStatusEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import AiReviewDecisionAckFrameData
 from snapper.messaging.schemas.data import AiReviewDecisionData
 
 TEST_TIMEOUT = 15
@@ -843,10 +844,17 @@ async def test_submit_decision_publishes_bus_event_after_commit(
         now=now,
     )
     assert result.error_code is None
-    publisher.send.assert_awaited_once()
-    topic, payload = publisher.send.await_args.args
+    bus_call = next(
+        (
+            call
+            for call in publisher.send.await_args_list
+            if isinstance(call.args[1], AiReviewDecisionData)
+        ),
+        None,
+    )
+    assert bus_call is not None
+    topic, payload = bus_call.args
     assert topic == "bus.ai_review_decision"
-    assert isinstance(payload, AiReviewDecisionData)
     assert payload.review_public_id == review_id
     assert payload.responding_delegate_public_id == delegate_pid
     assert payload.decision == "approve"
@@ -910,3 +918,116 @@ async def test_submit_decision_does_not_publish_on_terminal_shortcut(
     )
     assert second.error_code == ERROR_DECISION_ALREADY_RECORDED
     publisher.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_submit_decision_publishes_external_decision_ack_frame_post_commit(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Plan A §4.2 / Q16 + Phase 2 #7 — post-commit external WS fanout.
+
+    Given a configured AiReviewService with a wired publisher + a
+        pending review,
+    When submit_decision approves the review with a rationale,
+    Then publisher.send is awaited TWICE: once for
+        ``bus.ai_review_decision`` (Phase 2 #3 fast-path) AND once
+        for ``ai_reviews.{user}.{strategy}.decision_ack`` (this
+        chunk's external WS fanout). The decision_ack payload carries
+        every routing field at top-level, the responding delegate +
+        decision + new_status + rationale, and the dispatch_version
+        from the atomic resolve.
+    """
+    svc = AiReviewService.get_instance()
+    publisher = MagicMock()
+    publisher.send = AsyncMock()
+    publisher.tracker = SequenceTracker()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    now = _now()
+    user_pid = str(uuid7())
+    delegate_pid = await _seed_delegate(repo, user_public_id=user_pid, as_of=now)
+    review_id = await _seed_pending_review(
+        repo, selected_delegate_public_id=delegate_pid, as_of=now
+    )
+    result = await svc.submit_decision(
+        review_public_id=review_id,
+        caller_user_public_id=user_pid,
+        decision=AiReviewDecisionEnum.APPROVE,
+        rationale="LGTM",
+        repo=repo,
+        scope_grant_service=_FakeScopeGrantService(),
+        now=now,
+    )
+    assert result.error_code is None
+    assert publisher.send.await_count == 2
+    decision_ack_call = next(
+        (
+            call
+            for call in publisher.send.await_args_list
+            if isinstance(call.args[1], AiReviewDecisionAckFrameData)
+        ),
+        None,
+    )
+    assert decision_ack_call is not None
+    topic, payload = decision_ack_call.args
+    review_row = await repo.get_ai_review(review_id)
+    assert review_row is not None
+    expected_topic = (
+        f"ai_reviews.{review_row['user_public_id']}.{review_row['strategy_public_id']}.decision_ack"
+    )
+    assert topic == expected_topic
+    assert payload.type == "ai_review.decision_ack"
+    assert payload.review_public_id == review_id
+    assert payload.user_public_id == review_row["user_public_id"]
+    assert payload.strategy_public_id == review_row["strategy_public_id"]
+    assert payload.wallet_public_id == review_row["wallet_public_id"]
+    assert payload.instrument_public_id == review_row["instrument_public_id"]
+    assert payload.responding_delegate_public_id == delegate_pid
+    assert payload.decision == "approve"
+    assert payload.new_status == "resolved_approved"
+    assert payload.resolution_mode == "pick_one_primary"
+    assert payload.rationale == "LGTM"
+    assert payload.dispatch_version == result.dispatch_version
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_submit_decision_ack_publish_failure_does_not_mask_result(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Decision_ack send failure -> log + still return AiReviewDecisionResult.
+
+    Mirrors the Phase 2 #2/#3/#6 best-effort guarantee: the post-commit
+    decision result is the primary contract; the WS fanout is
+    auxiliary. A broker hiccup must NOT replace the success envelope
+    the AI delegate's MCP tool call sees.
+
+    Given a publisher whose send() raises RuntimeError on every call,
+    When submit_decision approves a pending review,
+    Then the AiReviewDecisionResult still returns success
+        (error_code is None) and the row is persisted as resolved.
+    """
+    svc = AiReviewService.get_instance()
+    publisher = MagicMock()
+    publisher.send = AsyncMock(side_effect=RuntimeError("broker down"))
+    publisher.tracker = SequenceTracker()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    now = _now()
+    user_pid = str(uuid7())
+    delegate_pid = await _seed_delegate(repo, user_public_id=user_pid, as_of=now)
+    review_id = await _seed_pending_review(
+        repo, selected_delegate_public_id=delegate_pid, as_of=now
+    )
+    result = await svc.submit_decision(
+        review_public_id=review_id,
+        caller_user_public_id=user_pid,
+        decision=AiReviewDecisionEnum.APPROVE,
+        rationale="LGTM",
+        repo=repo,
+        scope_grant_service=_FakeScopeGrantService(),
+        now=now,
+    )
+    assert result.error_code is None
+    row = await repo.get_ai_review(review_id)
+    assert row is not None
+    assert row["status"] == "resolved_approved"

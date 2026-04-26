@@ -63,6 +63,32 @@ describe('parseWsMessage', () => {
     expect(result).toMatchObject(message)
   })
 
+  it('parses ai_review.decision_ack frames published by Phase 2 #7', () => {
+    const message = {
+      type: 'ai_review.decision_ack',
+      sequence_id: 1,
+      public_id: '019dcb07-c3d4-7273-a015-d3878107c92e',
+      timestamp: '2026-04-26T19:35:00.000Z',
+      session_id: 'sess-xyz',
+      review_public_id: 'rev-abc',
+      user_public_id: 'user-1',
+      strategy_public_id: 'strat-1',
+      wallet_public_id: 'wal-1',
+      instrument_public_id: 'inst-1',
+      responding_delegate_public_id: 'del-1',
+      decision: 'approve',
+      new_status: 'resolved_approved',
+      resolution_mode: 'pick_one_primary',
+      rationale: 'LGTM',
+      dispatch_version: 1,
+    }
+    const result = parseWsMessage(message)
+
+    expect(result).not.toBeNull()
+    expect(result?.type).toBe('ai_review.decision_ack')
+    expect(result).toMatchObject(message)
+  })
+
   it('parses ai_review.caps_violation frames published by Phase 2 #2', () => {
     const message = {
       type: 'ai_review.caps_violation',

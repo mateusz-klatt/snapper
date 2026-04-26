@@ -204,6 +204,44 @@ struct AiReviewCapsViolationFrameData: Codable, Sendable {
     }
 }
 
+struct AiReviewDecisionAckFrameData: Codable, Sendable {
+    let type: String
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let reviewPublicId: String
+    let userPublicId: String
+    let strategyPublicId: String
+    let walletPublicId: String
+    let instrumentPublicId: String
+    let respondingDelegatePublicId: String
+    let decision: String
+    let newStatus: String
+    let resolutionMode: String
+    let rationale: String?
+    let dispatchVersion: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case reviewPublicId = "review_public_id"
+        case userPublicId = "user_public_id"
+        case strategyPublicId = "strategy_public_id"
+        case walletPublicId = "wallet_public_id"
+        case instrumentPublicId = "instrument_public_id"
+        case respondingDelegatePublicId = "responding_delegate_public_id"
+        case decision
+        case newStatus = "new_status"
+        case resolutionMode = "resolution_mode"
+        case rationale
+        case dispatchVersion = "dispatch_version"
+    }
+}
+
 struct AiReviewDecisionData: Codable, Sendable {
     let type: String
     let sequenceId: Int

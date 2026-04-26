@@ -64,6 +64,7 @@ from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import AiReviewCapsViolationFrameData
+from snapper.messaging.schemas.data import AiReviewDecisionAckFrameData
 from snapper.messaging.schemas.data import AiReviewDecisionData
 from snapper.messaging.schemas.data import AiReviewRequestFrameData
 from snapper.messaging.schemas.data import CapsViolationAfterAiApproveData
@@ -1016,6 +1017,20 @@ class AiReviewService:
             dispatch_version=int(atomic["dispatch_version"]),
             wall_clock=wall_clock,
         )
+        await self._publish_decision_ack_external_frame(
+            review_public_id=review_public_id,
+            user_public_id=review["user_public_id"],
+            strategy_public_id=review["strategy_public_id"],
+            wallet_public_id=review["wallet_public_id"],
+            instrument_public_id=review["instrument_public_id"],
+            responding_delegate_public_id=delegate_public_id,
+            decision=decision.value,
+            new_status=new_status.value,
+            resolution_mode=resolution_mode.value,
+            rationale=rationale,
+            dispatch_version=int(atomic["dispatch_version"]),
+            wall_clock=wall_clock,
+        )
         return AiReviewDecisionResult(
             error_code=None,
             message="Decision recorded.",
@@ -1024,6 +1039,86 @@ class AiReviewService:
             dispatch_version=int(atomic["dispatch_version"]),
             details={"previous_status": atomic["previous_status"]},
         )
+
+    async def _publish_decision_ack_external_frame(
+        self,
+        *,
+        review_public_id: str,
+        user_public_id: str,
+        strategy_public_id: str,
+        wallet_public_id: str,
+        instrument_public_id: str,
+        responding_delegate_public_id: str,
+        decision: str,
+        new_status: str,
+        resolution_mode: str,
+        rationale: str | None,
+        dispatch_version: int,
+        wall_clock: datetime,
+    ) -> None:
+        """Plan A §4.2 / Q16 — emit external WS frame acknowledging the decision.
+
+        Best-effort + race-safe (mirrors
+        :meth:`_publish_request_external_frame` +
+        :meth:`_publish_decision_bus_event`): publisher captured into
+        a local BEFORE any await; entire branch wrapped in a single
+        try/except so transport errors CAN'T replace the post-commit
+        :class:`AiReviewDecisionResult` envelope. The DB-side resolve
+        is the primary contract; the external WS fanout is auxiliary
+        — a lost frame degrades to the operator dashboard's REST
+        fallback poll on
+        ``GET /api/ai-reviews/pending`` (or REST detail).
+
+        Args:
+            review_public_id: Resolved review id.
+            user_public_id: Owner of the consulting strategy.
+            strategy_public_id: Origin strategy.
+            wallet_public_id: Wallet the strategy would have traded on.
+            instrument_public_id: Instrument the strategy consulted on.
+            responding_delegate_public_id: Decision actor.
+            decision: ``"approve"`` / ``"reject"`` (Plan A Q9).
+            new_status: Terminal status string.
+            resolution_mode: Plan A Q4 enum value.
+            rationale: Optional delegate-supplied rationale, surfaced
+                on the operator dashboard next to the decision.
+            dispatch_version: Q18 dedup key from the atomic resolve.
+            wall_clock: Decision wall clock — reused as the frame
+                timestamp so audit + WS fanout correlate.
+        """
+        publisher = self._msg_publisher
+        if publisher is None:
+            logger.warning(
+                "ai_reviews decision_ack frame NOT broadcast for "
+                f"review_public_id={review_public_id}: AiReviewService publisher unavailable"
+            )
+            return
+        topic = f"ai_reviews.{user_public_id}.{strategy_public_id}.decision_ack"
+        try:
+            tracker = publisher.tracker
+            payload = AiReviewDecisionAckFrameData(
+                public_id=str(uuid7()),
+                timestamp=wall_clock,
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence(topic),
+                review_public_id=review_public_id,
+                user_public_id=user_public_id,
+                strategy_public_id=strategy_public_id,
+                wallet_public_id=wallet_public_id,
+                instrument_public_id=instrument_public_id,
+                responding_delegate_public_id=responding_delegate_public_id,
+                decision=decision,
+                new_status=new_status,
+                resolution_mode=resolution_mode,
+                rationale=rationale,
+                dispatch_version=dispatch_version,
+            )
+            await publisher.send(topic, payload)
+        except Exception as publish_exc:
+            logger.exception(
+                "AiReviewService: failed to broadcast ai_reviews decision_ack frame for "
+                f"review_public_id={review_public_id}: {publish_exc} "
+                "(decision is committed; dashboards fall back to REST)"
+            )
 
     async def _publish_decision_bus_event(
         self,

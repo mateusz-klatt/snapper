@@ -34,6 +34,27 @@ export const AiReviewCapsViolationFrameDataSchema = z
   })
   .strict()
 
+export const AiReviewDecisionAckFrameDataSchema = z
+  .object({
+    type: z.literal('ai_review.decision_ack'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    review_public_id: z.string(),
+    user_public_id: z.string(),
+    strategy_public_id: z.string(),
+    wallet_public_id: z.string(),
+    instrument_public_id: z.string(),
+    responding_delegate_public_id: z.string(),
+    decision: z.string(),
+    new_status: z.string(),
+    resolution_mode: z.string(),
+    rationale: z.string().nullable(),
+    dispatch_version: z.number().int(),
+  })
+  .strict()
+
 export const AiReviewDecisionDataSchema = z
   .object({
     type: z.literal('ai_review_decision'),

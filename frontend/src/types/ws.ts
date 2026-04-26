@@ -1,5 +1,6 @@
 export type {
   AiReviewCapsViolationFrameData,
+  AiReviewDecisionAckFrameData,
   AiReviewRequestFrameData,
   BacktestProgressData,
   TickData,
@@ -38,6 +39,7 @@ export type {
 } from './ws.generated'
 import type {
   AiReviewCapsViolationFrameData,
+  AiReviewDecisionAckFrameData,
   AiReviewRequestFrameData,
   BacktestProgressData,
   TickData,
@@ -77,6 +79,7 @@ import type {
 
 export type WebSocketMessages =
   | AiReviewCapsViolationFrameData
+  | AiReviewDecisionAckFrameData
   | AiReviewRequestFrameData
   | BacktestProgressData
   | TickData

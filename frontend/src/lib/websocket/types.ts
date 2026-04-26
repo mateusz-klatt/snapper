@@ -1,5 +1,6 @@
 import type {
   AiReviewCapsViolationFrameData,
+  AiReviewDecisionAckFrameData,
   AiReviewRequestFrameData,
   BacktestProgressData,
   WebSocketMessages,
@@ -45,6 +46,7 @@ export interface WebSocketMessageTypeMap {
   pong: WSPongResponse
   backtest_progress: BacktestProgressData
   'ai_review.request': AiReviewRequestFrameData
+  'ai_review.decision_ack': AiReviewDecisionAckFrameData
   'ai_review.caps_violation': AiReviewCapsViolationFrameData
 }
 export type WebSocketMessageType = keyof WebSocketMessageTypeMap

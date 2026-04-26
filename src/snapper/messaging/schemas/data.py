@@ -631,6 +631,68 @@ class AiReviewRequestFrameData(StrictDataSchema[Literal["ai_review.request"]]):
     dispatch_version: int
 
 
+class AiReviewDecisionAckFrameData(StrictDataSchema[Literal["ai_review.decision_ack"]]):
+    """Plan A §4.2 / Q16 — external WS frame acknowledging a decision.
+
+    Published by :meth:`AiReviewService.submit_decision` (sole
+    publisher) AFTER the atomic resolve commits + the audit event +
+    the counter decrement + the internal
+    ``bus.ai_review_decision`` fast-path event. Targets the
+    ``ai_reviews.{user_public_id}.{strategy_public_id}.decision_ack``
+    topic so the operator dashboard + the originating delegate can
+    surface the decision in real-time without polling REST.
+
+    Distinct from the internal ``bus.ai_review_decision`` event
+    (Phase 2 #3): that event drives the strategy primitive's
+    in-process Future fast-path; this frame drives the bridge fanout
+    to WS subscribers (delegate UIs + operator dashboards). Both
+    fire from the same submit_decision post-commit chain but go to
+    different subscribers via different topic families.
+
+    Routing fields stay at envelope top-level so the bridge
+    per-frame scope filter (Plan A Q15) reads
+    ``wallet_public_id`` + ``instrument_public_id`` directly without
+    descending into the nested payload.
+
+    Q18 dedup: ``dispatch_version`` is the resolved review row's
+    counter (incremented atomically by ``atomic_resolve_ai_review``).
+    A re-fanout of the same decision after the row's version bumps
+    surfaces as a fresh frame to the delegate UI.
+
+    Attributes:
+        review_public_id: UUID7 of the resolved ``ai_reviews`` row.
+        user_public_id: Owner of the consulting strategy.
+        strategy_public_id: Origin strategy.
+        wallet_public_id: Wallet the strategy would trade on.
+        instrument_public_id: Instrument the strategy consulted on.
+        responding_delegate_public_id: ``ai_delegates.public_id`` of
+            the delegate whose decision resolved the row.
+        decision: Plan A Q9 enum value — ``"approve"`` or ``"reject"``.
+        new_status: Resolved row's terminal status
+            (``resolved_approved`` or ``resolved_rejected``).
+        resolution_mode: Plan A Q4 enum — ``pick_one_primary`` /
+            ``secondary_after_fanout`` / ``fanout_first_responder``.
+        rationale: Optional free-form rationale supplied by the
+            delegate, threaded onto the audit event payload + this
+            frame so the operator dashboard can show it next to the
+            decision.
+        dispatch_version: Plan A Q18 — bridge dedup key.
+    """
+
+    type: Literal["ai_review.decision_ack"] = "ai_review.decision_ack"
+    review_public_id: str
+    user_public_id: str
+    strategy_public_id: str
+    wallet_public_id: str
+    instrument_public_id: str
+    responding_delegate_public_id: str
+    decision: str
+    new_status: str
+    resolution_mode: str
+    rationale: str | None
+    dispatch_version: int
+
+
 class AiReviewCapsViolationFrameData(StrictDataSchema[Literal["ai_review.caps_violation"]]):
     """Plan A §4.2 / Q16 — external WS frame for caps violations.
 

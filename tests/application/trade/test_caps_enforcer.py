@@ -40,6 +40,7 @@ from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.data.repository import Repository
 from snapper.data.repository_types import UserRecentSubmitRow
 from snapper.data.repository_types import UserTradingCapsRow
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 _NOW = datetime(2026, 4, 18, 12, 0, 0, tzinfo=UTC)
 
@@ -594,8 +595,6 @@ def _ai_review_submission(
 
 def _publisher_with_tracker() -> MagicMock:
     """Build a MagicMock publisher with a real :class:`SequenceTracker`."""
-    from snapper.messaging.infrastructure.publisher import SequenceTracker
-
     publisher = MagicMock()
     publisher.send = AsyncMock()
     publisher.tracker = SequenceTracker()
