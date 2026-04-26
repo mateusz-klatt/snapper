@@ -526,6 +526,36 @@ class UserDeactivatedData(StrictDataSchema[Literal["user_deactivated"]]):
     reason: str | None = None
 
 
+class DelegateOfflineData(StrictDataSchema[Literal["delegate_offline"]]):
+    """Q17 Layer 1 fast-path event for an AI delegate that dropped its WS.
+
+    Published by :class:`WebSocketAuthManager` on the
+    ``bus.delegate_offline`` topic ONLY after a delay equal to
+    ``_delegate_offline_grace_seconds`` so a flapping reconnect within
+    the grace window cancels the publish before any subscriber observes
+    a phantom-offline transition. Sole subscriber per Plan D §3.5 is
+    ``AiReviewService``, which atomically CAS-fans-out matching pending
+    reviews (same UPDATE shape as the §3.4 Layer 2 scanner).
+
+    Attributes:
+        user_public_id: Owner of the AI_DELEGATE user row.
+        delegate_public_id: ``ai_delegates.public_id`` whose WS dropped.
+            Stable across reconnects for the same delegate user; used
+            by subscribers to look up affected ``ai_reviews`` rows by
+            ``selected_delegate_public_id``.
+        last_seen_at: Wall-clock at which the delayed publish fires
+            (= disconnect time + grace). Subscribers compare this to
+            ``ai_reviews.fanout_after`` to decide whether to dispatch
+            the fanout immediately or wait for the natural fanout
+            timer.
+    """
+
+    type: Literal["delegate_offline"] = "delegate_offline"
+    user_public_id: str
+    delegate_public_id: str
+    last_seen_at: datetime
+
+
 class ScopeRevokedData(StrictDataSchema[Literal["scope_revoked"]]):
     """Admin scope-revocation event for a wallet-operator scope grant.
 

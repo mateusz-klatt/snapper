@@ -28,10 +28,12 @@ from snapper.auth.tokens import get_token_manager
 from snapper.data.repository import Repository
 from snapper.interface.websocket.helpers import parse_wallet_scoped_topic
 from snapper.interface.websocket.schemas import WSErrorResponse
+from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
+from snapper.messaging.schemas.data import DelegateOfflineData
 from snapper.messaging.schemas.data import ScopeRevokedData
 from snapper.messaging.schemas.data import UserDeactivatedData
 
@@ -42,6 +44,23 @@ _ADMIN_SCOPE_REVOKED_TOPIC = "admin.scope_revoked"
 _ADMIN_LISTEN_RECV_BACKOFF_S = 0.1
 _KILL_SWITCH_REASON_MAX_BYTES = 123
 _SCOPE_REVOKED_ERROR_PREFIX = "topic_outside_scope"
+
+_BUS_DELEGATE_OFFLINE_TOPIC = "bus.delegate_offline"
+"""Plan D §3.5 internal-bus topic for delegate-offline fast-path notifications.
+
+Published by :class:`WebSocketAuthManager` after the configured grace
+window elapses without a reconnect; subscribed by ``AiReviewService``
+to atomically CAS-fan-out pending reviews. Backend-only — not registered
+in :data:`TOPIC_REGISTRY` because no WS client subscribes to it.
+"""
+
+DEFAULT_DELEGATE_OFFLINE_GRACE_SECONDS = 5
+"""Plan D §4 default grace window before a delegate disconnect publishes offline.
+
+A reconnect within this window cancels the pending publish so flapping
+WS connections never trigger a phantom-offline event for downstream
+subscribers (e.g. mid-traffic `ai_reviews` re-fanout).
+"""
 
 
 @dataclass(slots=True)
@@ -127,9 +146,13 @@ class WebSocketAuthManager:
         self._admin_running: bool = False
         self._admin_listener_lock = asyncio.Lock()
         self._scope_revoked_tracker = SequenceTracker()
+        self._delegate_offline_tracker = SequenceTracker()
         self.connection_manager: Any | None = None
         self.zmq_bridge: Any | None = None
         self.repository_factory: Callable[[], Repository] | None = None
+        self._msg_publisher: MessagePublisher | None = None
+        self._pending_offline_tasks: dict[str, asyncio.Task[None]] = {}
+        self._delegate_offline_grace_seconds: int = DEFAULT_DELEGATE_OFFLINE_GRACE_SECONDS
 
     def set_wiring(
         self,
@@ -359,6 +382,10 @@ class WebSocketAuthManager:
         """Disconnect and cleanup WebSocket connection.
 
         Removes connection from tracking and cancels expiration tasks.
+        AI-delegate hysteresis (Plan D §4 Q17 Layer 1) lives in the
+        async :meth:`on_disconnect` hook the WS dispatcher calls
+        alongside this synchronous cleanup so the offline publish can
+        run after the grace window without blocking close-path latency.
 
         Args:
             websocket: WebSocket connection to disconnect.
@@ -367,6 +394,188 @@ class WebSocketAuthManager:
         state = self._connection_states.pop(websocket, None)
         if state:
             self._cancel_tasks(state)
+
+    def set_msg_publisher(self, publisher: MessagePublisher | None) -> None:
+        """Inject the bus publisher used for ``bus.delegate_offline``.
+
+        Mirrors :meth:`ScopeGrantService.set_msg_publisher`: the FastAPI
+        lifespan calls this once the shared ZMQ PUB socket is available;
+        tests stub a fake publisher (or ``None`` to clear). Decoupling
+        socket ownership from the singleton keeps the manager trivially
+        testable without ZMQ.
+
+        Args:
+            publisher: Configured ``MessagePublisher`` or ``None`` to clear.
+        """
+        self._msg_publisher = publisher
+
+    def set_delegate_offline_grace_seconds(self, grace_seconds: int) -> None:
+        """Override the delayed-publish grace window (testing seam).
+
+        Plan D §4 default is 5s; tests override to a sub-second value so
+        the deferred-publish path can be exercised deterministically.
+
+        Args:
+            grace_seconds: New grace window in seconds. Must be positive.
+
+        Raises:
+            ValueError: ``grace_seconds`` is non-positive.
+        """
+        if grace_seconds <= 0:
+            raise ValueError(
+                f"delegate_offline_grace_seconds must be positive; got {grace_seconds}."
+            )
+        self._delegate_offline_grace_seconds = grace_seconds
+
+    async def on_authenticate(self, websocket: WebSocket, principal: AuthPrincipal) -> None:
+        """Cancel any pending offline publish for this delegate + bump last_seen_at.
+
+        Called from the WS dispatcher's authenticate path AFTER the
+        principal has been minted (via :meth:`verify_session_cookie` and
+        :meth:`register_connection`). Plan D §4 Q17 Layer 1 hysteresis:
+        a reconnect within :data:`DEFAULT_DELEGATE_OFFLINE_GRACE_SECONDS`
+        cancels the pending ``bus.delegate_offline`` task scheduled by
+        the prior :meth:`on_disconnect` so subscribers never observe a
+        phantom-offline transition for a flapping delegate.
+
+        Non-delegate principals short-circuit; only AI_DELEGATE
+        principals carry a populated ``delegate_public_id`` (Plan D Q19
+        ``AuthPrincipal`` extension).
+
+        Args:
+            websocket: WebSocket connection that just authenticated
+                (passed through for symmetry with future hooks; the
+                hysteresis logic itself is delegate-keyed).
+            principal: Resolved principal carrying
+                ``delegate_public_id`` for AI delegates.
+        """
+        del websocket
+        delegate_id = principal.delegate_public_id
+        if delegate_id is None:
+            return
+        pending = self._pending_offline_tasks.pop(delegate_id, None)
+        if pending is not None and not pending.done():
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending
+        if self.repository_factory is None:
+            logger.warning(
+                "WebSocketAuthManager.on_authenticate: skipping last_seen_at update "
+                "for delegate_public_id={} — repository_factory not wired",
+                delegate_id,
+            )
+            return
+        repo = self.repository_factory()
+        await repo.update_delegate_last_seen(delegate_id, datetime.now(UTC))
+
+    async def on_disconnect(self, websocket: WebSocket, principal: AuthPrincipal) -> None:
+        """Schedule a delayed ``bus.delegate_offline`` publish for an AI delegate.
+
+        Called from the WS dispatcher's disconnect path BEFORE (or
+        alongside) the synchronous :meth:`disconnect` cleanup. Plan D §4
+        hysteresis: the publish is deferred by
+        :data:`DEFAULT_DELEGATE_OFFLINE_GRACE_SECONDS` so a flapping
+        reconnect cancels it before any subscriber observes the
+        phantom-offline transition. If a prior pending task already
+        exists for this delegate it is cancelled first so only the
+        latest disconnect timestamp ever fires.
+
+        Non-delegate principals short-circuit; only AI_DELEGATE
+        principals carry a populated ``delegate_public_id``.
+
+        Args:
+            websocket: WebSocket connection that just dropped (passed
+                through for symmetry with future per-WS hooks).
+            principal: Resolved principal carrying
+                ``delegate_public_id`` for AI delegates.
+        """
+        del websocket
+        delegate_id = principal.delegate_public_id
+        if delegate_id is None:
+            return
+        existing = self._pending_offline_tasks.pop(delegate_id, None)
+        if existing is not None and not existing.done():
+            existing.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await existing
+        self._pending_offline_tasks[delegate_id] = asyncio.create_task(
+            self._delayed_offline_publish(
+                user_public_id=principal.user_public_id,
+                delegate_public_id=delegate_id,
+            )
+        )
+
+    async def _delayed_offline_publish(
+        self, *, user_public_id: str, delegate_public_id: str
+    ) -> None:
+        """Sleep the grace window, then publish ``bus.delegate_offline``.
+
+        Cancellation by :meth:`on_authenticate` (or by a follow-up
+        :meth:`on_disconnect` cancelling the prior task before
+        scheduling the next one) lets the ``CancelledError`` propagate
+        as the task's terminal state — callers wrap the await in
+        ``contextlib.suppress(asyncio.CancelledError)`` so the
+        cancellation is observed without the asyncio task graph seeing
+        it as an unhandled exception. Publish failures inside
+        :meth:`_publish_delegate_offline` are caught and logged so a
+        transient broker hiccup cannot leak either.
+
+        Args:
+            user_public_id: Owner of the AI_DELEGATE user row.
+            delegate_public_id: ``ai_delegates.public_id`` for the
+                disconnected WS. Caller (``on_disconnect``) MUST
+                supply a non-None value; this method is private and
+                no public path exposes a ``None`` route here.
+        """
+        await asyncio.sleep(self._delegate_offline_grace_seconds)
+        await self._publish_delegate_offline(
+            user_public_id=user_public_id,
+            delegate_public_id=delegate_public_id,
+            last_seen_at=datetime.now(UTC),
+        )
+
+    async def _publish_delegate_offline(
+        self,
+        *,
+        user_public_id: str,
+        delegate_public_id: str,
+        last_seen_at: datetime,
+    ) -> None:
+        """Emit one ``bus.delegate_offline`` message for the given delegate.
+
+        Best-effort on the publisher: a missing publisher logs a
+        warning instead of raising so a singleton spun up before
+        lifespan attached one still tolerates the call (the local
+        in-process subscriber, if any, would only matter for
+        cross-instance fanout, and the ``ai_delegates.last_seen_at``
+        column is the source of truth anyway via the §3.4 Layer 2
+        scanner).
+        """
+        if self._msg_publisher is None:
+            logger.warning(
+                "bus.delegate_offline NOT broadcast for delegate_public_id={}: "
+                "WebSocketAuthManager publisher unavailable",
+                delegate_public_id,
+            )
+            return
+        topic = _BUS_DELEGATE_OFFLINE_TOPIC
+        payload = DelegateOfflineData(
+            public_id=str(uuid7()),
+            timestamp=last_seen_at,
+            session_id=self._delegate_offline_tracker.session_id,
+            sequence_id=self._delegate_offline_tracker.next_sequence(topic),
+            user_public_id=user_public_id,
+            delegate_public_id=delegate_public_id,
+            last_seen_at=last_seen_at,
+        )
+        try:
+            await self._msg_publisher.send(topic, payload)
+        except Exception as exc:
+            logger.exception(
+                "Failed to broadcast bus.delegate_offline for delegate_public_id={}: {}",
+                delegate_public_id,
+                exc,
+            )
 
     def has_permission(self, websocket: WebSocket, required_role: UserRole) -> bool:
         """Check if connection has required role level.
