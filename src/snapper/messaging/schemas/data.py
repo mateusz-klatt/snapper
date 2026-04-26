@@ -526,6 +526,49 @@ class UserDeactivatedData(StrictDataSchema[Literal["user_deactivated"]]):
     reason: str | None = None
 
 
+class CapsViolationAfterAiApproveData(StrictDataSchema[Literal["caps_violation_after_ai_approve"]]):
+    """Plan D §3.6 — caps-violation event for an already-AI-approved CONSULT.
+
+    Published by ``TradingCapsEnforcer`` (deferred wiring chunk —
+    publisher side ships when the enforcer learns to thread the
+    ``ai_review_public_id`` through ``TradeCommandSubmission``) on the
+    internal ``bus.caps_violation_after_ai_approve`` topic when a
+    trade that previously passed the AI delegate's review later
+    fails the caps gate. ``AiReviewService.handle_caps_violation_bus_message``
+    subscribes and re-publishes the event onto the external WS
+    topic ``ai_reviews.{user_public_id}.{strategy_public_id}.caps_violation``
+    so the bridge (Plan C) can surface the rejection back to the
+    delegate's UI.
+
+    Attributes:
+        review_public_id: UUID7 of the ``ai_reviews`` row whose
+            decision authorised the trade.
+        user_public_id: Owner of the strategy that originally
+            consulted — drives the WS topic suffix.
+        strategy_public_id: Origin strategy — drives the WS topic
+            suffix so the operator dashboard can correlate back to
+            the strategy that made the call.
+        wallet_public_id: Wallet the trade would have settled on.
+        instrument_public_id: Instrument the trade was on.
+        cap_type: Plan A / Plan D cap classifier (e.g.
+            ``"max_open_orders"``, ``"max_daily_notional_usd"``,
+            ``"max_position_quantity"``).
+        attempted: Numeric value the trade tried to push the cap to.
+        limit: Configured cap value for the user that the attempt
+            exceeded.
+    """
+
+    type: Literal["caps_violation_after_ai_approve"] = "caps_violation_after_ai_approve"
+    review_public_id: str
+    user_public_id: str
+    strategy_public_id: str
+    wallet_public_id: str
+    instrument_public_id: str
+    cap_type: str
+    attempted: float
+    limit: float
+
+
 class DelegateOfflineData(StrictDataSchema[Literal["delegate_offline"]]):
     """Q17 Layer 1 fast-path event for an AI delegate that dropped its WS.
 

@@ -55,6 +55,7 @@ from snapper.data.repository_types import AiReviewInsertRow
 from snapper.data.repository_types import AiReviewRow
 from snapper.data.repository_types import PendingReviewSummary
 from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.schemas.data import CapsViolationAfterAiApproveData
 from snapper.messaging.schemas.data import DelegateOfflineData
 
 DEFAULT_HEARTBEAT_WINDOW_SECONDS = 15
@@ -1109,6 +1110,50 @@ class AiReviewService:
         if dispatched > 0:
             logger.info("ai_review fanout dispatched", trigger=trigger, count=dispatched)
         return dispatched
+
+    async def handle_caps_violation_bus_message(self, msg: CapsViolationAfterAiApproveData) -> bool:
+        """Plan D §3.6 — re-fanout caps-violation events to the WS topic family.
+
+        Subscribes to the internal ``bus.caps_violation_after_ai_approve``
+        topic; for each event, publishes the Plan A Q7 / Plan D §4.3
+        external topic
+        ``ai_reviews.{user_public_id}.{strategy_public_id}.caps_violation``
+        so the bridge can surface the rejection on the delegate's UI.
+
+        Best-effort: a missing publisher logs a warning instead of
+        raising (mirrors :class:`ScopeGrantService` semantics — a
+        singleton spun up before the FastAPI lifespan attached one
+        still tolerates the call). A send failure degrades to a
+        logged exception so a transient broker hiccup never crashes
+        the subscriber loop.
+
+        Args:
+            msg: Decoded :class:`CapsViolationAfterAiApproveData`
+                payload published by :class:`TradingCapsEnforcer`
+                (publisher-side wiring lands in a follow-up chunk).
+
+        Returns:
+            ``True`` when the WS event was handed to the publisher,
+            ``False`` when the publisher slot was empty.
+        """
+        if self._msg_publisher is None:
+            logger.warning(
+                "ai_reviews caps_violation NOT broadcast for review_public_id={}: "
+                "AiReviewService publisher unavailable",
+                msg.review_public_id,
+            )
+            return False
+        topic = f"ai_reviews.{msg.user_public_id}.{msg.strategy_public_id}.caps_violation"
+        try:
+            await self._msg_publisher.send(topic, msg)
+        except Exception as exc:
+            logger.exception(
+                "Failed to broadcast ai_reviews caps_violation for review_public_id={}: {}",
+                msg.review_public_id,
+                exc,
+            )
+            return False
+        return True
 
     async def handle_delegate_offline_bus_message(
         self, msg: DelegateOfflineData, *, repo: Repository
