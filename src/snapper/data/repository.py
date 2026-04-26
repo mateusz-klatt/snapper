@@ -3490,19 +3490,31 @@ class Repository(ABC):
         self,
         *,
         selected_delegate_public_id: str,
+        now: datetime,
         limit: int = 100,
     ) -> list[PendingReviewSummary]:
-        """Plan D §3.5 fast-path input: pending rows for one delegate.
+        """Plan D §3.5 fast-path input: pending rows for one delegate past fanout.
 
         Used by :meth:`AiReviewService.handle_delegate_offline_bus_message`
         to snapshot the affected reviews when a ``bus.delegate_offline``
-        event lands. Status filter excludes ``fanout_dispatched`` and
-        terminal states so the same row never gets re-fanned twice
+        event lands. Mirrors :meth:`list_offline_pending_reviews` shape:
+        the ``fanout_after < now`` predicate is REQUIRED so the fast
+        path does not dispatch fanout before the natural fanout timer
+        elapses (the :class:`DelegateOfflineData` schema docstring
+        explicitly says subscribers compare ``last_seen_at`` to
+        ``ai_reviews.fanout_after`` and either dispatch immediately
+        OR wait for the natural fanout timer — which the §3.4
+        scanner provides). Status filter excludes ``fanout_dispatched``
+        and terminal states so the same row never gets re-fanned twice
         (idempotent if §3.4 Layer 2 scanner already fired).
 
         Args:
             selected_delegate_public_id: ``ai_delegates.public_id`` to
                 scan for.
+            now: Wall-clock used for the ``fanout_after`` cutoff —
+                callers pass ``msg.last_seen_at`` from the
+                ``bus.delegate_offline`` event so the gate matches the
+                instant the delegate actually went offline.
             limit: Cap on returned rows per call.
 
         Returns:
@@ -10226,9 +10238,10 @@ class SQLAlchemyRepository(Repository):
         self,
         *,
         selected_delegate_public_id: str,
+        now: datetime,
         limit: int = 100,
     ) -> list[PendingReviewSummary]:
-        """Plan D §3.5 fast-path input: pending rows for one delegate."""
+        """Plan D §3.5 fast-path input: pending rows for one delegate past fanout."""
         async with self.session() as s:
             rows = (
                 await s.execute(
@@ -10243,6 +10256,7 @@ class SQLAlchemyRepository(Repository):
                     .where(
                         AiReview.selected_delegate_public_id == selected_delegate_public_id,
                         AiReview.status == "pending",
+                        AiReview.fanout_after < now,
                     )
                     .order_by(AiReview.fanout_after.asc())
                     .limit(limit)

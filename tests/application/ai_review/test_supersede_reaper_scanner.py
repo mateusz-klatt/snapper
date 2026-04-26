@@ -679,6 +679,54 @@ async def test_offline_scanner_skips_row_lost_to_peer_dispatch(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
+async def test_handle_delegate_offline_skips_review_before_fanout_after(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """§3.5 fast-path defers reviews whose fanout_after is still in the future.
+
+    Plan D §3.5 + DelegateOfflineData docstring lock: subscribers
+    compare ``last_seen_at`` to ``ai_reviews.fanout_after`` and either
+    dispatch immediately OR wait for the natural fanout timer (the
+    §3.4 Layer 2 scanner). The fast-path MUST NOT re-fan reviews
+    whose grace window has not elapsed.
+
+    Given a pending review whose fanout_after is still in the future
+    AND a bus.delegate_offline message timestamped at ``now``,
+    When handle_delegate_offline_bus_message runs,
+    Then it returns 0 dispatches and the row stays pending; the §3.4
+    scanner picks it up after ``fanout_after`` elapses.
+    """
+    svc = AiReviewService.get_instance()
+    now = _now()
+    delegate_pid = await _seed_delegate(
+        repo, user_public_id="user-1", last_seen_at=now, creation_time=now
+    )
+    review_id = await _seed_review(
+        repo,
+        selected_delegate_public_id=delegate_pid,
+        as_of=now,
+        fanout_after_offset_seconds=30,
+        deadline_offset_seconds=300,
+    )
+    msg = DelegateOfflineData(
+        public_id=str(uuid7()),
+        timestamp=now,
+        session_id=str(uuid7()),
+        sequence_id=1,
+        user_public_id="user-1",
+        delegate_public_id=delegate_pid,
+        last_seen_at=now,
+    )
+    dispatched = await svc.handle_delegate_offline_bus_message(msg, repo=repo)
+    assert dispatched == 0
+    row = await repo.get_ai_review(review_id)
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["dispatch_version"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
 async def test_delegate_offline_idempotent_with_layer_2_scanner(
     repo: SQLAlchemyRepository,
 ) -> None:

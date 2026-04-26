@@ -949,7 +949,13 @@ class AiReviewService:
                 delegate whose ``bus.delegate_offline`` event triggered
                 the call.
             repo: Repository handle.
-            now: Optional override for the wall-clock.
+            now: Optional override for the wall-clock. Callers from the
+                bus subscriber pass ``msg.last_seen_at`` so the
+                ``fanout_after`` gate matches the instant the delegate
+                actually went offline; reviews whose ``fanout_after``
+                is still in the future are deferred to the §3.4 Layer 2
+                scanner per the :class:`DelegateOfflineData` schema
+                contract.
 
         Returns:
             Number of pending reviews whose CAS won this fast-path
@@ -957,7 +963,7 @@ class AiReviewService:
         """
         wall_clock = now if now is not None else datetime.now(UTC)
         candidates = await repo.list_pending_reviews_for_delegate(
-            selected_delegate_public_id=delegate_public_id
+            selected_delegate_public_id=delegate_public_id, now=wall_clock
         )
         return await self._dispatch_fanout_for_candidates(
             candidates=candidates,
