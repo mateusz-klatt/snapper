@@ -34,19 +34,25 @@ from uuid import uuid7
 from fastapi import HTTPException
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult
 from sqlalchemy.exc import IntegrityError
 
+from snapper.application.ai_review.service import ERROR_DECISION_ALREADY_RECORDED
+from snapper.application.ai_review.service import get_ai_review_service
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.scope_grant_service import get_scope_grant_service
+from snapper.core.types import AiReviewDecisionEnum
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.mcp.auth import ensure_operator_in_claims
 from snapper.mcp.auth import validate_user_wallet_scope
+from snapper.mcp.error_envelope import to_call_tool_result
 from snapper.mcp.output_sanitizer import sanitize_output
 
 _MCP_SOURCE_SURFACE = "mcp"
@@ -486,3 +492,81 @@ def register_mcp_tools(
             }
         )
         return sanitized
+
+    @mcp_server.tool()
+    async def submit_ai_review_decision(
+        review_id: str,
+        decision: str,
+        rationale: str | None = None,
+    ) -> CallToolResult:
+        """AI delegate decision endpoint for a CONSULT request (Plan D §6).
+
+        Wraps :meth:`AiReviewService.submit_decision` for the MCP
+        transport. Expects an AI_DELEGATE caller (Plan A Q14 narrows
+        the permission set; ``CREATE_ORDERS`` is the explicit gate
+        per Plan A v1.4 §6.3 since the decision affects the trade
+        path the strategy is awaiting).
+
+        Args:
+            review_id: UUID7 of the ``ai_reviews`` row the delegate is
+                deciding on.
+            decision: ``"approve"`` or ``"reject"``. Validated server-
+                side against :class:`AiReviewDecisionEnum`; an invalid
+                value surfaces as ``error_code="invalid_decision"``.
+            rationale: Optional free-text rationale (≤4096 chars per
+                the column constraint). Persisted on the
+                ``ai_reviews.rationale`` column AND on the audit-event
+                ``decision_recorded`` payload.
+
+        Returns:
+            :class:`mcp.types.CallToolResult` carrying the Plan A Q14
+            envelope (``success``, ``error_code``, ``message``,
+            ``details``). Idempotent retries (same delegate + same
+            decision after a successful resolve) surface as
+            ``success=True, error_code="decision_already_recorded"``
+            per cross-plan decision D3.
+
+        Raises:
+            PermissionError: if the caller lacks
+                :data:`Permission.CREATE_ORDERS` (caught by FastMCP
+                and surfaced to the client as a tool error). All
+                other failure modes flow through the envelope —
+                FastMCP NEVER sees an exception for a known
+                :class:`AiReviewDecisionResult` outcome.
+        """
+        claims = claims_getter()
+        _require_permission(claims, Permission.CREATE_ORDERS)
+        repo = _get_repository_or_raise(repository_getter)
+        try:
+            decision_enum = AiReviewDecisionEnum(decision)
+        except ValueError:
+            return to_call_tool_result(
+                success=False,
+                error_code="invalid_decision",
+                message=(f"decision must be 'approve' or 'reject'; got {decision!r}."),
+                details={"decision": decision},
+            )
+        result = await get_ai_review_service().submit_decision(
+            review_public_id=review_id,
+            caller_user_public_id=claims.user_public_id,
+            decision=decision_enum,
+            rationale=rationale,
+            repo=repo,
+            scope_grant_service=get_scope_grant_service(),
+        )
+        details: dict[str, Any] = dict(result.details)
+        if result.status is not None:
+            details["status"] = result.status.value
+        if result.resolution_mode is not None:
+            details["resolution_mode"] = result.resolution_mode.value
+        if result.dispatch_version is not None:
+            details["dispatch_version"] = result.dispatch_version
+        idempotent_retry = result.error_code == ERROR_DECISION_ALREADY_RECORDED
+        success = result.error_code is None or idempotent_retry
+        sanitized_details: dict[str, Any] = sanitize_output(details)
+        return to_call_tool_result(
+            success=success,
+            error_code=result.error_code,
+            message=result.message,
+            details=sanitized_details,
+        )
