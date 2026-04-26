@@ -543,24 +543,28 @@ Processes can be:
 By default, the FastAPI lifespan starts all enabled processes (all-in-one
 dev mode).  Set `SERVER_API_ONLY=true` to skip process autostart -- the
 ZMQ-WebSocket bridge still starts, so the frontend receives live data from
-a separately-running engine.  Useful for multi-worker uvicorn or when
-broker/strategies/executors run on different hosts.
+a separately-running engine. Useful when broker/strategies/executors run
+on different hosts.
 
-**AI delegate fanout constraint (Phase 2 #1):** the multi-worker
-deployment path is currently single-instance-only for the AI-review
-``ai_reviews.*.caps_violation`` external WebSocket fanout. Each FastAPI
-process runs its own ``AiReviewService.start_bus_listener`` which
+**Single-instance constraint (Phase 2 #1, AI-review fanout):** the
+supported deployment topology is currently **exactly one FastAPI
+process per cluster**. Multi-worker uvicorn (multiple FastAPI
+processes sharing a broker) is NOT a supported production path
+until the Phase 2 follow-up lands. Reason: each FastAPI process
+runs its own ``AiReviewService.start_bus_listener`` which
 re-publishes ``bus.caps_violation_after_ai_approve`` events as the
-external WS frame; under multi-worker uvicorn each subscriber would
-re-publish the same internal event and connected clients would
-receive N duplicate frames per N processes. The companion
-``bus.delegate_offline`` branch is unaffected because the handler
-runs an idempotent DB CAS UPDATE so only one process wins per row.
-Until a Phase 2 follow-up adds per-bus-event idempotency claims OR
-partitions the caps re-publish to a single dedicated worker, run
-exactly one FastAPI process per cluster (single-instance is the
-current production target). The constraint is also documented in
-``AiReviewService.start_bus_listener``'s docstring.
+external ``ai_reviews.*.caps_violation`` WS frame; under
+multi-worker uvicorn each subscriber would re-publish the same
+internal event and connected clients would receive N duplicate
+frames per N processes. The companion ``bus.delegate_offline``
+branch is unaffected because the handler runs an idempotent DB
+CAS UPDATE so only one process wins per row. Tracked Phase 2
+remediation paths: add a per-bus-event idempotency claim column on
+the ``ai_reviews`` row (CAS-protected re-publish), OR partition the
+caps re-publish to a single dedicated worker. The constraint is
+also documented in ``AiReviewService.start_bus_listener``'s
+docstring + on the ``SERVER_API_ONLY`` env var row in
+``docs/configuration.md`` + ``docs/cli.md``.
 
 ## Execution Plans
 

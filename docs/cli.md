@@ -36,8 +36,12 @@ snapper server [OPTIONS]
 **Environment:**
 
 Set `SERVER_API_ONLY=true` to skip process autostart while keeping
-the ZMQ-WebSocket bridge alive (useful for multi-worker deployments or when
-the engine runs as a separate process).
+the ZMQ-WebSocket bridge alive (useful when the engine runs as a
+separate process). **Note:** running multiple FastAPI processes
+in parallel (multi-worker uvicorn) is currently unsupported for
+clusters that have AI delegates configured — see the AI-review
+fanout constraint in `docs/architecture.md` (Deployment Modes)
+for the tracked Phase 2 follow-up.
 
 **Examples:**
 
