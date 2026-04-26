@@ -1,4 +1,6 @@
 import type {
+  AiReviewCapsViolationFrameData,
+  AiReviewRequestFrameData,
   BacktestProgressData,
   WebSocketMessages,
   TickData,
@@ -42,6 +44,8 @@ export interface WebSocketMessageTypeMap {
   subscriptions_list: WSSubscriptionsListResponse
   pong: WSPongResponse
   backtest_progress: BacktestProgressData
+  'ai_review.request': AiReviewRequestFrameData
+  'ai_review.caps_violation': AiReviewCapsViolationFrameData
 }
 export type WebSocketMessageType = keyof WebSocketMessageTypeMap
 export type AuthControlMessageType =
