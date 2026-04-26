@@ -1299,6 +1299,24 @@ class AiReviewService:
         single-listener failures. Mirrors
         :meth:`WebSocketAuthManager.start_admin_listener` semantics.
 
+        Multi-instance deployment caveat: Plan D §14 anticipates each
+        process running its own bus subscriber. For the
+        ``bus.delegate_offline`` branch that is safe — the handler
+        executes a DB CAS UPDATE per affected pending review, so only
+        one process wins per row regardless of how many subscribers
+        receive the same internal event. For
+        ``bus.caps_violation_after_ai_approve`` the handler currently
+        re-publishes a fresh ``ai_reviews.*.caps_violation`` external
+        WS frame on every dispatch, which under multi-instance
+        deployment would N-duplicate the WS fanout (each WS bridge
+        subscribes to ``ai_reviews.*`` and would receive N copies of
+        the same caps event from N processes' re-publishes). The
+        single-instance Snapper deployment is the current target and
+        is unaffected; multi-instance dedup is tracked as a Phase 2
+        follow-up — likely via a per-bus-event idempotency claim
+        column on the :class:`AiReview` row, or by partitioning the
+        caps-violation re-publish to a single dedicated worker.
+
         Args:
             zmq_broker_xpub: Address of the broker's XPUB endpoint.
                 Empty string skips the listener entirely (test mode +

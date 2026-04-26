@@ -721,12 +721,25 @@ class TestLifespan:
         Phase 2 #1 wiring: lifespan must spin up the
         ``bus.delegate_offline`` + ``bus.caps_violation_after_ai_approve``
         subscriber so the Phase 1 #2 + #8 handlers actually drain
-        events in production. The repository_factory MUST be injected
-        BEFORE ``start_bus_listener`` so the first dispatched
-        ``bus.delegate_offline`` frame finds a non-None factory; on
-        teardown the lifespan stops the listener and clears the
-        factory slot so any in-flight singleton observes a clean
-        slate.
+        events in production. Pins the load-bearing relative ordering
+        recorded into a single sequence so a regression that moves
+        any of the four hooks fails this test:
+
+        - ``set_msg_publisher`` (Phase 1 #8 — caps_violation handler
+          publish path) MUST run BEFORE ``start_bus_listener`` so the
+          first event the listener dispatches finds a non-None
+          publisher slot.
+        - ``set_repository_factory`` MUST run BEFORE
+          ``start_bus_listener`` so the first ``bus.delegate_offline``
+          frame finds a non-None factory.
+        - ``stop_bus_listener`` MUST run BEFORE
+          ``_shutdown_user_service_publisher`` (which clears the
+          AiReviewService publisher slot) so an in-flight handler
+          dispatched by the listener never observes a torn-down
+          publisher.
+        - ``set_repository_factory(None)`` runs AFTER
+          ``stop_bus_listener`` so the listener cannot dispatch a
+          new frame against a None factory.
         """
         mock_app = MagicMock()
         mock_manager = MagicMock()
@@ -741,6 +754,9 @@ class TestLifespan:
         mock_ai_review.set_repository_factory.side_effect = lambda _f: recorded.append(
             "set_factory" if _f is not None else "clear_factory"
         )
+        mock_ai_review.set_msg_publisher.side_effect = lambda _p: recorded.append(
+            "set_publisher" if _p is not None else "clear_publisher"
+        )
 
         async def _start(_xpub: str) -> None:
             recorded.append("start_bus_listener")
@@ -750,6 +766,10 @@ class TestLifespan:
 
         mock_ai_review.start_bus_listener = _start
         mock_ai_review.stop_bus_listener = _stop
+
+        def _shutdown_publisher_recorder(_app: FastAPI) -> None:
+            recorded.append("shutdown_publisher")
+
         with (
             patch("snapper.server.app.discover_processes"),
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
@@ -758,7 +778,10 @@ class TestLifespan:
                 "snapper.server.app._build_user_service_publisher",
                 return_value=(MagicMock(), MagicMock()),
             ),
-            patch("snapper.server.app._shutdown_user_service_publisher"),
+            patch(
+                "snapper.server.app._shutdown_user_service_publisher",
+                side_effect=_shutdown_publisher_recorder,
+            ),
             patch("snapper.server.app.get_user_service", return_value=MagicMock()),
             patch("snapper.server.app.get_scope_grant_service", return_value=MagicMock()),
             patch(
@@ -792,13 +815,24 @@ class TestLifespan:
             mock_factory_cls.return_value = mock_factory
             async with lifespan(mock_app):
                 pass
-        assert recorded[0] == "set_factory"
-        assert recorded[1] == "start_bus_listener"
+        publisher_idx = recorded.index("set_publisher")
+        factory_idx = recorded.index("set_factory")
+        start_idx = recorded.index("start_bus_listener")
         stop_idx = recorded.index("stop_bus_listener")
-        clear_idx = recorded.index("clear_factory")
+        shutdown_pub_idx = recorded.index("shutdown_publisher")
+        clear_factory_idx = recorded.index("clear_factory")
         assert (
-            stop_idx < clear_idx
-        ), f"lifespan must stop_bus_listener BEFORE clearing the factory: {recorded}"
+            publisher_idx < start_idx
+        ), f"set_msg_publisher must precede start_bus_listener: {recorded}"
+        assert (
+            factory_idx < start_idx
+        ), f"set_repository_factory must precede start_bus_listener: {recorded}"
+        assert (
+            stop_idx < shutdown_pub_idx
+        ), f"stop_bus_listener must precede shutdown_publisher: {recorded}"
+        assert (
+            stop_idx < clear_factory_idx
+        ), f"stop_bus_listener must precede set_repository_factory(None): {recorded}"
 
     @pytest.mark.asyncio
     async def test_lifespan_wires_ws_auth_manager_before_start_admin_listener(
