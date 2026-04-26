@@ -307,11 +307,12 @@ def _build_user_service_publisher(
 def _shutdown_user_service_publisher(app: FastAPI) -> None:
     """Close UserService's `admin.user_deactivated` publisher socket.
 
-    Mirrors `SettingsService.shutdown` ordering: clear all three
-    singleton publisher references (UserService, ScopeGrantService and
-    AiReviewService share the same socket by design) so any in-flight
-    `deactivate_user` / `revoke_grant` /
-    `handle_caps_violation_bus_message` call observes a None publisher
+    Mirrors `SettingsService.shutdown` ordering: clear all four
+    singleton publisher references (UserService, ScopeGrantService,
+    AiReviewService and WebSocketAuthManager share the same socket by
+    design) so any in-flight `deactivate_user` / `revoke_grant` /
+    `handle_caps_violation_bus_message` /
+    `_publish_delegate_offline` call observes a None publisher
     (graceful degradation), then close the socket and terminate the
     context. ``contextlib.suppress(Exception)`` mirrors the
     `SettingsService.shutdown` resilience contract.
@@ -319,6 +320,7 @@ def _shutdown_user_service_publisher(app: FastAPI) -> None:
     get_user_service().set_msg_publisher(None)
     get_scope_grant_service().set_msg_publisher(None)
     get_ai_review_service().set_msg_publisher(None)
+    get_ws_auth_manager().set_msg_publisher(None)
     publisher = getattr(app.state, "user_service_publisher", None)
     context = getattr(app.state, "user_service_publisher_context", None)
     if publisher is not None:
@@ -486,6 +488,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         get_ai_review_service().set_msg_publisher(user_publisher)
         logger.info("AiReviewService publisher wired to ZMQ broker for ai_reviews.* fanout")
         ws_auth_manager = get_ws_auth_manager()
+        ws_auth_manager.set_msg_publisher(user_publisher)
+        logger.info("WebSocketAuthManager publisher wired to ZMQ broker for bus.delegate_offline")
         manager_for_wiring: WebSocketConnectionManager = app.state.manager
         ws_auth_manager.set_wiring(
             connection_manager=manager_for_wiring,

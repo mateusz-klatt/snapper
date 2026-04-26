@@ -1132,10 +1132,14 @@ class AiReviewService:
         singleton spun up before the FastAPI lifespan attached one
         still tolerates the call). A send failure degrades to a
         logged exception so a transient broker hiccup never crashes
-        the subscriber loop. Provenance fields (``session_id`` +
-        ``sequence_id``) are forwarded verbatim from the internal
-        message so the bridge gap detector keys both records onto the
-        same producer chain.
+        the subscriber loop. Provenance fields are stamped fresh from
+        :attr:`MessagePublisher.tracker` so the per-topic gap detector
+        on the bridge sees a monotonic sequence keyed to the external
+        ``ai_reviews.{user}.{strategy}.caps_violation`` topic instead
+        of the internal ``bus.caps_violation_after_ai_approve``
+        sequence (which would be interleaved with other strategies'
+        caps events under the same internal stream key, causing false
+        gap telemetry on the per-strategy external stream).
 
         Args:
             msg: Decoded :class:`CapsViolationAfterAiApproveData`
@@ -1155,11 +1159,12 @@ class AiReviewService:
             )
             return False
         topic = f"ai_reviews.{msg.user_public_id}.{msg.strategy_public_id}.caps_violation"
+        tracker = self._msg_publisher.tracker
         external_frame = AiReviewCapsViolationFrameData(
-            public_id=msg.public_id,
-            timestamp=msg.timestamp,
-            session_id=msg.session_id,
-            sequence_id=msg.sequence_id,
+            public_id=str(uuid7()),
+            timestamp=datetime.now(UTC),
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence(topic),
             review_public_id=msg.review_public_id,
             user_public_id=msg.user_public_id,
             strategy_public_id=msg.strategy_public_id,

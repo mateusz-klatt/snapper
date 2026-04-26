@@ -117,6 +117,8 @@ def _get_topic_prefix_validators() -> list[tuple[str, Callable[[str], tuple[bool
         ("backtest.", _validate_backtest_topic),
         ("alerts.", _validate_alerts_topic),
         ("plans.decisions.", _validate_plans_decisions_topic),
+        ("ai_reviews.", _validate_ai_reviews_topic),
+        ("bus.", _validate_bus_topic),
     ]
 
 
@@ -739,6 +741,101 @@ def _validate_alerts_topic(topic: str) -> tuple[bool, str]:
     return True, ""
 
 
+_AI_REVIEW_FRAME_SUFFIXES: frozenset[str] = frozenset({"request", "decision_ack", "caps_violation"})
+"""Plan A §4.2 / Q16 — fixed external WS frame suffixes for the
+``ai_reviews.{user}.{strategy}.*`` topic family. The bridge per-frame
+scope filter routes by user/strategy + the JS dispatcher's
+``switch (frame.type)`` (Plan A §4.2 line 503) covers exactly these
+three branches; any new suffix would need a paired JS handler so we
+fail closed on unknown ones."""
+
+
+_AI_REVIEW_TOPIC_FORMAT_MSG = (
+    "ai_reviews.* requires 4 segments "
+    "(ai_reviews.<user_public_id>.<strategy_public_id>.<request|decision_ack|caps_violation>)"
+)
+
+
+def _validate_ai_reviews_topic(topic: str) -> tuple[bool, str]:
+    """Validate an external WS ``ai_reviews.*`` fanout topic.
+
+    Plan A §4.3 / Plan D §4.3 — outbound topic family for delegate
+    consultations. Shape is
+    ``ai_reviews.{user_public_id}.{strategy_public_id}.{suffix}`` where
+    user / strategy ids are UUID7 and the suffix is one of the three
+    Q16 frame discriminators (``request`` / ``decision_ack`` /
+    ``caps_violation``). The matching ``ai_reviews.`` entry already
+    exists in :data:`TOPIC_REGISTRY`; this validator is the publish-side
+    counterpart so the shared ZMQ PUB socket accepts the topic before
+    handing it to the bridge per-frame scope filter (Q15).
+
+    Args:
+        topic: Topic string starting with ``ai_reviews.``.
+
+    Returns:
+        Tuple of (is_valid, error_message). Empty error_message when
+        valid; dense diagnostic string when not.
+    """
+    segments = topic.split(".")
+    if topic.endswith(".") or len(segments) != 4:
+        return False, f"{_AI_REVIEW_TOPIC_FORMAT_MSG}, got '{topic}'"
+    if segments[0] != "ai_reviews":
+        return False, f"Expected 'ai_reviews' category, got '{segments[0]}'"
+    user_public_id = segments[1]
+    strategy_public_id = segments[2]
+    suffix = segments[3]
+    if not is_uuid7(user_public_id):
+        return False, f"ai_reviews.* segment 2 must be UUID7, got '{user_public_id}'"
+    if not is_uuid7(strategy_public_id):
+        return False, f"ai_reviews.* segment 3 must be UUID7, got '{strategy_public_id}'"
+    if suffix not in _AI_REVIEW_FRAME_SUFFIXES:
+        return False, (
+            f"ai_reviews.* segment 4 must be one of "
+            f"{', '.join(sorted(_AI_REVIEW_FRAME_SUFFIXES))}, got '{suffix}'"
+        )
+    return True, ""
+
+
+_BUS_TOPIC_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+"""Snake-case bus topic name shape — lowercase, digits and underscores
+allowed after the leading letter. Mirrors the Plan D §3 bus topic
+naming convention so a typo (``bus.Delegate-Offline``) fails fast at
+the publisher boundary."""
+
+
+def _validate_bus_topic(topic: str) -> tuple[bool, str]:
+    """Validate an internal ``bus.*`` cross-service event topic.
+
+    Plan A §3 / Plan D §3 — internal-only event bus used by services
+    that fan out across the same ZMQ broker (e.g.
+    ``bus.delegate_offline``, ``bus.ai_review_request``,
+    ``bus.caps_violation_after_ai_approve``). Shape is ``bus.{name}``
+    with a snake-case suffix; the discriminator on the wire payload
+    (``StrictDataSchema.type``) is the authoritative routing hint, so
+    the validator only enforces the topic's structural shape and lets
+    the schema layer reject unknown payload types.
+
+    Args:
+        topic: Topic string starting with ``bus.``.
+
+    Returns:
+        Tuple of (is_valid, error_message). Empty error_message when
+        valid; dense diagnostic string when not.
+    """
+    segments = topic.split(".")
+    if topic.endswith(".") or len(segments) != 2:
+        return False, f"bus.* requires 2 segments (bus.<name>), got '{topic}'"
+    if segments[0] != "bus":
+        return False, f"Expected 'bus' category, got '{segments[0]}'"
+    name = segments[1]
+    if not _BUS_TOPIC_NAME_PATTERN.fullmatch(name):
+        return False, (
+            f"bus.* segment 2 must be snake_case (lowercase + digits + underscores, "
+            f"leading letter), got '{name}'"
+        )
+    return True, ""
+
+
 def _validate_plans_decisions_topic(topic: str) -> tuple[bool, str]:
     """Validate a ``plans.decisions.{plan_public_id}`` topic (§D6.2).
 
@@ -884,6 +981,8 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
         "backtest",
         "alerts",
         "plans",
+        "ai_reviews",
+        "bus",
     }
     if category not in valid_categories:
         return False, f"Unknown topic category: {category}"

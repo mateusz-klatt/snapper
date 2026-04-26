@@ -17,15 +17,18 @@ from snapper.messaging.schemas.data import AlertType
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.topics import validation
 from snapper.messaging.topics.builders import market_topic
+from snapper.messaging.topics.validation import _AI_REVIEW_FRAME_SUFFIXES
 from snapper.messaging.topics.validation import _ALERT_TYPES
 from snapper.messaging.topics.validation import BACKTEST_EVENTS
 from snapper.messaging.topics.validation import TopicValidationError
 from snapper.messaging.topics.validation import _is_valid_timeframe
 from snapper.messaging.topics.validation import _validate_accruals_topic
 from snapper.messaging.topics.validation import _validate_admin_topic
+from snapper.messaging.topics.validation import _validate_ai_reviews_topic
 from snapper.messaging.topics.validation import _validate_alerts_topic
 from snapper.messaging.topics.validation import _validate_backtest_prefix
 from snapper.messaging.topics.validation import _validate_backtest_topic
+from snapper.messaging.topics.validation import _validate_bus_topic
 from snapper.messaging.topics.validation import _validate_candle_timeframe
 from snapper.messaging.topics.validation import _validate_exchange
 from snapper.messaging.topics.validation import _validate_instrument
@@ -3932,6 +3935,165 @@ class TestPlansDecisionsTopicValidation:
         """
         valid, err = validate_subscription_pattern("plans.decisions.")
 
+        assert valid, err
+
+
+class TestAiReviewsTopicValidation:
+    """Tests for ``_validate_ai_reviews_topic`` (Plan A §4.3 / Plan D §4.3).
+
+    The ``ai_reviews.`` prefix is in :data:`TOPIC_REGISTRY` (subscriber
+    side), but until Phase 1 #8 fix-up the dispatcher had no matching
+    publish-side validator — so ``MessagePublisher.send`` raised
+    :class:`TopicValidationError` for every legitimate
+    ``ai_reviews.{user}.{strategy}.caps_violation`` fanout. These cases
+    pin the validator's contract.
+    """
+
+    _USER = "019dbb34-f439-77bd-afa8-ee5321d60307"
+    _STRATEGY = "019dbb34-f439-77bd-afa8-ee5321d60308"
+
+    def test_valid_caps_violation_topic(self) -> None:
+        """Happy path: 4-segment UUID7-suffixed caps_violation accepted."""
+        valid, err = _validate_ai_reviews_topic(
+            f"ai_reviews.{self._USER}.{self._STRATEGY}.caps_violation"
+        )
+        assert valid
+        assert err == ""
+
+    def test_valid_request_and_decision_ack_suffixes(self) -> None:
+        """All three Q16 frame suffixes accepted (request / decision_ack / caps_violation)."""
+        for suffix in ("request", "decision_ack", "caps_violation"):
+            topic = f"ai_reviews.{self._USER}.{self._STRATEGY}.{suffix}"
+            valid, err = _validate_ai_reviews_topic(topic)
+            assert valid, f"{topic!r} should be valid: {err}"
+
+    def test_wrong_segment_count_rejected(self) -> None:
+        """Segment counts other than 4 are rejected."""
+        for bad in (
+            "ai_reviews.foo",
+            "ai_reviews.foo.bar",
+            f"ai_reviews.{self._USER}.{self._STRATEGY}.caps_violation.extra",
+            "ai_reviews.",
+        ):
+            valid, err = _validate_ai_reviews_topic(bad)
+            assert not valid, f"{bad!r} should be invalid"
+            assert "4 segments" in err
+
+    def test_wrong_category_rejected(self) -> None:
+        """First segment must be ``ai_reviews``."""
+        valid, err = _validate_ai_reviews_topic(
+            f"ai_review.{self._USER}.{self._STRATEGY}.caps_violation"
+        )
+        assert not valid
+        assert "ai_reviews" in err
+
+    def test_non_uuid7_user_rejected(self) -> None:
+        """Segment 2 must be a UUID7 per project public_id convention."""
+        valid, err = _validate_ai_reviews_topic(
+            f"ai_reviews.not-a-uuid.{self._STRATEGY}.caps_violation"
+        )
+        assert not valid
+        assert "UUID7" in err
+        assert "segment 2" in err
+
+    def test_non_uuid7_strategy_rejected(self) -> None:
+        """Segment 3 must be a UUID7 per project public_id convention."""
+        valid, err = _validate_ai_reviews_topic(
+            f"ai_reviews.{self._USER}.not-a-uuid.caps_violation"
+        )
+        assert not valid
+        assert "UUID7" in err
+        assert "segment 3" in err
+
+    def test_unknown_suffix_rejected(self) -> None:
+        """Suffix must be one of the three Q16 frame discriminators."""
+        valid, err = _validate_ai_reviews_topic(f"ai_reviews.{self._USER}.{self._STRATEGY}.bogus")
+        assert not valid
+        assert "segment 4" in err
+        assert "bogus" in err
+
+    def test_via_validate_topic_dispatcher(self) -> None:
+        """Top-level ``validate_topic`` routes ``ai_reviews.*`` to the validator."""
+        valid, err = validate_topic(f"ai_reviews.{self._USER}.{self._STRATEGY}.caps_violation")
+        assert valid, err
+
+    def test_subscription_prefix_accepted(self) -> None:
+        """Bridge / handler subscriber side accepts the registry prefix.
+
+        The bridge subscribes to the registry root via
+        ``validate_subscription_pattern("ai_reviews.")`` per Plan D §9
+        + Phase 1 #7 wiring; the validator-side allowlist must still
+        accept this prefix for the subscribe path even though the
+        publish path goes through the stricter 4-segment check above.
+        """
+        valid, err = validate_subscription_pattern("ai_reviews.")
+        assert valid, err
+
+    def test_frame_suffix_set_matches_q16_contract(self) -> None:
+        """The validator's suffix set matches the Plan A §4.2 / Q16 contract.
+
+        Plan A §4.2 line 472-473 fixes the three external WS frame
+        types at ``ai_review.request`` / ``ai_review.decision_ack`` /
+        ``ai_review.caps_violation``. The topic-suffix set drops the
+        ``ai_review.`` prefix on the wire (the topic family is already
+        ``ai_reviews.`` plural) but otherwise stays in lockstep.
+        """
+        assert frozenset({"request", "decision_ack", "caps_violation"}) == _AI_REVIEW_FRAME_SUFFIXES
+
+
+class TestBusTopicValidation:
+    """Tests for ``_validate_bus_topic`` (internal cross-service event bus).
+
+    Closes the parallel topic-validation gap that left
+    ``bus.delegate_offline`` unable to publish through the real
+    :class:`MessagePublisher` — without this validator, every Phase 1 #2
+    layer-1 fast-path publish would have raised
+    :class:`TopicValidationError`.
+    """
+
+    def test_valid_bus_topic(self) -> None:
+        """Happy path: ``bus.{snake_case}`` accepted."""
+        for topic in (
+            "bus.delegate_offline",
+            "bus.ai_review_request",
+            "bus.caps_violation_after_ai_approve",
+        ):
+            valid, err = _validate_bus_topic(topic)
+            assert valid, f"{topic!r} should be valid: {err}"
+
+    def test_wrong_segment_count_rejected(self) -> None:
+        """Segment counts other than 2 are rejected."""
+        for bad in (
+            "bus",
+            "bus.",
+            "bus.foo.bar",
+            "bus.a.b.c",
+        ):
+            valid, err = _validate_bus_topic(bad)
+            assert not valid, f"{bad!r} should be invalid"
+            assert "2 segments" in err
+
+    def test_wrong_category_rejected(self) -> None:
+        """First segment must be ``bus``."""
+        valid, err = _validate_bus_topic("admin.foo")
+        assert not valid
+        assert "bus" in err
+
+    def test_non_snake_case_name_rejected(self) -> None:
+        """Suffix must be snake_case (lowercase + digits + underscores)."""
+        for bad in (
+            "bus.Delegate_Offline",
+            "bus.delegate-offline",
+            "bus.123leading_digit",
+            "bus.has space",
+        ):
+            valid, err = _validate_bus_topic(bad)
+            assert not valid, f"{bad!r} should be invalid"
+            assert "snake_case" in err
+
+    def test_via_validate_topic_dispatcher(self) -> None:
+        """Top-level ``validate_topic`` routes ``bus.*`` to the validator."""
+        valid, err = validate_topic("bus.delegate_offline")
         assert valid, err
 
 

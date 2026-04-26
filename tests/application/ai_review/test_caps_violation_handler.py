@@ -19,8 +19,24 @@ import pytest
 
 from snapper.application.ai_review.service import AiReviewService
 from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import AiReviewCapsViolationFrameData
 from snapper.messaging.schemas.data import CapsViolationAfterAiApproveData
+
+
+def _make_publisher() -> MagicMock:
+    """Build a MagicMock publisher with a real :class:`SequenceTracker`.
+
+    The handler stamps fresh ``sequence_id`` + ``session_id`` from the
+    publisher's tracker (Plan D §3.6 fix-up) so the gap detector keys
+    the external stream by the external topic, not by the internal
+    bus topic. Tests need a real tracker so ``next_sequence`` actually
+    increments + so ``session_id`` returns a deterministic UUID7.
+    """
+    publisher = MagicMock()
+    publisher.send = AsyncMock()
+    publisher.tracker = SequenceTracker()
+    return publisher
 
 
 @pytest.fixture(autouse=True)
@@ -75,8 +91,7 @@ async def test_publishes_caps_violation_to_external_ws_topic() -> None:
     message), and the handler returns True.
     """
     svc = AiReviewService.get_instance()
-    publisher = MagicMock()
-    publisher.send = AsyncMock()
+    publisher = _make_publisher()
     svc.set_msg_publisher(cast(MessagePublisher, publisher))
     msg = _make_event()
     result = await svc.handle_caps_violation_bus_message(msg)
@@ -121,7 +136,7 @@ async def test_swallows_publisher_failure_and_returns_false() -> None:
     Then it returns False and does not propagate the exception.
     """
     svc = AiReviewService.get_instance()
-    publisher = MagicMock()
+    publisher = _make_publisher()
     publisher.send = AsyncMock(side_effect=RuntimeError("broker down"))
     svc.set_msg_publisher(cast(MessagePublisher, publisher))
     msg = _make_event()
@@ -144,8 +159,7 @@ async def test_topic_includes_user_and_strategy_ids_verbatim() -> None:
     Then the topic carries them as-is (no encoding / hashing).
     """
     svc = AiReviewService.get_instance()
-    publisher = MagicMock()
-    publisher.send = AsyncMock()
+    publisher = _make_publisher()
     svc.set_msg_publisher(cast(MessagePublisher, publisher))
     user_pid = str(uuid7())
     strategy_pid = str(uuid7())
@@ -170,8 +184,7 @@ async def test_payload_carries_cap_type_attempted_and_limit() -> None:
     Then the forwarded payload carries the exact same triple.
     """
     svc = AiReviewService.get_instance()
-    publisher = MagicMock()
-    publisher.send = AsyncMock()
+    publisher = _make_publisher()
     svc.set_msg_publisher(cast(MessagePublisher, publisher))
     msg = CapsViolationAfterAiApproveData(
         public_id=str(uuid7()),
@@ -191,8 +204,8 @@ async def test_payload_carries_cap_type_attempted_and_limit() -> None:
     forwarded = publisher.send.await_args.args[1]
     assert isinstance(forwarded, AiReviewCapsViolationFrameData)
     assert forwarded.cap_type == "max_open_orders"
-    assert forwarded.attempted == 11.0
-    assert forwarded.limit == 10.0
+    assert forwarded.attempted == pytest.approx(11.0)
+    assert forwarded.limit == pytest.approx(10.0)
 
 
 @pytest.mark.asyncio
@@ -212,8 +225,7 @@ async def test_external_frame_type_matches_q16_contract() -> None:
     Then the outbound frame.type equals ``"ai_review.caps_violation"``.
     """
     svc = AiReviewService.get_instance()
-    publisher = MagicMock()
-    publisher.send = AsyncMock()
+    publisher = _make_publisher()
     svc.set_msg_publisher(cast(MessagePublisher, publisher))
     msg = _make_event()
     assert msg.type == "caps_violation_after_ai_approve"
@@ -223,25 +235,24 @@ async def test_external_frame_type_matches_q16_contract() -> None:
 
 
 @pytest.mark.asyncio
-async def test_external_frame_preserves_routing_fields_and_provenance() -> None:
-    """Plan A Q15/Q16 — routing fields stay at envelope top level.
+async def test_external_frame_preserves_routing_fields() -> None:
+    """Plan A Q15 — routing fields stay at envelope top level.
 
     The bridge per-frame scope filter (``_enforce_ai_review_scope``)
     reads ``wallet_public_id`` + ``instrument_public_id`` directly off
     the parsed JSON envelope without descending into a nested payload.
-    Provenance fields (``session_id`` + ``sequence_id`` + ``public_id``
-    + ``timestamp``) are forwarded verbatim so the bridge gap detector
-    sees both the internal bus row and the outbound frame on the same
-    producer chain.
+    Routing fields + the substantive ``review_public_id`` MUST be
+    forwarded verbatim from the bus message so the bridge can route
+    + the JS dispatcher can correlate the rejection back to the
+    originating ``ai_reviews`` row.
 
-    Given a bus message with full routing + provenance,
+    Given a bus message with full routing,
     When the handler translates,
-    Then every routing + provenance field appears on the outbound
-    frame at top-level with the same value.
+    Then every routing field appears on the outbound frame at
+    top-level with the same value.
     """
     svc = AiReviewService.get_instance()
-    publisher = MagicMock()
-    publisher.send = AsyncMock()
+    publisher = _make_publisher()
     svc.set_msg_publisher(cast(MessagePublisher, publisher))
     msg = _make_event()
     await svc.handle_caps_violation_bus_message(msg)
@@ -251,7 +262,40 @@ async def test_external_frame_preserves_routing_fields_and_provenance() -> None:
     assert forwarded.strategy_public_id == msg.strategy_public_id
     assert forwarded.wallet_public_id == msg.wallet_public_id
     assert forwarded.instrument_public_id == msg.instrument_public_id
-    assert forwarded.public_id == msg.public_id
-    assert forwarded.timestamp == msg.timestamp
-    assert forwarded.session_id == msg.session_id
-    assert forwarded.sequence_id == msg.sequence_id
+
+
+@pytest.mark.asyncio
+async def test_external_frame_provenance_is_stamped_from_publisher_tracker() -> None:
+    """Provenance comes from the publisher's tracker, NOT the bus message.
+
+    The bridge gap detector keys per-stream sequence by topic. The
+    internal ``bus.caps_violation_after_ai_approve`` topic interleaves
+    caps events from every strategy, so reusing its ``sequence_id`` on
+    the per-strategy external topic
+    ``ai_reviews.{user}.{strategy}.caps_violation`` would create
+    false gaps + mid-stream session-id joins on every fanout. The
+    handler therefore allocates fresh provenance from
+    :class:`SequenceTracker` keyed to the external topic.
+
+    Given a publisher with a real tracker + a bus message,
+    When the handler routes,
+    Then the outbound frame's ``session_id`` matches the publisher's
+    tracker session, ``sequence_id`` increments per topic, and
+    ``public_id`` is a fresh UUID7 (not the bus message's id).
+    """
+    svc = AiReviewService.get_instance()
+    publisher = _make_publisher()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    msg = _make_event()
+    await svc.handle_caps_violation_bus_message(msg)
+    msg2 = _make_event()
+    await svc.handle_caps_violation_bus_message(msg2)
+    first = publisher.send.await_args_list[0].args[1]
+    second = publisher.send.await_args_list[1].args[1]
+    assert first.session_id == publisher.tracker.session_id
+    assert second.session_id == publisher.tracker.session_id
+    assert first.sequence_id == 1
+    assert second.sequence_id == 2
+    assert first.public_id != msg.public_id
+    assert second.public_id != msg2.public_id
+    assert first.public_id != second.public_id
