@@ -484,6 +484,121 @@ class TestLifespan:
         mock_scope_grant_service.set_msg_publisher.assert_called_once_with(user_publisher)
 
     @pytest.mark.asyncio
+    async def test_lifespan_injects_ai_review_service_publisher(
+        self,
+    ) -> None:
+        """AiReviewService shares the same publisher socket as UserService.
+
+        Plan D §3.6 ``handle_caps_violation_bus_message`` re-fanouts
+        internal caps-violation events onto the external
+        ``ai_reviews.{user}.{strategy}.caps_violation`` WS topic. The
+        FastAPI lifespan MUST inject the publisher singleton so the
+        handler is non-degraded by the time the bus subscriber loop
+        delivers the first event; without this wiring the handler logs
+        a warning and silently drops every fanout. Mirrors the
+        ScopeGrantService wiring (single ZMQ PUB socket fans out
+        admin.* + ai_reviews.* topics; opening a second socket would
+        double broker connection count for no gain) and asserts the
+        teardown clears the slot for graceful shutdown.
+        """
+        mock_app = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.cleanup = AsyncMock()
+        mock_zmq_bridge = MagicMock()
+        mock_zmq_bridge.start = AsyncMock()
+        mock_zmq_bridge.stop = AsyncMock()
+        mock_manager.zmq_bridge = mock_zmq_bridge
+        mock_app.state.manager = mock_manager
+        user_publisher = MagicMock()
+        mock_user_service = MagicMock()
+        mock_scope_grant_service = MagicMock()
+        mock_ai_review_service = MagicMock()
+        with (
+            patch("snapper.server.app.discover_processes"),
+            patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
+            patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app._build_user_service_publisher",
+                return_value=(user_publisher, MagicMock()),
+            ),
+            patch("snapper.server.app._shutdown_user_service_publisher"),
+            patch(
+                "snapper.server.app.get_user_service",
+                return_value=mock_user_service,
+            ),
+            patch(
+                "snapper.server.app.get_scope_grant_service",
+                return_value=mock_scope_grant_service,
+            ),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=mock_ai_review_service,
+            ),
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
+                ),
+            ),
+            patch(
+                "snapper.server.app.get_token_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
+        ):
+            mock_settings_service = MagicMock()
+            mock_settings_service.shutdown = AsyncMock()
+            mock_get_settings_service.return_value = mock_settings_service
+            mock_factory = MagicMock()
+            mock_factory.sync_registry_to_database = AsyncMock()
+            mock_factory.start_all_processes = AsyncMock()
+            mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
+            mock_factory.stop_all_processes = AsyncMock()
+            mock_factory_cls.return_value = mock_factory
+            async with lifespan(mock_app):
+                pass
+        mock_ai_review_service.set_msg_publisher.assert_called_once_with(user_publisher)
+
+    @pytest.mark.asyncio
+    async def test_shutdown_clears_ai_review_service_publisher_slot(self) -> None:
+        """``_shutdown_user_service_publisher`` clears the AiReviewService slot.
+
+        The shutdown helper closes the single shared publisher socket
+        used by UserService, ScopeGrantService and AiReviewService. It
+        MUST clear all three publisher slots BEFORE closing the socket
+        so any in-flight handler observes ``None`` and degrades
+        gracefully rather than calling ``.send()`` on a torn-down ZMQ
+        socket. Mirrors the existing UserService / ScopeGrantService
+        teardown contract.
+        """
+        mock_app = MagicMock()
+        mock_app.state.user_service_publisher = None
+        mock_app.state.user_service_publisher_context = None
+        mock_user_service = MagicMock()
+        mock_scope_grant_service = MagicMock()
+        mock_ai_review_service = MagicMock()
+        with (
+            patch(
+                "snapper.server.app.get_user_service",
+                return_value=mock_user_service,
+            ),
+            patch(
+                "snapper.server.app.get_scope_grant_service",
+                return_value=mock_scope_grant_service,
+            ),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=mock_ai_review_service,
+            ),
+        ):
+            _shutdown_user_service_publisher(mock_app)
+        mock_ai_review_service.set_msg_publisher.assert_called_once_with(None)
+
+    @pytest.mark.asyncio
     async def test_lifespan_wires_ws_auth_manager_before_start_admin_listener(
         self,
     ) -> None:

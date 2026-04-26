@@ -1,9 +1,10 @@
 """Tests for Plan D §3.6 caps_violation_after_ai_approve handler.
 
 Covers :meth:`AiReviewService.handle_caps_violation_bus_message` —
-re-fanouts internal caps-violation events to the external
-``ai_reviews.{user}.{strategy}.caps_violation`` WS topic so the bridge
-can surface the rejection on the delegate's UI.
+translates the internal ``caps_violation_after_ai_approve`` bus payload
+to the external ``ai_review.caps_violation`` Q16 WS frame and re-fanouts
+to the ``ai_reviews.{user}.{strategy}.caps_violation`` topic so the
+bridge can surface the rejection on the delegate's UI.
 """
 
 from collections.abc import Iterator
@@ -18,6 +19,7 @@ import pytest
 
 from snapper.application.ai_review.service import AiReviewService
 from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.schemas.data import AiReviewCapsViolationFrameData
 from snapper.messaging.schemas.data import CapsViolationAfterAiApproveData
 
 
@@ -59,13 +61,18 @@ async def test_publishes_caps_violation_to_external_ws_topic() -> None:
 
     Plan D §3.6 + Plan A Q7 — the external topic suffix is
     ``ai_reviews.{user}.{strategy}.caps_violation`` so the bridge per-frame
-    scope filter routes the frame to the right delegate.
+    scope filter routes the frame to the right delegate. Plan A §4.2
+    line 467 fixes the OUTBOUND frame discriminator at
+    ``ai_review.caps_violation`` (a different value from the internal
+    ``caps_violation_after_ai_approve`` bus type), so the handler must
+    translate to :class:`AiReviewCapsViolationFrameData` before
+    publishing.
 
     Given an AiReviewService with a wired publisher,
     When handle_caps_violation_bus_message receives a caps event,
-    Then publisher.send is called once with the right topic + the
-    same envelope passed through verbatim, and the handler returns
-    True.
+    Then publisher.send is called once with the right topic + an
+    :class:`AiReviewCapsViolationFrameData` envelope (NOT the raw bus
+    message), and the handler returns True.
     """
     svc = AiReviewService.get_instance()
     publisher = MagicMock()
@@ -78,7 +85,9 @@ async def test_publishes_caps_violation_to_external_ws_topic() -> None:
     args, _ = publisher.send.await_args
     topic, payload = args
     assert topic == "ai_reviews.user-1.strat-1.caps_violation"
-    assert payload is msg
+    assert isinstance(payload, AiReviewCapsViolationFrameData)
+    assert payload is not msg
+    assert payload.type == "ai_review.caps_violation"
 
 
 @pytest.mark.asyncio
@@ -180,6 +189,69 @@ async def test_payload_carries_cap_type_attempted_and_limit() -> None:
     )
     await svc.handle_caps_violation_bus_message(msg)
     forwarded = publisher.send.await_args.args[1]
+    assert isinstance(forwarded, AiReviewCapsViolationFrameData)
     assert forwarded.cap_type == "max_open_orders"
     assert forwarded.attempted == 11.0
     assert forwarded.limit == 10.0
+
+
+@pytest.mark.asyncio
+async def test_external_frame_type_matches_q16_contract() -> None:
+    """Plan A §4.2 line 467 / Q16 — external frame ``type`` is fixed.
+
+    The internal bus payload carries
+    ``type="caps_violation_after_ai_approve"`` (snake-case bus name),
+    but the OUTBOUND WS frame the JS bridge dispatcher reads MUST be
+    ``"ai_review.caps_violation"`` (Plan A §4.2 line 467; bridge
+    dispatcher ``switch (frame.type)`` at line 503). Pin the
+    discriminator translation here so a future renaming of the
+    internal schema cannot silently break the JS dispatcher contract.
+
+    Given a bus message with the internal type literal,
+    When handle_caps_violation_bus_message routes,
+    Then the outbound frame.type equals ``"ai_review.caps_violation"``.
+    """
+    svc = AiReviewService.get_instance()
+    publisher = MagicMock()
+    publisher.send = AsyncMock()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    msg = _make_event()
+    assert msg.type == "caps_violation_after_ai_approve"
+    await svc.handle_caps_violation_bus_message(msg)
+    forwarded = publisher.send.await_args.args[1]
+    assert forwarded.type == "ai_review.caps_violation"
+
+
+@pytest.mark.asyncio
+async def test_external_frame_preserves_routing_fields_and_provenance() -> None:
+    """Plan A Q15/Q16 — routing fields stay at envelope top level.
+
+    The bridge per-frame scope filter (``_enforce_ai_review_scope``)
+    reads ``wallet_public_id`` + ``instrument_public_id`` directly off
+    the parsed JSON envelope without descending into a nested payload.
+    Provenance fields (``session_id`` + ``sequence_id`` + ``public_id``
+    + ``timestamp``) are forwarded verbatim so the bridge gap detector
+    sees both the internal bus row and the outbound frame on the same
+    producer chain.
+
+    Given a bus message with full routing + provenance,
+    When the handler translates,
+    Then every routing + provenance field appears on the outbound
+    frame at top-level with the same value.
+    """
+    svc = AiReviewService.get_instance()
+    publisher = MagicMock()
+    publisher.send = AsyncMock()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    msg = _make_event()
+    await svc.handle_caps_violation_bus_message(msg)
+    forwarded = publisher.send.await_args.args[1]
+    assert forwarded.review_public_id == msg.review_public_id
+    assert forwarded.user_public_id == msg.user_public_id
+    assert forwarded.strategy_public_id == msg.strategy_public_id
+    assert forwarded.wallet_public_id == msg.wallet_public_id
+    assert forwarded.instrument_public_id == msg.instrument_public_id
+    assert forwarded.public_id == msg.public_id
+    assert forwarded.timestamp == msg.timestamp
+    assert forwarded.session_id == msg.session_id
+    assert forwarded.sequence_id == msg.sequence_id

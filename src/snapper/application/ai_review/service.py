@@ -55,6 +55,7 @@ from snapper.data.repository_types import AiReviewInsertRow
 from snapper.data.repository_types import AiReviewRow
 from snapper.data.repository_types import PendingReviewSummary
 from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.schemas.data import AiReviewCapsViolationFrameData
 from snapper.messaging.schemas.data import CapsViolationAfterAiApproveData
 from snapper.messaging.schemas.data import DelegateOfflineData
 
@@ -1115,17 +1116,26 @@ class AiReviewService:
         """Plan D §3.6 — re-fanout caps-violation events to the WS topic family.
 
         Subscribes to the internal ``bus.caps_violation_after_ai_approve``
-        topic; for each event, publishes the Plan A Q7 / Plan D §4.3
-        external topic
+        topic; for each event, translates the internal
+        :class:`CapsViolationAfterAiApproveData`
+        (``type="caps_violation_after_ai_approve"``) into the external
+        :class:`AiReviewCapsViolationFrameData`
+        (``type="ai_review.caps_violation"``, fixed by Plan A §4.2
+        line 467 / Q16) and publishes it on the
         ``ai_reviews.{user_public_id}.{strategy_public_id}.caps_violation``
-        so the bridge can surface the rejection on the delegate's UI.
+        topic so the bridge per-frame scope filter (Q15) routes the
+        frame to the right delegate's UI dispatcher
+        (Plan A §4.2 line 503).
 
         Best-effort: a missing publisher logs a warning instead of
         raising (mirrors :class:`ScopeGrantService` semantics — a
         singleton spun up before the FastAPI lifespan attached one
         still tolerates the call). A send failure degrades to a
         logged exception so a transient broker hiccup never crashes
-        the subscriber loop.
+        the subscriber loop. Provenance fields (``session_id`` +
+        ``sequence_id``) are forwarded verbatim from the internal
+        message so the bridge gap detector keys both records onto the
+        same producer chain.
 
         Args:
             msg: Decoded :class:`CapsViolationAfterAiApproveData`
@@ -1134,7 +1144,8 @@ class AiReviewService:
 
         Returns:
             ``True`` when the WS event was handed to the publisher,
-            ``False`` when the publisher slot was empty.
+            ``False`` when the publisher slot was empty OR the publish
+            attempt raised.
         """
         if self._msg_publisher is None:
             logger.warning(
@@ -1144,8 +1155,22 @@ class AiReviewService:
             )
             return False
         topic = f"ai_reviews.{msg.user_public_id}.{msg.strategy_public_id}.caps_violation"
+        external_frame = AiReviewCapsViolationFrameData(
+            public_id=msg.public_id,
+            timestamp=msg.timestamp,
+            session_id=msg.session_id,
+            sequence_id=msg.sequence_id,
+            review_public_id=msg.review_public_id,
+            user_public_id=msg.user_public_id,
+            strategy_public_id=msg.strategy_public_id,
+            wallet_public_id=msg.wallet_public_id,
+            instrument_public_id=msg.instrument_public_id,
+            cap_type=msg.cap_type,
+            attempted=msg.attempted,
+            limit=msg.limit,
+        )
         try:
-            await self._msg_publisher.send(topic, msg)
+            await self._msg_publisher.send(topic, external_frame)
         except Exception as exc:
             logger.exception(
                 "Failed to broadcast ai_reviews caps_violation for review_public_id={}: {}",

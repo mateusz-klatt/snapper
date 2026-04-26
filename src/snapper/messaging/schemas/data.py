@@ -569,6 +569,53 @@ class CapsViolationAfterAiApproveData(StrictDataSchema[Literal["caps_violation_a
     limit: float
 
 
+class AiReviewCapsViolationFrameData(StrictDataSchema[Literal["ai_review.caps_violation"]]):
+    """Plan A §4.2 / Q16 — external WS frame for caps violations.
+
+    Public-facing counterpart to :class:`CapsViolationAfterAiApproveData`.
+    The internal bus topic ``bus.caps_violation_after_ai_approve`` carries
+    the snake-case ``caps_violation_after_ai_approve`` discriminator;
+    Plan A §4.2 line 467 fixes the OUTBOUND WS frame discriminator at
+    ``ai_review.caps_violation`` so the JS bridge dispatcher's
+    ``switch (frame.type)`` (Plan A §4.2 line 503) routes the frame to
+    the delegate's ``handleCapsViolation`` handler.
+    :meth:`AiReviewService.handle_caps_violation_bus_message` translates
+    from the internal schema to this external schema before publishing
+    to the ``ai_reviews.{user}.{strategy}.caps_violation`` topic.
+    Routing fields stay at envelope level so the bridge per-frame scope
+    filter (Plan A Q15) reads ``wallet_public_id`` +
+    ``instrument_public_id`` directly off the parsed envelope without
+    descending into a nested payload.
+
+    Attributes:
+        review_public_id: UUID7 of the ``ai_reviews`` row whose AI
+            decision authorised the trade that later violated a cap.
+        user_public_id: Owner of the consulting strategy — drives the
+            WS topic suffix.
+        strategy_public_id: Origin strategy — drives the WS topic
+            suffix so the operator dashboard can correlate the rejection
+            back to the strategy that made the call.
+        wallet_public_id: Wallet the trade would have settled on.
+        instrument_public_id: Instrument the trade was on.
+        cap_type: Plan A / Plan D cap classifier (e.g.
+            ``"max_open_orders"``, ``"max_daily_notional_usd"``,
+            ``"max_position_quantity"``).
+        attempted: Numeric value the trade tried to push the cap to.
+        limit: Configured cap value for the user that the attempt
+            exceeded.
+    """
+
+    type: Literal["ai_review.caps_violation"] = "ai_review.caps_violation"
+    review_public_id: str
+    user_public_id: str
+    strategy_public_id: str
+    wallet_public_id: str
+    instrument_public_id: str
+    cap_type: str
+    attempted: float
+    limit: float
+
+
 class DelegateOfflineData(StrictDataSchema[Literal["delegate_offline"]]):
     """Q17 Layer 1 fast-path event for an AI delegate that dropped its WS.
 
