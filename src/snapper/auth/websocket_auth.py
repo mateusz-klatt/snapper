@@ -153,6 +153,7 @@ class WebSocketAuthManager:
         self._msg_publisher: MessagePublisher | None = None
         self._pending_offline_tasks: dict[str, asyncio.Task[None]] = {}
         self._delegate_offline_grace_seconds: int = DEFAULT_DELEGATE_OFFLINE_GRACE_SECONDS
+        self._delegate_locks: dict[str, asyncio.Lock] = {}
 
     def set_wiring(
         self,
@@ -427,6 +428,28 @@ class WebSocketAuthManager:
             )
         self._delegate_offline_grace_seconds = grace_seconds
 
+    def _delegate_lock(self, delegate_id: str) -> asyncio.Lock:
+        """Return the per-delegate :class:`asyncio.Lock` (lazily created).
+
+        Plan D §4 hysteresis correctness depends on serialising the
+        ``pop -> cancel -> await -> reassign`` critical section in
+        :meth:`on_disconnect` AND :meth:`on_authenticate` for the same
+        ``delegate_public_id``. Without serialisation, two concurrent
+        same-delegate hooks can interleave at the ``await existing``
+        yield and orphan the intermediate task — the orphan still
+        wakes up and publishes ``bus.delegate_offline`` even though a
+        reconnect already happened, breaking Plan D's
+        phantom-offline-suppression contract.
+
+        ``dict.setdefault`` is atomic under the GIL (no ``await``
+        between lookup and store) so two callers racing the first
+        lookup for the same delegate observe the same lock object —
+        an extra ``asyncio.Lock`` may be instantiated and immediately
+        GC'd, but no caller ends up with a different lock than its
+        peer.
+        """
+        return self._delegate_locks.setdefault(delegate_id, asyncio.Lock())
+
     async def on_authenticate(self, websocket: WebSocket, principal: AuthPrincipal) -> None:
         """Cancel any pending offline publish for this delegate + bump last_seen_at.
 
@@ -440,7 +463,9 @@ class WebSocketAuthManager:
 
         Non-delegate principals short-circuit; only AI_DELEGATE
         principals carry a populated ``delegate_public_id`` (Plan D Q19
-        ``AuthPrincipal`` extension).
+        ``AuthPrincipal`` extension). Same-delegate transitions are
+        serialised through :meth:`_delegate_lock` so concurrent hooks
+        cannot orphan a pending offline task.
 
         Args:
             websocket: WebSocket connection that just authenticated
@@ -453,20 +478,21 @@ class WebSocketAuthManager:
         delegate_id = principal.delegate_public_id
         if delegate_id is None:
             return
-        pending = self._pending_offline_tasks.pop(delegate_id, None)
-        if pending is not None and not pending.done():
-            pending.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await pending
-        if self.repository_factory is None:
-            logger.warning(
-                "WebSocketAuthManager.on_authenticate: skipping last_seen_at update "
-                "for delegate_public_id={} — repository_factory not wired",
-                delegate_id,
-            )
-            return
-        repo = self.repository_factory()
-        await repo.update_delegate_last_seen(delegate_id, datetime.now(UTC))
+        async with self._delegate_lock(delegate_id):
+            pending = self._pending_offline_tasks.pop(delegate_id, None)
+            if pending is not None and not pending.done():
+                pending.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pending
+            if self.repository_factory is None:
+                logger.warning(
+                    "WebSocketAuthManager.on_authenticate: skipping last_seen_at "
+                    "update for delegate_public_id={} — repository_factory not wired",
+                    delegate_id,
+                )
+                return
+            repo = self.repository_factory()
+            await repo.update_delegate_last_seen(delegate_id, datetime.now(UTC))
 
     async def on_disconnect(self, websocket: WebSocket, principal: AuthPrincipal) -> None:
         """Schedule a delayed ``bus.delegate_offline`` publish for an AI delegate.
@@ -478,10 +504,23 @@ class WebSocketAuthManager:
         reconnect cancels it before any subscriber observes the
         phantom-offline transition. If a prior pending task already
         exists for this delegate it is cancelled first so only the
-        latest disconnect timestamp ever fires.
+        latest disconnect timestamp ever fires. Same-delegate
+        transitions are serialised through :meth:`_delegate_lock` so
+        concurrent disconnects cannot orphan a pending offline task.
 
         Non-delegate principals short-circuit; only AI_DELEGATE
         principals carry a populated ``delegate_public_id``.
+
+        Multi-WS-per-delegate note: the registry is delegate-keyed,
+        not WS-keyed, so disconnecting one of N concurrent sessions for
+        the same delegate does schedule an offline publish even when
+        other sessions remain authenticated. The §3.4 Layer 2 DB
+        scanner is the correctness backstop — it consults
+        ``ai_delegates.last_seen_at``, which the surviving session(s)
+        keep refreshing via :meth:`on_authenticate`, so the
+        false-positive Layer 1 publish is filtered by the scanner's
+        freshness predicate or immediately superseded once the next
+        heartbeat lands.
 
         Args:
             websocket: WebSocket connection that just dropped (passed
@@ -493,17 +532,36 @@ class WebSocketAuthManager:
         delegate_id = principal.delegate_public_id
         if delegate_id is None:
             return
-        existing = self._pending_offline_tasks.pop(delegate_id, None)
-        if existing is not None and not existing.done():
-            existing.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await existing
-        self._pending_offline_tasks[delegate_id] = asyncio.create_task(
-            self._delayed_offline_publish(
-                user_public_id=principal.user_public_id,
-                delegate_public_id=delegate_id,
+        async with self._delegate_lock(delegate_id):
+            existing = self._pending_offline_tasks.pop(delegate_id, None)
+            if existing is not None and not existing.done():
+                existing.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await existing
+            self._pending_offline_tasks[delegate_id] = asyncio.create_task(
+                self._delayed_offline_publish(
+                    user_public_id=principal.user_public_id,
+                    delegate_public_id=delegate_id,
+                )
             )
-        )
+
+    async def cancel_pending_offline_tasks(self) -> None:
+        """Cancel + drain every in-flight delayed-offline task.
+
+        Called from the FastAPI lifespan shutdown path so a closing
+        process does not leave Plan D §4 deferred-publish tasks
+        sleeping against a torn-down ZMQ publisher / repository
+        connection. Idempotent: clears the registry after draining so
+        a second call is a no-op.
+        """
+        tasks = list(self._pending_offline_tasks.values())
+        self._pending_offline_tasks.clear()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     async def _delayed_offline_publish(
         self, *, user_public_id: str, delegate_public_id: str

@@ -442,3 +442,97 @@ async def test_publish_payload_carries_session_and_sequence() -> None:
     assert payloads[1].delegate_public_id == "del-b"
     assert payloads[0].session_id == payloads[1].session_id
     assert payloads[1].sequence_id > payloads[0].sequence_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_concurrent_on_disconnect_does_not_orphan_pending_task() -> None:
+    """Same-delegate concurrent disconnects never orphan a pending publish task.
+
+    Plan D §4 hysteresis: if call A and call B both run on_disconnect
+    for the same delegate, both must serialise so only the latest
+    scheduled task lives in the registry and any earlier task is
+    cancelled. Without the per-delegate lock, A's `await existing`
+    yields and B can install a new task that A then overwrites,
+    leaving an orphan that wakes up and publishes anyway.
+
+    Given a manager with one already-pending offline task,
+    When two on_disconnect coroutines race for the same delegate via
+    asyncio.gather,
+    Then exactly one task remains in the registry, every prior task is
+    cancelled (or done), and a single subsequent on_authenticate
+    suppresses the offline publish entirely.
+    """
+    publisher = _mock_publisher()
+    factory, _repo = _mock_repo_factory()
+    manager = _make_manager(publisher=publisher, repository_factory=factory, grace_seconds=10)
+    principal = _delegate_principal()
+    ws = MagicMock()
+    await manager.on_disconnect(ws, principal)
+    await asyncio.gather(
+        manager.on_disconnect(ws, principal),
+        manager.on_disconnect(ws, principal),
+        manager.on_disconnect(ws, principal),
+    )
+    assert len(manager._pending_offline_tasks) == 1
+    surviving = manager._pending_offline_tasks["del-1"]
+    assert not surviving.done()
+    await manager.on_authenticate(ws, principal)
+    assert "del-1" not in manager._pending_offline_tasks
+    assert surviving.cancelled()
+    publisher.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_cancel_pending_offline_tasks_skips_already_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Already-completed task in the registry is skipped, not cancelled.
+
+    Given a manager whose pending task already ran to completion (the
+    delayed publish fired and the task is done),
+    When cancel_pending_offline_tasks runs,
+    Then the loop sees ``task.done() is True`` for that entry and skips
+    the cancel, the registry is cleared, and no exception leaks.
+    """
+    publisher = _mock_publisher()
+    manager = _make_manager(publisher=publisher, grace_seconds=10)
+    monkeypatch.setattr("snapper.auth.websocket_auth.asyncio.sleep", _instant_sleep)
+    ws = MagicMock()
+    await manager.on_disconnect(ws, _delegate_principal())
+    task = manager._pending_offline_tasks["del-1"]
+    await task
+    assert task.done()
+    await manager.cancel_pending_offline_tasks()
+    assert manager._pending_offline_tasks == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_cancel_pending_offline_tasks_drains_registry() -> None:
+    """Shutdown helper cancels every in-flight delayed task and clears the dict.
+
+    FastAPI lifespan calls this on shutdown so a closing process does
+    not leave Plan D §4 deferred-publish tasks sleeping against
+    torn-down wiring.
+
+    Given a manager with multiple pending tasks for distinct delegates,
+    When cancel_pending_offline_tasks runs,
+    Then the registry is empty, every task is done (cancelled), and the
+    publisher was never called.
+    """
+    publisher = _mock_publisher()
+    manager = _make_manager(publisher=publisher, grace_seconds=10)
+    ws = MagicMock()
+    await manager.on_disconnect(ws, _delegate_principal(delegate_public_id="d-1"))
+    await manager.on_disconnect(ws, _delegate_principal(delegate_public_id="d-2"))
+    await manager.on_disconnect(ws, _delegate_principal(delegate_public_id="d-3"))
+    pending_snapshot = list(manager._pending_offline_tasks.values())
+    assert len(pending_snapshot) == 3
+    await manager.cancel_pending_offline_tasks()
+    assert manager._pending_offline_tasks == {}
+    for task in pending_snapshot:
+        assert task.done()
+    publisher.send.assert_not_called()
+    await manager.cancel_pending_offline_tasks()
