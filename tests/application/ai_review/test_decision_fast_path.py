@@ -26,6 +26,7 @@ from uuid import uuid7
 
 import pytest
 
+from snapper.application.ai_review.service import _PENDING_RESOLUTION_MAX_ENTRIES
 from snapper.application.ai_review.service import AiReviewService
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -396,10 +397,8 @@ class TestPendingResolutionsSizeCap:
             5 (Python dict preserves insertion order so popping from
             the front evicts oldest first; freshest events survive).
         """
-        from snapper.application.ai_review import service as svc_module
-
         svc = AiReviewService.get_instance()
-        cap = svc_module._PENDING_RESOLUTION_MAX_ENTRIES
+        cap = _PENDING_RESOLUTION_MAX_ENTRIES
         for i in range(cap + 5):
             event = _make_decision_event(review_public_id=f"rev-{i:05d}")
             svc.handle_ai_review_decision_bus_message(event)
@@ -417,10 +416,8 @@ class TestPendingResolutionsSizeCap:
         When _enforce_pending_resolution_size_cap is invoked,
         Then no entries are evicted (overflow=0).
         """
-        from snapper.application.ai_review import service as svc_module
-
         svc = AiReviewService.get_instance()
-        cap = svc_module._PENDING_RESOLUTION_MAX_ENTRIES
+        cap = _PENDING_RESOLUTION_MAX_ENTRIES
         for i in range(cap):
             event = _make_decision_event(review_public_id=f"rev-{i:05d}")
             svc.handle_ai_review_decision_bus_message(event)
