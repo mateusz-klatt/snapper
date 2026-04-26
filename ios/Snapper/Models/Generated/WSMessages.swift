@@ -232,6 +232,42 @@ struct AiReviewDecisionData: Codable, Sendable {
     }
 }
 
+struct AiReviewRequestFrameData: Codable, Sendable {
+    let type: String
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let reviewPublicId: String
+    let userPublicId: String
+    let strategyPublicId: String
+    let walletPublicId: String
+    let instrumentPublicId: String
+    let selectedDelegatePublicId: String
+    let deadline: Date
+    let signalEnvelope: JsonObject
+    let instrumentMetadata: JsonObject
+    let dispatchVersion: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case reviewPublicId = "review_public_id"
+        case userPublicId = "user_public_id"
+        case strategyPublicId = "strategy_public_id"
+        case walletPublicId = "wallet_public_id"
+        case instrumentPublicId = "instrument_public_id"
+        case selectedDelegatePublicId = "selected_delegate_public_id"
+        case deadline
+        case signalEnvelope = "signal_envelope"
+        case instrumentMetadata = "instrument_metadata"
+        case dispatchVersion = "dispatch_version"
+    }
+}
+
 struct AlertEventData: Codable, Sendable {
     let type: String
     let sequenceId: Int

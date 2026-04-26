@@ -65,6 +65,7 @@ from snapper.messaging.infrastructure.validated_socket import ValidatedSubscribe
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import AiReviewCapsViolationFrameData
 from snapper.messaging.schemas.data import AiReviewDecisionData
+from snapper.messaging.schemas.data import AiReviewRequestFrameData
 from snapper.messaging.schemas.data import CapsViolationAfterAiApproveData
 from snapper.messaging.schemas.data import DelegateOfflineData
 
@@ -734,10 +735,99 @@ class AiReviewService:
             selected_delegate_public_id=selected,
             candidate_count=len(candidate_ids),
         )
+        await self._publish_request_external_frame(
+            review_public_id=review_public_id,
+            user_public_id=request.user_public_id,
+            strategy_public_id=request.strategy_public_id,
+            wallet_public_id=request.wallet_public_id,
+            instrument_public_id=request.instrument_public_id,
+            selected_delegate_public_id=selected,
+            deadline=deadline,
+            signal_envelope=request.signal_envelope,
+            instrument_metadata=request.instrument_metadata,
+            wall_clock=wall_clock,
+        )
         return AiReviewCreated(
             review_public_id=review_public_id,
             selected_delegate_public_id=selected,
         )
+
+    async def _publish_request_external_frame(
+        self,
+        *,
+        review_public_id: str,
+        user_public_id: str,
+        strategy_public_id: str,
+        wallet_public_id: str,
+        instrument_public_id: str,
+        selected_delegate_public_id: str,
+        deadline: datetime,
+        signal_envelope: JsonObject,
+        instrument_metadata: JsonObject,
+        wall_clock: datetime,
+    ) -> None:
+        """Plan A §4.2 / Q16 — emit external WS frame for the new review.
+
+        Best-effort + race-safe (mirrors :meth:`_publish_decision_bus_event`
+        + :meth:`TradingCapsEnforcer._publish_caps_violation_after_ai_approve`):
+        the publisher reference is captured into a local BEFORE any
+        await so a concurrent shutdown clearing the slot cannot null
+        it mid-helper, and the entire publish branch is wrapped in a
+        single try/except so NO failure (broker hiccup, validator
+        reject, transport error) can replace the post-commit
+        :class:`AiReviewCreated` envelope the caller is about to
+        return. The DB-side claim+insert is the primary contract; the
+        WS fanout is auxiliary. A lost frame degrades to the
+        delegate's REST fallback poll on
+        ``GET /api/ai-reviews/pending``.
+
+        Args:
+            review_public_id: Just-inserted review id.
+            user_public_id: Owner of the consulting strategy.
+            strategy_public_id: Origin strategy.
+            wallet_public_id: Wallet the strategy would trade on.
+            instrument_public_id: Instrument the strategy is consulting on.
+            selected_delegate_public_id: Q10 admission control's pick.
+            deadline: Decision deadline.
+            signal_envelope: Strategy's payload (16KB-bounded by
+                :meth:`create_review`).
+            instrument_metadata: Strategy-supplied instrument context.
+            wall_clock: Creation wall clock — reused as the frame
+                timestamp so audit + WS fanout correlate.
+        """
+        publisher = self._msg_publisher
+        if publisher is None:
+            logger.warning(
+                "ai_reviews request frame NOT broadcast for "
+                f"review_public_id={review_public_id}: AiReviewService publisher unavailable"
+            )
+            return
+        topic = f"ai_reviews.{user_public_id}.{strategy_public_id}.request"
+        try:
+            tracker = publisher.tracker
+            payload = AiReviewRequestFrameData(
+                public_id=str(uuid7()),
+                timestamp=wall_clock,
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence(topic),
+                review_public_id=review_public_id,
+                user_public_id=user_public_id,
+                strategy_public_id=strategy_public_id,
+                wallet_public_id=wallet_public_id,
+                instrument_public_id=instrument_public_id,
+                selected_delegate_public_id=selected_delegate_public_id,
+                deadline=deadline,
+                signal_envelope=signal_envelope,
+                instrument_metadata=instrument_metadata,
+                dispatch_version=0,
+            )
+            await publisher.send(topic, payload)
+        except Exception as publish_exc:
+            logger.exception(
+                "AiReviewService: failed to broadcast ai_reviews request frame for "
+                f"review_public_id={review_public_id}: {publish_exc} "
+                "(review row is committed; delegate falls back to REST poll)"
+            )
 
     async def submit_decision(
         self,

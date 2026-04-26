@@ -854,6 +854,26 @@ export const WSAuthCompleteResponseSchema = z
 
 export const JsonObjectSchema = z.record(z.string(), z.any())
 
+export const AiReviewRequestFrameDataSchema = z
+  .object({
+    type: z.literal('ai_review.request'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    review_public_id: z.string(),
+    user_public_id: z.string(),
+    strategy_public_id: z.string(),
+    wallet_public_id: z.string(),
+    instrument_public_id: z.string(),
+    selected_delegate_public_id: z.string(),
+    deadline: z.iso.datetime(),
+    signal_envelope: z.record(z.string(), z.any()),
+    instrument_metadata: z.record(z.string(), z.any()),
+    dispatch_version: z.number().int(),
+  })
+  .strict()
+
 export const AlertEventDataSchema = z
   .object({
     type: z.literal('alert_event'),

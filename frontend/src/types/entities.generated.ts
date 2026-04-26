@@ -57,6 +57,27 @@ export interface AiReviewDecision {
 }
 
 /**
+ * Canonical AiReviewRequestFrame entity.
+ * From WebSocket AiReviewRequestFrameData.
+ */
+export interface AiReviewRequestFrame {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  reviewPublicId: string
+  userPublicId: string
+  strategyPublicId: string
+  walletPublicId: string
+  instrumentPublicId: string
+  selectedDelegatePublicId: string
+  deadline: Date
+  signalEnvelope: Record<string, unknown>
+  instrumentMetadata: Record<string, unknown>
+  dispatchVersion: number
+}
+
+/**
  * Canonical AlertEvent entity.
  * From WebSocket AlertEventData.
  */

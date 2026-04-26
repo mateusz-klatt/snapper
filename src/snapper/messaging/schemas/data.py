@@ -575,6 +575,62 @@ class CapsViolationAfterAiApproveData(StrictDataSchema[Literal["caps_violation_a
     a frame the bridge already forwarded)."""
 
 
+class AiReviewRequestFrameData(StrictDataSchema[Literal["ai_review.request"]]):
+    """Plan A §4.2 / Q16 — external WS frame for new AI review consults.
+
+    Published by :meth:`AiReviewService.create_review` (sole publisher)
+    AFTER the atomic claim+insert commits. Targets the
+    ``ai_reviews.{user_public_id}.{strategy_public_id}.request`` topic
+    so the bridge per-frame scope filter (Plan A Q15) routes it to
+    AI delegates that have a scope grant on the wallet+instrument.
+    Routing fields stay at envelope level (top-level
+    ``wallet_public_id`` + ``instrument_public_id``) so the bridge
+    scope filter reads them directly off the parsed JSON without
+    descending into the nested payload.
+
+    Q18 dedup: ``dispatch_version`` is the original review row's
+    counter (always 0 on the request frame since the row was just
+    inserted; supersede / fanout retries that increment the counter
+    are surfaced as separate frames). The JS bridge dispatcher
+    dedupes by ``(public_id, dispatch_version)`` so duplicate
+    receives from a flapping subscriber don't replay the consult
+    request.
+
+    Attributes:
+        review_public_id: UUID7 of the just-created ``ai_reviews`` row.
+        user_public_id: Owner of the consulting strategy.
+        strategy_public_id: Origin strategy.
+        wallet_public_id: Wallet the strategy would trade on.
+        instrument_public_id: Instrument the strategy is consulting on.
+        selected_delegate_public_id: AI delegate selected by Q10
+            admission control. Threaded onto the frame so the
+            delegate UI can show a "this is for you" affordance vs a
+            broadcast frame received via fanout.
+        deadline: ISO8601 wall-clock deadline by which the delegate
+            must submit a decision before the strategy primitive
+            transitions the row to ``timeout``. The delegate UI
+            renders this as a countdown.
+        signal_envelope: Plan A §3 strategy signal payload.
+            Bounded by 16KB at the create_review enforcement layer.
+        instrument_metadata: Strategy-supplied instrument context
+            (e.g. order book snapshot, recent volatility metrics)
+            used by the delegate to inform their decision.
+        dispatch_version: Plan A Q18 — bridge dedup key.
+    """
+
+    type: Literal["ai_review.request"] = "ai_review.request"
+    review_public_id: str
+    user_public_id: str
+    strategy_public_id: str
+    wallet_public_id: str
+    instrument_public_id: str
+    selected_delegate_public_id: str
+    deadline: datetime
+    signal_envelope: JsonObject
+    instrument_metadata: JsonObject
+    dispatch_version: int
+
+
 class AiReviewCapsViolationFrameData(StrictDataSchema[Literal["ai_review.caps_violation"]]):
     """Plan A §4.2 / Q16 — external WS frame for caps violations.
 

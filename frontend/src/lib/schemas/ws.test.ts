@@ -38,6 +38,31 @@ describe('parseWsMessage', () => {
     )
   })
 
+  it('parses ai_review.request frames published by Phase 2 #6', () => {
+    const message = {
+      type: 'ai_review.request',
+      sequence_id: 1,
+      public_id: '019dcaf5-0a22-7ef2-8767-9a37d05a7f68',
+      timestamp: '2026-04-26T19:30:00.000Z',
+      session_id: 'sess-xyz',
+      review_public_id: 'rev-abc',
+      user_public_id: 'user-1',
+      strategy_public_id: 'strat-1',
+      wallet_public_id: 'wal-1',
+      instrument_public_id: 'inst-1',
+      selected_delegate_public_id: 'del-1',
+      deadline: '2026-04-26T19:31:00.000Z',
+      signal_envelope: { signal: 'long', confidence: 0.7 },
+      instrument_metadata: { last_price: 50000 },
+      dispatch_version: 0,
+    }
+    const result = parseWsMessage(message)
+
+    expect(result).not.toBeNull()
+    expect(result?.type).toBe('ai_review.request')
+    expect(result).toMatchObject(message)
+  })
+
   it('parses ai_review.caps_violation frames published by Phase 2 #2', () => {
     const message = {
       type: 'ai_review.caps_violation',

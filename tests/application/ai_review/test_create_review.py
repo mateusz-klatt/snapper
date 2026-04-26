@@ -16,6 +16,9 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 from uuid import uuid7
 
 import pytest
@@ -39,6 +42,9 @@ from snapper.data.models import User
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import AiReviewRequestFrameData
 
 TEST_TIMEOUT = 15
 
@@ -702,3 +708,102 @@ async def test_envelope_at_16kb_boundary_succeeds(
     result = await svc.create_review(request, repo=repo, now=now)
     row = await repo.get_ai_review(result.review_public_id)
     assert row is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_create_review_publishes_external_request_frame_post_commit(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Plan A §4.2 / Q16 + Phase 2 #6 — post-commit external WS fanout.
+
+    Given a configured AiReviewService with a wired publisher,
+    When create_review claims+inserts a review,
+    Then publisher.send is awaited once with topic
+        ``ai_reviews.{user}.{strategy}.request`` carrying the Q16
+        envelope: routing fields at top-level, signal_envelope +
+        instrument_metadata + deadline + selected_delegate_public_id
+        all forwarded; dispatch_version is 0 on the just-inserted row;
+        publisher tracker stamps fresh provenance.
+    """
+    svc = AiReviewService.get_instance()
+    publisher = MagicMock()
+    publisher.send = AsyncMock()
+    publisher.tracker = SequenceTracker()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    now = _now()
+    ids = await _seed_eligible_delegate(repo, as_of=now)
+    request = _make_request(ids)
+    result = await svc.create_review(request, repo=repo, now=now)
+    publisher.send.assert_awaited_once()
+    topic, payload = publisher.send.await_args.args
+    expected_topic = f"ai_reviews.{ids['user_public_id']}.{request.strategy_public_id}.request"
+    assert topic == expected_topic
+    assert isinstance(payload, AiReviewRequestFrameData)
+    assert payload.type == "ai_review.request"
+    assert payload.review_public_id == result.review_public_id
+    assert payload.user_public_id == ids["user_public_id"]
+    assert payload.strategy_public_id == request.strategy_public_id
+    assert payload.wallet_public_id == ids["wallet_public_id"]
+    assert payload.instrument_public_id == ids["instrument_public_id"]
+    assert payload.selected_delegate_public_id == result.selected_delegate_public_id
+    assert payload.deadline == now + timedelta(seconds=request.deadline_seconds)
+    assert payload.signal_envelope == request.signal_envelope
+    assert payload.instrument_metadata == request.instrument_metadata
+    assert payload.dispatch_version == 0
+    assert payload.session_id == publisher.tracker.session_id
+    assert payload.sequence_id == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_create_review_returns_envelope_when_publisher_missing(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Missing publisher -> warn + still return AiReviewCreated.
+
+    The DB-side claim+insert is the primary contract; the WS fanout
+    is auxiliary. A lost frame degrades to the delegate's REST
+    fallback poll on ``GET /api/ai-reviews/pending``.
+
+    Given a configured AiReviewService WITHOUT a publisher wired,
+    When create_review claims+inserts a review,
+    Then the envelope still returns successfully (no exception
+        propagates from the missing publisher branch).
+    """
+    svc = AiReviewService.get_instance()
+    now = _now()
+    ids = await _seed_eligible_delegate(repo, as_of=now)
+    request = _make_request(ids)
+    result = await svc.create_review(request, repo=repo, now=now)
+    assert result.selected_delegate_public_id == ids["delegate_public_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_create_review_returns_envelope_when_publish_fails(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Publisher.send raising -> log + still return AiReviewCreated.
+
+    Closes the same exception-masking guarantee as Phase 2 #2 +
+    Phase 2 #3: a broker hiccup must NOT replace the post-commit
+    AiReviewCreated envelope.
+
+    Given a publisher whose send() raises RuntimeError,
+    When create_review claims+inserts a review,
+    Then the envelope still returns the freshly inserted row's id +
+        the strategy primitive's await loop falls through to the
+        DB-poll fallback when the bridge dispatcher misses the frame.
+    """
+    svc = AiReviewService.get_instance()
+    publisher = MagicMock()
+    publisher.send = AsyncMock(side_effect=RuntimeError("broker down"))
+    publisher.tracker = SequenceTracker()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    now = _now()
+    ids = await _seed_eligible_delegate(repo, as_of=now)
+    request = _make_request(ids)
+    result = await svc.create_review(request, repo=repo, now=now)
+    assert result.selected_delegate_public_id == ids["delegate_public_id"]
+    assert result.review_public_id

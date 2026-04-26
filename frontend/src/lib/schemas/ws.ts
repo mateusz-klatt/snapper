@@ -18,6 +18,7 @@ export {
   SettingChangedDataSchema as settingChangedSchema,
   SymbolAliasUpdateDataSchema as symbolAliasUpdateSchema,
   AiReviewCapsViolationFrameDataSchema as aiReviewCapsViolationFrameSchema,
+  AiReviewRequestFrameDataSchema as aiReviewRequestFrameSchema,
   WSAuthRequiredResponseSchema as authRequiredMessageSchema,
   WSAuthOkResponseSchema as authOkMessageSchema,
   WSAuthFailedResponseSchema as authFailedMessageSchema,
@@ -50,6 +51,7 @@ import {
   SettingChangedDataSchema,
   SymbolAliasUpdateDataSchema,
   AiReviewCapsViolationFrameDataSchema,
+  AiReviewRequestFrameDataSchema,
   WSAuthRequiredResponseSchema,
   WSAuthOkResponseSchema,
   WSAuthFailedResponseSchema,
@@ -81,6 +83,7 @@ export const wsMessageUnionSchema = z.discriminatedUnion('type', [
   SettingChangedDataSchema,
   SymbolAliasUpdateDataSchema,
   AiReviewCapsViolationFrameDataSchema,
+  AiReviewRequestFrameDataSchema,
   WSAuthRequiredResponseSchema,
   WSAuthOkResponseSchema,
   WSAuthFailedResponseSchema,
@@ -107,6 +110,7 @@ export type Order = z.infer<typeof OrderDataSchema>
 export type Execution = z.infer<typeof ExecutionDataSchema>
 export type Heartbeat = z.infer<typeof HeartbeatDataSchema>
 export type AiReviewCapsViolation = z.infer<typeof AiReviewCapsViolationFrameDataSchema>
+export type AiReviewRequest = z.infer<typeof AiReviewRequestFrameDataSchema>
 const KNOWN_MESSAGE_TYPES = new Set([
   'tick',
   'candle',
@@ -125,6 +129,7 @@ const KNOWN_MESSAGE_TYPES = new Set([
   'setting_changed',
   'symbol_alias_update',
   'ai_review.caps_violation',
+  'ai_review.request',
   'auth_expired',
   'auth_failed',
   'auth_ok',
