@@ -540,11 +540,15 @@ def register_mcp_tools(
         try:
             decision_enum = AiReviewDecisionEnum(decision)
         except ValueError:
+            sanitized_invalid: dict[str, Any] = sanitize_output({"decision": decision})
             return to_call_tool_result(
                 success=False,
                 error_code="invalid_decision",
-                message=(f"decision must be 'approve' or 'reject'; got {decision!r}."),
-                details={"decision": decision},
+                message=(
+                    "decision must be 'approve' or 'reject'; got an "
+                    "unrecognised value (see details.decision)."
+                ),
+                details=sanitized_invalid,
             )
         result = await get_ai_review_service().submit_decision(
             review_public_id=review_id,
