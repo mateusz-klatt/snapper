@@ -171,9 +171,9 @@ struct EditDevicePrefView: View {
                         if scopeKind == .operator_ || scopeKind == .wallet {
                             Picker("Operator", selection: $selectedOperatorId) {
                                 Text("Select…").tag(Optional<String>.none)
-                                ForEach(appState.availableOperators, id: \.publicId) { operator_ in
-                                    Text(operator_.label)
-                                        .tag(Optional(operator_.publicId))
+                                ForEach(appState.availableOperators, id: \.publicId) { operatorInfo in
+                                    Text(operatorInfo.label)
+                                        .tag(Optional(operatorInfo.publicId))
                                 }
                             }
                         }

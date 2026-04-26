@@ -97,7 +97,9 @@ struct PositionsView: View {
             Button("Reduce position") {
                 reduceModalPosition = IdentifiedPosition(position: position)
             }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) {
+                actionSheetPosition = nil
+            }
         } message: { position in
             Text(
                 "\(PositionCard.direction(for: position.quantity)) \(String(format: "%.4f", position.quantity)) @ \(String(format: "%.4f", position.averagePrice))"
@@ -114,7 +116,9 @@ struct PositionsView: View {
             Button("Close", role: .destructive) {
                 Task { await submitMarketReduce(position: position, quantity: abs(position.quantity)) }
             }
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel) {
+                pendingClosePosition = nil
+            }
         } message: { position in
             Text(
                 "Submits a reduce-only market order for \(String(format: "%.4f", abs(position.quantity))) \(position.instrument)."
@@ -136,7 +140,9 @@ struct PositionsView: View {
             ),
             presenting: submitError
         ) { _ in
-            Button("OK", role: .cancel) {}
+            Button("OK", role: .cancel) {
+                submitError = nil
+            }
         } message: { error in
             Text(error)
         }
