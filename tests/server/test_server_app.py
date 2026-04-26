@@ -51,6 +51,23 @@ from snapper.utils.logging import setup_logging
 from tests.server import dummy_processes
 
 
+def _make_ai_review_service_mock() -> MagicMock:
+    """Build an AiReviewService mock safe for the lifespan path.
+
+    The real singleton's :meth:`start_bus_listener` opens a ZMQ
+    socket which would hang forever when handed a MagicMock-coerced
+    URL from the settings stub, so every lifespan-entry test that
+    does not exercise ai-review wiring directly MUST patch this
+    factory in via ``snapper.server.app.get_ai_review_service``.
+    """
+    return MagicMock(
+        set_msg_publisher=MagicMock(),
+        set_repository_factory=MagicMock(),
+        start_bus_listener=AsyncMock(),
+        stop_bus_listener=AsyncMock(),
+    )
+
+
 def _make_token_listener_recorder(recorded: list[str]) -> MagicMock:
     """Build a TokenManager mock whose listener calls append to ``recorded``.
 
@@ -213,6 +230,10 @@ class TestLifespan:
         )
         with (
             patch("snapper.server.app.discover_processes"),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
             patch(
@@ -272,6 +293,10 @@ class TestLifespan:
         api_only_settings.zmq_broker_xpub = "tcp://test-broker-xpub:7501"
         with (
             patch("snapper.server.app.discover_processes"),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
             patch(
@@ -361,6 +386,10 @@ class TestLifespan:
 
         with (
             patch("snapper.server.app.discover_processes"),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
             patch(
@@ -437,6 +466,10 @@ class TestLifespan:
         mock_scope_grant_service = MagicMock()
         with (
             patch("snapper.server.app.discover_processes"),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
             patch(
@@ -512,9 +545,13 @@ class TestLifespan:
         user_publisher = MagicMock()
         mock_user_service = MagicMock()
         mock_scope_grant_service = MagicMock()
-        mock_ai_review_service = MagicMock()
+        mock_ai_review_service = _make_ai_review_service_mock()
         with (
             patch("snapper.server.app.discover_processes"),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
             patch(
@@ -592,6 +629,10 @@ class TestLifespan:
         )
         with (
             patch("snapper.server.app.discover_processes"),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
             patch(
@@ -601,7 +642,10 @@ class TestLifespan:
             patch("snapper.server.app._shutdown_user_service_publisher"),
             patch("snapper.server.app.get_user_service", return_value=MagicMock()),
             patch("snapper.server.app.get_scope_grant_service", return_value=MagicMock()),
-            patch("snapper.server.app.get_ai_review_service", return_value=MagicMock()),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
             patch(
                 "snapper.server.app.get_ws_auth_manager",
                 return_value=ws_auth_manager_mock,
@@ -644,7 +688,7 @@ class TestLifespan:
         mock_app.state.user_service_publisher_context = None
         mock_user_service = MagicMock()
         mock_scope_grant_service = MagicMock()
-        mock_ai_review_service = MagicMock()
+        mock_ai_review_service = _make_ai_review_service_mock()
         mock_ws_auth_manager = MagicMock()
         with (
             patch(
@@ -669,6 +713,92 @@ class TestLifespan:
         mock_scope_grant_service.set_msg_publisher.assert_called_once_with(None)
         mock_ai_review_service.set_msg_publisher.assert_called_once_with(None)
         mock_ws_auth_manager.set_msg_publisher.assert_called_once_with(None)
+
+    @pytest.mark.asyncio
+    async def test_lifespan_starts_and_stops_ai_review_bus_listener(self) -> None:
+        """AiReviewService bus listener is started + stopped by lifespan.
+
+        Phase 2 #1 wiring: lifespan must spin up the
+        ``bus.delegate_offline`` + ``bus.caps_violation_after_ai_approve``
+        subscriber so the Phase 1 #2 + #8 handlers actually drain
+        events in production. The repository_factory MUST be injected
+        BEFORE ``start_bus_listener`` so the first dispatched
+        ``bus.delegate_offline`` frame finds a non-None factory; on
+        teardown the lifespan stops the listener and clears the
+        factory slot so any in-flight singleton observes a clean
+        slate.
+        """
+        mock_app = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.cleanup = AsyncMock()
+        mock_zmq_bridge = MagicMock()
+        mock_zmq_bridge.start = AsyncMock()
+        mock_zmq_bridge.stop = AsyncMock()
+        mock_manager.zmq_bridge = mock_zmq_bridge
+        mock_app.state.manager = mock_manager
+        recorded: list[str] = []
+        mock_ai_review = _make_ai_review_service_mock()
+        mock_ai_review.set_repository_factory.side_effect = lambda _f: recorded.append(
+            "set_factory" if _f is not None else "clear_factory"
+        )
+
+        async def _start(_xpub: str) -> None:
+            recorded.append("start_bus_listener")
+
+        async def _stop() -> None:
+            recorded.append("stop_bus_listener")
+
+        mock_ai_review.start_bus_listener = _start
+        mock_ai_review.stop_bus_listener = _stop
+        with (
+            patch("snapper.server.app.discover_processes"),
+            patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
+            patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app._build_user_service_publisher",
+                return_value=(MagicMock(), MagicMock()),
+            ),
+            patch("snapper.server.app._shutdown_user_service_publisher"),
+            patch("snapper.server.app.get_user_service", return_value=MagicMock()),
+            patch("snapper.server.app.get_scope_grant_service", return_value=MagicMock()),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=mock_ai_review,
+            ),
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
+                ),
+            ),
+            patch(
+                "snapper.server.app.get_token_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
+        ):
+            mock_settings_service = MagicMock()
+            mock_settings_service.shutdown = AsyncMock()
+            mock_get_settings_service.return_value = mock_settings_service
+            mock_factory = MagicMock()
+            mock_factory.sync_registry_to_database = AsyncMock()
+            mock_factory.start_all_processes = AsyncMock()
+            mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
+            mock_factory.stop_all_processes = AsyncMock()
+            mock_factory_cls.return_value = mock_factory
+            async with lifespan(mock_app):
+                pass
+        assert recorded[0] == "set_factory"
+        assert recorded[1] == "start_bus_listener"
+        stop_idx = recorded.index("stop_bus_listener")
+        clear_idx = recorded.index("clear_factory")
+        assert (
+            stop_idx < clear_idx
+        ), f"lifespan must stop_bus_listener BEFORE clearing the factory: {recorded}"
 
     @pytest.mark.asyncio
     async def test_lifespan_wires_ws_auth_manager_before_start_admin_listener(
@@ -709,6 +839,10 @@ class TestLifespan:
 
         with (
             patch("snapper.server.app.discover_processes"),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
             patch(
@@ -914,6 +1048,10 @@ class TestLifespan:
         api_only_settings.server_api_only = True
         with (
             patch("snapper.server.app.discover_processes"),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
             patch(
@@ -1858,6 +1996,10 @@ class TestLifespanCancellation:
         mock_app.state.zmq_bridge_task = mock_bridge_task
         with (
             patch("snapper.server.app.discover_processes"),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
         ):
@@ -1901,6 +2043,10 @@ class TestLifespanCancellation:
         mock_app.state.manager = mock_manager
         with (
             patch("snapper.server.app.discover_processes"),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
             patch("snapper.server.app.logger") as mock_logger,
@@ -1949,6 +2095,10 @@ class TestLifespanCancellation:
         mock_app.state.manager = mock_manager
         with (
             patch("snapper.server.app.discover_processes"),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
         ):

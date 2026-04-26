@@ -32,14 +32,18 @@ hang on a future the listener can't see. Tests reset the singleton via
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from uuid import uuid7
 
+import zmq
+import zmq.asyncio
 from loguru import logger
 
 from snapper.auth.scope_grant_service import ScopeGrantService
@@ -55,9 +59,32 @@ from snapper.data.repository_types import AiReviewInsertRow
 from snapper.data.repository_types import AiReviewRow
 from snapper.data.repository_types import PendingReviewSummary
 from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
+from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import AiReviewCapsViolationFrameData
 from snapper.messaging.schemas.data import CapsViolationAfterAiApproveData
 from snapper.messaging.schemas.data import DelegateOfflineData
+
+_BUS_DELEGATE_OFFLINE_TOPIC = "bus.delegate_offline"
+"""Internal Q17 layer-1 fast-path topic published by
+``WebSocketAuthManager._publish_delegate_offline`` (sole publisher).
+Subscribed by :meth:`AiReviewService.handle_delegate_offline_bus_message`
+which CAS-fans-out matching pending reviews."""
+
+_BUS_CAPS_VIOLATION_TOPIC = "bus.caps_violation_after_ai_approve"
+"""Internal Plan D §3.6 topic published by ``TradingCapsEnforcer``
+(deferred publisher-side wiring chunk) when an AI-approved trade
+later fails the caps gate. Subscribed by
+:meth:`AiReviewService.handle_caps_violation_bus_message` which
+re-fanouts to the external ``ai_reviews.{user}.{strategy}.caps_violation``
+WS topic."""
+
+_AI_REVIEW_LISTEN_RECV_BACKOFF_S = 0.1
+"""Sleep between recv retries when the ZMQ subscriber raises a
+non-cancellation error. Mirrors the admin listener's
+``_ADMIN_LISTEN_RECV_BACKOFF_S`` so a transient broker hiccup never
+bursts the listener loop into a busy retry tight-loop."""
 
 DEFAULT_HEARTBEAT_WINDOW_SECONDS = 15
 """Plan A Q10 v1.3 + Q17 cross-plan lock — liveness threshold for admission control.
@@ -368,6 +395,12 @@ class AiReviewService:
         self._initialized = True
         self._msg_publisher: MessagePublisher | None = None
         self._futures: dict[str, asyncio.Future[object]] = {}
+        self._repository_factory: Callable[[], Repository] | None = None
+        self._bus_subscriber: ValidatedSubscriber | None = None
+        self._bus_zmq_context: zmq.asyncio.Context | None = None
+        self._bus_listen_task: asyncio.Task[None] | None = None
+        self._bus_running: bool = False
+        self._bus_listener_lock: asyncio.Lock = asyncio.Lock()
 
     def set_msg_publisher(self, publisher: MessagePublisher | None) -> None:
         """Inject the bus publisher used for ``bus.ai_review_*`` topics.
@@ -1231,6 +1264,194 @@ class AiReviewService:
         if responding_delegate_public_id == selected_delegate_public_id:
             return AiReviewResolutionModeEnum.SECONDARY_AFTER_FANOUT
         return AiReviewResolutionModeEnum.FANOUT_FIRST_RESPONDER
+
+    def set_repository_factory(self, repository_factory: Callable[[], Repository] | None) -> None:
+        """Inject the repository factory used by the bus listener path.
+
+        Mirrors :meth:`WebSocketAuthManager.set_wiring`'s
+        ``repository_factory`` argument: the bus listener needs a fresh
+        :class:`Repository` per dispatch (so the per-tick UnitOfWork
+        is bounded + does not bleed connections across handler calls).
+        Production wires this from the FastAPI lifespan; tests pass a
+        callable that returns a fake repository.
+
+        Args:
+            repository_factory: Callable that returns a
+                :class:`Repository`, or ``None`` to clear.
+        """
+        self._repository_factory = repository_factory
+
+    async def start_bus_listener(self, zmq_broker_xpub: str) -> None:
+        """Open the AI-review bus subscriber and start the dispatch task.
+
+        Subscribes to ``bus.delegate_offline`` (Q17 layer-1 fast-path
+        published by :class:`WebSocketAuthManager._publish_delegate_offline`
+        — sole publisher) AND ``bus.caps_violation_after_ai_approve``
+        (Plan D §3.6 fanout published by ``TradingCapsEnforcer`` —
+        deferred publisher-side chunk). Both topics dispatch to the
+        existing per-message handlers shipped in Phase 1 #2 + #8.
+
+        Idempotent + restart-safe via :attr:`_bus_listener_lock`: a
+        second call while a healthy listener is already running is a
+        no-op; a second call after the previous task finished early
+        (e.g. the loop unwound on an unexpected exception) reaps the
+        dead task and re-allocates so the bus path stays live across
+        single-listener failures. Mirrors
+        :meth:`WebSocketAuthManager.start_admin_listener` semantics.
+
+        Args:
+            zmq_broker_xpub: Address of the broker's XPUB endpoint.
+                Empty string skips the listener entirely (test mode +
+                ``SERVER_API_ONLY`` boots).
+        """
+        async with self._bus_listener_lock:
+            if self._bus_listen_task is not None and not self._bus_listen_task.done():
+                return
+            if self._bus_listen_task is not None:
+                await self._reap_bus_listener_unlocked()
+            if not zmq_broker_xpub:
+                logger.info("AiReviewService: empty broker XPUB, skipping bus listener")
+                return
+            self._bus_zmq_context = zmq.asyncio.Context()
+            raw_sub_socket = self._bus_zmq_context.socket(zmq.SUB)
+            apply_hwm(raw_sub_socket, rcvhwm=HWM_AUDIT)
+            raw_sub_socket.connect(zmq_broker_xpub)
+            self._bus_subscriber = ValidatedSubscriber(raw_sub_socket)
+            self._bus_subscriber.subscribe(_BUS_DELEGATE_OFFLINE_TOPIC)
+            self._bus_subscriber.subscribe(_BUS_CAPS_VIOLATION_TOPIC)
+            self._bus_running = True
+            self._bus_listen_task = asyncio.create_task(self._bus_listen_loop())
+            logger.info(
+                "AiReviewService: bus listener subscribed to {} + {} on {}",
+                _BUS_DELEGATE_OFFLINE_TOPIC,
+                _BUS_CAPS_VIOLATION_TOPIC,
+                zmq_broker_xpub,
+            )
+
+    async def stop_bus_listener(self) -> None:
+        """Cancel the dispatch task, close the subscriber, terminate the context.
+
+        Serialised against :meth:`start_bus_listener` via
+        :attr:`_bus_listener_lock` so an overlapping start cannot
+        allocate a new socket while we are tearing the old one down.
+        Resource refs are captured into locals BEFORE attributes are
+        nulled so a concurrent operation that races into the lock
+        cannot observe stale references after the close. Idempotent.
+        """
+        async with self._bus_listener_lock:
+            await self._reap_bus_listener_unlocked()
+
+    async def _reap_bus_listener_unlocked(self) -> None:
+        """Tear down listener resources. Caller MUST hold ``_bus_listener_lock``.
+
+        Captures every resource reference into locals BEFORE clearing
+        the attributes so a follow-up :meth:`start_bus_listener` (which
+        runs after we release the lock) sees a fully-clean slate and
+        cannot interfere with the close + term calls below. Mirrors
+        :meth:`WebSocketAuthManager._reap_admin_listener_unlocked`.
+        """
+        self._bus_running = False
+        task = self._bus_listen_task
+        subscriber = self._bus_subscriber
+        context = self._bus_zmq_context
+        self._bus_listen_task = None
+        self._bus_subscriber = None
+        self._bus_zmq_context = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        if subscriber is not None:
+            with contextlib.suppress(Exception):
+                subscriber.close()
+        if context is not None:
+            with contextlib.suppress(Exception):
+                context.term()
+
+    async def _bus_listen_loop(self) -> None:
+        """Receive AI-review bus events and dispatch to per-topic handlers.
+
+        Per-message failures (parse errors, handler exceptions, recv
+        errors) are caught + logged so a single bad frame can never
+        silently stop the listener. Only :class:`asyncio.CancelledError`
+        from :meth:`stop_bus_listener` unwinds the loop. The recv +
+        dispatch halves are factored into helpers so the loop body
+        stays under the project's cognitive-complexity ceiling.
+        """
+        subscriber = self._bus_subscriber
+        if subscriber is None:
+            return
+        try:
+            while self._bus_running:
+                frame = await self._bus_recv_one_frame(subscriber)
+                if frame is None:
+                    continue
+                await self._bus_dispatch_frame(*frame)
+        except asyncio.CancelledError:
+            logger.info("AiReviewService: bus listen loop cancelled")
+            raise
+
+    async def _bus_recv_one_frame(self, subscriber: ValidatedSubscriber) -> tuple[str, str] | None:
+        """Receive and decode one AI-review bus frame.
+
+        Returns ``None`` (after a small backoff) when recv raises a
+        non-cancellation error OR when the decoded bytes are not
+        valid UTF-8 — both cases let the caller simply ``continue``
+        instead of letting a malformed frame unwind the listener
+        loop. Decode is INSIDE the ``try`` so a
+        :class:`UnicodeDecodeError` cannot escape the helper.
+        """
+        try:
+            topic_bytes, payload_bytes = await subscriber.recv_multipart()
+            topic = topic_bytes.decode() if isinstance(topic_bytes, bytes) else str(topic_bytes)
+            payload = (
+                payload_bytes.decode() if isinstance(payload_bytes, bytes) else str(payload_bytes)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("AiReviewService bus listener recv failed: {}", exc)
+            await asyncio.sleep(_AI_REVIEW_LISTEN_RECV_BACKOFF_S)
+            return None
+        return topic, payload
+
+    async def _bus_dispatch_frame(self, topic: str, payload: str) -> None:
+        """Route one decoded AI-review bus frame to its typed handler.
+
+        Handler exceptions other than :class:`asyncio.CancelledError`
+        are logged + swallowed so one bad frame cannot stop the
+        listener — the column-level audit trail
+        (``ai_review_events``) remains the source of truth.
+
+        ``bus.delegate_offline`` requires a fresh :class:`Repository`
+        per dispatch so the per-tick UnitOfWork is bounded; if the
+        lifespan never injected a factory we log a warning + skip
+        (matches the ``ScopeGrantService`` best-effort contract).
+        """
+        try:
+            if topic == _BUS_DELEGATE_OFFLINE_TOPIC:
+                if self._repository_factory is None:
+                    logger.warning(
+                        "AiReviewService: {} received without repository_factory wiring; skipping",
+                        _BUS_DELEGATE_OFFLINE_TOPIC,
+                    )
+                    return
+                await self.handle_delegate_offline_bus_message(
+                    DelegateOfflineData.from_json(payload),
+                    repo=self._repository_factory(),
+                )
+            elif topic == _BUS_CAPS_VIOLATION_TOPIC:
+                await self.handle_caps_violation_bus_message(
+                    CapsViolationAfterAiApproveData.from_json(payload)
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "AiReviewService bus handler failed: topic={} err={}",
+                topic,
+                exc,
+            )
 
     @classmethod
     def get_instance(cls) -> AiReviewService:

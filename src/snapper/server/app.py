@@ -498,6 +498,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         )
         await ws_auth_manager.start_admin_listener(settings.zmq_broker_xpub)
         await get_token_manager().start_admin_listener(settings.zmq_broker_xpub)
+        ai_review_service = get_ai_review_service()
+        ai_review_service.set_repository_factory(lambda: get_repository(settings.db_url))
+        await ai_review_service.start_bus_listener(settings.zmq_broker_xpub)
+        logger.info(
+            "AiReviewService bus listener subscribed to bus.delegate_offline + bus.caps_violation_after_ai_approve"
+        )
         discover_processes()
         process_factory = ProcessLauncherService(settings)
         app.state.process_factory = process_factory
@@ -544,6 +550,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await ws_auth_manager_for_shutdown.cancel_pending_offline_tasks()
         await ws_auth_manager_for_shutdown.stop_admin_listener()
         await get_token_manager().stop_admin_listener()
+        await get_ai_review_service().stop_bus_listener()
+        get_ai_review_service().set_repository_factory(None)
         _shutdown_user_service_publisher(app)
         _clear_runtime_singletons()
         await dispose_repositories()
