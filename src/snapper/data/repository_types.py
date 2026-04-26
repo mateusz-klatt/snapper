@@ -1854,12 +1854,15 @@ class PendingReviewSummary(TypedDict):
     dispatch_version, deadline, status)` to drive per-row atomic
     timeouts. Plan D §3.4 / §3.5 scanners use the same shape minus the
     deadline (offline dispatch is gated by ``fanout_after`` instead).
-    Keeping a single shared TypedDict avoids drift between the three
-    callers.
+    The Plan D §7 ``GET /api/ai-reviews/pending`` REST surface adds
+    ``wallet_public_id`` so dashboards / the bridge can render the
+    review without a follow-up read. Keeping a single shared TypedDict
+    avoids drift between the four callers.
     """
 
     public_id: str
     selected_delegate_public_id: str
+    wallet_public_id: str
     dispatch_version: int
     status: str
     deadline: datetime

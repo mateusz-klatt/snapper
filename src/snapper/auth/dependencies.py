@@ -102,6 +102,11 @@ async def get_current_user(
     token_data: TokenClaims | None = await token_manager.verify_token_with_db(access_token, repo)
     if not token_data:
         return None
+    delegate_public_id: str | None = None
+    if token_data.role == UserRole.AI_DELEGATE:
+        delegate_row = await repo.get_ai_delegate_by_user_public_id(token_data.user_public_id)
+        if delegate_row is not None:
+            delegate_public_id = delegate_row["public_id"]
     principal = AuthPrincipal(
         username=token_data.username,
         role=token_data.role,
@@ -109,6 +114,7 @@ async def get_current_user(
         operator_public_ids=token_data.operator_public_ids,
         primary_operator_public_id=token_data.primary_operator_public_id,
         active_wallet_public_id=token_data.active_wallet_public_id,
+        delegate_public_id=delegate_public_id,
     )
     request.state.user = principal
     request.state.token_data = token_data

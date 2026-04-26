@@ -47,6 +47,7 @@ from snapper.application.ai_review.service import ERROR_REVIEW_EXPIRED
 from snapper.application.ai_review.service import ERROR_REVIEW_NOT_FOUND
 from snapper.application.ai_review.service import get_ai_review_service
 from snapper.auth.dependencies import require_permission
+from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import get_scope_grant_service
@@ -116,6 +117,7 @@ class PendingReviewSummaryItem(StrictBody):
 
     review_public_id: str
     selected_delegate_public_id: str
+    wallet_public_id: str
     dispatch_version: int
     status: str
     deadline: datetime
@@ -158,6 +160,7 @@ async def submit_ai_review_decision_route(
     body: Annotated[AiReviewDecisionRequest, Depends(json_body(AiReviewDecisionRequest))],
     principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.CREATE_ORDERS))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
+    _csrf: Annotated[None, Depends(validate_csrf_token)] = None,
 ) -> AiReviewDecisionResponse:
     """REST mirror of the ``submit_ai_review_decision`` MCP tool.
 
@@ -249,12 +252,21 @@ async def list_pending_ai_reviews(
     principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_SIGNALS))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    wallet_public_id: Annotated[str | None, Query()] = None,
 ) -> PendingReviewListResponse:
     """List pending CONSULT reviews where the caller is the selected delegate.
 
     Used by the bridge (Plan C v1.1 catch-up after WS reconnect) and
     by operator dashboards. Snapshot is bounded by ``limit`` and
     ordered by ``fanout_after ASC`` (oldest first).
+
+    The ``fanout_after < now`` gate uses ``datetime.now(UTC)`` because
+    this REST poll is the catch-up surface — the live wall-clock is
+    the right reference for "what should the bridge re-acknowledge
+    right now". The §3.5 fast-path bus subscriber uses
+    ``msg.last_seen_at`` for a different reason: it dispatches
+    fanout, while THIS endpoint only lists what is currently fan-
+    eligible.
 
     Args:
         principal: Authenticated AI_DELEGATE caller. Non-delegate
@@ -263,6 +275,11 @@ async def list_pending_ai_reviews(
             endpoint is keyed by the delegate identity.
         repo: Repository handle.
         limit: Max rows returned (clamped to ``[1, 500]``).
+        wallet_public_id: Optional Plan D §7 filter — narrows the
+            snapshot to one wallet. Bridge passes this when it wants
+            catch-up scoped to the wallet currently surfaced in the
+            UI; ``None`` returns every wallet the delegate is
+            assigned to.
 
     Returns:
         :class:`PendingReviewListResponse` with up to ``limit`` items.
@@ -280,6 +297,7 @@ async def list_pending_ai_reviews(
     rows = await repo.list_pending_reviews_for_delegate(
         selected_delegate_public_id=principal.delegate_public_id,
         now=datetime.now(UTC),
+        wallet_public_id=wallet_public_id,
         limit=limit,
     )
     items = [
@@ -290,6 +308,7 @@ async def list_pending_ai_reviews(
             status=row["status"],
             deadline=row["deadline"],
             fanout_after=row["fanout_after"],
+            wallet_public_id=row["wallet_public_id"],
         )
         for row in rows
     ]

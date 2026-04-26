@@ -1433,6 +1433,137 @@ class TestGetCurrentUser:
             assert request.state.token_data == token_data
             mock_token_manager.verify_token_with_db.assert_awaited_once_with("valid_token", repo)
 
+    async def test_get_current_user_populates_delegate_public_id_for_ai_delegate(
+        self,
+    ) -> None:
+        """AI_DELEGATE role -> ``AuthPrincipal.delegate_public_id`` populated.
+
+        Plan D Q19 contract: the AI_DELEGATE auth chain MUST forward
+        ``ai_delegates.public_id`` onto the principal so downstream
+        routes (``GET /api/ai-reviews/pending``, the WS hysteresis
+        hooks) can key on the delegate identity without re-querying.
+
+        Given a valid AI_DELEGATE token,
+        When get_current_user resolves the principal,
+        Then it issues a delegate-row lookup keyed by user_public_id
+        and sets ``delegate_public_id`` from the resulting row.
+        """
+        request = Mock(spec=Request)
+        request.state = Mock()
+        request.cookies = {"access_token": "valid_token"}
+        request.headers = {}
+        now = int(datetime.now(UTC).timestamp())
+        token_data = TokenClaims(
+            sub="user-delegate-1",
+            username="delegate-1",
+            role=UserRole.AI_DELEGATE,
+            permissions=["create:orders", "read:signals"],
+            exp=now + 3600,
+            iat=now,
+            jti="jwt-d",
+            sid="sid-d",
+            user_public_id="user-delegate-1",
+        )
+        with patch("snapper.auth.dependencies.get_token_manager") as mock_get_token_manager:
+            mock_token_manager = Mock()
+            mock_token_manager.verify_token_with_db = AsyncMock(return_value=token_data)
+            mock_get_token_manager.return_value = mock_token_manager
+            repo = Mock()
+            repo.get_ai_delegate_by_user_public_id = AsyncMock(
+                return_value={
+                    "public_id": "del-9",
+                    "user_public_id": "user-delegate-1",
+                    "last_seen_at": None,
+                    "active_reviews_count": 0,
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+            result = await get_current_user(request, repo)
+        assert result is not None
+        assert result.role == UserRole.AI_DELEGATE
+        assert result.delegate_public_id == "del-9"
+        repo.get_ai_delegate_by_user_public_id.assert_awaited_once_with("user-delegate-1")
+
+    async def test_get_current_user_skips_delegate_lookup_for_non_delegate_role(
+        self,
+    ) -> None:
+        """Non-AI_DELEGATE roles -> ``delegate_public_id`` stays ``None``.
+
+        Given a valid OPERATOR token,
+        When get_current_user resolves the principal,
+        Then no AiDelegate lookup is performed and the delegate field
+        remains ``None``.
+        """
+        request = Mock(spec=Request)
+        request.state = Mock()
+        request.cookies = {"access_token": "valid_token"}
+        request.headers = {}
+        now = int(datetime.now(UTC).timestamp())
+        token_data = TokenClaims(
+            sub="op-user",
+            username="op-user",
+            role=UserRole.OPERATOR,
+            permissions=["create:orders"],
+            exp=now + 3600,
+            iat=now,
+            jti="jwt-o",
+            sid="sid-o",
+        )
+        with patch("snapper.auth.dependencies.get_token_manager") as mock_get_token_manager:
+            mock_token_manager = Mock()
+            mock_token_manager.verify_token_with_db = AsyncMock(return_value=token_data)
+            mock_get_token_manager.return_value = mock_token_manager
+            repo = Mock()
+            repo.get_ai_delegate_by_user_public_id = AsyncMock()
+            result = await get_current_user(request, repo)
+        assert result is not None
+        assert result.role == UserRole.OPERATOR
+        assert result.delegate_public_id is None
+        repo.get_ai_delegate_by_user_public_id.assert_not_awaited()
+
+    async def test_get_current_user_handles_missing_delegate_row_gracefully(
+        self,
+    ) -> None:
+        """AI_DELEGATE role with no delegate row -> ``delegate_public_id`` stays None.
+
+        Defends the legacy migration path where a token may have
+        ``role=AI_DELEGATE`` before the operational ``ai_delegates``
+        row exists (rare, but possible during a partial backfill).
+
+        Given an AI_DELEGATE token whose ``user_public_id`` has no row,
+        When get_current_user resolves the principal,
+        Then delegate_public_id is None and authentication still
+        succeeds — downstream endpoints that key on the delegate
+        identity surface their own 422.
+        """
+        request = Mock(spec=Request)
+        request.state = Mock()
+        request.cookies = {"access_token": "valid_token"}
+        request.headers = {}
+        now = int(datetime.now(UTC).timestamp())
+        token_data = TokenClaims(
+            sub="user-orphan",
+            username="orphan",
+            role=UserRole.AI_DELEGATE,
+            permissions=[],
+            exp=now + 3600,
+            iat=now,
+            jti="jwt-x",
+            sid="sid-x",
+            user_public_id="user-orphan",
+        )
+        with patch("snapper.auth.dependencies.get_token_manager") as mock_get_token_manager:
+            mock_token_manager = Mock()
+            mock_token_manager.verify_token_with_db = AsyncMock(return_value=token_data)
+            mock_get_token_manager.return_value = mock_token_manager
+            repo = Mock()
+            repo.get_ai_delegate_by_user_public_id = AsyncMock(return_value=None)
+            result = await get_current_user(request, repo)
+        assert result is not None
+        assert result.role == UserRole.AI_DELEGATE
+        assert result.delegate_public_id is None
+
     async def test_get_current_user_invalid_token(self) -> None:
         """Verify get_current_user returns None for invalid token.
 

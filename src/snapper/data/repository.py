@@ -3491,14 +3491,18 @@ class Repository(ABC):
         *,
         selected_delegate_public_id: str,
         now: datetime,
+        wallet_public_id: str | None = None,
         limit: int = 100,
     ) -> list[PendingReviewSummary]:
         """Plan D §3.5 fast-path input: pending rows for one delegate past fanout.
 
         Used by :meth:`AiReviewService.handle_delegate_offline_bus_message`
         to snapshot the affected reviews when a ``bus.delegate_offline``
-        event lands. Mirrors :meth:`list_offline_pending_reviews` shape:
-        the ``fanout_after < now`` predicate is REQUIRED so the fast
+        event lands AND by the Plan D §7
+        ``GET /api/ai-reviews/pending`` REST endpoint for bridge
+        catch-up after WS reconnect. Mirrors
+        :meth:`list_offline_pending_reviews` shape: the
+        ``fanout_after < now`` predicate is REQUIRED so the fast
         path does not dispatch fanout before the natural fanout timer
         elapses (the :class:`DelegateOfflineData` schema docstring
         explicitly says subscribers compare ``last_seen_at`` to
@@ -3512,9 +3516,17 @@ class Repository(ABC):
             selected_delegate_public_id: ``ai_delegates.public_id`` to
                 scan for.
             now: Wall-clock used for the ``fanout_after`` cutoff —
-                callers pass ``msg.last_seen_at`` from the
-                ``bus.delegate_offline`` event so the gate matches the
-                instant the delegate actually went offline.
+                bus subscribers pass ``msg.last_seen_at`` from the
+                ``bus.delegate_offline`` event so the gate matches
+                the instant the delegate actually went offline; the
+                REST surface passes ``datetime.now(UTC)`` since the
+                live wall-clock is the right reference for
+                catch-up polls.
+            wallet_public_id: Optional Plan D §7 filter — when
+                provided, narrows the snapshot to one wallet (the
+                bridge passes this for wallet-scoped catch-up). When
+                ``None``, returns every wallet the delegate is
+                assigned to.
             limit: Cap on returned rows per call.
 
         Returns:
@@ -10155,6 +10167,7 @@ class SQLAlchemyRepository(Repository):
                     select(
                         AiReview.public_id,
                         AiReview.selected_delegate_public_id,
+                        AiReview.wallet_public_id,
                         AiReview.dispatch_version,
                         AiReview.status,
                         AiReview.deadline,
@@ -10174,10 +10187,11 @@ class SQLAlchemyRepository(Repository):
                     {
                         "public_id": r[0],
                         "selected_delegate_public_id": r[1],
-                        "dispatch_version": int(r[2]),
-                        "status": str(r[3]),
-                        "deadline": r[4],
-                        "fanout_after": r[5],
+                        "wallet_public_id": str(r[2]),
+                        "dispatch_version": int(r[3]),
+                        "status": str(r[4]),
+                        "deadline": r[5],
+                        "fanout_after": r[6],
                     },
                 )
                 for r in rows
@@ -10198,6 +10212,7 @@ class SQLAlchemyRepository(Repository):
                     select(
                         AiReview.public_id,
                         AiReview.selected_delegate_public_id,
+                        AiReview.wallet_public_id,
                         AiReview.dispatch_version,
                         AiReview.status,
                         AiReview.deadline,
@@ -10225,10 +10240,11 @@ class SQLAlchemyRepository(Repository):
                     {
                         "public_id": r[0],
                         "selected_delegate_public_id": r[1],
-                        "dispatch_version": int(r[2]),
-                        "status": str(r[3]),
-                        "deadline": r[4],
-                        "fanout_after": r[5],
+                        "wallet_public_id": str(r[2]),
+                        "dispatch_version": int(r[3]),
+                        "status": str(r[4]),
+                        "deadline": r[5],
+                        "fanout_after": r[6],
                     },
                 )
                 for r in rows
@@ -10239,25 +10255,30 @@ class SQLAlchemyRepository(Repository):
         *,
         selected_delegate_public_id: str,
         now: datetime,
+        wallet_public_id: str | None = None,
         limit: int = 100,
     ) -> list[PendingReviewSummary]:
         """Plan D §3.5 fast-path input: pending rows for one delegate past fanout."""
+        predicates = [
+            AiReview.selected_delegate_public_id == selected_delegate_public_id,
+            AiReview.status == "pending",
+            AiReview.fanout_after < now,
+        ]
+        if wallet_public_id is not None:
+            predicates.append(AiReview.wallet_public_id == wallet_public_id)
         async with self.session() as s:
             rows = (
                 await s.execute(
                     select(
                         AiReview.public_id,
                         AiReview.selected_delegate_public_id,
+                        AiReview.wallet_public_id,
                         AiReview.dispatch_version,
                         AiReview.status,
                         AiReview.deadline,
                         AiReview.fanout_after,
                     )
-                    .where(
-                        AiReview.selected_delegate_public_id == selected_delegate_public_id,
-                        AiReview.status == "pending",
-                        AiReview.fanout_after < now,
-                    )
+                    .where(*predicates)
                     .order_by(AiReview.fanout_after.asc())
                     .limit(limit)
                 )
@@ -10268,10 +10289,11 @@ class SQLAlchemyRepository(Repository):
                     {
                         "public_id": r[0],
                         "selected_delegate_public_id": r[1],
-                        "dispatch_version": int(r[2]),
-                        "status": str(r[3]),
-                        "deadline": r[4],
-                        "fanout_after": r[5],
+                        "wallet_public_id": str(r[2]),
+                        "dispatch_version": int(r[3]),
+                        "status": str(r[4]),
+                        "deadline": r[5],
+                        "fanout_after": r[6],
                     },
                 )
                 for r in rows

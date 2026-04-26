@@ -679,6 +679,66 @@ async def test_offline_scanner_skips_row_lost_to_peer_dispatch(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
+async def test_list_pending_for_delegate_wallet_filter(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """``wallet_public_id`` predicate narrows the snapshot to one wallet.
+
+    Plan D §7 REST-surface filter — bridge passes the wallet it is
+    rendering so the catch-up snapshot stays scoped.
+
+    Given two pending reviews for the same delegate on different wallets,
+    When list_pending_reviews_for_delegate is called with wallet_public_id,
+    Then only the matching row is returned.
+    """
+    now = _now()
+    delegate_pid = await _seed_delegate(
+        repo, user_public_id=str(uuid7()), last_seen_at=now, creation_time=now
+    )
+    review_a = await _seed_review(
+        repo,
+        selected_delegate_public_id=delegate_pid,
+        as_of=now - timedelta(seconds=60),
+        fanout_after_offset_seconds=30,
+        deadline_offset_seconds=300,
+    )
+    review_b = await _seed_review(
+        repo,
+        selected_delegate_public_id=delegate_pid,
+        as_of=now - timedelta(seconds=60),
+        fanout_after_offset_seconds=30,
+        deadline_offset_seconds=300,
+    )
+    from snapper.data.models import AiReview
+
+    async with repo.session() as s:
+        await s.execute(
+            sqlalchemy.update(AiReview)
+            .where(AiReview.public_id == review_a)
+            .values(wallet_public_id="wal-A")
+        )
+        await s.execute(
+            sqlalchemy.update(AiReview)
+            .where(AiReview.public_id == review_b)
+            .values(wallet_public_id="wal-B")
+        )
+        await s.commit()
+    rows_filtered = await repo.list_pending_reviews_for_delegate(
+        selected_delegate_public_id=delegate_pid,
+        now=now,
+        wallet_public_id="wal-A",
+    )
+    assert len(rows_filtered) == 1
+    assert rows_filtered[0]["public_id"] == review_a
+    assert rows_filtered[0]["wallet_public_id"] == "wal-A"
+    rows_unfiltered = await repo.list_pending_reviews_for_delegate(
+        selected_delegate_public_id=delegate_pid, now=now
+    )
+    assert {row["public_id"] for row in rows_unfiltered} == {review_a, review_b}
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
 async def test_handle_delegate_offline_skips_review_before_fanout_after(
     repo: SQLAlchemyRepository,
 ) -> None:

@@ -285,12 +285,19 @@ class TestSubmitDecisionRoute:
 class TestListPendingRoute:
     """``GET /api/ai-reviews/pending`` HTTP-surface coverage."""
 
-    def _make_summary(self, *, public_id: str, fanout_after: datetime) -> PendingReviewSummary:
+    def _make_summary(
+        self,
+        *,
+        public_id: str,
+        fanout_after: datetime,
+        wallet_public_id: str = "wal-1",
+    ) -> PendingReviewSummary:
         return cast(
             PendingReviewSummary,
             {
                 "public_id": public_id,
                 "selected_delegate_public_id": "del-1",
+                "wallet_public_id": wallet_public_id,
                 "dispatch_version": 0,
                 "status": "pending",
                 "deadline": fanout_after + timedelta(seconds=60),
@@ -364,3 +371,25 @@ class TestListPendingRoute:
         client = _create_client(repo=AsyncMock(), principal=_delegate_principal())
         response = client.get("/api/ai-reviews/pending?limit=0")
         assert response.status_code == 422
+
+    def test_wallet_public_id_filter_threaded_through_to_repo(self) -> None:
+        """``?wallet_public_id=`` query param reaches the repo predicate.
+
+        Plan D §7 spec — bridge passes wallet_public_id to scope the
+        catch-up snapshot. The route MUST forward the filter so the
+        repo's WHERE clause adds ``ai_reviews.wallet_public_id ==
+        wallet_public_id``.
+
+        Given a repo whose mock records the kwargs it received,
+        When GET /api/ai-reviews/pending?wallet_public_id=wal-9 runs,
+        Then the repo call carries ``wallet_public_id='wal-9'``.
+        """
+        repo = AsyncMock()
+        repo.list_pending_reviews_for_delegate = AsyncMock(return_value=[])
+        client = _create_client(repo=repo, principal=_delegate_principal())
+        response = client.get("/api/ai-reviews/pending?wallet_public_id=wal-9")
+        assert response.status_code == 200
+        repo.list_pending_reviews_for_delegate.assert_awaited_once()
+        kwargs = repo.list_pending_reviews_for_delegate.await_args.kwargs
+        assert kwargs["wallet_public_id"] == "wal-9"
+        assert kwargs["selected_delegate_public_id"] == "del-1"
