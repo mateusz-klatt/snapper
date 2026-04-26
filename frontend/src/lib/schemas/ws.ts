@@ -17,6 +17,8 @@ export {
   ReplayStartDataSchema as replayStartSchema,
   SettingChangedDataSchema as settingChangedSchema,
   SymbolAliasUpdateDataSchema as symbolAliasUpdateSchema,
+  AiReviewCapsViolationFrameDataSchema as aiReviewCapsViolationFrameSchema,
+  AiReviewDecisionDataSchema as aiReviewDecisionSchema,
   WSAuthRequiredResponseSchema as authRequiredMessageSchema,
   WSAuthOkResponseSchema as authOkMessageSchema,
   WSAuthFailedResponseSchema as authFailedMessageSchema,
@@ -48,6 +50,8 @@ import {
   ReplayStartDataSchema,
   SettingChangedDataSchema,
   SymbolAliasUpdateDataSchema,
+  AiReviewCapsViolationFrameDataSchema,
+  AiReviewDecisionDataSchema,
   WSAuthRequiredResponseSchema,
   WSAuthOkResponseSchema,
   WSAuthFailedResponseSchema,
@@ -78,6 +82,8 @@ export const wsMessageUnionSchema = z.discriminatedUnion('type', [
   ReplayStartDataSchema,
   SettingChangedDataSchema,
   SymbolAliasUpdateDataSchema,
+  AiReviewCapsViolationFrameDataSchema,
+  AiReviewDecisionDataSchema,
   WSAuthRequiredResponseSchema,
   WSAuthOkResponseSchema,
   WSAuthFailedResponseSchema,
@@ -103,6 +109,8 @@ export type Signal = z.infer<typeof SignalDataSchema>
 export type Order = z.infer<typeof OrderDataSchema>
 export type Execution = z.infer<typeof ExecutionDataSchema>
 export type Heartbeat = z.infer<typeof HeartbeatDataSchema>
+export type AiReviewCapsViolation = z.infer<typeof AiReviewCapsViolationFrameDataSchema>
+export type AiReviewDecisionEvent = z.infer<typeof AiReviewDecisionDataSchema>
 const KNOWN_MESSAGE_TYPES = new Set([
   'tick',
   'candle',
@@ -120,6 +128,8 @@ const KNOWN_MESSAGE_TYPES = new Set([
   'replay_start',
   'setting_changed',
   'symbol_alias_update',
+  'ai_review.caps_violation',
+  'ai_review_decision',
   'auth_expired',
   'auth_failed',
   'auth_ok',

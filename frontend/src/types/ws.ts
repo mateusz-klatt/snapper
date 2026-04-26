@@ -1,4 +1,6 @@
 export type {
+  AiReviewCapsViolationFrameData,
+  AiReviewDecisionData,
   BacktestProgressData,
   TickData,
   CandleData,
@@ -35,6 +37,8 @@ export type {
   WSPongResponse,
 } from './ws.generated'
 import type {
+  AiReviewCapsViolationFrameData,
+  AiReviewDecisionData,
   BacktestProgressData,
   TickData,
   CandleData,
@@ -72,6 +76,8 @@ import type {
 } from './ws.generated'
 
 export type WebSocketMessages =
+  | AiReviewCapsViolationFrameData
+  | AiReviewDecisionData
   | BacktestProgressData
   | TickData
   | CandleData
