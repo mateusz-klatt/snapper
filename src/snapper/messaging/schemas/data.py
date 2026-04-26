@@ -655,9 +655,10 @@ class AiReviewDecisionAckFrameData(StrictDataSchema[Literal["ai_review.decision_
     descending into the nested payload.
 
     Q18 dedup: ``dispatch_version`` is the resolved review row's
-    counter (incremented atomically by ``atomic_resolve_ai_review``).
-    A re-fanout of the same decision after the row's version bumps
-    surfaces as a fresh frame to the delegate UI.
+    current counter (atomic_resolve preserves it; supersede / fanout
+    flows are the operations that bump it). A re-fanout of the same
+    decision after the row's version bumps surfaces as a fresh frame
+    to the delegate UI.
 
     Attributes:
         review_public_id: UUID7 of the resolved ``ai_reviews`` row.
