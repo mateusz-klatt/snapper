@@ -98,7 +98,7 @@ class TestWsBearerTransportContract:
             tuple is returned.
         """
         manager = WebSocketAuthManager()
-        repo = MagicMock()
+        repo = MagicMock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
         ws = _fake_websocket(auth_header="Bearer header-only-token")
         claims = _token_claims()
         with patch.object(
@@ -126,7 +126,7 @@ class TestWsBearerTransportContract:
             a new transport option.
         """
         manager = WebSocketAuthManager()
-        repo = MagicMock()
+        repo = MagicMock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
         ws = _fake_websocket(cookie_token="cookie-only-token")
         claims = _token_claims(username="browser-operator")
         with patch.object(
@@ -150,7 +150,7 @@ class TestWsBearerTransportContract:
             never competes with a leftover browser cookie.
         """
         manager = WebSocketAuthManager()
-        repo = MagicMock()
+        repo = MagicMock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
         ws = _fake_websocket(
             auth_header="Bearer header-token",
             cookie_token="cookie-token",
@@ -176,7 +176,7 @@ class TestWsBearerTransportContract:
             and closes with code ``4401``.
         """
         manager = WebSocketAuthManager()
-        repo = MagicMock()
+        repo = MagicMock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
         ws = _fake_websocket()
         with patch.object(
             manager.token_manager,
@@ -201,7 +201,7 @@ class TestWsBearerTransportContract:
             contract predictable.
         """
         manager = WebSocketAuthManager()
-        repo = MagicMock()
+        repo = MagicMock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
         ws = _fake_websocket(
             auth_header="Basic dXNlcjpwYXNz",
             cookie_token="cookie-only-token",

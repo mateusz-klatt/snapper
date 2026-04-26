@@ -264,6 +264,13 @@ class WebSocketAuthManager:
         token_data = await self.token_manager.verify_token_with_db(token, repository)
         if not token_data:
             return None
+        delegate_public_id: str | None = None
+        if token_data.role == UserRole.AI_DELEGATE:
+            delegate_row = await repository.get_ai_delegate_by_user_public_id(
+                token_data.user_public_id
+            )
+            if delegate_row is not None:
+                delegate_public_id = delegate_row["public_id"]
         user = AuthPrincipal(
             username=token_data.username,
             role=token_data.role,
@@ -271,6 +278,7 @@ class WebSocketAuthManager:
             operator_public_ids=token_data.operator_public_ids,
             primary_operator_public_id=token_data.primary_operator_public_id,
             active_wallet_public_id=token_data.active_wallet_public_id,
+            delegate_public_id=delegate_public_id,
         )
         return user, token_data
 

@@ -701,6 +701,13 @@ class ZmqWebSocketBridgeService:
         max_pending = self._get_max_pending(topic)
         is_trade = self._is_trade_topic(topic)
         ai_review_payload = self._maybe_parse_ai_review_payload(topic, message_str)
+        if topic.startswith(AI_REVIEWS_TOPIC_PREFIX) and ai_review_payload is None:
+            logger.warning(
+                "Dropping malformed ai_reviews.* frame (failed JSON / non-dict envelope) "
+                "for topic=%s — would otherwise bypass per-frame scope filter",
+                topic,
+            )
+            return
         for subscription in self.topic_subscriptions[topic][:]:
             try:
                 if self._is_throttled(subscription, current_time, topic):

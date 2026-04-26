@@ -1759,6 +1759,35 @@ class TestAiReviewScopeFilterWiring:
         ws.send_text.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_forward_drops_malformed_ai_review_frame_before_iterating(self) -> None:
+        """Malformed ``ai_reviews.*`` frame -> early return, never iterates subs.
+
+        Defense-in-depth fix (Copilot review). ``_check_gap`` already
+        rejects malformed JSON before forwarding in production, but
+        if a non-dict envelope ever reached ``_forward_to_clients``
+        it would otherwise bypass the per-frame scope check (which is
+        only invoked when ``ai_review_payload is not None``). The
+        bridge now explicitly drops the frame and logs a warning.
+
+        Given: A bridge with one ai_reviews subscription,
+        When: ``_forward_to_clients`` is called with a JSON array body,
+        Then: ``send_text`` is NOT called AND
+        ``enforce_ai_review_scope`` is NOT consulted (early return).
+        """
+        bridge, ws = self._make_bridge_with_subscription()
+        with patch(
+            "snapper.interface.websocket.bridge.enforce_ai_review_scope",
+            new=AsyncMock(),
+        ) as filter_mock:
+            await bridge._forward_to_clients(
+                "ai_reviews.",
+                "ai_reviews.user-1.strat-1.request",
+                "[1, 2, 3]",
+            )
+        ws.send_text.assert_not_called()
+        filter_mock.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_forward_sends_ai_review_frame_when_scope_check_allows(self) -> None:
         """Bridge sends frame when enforce_ai_review_scope returns True.
 

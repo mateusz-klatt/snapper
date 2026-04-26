@@ -114,7 +114,7 @@ class TestGetCurrentUserBearer:
         """
         request = _make_request(headers={"authorization": "Bearer h.e.ader-jwt"})
         claims = self._token_claims()
-        repo = Mock()
+        repo = Mock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
         with patch("snapper.auth.dependencies.get_token_manager") as mock_get:
             mgr = Mock()
             mgr.verify_token_with_db = AsyncMock(return_value=claims)
@@ -136,7 +136,7 @@ class TestGetCurrentUserBearer:
             cookies={"access_token": "cookie.jwt"},
         )
         claims = self._token_claims()
-        repo = Mock()
+        repo = Mock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
         with patch("snapper.auth.dependencies.get_token_manager") as mock_get:
             mgr = Mock()
             mgr.verify_token_with_db = AsyncMock(return_value=claims)
@@ -249,7 +249,7 @@ class TestWebSocketBearerAuth:
         WebSocketAuthManager._initialized = False
         manager.__init__()
 
-        repo = Mock()
+        repo = Mock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
         with patch.object(manager, "token_manager") as token_manager_mock:
             token_manager_mock.verify_token_with_db = AsyncMock(return_value=claims)
             result = await manager.verify_session_cookie(ws, repo)
@@ -258,6 +258,91 @@ class TestWebSocketBearerAuth:
         principal, _claims = result
         assert principal.username == "ai-delegate-1"
         token_manager_mock.verify_token_with_db.assert_awaited_once_with("ws.jwt", repo)
+
+    @pytest.mark.asyncio
+    async def test_ai_delegate_principal_carries_delegate_public_id(self) -> None:
+        """AI_DELEGATE WS upgrade -> ``AuthPrincipal.delegate_public_id`` populated.
+
+        Plan D Q19 + Phase 1 #7 fix-up — the WS auth chain MUST
+        mirror the REST chain's ``ai_delegates`` lookup so the
+        per-frame scope filter (``enforce_ai_review_scope``) finds
+        a non-None delegate id. Without this, every legitimate
+        AI_DELEGATE WS subscriber gets dropped by the filter and
+        silently receives no ``ai_reviews.*`` events.
+
+        Given an AI_DELEGATE token + a repo whose
+        ``get_ai_delegate_by_user_public_id`` returns a delegate row,
+        When ``verify_session_cookie`` resolves the principal,
+        Then ``delegate_public_id`` is populated from the row.
+        """
+        now = int(datetime.now(UTC).timestamp())
+        claims = TokenClaims(
+            sub="ai-user",
+            username="ai-delegate-2",
+            role=UserRole.AI_DELEGATE,
+            permissions=["read:signals"],
+            exp=now + 3600,
+            iat=now,
+            jti="jti-ws-2",
+            sid="sid-ws-2",
+            user_public_id="ai-user",
+        )
+        ws = self._make_ws(headers={"authorization": "Bearer ws.jwt"})
+        manager = WebSocketAuthManager()
+        WebSocketAuthManager._initialized = False
+        manager.__init__()
+        repo = Mock(
+            get_ai_delegate_by_user_public_id=AsyncMock(
+                return_value={
+                    "public_id": "del-9",
+                    "user_public_id": "ai-user",
+                    "last_seen_at": None,
+                    "active_reviews_count": 0,
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+        )
+        with patch.object(manager, "token_manager") as token_manager_mock:
+            token_manager_mock.verify_token_with_db = AsyncMock(return_value=claims)
+            result = await manager.verify_session_cookie(ws, repo)
+        assert result is not None
+        principal, _claims = result
+        assert principal.delegate_public_id == "del-9"
+        repo.get_ai_delegate_by_user_public_id.assert_awaited_once_with("ai-user")
+
+    @pytest.mark.asyncio
+    async def test_non_ai_delegate_role_skips_delegate_lookup(self) -> None:
+        """OPERATOR / VIEWER WS upgrade -> no delegate lookup; field stays None.
+
+        Given an OPERATOR token (not AI_DELEGATE),
+        When ``verify_session_cookie`` resolves the principal,
+        Then ``get_ai_delegate_by_user_public_id`` is never awaited
+        and ``delegate_public_id`` stays None.
+        """
+        now = int(datetime.now(UTC).timestamp())
+        claims = TokenClaims(
+            sub="op-user",
+            username="op",
+            role=UserRole.OPERATOR,
+            permissions=["create:orders"],
+            exp=now + 3600,
+            iat=now,
+            jti="jti-ws-3",
+            sid="sid-ws-3",
+        )
+        ws = self._make_ws(headers={"authorization": "Bearer ws.jwt"})
+        manager = WebSocketAuthManager()
+        WebSocketAuthManager._initialized = False
+        manager.__init__()
+        repo = Mock(get_ai_delegate_by_user_public_id=AsyncMock())
+        with patch.object(manager, "token_manager") as token_manager_mock:
+            token_manager_mock.verify_token_with_db = AsyncMock(return_value=claims)
+            result = await manager.verify_session_cookie(ws, repo)
+        assert result is not None
+        principal, _claims = result
+        assert principal.delegate_public_id is None
+        repo.get_ai_delegate_by_user_public_id.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_bearer_header_takes_precedence_over_cookie(self) -> None:
@@ -282,7 +367,7 @@ class TestWebSocketBearerAuth:
         WebSocketAuthManager._initialized = False
         manager.__init__()
 
-        repo = Mock()
+        repo = Mock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
         with patch.object(manager, "token_manager") as token_manager_mock:
             token_manager_mock.verify_token_with_db = AsyncMock(return_value=claims)
             await manager.verify_session_cookie(ws, repo)
@@ -296,7 +381,7 @@ class TestWebSocketBearerAuth:
         manager = WebSocketAuthManager()
         WebSocketAuthManager._initialized = False
         manager.__init__()
-        repo = Mock()
+        repo = Mock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
         assert await manager.verify_session_cookie(ws, repo) is None
 
     @pytest.mark.asyncio
@@ -320,7 +405,7 @@ class TestWebSocketBearerAuth:
         manager = WebSocketAuthManager()
         WebSocketAuthManager._initialized = False
         manager.__init__()
-        repo = Mock()
+        repo = Mock(get_ai_delegate_by_user_public_id=AsyncMock(return_value=None))
         with patch.object(manager, "token_manager") as token_manager_mock:
             token_manager_mock.verify_token_with_db = AsyncMock(return_value=claims)
             await manager.verify_session_cookie(ws, repo)
