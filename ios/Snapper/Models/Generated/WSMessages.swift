@@ -170,6 +170,38 @@ struct WsMessageBase: Codable, Sendable {
     }
 }
 
+struct AiReviewCapsViolationFrameData: Codable, Sendable {
+    let type: String
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let reviewPublicId: String
+    let userPublicId: String
+    let strategyPublicId: String
+    let walletPublicId: String
+    let instrumentPublicId: String
+    let capType: String
+    let attempted: Double
+    let limit: Double
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case reviewPublicId = "review_public_id"
+        case userPublicId = "user_public_id"
+        case strategyPublicId = "strategy_public_id"
+        case walletPublicId = "wallet_public_id"
+        case instrumentPublicId = "instrument_public_id"
+        case capType = "cap_type"
+        case attempted
+        case limit
+    }
+}
+
 struct AlertEventData: Codable, Sendable {
     let type: String
     let sequenceId: Int
@@ -281,6 +313,38 @@ struct CandleData: Codable, Sendable {
         case volume
         case vwap
         case trades
+    }
+}
+
+struct CapsViolationAfterAiApproveData: Codable, Sendable {
+    let type: String
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let reviewPublicId: String
+    let userPublicId: String
+    let strategyPublicId: String
+    let walletPublicId: String
+    let instrumentPublicId: String
+    let capType: String
+    let attempted: Double
+    let limit: Double
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case reviewPublicId = "review_public_id"
+        case userPublicId = "user_public_id"
+        case strategyPublicId = "strategy_public_id"
+        case walletPublicId = "wallet_public_id"
+        case instrumentPublicId = "instrument_public_id"
+        case capType = "cap_type"
+        case attempted
+        case limit
     }
 }
 

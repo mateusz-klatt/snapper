@@ -20,6 +20,25 @@ type TradeSide = 'buy' | 'sell'
 type Mode = 'live' | 'paper'
 
 /**
+ * Canonical AiReviewCapsViolationFrame entity.
+ * From WebSocket AiReviewCapsViolationFrameData.
+ */
+export interface AiReviewCapsViolationFrame {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  reviewPublicId: string
+  userPublicId: string
+  strategyPublicId: string
+  walletPublicId: string
+  instrumentPublicId: string
+  capType: string
+  attempted: number
+  limit: number
+}
+
+/**
  * Canonical AlertEvent entity.
  * From WebSocket AlertEventData.
  */
@@ -83,6 +102,25 @@ export interface Candle {
   volume: number
   vwap?: number | null
   trades?: number | null
+}
+
+/**
+ * Canonical CapsViolationAfterAiApprove entity.
+ * From WebSocket CapsViolationAfterAiApproveData.
+ */
+export interface CapsViolationAfterAiApprove {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  reviewPublicId: string
+  userPublicId: string
+  strategyPublicId: string
+  walletPublicId: string
+  instrumentPublicId: string
+  capType: string
+  attempted: number
+  limit: number
 }
 
 /**

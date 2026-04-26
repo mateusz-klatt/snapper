@@ -15,6 +15,24 @@ export const WsMessageBaseSchema = z
   })
   .strict()
 
+export const AiReviewCapsViolationFrameDataSchema = z
+  .object({
+    type: z.literal('ai_review.caps_violation'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    review_public_id: z.string(),
+    user_public_id: z.string(),
+    strategy_public_id: z.string(),
+    wallet_public_id: z.string(),
+    instrument_public_id: z.string(),
+    cap_type: z.string(),
+    attempted: z.number(),
+    limit: z.number(),
+  })
+  .strict()
+
 export const JsonPrimitiveSchema = z.unknown()
 
 export const BacktestProgressDataSchema = z
@@ -62,6 +80,24 @@ export const CandleDataSchema = z
     volume: z.number(),
     vwap: z.number().nullable(),
     trades: z.number().int().nullable(),
+  })
+  .strict()
+
+export const CapsViolationAfterAiApproveDataSchema = z
+  .object({
+    type: z.literal('caps_violation_after_ai_approve'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    review_public_id: z.string(),
+    user_public_id: z.string(),
+    strategy_public_id: z.string(),
+    wallet_public_id: z.string(),
+    instrument_public_id: z.string(),
+    cap_type: z.string(),
+    attempted: z.number(),
+    limit: z.number(),
   })
   .strict()
 
