@@ -8,8 +8,10 @@ the ``control`` table for audit purposes.
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
+from collections.abc import Mapping
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -19,6 +21,8 @@ import zmq
 import zmq.asyncio
 from fastapi import WebSocket
 
+from snapper.auth.scope_grant_service import get_scope_grant_service
+from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.data.models import Control
@@ -32,6 +36,8 @@ from snapper.interface.websocket.models import TopicMetricsModel
 from snapper.interface.websocket.models import TopicMetricSnapshot
 from snapper.interface.websocket.models import TopicSubscriptionModel
 from snapper.interface.websocket.schemas import WSErrorResponse
+from snapper.interface.websocket.scope_filter import AI_REVIEWS_TOPIC_PREFIX
+from snapper.interface.websocket.scope_filter import enforce_ai_review_scope
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
@@ -694,9 +700,16 @@ class ZmqWebSocketBridgeService:
         current_time = time.time()
         max_pending = self._get_max_pending(topic)
         is_trade = self._is_trade_topic(topic)
+        ai_review_payload = self._maybe_parse_ai_review_payload(topic, message_str)
         for subscription in self.topic_subscriptions[topic][:]:
             try:
                 if self._is_throttled(subscription, current_time, topic):
+                    continue
+                if ai_review_payload is not None and not await self._enforce_ai_review_scope(
+                    subscription=subscription,
+                    topic=topic,
+                    payload=ai_review_payload,
+                ):
                     continue
                 if await self._handle_backpressure(subscription, topic, max_pending, is_trade):
                     continue
@@ -705,6 +718,48 @@ class ZmqWebSocketBridgeService:
                 logger.warning(f"Failed to send message to client {subscription.client_id}: {e}")
                 with contextlib.suppress(Exception):
                     await self.disconnect_client(subscription.websocket)
+
+    def _maybe_parse_ai_review_payload(self, topic: str, message_str: str) -> dict[str, Any] | None:
+        """Parse an ``ai_reviews.*`` frame's JSON payload exactly once.
+
+        Returns ``None`` for non-AI-review topics (no per-frame scope
+        check needed) AND for malformed payloads (defensive: a
+        non-dict payload would have failed downstream serialisation
+        anyway, so dropping it here costs nothing).
+        """
+        if not topic.startswith(AI_REVIEWS_TOPIC_PREFIX):
+            return None
+        try:
+            parsed = json.loads(message_str)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        return parsed
+
+    async def _enforce_ai_review_scope(
+        self,
+        *,
+        subscription: TopicSubscriptionModel,
+        topic: str,
+        payload: Mapping[str, Any],
+    ) -> bool:
+        """Plan D §9 + Q15 per-frame scope filter for the ``ai_reviews.*`` family.
+
+        Resolves the destination socket's principal via the
+        :class:`WebSocketAuthManager` singleton + delegates to
+        :func:`enforce_ai_review_scope`. Forward iff the helper
+        returns ``True``.
+        """
+        principal = WebSocketAuthManager.get_instance().get_authenticated_user(
+            subscription.websocket
+        )
+        return await enforce_ai_review_scope(
+            topic=topic,
+            connection_principal=principal,
+            payload=payload,
+            scope_grant_service=get_scope_grant_service(),
+        )
 
     async def start_zmq_subscriber(self, topic: str) -> None:
         """Start a ZMQ subscriber for a specific topic.

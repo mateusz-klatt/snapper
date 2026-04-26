@@ -1666,3 +1666,115 @@ class TestBridgeIntermediatePrefixDefense:
         result = await bridge.subscribe_websocket(ws, "market.kraken.")
         assert result is False
         bridge._record_bridge_control.assert_awaited_once()
+
+
+class TestAiReviewScopeFilterWiring:
+    """Plan D §9 + Q15 — bridge calls enforce_ai_review_scope per-subscription."""
+
+    def _make_bridge_with_subscription(self) -> tuple[Any, Any]:
+        """Build a bridge with one subscription on the ai_reviews family."""
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        ws: Any = DummyWebSocket()
+        bridge.topic_subscriptions["ai_reviews."] = [
+            TopicSubscriptionModel(websocket=ws, throttle_ms=0)
+        ]
+        bridge.topic_metrics["ai_reviews."] = TopicMetricsModel()
+        return bridge, ws
+
+    @pytest.mark.asyncio
+    async def test_maybe_parse_returns_none_for_non_ai_review_topic(self) -> None:
+        """Non-``ai_reviews.*`` topic short-circuits parser to None.
+
+        Given: A bridge instance,
+        When: _maybe_parse_ai_review_payload is called with topic 'market.',
+        Then: Returns None without parsing the payload.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        result = bridge._maybe_parse_ai_review_payload("market.kraken.BTC", '{"x": 1}')
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_maybe_parse_returns_dict_for_valid_ai_review_payload(self) -> None:
+        """Valid JSON dict on ``ai_reviews.*`` -> parsed dict.
+
+        Given: A bridge instance,
+        When: _maybe_parse_ai_review_payload is called with valid JSON,
+        Then: Returns the parsed dict.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        result = bridge._maybe_parse_ai_review_payload(
+            "ai_reviews.user-1.strat-1.request",
+            '{"wallet_public_id": "wal-A", "instrument_public_id": "inst-A"}',
+        )
+        assert result == {"wallet_public_id": "wal-A", "instrument_public_id": "inst-A"}
+
+    @pytest.mark.asyncio
+    async def test_maybe_parse_returns_none_for_malformed_json(self) -> None:
+        """Malformed JSON on ``ai_reviews.*`` -> None (defensive).
+
+        Given: A bridge instance,
+        When: _maybe_parse_ai_review_payload is called with bad JSON,
+        Then: Returns None instead of raising.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        result = bridge._maybe_parse_ai_review_payload(
+            "ai_reviews.user-1.strat-1.request",
+            "not-json",
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_maybe_parse_returns_none_for_non_dict_payload(self) -> None:
+        """JSON array on ``ai_reviews.*`` -> None (envelope must be a dict).
+
+        Given: A bridge instance,
+        When: _maybe_parse_ai_review_payload is called with a JSON list,
+        Then: Returns None.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        result = bridge._maybe_parse_ai_review_payload(
+            "ai_reviews.user-1.strat-1.request",
+            "[1, 2, 3]",
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_forward_drops_ai_review_frame_when_scope_check_denies(self) -> None:
+        """Bridge skips send when enforce_ai_review_scope returns False.
+
+        Given: A bridge with one ai_reviews subscription,
+        When: _forward_to_clients is called and the scope filter denies,
+        Then: send_text is NOT called on the WebSocket.
+        """
+        bridge, ws = self._make_bridge_with_subscription()
+        with patch(
+            "snapper.interface.websocket.bridge.enforce_ai_review_scope",
+            new=AsyncMock(return_value=False),
+        ):
+            await bridge._forward_to_clients(
+                "ai_reviews.",
+                "ai_reviews.user-1.strat-1.request",
+                json.dumps({"wallet_public_id": "wal-A", "instrument_public_id": "inst-A"}),
+            )
+        ws.send_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_forward_sends_ai_review_frame_when_scope_check_allows(self) -> None:
+        """Bridge sends frame when enforce_ai_review_scope returns True.
+
+        Given: A bridge with one ai_reviews subscription,
+        When: _forward_to_clients is called and the scope filter allows,
+        Then: send_text is called with the raw JSON message.
+        """
+        bridge, ws = self._make_bridge_with_subscription()
+        raw_json = json.dumps({"wallet_public_id": "wal-A", "instrument_public_id": "inst-A"})
+        with patch(
+            "snapper.interface.websocket.bridge.enforce_ai_review_scope",
+            new=AsyncMock(return_value=True),
+        ):
+            await bridge._forward_to_clients(
+                "ai_reviews.",
+                "ai_reviews.user-1.strat-1.request",
+                raw_json,
+            )
+        ws.send_text.assert_awaited_once_with(raw_json)
