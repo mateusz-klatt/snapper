@@ -25,6 +25,7 @@ import sqlalchemy
 
 from snapper.application.ai_review.service import AiReviewService
 from snapper.data.models import AiDelegate
+from snapper.data.models import AiReview
 from snapper.data.models import AiReviewEvent
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.schemas.data import DelegateOfflineData
@@ -709,8 +710,6 @@ async def test_list_pending_for_delegate_wallet_filter(
         fanout_after_offset_seconds=30,
         deadline_offset_seconds=300,
     )
-    from snapper.data.models import AiReview
-
     async with repo.session() as s:
         await s.execute(
             sqlalchemy.update(AiReview)

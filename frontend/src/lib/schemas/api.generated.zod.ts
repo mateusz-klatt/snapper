@@ -440,6 +440,18 @@ export const OrphanSweepResultDataSchema = z
   })
   .strict()
 
+export const PendingReviewSummaryItemSchema = z
+  .object({
+    review_public_id: z.string(),
+    selected_delegate_public_id: z.string(),
+    wallet_public_id: z.string(),
+    dispatch_version: z.number().int(),
+    status: z.string(),
+    deadline: z.iso.datetime(),
+    fanout_after: z.iso.datetime(),
+  })
+  .strict()
+
 export const PositionCycleDataSchema = z
   .object({
     type: z.literal('position_cycle'),
@@ -898,6 +910,13 @@ export const DelegateDeactivateBodySchema = z
   })
   .strict()
 
+export const AiReviewDecisionRequestSchema = z
+  .object({
+    decision: z.string(),
+    rationale: z.string().nullable().optional(),
+  })
+  .strict()
+
 export const BacktestCompareBodySchema = z
   .object({
     mode: z.enum(['manual', 'auto']),
@@ -1304,6 +1323,13 @@ export const OrphanSweepResponseSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: OrphanSweepResultDataSchema,
+  })
+  .strict()
+
+export const PendingReviewListResponseSchema = z
+  .object({
+    items: z.array(PendingReviewSummaryItemSchema),
+    count: z.number().int(),
   })
   .strict()
 
@@ -2104,6 +2130,15 @@ export const HealthCheckResponseSchema = z
   })
   .strict()
 
+export const AiReviewDecisionResponseSchema = z
+  .object({
+    success: z.boolean(),
+    error_code: z.string().nullable(),
+    message: z.string(),
+    details: z.record(z.string(), z.any()),
+  })
+  .strict()
+
 export const AlertEventInfoSchema = z
   .object({
     type: z.literal('alert_event_info'),
@@ -2682,6 +2717,7 @@ export type NotificationMetricsData = z.infer<typeof NotificationMetricsDataSche
 export type OperatorInfo = z.infer<typeof OperatorInfoSchema>
 export type OrderData = z.infer<typeof OrderDataSchema>
 export type OrphanSweepResultData = z.infer<typeof OrphanSweepResultDataSchema>
+export type PendingReviewSummaryItem = z.infer<typeof PendingReviewSummaryItemSchema>
 export type PositionCycleData = z.infer<typeof PositionCycleDataSchema>
 export type PositionData = z.infer<typeof PositionDataSchema>
 export type ProcessCategoryCount = z.infer<typeof ProcessCategoryCountSchema>
@@ -2725,6 +2761,7 @@ export type SettingUpdateBody = z.infer<typeof SettingUpdateBodySchema>
 export type PushBetaUsersBody = z.infer<typeof PushBetaUsersBodySchema>
 export type RemoveSettingBody = z.infer<typeof RemoveSettingBodySchema>
 export type DelegateDeactivateBody = z.infer<typeof DelegateDeactivateBodySchema>
+export type AiReviewDecisionRequest = z.infer<typeof AiReviewDecisionRequestSchema>
 export type BacktestCompareBody = z.infer<typeof BacktestCompareBodySchema>
 export type BacktestCancelBody = z.infer<typeof BacktestCancelBodySchema>
 export type CreateCredentialBody = z.infer<typeof CreateCredentialBodySchema>
@@ -2765,6 +2802,7 @@ export type NotificationMetricsResponse = z.infer<typeof NotificationMetricsResp
 export type OperatorListResponse = z.infer<typeof OperatorListResponseSchema>
 export type OrderListResponse = z.infer<typeof OrderListResponseSchema>
 export type OrphanSweepResponse = z.infer<typeof OrphanSweepResponseSchema>
+export type PendingReviewListResponse = z.infer<typeof PendingReviewListResponseSchema>
 export type PositionCycleListResponse = z.infer<typeof PositionCycleListResponseSchema>
 export type PositionListResponse = z.infer<typeof PositionListResponseSchema>
 export type ProcessSummaryData = z.infer<typeof ProcessSummaryDataSchema>
@@ -2837,6 +2875,7 @@ export type UpdateUserRequest = z.infer<typeof UpdateUserRequestSchema>
 export type WsStatsResponse = z.infer<typeof WsStatsResponseSchema>
 export type ZmqHealthResponse = z.infer<typeof ZmqHealthResponseSchema>
 export type HealthCheckResponse = z.infer<typeof HealthCheckResponseSchema>
+export type AiReviewDecisionResponse = z.infer<typeof AiReviewDecisionResponseSchema>
 export type AlertEventInfo = z.infer<typeof AlertEventInfoSchema>
 export type AvailableProcess = z.infer<typeof AvailableProcessSchema>
 export type BacktestResultInline = z.infer<typeof BacktestResultInlineSchema>

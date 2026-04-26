@@ -802,6 +802,15 @@ export interface DelegateDeactivate {
 }
 
 /**
+ * AiReviewDecision request entity.
+ * Use with aiReviewDecisionToAPI() transform.
+ */
+export interface AiReviewDecision {
+  decision: string
+  rationale?: string | null
+}
+
+/**
  * BacktestCompare request entity.
  * Use with backtestCompareToAPI() transform.
  */

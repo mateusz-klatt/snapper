@@ -292,6 +292,38 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/ai-reviews/{review_public_id}/decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: Operations["submit_ai_review_decision_route_api_ai_reviews__review_public_id__decision_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ai-reviews/pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: Operations["list_pending_ai_reviews_api_ai_reviews_pending_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/processes/available": {
         parameters: {
             query?: never;
@@ -1368,6 +1400,12 @@ export type Paths = {
 export type webhooks = Record<string, never>;
 export type Components = {
     schemas: {
+        AiReviewDecisionResponse: {
+            success: boolean;
+            error_code: string | null;
+            message: string;
+            details: Record<string, unknown>;
+        };
         AlertEventInfo: {
             type: "alert_event_info";
             sequence_id: number;
@@ -2252,6 +2290,19 @@ export type Components = {
             closed_count: number;
             closed_cycle_ids: string[];
         };
+        PendingReviewListResponse: {
+            items: Components["schemas"]["PendingReviewSummaryItem"][];
+            count: number;
+        };
+        PendingReviewSummaryItem: {
+            review_public_id: string;
+            selected_delegate_public_id: string;
+            wallet_public_id: string;
+            dispatch_version: number;
+            status: string;
+            deadline: string;
+            fanout_after: string;
+        };
         PositionCycleData: {
             type: "position_cycle";
             sequence_id: number;
@@ -3133,6 +3184,10 @@ export type Components = {
         DelegateDeactivateBody: {
             reason?: string | null;
         };
+        AiReviewDecisionRequest: {
+            decision: string;
+            rationale?: string | null;
+        };
         BacktestCreateCommand: {
             type?: "backtest_create_command";
             sequence_id: number;
@@ -4007,6 +4062,89 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    submit_ai_review_decision_route_api_ai_reviews__review_public_id__decision_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                review_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["AiReviewDecisionRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["AiReviewDecisionResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_pending_ai_reviews_api_ai_reviews_pending_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                wallet_public_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["PendingReviewListResponse"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

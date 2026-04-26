@@ -284,6 +284,20 @@ enum CreateScopeGrantBodyScopeKind: String, Codable, Sendable {
     case instrument
 }
 
+struct AiReviewDecisionResponse: Codable, Sendable {
+    let success: Bool
+    let errorCode: String?
+    let message: String
+    let details: JsonObject
+
+    enum CodingKeys: String, CodingKey {
+        case success
+        case errorCode = "error_code"
+        case message
+        case details
+    }
+}
+
 struct AlertEventInfo: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -2176,6 +2190,31 @@ struct OrphanSweepResultData: Codable, Sendable {
         case sessionId = "session_id"
         case closedCount = "closed_count"
         case closedCycleIds = "closed_cycle_ids"
+    }
+}
+
+struct PendingReviewListResponse: Codable, Sendable {
+    let items: [PendingReviewSummaryItem]
+    let count: Int
+}
+
+struct PendingReviewSummaryItem: Codable, Sendable {
+    let reviewPublicId: String
+    let selectedDelegatePublicId: String
+    let walletPublicId: String
+    let dispatchVersion: Int
+    let status: String
+    let deadline: Date
+    let fanoutAfter: Date
+
+    enum CodingKeys: String, CodingKey {
+        case reviewPublicId = "review_public_id"
+        case selectedDelegatePublicId = "selected_delegate_public_id"
+        case walletPublicId = "wallet_public_id"
+        case dispatchVersion = "dispatch_version"
+        case status
+        case deadline
+        case fanoutAfter = "fanout_after"
     }
 }
 
@@ -4074,6 +4113,11 @@ struct DelegateDeactivateRequest: Codable, Sendable {
 
 struct DelegateDeactivateBody: Codable, Sendable {
     let reason: String?
+}
+
+struct AiReviewDecisionRequest: Codable, Sendable {
+    let decision: String
+    let rationale: String?
 }
 
 struct BacktestCreateCommand: Codable, Sendable {
