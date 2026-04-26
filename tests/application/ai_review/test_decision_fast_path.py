@@ -18,6 +18,7 @@ import asyncio
 from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -273,5 +274,103 @@ class TestHandleAiReviewDecisionBusMessage:
             )
             assert fut_a.done()
             assert not fut_b.done()
+        finally:
+            loop.close()
+
+
+class TestRegisterAfterCreateRace:
+    """Cache-driven fix for the register-after-create race.
+
+    Closes Codex P2 finding on commit 7d26a03: a fast delegate could
+    submit a decision in the gap between :meth:`create_review`'s
+    INSERT-commit and the strategy primitive's :meth:`register_future`
+    invocation. Pre-fix the listener no-op'd. Post-fix the listener
+    stashes the event in :attr:`_pending_resolutions`; the next
+    register_future drains the cache + resolves the future immediately.
+    """
+
+    def test_decision_received_before_register_future_resolves_on_register(self) -> None:
+        """Bus event before register_future -> next register_future resolves immediately.
+
+        Given a decision event arrives + listener stashes it because
+            no future is registered yet,
+        When the strategy primitive calls register_future for the
+            same review_public_id,
+        Then the future resolves immediately (no spinning DB poll).
+        """
+        loop = asyncio.new_event_loop()
+        try:
+            svc = AiReviewService.get_instance()
+            event = _make_decision_event(review_public_id="rev-race")
+            stashed = svc.handle_ai_review_decision_bus_message(event)
+            assert stashed is False
+            assert "rev-race" in svc._pending_resolutions
+            fut: asyncio.Future[object] = loop.create_future()
+            svc.register_future("rev-race", fut)
+            assert fut.done()
+            assert fut.result() is event
+            assert "rev-race" not in svc._pending_resolutions
+        finally:
+            loop.close()
+
+    def test_pending_cache_does_not_resolve_already_done_future(self) -> None:
+        """register_future against an already-done future is a no-op even with cache hit.
+
+        Given a future that already completed via the DB-poll path +
+            a cached event from the bus listener,
+        When register_future is called against the done future,
+        Then the cache entry is dropped but set_result is NOT called
+            on the done future (no InvalidStateError).
+        """
+        loop = asyncio.new_event_loop()
+        try:
+            svc = AiReviewService.get_instance()
+            event = _make_decision_event(review_public_id="rev-stale")
+            svc.handle_ai_review_decision_bus_message(event)
+            assert "rev-stale" in svc._pending_resolutions
+            fut: asyncio.Future[object] = loop.create_future()
+            fut.set_result("poll-driven")
+            svc.register_future("rev-stale", fut)
+            assert fut.result() == "poll-driven"
+            assert "rev-stale" not in svc._pending_resolutions
+        finally:
+            loop.close()
+
+    def test_unregister_future_evicts_pending_cache_entry(self) -> None:
+        """unregister_future drops the matching pending-resolution cache entry.
+
+        Given a cached event from the bus listener for a strategy
+            that has not yet registered its future,
+        When unregister_future is called for the same review_public_id
+            (e.g. strategy crashed),
+        Then the cache entry is dropped (TTL would eventually evict
+            it, but explicit removal keeps the cache tight).
+        """
+        svc = AiReviewService.get_instance()
+        event = _make_decision_event(review_public_id="rev-unreg")
+        svc.handle_ai_review_decision_bus_message(event)
+        assert "rev-unreg" in svc._pending_resolutions
+        svc.unregister_future("rev-unreg")
+        assert "rev-unreg" not in svc._pending_resolutions
+
+    def test_pending_cache_entry_evicted_after_ttl_expires(self) -> None:
+        """Stale entries past TTL are evicted on the next register_future call.
+
+        Given a stale cache entry past the 30s TTL,
+        When register_future is called (for any review),
+        Then the stale entry is evicted opportunistically and the
+            corresponding future is NOT resolved (the cache miss is
+            treated as a true cache miss, NOT a stale hit).
+        """
+        loop = asyncio.new_event_loop()
+        try:
+            svc = AiReviewService.get_instance()
+            event = _make_decision_event(review_public_id="rev-stale")
+            stale_timestamp = datetime.now(UTC) - timedelta(seconds=60)
+            svc._pending_resolutions["rev-stale"] = (event, stale_timestamp)
+            fut: asyncio.Future[object] = loop.create_future()
+            svc.register_future("rev-stale", fut)
+            assert not fut.done()
+            assert "rev-stale" not in svc._pending_resolutions
         finally:
             loop.close()

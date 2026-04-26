@@ -96,6 +96,17 @@ non-cancellation error. Mirrors the admin listener's
 ``_ADMIN_LISTEN_RECV_BACKOFF_S`` so a transient broker hiccup never
 bursts the listener loop into a busy retry tight-loop."""
 
+_PENDING_RESOLUTION_TTL_SECONDS = 30
+"""Cache TTL for decision events that arrive before the strategy
+primitive's :meth:`register_future` call. Closes the
+register-after-create race where a fast delegate submits a decision
+in the gap between :meth:`create_review`'s INSERT-commit and the
+strategy primitive's :meth:`register_future` invocation. 30s
+comfortably exceeds the DB-poll worst-case interval
+(``poll_max_seconds`` default 7s) so any in-flight strategy await
+loop is guaranteed to either pick the cached event up via
+register_future OR observe terminal state via its own DB poll."""
+
 DEFAULT_HEARTBEAT_WINDOW_SECONDS = 15
 """Plan A Q10 v1.3 + Q17 cross-plan lock — liveness threshold for admission control.
 
@@ -405,6 +416,7 @@ class AiReviewService:
         self._initialized = True
         self._msg_publisher: MessagePublisher | None = None
         self._futures: dict[str, asyncio.Future[object]] = {}
+        self._pending_resolutions: dict[str, tuple[AiReviewDecisionData, datetime]] = {}
         self._repository_factory: Callable[[], Repository] | None = None
         self._bus_subscriber: ValidatedSubscriber | None = None
         self._bus_zmq_context: zmq.asyncio.Context | None = None
@@ -441,30 +453,86 @@ class AiReviewService:
     def register_future(self, review_public_id: str, fut: asyncio.Future[object]) -> None:
         """Register a future that the strategy is awaiting on.
 
-        Called by ``StrategyContext.create_ai_review`` BEFORE
-        :meth:`create_review` publishes ``bus.ai_review_request``, so the
-        listener side never sees a decision it can't deliver. Re-registering
-        the same id replaces the previous handle: the most recent waiter wins,
-        which matches the Plan D §8 retry-on-restart contract where a
-        reconnecting strategy is the only legitimate re-registrant.
+        Called by the strategy primitive AFTER
+        :meth:`create_review` returns the public_id. This creates a
+        register-after-create race: a fast delegate could submit a
+        decision in the gap between the row's INSERT and our
+        register_future call, the bus event would arrive at the
+        listener with no future to resolve, and the strategy would
+        fall through to the DB-poll fallback path (slower than the
+        fast-path but still correct).
+
+        To close that race, the listener stashes any decision it
+        receives without a matching future into
+        :attr:`_pending_resolutions` (a small bounded cache). On
+        register_future we drain the cache: if a decision for this
+        ``review_public_id`` arrived before our registration, we
+        resolve the future immediately + drop the cache entry. Stale
+        entries past
+        :data:`_PENDING_RESOLUTION_TTL_SECONDS` get evicted on every
+        register_future call so the cache cannot grow unbounded
+        even if the strategy crashes between create_review and
+        register_future.
+
+        Re-registering the same id replaces the previous handle: the
+        most recent waiter wins, which matches the Plan D §8
+        retry-on-restart contract where a reconnecting strategy is
+        the only legitimate re-registrant.
 
         Args:
             review_public_id: UUID7 of the ``ai_reviews`` row.
             fut: ``asyncio.Future`` the strategy is awaiting.
         """
         self._futures[review_public_id] = fut
+        self._evict_expired_pending_resolutions()
+        pending = self._pending_resolutions.pop(review_public_id, None)
+        if pending is None:
+            return
+        cached_event, _ = pending
+        if not fut.done():
+            fut.set_result(cached_event)
+            logger.debug(
+                "ai_review fast-path future resolved from pending cache",
+                review_public_id=review_public_id,
+                decision=cached_event.decision,
+            )
+
+    def _evict_expired_pending_resolutions(self) -> None:
+        """Drop pending-resolution cache entries past their TTL.
+
+        Bounded-size guarantee even if a strategy crashes between
+        :meth:`create_review` and :meth:`register_future`. Called
+        opportunistically from :meth:`register_future` +
+        :meth:`handle_ai_review_decision_bus_message` so no
+        background task is required.
+        """
+        if not self._pending_resolutions:
+            return
+        cutoff = datetime.now(UTC) - timedelta(seconds=_PENDING_RESOLUTION_TTL_SECONDS)
+        stale = [
+            rid
+            for rid, (_event, cached_at) in self._pending_resolutions.items()
+            if cached_at < cutoff
+        ]
+        for rid in stale:
+            self._pending_resolutions.pop(rid, None)
 
     def unregister_future(self, review_public_id: str) -> None:
-        """Drop a future from the registry.
+        """Drop a future from the registry + any pending-resolution cache entry.
 
         Idempotent — the await-loop calls this in its ``finally`` after either
         normal resolution or timeout, and the reaper / supersede paths call it
-        again as a safety net.
+        again as a safety net. Also drops any matching entry from
+        :attr:`_pending_resolutions` so a strategy that already saw its
+        outcome via the DB-poll fallback doesn't leave a stale event in the
+        cache (the TTL would clean it up eventually, but explicit removal
+        keeps the cache tight).
 
         Args:
             review_public_id: UUID7 of the ``ai_reviews`` row to forget.
         """
         self._futures.pop(review_public_id, None)
+        self._pending_resolutions.pop(review_public_id, None)
 
     def get_future(self, review_public_id: str) -> asyncio.Future[object] | None:
         """Look up a future without removing it.
@@ -1316,14 +1384,22 @@ class AiReviewService:
         immediately instead of spinning the DB-poll loop until the
         next jitter interval.
 
+        Race-safety against register-after-create: if no future is
+        registered yet for this ``review_public_id`` we cache the
+        event in :attr:`_pending_resolutions` for up to
+        :data:`_PENDING_RESOLUTION_TTL_SECONDS`. The next
+        :meth:`register_future` call drains the cache + resolves the
+        future immediately. This closes the race where a fast
+        delegate submits a decision in the gap between
+        :meth:`create_review`'s INSERT-commit and the strategy
+        primitive's :meth:`register_future` invocation. The cache is
+        bounded by the TTL even if the strategy crashes mid-creation.
+
         Cross-instance behaviour: a remote-instance listener that
-        finds no matching future in its in-memory registry treats the
-        event as a no-op — the originating instance owns the future,
-        and the remote-instance strategy await loop is unaffected by
-        the bus broadcast (it polls the DB row state directly). This
-        no-op is the single-publisher / multi-subscriber correctness
-        invariant: every instance subscribes; only the owning instance
-        has a future to resolve.
+        finds no matching future + caches the event nonetheless —
+        cheap, bounded, and the cache will simply expire in 30s when
+        the originating instance's strategy returns terminal via its
+        own DB-poll path.
 
         Idempotency: a duplicate frame for a future that was already
         resolved (or unregistered by the strategy's ``finally`` block
@@ -1338,11 +1414,18 @@ class AiReviewService:
 
         Returns:
             ``True`` when a future matching ``review_public_id`` was
-            found AND resolved by this call; ``False`` for every
-            cross-instance / already-resolved / never-registered case.
+            found AND resolved by this call; ``False`` when stashed
+            in the pending-resolution cache OR already-resolved.
         """
         future = self._futures.get(msg.review_public_id)
         if future is None:
+            self._evict_expired_pending_resolutions()
+            self._pending_resolutions[msg.review_public_id] = (msg, datetime.now(UTC))
+            logger.debug(
+                "ai_review fast-path event cached pending future registration",
+                review_public_id=msg.review_public_id,
+                decision=msg.decision,
+            )
             return False
         if future.done():
             return False
@@ -1452,6 +1535,19 @@ class AiReviewService:
         follow-up — likely via a per-bus-event idempotency claim
         column on the :class:`AiReview` row, or by partitioning the
         caps-violation re-publish to a single dedicated worker.
+
+        Process-mode strategy caveat (Phase 2 #3): the FastAPI server
+        lifespan calls :meth:`start_bus_listener` so the strategy
+        primitive's fast-path future resolution (Plan A §7.1) works
+        for strategies that share the server's event loop (thread
+        mode). Strategies launched via
+        :class:`ProcessLauncherService` in ``ProcessModeEnum.PROCESS``
+        run in a separate subprocess that does not invoke this
+        listener wiring; their futures live in the subprocess
+        registry, but only the server process subscribes. Result:
+        process-mode strategies fall back to the DB-poll path
+        (correct, just slower than fast-path). Subprocess listener
+        wiring is a separate Phase 2 follow-up.
 
         Args:
             zmq_broker_xpub: Address of the broker's XPUB endpoint.
