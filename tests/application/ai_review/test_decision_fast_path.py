@@ -374,3 +374,69 @@ class TestRegisterAfterCreateRace:
             assert "rev-stale" not in svc._pending_resolutions
         finally:
             loop.close()
+
+
+class TestPendingResolutionsSizeCap:
+    """Hard-size cap on _pending_resolutions cache (Phase 2 #5).
+
+    Closes Codex non-blocking note from Phase 2 #3: TTL eviction is
+    opportunistic, so a runaway publisher emitting events for review
+    ids no strategy ever registers a future for could in principle
+    grow the dict without bound between TTL sweeps. The hard cap
+    bounds memory regardless of TTL pressure.
+    """
+
+    def test_overflow_evicts_oldest_entries_first(self) -> None:
+        """Cap exceeded -> drop the oldest entries (insertion-order).
+
+        Given the cache populated to MAX_ENTRIES+5 unique ids,
+        When the cap is enforced opportunistically by the dispatch
+            handler,
+        Then exactly 5 entries are evicted and they are the OLDEST
+            5 (Python dict preserves insertion order so popping from
+            the front evicts oldest first; freshest events survive).
+        """
+        from snapper.application.ai_review import service as svc_module
+
+        svc = AiReviewService.get_instance()
+        cap = svc_module._PENDING_RESOLUTION_MAX_ENTRIES
+        for i in range(cap + 5):
+            event = _make_decision_event(review_public_id=f"rev-{i:05d}")
+            svc.handle_ai_review_decision_bus_message(event)
+        assert len(svc._pending_resolutions) == cap
+        assert "rev-00000" not in svc._pending_resolutions
+        assert "rev-00004" not in svc._pending_resolutions
+        assert "rev-00005" in svc._pending_resolutions
+        latest_key = f"rev-{cap + 4:05d}"
+        assert latest_key in svc._pending_resolutions
+
+    def test_at_or_below_cap_is_noop(self) -> None:
+        """Cache size at-or-below the cap leaves every entry alone.
+
+        Given the cache populated to exactly MAX_ENTRIES,
+        When _enforce_pending_resolution_size_cap is invoked,
+        Then no entries are evicted (overflow=0).
+        """
+        from snapper.application.ai_review import service as svc_module
+
+        svc = AiReviewService.get_instance()
+        cap = svc_module._PENDING_RESOLUTION_MAX_ENTRIES
+        for i in range(cap):
+            event = _make_decision_event(review_public_id=f"rev-{i:05d}")
+            svc.handle_ai_review_decision_bus_message(event)
+        assert len(svc._pending_resolutions) == cap
+        svc._enforce_pending_resolution_size_cap()
+        assert len(svc._pending_resolutions) == cap
+        assert "rev-00000" in svc._pending_resolutions
+
+    def test_empty_cache_size_cap_is_noop(self) -> None:
+        """Empty cache -> _enforce_pending_resolution_size_cap is a no-op.
+
+        Given an empty pending-resolution cache,
+        When _enforce_pending_resolution_size_cap is invoked,
+        Then no entries are evicted and no warning is logged.
+        """
+        svc = AiReviewService.get_instance()
+        assert len(svc._pending_resolutions) == 0
+        svc._enforce_pending_resolution_size_cap()
+        assert len(svc._pending_resolutions) == 0

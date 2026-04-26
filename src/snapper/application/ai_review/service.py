@@ -34,6 +34,7 @@ hang on a future the listener can't see. Tests reset the singleton via
 import asyncio
 import contextlib
 import hashlib
+import itertools
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -106,6 +107,21 @@ comfortably exceeds the DB-poll worst-case interval
 (``poll_max_seconds`` default 7s) so any in-flight strategy await
 loop is guaranteed to either pick the cached event up via
 register_future OR observe terminal state via its own DB poll."""
+
+_PENDING_RESOLUTION_MAX_ENTRIES = 1024
+"""Hard size cap on the pending-resolution cache.
+
+TTL eviction is opportunistic (runs on every register_future +
+handle_ai_review_decision_bus_message call) so under normal
+conditions the cache stays well under this cap. The cap is the
+last-resort defense against a runaway publisher (e.g. a misconfigured
+test harness emitting events for review_public_ids no strategy ever
+registers a future for) that would otherwise let the dict grow
+without bound between TTL sweeps. On overflow we drop the OLDEST
+entries first (insertion-order-preserving dict semantics) so the
+freshest events survive longer. Sized at 1024 to comfortably
+exceed any realistic in-flight strategy count without consuming
+meaningful memory (each entry ≈ a couple hundred bytes)."""
 
 DEFAULT_HEARTBEAT_WINDOW_SECONDS = 15
 """Plan A Q10 v1.3 + Q17 cross-plan lock — liveness threshold for admission control.
@@ -516,6 +532,34 @@ class AiReviewService:
         ]
         for rid in stale:
             self._pending_resolutions.pop(rid, None)
+
+    def _enforce_pending_resolution_size_cap(self) -> None:
+        """Last-resort hard-size cap on the pending-resolution cache.
+
+        TTL eviction is opportunistic so under normal conditions the
+        cache stays well under :data:`_PENDING_RESOLUTION_MAX_ENTRIES`.
+        Defends against a runaway publisher emitting events for
+        review_public_ids no strategy ever registers — without this
+        cap the dict could grow without bound between TTL sweeps if
+        all entries are still within their 30s window.
+
+        Drop-oldest semantics: Python ``dict`` preserves insertion
+        order, so popping from the front evicts the OLDEST entries
+        first and the freshest events survive longer. Logs a single
+        warning per overflow batch so operators see the signal
+        without busy-spamming the log.
+        """
+        overflow = len(self._pending_resolutions) - _PENDING_RESOLUTION_MAX_ENTRIES
+        if overflow <= 0:
+            return
+        oldest_keys = list(itertools.islice(self._pending_resolutions, overflow))
+        for rid in oldest_keys:
+            self._pending_resolutions.pop(rid, None)
+        logger.warning(
+            "ai_review pending-resolution cache overflow",
+            evicted=len(oldest_keys),
+            cap=_PENDING_RESOLUTION_MAX_ENTRIES,
+        )
 
     def unregister_future(self, review_public_id: str) -> None:
         """Drop a future from the registry + any pending-resolution cache entry.
@@ -1421,6 +1465,7 @@ class AiReviewService:
         if future is None:
             self._evict_expired_pending_resolutions()
             self._pending_resolutions[msg.review_public_id] = (msg, datetime.now(UTC))
+            self._enforce_pending_resolution_size_cap()
             logger.debug(
                 "ai_review fast-path event cached pending future registration",
                 review_public_id=msg.review_public_id,
