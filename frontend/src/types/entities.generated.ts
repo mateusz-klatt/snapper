@@ -127,6 +127,20 @@ export interface Contract {
 }
 
 /**
+ * Canonical DelegateOffline entity.
+ * From WebSocket DelegateOfflineData.
+ */
+export interface DelegateOffline {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  userPublicId: string
+  delegatePublicId: string
+  lastSeenAt: Date
+}
+
+/**
  * Canonical Execution entity.
  * From WebSocket ExecutionData.
  */

@@ -104,6 +104,19 @@ export const ContractDataSchema = z
   })
   .strict()
 
+export const DelegateOfflineDataSchema = z
+  .object({
+    type: z.literal('delegate_offline'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    user_public_id: z.string(),
+    delegate_public_id: z.string(),
+    last_seen_at: z.iso.datetime(),
+  })
+  .strict()
+
 export const ExecutionDataSchema = z
   .object({
     type: z.literal('execution'),

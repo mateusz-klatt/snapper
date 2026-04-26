@@ -284,6 +284,28 @@ struct CandleData: Codable, Sendable {
     }
 }
 
+struct DelegateOfflineData: Codable, Sendable {
+    let type: String
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let userPublicId: String
+    let delegatePublicId: String
+    let lastSeenAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case userPublicId = "user_public_id"
+        case delegatePublicId = "delegate_public_id"
+        case lastSeenAt = "last_seen_at"
+    }
+}
+
 struct ExecutionPlanDecisionEventData: Codable, Sendable {
     let type: String
     let sequenceId: Int

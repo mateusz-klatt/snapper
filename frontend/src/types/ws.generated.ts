@@ -11,6 +11,7 @@ export type WebSocketMessages =
   | CandleData
   | ContinuousCandleData
   | ContractData
+  | DelegateOfflineData
   | ExecutionData
   | ExecutionPlanData
   | ExecutionPlanDecisionEventData
@@ -90,7 +91,8 @@ export type Type4 = "contract";
 export type ExpiryAt = string | null;
 export type InstrumentKind = string | null;
 export type ContractFamily = string | null;
-export type Type5 = "execution";
+export type Type5 = "delegate_offline";
+export type Type6 = "execution";
 export type TradeId = string | null;
 export type ExchangeOrderId = string | null;
 export type Exchange1 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
@@ -98,33 +100,33 @@ export type Side = "buy" | "sell";
 export type Status = "filled" | "partial";
 export type OperatorPublicId1 = string | null;
 export type UserPublicId = string | null;
-export type Type6 = "execution_plan";
+export type Type7 = "execution_plan";
 export type OperatorPublicId2 = string | null;
 export type PositionCyclePublicId = string | null;
 export type ParentPlanPublicId = string | null;
 export type LastError = string | null;
 export type IdempotencyKey = string | null;
-export type Type7 = "execution_plan_decision_event";
-export type Type8 = "front_month";
+export type Type8 = "execution_plan_decision_event";
+export type Type9 = "front_month";
 export type ContractFamily1 = string | null;
-export type Type9 = "funding_accrual";
+export type Type10 = "funding_accrual";
 export type Exchange2 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Mode = "live" | "paper";
 export type AccrualType = "funding" | "rollover" | "borrow";
-export type Type10 = "heartbeat";
+export type Type11 = "heartbeat";
 export type Status1 = "healthy" | "warning" | "error";
-export type Type11 = "instrument_capability";
+export type Type12 = "instrument_capability";
 export type SupportedOrderTypes = string[];
 export type MinNotional = number | null;
 export type MaxOrderSize = number | null;
-export type Type12 = "instrument_detail";
+export type Type13 = "instrument_detail";
 export type InstrumentKind1 = string | null;
 export type ExpiryAt1 = string | null;
-export type Type13 = "order_cancel";
+export type Type14 = "order_cancel";
 export type Exchange3 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type OperatorPublicId3 = string | null;
 export type UserPublicId1 = string | null;
-export type Type14 = "order";
+export type Type15 = "order";
 export type ExchangeOrderId1 = string | null;
 export type Exchange4 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Mode1 = "live" | "paper";
@@ -139,19 +141,19 @@ export type UpdatedAt = string | null;
 export type Leverage = number | null;
 export type OperatorPublicId4 = string | null;
 export type UserPublicId2 = string | null;
-export type Type15 = "order_event";
+export type Type16 = "order_event";
 export type Exchange5 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Event1 = "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced";
 export type Reason1 = string | null;
 export type OperatorPublicId5 = string | null;
 export type UserPublicId3 = string | null;
-export type Type16 = "order_replace";
+export type Type17 = "order_replace";
 export type Exchange6 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type NewQuantity = number | null;
 export type NewPrice = number | null;
 export type OperatorPublicId6 = string | null;
 export type UserPublicId4 = string | null;
-export type Type17 = "order_request";
+export type Type18 = "order_request";
 export type Exchange7 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Mode2 = "live" | "paper";
 export type Side2 = "buy" | "sell";
@@ -162,81 +164,81 @@ export type StrategyTag = string | null;
 export type Leverage1 = number | null;
 export type OperatorPublicId7 = string | null;
 export type UserPublicId5 = string | null;
-export type Type18 = "position";
+export type Type19 = "position";
 export type Exchange8 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Mode3 = "live" | "paper";
 export type PositionCyclePublicId1 = string | null;
-export type Type19 = "replay_end";
-export type Type20 = "replay_start";
+export type Type20 = "replay_end";
+export type Type21 = "replay_start";
 export type StartedAt = string | null;
-export type Type21 = "scope_revoked";
+export type Type22 = "scope_revoked";
 export type ScopeKind = "underlying" | "instrument";
 export type UnderlyingPublicId = string | null;
 export type InstrumentPublicId = string | null;
 export type RevokedByUserPublicId = string | null;
 export type Reason2 = string | null;
-export type Type22 = "setting_changed";
+export type Type23 = "setting_changed";
 export type UpdatedBy = string | null;
-export type Type23 = "signal";
+export type Type24 = "signal";
 export type Exchange9 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Side3 = "buy" | "sell";
 export type Price2 = number | null;
 export type StrategyName = string | null;
 export type OperatorPublicId8 = string | null;
 export type UserPublicId6 = string | null;
-export type Type24 = "symbol_alias_update";
+export type Type25 = "symbol_alias_update";
 export type Event2 = "symbol_aliases_updated";
 export type Action = "clear_cache";
-export type Type25 = "tick";
+export type Type26 = "tick";
 export type Exchange10 = "kraken" | "kraken_futures" | "kraken_equities" | "zonda" | "walutomat" | "polygon";
 export type Bid = number | null;
 export type Ask = number | null;
 export type Last = number | null;
 export type IsExtendedHours = boolean | null;
-export type Type26 = "trade";
+export type Type27 = "trade";
 export type Exchange11 = "kraken" | "kraken_futures" | "kraken_equities" | "zonda" | "walutomat" | "polygon";
 export type ExecutedAt = string | null;
 export type Side4 = string | null;
 export type TradeId1 = string | null;
-export type Type27 = "underlying_asset";
+export type Type28 = "underlying_asset";
 export type Sector = string | null;
-export type Type28 = "underlying_instrument";
+export type Type29 = "underlying_instrument";
 export type ContractFamily2 = string | null;
-export type Type29 = "user_deactivated";
+export type Type30 = "user_deactivated";
 export type Reason3 = string | null;
-export type Type30 = "venue_fee_schedule";
+export type Type31 = "venue_fee_schedule";
 export type InstrumentPublicId1 = string | null;
 export type MinVolume30D = number | null;
-export type Type31 = "auth_complete";
+export type Type32 = "auth_complete";
 export type AvailableTopics = string[];
 export type UserRole = "ai_delegate" | "viewer" | "operator" | "admin";
 export type SessionExpiresAt = string | null;
-export type Type32 = "auth_expired";
-export type Type33 = "auth_failed";
+export type Type33 = "auth_expired";
+export type Type34 = "auth_failed";
 export type Reason4 = string | null;
-export type Type34 = "auth_ok";
-export type Type35 = "auth_required";
-export type Type36 = "authenticate";
-export type Type37 = "error";
-export type Type38 = "get_subscriptions";
-export type Type39 = "ping";
-export type Type40 = "pong";
-export type Type41 = "reauth_ok";
-export type Type42 = "reauth";
-export type Type43 = "reauth_required";
-export type Type44 = "subscribe";
+export type Type35 = "auth_ok";
+export type Type36 = "auth_required";
+export type Type37 = "authenticate";
+export type Type38 = "error";
+export type Type39 = "get_subscriptions";
+export type Type40 = "ping";
+export type Type41 = "pong";
+export type Type42 = "reauth_ok";
+export type Type43 = "reauth";
+export type Type44 = "reauth_required";
+export type Type45 = "subscribe";
 export type Topics = string[];
-export type Type45 = "subscription_success";
+export type Type46 = "subscription_success";
 export type Action1 = "subscribe" | "unsubscribe";
 export type Status2 = "subscribed" | "unsubscribed" | "partial" | "denied" | "no_topics";
 export type Topics1 = string[];
 export type DeniedTopics = string[];
 export type ActiveSubscriptions = string[];
 export type Message = string | null;
-export type Type46 = "subscriptions_list";
+export type Type47 = "subscriptions_list";
 export type Subscriptions = string[];
 export type AvailableTopics1 = string[];
-export type Type47 = "unsubscribe";
+export type Type48 = "unsubscribe";
 export type Topics2 = string[];
 
 export interface StrictDataSchema {
@@ -336,8 +338,18 @@ export interface ContractData {
   contract_family: ContractFamily;
   is_front_month: boolean;
 }
-export interface ExecutionData {
+export interface DelegateOfflineData {
   type: Type5;
+  sequence_id: number;
+  public_id: string;
+  timestamp: string;
+  session_id: string;
+  user_public_id: string;
+  delegate_public_id: string;
+  last_seen_at: string;
+}
+export interface ExecutionData {
+  type: Type6;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -362,7 +374,7 @@ export interface ExecutionData {
   liquidity_role?: string;
 }
 export interface ExecutionPlanData {
-  type: Type6;
+  type: Type7;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -389,7 +401,7 @@ export interface Params {
   [k: string]: unknown;
 }
 export interface ExecutionPlanDecisionEventData {
-  type: Type7;
+  type: Type8;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -402,7 +414,7 @@ export interface ExecutionPlanDecisionEventData {
   triggered_at: string;
 }
 export interface FrontMonthData {
-  type: Type8;
+  type: Type9;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -415,7 +427,7 @@ export interface FrontMonthData {
   contract_family: ContractFamily1;
 }
 export interface FundingAccrualData {
-  type: Type9;
+  type: Type10;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -432,7 +444,7 @@ export interface FundingAccrualData {
   position_quantity: number;
 }
 export interface HeartbeatData {
-  type: Type10;
+  type: Type11;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -447,7 +459,7 @@ export interface JsonObject1 {
   [k: string]: JsonValue;
 }
 export interface InstrumentCapabilityData {
-  type: Type11;
+  type: Type12;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -471,7 +483,7 @@ export interface InstrumentCapabilityData {
   top_of_book_quality: string;
 }
 export interface InstrumentDetailData {
-  type: Type12;
+  type: Type13;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -487,7 +499,7 @@ export interface InstrumentDetailData {
   expiry_at: ExpiryAt1;
 }
 export interface OrderCancelData {
-  type: Type13;
+  type: Type14;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -501,7 +513,7 @@ export interface OrderCancelData {
   user_public_id?: UserPublicId1;
 }
 export interface OrderData {
-  type: Type14;
+  type: Type15;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -530,7 +542,7 @@ export interface OrderData {
   user_public_id?: UserPublicId2;
 }
 export interface OrderEventData {
-  type: Type15;
+  type: Type16;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -546,7 +558,7 @@ export interface OrderEventData {
   user_public_id?: UserPublicId3;
 }
 export interface OrderReplaceData {
-  type: Type16;
+  type: Type17;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -562,7 +574,7 @@ export interface OrderReplaceData {
   user_public_id?: UserPublicId4;
 }
 export interface OrderRequestData {
-  type: Type17;
+  type: Type18;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -585,7 +597,7 @@ export interface OrderRequestData {
   user_public_id?: UserPublicId5;
 }
 export interface PositionData {
-  type: Type18;
+  type: Type19;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -602,14 +614,14 @@ export interface PositionData {
   wallet_public_id?: string;
 }
 export interface ReplayEndData {
-  type: Type19;
+  type: Type20;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
 }
 export interface ReplayStartData {
-  type: Type20;
+  type: Type21;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -617,7 +629,7 @@ export interface ReplayStartData {
   started_at?: StartedAt;
 }
 export interface ScopeRevokedData {
-  type: Type21;
+  type: Type22;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -633,7 +645,7 @@ export interface ScopeRevokedData {
   reason?: Reason2;
 }
 export interface SettingChangedData {
-  type: Type22;
+  type: Type23;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -644,7 +656,7 @@ export interface SettingChangedData {
   updated_by?: UpdatedBy;
 }
 export interface SignalData {
-  type: Type23;
+  type: Type24;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -662,7 +674,7 @@ export interface SignalData {
   user_public_id?: UserPublicId6;
 }
 export interface SymbolAliasUpdateData {
-  type: Type24;
+  type: Type25;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -671,7 +683,7 @@ export interface SymbolAliasUpdateData {
   action: Action;
 }
 export interface TickData {
-  type: Type25;
+  type: Type26;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -686,7 +698,7 @@ export interface TickData {
   is_extended_hours?: IsExtendedHours;
 }
 export interface TradeData {
-  type: Type26;
+  type: Type27;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -700,7 +712,7 @@ export interface TradeData {
   trade_id?: TradeId1;
 }
 export interface UnderlyingAssetData {
-  type: Type27;
+  type: Type28;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -712,7 +724,7 @@ export interface UnderlyingAssetData {
   instrument_count: number;
 }
 export interface UnderlyingInstrumentData {
-  type: Type28;
+  type: Type29;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -725,7 +737,7 @@ export interface UnderlyingInstrumentData {
   contract_family: ContractFamily2;
 }
 export interface UserDeactivatedData {
-  type: Type29;
+  type: Type30;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -735,7 +747,7 @@ export interface UserDeactivatedData {
   reason?: Reason3;
 }
 export interface VenueFeeScheduleData {
-  type: Type30;
+  type: Type31;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -749,7 +761,7 @@ export interface VenueFeeScheduleData {
   currency: string;
 }
 export interface WSAuthCompleteResponse {
-  type: Type31;
+  type: Type32;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -760,14 +772,14 @@ export interface WSAuthCompleteResponse {
   ws_token_exp: string;
 }
 export interface WSAuthExpiredResponse {
-  type: Type32;
+  type: Type33;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
 }
 export interface WSAuthFailedResponse {
-  type: Type33;
+  type: Type34;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -775,7 +787,7 @@ export interface WSAuthFailedResponse {
   reason?: Reason4;
 }
 export interface WSAuthOkResponse {
-  type: Type34;
+  type: Type35;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -783,7 +795,7 @@ export interface WSAuthOkResponse {
   exp: string;
 }
 export interface WSAuthRequiredResponse {
-  type: Type35;
+  type: Type36;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -791,7 +803,7 @@ export interface WSAuthRequiredResponse {
   timeout?: number;
 }
 export interface WSAuthenticateRequest {
-  type: Type36;
+  type: Type37;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -799,7 +811,7 @@ export interface WSAuthenticateRequest {
   ws_token: string;
 }
 export interface WSErrorResponse {
-  type: Type37;
+  type: Type38;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -807,21 +819,21 @@ export interface WSErrorResponse {
   message: string;
 }
 export interface WSGetSubscriptionsRequest {
-  type: Type38;
-  sequence_id: number;
-  public_id: string;
-  timestamp: string;
-  session_id: string;
-}
-export interface WSPingRequest {
   type: Type39;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
 }
-export interface WSPongResponse {
+export interface WSPingRequest {
   type: Type40;
+  sequence_id: number;
+  public_id: string;
+  timestamp: string;
+  session_id: string;
+}
+export interface WSPongResponse {
+  type: Type41;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -829,7 +841,7 @@ export interface WSPongResponse {
   active_connections: number;
 }
 export interface WSReauthOkResponse {
-  type: Type41;
+  type: Type42;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -837,7 +849,7 @@ export interface WSReauthOkResponse {
   exp: string;
 }
 export interface WSReauthRequest {
-  type: Type42;
+  type: Type43;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -845,7 +857,7 @@ export interface WSReauthRequest {
   ws_token: string;
 }
 export interface WSReauthRequiredResponse {
-  type: Type43;
+  type: Type44;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -853,7 +865,7 @@ export interface WSReauthRequiredResponse {
   deadline: string;
 }
 export interface WSSubscribeRequest {
-  type: Type44;
+  type: Type45;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -861,7 +873,7 @@ export interface WSSubscribeRequest {
   topics: Topics;
 }
 export interface WSSubscriptionSuccessResponse {
-  type: Type45;
+  type: Type46;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -874,7 +886,7 @@ export interface WSSubscriptionSuccessResponse {
   message?: Message;
 }
 export interface WSSubscriptionsListResponse {
-  type: Type46;
+  type: Type47;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -884,7 +896,7 @@ export interface WSSubscriptionsListResponse {
   total_available: number;
 }
 export interface WSUnsubscribeRequest {
-  type: Type47;
+  type: Type48;
   sequence_id: number;
   public_id: string;
   timestamp: string;
