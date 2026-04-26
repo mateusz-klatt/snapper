@@ -53,7 +53,9 @@ from snapper.data.repository import Repository
 from snapper.data.repository_types import AiReviewEventInsertRow
 from snapper.data.repository_types import AiReviewInsertRow
 from snapper.data.repository_types import AiReviewRow
+from snapper.data.repository_types import PendingReviewSummary
 from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.schemas.data import DelegateOfflineData
 
 DEFAULT_HEARTBEAT_WINDOW_SECONDS = 15
 """Plan A Q10 v1.3 + Q17 cross-plan lock — liveness threshold for admission control.
@@ -772,6 +774,266 @@ class AiReviewService:
                 "responding_delegate_public_id": responding,
                 "recorded_decision": recorded_decision,
             },
+        )
+
+    async def supersede_review(
+        self,
+        *,
+        review_public_id: str,
+        reason: str,
+        repo: Repository,
+        now: datetime | None = None,
+    ) -> bool:
+        """Plan D §3 strategy-abandon path: pending/fanout_dispatched -> superseded.
+
+        Atomically transitions the row to ``superseded`` /
+        ``superseded_by_strategy``, appends a ``superseded`` audit
+        event with the reason, and decrements the
+        ``ai_delegates.active_reviews_count`` exactly once via the
+        Q10 v1.2 ``counter_decremented_at`` CAS primitive shared with
+        :meth:`submit_decision` and :meth:`_reaper_tick`.
+
+        Args:
+            review_public_id: UUID7 of the ``ai_reviews`` row to
+                supersede.
+            reason: Free-text rationale stored on the audit-event
+                payload (no length cap enforced here — strategy code
+                is internal).
+            repo: Repository handle (single-transaction caller
+                context).
+            now: Optional override for the wall-clock; tests inject a
+                fixed value so the resolved_at + audit timestamps are
+                deterministic.
+
+        Returns:
+            ``True`` when this call won the CAS and the row
+            transitioned to terminal; ``False`` when a peer (a
+            decision, the reaper, or another supersede) had already
+            transitioned the row.
+        """
+        wall_clock = now if now is not None else datetime.now(UTC)
+        atomic = await repo.atomic_supersede_ai_review(
+            review_public_id=review_public_id, now=wall_clock
+        )
+        if atomic is None:
+            return False
+        await repo.insert_ai_review_event(
+            {
+                "public_id": str(uuid7()),
+                "review_public_id": review_public_id,
+                "event_type": AiReviewEventTypeEnum.SUPERSEDED.value,
+                "actor_delegate_public_id": None,
+                "previous_status": atomic["previous_status"],
+                "new_status": AiReviewStatusEnum.SUPERSEDED.value,
+                "payload": {"reason": reason},
+                "occurred_at": wall_clock,
+            }
+        )
+        await repo.decrement_delegate_active_count_for_review(
+            review_public_id=review_public_id,
+            selected_delegate_public_id=atomic["selected_delegate_public_id"],
+            now=wall_clock,
+        )
+        logger.info(
+            "ai_review superseded",
+            review_public_id=review_public_id,
+            reason=reason,
+        )
+        return True
+
+    async def _reaper_tick(self, *, repo: Repository, now: datetime | None = None) -> int:
+        """Plan D §3.3 single-tick reaper iteration.
+
+        Snapshots up to N expired pending/fanout_dispatched reviews,
+        then per-row drives the existing
+        :meth:`Repository.atomic_timeout_ai_review` CAS + audit-event
+        + counter-decrement primitives shared with
+        :meth:`submit_decision`. Returns the number of rows that won
+        the per-row CAS this tick (rows that lost — because a peer
+        decision or earlier reaper landed first — are silently
+        skipped, matching the spec's "drop-the-lease" guarantee).
+
+        Args:
+            repo: Repository handle.
+            now: Optional override for the wall-clock.
+
+        Returns:
+            Number of rows successfully transitioned to ``timeout`` by
+            this tick.
+        """
+        wall_clock = now if now is not None else datetime.now(UTC)
+        candidates = await repo.list_expired_pending_reviews(now=wall_clock)
+        transitioned = 0
+        for candidate in candidates:
+            atomic = await repo.atomic_timeout_ai_review(
+                review_public_id=candidate["public_id"], now=wall_clock
+            )
+            if atomic is None:
+                continue
+            await repo.insert_ai_review_event(
+                {
+                    "public_id": str(uuid7()),
+                    "review_public_id": candidate["public_id"],
+                    "event_type": AiReviewEventTypeEnum.TIMEOUT_MARKED.value,
+                    "actor_delegate_public_id": None,
+                    "previous_status": atomic["previous_status"],
+                    "new_status": AiReviewStatusEnum.TIMEOUT.value,
+                    "payload": {"trigger": "reaper_tick"},
+                    "occurred_at": wall_clock,
+                }
+            )
+            await repo.decrement_delegate_active_count_for_review(
+                review_public_id=candidate["public_id"],
+                selected_delegate_public_id=atomic["selected_delegate_public_id"],
+                now=wall_clock,
+            )
+            transitioned += 1
+        if transitioned > 0:
+            logger.info("ai_review reaper tick", transitioned=transitioned)
+        return transitioned
+
+    async def _offline_scanner_tick(
+        self,
+        *,
+        repo: Repository,
+        now: datetime | None = None,
+        heartbeat_window_seconds: int = DEFAULT_HEARTBEAT_WINDOW_SECONDS,
+    ) -> int:
+        """Plan D §3.4 single-tick Layer 2 offline scanner iteration.
+
+        Snapshots up to N pending reviews whose ``fanout_after`` has
+        elapsed AND whose selected delegate has gone silent past the
+        heartbeat window, then drives the per-row atomic
+        ``pending -> fanout_dispatched`` CAS + ``fanout_dispatched``
+        audit event for each. Returns the number of fanouts dispatched
+        this tick.
+
+        Args:
+            repo: Repository handle.
+            now: Optional override for the wall-clock.
+            heartbeat_window_seconds: Liveness window passed through
+                to the eligibility query.
+
+        Returns:
+            Number of pending reviews whose CAS won this tick.
+        """
+        wall_clock = now if now is not None else datetime.now(UTC)
+        candidates = await repo.list_offline_pending_reviews(
+            now=wall_clock, heartbeat_window_seconds=heartbeat_window_seconds
+        )
+        return await self._dispatch_fanout_for_candidates(
+            candidates=candidates,
+            repo=repo,
+            now=wall_clock,
+            trigger="offline_scanner_tick",
+        )
+
+    async def _delegate_offline_tick(
+        self,
+        *,
+        delegate_public_id: str,
+        repo: Repository,
+        now: datetime | None = None,
+    ) -> int:
+        """Plan D §3.5 fast-path equivalent of the §3.4 scanner.
+
+        Scans only the pending rows whose
+        ``selected_delegate_public_id`` matches the freshly-offline
+        delegate, then drives the same atomic fanout-dispatch CAS as
+        the Layer 2 scanner. Idempotent vs §3.4: a row that the
+        scanner already transitioned is skipped because the CAS
+        predicate is ``status='pending'``.
+
+        Args:
+            delegate_public_id: ``ai_delegates.public_id`` of the
+                delegate whose ``bus.delegate_offline`` event triggered
+                the call.
+            repo: Repository handle.
+            now: Optional override for the wall-clock.
+
+        Returns:
+            Number of pending reviews whose CAS won this fast-path
+            invocation.
+        """
+        wall_clock = now if now is not None else datetime.now(UTC)
+        candidates = await repo.list_pending_reviews_for_delegate(
+            selected_delegate_public_id=delegate_public_id
+        )
+        return await self._dispatch_fanout_for_candidates(
+            candidates=candidates,
+            repo=repo,
+            now=wall_clock,
+            trigger="delegate_offline_bus",
+        )
+
+    async def _dispatch_fanout_for_candidates(
+        self,
+        *,
+        candidates: list[PendingReviewSummary],
+        repo: Repository,
+        now: datetime,
+        trigger: str,
+    ) -> int:
+        """Common per-candidate CAS + audit-event loop for §3.4 / §3.5.
+
+        Both the Layer 2 scanner and the §3.5 fast-path share the same
+        per-row dispatch shape: atomic CAS UPDATE pending ->
+        fanout_dispatched (incrementing ``dispatch_version``), then
+        append a ``fanout_dispatched`` audit-event row with the
+        trigger source on the payload. Extracted into a helper so the
+        two callers can't drift on the audit-event shape.
+        """
+        dispatched = 0
+        for candidate in candidates:
+            new_version = await repo.atomic_dispatch_fanout(
+                review_public_id=candidate["public_id"], now=now
+            )
+            if new_version is None:
+                continue
+            await repo.insert_ai_review_event(
+                {
+                    "public_id": str(uuid7()),
+                    "review_public_id": candidate["public_id"],
+                    "event_type": AiReviewEventTypeEnum.FANOUT_DISPATCHED.value,
+                    "actor_delegate_public_id": None,
+                    "previous_status": AiReviewStatusEnum.PENDING.value,
+                    "new_status": AiReviewStatusEnum.FANOUT_DISPATCHED.value,
+                    "payload": {
+                        "trigger": trigger,
+                        "dispatch_version": new_version,
+                    },
+                    "occurred_at": now,
+                }
+            )
+            dispatched += 1
+        if dispatched > 0:
+            logger.info("ai_review fanout dispatched", trigger=trigger, count=dispatched)
+        return dispatched
+
+    async def handle_delegate_offline_bus_message(
+        self, msg: DelegateOfflineData, *, repo: Repository
+    ) -> int:
+        """Plan D §3.5 ``bus.delegate_offline`` subscriber entry point.
+
+        Wraps :meth:`_delegate_offline_tick` so the ZMQ listener loop
+        (wired in a follow-up commit) can dispatch on the message
+        envelope without knowing the ``_tick`` argument shape.
+
+        Args:
+            msg: Decoded ``bus.delegate_offline`` payload published by
+                :class:`WebSocketAuthManager`.
+            repo: Repository handle (passed by the listener's per-tick
+                wiring).
+
+        Returns:
+            Number of pending reviews whose CAS won this fast-path
+            invocation (forwarded from
+            :meth:`_delegate_offline_tick`).
+        """
+        return await self._delegate_offline_tick(
+            delegate_public_id=msg.delegate_public_id,
+            repo=repo,
+            now=msg.last_seen_at,
         )
 
     @staticmethod

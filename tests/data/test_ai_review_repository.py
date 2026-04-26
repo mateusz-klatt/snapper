@@ -1538,3 +1538,102 @@ async def test_claim_and_insert_returns_none_for_empty_candidate_list(
     )
     assert selected is None
     assert await repo.get_ai_review(review_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_atomic_supersede_unknown_id_returns_none(tmp_path: Path) -> None:
+    """Unknown review_id -> ``atomic_supersede_ai_review`` returns ``None``.
+
+    Given an empty repository,
+    When atomic_supersede_ai_review runs against a public_id that does
+    not exist,
+    Then it returns None at the SELECT-step pre_row guard.
+    """
+    repo = await _build_repo(tmp_path, "supersede_unknown.db")
+    result = await repo.atomic_supersede_ai_review(review_public_id="ghost-id", now=_now())
+    assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_atomic_supersede_rowcount_zero_returns_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UPDATE rowcount=0 -> ``atomic_supersede_ai_review`` returns ``None``.
+
+    Given a stub that forces UPDATE rowcount=0 (peer transitioned the
+    row between SELECT and CAS UPDATE),
+    When atomic_supersede_ai_review is called,
+    Then it returns None rather than crashing on the post-UPDATE SELECT.
+    """
+    repo = await _build_repo(tmp_path, "supersede_rowcount0.db")
+    now = _now()
+    review_pid, _ = await _seed_pending_for_atomic(repo, as_of=now)
+    original_execute = AsyncSession.execute
+
+    async def _stub(self: _Any, statement: _Any, *a: _Any, **kw: _Any) -> _Any:
+        result = await original_execute(self, statement, *a, **kw)
+        if isinstance(statement, Update):
+
+            class _Wrap:
+                rowcount = 0
+
+                def __init__(self, inner: _Any) -> None:
+                    self._inner = inner
+
+                def __getattr__(self, name: str) -> _Any:
+                    return getattr(self._inner, name)
+
+            return _Wrap(result)
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", _stub)
+    try:
+        result = await repo.atomic_supersede_ai_review(review_public_id=review_pid, now=now)
+    finally:
+        monkeypatch.setattr(AsyncSession, "execute", original_execute)
+    assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_atomic_dispatch_fanout_rowcount_zero_returns_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UPDATE rowcount=0 -> ``atomic_dispatch_fanout`` returns ``None``.
+
+    Given a stub that forces UPDATE rowcount=0 (peer transitioned the
+    row away from 'pending' between snapshot and CAS),
+    When atomic_dispatch_fanout is called,
+    Then it returns None and does not crash on the post-UPDATE SELECT.
+    """
+    repo = await _build_repo(tmp_path, "dispatch_rowcount0.db")
+    now = _now()
+    review_pid, _ = await _seed_pending_for_atomic(repo, as_of=now)
+    original_execute = AsyncSession.execute
+
+    async def _stub(self: _Any, statement: _Any, *a: _Any, **kw: _Any) -> _Any:
+        result = await original_execute(self, statement, *a, **kw)
+        if isinstance(statement, Update):
+
+            class _Wrap:
+                rowcount = 0
+
+                def __init__(self, inner: _Any) -> None:
+                    self._inner = inner
+
+                def __getattr__(self, name: str) -> _Any:
+                    return getattr(self._inner, name)
+
+            return _Wrap(result)
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", _stub)
+    try:
+        result = await repo.atomic_dispatch_fanout(review_public_id=review_pid, now=now)
+    finally:
+        monkeypatch.setattr(AsyncSession, "execute", original_execute)
+    assert result is None

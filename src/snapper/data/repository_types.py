@@ -1845,3 +1845,22 @@ class AtomicResolveResult(TypedDict):
     selected_delegate_public_id: str
     dispatch_version: int
     previous_status: str
+
+
+class PendingReviewSummary(TypedDict):
+    """Read-only projection of ``ai_reviews`` rows for reaper / scanner ticks.
+
+    Plan D §3.3 reaper iterates `(public_id, selected_delegate_public_id,
+    dispatch_version, deadline, status)` to drive per-row atomic
+    timeouts. Plan D §3.4 / §3.5 scanners use the same shape minus the
+    deadline (offline dispatch is gated by ``fanout_after`` instead).
+    Keeping a single shared TypedDict avoids drift between the three
+    callers.
+    """
+
+    public_id: str
+    selected_delegate_public_id: str
+    dispatch_version: int
+    status: str
+    deadline: datetime
+    fanout_after: datetime

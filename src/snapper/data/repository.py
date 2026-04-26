@@ -169,6 +169,7 @@ from snapper.data.repository_types import NotificationDeviceUpsertRow
 from snapper.data.repository_types import OperatorRow
 from snapper.data.repository_types import OrderInsertRow
 from snapper.data.repository_types import OrderRow
+from snapper.data.repository_types import PendingReviewSummary
 from snapper.data.repository_types import PositionCycleInsertRow
 from snapper.data.repository_types import PositionCycleRow
 from snapper.data.repository_types import PositionRow
@@ -3395,6 +3396,144 @@ class Repository(ABC):
         Returns:
             The claimed ``ai_delegates.public_id`` on success; ``None``
             when every candidate's CAS lost (all busy).
+        """
+        ...
+
+    @abstractmethod
+    async def atomic_supersede_ai_review(
+        self,
+        *,
+        review_public_id: str,
+        now: datetime,
+    ) -> AtomicResolveResult | None:
+        """Plan D §3 strategy-abandon path: pending/fanout_dispatched -> superseded.
+
+        CAS UPDATE that mirrors :meth:`atomic_resolve_ai_review` minus
+        the decision/responding_delegate fields and the deadline gate:
+        a strategy may abandon its review even after the deadline
+        elapsed (the timeout shortcut applies only when a delegate is
+        trying to land a late decision; the strategy itself is free to
+        give up at any time before terminal state).
+
+        Args:
+            review_public_id: UUID7 of the ``ai_reviews`` row.
+            now: Wall-clock used for ``resolved_at`` / ``updated_at``.
+
+        Returns:
+            :class:`AtomicResolveResult` on a winning transition;
+            ``None`` when the row was already terminal.
+        """
+        ...
+
+    @abstractmethod
+    async def list_expired_pending_reviews(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[PendingReviewSummary]:
+        """Plan D §3.3 reaper input: pending/fanout_dispatched rows past deadline.
+
+        Snapshot read used by :meth:`AiReviewService._reaper_tick` to
+        drive per-row atomic timeouts. The reaper trusts that any row
+        observed here may already have raced against a peer decision /
+        supersede / earlier reaper tick by the time the per-row
+        :meth:`atomic_timeout_ai_review` fires; the CAS shape of that
+        method is the actual correctness guarantee.
+
+        Args:
+            now: Wall-clock the reaper is reaping against.
+            limit: Cap on the number of rows returned per tick. Default
+                100 keeps a single tick bounded under load surges.
+
+        Returns:
+            Up to ``limit`` :class:`PendingReviewSummary` rows ordered by
+            ``deadline ASC`` (oldest first) so the reaper drains the
+            backlog in a fair order.
+        """
+        ...
+
+    @abstractmethod
+    async def list_offline_pending_reviews(
+        self,
+        *,
+        now: datetime,
+        heartbeat_window_seconds: int,
+        limit: int = 100,
+    ) -> list[PendingReviewSummary]:
+        """Plan D §3.4 offline scanner input: pending past fanout_after with stale delegate.
+
+        Returns ``ai_reviews`` rows that are still ``status='pending'``
+        AND whose ``fanout_after`` has elapsed AND whose
+        ``selected_delegate_public_id`` has either never connected
+        (``last_seen_at IS NULL``) or has gone silent
+        (``last_seen_at < now - heartbeat_window``). Rows already in
+        ``fanout_dispatched`` are excluded — only fresh pending rows
+        get re-fanned out.
+
+        Args:
+            now: Wall-clock used for ``fanout_after`` / heartbeat window
+                comparisons.
+            heartbeat_window_seconds: Seconds of silence after which
+                the delegate is considered offline (Plan A Q10 v1.3
+                lock — default 15s; the service passes the configured
+                value through).
+            limit: Cap on the number of rows returned per tick.
+
+        Returns:
+            Up to ``limit`` :class:`PendingReviewSummary` rows.
+        """
+        ...
+
+    @abstractmethod
+    async def list_pending_reviews_for_delegate(
+        self,
+        *,
+        selected_delegate_public_id: str,
+        limit: int = 100,
+    ) -> list[PendingReviewSummary]:
+        """Plan D §3.5 fast-path input: pending rows for one delegate.
+
+        Used by :meth:`AiReviewService.handle_delegate_offline_bus_message`
+        to snapshot the affected reviews when a ``bus.delegate_offline``
+        event lands. Status filter excludes ``fanout_dispatched`` and
+        terminal states so the same row never gets re-fanned twice
+        (idempotent if §3.4 Layer 2 scanner already fired).
+
+        Args:
+            selected_delegate_public_id: ``ai_delegates.public_id`` to
+                scan for.
+            limit: Cap on returned rows per call.
+
+        Returns:
+            Up to ``limit`` :class:`PendingReviewSummary` rows.
+        """
+        ...
+
+    @abstractmethod
+    async def atomic_dispatch_fanout(
+        self,
+        *,
+        review_public_id: str,
+        now: datetime,
+    ) -> int | None:
+        """Plan D §3.4 / §3.5 atomic CAS: pending -> fanout_dispatched (+ version bump).
+
+        Single-row UPDATE with ``WHERE status='pending'`` predicate
+        + ``RETURNING dispatch_version`` semantics so callers can tell
+        whether THEY landed the transition or a peer beat them. The
+        dispatch_version is incremented atomically so the bridge can
+        dedup re-fanouts triggered by §3.4 Layer 2 racing §3.5
+        Layer 1 for the same review.
+
+        Args:
+            review_public_id: UUID7 of the ``ai_reviews`` row.
+            now: Wall-clock for ``updated_at``.
+
+        Returns:
+            The new ``dispatch_version`` on a winning CAS transition;
+            ``None`` when the row was no longer ``pending`` at update
+            time (peer fanout or terminal transition won).
         """
         ...
 
@@ -9934,6 +10073,226 @@ class SQLAlchemyRepository(Repository):
                 await s.commit()
                 return candidate_id
             return None
+
+    async def atomic_supersede_ai_review(
+        self,
+        *,
+        review_public_id: str,
+        now: datetime,
+    ) -> AtomicResolveResult | None:
+        """Plan D §3 strategy-abandon CAS UPDATE.
+
+        Mirrors :meth:`atomic_resolve_ai_review` minus the deadline
+        gate and the decision/responding_delegate fields. Returns
+        ``None`` when the row was already terminal so the service can
+        skip the audit-event + counter-decrement steps cleanly.
+        """
+        async with self.session() as s:
+            pre_row = (
+                await s.execute(
+                    select(AiReview.status, AiReview.dispatch_version).where(
+                        AiReview.public_id == review_public_id
+                    )
+                )
+            ).first()
+            if pre_row is None:
+                return None
+            previous_status, dispatch_version = pre_row
+            if previous_status not in ("pending", "fanout_dispatched"):
+                return None
+            update_stmt = (
+                update(AiReview)
+                .where(
+                    AiReview.public_id == review_public_id,
+                    AiReview.status.in_(("pending", "fanout_dispatched")),
+                )
+                .values(
+                    status="superseded",
+                    resolution_mode="superseded_by_strategy",
+                    resolved_at=now,
+                    updated_at=now,
+                )
+            )
+            result = await s.execute(update_stmt)
+            await s.commit()
+            if int(cast(Any, result).rowcount or 0) == 0:
+                return None
+            selected = (
+                await s.execute(
+                    select(AiReview.selected_delegate_public_id).where(
+                        AiReview.public_id == review_public_id
+                    )
+                )
+            ).scalar_one()
+            return AtomicResolveResult(
+                selected_delegate_public_id=selected,
+                dispatch_version=int(dispatch_version),
+                previous_status=str(previous_status),
+            )
+
+    async def list_expired_pending_reviews(
+        self,
+        *,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[PendingReviewSummary]:
+        """Plan D §3.3 reaper input: pending/fanout_dispatched past deadline."""
+        async with self.session() as s:
+            rows = (
+                await s.execute(
+                    select(
+                        AiReview.public_id,
+                        AiReview.selected_delegate_public_id,
+                        AiReview.dispatch_version,
+                        AiReview.status,
+                        AiReview.deadline,
+                        AiReview.fanout_after,
+                    )
+                    .where(
+                        AiReview.status.in_(("pending", "fanout_dispatched")),
+                        AiReview.deadline < now,
+                    )
+                    .order_by(AiReview.deadline.asc())
+                    .limit(limit)
+                )
+            ).all()
+            return [
+                cast(
+                    PendingReviewSummary,
+                    {
+                        "public_id": r[0],
+                        "selected_delegate_public_id": r[1],
+                        "dispatch_version": int(r[2]),
+                        "status": str(r[3]),
+                        "deadline": r[4],
+                        "fanout_after": r[5],
+                    },
+                )
+                for r in rows
+            ]
+
+    async def list_offline_pending_reviews(
+        self,
+        *,
+        now: datetime,
+        heartbeat_window_seconds: int,
+        limit: int = 100,
+    ) -> list[PendingReviewSummary]:
+        """Plan D §3.4 offline scanner input: pending past fanout_after with stale delegate."""
+        threshold = now - timedelta(seconds=heartbeat_window_seconds)
+        async with self.session() as s:
+            rows = (
+                await s.execute(
+                    select(
+                        AiReview.public_id,
+                        AiReview.selected_delegate_public_id,
+                        AiReview.dispatch_version,
+                        AiReview.status,
+                        AiReview.deadline,
+                        AiReview.fanout_after,
+                    )
+                    .join(
+                        AiDelegate,
+                        AiDelegate.public_id == AiReview.selected_delegate_public_id,
+                    )
+                    .where(
+                        AiReview.status == "pending",
+                        AiReview.fanout_after < now,
+                        or_(
+                            AiDelegate.last_seen_at.is_(None),
+                            AiDelegate.last_seen_at < threshold,
+                        ),
+                    )
+                    .order_by(AiReview.fanout_after.asc())
+                    .limit(limit)
+                )
+            ).all()
+            return [
+                cast(
+                    PendingReviewSummary,
+                    {
+                        "public_id": r[0],
+                        "selected_delegate_public_id": r[1],
+                        "dispatch_version": int(r[2]),
+                        "status": str(r[3]),
+                        "deadline": r[4],
+                        "fanout_after": r[5],
+                    },
+                )
+                for r in rows
+            ]
+
+    async def list_pending_reviews_for_delegate(
+        self,
+        *,
+        selected_delegate_public_id: str,
+        limit: int = 100,
+    ) -> list[PendingReviewSummary]:
+        """Plan D §3.5 fast-path input: pending rows for one delegate."""
+        async with self.session() as s:
+            rows = (
+                await s.execute(
+                    select(
+                        AiReview.public_id,
+                        AiReview.selected_delegate_public_id,
+                        AiReview.dispatch_version,
+                        AiReview.status,
+                        AiReview.deadline,
+                        AiReview.fanout_after,
+                    )
+                    .where(
+                        AiReview.selected_delegate_public_id == selected_delegate_public_id,
+                        AiReview.status == "pending",
+                    )
+                    .order_by(AiReview.fanout_after.asc())
+                    .limit(limit)
+                )
+            ).all()
+            return [
+                cast(
+                    PendingReviewSummary,
+                    {
+                        "public_id": r[0],
+                        "selected_delegate_public_id": r[1],
+                        "dispatch_version": int(r[2]),
+                        "status": str(r[3]),
+                        "deadline": r[4],
+                        "fanout_after": r[5],
+                    },
+                )
+                for r in rows
+            ]
+
+    async def atomic_dispatch_fanout(
+        self,
+        *,
+        review_public_id: str,
+        now: datetime,
+    ) -> int | None:
+        """Plan D §3.4 / §3.5 atomic CAS: pending -> fanout_dispatched."""
+        async with self.session() as s:
+            update_stmt = (
+                update(AiReview)
+                .where(
+                    AiReview.public_id == review_public_id,
+                    AiReview.status == "pending",
+                )
+                .values(
+                    status="fanout_dispatched",
+                    dispatch_version=AiReview.dispatch_version + 1,
+                    updated_at=now,
+                )
+            )
+            result = await s.execute(update_stmt)
+            await s.commit()
+            if int(cast(Any, result).rowcount or 0) == 0:
+                return None
+            new_version = (
+                await s.execute(
+                    select(AiReview.dispatch_version).where(AiReview.public_id == review_public_id)
+                )
+            ).scalar_one()
+            return int(new_version)
 
 
 _repository_cache: dict[str, Repository] = {}
