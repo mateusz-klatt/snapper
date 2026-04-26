@@ -24,6 +24,7 @@ from uuid import uuid7
 import pytest
 
 from snapper.application.ai_review.service import AiReviewService
+from snapper.messaging.schemas.data import AiReviewDecisionData
 from snapper.messaging.schemas.data import CapsViolationAfterAiApproveData
 from snapper.messaging.schemas.data import DelegateOfflineData
 
@@ -47,6 +48,29 @@ def _delegate_offline_payload() -> str:
         user_public_id="user-1",
         delegate_public_id="del-1",
         last_seen_at=now,
+    ).to_json()
+
+
+def _decision_payload(
+    *,
+    review_public_id: str = "rev-1",
+    decision: str = "approve",
+    new_status: str = "resolved_approved",
+    resolution_mode: str = "pick_one_primary",
+    dispatch_version: int = 1,
+) -> str:
+    """Build a canonical ``AiReviewDecisionData`` JSON payload."""
+    return AiReviewDecisionData(
+        public_id=str(uuid7()),
+        timestamp=datetime.now(UTC),
+        session_id="t-sid",
+        sequence_id=1,
+        review_public_id=review_public_id,
+        responding_delegate_public_id="del-1",
+        decision=decision,
+        new_status=new_status,
+        resolution_mode=resolution_mode,
+        dispatch_version=dispatch_version,
     ).to_json()
 
 
@@ -106,6 +130,23 @@ class TestBusDispatchFrame:
                 "bus.caps_violation_after_ai_approve", _caps_violation_payload()
             )
         mock_handler.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_ai_review_decision_topic_dispatches_to_handler(self) -> None:
+        """``bus.ai_review_decision`` → ``handle_ai_review_decision_bus_message``.
+
+        Phase 2 #3 fast-path: the listener wakes registered Futures so
+        the strategy primitive's await loop bypasses the DB-poll
+        interval. The dispatch must route to the synchronous handler
+        without requiring repository_factory wiring (the handler is
+        in-memory only).
+        """
+        svc = AiReviewService.get_instance()
+        with patch.object(
+            svc, "handle_ai_review_decision_bus_message", return_value=True
+        ) as mock_handler:
+            await svc._bus_dispatch_frame("bus.ai_review_decision", _decision_payload())
+        mock_handler.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_delegate_offline_dispatches_with_repo_from_factory(self) -> None:
@@ -309,8 +350,8 @@ class TestStartStopBusListener:
         await svc.stop_bus_listener()
 
     @pytest.mark.asyncio
-    async def test_subscribes_to_both_topics(self) -> None:
-        """Start subscribes to BOTH bus.delegate_offline + bus.caps_violation_after_ai_approve."""
+    async def test_subscribes_to_three_topics(self) -> None:
+        """Start subscribes to delegate_offline + caps_violation + ai_review_decision."""
         svc = AiReviewService.get_instance()
 
         async def _never() -> None:
@@ -330,6 +371,7 @@ class TestStartStopBusListener:
         assert subscribed == {
             "bus.delegate_offline",
             "bus.caps_violation_after_ai_approve",
+            "bus.ai_review_decision",
         }
         await svc.stop_bus_listener()
 

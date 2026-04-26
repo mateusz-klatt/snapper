@@ -40,6 +40,23 @@ export interface AiReviewCapsViolationFrame {
 }
 
 /**
+ * Canonical AiReviewDecision entity.
+ * From WebSocket AiReviewDecisionData.
+ */
+export interface AiReviewDecision {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  reviewPublicId: string
+  respondingDelegatePublicId: string
+  decision: string
+  newStatus: string
+  resolutionMode: string
+  dispatchVersion: number
+}
+
+/**
  * Canonical AlertEvent entity.
  * From WebSocket AlertEventData.
  */

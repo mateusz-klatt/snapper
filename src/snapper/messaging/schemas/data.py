@@ -629,6 +629,48 @@ class AiReviewCapsViolationFrameData(StrictDataSchema[Literal["ai_review.caps_vi
     every ``ai_review.*`` frame type."""
 
 
+class AiReviewDecisionData(StrictDataSchema[Literal["ai_review_decision"]]):
+    """Plan A §7.1 — internal bus event published when an AI review row resolves.
+
+    Published by :meth:`AiReviewService.submit_decision` (sole publisher)
+    on the internal ``bus.ai_review_decision`` topic AFTER the atomic
+    state-machine transition + audit event + counter decrement have
+    committed. Sole subscriber is the same :class:`AiReviewService`
+    bus listener (Phase 2 #1) which resolves the registered
+    :class:`asyncio.Future` so the strategy primitive's await loop
+    (Plan A §7.1) wakes up immediately instead of spinning the DB-poll
+    loop until the next jitter interval. Cross-instance: a remote
+    instance's listener that finds no matching future in its registry
+    treats the event as a no-op (the strategy's future was registered
+    on the originating instance).
+
+    Attributes:
+        review_public_id: UUID7 of the resolved ``ai_reviews`` row.
+            The strategy primitive uses this to look up the matching
+            future in :class:`AiReviewService`'s in-memory registry.
+        responding_delegate_public_id: ``ai_delegates.public_id`` of
+            the delegate whose decision resolved the row. Threaded onto
+            the outcome surfaced to the strategy.
+        decision: Plan A Q9 enum value — ``"approve"`` or ``"reject"``.
+        new_status: Resolved row's terminal status (``resolved_approved``
+            or ``resolved_rejected``).
+        resolution_mode: Plan A Q4 enum — ``pick_one_primary`` /
+            ``secondary_after_fanout`` / ``fanout_first_responder``.
+        dispatch_version: Plan A Q18 — bridge dedup key forwarded onto
+            the optional external WS frame so a re-fanout of the same
+            decision after a row's version bumped surfaces as a fresh
+            frame to the delegate UI.
+    """
+
+    type: Literal["ai_review_decision"] = "ai_review_decision"
+    review_public_id: str
+    responding_delegate_public_id: str
+    decision: str
+    new_status: str
+    resolution_mode: str
+    dispatch_version: int
+
+
 class DelegateOfflineData(StrictDataSchema[Literal["delegate_offline"]]):
     """Q17 Layer 1 fast-path event for an AI delegate that dropped its WS.
 

@@ -63,6 +63,7 @@ from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import AiReviewCapsViolationFrameData
+from snapper.messaging.schemas.data import AiReviewDecisionData
 from snapper.messaging.schemas.data import CapsViolationAfterAiApproveData
 from snapper.messaging.schemas.data import DelegateOfflineData
 
@@ -71,6 +72,15 @@ _BUS_DELEGATE_OFFLINE_TOPIC = "bus.delegate_offline"
 ``WebSocketAuthManager._publish_delegate_offline`` (sole publisher).
 Subscribed by :meth:`AiReviewService.handle_delegate_offline_bus_message`
 which CAS-fans-out matching pending reviews."""
+
+_BUS_AI_REVIEW_DECISION_TOPIC = "bus.ai_review_decision"
+"""Plan A §7.1 fast-path topic published by
+:meth:`AiReviewService.submit_decision` (sole publisher) AFTER the
+atomic resolve commits. Sole subscriber is the same
+:class:`AiReviewService` bus listener (Phase 2 #1) which resolves the
+registered :class:`asyncio.Future` so the strategy primitive's await
+loop wakes up immediately instead of spinning the DB-poll loop until
+the next jitter interval."""
 
 _BUS_CAPS_VIOLATION_TOPIC = "bus.caps_violation_after_ai_approve"
 """Internal Plan D §3.6 topic published by ``TradingCapsEnforcer``
@@ -795,6 +805,15 @@ class AiReviewService:
             decision=decision.value,
             resolution_mode=resolution_mode.value,
         )
+        await self._publish_decision_bus_event(
+            review_public_id=review_public_id,
+            responding_delegate_public_id=delegate_public_id,
+            decision=decision.value,
+            new_status=new_status.value,
+            resolution_mode=resolution_mode.value,
+            dispatch_version=int(atomic["dispatch_version"]),
+            wall_clock=wall_clock,
+        )
         return AiReviewDecisionResult(
             error_code=None,
             message="Decision recorded.",
@@ -803,6 +822,73 @@ class AiReviewService:
             dispatch_version=int(atomic["dispatch_version"]),
             details={"previous_status": atomic["previous_status"]},
         )
+
+    async def _publish_decision_bus_event(
+        self,
+        *,
+        review_public_id: str,
+        responding_delegate_public_id: str,
+        decision: str,
+        new_status: str,
+        resolution_mode: str,
+        dispatch_version: int,
+        wall_clock: datetime,
+    ) -> None:
+        """Plan A §7.1 — emit the fast-path ``bus.ai_review_decision`` event.
+
+        Best-effort + race-safe (mirrors :meth:`TradingCapsEnforcer.
+        _publish_caps_violation_after_ai_approve` semantics): the
+        publisher reference is captured into a local BEFORE any await
+        so a concurrent shutdown clearing the slot cannot null it
+        mid-helper, and the entire publish branch is wrapped in a
+        single try/except so NO failure (broker hiccup, validator
+        reject, transport error) can replace the post-commit
+        :class:`AiReviewDecisionResult` the caller is about to return.
+        The DB-side decision is the primary contract; the bus event
+        is auxiliary fanout that drives the strategy primitive's
+        fast-path Future wake-up. A lost event degrades the strategy
+        await to its DB-poll fallback (Plan A §7.1) — slower, not
+        broken.
+
+        Args:
+            review_public_id: UUID7 of the resolved row.
+            responding_delegate_public_id: Decision actor.
+            decision: ``"approve"`` / ``"reject"`` (Plan A Q9).
+            new_status: Terminal status string.
+            resolution_mode: Plan A Q4 enum value.
+            dispatch_version: Q18 dedup key from the atomic resolve
+                result.
+            wall_clock: Decision wall clock — reused as the bus event
+                timestamp so audit + bus correlate.
+        """
+        publisher = self._msg_publisher
+        if publisher is None:
+            logger.warning(
+                "bus.ai_review_decision NOT broadcast for "
+                f"review_public_id={review_public_id}: AiReviewService publisher unavailable"
+            )
+            return
+        try:
+            tracker = publisher.tracker
+            payload = AiReviewDecisionData(
+                public_id=str(uuid7()),
+                timestamp=wall_clock,
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence(_BUS_AI_REVIEW_DECISION_TOPIC),
+                review_public_id=review_public_id,
+                responding_delegate_public_id=responding_delegate_public_id,
+                decision=decision,
+                new_status=new_status,
+                resolution_mode=resolution_mode,
+                dispatch_version=dispatch_version,
+            )
+            await publisher.send(_BUS_AI_REVIEW_DECISION_TOPIC, payload)
+        except Exception as publish_exc:
+            logger.exception(
+                f"AiReviewService: failed to broadcast bus.ai_review_decision for "
+                f"review_public_id={review_public_id}: {publish_exc} "
+                "(decision is committed; strategy await falls back to DB poll)"
+            )
 
     def _terminal_state_envelope(
         self,
@@ -1219,6 +1305,55 @@ class AiReviewService:
             return False
         return True
 
+    def handle_ai_review_decision_bus_message(self, msg: AiReviewDecisionData) -> bool:
+        """Plan A §7.1 fast-path — resolve the registered strategy await Future.
+
+        When :meth:`submit_decision` commits a decision, it publishes
+        ``bus.ai_review_decision`` so any process that registered an
+        :class:`asyncio.Future` for the resolved review (typically the
+        strategy that initiated the CONSULT and is now awaiting the
+        outcome via :func:`create_ai_review_and_await`) can wake up
+        immediately instead of spinning the DB-poll loop until the
+        next jitter interval.
+
+        Cross-instance behaviour: a remote-instance listener that
+        finds no matching future in its in-memory registry treats the
+        event as a no-op — the originating instance owns the future,
+        and the remote-instance strategy await loop is unaffected by
+        the bus broadcast (it polls the DB row state directly). This
+        no-op is the single-publisher / multi-subscriber correctness
+        invariant: every instance subscribes; only the owning instance
+        has a future to resolve.
+
+        Idempotency: a duplicate frame for a future that was already
+        resolved (or unregistered by the strategy's ``finally`` block
+        after a DB-poll-driven outcome arrived first) is a no-op via
+        the :meth:`asyncio.Future.set_result` call's
+        :meth:`asyncio.Future.done` guard. We do NOT raise on the
+        ``InvalidStateError`` path — the strategy already woke up; the
+        bus broadcast was just slower than the poll.
+
+        Args:
+            msg: Decoded ``bus.ai_review_decision`` payload.
+
+        Returns:
+            ``True`` when a future matching ``review_public_id`` was
+            found AND resolved by this call; ``False`` for every
+            cross-instance / already-resolved / never-registered case.
+        """
+        future = self._futures.get(msg.review_public_id)
+        if future is None:
+            return False
+        if future.done():
+            return False
+        future.set_result(msg)
+        logger.debug(
+            "ai_review fast-path future resolved",
+            review_public_id=msg.review_public_id,
+            decision=msg.decision,
+        )
+        return True
+
     async def handle_delegate_offline_bus_message(
         self, msg: DelegateOfflineData, *, repo: Repository
     ) -> int:
@@ -1338,12 +1473,14 @@ class AiReviewService:
             self._bus_subscriber = ValidatedSubscriber(raw_sub_socket)
             self._bus_subscriber.subscribe(_BUS_DELEGATE_OFFLINE_TOPIC)
             self._bus_subscriber.subscribe(_BUS_CAPS_VIOLATION_TOPIC)
+            self._bus_subscriber.subscribe(_BUS_AI_REVIEW_DECISION_TOPIC)
             self._bus_running = True
             self._bus_listen_task = asyncio.create_task(self._bus_listen_loop())
             logger.info(
-                "AiReviewService: bus listener subscribed to {} + {} on {}",
+                "AiReviewService: bus listener subscribed to {} + {} + {} on {}",
                 _BUS_DELEGATE_OFFLINE_TOPIC,
                 _BUS_CAPS_VIOLATION_TOPIC,
+                _BUS_AI_REVIEW_DECISION_TOPIC,
                 zmq_broker_xpub,
             )
 
@@ -1463,6 +1600,8 @@ class AiReviewService:
                 await self.handle_caps_violation_bus_message(
                     CapsViolationAfterAiApproveData.from_json(payload)
                 )
+            elif topic == _BUS_AI_REVIEW_DECISION_TOPIC:
+                self.handle_ai_review_decision_bus_message(AiReviewDecisionData.from_json(payload))
         except asyncio.CancelledError:
             raise
         except Exception as exc:

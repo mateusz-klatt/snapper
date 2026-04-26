@@ -7,6 +7,7 @@ Covers the full state machine:
 - Q9 step 3.5 inline late-decision timeout.
 - Atomic CAS resolve + audit-event append + Q10 counter decrement.
 - Resolution-mode classification across pending vs fanout_dispatched.
+- Phase 2 #3: post-commit ``bus.ai_review_decision`` fast-path emission.
 """
 
 from collections.abc import AsyncIterator
@@ -15,6 +16,9 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 from uuid import uuid7
 
 import pytest
@@ -29,6 +33,9 @@ from snapper.core.types import AiReviewDecisionEnum
 from snapper.core.types import AiReviewResolutionModeEnum
 from snapper.core.types import AiReviewStatusEnum
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import AiReviewDecisionData
 
 TEST_TIMEOUT = 15
 
@@ -792,3 +799,114 @@ async def test_atomic_resolve_returns_none_then_row_disappeared(
         now=now,
     )
     assert result.error_code == ERROR_PEER_RESOLVED
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_submit_decision_publishes_bus_event_after_commit(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Plan A §7.1 / Phase 2 #3 — post-commit bus.ai_review_decision fanout.
+
+    The publisher MUST fire AFTER the atomic resolve commits + the
+    audit event lands + the counter decrements. The bus event drives
+    the strategy primitive's registered Future to resolve immediately
+    (fast-path) instead of waiting for the next DB-poll jitter
+    interval. Pin the post-commit ordering by asserting the row is
+    already in terminal state when the publisher gets called.
+
+    Given a wired publisher + a pending review,
+    When submit_decision approves the review,
+    Then publisher.send is awaited once with topic
+        ``bus.ai_review_decision`` AND the payload's review_public_id
+        + decision + new_status + dispatch_version match the resolved
+        row.
+    """
+    svc = AiReviewService.get_instance()
+    publisher = MagicMock()
+    publisher.send = AsyncMock()
+    publisher.tracker = SequenceTracker()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    now = _now()
+    user_pid = str(uuid7())
+    delegate_pid = await _seed_delegate(repo, user_public_id=user_pid, as_of=now)
+    review_id = await _seed_pending_review(
+        repo, selected_delegate_public_id=delegate_pid, as_of=now
+    )
+    result = await svc.submit_decision(
+        review_public_id=review_id,
+        caller_user_public_id=user_pid,
+        decision=AiReviewDecisionEnum.APPROVE,
+        rationale="LGTM",
+        repo=repo,
+        scope_grant_service=_FakeScopeGrantService(),
+        now=now,
+    )
+    assert result.error_code is None
+    publisher.send.assert_awaited_once()
+    topic, payload = publisher.send.await_args.args
+    assert topic == "bus.ai_review_decision"
+    assert isinstance(payload, AiReviewDecisionData)
+    assert payload.review_public_id == review_id
+    assert payload.responding_delegate_public_id == delegate_pid
+    assert payload.decision == "approve"
+    assert payload.new_status == "resolved_approved"
+    assert payload.resolution_mode == "pick_one_primary"
+    assert payload.dispatch_version == result.dispatch_version
+    row = await repo.get_ai_review(review_id)
+    assert row is not None
+    assert row["status"] == "resolved_approved"
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_submit_decision_does_not_publish_on_terminal_shortcut(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Idempotent retry / peer-resolved shortcuts skip the publish branch.
+
+    Terminal-state shortcuts return ``decision_already_recorded`` or
+    ``review_already_resolved_by_peer`` WITHOUT touching
+    atomic_resolve_ai_review (no commit, no state change). The
+    publisher therefore must not fire — there is no fresh decision to
+    fan out and the original decision's bus event already fired.
+
+    Given a wired publisher + a review that already resolved on a
+        prior submit_decision call,
+    When the same delegate retries the identical decision,
+    Then the second call returns ``decision_already_recorded`` AND
+        publisher.send is NOT awaited a second time.
+    """
+    svc = AiReviewService.get_instance()
+    publisher = MagicMock()
+    publisher.send = AsyncMock()
+    publisher.tracker = SequenceTracker()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    now = _now()
+    user_pid = str(uuid7())
+    delegate_pid = await _seed_delegate(repo, user_public_id=user_pid, as_of=now)
+    review_id = await _seed_pending_review(
+        repo, selected_delegate_public_id=delegate_pid, as_of=now
+    )
+    first = await svc.submit_decision(
+        review_public_id=review_id,
+        caller_user_public_id=user_pid,
+        decision=AiReviewDecisionEnum.APPROVE,
+        rationale="LGTM",
+        repo=repo,
+        scope_grant_service=_FakeScopeGrantService(),
+        now=now,
+    )
+    assert first.error_code is None
+    publisher.send.reset_mock()
+    second = await svc.submit_decision(
+        review_public_id=review_id,
+        caller_user_public_id=user_pid,
+        decision=AiReviewDecisionEnum.APPROVE,
+        rationale="LGTM again",
+        repo=repo,
+        scope_grant_service=_FakeScopeGrantService(),
+        now=now,
+    )
+    assert second.error_code == ERROR_DECISION_ALREADY_RECORDED
+    publisher.send.assert_not_awaited()
