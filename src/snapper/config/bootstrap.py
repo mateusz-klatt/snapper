@@ -54,7 +54,13 @@ class BootstrapSettingsLoader(BaseSettings):
             background processes (broker, publishers, strategies, executors).
             The ZMQ-WebSocket bridge still starts so the frontend receives
             live data from a separately-running engine.  Useful for
-            production deployments or multiple uvicorn workers.
+            production deployments where the engine runs on a different
+            host. Multi-uvicorn-worker deployments are currently
+            single-instance-only for the AI-review caps_violation fanout
+            (each worker runs its own bus subscriber + re-publishes the
+            external WS frame, N-duplicating the fanout under multiple
+            processes); see ``docs/architecture.md`` Deployment Modes
+            for the tracked Phase 2 follow-up.
         server_proxy_headers: Enable parsing proxy headers in uvicorn.
         server_forwarded_allow_ips: Trusted proxy source IP list for
             forwarded headers.
