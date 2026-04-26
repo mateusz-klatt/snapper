@@ -62,7 +62,7 @@ describe('parseWsMessage', () => {
     expect(result).toMatchObject(message)
   })
 
-  it('parses ai_review_decision bus events published by Phase 2 #3', () => {
+  it('blocks ai_review_decision (server-internal bus topic, not a WS frame)', () => {
     const message = {
       type: 'ai_review_decision',
       sequence_id: 7,
@@ -78,8 +78,7 @@ describe('parseWsMessage', () => {
     }
     const result = parseWsMessage(message)
 
-    expect(result).not.toBeNull()
-    expect(result?.type).toBe('ai_review_decision')
-    expect(result).toMatchObject(message)
+    expect(result).toBeNull()
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('ai_review_decision'))
   })
 })
