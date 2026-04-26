@@ -528,7 +528,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             await manager.cleanup()
         if settings_service is not None:
             await settings_service.shutdown()
-        await get_ws_auth_manager().stop_admin_listener()
+        ws_auth_manager_for_shutdown = get_ws_auth_manager()
+        await ws_auth_manager_for_shutdown.cancel_pending_offline_tasks()
+        await ws_auth_manager_for_shutdown.stop_admin_listener()
         await get_token_manager().stop_admin_listener()
         _shutdown_user_service_publisher(app)
         _clear_runtime_singletons()

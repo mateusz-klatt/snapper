@@ -143,6 +143,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
             patch(
@@ -150,6 +151,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
         ):
@@ -223,6 +225,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
             patch(
@@ -230,6 +233,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
         ):
@@ -284,6 +288,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
             patch(
@@ -291,6 +296,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
         ):
@@ -343,8 +349,12 @@ class TestLifespan:
         async def _stop_listener() -> None:
             recorded.append("ws_stop_admin_listener")
 
+        async def _cancel_pending_offline() -> None:
+            recorded.append("ws_cancel_pending_offline_tasks")
+
         mock_ws_auth.start_admin_listener = _start_listener
         mock_ws_auth.stop_admin_listener = _stop_listener
+        mock_ws_auth.cancel_pending_offline_tasks = _cancel_pending_offline
 
         def _shutdown_publisher(_app: FastAPI) -> None:
             recorded.append("shutdown_publisher")
@@ -385,7 +395,7 @@ class TestLifespan:
             mock_factory_cls.return_value = mock_factory
             async with lifespan(mock_app):
                 pass
-        shutdown_anchor = recorded.index("ws_stop_admin_listener")
+        shutdown_anchor = recorded.index("ws_cancel_pending_offline_tasks")
         startup_order = recorded[:shutdown_anchor]
         shutdown_order = recorded[shutdown_anchor:]
         assert startup_order == [
@@ -394,6 +404,7 @@ class TestLifespan:
             "tm_start_admin_listener",
         ]
         assert shutdown_order == [
+            "ws_cancel_pending_offline_tasks",
             "ws_stop_admin_listener",
             "tm_stop_admin_listener",
             "shutdown_publisher",
@@ -446,6 +457,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
             patch(
@@ -453,6 +465,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
         ):
@@ -505,6 +518,7 @@ class TestLifespan:
 
         ws_auth_manager.start_admin_listener = _start_listener
         ws_auth_manager.stop_admin_listener = _stop_listener
+        ws_auth_manager.cancel_pending_offline_tasks = AsyncMock()
 
         with (
             patch("snapper.server.app.discover_processes"),
@@ -524,6 +538,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
         ):
@@ -593,6 +608,7 @@ class TestLifespan:
 
         mock_ws_auth.start_admin_listener = _start_listener
         mock_ws_auth.stop_admin_listener = _stop_listener
+        mock_ws_auth.cancel_pending_offline_tasks = AsyncMock()
 
         def _shutdown_publisher(_app: FastAPI) -> None:
             recorded.append("shutdown_publisher")
@@ -674,6 +690,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
             patch(
@@ -681,6 +698,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
             pytest.raises(RuntimeError, match="db unreachable"),
@@ -725,6 +743,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
             patch(
@@ -732,6 +751,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
         ):
@@ -776,6 +796,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
             patch(
@@ -783,6 +804,7 @@ class TestLifespan:
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
                 ),
             ),
         ):
