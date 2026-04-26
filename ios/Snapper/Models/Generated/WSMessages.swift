@@ -184,6 +184,7 @@ struct AiReviewCapsViolationFrameData: Codable, Sendable {
     let capType: String
     let attempted: Double
     let limit: Double
+    let dispatchVersion: Int
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -199,6 +200,7 @@ struct AiReviewCapsViolationFrameData: Codable, Sendable {
         case capType = "cap_type"
         case attempted
         case limit
+        case dispatchVersion = "dispatch_version"
     }
 }
 
@@ -330,6 +332,7 @@ struct CapsViolationAfterAiApproveData: Codable, Sendable {
     let capType: String
     let attempted: Double
     let limit: Double
+    let dispatchVersion: Int
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -345,6 +348,7 @@ struct CapsViolationAfterAiApproveData: Codable, Sendable {
         case capType = "cap_type"
         case attempted
         case limit
+        case dispatchVersion = "dispatch_version"
     }
 }
 

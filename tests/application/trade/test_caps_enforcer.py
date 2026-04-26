@@ -773,6 +773,45 @@ class TestCapsViolationAfterAiApprovePublish:
         assert enforcer._msg_publisher is None
 
     @pytest.mark.asyncio
+    async def test_get_ai_review_raising_does_not_mask_caps_violation(self) -> None:
+        """Race-safety: a DB error in get_ai_review must NOT replace the cap rejection.
+
+        Codex review on e46dfba flagged that the original best-effort
+        branch only wrapped ``send()`` in try/except. Any pre-send
+        failure (DB hiccup on get_ai_review, payload validation error,
+        tracker race during shutdown) would replace the
+        :class:`CapsViolationError` with the unrelated transport
+        exception — the trade would still be rejected by the caller's
+        flow but the error surface would be wrong. Pin the contract
+        that the cap rejection is the primary user-visible error
+        regardless of how the auxiliary fanout fails.
+
+        Given a publisher wired + repo.get_ai_review raises
+            DBConnectionError,
+        When guard() runs against an AI-approved submission that
+            trips a cap,
+        Then CapsViolationError still propagates to the caller (NOT a
+            DBConnectionError).
+        """
+        caps = _caps(max_order_quantity_per_instrument=Decimal("10"))
+        repo = MagicMock()
+        repo.get_user_trading_caps = AsyncMock(return_value=caps)
+        repo.count_user_open_commands = AsyncMock(return_value=0)
+        repo.get_user_recent_submits = AsyncMock(return_value=[])
+        repo.count_user_rolling_cancels = AsyncMock(return_value=0)
+        repo.get_ai_review = AsyncMock(side_effect=RuntimeError("db hiccup"))
+        enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
+        publisher = _publisher_with_tracker()
+        enforcer.set_msg_publisher(publisher)
+        with pytest.raises(CapsViolationError) as exc_info:
+            async with enforcer.guard(
+                _ai_review_submission(review_public_id="rev-1", quantity=Decimal("100"))
+            ):
+                pass
+        assert exc_info.value.cap_type == "max_order_quantity_per_instrument"
+        publisher.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_skips_publish_when_attempted_or_limit_is_none(self) -> None:
         """Defensive guard: hand-crafted CapsViolationError without numeric bounds.
 

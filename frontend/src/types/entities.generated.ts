@@ -36,6 +36,7 @@ export interface AiReviewCapsViolationFrame {
   capType: string
   attempted: number
   limit: number
+  dispatchVersion: number
 }
 
 /**
@@ -121,6 +122,7 @@ export interface CapsViolationAfterAiApprove {
   capType: string
   attempted: number
   limit: number
+  dispatchVersion: number
 }
 
 /**

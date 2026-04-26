@@ -30,6 +30,7 @@ export const AiReviewCapsViolationFrameDataSchema = z
     cap_type: z.string(),
     attempted: z.number(),
     limit: z.number(),
+    dispatch_version: z.number().int(),
   })
   .strict()
 
@@ -98,6 +99,7 @@ export const CapsViolationAfterAiApproveDataSchema = z
     cap_type: z.string(),
     attempted: z.number(),
     limit: z.number(),
+    dispatch_version: z.number().int(),
   })
   .strict()
 

@@ -432,13 +432,22 @@ class TradingCapsEnforcer:
         explicitly skipped — neither maps to a delegate-actionable
         rejection on the WS UI.
 
-        Best-effort: a missing publisher logs a warning instead of
-        raising (mirrors :class:`AiReviewService` semantics — the
-        enforcer must still raise the original
-        :class:`CapsViolationError` regardless of publish outcome so
-        the trade is rejected). A send failure logs an exception +
-        swallows so a transient broker hiccup never converts a real
-        cap violation into a transport-error mask.
+        Best-effort + race-safe: the entire helper body is wrapped in
+        a top-level try/except so NO failure in this branch (missing
+        publisher, get_ai_review raising, payload construction error,
+        broker hiccup, lifespan racing in to clear the publisher slot
+        mid-await) can replace the original :class:`CapsViolationError`
+        the caller is about to raise. The trade rejection is the
+        primary contract; the bus broadcast is auxiliary fanout. The
+        publisher reference is captured into a local at the top of the
+        helper before any await so a concurrent
+        :meth:`set_msg_publisher` cannot null the slot mid-helper after
+        the None-check passes (shutdown race).
+
+        Cap-type filters (early-return without log noise): pricing
+        oracle (``"price_unavailable"``) and missing-user
+        (``"missing_user_public_id"``) — neither maps to a
+        delegate-actionable rejection on the WS UI.
 
         Args:
             submission: The :class:`TradeCommandSubmission` that
@@ -458,42 +467,44 @@ class TradingCapsEnforcer:
                 "(future cap_type without numeric bounds; not delegate-actionable)"
             )
             return
-        if self._msg_publisher is None:
+        publisher = self._msg_publisher
+        if publisher is None:
             logger.warning(
                 "caps_enforcer: bus.caps_violation_after_ai_approve NOT broadcast for "
                 f"review_public_id={submission.ai_review_public_id} cap_type={exc.cap_type}: "
                 "publisher unavailable"
             )
             return
-        review = await self._repository.get_ai_review(submission.ai_review_public_id)
-        if review is None:
-            logger.warning(
-                "caps_enforcer: bus.caps_violation_after_ai_approve NOT broadcast for "
-                f"review_public_id={submission.ai_review_public_id}: ai_review row not found"
-            )
-            return
-        tracker = self._msg_publisher.tracker
-        payload = CapsViolationAfterAiApproveData(
-            public_id=str(uuid7()),
-            timestamp=self._now(),
-            session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence(_BUS_CAPS_VIOLATION_TOPIC),
-            review_public_id=submission.ai_review_public_id,
-            user_public_id=review["user_public_id"],
-            strategy_public_id=review["strategy_public_id"],
-            wallet_public_id=review["wallet_public_id"],
-            instrument_public_id=review["instrument_public_id"],
-            cap_type=exc.cap_type,
-            attempted=exc.attempted,
-            limit=exc.limit,
-            dispatch_version=review["dispatch_version"],
-        )
         try:
-            await self._msg_publisher.send(_BUS_CAPS_VIOLATION_TOPIC, payload)
+            review = await self._repository.get_ai_review(submission.ai_review_public_id)
+            if review is None:
+                logger.warning(
+                    "caps_enforcer: bus.caps_violation_after_ai_approve NOT broadcast for "
+                    f"review_public_id={submission.ai_review_public_id}: ai_review row not found"
+                )
+                return
+            tracker = publisher.tracker
+            payload = CapsViolationAfterAiApproveData(
+                public_id=str(uuid7()),
+                timestamp=self._now(),
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence(_BUS_CAPS_VIOLATION_TOPIC),
+                review_public_id=submission.ai_review_public_id,
+                user_public_id=review["user_public_id"],
+                strategy_public_id=review["strategy_public_id"],
+                wallet_public_id=review["wallet_public_id"],
+                instrument_public_id=review["instrument_public_id"],
+                cap_type=exc.cap_type,
+                attempted=exc.attempted,
+                limit=exc.limit,
+                dispatch_version=review["dispatch_version"],
+            )
+            await publisher.send(_BUS_CAPS_VIOLATION_TOPIC, payload)
         except Exception as publish_exc:
             logger.exception(
                 "caps_enforcer: failed to broadcast bus.caps_violation_after_ai_approve "
-                f"for review_public_id={submission.ai_review_public_id}: {publish_exc}"
+                f"for review_public_id={submission.ai_review_public_id}: {publish_exc} "
+                "(original CapsViolationError still propagates to caller)"
             )
 
     async def _check_cancels_cap(self, user_public_id: str, caps: UserTradingCapsRow) -> None:

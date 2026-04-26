@@ -266,6 +266,7 @@ export interface AiReviewCapsViolationFrameData {
   cap_type: string;
   attempted: number;
   limit: number;
+  dispatch_version: number;
 }
 export interface AlertEventData {
   type: Type1;
@@ -338,6 +339,7 @@ export interface CapsViolationAfterAiApproveData {
   cap_type: string;
   attempted: number;
   limit: number;
+  dispatch_version: number;
 }
 export interface ContinuousCandleData {
   type: Type5;
