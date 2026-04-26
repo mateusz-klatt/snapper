@@ -179,6 +179,7 @@ from snapper.messaging.schemas.data import VenueFeeScheduleData
 from snapper.server.ai_delegate_routes import AiIntegrationDisabledError
 from snapper.server.ai_delegate_routes import ai_integration_disabled_handler
 from snapper.server.ai_delegate_routes import router as ai_delegate_router
+from snapper.server.ai_review_routes import router as ai_review_router
 from snapper.server.alert_default_routes import router as alert_default_router
 from snapper.server.alerts_routes import router as alerts_router
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
@@ -615,6 +616,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router, prefix=API_PREFIX)
     app.include_router(settings_router, prefix=API_PREFIX)
     app.include_router(ai_delegate_router, prefix=API_PREFIX)
+    app.include_router(ai_review_router, prefix=API_PREFIX)
     app.include_router(process_router, prefix=API_PREFIX)
     app.include_router(strategy_router, prefix=API_PREFIX)
     app.include_router(wallet_router, prefix=API_PREFIX)
