@@ -255,6 +255,45 @@ class AiReviewAdmissionPolicy:
 _DEFAULT_AI_REVIEW_ADMISSION_POLICY = AiReviewAdmissionPolicy()
 
 
+@dataclass(slots=True, frozen=True)
+class AiReviewDecisionOutcome:
+    """Terminal-state projection for the strategy-side await primitive.
+
+    Returned by :func:`create_ai_review_and_await` (Plan D §8) once a
+    CONSULT review has reached a terminal status. Strategies branch
+    on :attr:`status`:
+
+    - ``RESOLVED_APPROVED`` — proceed with the trade.
+    - ``RESOLVED_REJECTED`` — VETO per Q12; abort, no trade.
+    - ``TIMEOUT`` — deadline elapsed without a decision; strategy
+      falls through to the original non-AI decision (Q3).
+    - ``SUPERSEDED`` — strategy abandoned the review (e.g. signal
+      expired before deadline).
+
+    Attributes:
+        review_public_id: UUID7 of the resolved ``ai_reviews`` row.
+        status: Terminal :class:`AiReviewStatusEnum`.
+        resolution_mode: How resolution happened (or ``None`` for
+          mid-state reads, but at terminal state it is always set).
+        decision: ``approve`` / ``reject`` for resolved rows; ``None``
+          for timeout / superseded.
+        rationale: Free-text rationale recorded by the deciding
+          delegate; ``None`` for non-decision terminal states.
+        dispatch_version: Plan A Q18 version counter at terminal
+          time (used by bridges to dedup re-fanouts).
+        responding_delegate_public_id: Delegate that submitted the
+          decision; ``None`` for timeout / superseded.
+    """
+
+    review_public_id: str
+    status: AiReviewStatusEnum
+    resolution_mode: AiReviewResolutionModeEnum | None
+    decision: AiReviewDecisionEnum | None
+    rationale: str | None
+    dispatch_version: int
+    responding_delegate_public_id: str | None
+
+
 @dataclass(slots=True)
 class AiReviewCreated:
     """Result envelope for a successful :meth:`AiReviewService.create_review`.
@@ -775,6 +814,61 @@ class AiReviewService:
                 "recorded_decision": recorded_decision,
             },
         )
+
+    async def timeout_review(
+        self,
+        *,
+        review_public_id: str,
+        repo: Repository,
+        now: datetime | None = None,
+    ) -> bool:
+        """Plan D §3 + §8 inline timeout: pending/fanout_dispatched -> timeout.
+
+        Called by :func:`create_ai_review_and_await` (Plan D §8) when
+        the strategy's deadline elapses with the row still
+        non-terminal. Mirrors :meth:`supersede_review` shape — atomic
+        CAS UPDATE + ``timeout_marked`` audit event + Q10 v1.2 counter
+        decrement — with the resolution_mode set to
+        ``timeout_no_response``.
+
+        Args:
+            review_public_id: UUID7 of the ``ai_reviews`` row.
+            repo: Repository handle.
+            now: Optional wall-clock override for deterministic tests.
+
+        Returns:
+            ``True`` when this call won the CAS and the row
+            transitioned; ``False`` when a peer (decision / reaper /
+            supersede) had already transitioned the row.
+        """
+        wall_clock = now if now is not None else datetime.now(UTC)
+        atomic = await repo.atomic_timeout_ai_review(
+            review_public_id=review_public_id, now=wall_clock
+        )
+        if atomic is None:
+            return False
+        await repo.insert_ai_review_event(
+            {
+                "public_id": str(uuid7()),
+                "review_public_id": review_public_id,
+                "event_type": AiReviewEventTypeEnum.TIMEOUT_MARKED.value,
+                "actor_delegate_public_id": None,
+                "previous_status": atomic["previous_status"],
+                "new_status": AiReviewStatusEnum.TIMEOUT.value,
+                "payload": {"trigger": "strategy_await_loop"},
+                "occurred_at": wall_clock,
+            }
+        )
+        await repo.decrement_delegate_active_count_for_review(
+            review_public_id=review_public_id,
+            selected_delegate_public_id=atomic["selected_delegate_public_id"],
+            now=wall_clock,
+        )
+        logger.info(
+            "ai_review timeout (strategy await loop)",
+            review_public_id=review_public_id,
+        )
+        return True
 
     async def supersede_review(
         self,
