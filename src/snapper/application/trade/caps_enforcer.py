@@ -49,9 +49,20 @@ from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.data.repository import Repository
 from snapper.data.repository_types import UserTradingCapsRow
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.schemas.data import CapsViolationAfterAiApproveData
 
 ROLLING_NOTIONAL_WINDOW = timedelta(hours=24)
 ROLLING_CANCELS_WINDOW = timedelta(seconds=60)
+
+_BUS_CAPS_VIOLATION_TOPIC = "bus.caps_violation_after_ai_approve"
+"""Plan D §3.6 — internal bus topic that
+:class:`~snapper.application.ai_review.service.AiReviewService` subscribes
+to. Sole publisher is this enforcer, fired exclusively when a
+:class:`CapsViolationError` is raised against a submission whose
+``ai_review_public_id`` is non-None (i.e. the trade was previously
+AI-approved). Strategy-side hot-path submissions and unrelated
+manual REST/MCP submissions never trip this branch."""
 
 
 class CapsViolationError(Exception):
@@ -141,6 +152,23 @@ class TradingCapsEnforcer:
             weakref.WeakValueDictionary()
         )
         self._map_lock = asyncio.Lock()
+        self._msg_publisher: MessagePublisher | None = None
+
+    def set_msg_publisher(self, publisher: MessagePublisher | None) -> None:
+        """Inject the bus publisher used for ``bus.caps_violation_after_ai_approve``.
+
+        The FastAPI lifespan calls this once the shared ZMQ PUB socket is
+        available; tests pass a fake publisher (or ``None`` to clear).
+        Decoupling socket ownership from the enforcer keeps the cap path
+        trivially testable without ZMQ. Mirrors
+        :meth:`AiReviewService.set_msg_publisher` so the same shared
+        publisher socket fans out admin.* + ai_reviews.* + bus.* topics
+        without doubling broker connection count.
+
+        Args:
+            publisher: Configured ``MessagePublisher`` or ``None`` to clear.
+        """
+        self._msg_publisher = publisher
 
     async def _get_user_lock(self, user_public_id: str) -> asyncio.Lock:
         """Return the shared :class:`asyncio.Lock` for a user.
@@ -198,7 +226,11 @@ class TradingCapsEnforcer:
             )
         lock = await self._get_user_lock(submission.user_public_id)
         async with lock:
-            await self._evaluate_caps(submission)
+            try:
+                await self._evaluate_caps(submission)
+            except CapsViolationError as exc:
+                await self._publish_caps_violation_after_ai_approve(submission, exc)
+                raise
             assigned = str(uuid7())
             yield Guard(submission=submission, assigned_public_id=assigned)
 
@@ -381,6 +413,87 @@ class TradingCapsEnforcer:
                 "max_daily_notional_usd",
                 attempted=float(total),
                 limit=float(limit),
+            )
+
+    async def _publish_caps_violation_after_ai_approve(
+        self, submission: TradeCommandSubmission, exc: CapsViolationError
+    ) -> None:
+        """Plan D §3.6 — emit a bus event for an AI-approved trade rejected by caps.
+
+        Fires only when the submission carries an
+        ``ai_review_public_id`` (i.e. the trade was previously
+        AI-approved via the CONSULT pattern) AND a
+        :class:`CapsViolationError` is being raised. Loads the
+        ``ai_reviews`` row to populate ``strategy_public_id`` and
+        ``dispatch_version`` (Plan A Q18 dedup key) which the
+        :class:`TradeCommandSubmission` does not carry. Pricing-oracle
+        violations (``cap_type == "price_unavailable"``) and missing-user
+        violations (``cap_type == "missing_user_public_id"``) are
+        explicitly skipped — neither maps to a delegate-actionable
+        rejection on the WS UI.
+
+        Best-effort: a missing publisher logs a warning instead of
+        raising (mirrors :class:`AiReviewService` semantics — the
+        enforcer must still raise the original
+        :class:`CapsViolationError` regardless of publish outcome so
+        the trade is rejected). A send failure logs an exception +
+        swallows so a transient broker hiccup never converts a real
+        cap violation into a transport-error mask.
+
+        Args:
+            submission: The :class:`TradeCommandSubmission` that
+                tripped the cap.
+            exc: The :class:`CapsViolationError` about to propagate to
+                the caller.
+        """
+        if submission.ai_review_public_id is None:
+            return
+        if exc.cap_type in ("price_unavailable", "missing_user_public_id"):
+            return
+        if exc.attempted is None or exc.limit is None:
+            logger.warning(
+                "caps_enforcer: bus.caps_violation_after_ai_approve NOT broadcast for "
+                f"review_public_id={submission.ai_review_public_id} cap_type={exc.cap_type}: "
+                "attempted/limit field missing on CapsViolationError "
+                "(future cap_type without numeric bounds; not delegate-actionable)"
+            )
+            return
+        if self._msg_publisher is None:
+            logger.warning(
+                "caps_enforcer: bus.caps_violation_after_ai_approve NOT broadcast for "
+                f"review_public_id={submission.ai_review_public_id} cap_type={exc.cap_type}: "
+                "publisher unavailable"
+            )
+            return
+        review = await self._repository.get_ai_review(submission.ai_review_public_id)
+        if review is None:
+            logger.warning(
+                "caps_enforcer: bus.caps_violation_after_ai_approve NOT broadcast for "
+                f"review_public_id={submission.ai_review_public_id}: ai_review row not found"
+            )
+            return
+        tracker = self._msg_publisher.tracker
+        payload = CapsViolationAfterAiApproveData(
+            public_id=str(uuid7()),
+            timestamp=self._now(),
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence(_BUS_CAPS_VIOLATION_TOPIC),
+            review_public_id=submission.ai_review_public_id,
+            user_public_id=review["user_public_id"],
+            strategy_public_id=review["strategy_public_id"],
+            wallet_public_id=review["wallet_public_id"],
+            instrument_public_id=review["instrument_public_id"],
+            cap_type=exc.cap_type,
+            attempted=exc.attempted,
+            limit=exc.limit,
+            dispatch_version=review["dispatch_version"],
+        )
+        try:
+            await self._msg_publisher.send(_BUS_CAPS_VIOLATION_TOPIC, payload)
+        except Exception as publish_exc:
+            logger.exception(
+                "caps_enforcer: failed to broadcast bus.caps_violation_after_ai_approve "
+                f"for review_public_id={submission.ai_review_public_id}: {publish_exc}"
             )
 
     async def _check_cancels_cap(self, user_public_id: str, caps: UserTradingCapsRow) -> None:

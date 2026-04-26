@@ -321,6 +321,9 @@ def _shutdown_user_service_publisher(app: FastAPI) -> None:
     get_scope_grant_service().set_msg_publisher(None)
     get_ai_review_service().set_msg_publisher(None)
     get_ws_auth_manager().set_msg_publisher(None)
+    caps_enforcer_for_shutdown = _safe_get_caps_enforcer()
+    if caps_enforcer_for_shutdown is not None:
+        caps_enforcer_for_shutdown.set_msg_publisher(None)
     publisher = getattr(app.state, "user_service_publisher", None)
     context = getattr(app.state, "user_service_publisher_context", None)
     if publisher is not None:
@@ -487,6 +490,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         logger.info("ScopeGrantService publisher wired to ZMQ broker for admin.scope_revoked")
         get_ai_review_service().set_msg_publisher(user_publisher)
         logger.info("AiReviewService publisher wired to ZMQ broker for ai_reviews.* fanout")
+        caps_enforcer_for_publisher = _safe_get_caps_enforcer()
+        if caps_enforcer_for_publisher is not None:
+            caps_enforcer_for_publisher.set_msg_publisher(user_publisher)
+            logger.info(
+                "TradingCapsEnforcer publisher wired to ZMQ broker for bus.caps_violation_after_ai_approve"
+            )
         ws_auth_manager = get_ws_auth_manager()
         ws_auth_manager.set_msg_publisher(user_publisher)
         logger.info("WebSocketAuthManager publisher wired to ZMQ broker for bus.delegate_offline")

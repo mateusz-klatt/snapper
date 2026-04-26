@@ -53,6 +53,7 @@ def _make_event(
     user_public_id: str = "user-1",
     strategy_public_id: str = "strat-1",
     cap_type: str = "max_daily_notional_usd",
+    dispatch_version: int = 1,
 ) -> CapsViolationAfterAiApproveData:
     """Build a minimal caps-violation event payload."""
     return CapsViolationAfterAiApproveData(
@@ -68,6 +69,7 @@ def _make_event(
         cap_type=cap_type,
         attempted=15000.0,
         limit=10000.0,
+        dispatch_version=dispatch_version,
     )
 
 
@@ -199,6 +201,7 @@ async def test_payload_carries_cap_type_attempted_and_limit() -> None:
         cap_type="max_open_orders",
         attempted=11.0,
         limit=10.0,
+        dispatch_version=1,
     )
     await svc.handle_caps_violation_bus_message(msg)
     forwarded = publisher.send.await_args.args[1]
@@ -206,6 +209,29 @@ async def test_payload_carries_cap_type_attempted_and_limit() -> None:
     assert forwarded.cap_type == "max_open_orders"
     assert forwarded.attempted == pytest.approx(11.0)
     assert forwarded.limit == pytest.approx(10.0)
+
+
+@pytest.mark.asyncio
+async def test_external_frame_carries_dispatch_version_for_q18_dedup() -> None:
+    """Plan A §4.2 line 481 / Q18 — dispatch_version forwarded to external frame.
+
+    The bridge dedupes external frames by ``(public_id, dispatch_version)``
+    so a re-fanout of the same event after the original review row's
+    state has incremented the version is surfaced as a fresh frame.
+    The handler MUST carry the inbound bus event's ``dispatch_version``
+    onto the external frame verbatim.
+
+    Given a bus event with dispatch_version=7,
+    When the handler routes,
+    Then the outbound frame carries dispatch_version=7.
+    """
+    svc = AiReviewService.get_instance()
+    publisher = _make_publisher()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    msg = _make_event(dispatch_version=7)
+    await svc.handle_caps_violation_bus_message(msg)
+    forwarded = publisher.send.await_args.args[1]
+    assert forwarded.dispatch_version == 7
 
 
 @pytest.mark.asyncio

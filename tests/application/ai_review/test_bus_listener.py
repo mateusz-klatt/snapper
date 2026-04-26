@@ -66,6 +66,7 @@ def _caps_violation_payload() -> str:
         cap_type="max_open_orders",
         attempted=11.0,
         limit=10.0,
+        dispatch_version=1,
     ).to_json()
 
 

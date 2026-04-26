@@ -64,3 +64,13 @@ class TradeCommandSubmission:
     price: Decimal | None
     source_surface: str
     idempotency_key: str | None
+    ai_review_public_id: str | None = None
+    """Plan D §3.6 — UUID7 of the ``ai_reviews`` row that AI-approved
+    this trade, or ``None`` for non-AI-mediated submissions. When set,
+    a :class:`CapsViolationError` raised inside
+    :meth:`TradingCapsEnforcer.guard` triggers an additional
+    ``bus.caps_violation_after_ai_approve`` publish so
+    :class:`~snapper.application.ai_review.service.AiReviewService` can
+    re-fanout the rejection to the delegate's UI. Default ``None`` keeps
+    every existing call site (REST manual submit, MCP submit_manual_order,
+    plan executor, strategy hot-path) untouched."""

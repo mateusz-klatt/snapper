@@ -567,6 +567,12 @@ class CapsViolationAfterAiApproveData(StrictDataSchema[Literal["caps_violation_a
     cap_type: str
     attempted: float
     limit: float
+    dispatch_version: int
+    """Plan A Q18 — bridge dedup key. Mirrors the ``ai_reviews``
+    row's ``dispatch_version`` at publish time so the JS bridge
+    dispatcher can dedupe replays of the same caps violation
+    against the same review row (e.g. if the listener re-dispatches
+    a frame the bridge already forwarded)."""
 
 
 class AiReviewCapsViolationFrameData(StrictDataSchema[Literal["ai_review.caps_violation"]]):
@@ -614,6 +620,13 @@ class AiReviewCapsViolationFrameData(StrictDataSchema[Literal["ai_review.caps_vi
     cap_type: str
     attempted: float
     limit: float
+    dispatch_version: int
+    """Plan A Q18 — bridge dedup key forwarded verbatim from the
+    internal :class:`CapsViolationAfterAiApproveData` (which the
+    publisher populates from the ``ai_reviews`` row). Listed here so
+    the external WS frame matches the Plan A §4.2 line 481 envelope
+    contract that fixes ``dispatch_version`` as a required field on
+    every ``ai_review.*`` frame type."""
 
 
 class DelegateOfflineData(StrictDataSchema[Literal["delegate_offline"]]):

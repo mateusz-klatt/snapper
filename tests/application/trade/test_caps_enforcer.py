@@ -541,3 +541,277 @@ async def test_per_user_lock_serializes_concurrent_submissions_for_same_user() -
 
     results = await asyncio.gather(one_submit(), one_submit())
     assert sorted(results) == [False, True]
+
+
+def _ai_review_row(
+    *,
+    review_public_id: str = "rev-1",
+    user_public_id: str = "user-1",
+    strategy_public_id: str = "strat-1",
+    wallet_public_id: str = "wallet-1",
+    instrument_public_id: str = "inst-btc",
+    dispatch_version: int = 3,
+) -> dict[str, object]:
+    """Build a minimal AiReviewRow dict for the publisher branch tests.
+
+    The enforcer reads ``user_public_id`` / ``strategy_public_id`` /
+    ``wallet_public_id`` / ``instrument_public_id`` / ``dispatch_version``
+    off the row before publishing the bus event; other columns are
+    irrelevant for that path so we cast a partial dict through the
+    Repository mock's ``get_ai_review`` AsyncMock return.
+    """
+    return {
+        "public_id": review_public_id,
+        "user_public_id": user_public_id,
+        "strategy_public_id": strategy_public_id,
+        "wallet_public_id": wallet_public_id,
+        "instrument_public_id": instrument_public_id,
+        "dispatch_version": dispatch_version,
+    }
+
+
+def _ai_review_submission(
+    *,
+    review_public_id: str | None = "rev-1",
+    quantity: Decimal | None = Decimal("9999"),
+) -> TradeCommandSubmission:
+    """Submission carrying ``ai_review_public_id`` so the enforcer publishes."""
+    return TradeCommandSubmission(
+        user_public_id="user-1",
+        operator_public_id="op-1",
+        wallet_public_id="wallet-1",
+        instrument_public_id="inst-btc",
+        command_type="submit",
+        side="buy",
+        order_type="market",
+        quantity=quantity,
+        price=None,
+        source_surface="strategy",
+        idempotency_key=None,
+        ai_review_public_id=review_public_id,
+    )
+
+
+def _publisher_with_tracker() -> MagicMock:
+    """Build a MagicMock publisher with a real :class:`SequenceTracker`."""
+    from snapper.messaging.infrastructure.publisher import SequenceTracker
+
+    publisher = MagicMock()
+    publisher.send = AsyncMock()
+    publisher.tracker = SequenceTracker()
+    return publisher
+
+
+class TestCapsViolationAfterAiApprovePublish:
+    """Phase 2 #2 — bus.caps_violation_after_ai_approve publisher branch.
+
+    Verifies the four-way decision tree on the
+    :meth:`TradingCapsEnforcer.guard` exception path:
+
+    1. AI-approved submission + cap exceeded + publisher wired ->
+       publish + raise.
+    2. Non-AI submission (ai_review_public_id is None) + cap exceeded ->
+       raise WITHOUT publish.
+    3. AI-approved submission + cap exceeded + publisher missing ->
+       raise WITHOUT publish + log warning (graceful degradation).
+    4. Pricing-oracle / missing-user violations skip the publish branch
+       even when ai_review_public_id is set (neither maps to a
+       delegate-actionable rejection).
+    """
+
+    @pytest.mark.asyncio
+    async def test_publishes_when_ai_review_id_set_and_cap_exceeded(self) -> None:
+        """Cap violation on AI-approved submission -> publish bus event + raise."""
+        caps = _caps(max_order_quantity_per_instrument=Decimal("10"))
+        repo = MagicMock()
+        repo.get_user_trading_caps = AsyncMock(return_value=caps)
+        repo.count_user_open_commands = AsyncMock(return_value=0)
+        repo.get_user_recent_submits = AsyncMock(return_value=[])
+        repo.count_user_rolling_cancels = AsyncMock(return_value=0)
+        repo.get_ai_review = AsyncMock(
+            return_value=_ai_review_row(review_public_id="rev-1", dispatch_version=4)
+        )
+        enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
+        publisher = _publisher_with_tracker()
+        enforcer.set_msg_publisher(publisher)
+        with pytest.raises(CapsViolationError) as exc_info:
+            async with enforcer.guard(
+                _ai_review_submission(review_public_id="rev-1", quantity=Decimal("100"))
+            ):
+                pass
+        assert exc_info.value.cap_type == "max_order_quantity_per_instrument"
+        publisher.send.assert_awaited_once()
+        topic, payload = publisher.send.await_args.args
+        assert topic == "bus.caps_violation_after_ai_approve"
+        assert payload.review_public_id == "rev-1"
+        assert payload.cap_type == "max_order_quantity_per_instrument"
+        assert payload.dispatch_version == 4
+        assert payload.attempted == pytest.approx(100.0)
+        assert payload.limit == pytest.approx(10.0)
+        repo.get_ai_review.assert_awaited_once_with("rev-1")
+
+    @pytest.mark.asyncio
+    async def test_does_not_publish_when_ai_review_id_is_none(self) -> None:
+        """Non-AI submission cap violation -> raise WITHOUT publish."""
+        caps = _caps(max_order_quantity_per_instrument=Decimal("10"))
+        repo = MagicMock()
+        repo.get_user_trading_caps = AsyncMock(return_value=caps)
+        repo.count_user_open_commands = AsyncMock(return_value=0)
+        repo.get_user_recent_submits = AsyncMock(return_value=[])
+        repo.count_user_rolling_cancels = AsyncMock(return_value=0)
+        repo.get_ai_review = AsyncMock()
+        enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
+        publisher = _publisher_with_tracker()
+        enforcer.set_msg_publisher(publisher)
+        with pytest.raises(CapsViolationError):
+            async with enforcer.guard(_submission(quantity=Decimal("100"))):
+                pass
+        publisher.send.assert_not_awaited()
+        repo.get_ai_review.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_publisher_missing_logs_warning_and_still_raises(self) -> None:
+        """Missing publisher -> raise CapsViolationError (graceful degradation)."""
+        caps = _caps(max_order_quantity_per_instrument=Decimal("10"))
+        repo = MagicMock()
+        repo.get_user_trading_caps = AsyncMock(return_value=caps)
+        repo.count_user_open_commands = AsyncMock(return_value=0)
+        repo.get_user_recent_submits = AsyncMock(return_value=[])
+        repo.count_user_rolling_cancels = AsyncMock(return_value=0)
+        repo.get_ai_review = AsyncMock()
+        enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
+        with pytest.raises(CapsViolationError):
+            async with enforcer.guard(
+                _ai_review_submission(review_public_id="rev-1", quantity=Decimal("100"))
+            ):
+                pass
+        repo.get_ai_review.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_failure_swallowed_and_violation_still_raises(self) -> None:
+        """Publisher.send raising -> log + still propagate CapsViolationError.
+
+        A broken broker connection must not convert a real cap rejection
+        into a transport-error mask. The trade MUST still be rejected.
+        """
+        caps = _caps(max_order_quantity_per_instrument=Decimal("10"))
+        repo = MagicMock()
+        repo.get_user_trading_caps = AsyncMock(return_value=caps)
+        repo.count_user_open_commands = AsyncMock(return_value=0)
+        repo.get_user_recent_submits = AsyncMock(return_value=[])
+        repo.count_user_rolling_cancels = AsyncMock(return_value=0)
+        repo.get_ai_review = AsyncMock(return_value=_ai_review_row())
+        enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
+        publisher = _publisher_with_tracker()
+        publisher.send = AsyncMock(side_effect=RuntimeError("broker down"))
+        enforcer.set_msg_publisher(publisher)
+        with pytest.raises(CapsViolationError):
+            async with enforcer.guard(
+                _ai_review_submission(review_public_id="rev-1", quantity=Decimal("100"))
+            ):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_review_row_missing_logs_warning_and_skips_publish(self) -> None:
+        """Stale ai_review_public_id (row gone) -> warn + skip publish + still raise."""
+        caps = _caps(max_order_quantity_per_instrument=Decimal("10"))
+        repo = MagicMock()
+        repo.get_user_trading_caps = AsyncMock(return_value=caps)
+        repo.count_user_open_commands = AsyncMock(return_value=0)
+        repo.get_user_recent_submits = AsyncMock(return_value=[])
+        repo.count_user_rolling_cancels = AsyncMock(return_value=0)
+        repo.get_ai_review = AsyncMock(return_value=None)
+        enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
+        publisher = _publisher_with_tracker()
+        enforcer.set_msg_publisher(publisher)
+        with pytest.raises(CapsViolationError):
+            async with enforcer.guard(
+                _ai_review_submission(review_public_id="missing-rev", quantity=Decimal("100"))
+            ):
+                pass
+        publisher.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_price_unavailable_skips_publish_branch(self) -> None:
+        """price_unavailable cap_type does NOT publish — not delegate-actionable."""
+        caps = _caps(max_daily_notional_usd=Decimal("1000"))
+        repo = MagicMock()
+        repo.get_user_trading_caps = AsyncMock(return_value=caps)
+        repo.count_user_open_commands = AsyncMock(return_value=0)
+        repo.get_user_recent_submits = AsyncMock(return_value=[])
+        repo.count_user_rolling_cancels = AsyncMock(return_value=0)
+        repo.get_ai_review = AsyncMock()
+        pricing = MagicMock(spec=USDConverter)
+        pricing.to_usd = AsyncMock(
+            side_effect=PriceUnavailableError(
+                reason="oracle_down", instrument_public_id="inst-btc", detail="x"
+            )
+        )
+        enforcer = TradingCapsEnforcer(
+            cast(Repository, repo), cast(USDConverter, pricing), now=lambda: _NOW
+        )
+        publisher = _publisher_with_tracker()
+        enforcer.set_msg_publisher(publisher)
+        with pytest.raises(CapsViolationError) as exc_info:
+            async with enforcer.guard(
+                _ai_review_submission(review_public_id="rev-1", quantity=Decimal("1"))
+            ):
+                pass
+        assert exc_info.value.cap_type == "price_unavailable"
+        publisher.send.assert_not_awaited()
+        repo.get_ai_review.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_set_msg_publisher_clears_with_none(self) -> None:
+        """``set_msg_publisher(None)`` resets the slot."""
+        repo = _stub_repo()
+        enforcer = TradingCapsEnforcer(repo, _stub_pricing(), now=lambda: _NOW)
+        publisher = _publisher_with_tracker()
+        enforcer.set_msg_publisher(publisher)
+        assert enforcer._msg_publisher is publisher
+        enforcer.set_msg_publisher(None)
+        assert enforcer._msg_publisher is None
+
+    @pytest.mark.asyncio
+    async def test_skips_publish_when_attempted_or_limit_is_none(self) -> None:
+        """Defensive guard: hand-crafted CapsViolationError without numeric bounds.
+
+        Today every real cap_type populates attempted+limit, but the
+        guard exists so a future cap_type that lacks numeric bounds
+        (e.g. a binary policy switch) cannot crash the publisher path
+        on the NotNone Pydantic field constraint. We exercise the
+        branch by calling the helper directly with a synthetic exception.
+        """
+        repo = MagicMock()
+        repo.get_ai_review = AsyncMock(return_value=_ai_review_row())
+        enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
+        publisher = _publisher_with_tracker()
+        enforcer.set_msg_publisher(publisher)
+        synthetic_exc = CapsViolationError("future_binary_policy", attempted=None, limit=None)
+        await enforcer._publish_caps_violation_after_ai_approve(
+            _ai_review_submission(review_public_id="rev-1"), synthetic_exc
+        )
+        publisher.send.assert_not_awaited()
+        repo.get_ai_review.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_publishes_on_open_orders_cap_exceeded(self) -> None:
+        """The publish branch fires for ``max_open_orders`` too (every cap branch)."""
+        caps = _caps(max_open_orders=2)
+        repo = MagicMock()
+        repo.get_user_trading_caps = AsyncMock(return_value=caps)
+        repo.count_user_open_commands = AsyncMock(return_value=2)
+        repo.get_user_recent_submits = AsyncMock(return_value=[])
+        repo.count_user_rolling_cancels = AsyncMock(return_value=0)
+        repo.get_ai_review = AsyncMock(return_value=_ai_review_row())
+        enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
+        publisher = _publisher_with_tracker()
+        enforcer.set_msg_publisher(publisher)
+        with pytest.raises(CapsViolationError):
+            async with enforcer.guard(
+                _ai_review_submission(review_public_id="rev-1", quantity=Decimal("1"))
+            ):
+                pass
+        publisher.send.assert_awaited_once()
+        _, payload = publisher.send.await_args.args
+        assert payload.cap_type == "max_open_orders"

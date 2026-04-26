@@ -1206,6 +1206,7 @@ class AiReviewService:
             cap_type=msg.cap_type,
             attempted=msg.attempted,
             limit=msg.limit,
+            dispatch_version=msg.dispatch_version,
         )
         try:
             await self._msg_publisher.send(topic, external_frame)

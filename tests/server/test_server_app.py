@@ -676,12 +676,13 @@ class TestLifespan:
         """``_shutdown_user_service_publisher`` clears every publisher slot.
 
         The shutdown helper closes the single shared publisher socket
-        used by UserService, ScopeGrantService, AiReviewService AND
-        WebSocketAuthManager. It MUST clear all four publisher slots
-        BEFORE closing the socket so any in-flight handler observes
-        ``None`` and degrades gracefully rather than calling
-        ``.send()`` on a torn-down ZMQ socket. Mirrors the existing
-        UserService / ScopeGrantService teardown contract.
+        used by UserService, ScopeGrantService, AiReviewService,
+        WebSocketAuthManager AND TradingCapsEnforcer. It MUST clear
+        all five publisher slots BEFORE closing the socket so any
+        in-flight handler observes ``None`` and degrades gracefully
+        rather than calling ``.send()`` on a torn-down ZMQ socket.
+        Mirrors the existing UserService / ScopeGrantService teardown
+        contract.
         """
         mock_app = MagicMock()
         mock_app.state.user_service_publisher = None
@@ -690,6 +691,7 @@ class TestLifespan:
         mock_scope_grant_service = MagicMock()
         mock_ai_review_service = _make_ai_review_service_mock()
         mock_ws_auth_manager = MagicMock()
+        mock_caps_enforcer = MagicMock()
         with (
             patch(
                 "snapper.server.app.get_user_service",
@@ -707,12 +709,185 @@ class TestLifespan:
                 "snapper.server.app.get_ws_auth_manager",
                 return_value=mock_ws_auth_manager,
             ),
+            patch(
+                "snapper.server.app._safe_get_caps_enforcer",
+                return_value=mock_caps_enforcer,
+            ),
         ):
             _shutdown_user_service_publisher(mock_app)
         mock_user_service.set_msg_publisher.assert_called_once_with(None)
         mock_scope_grant_service.set_msg_publisher.assert_called_once_with(None)
         mock_ai_review_service.set_msg_publisher.assert_called_once_with(None)
         mock_ws_auth_manager.set_msg_publisher.assert_called_once_with(None)
+        mock_caps_enforcer.set_msg_publisher.assert_called_once_with(None)
+
+    @pytest.mark.asyncio
+    async def test_shutdown_tolerates_caps_enforcer_unavailable(self) -> None:
+        """``_safe_get_caps_enforcer`` returns None pre-startup -> no crash.
+
+        Pre-startup window (or non-SQLAlchemy repo in tests) makes the
+        enforcer singleton unavailable. The shutdown helper must
+        tolerate this and skip the slot clear without raising.
+        """
+        mock_app = MagicMock()
+        mock_app.state.user_service_publisher = None
+        mock_app.state.user_service_publisher_context = None
+        with (
+            patch("snapper.server.app.get_user_service", return_value=MagicMock()),
+            patch("snapper.server.app.get_scope_grant_service", return_value=MagicMock()),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
+            patch("snapper.server.app.get_ws_auth_manager", return_value=MagicMock()),
+            patch("snapper.server.app._safe_get_caps_enforcer", return_value=None),
+        ):
+            _shutdown_user_service_publisher(mock_app)
+
+    @pytest.mark.asyncio
+    async def test_lifespan_injects_caps_enforcer_publisher(self) -> None:
+        """TradingCapsEnforcer shares the UserService publisher socket.
+
+        Phase 2 #2 wiring: lifespan must inject the ZMQ publisher onto
+        the caps enforcer at startup (so CapsViolationError raised
+        against AI-approved submissions can fan out
+        bus.caps_violation_after_ai_approve to AiReviewService) AND
+        clear the slot at shutdown (so an in-flight cap evaluation
+        observes ``None`` and degrades gracefully). Mirrors the
+        AiReviewService / WebSocketAuthManager wiring assertions above.
+        Uses a recorder side-effect on ``set_msg_publisher`` so both
+        startup + shutdown calls are pinned in a single sequence.
+        """
+        mock_app = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.cleanup = AsyncMock()
+        mock_zmq_bridge = MagicMock()
+        mock_zmq_bridge.start = AsyncMock()
+        mock_zmq_bridge.stop = AsyncMock()
+        mock_manager.zmq_bridge = mock_zmq_bridge
+        mock_app.state.manager = mock_manager
+        user_publisher = MagicMock()
+        mock_caps_enforcer = MagicMock()
+        recorded_publisher_calls: list[object] = []
+        mock_caps_enforcer.set_msg_publisher.side_effect = (
+            lambda value: recorded_publisher_calls.append(value)
+        )
+
+        def _shutdown_user_pub_passthrough(_app: FastAPI) -> None:
+            mock_caps_enforcer.set_msg_publisher(None)
+
+        with (
+            patch("snapper.server.app.discover_processes"),
+            patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
+            patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app._build_user_service_publisher",
+                return_value=(user_publisher, MagicMock()),
+            ),
+            patch(
+                "snapper.server.app._shutdown_user_service_publisher",
+                side_effect=_shutdown_user_pub_passthrough,
+            ),
+            patch("snapper.server.app.get_user_service", return_value=MagicMock()),
+            patch("snapper.server.app.get_scope_grant_service", return_value=MagicMock()),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
+            patch(
+                "snapper.server.app._safe_get_caps_enforcer",
+                return_value=mock_caps_enforcer,
+            ),
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
+                ),
+            ),
+            patch(
+                "snapper.server.app.get_token_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
+        ):
+            mock_settings_service = MagicMock()
+            mock_settings_service.shutdown = AsyncMock()
+            mock_get_settings_service.return_value = mock_settings_service
+            mock_factory = MagicMock()
+            mock_factory.sync_registry_to_database = AsyncMock()
+            mock_factory.start_all_processes = AsyncMock()
+            mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
+            mock_factory.stop_all_processes = AsyncMock()
+            mock_factory_cls.return_value = mock_factory
+            async with lifespan(mock_app):
+                pass
+        assert recorded_publisher_calls == [user_publisher, None]
+
+    @pytest.mark.asyncio
+    async def test_lifespan_skips_caps_enforcer_publisher_when_not_initialised(self) -> None:
+        """``_safe_get_caps_enforcer`` returns None pre-startup -> no crash.
+
+        The enforcer is built lazily when the first cap-evaluating
+        request hits ``get_caps_enforcer_dependency``; the lifespan
+        must tolerate the brief pre-startup window where the singleton
+        does not yet exist (or is unavailable for non-SQLAlchemy
+        repos in tests).
+        """
+        mock_app = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.cleanup = AsyncMock()
+        mock_zmq_bridge = MagicMock()
+        mock_zmq_bridge.start = AsyncMock()
+        mock_zmq_bridge.stop = AsyncMock()
+        mock_manager.zmq_bridge = mock_zmq_bridge
+        mock_app.state.manager = mock_manager
+        with (
+            patch("snapper.server.app.discover_processes"),
+            patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
+            patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app._build_user_service_publisher",
+                return_value=(MagicMock(), MagicMock()),
+            ),
+            patch("snapper.server.app._shutdown_user_service_publisher"),
+            patch("snapper.server.app.get_user_service", return_value=MagicMock()),
+            patch("snapper.server.app.get_scope_grant_service", return_value=MagicMock()),
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
+            patch("snapper.server.app._safe_get_caps_enforcer", return_value=None),
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                    cancel_pending_offline_tasks=AsyncMock(),
+                ),
+            ),
+            patch(
+                "snapper.server.app.get_token_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
+        ):
+            mock_settings_service = MagicMock()
+            mock_settings_service.shutdown = AsyncMock()
+            mock_get_settings_service.return_value = mock_settings_service
+            mock_factory = MagicMock()
+            mock_factory.sync_registry_to_database = AsyncMock()
+            mock_factory.start_all_processes = AsyncMock()
+            mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
+            mock_factory.stop_all_processes = AsyncMock()
+            mock_factory_cls.return_value = mock_factory
+            async with lifespan(mock_app):
+                pass
 
     @pytest.mark.asyncio
     async def test_lifespan_starts_and_stops_ai_review_bus_listener(self) -> None:
