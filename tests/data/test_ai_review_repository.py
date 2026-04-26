@@ -1203,6 +1203,38 @@ async def test_list_eligible_returns_delegate_with_instrument_grant(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
+async def test_list_eligible_excludes_deactivated_user(tmp_path: Path) -> None:
+    """``users.is_active=False`` -> delegate filtered out even when fully scoped + live.
+
+    Plan A v1.4 risk register: user deactivation is implemented as a
+    ``users.is_active=False`` flip on the active SCD2 row (see
+    ``UserService.deactivate_user``); the eligibility query MUST honour
+    that flag so a recently-seen deactivated delegate cannot still be
+    claimed during the heartbeat window.
+    """
+    repo = await _build_repo(tmp_path, "eligible_deactivated.db")
+    as_of = _now()
+    ids = await _seed_full_eligible_setup(repo, as_of=as_of)
+    async with repo.session() as s:
+        await s.execute(
+            __import__("sqlalchemy")
+            .update(User)
+            .where(User.public_id == ids["user_public_id"])
+            .values(is_active=False)
+        )
+        await s.commit()
+    result = await repo.list_eligible_delegates_for_ai_review(
+        operator_public_id=ids["operator_public_id"],
+        wallet_public_id=ids["wallet_public_id"],
+        instrument_public_id=ids["instrument_public_id"],
+        heartbeat_window_seconds=15,
+        as_of=as_of,
+    )
+    assert result == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
 async def test_list_eligible_returns_delegate_with_underlying_grant(
     tmp_path: Path,
 ) -> None:

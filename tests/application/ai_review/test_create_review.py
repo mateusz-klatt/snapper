@@ -21,11 +21,13 @@ from uuid import uuid7
 import pytest
 import sqlalchemy
 
+from snapper.application.ai_review.service import MAX_SIGNAL_ENVELOPE_BYTES
 from snapper.application.ai_review.service import AiReviewAdmissionPolicy
 from snapper.application.ai_review.service import AiReviewCreateRequest
 from snapper.application.ai_review.service import AiReviewService
 from snapper.application.ai_review.service import DelegateBusyError
 from snapper.application.ai_review.service import NoLiveDelegateError
+from snapper.application.ai_review.service import SignalEnvelopeTooLargeError
 from snapper.application.ai_review.service import _signal_envelope_hash
 from snapper.data.models import AiDelegate
 from snapper.data.models import AiReviewEvent
@@ -483,7 +485,8 @@ async def test_custom_policy_extends_heartbeat_window_admits_stale_delegate(
     Given a configured AiReviewService and a delegate seen 30s ago,
     When create_review runs with the default 15s heartbeat window,
     Then the call raises NoLiveDelegateError;
-    And when the same call uses a policy with ``heartbeat_window_seconds=60``,
+    And when the same call uses a policy with ``heartbeat_window_seconds=60``
+    (with a strictly-greater fanout to satisfy the Q17 invariant),
     Then admission succeeds and the delegate is claimed.
     """
     svc = AiReviewService.get_instance()
@@ -503,7 +506,7 @@ async def test_custom_policy_extends_heartbeat_window_admits_stale_delegate(
         request,
         repo=repo,
         now=now,
-        policy=AiReviewAdmissionPolicy(heartbeat_window_seconds=60),
+        policy=AiReviewAdmissionPolicy(heartbeat_window_seconds=60, fanout_after_seconds=120),
     )
     assert result.selected_delegate_public_id == ids["delegate_public_id"]
 
@@ -515,8 +518,10 @@ async def test_custom_policy_overrides_fanout_after_seconds(
 ) -> None:
     """Custom ``fanout_after_seconds`` lands on the persisted row.
 
-    Given a configured AiReviewService and a custom policy,
-    When create_review runs with ``fanout_after_seconds=10``,
+    Given a configured AiReviewService and a custom policy with
+    ``heartbeat_window_seconds=5`` + ``fanout_after_seconds=10`` (Q17
+    invariant satisfied),
+    When create_review runs,
     Then the persisted row's fanout_after equals ``now + 10s``.
     """
     svc = AiReviewService.get_instance()
@@ -527,11 +532,31 @@ async def test_custom_policy_overrides_fanout_after_seconds(
         request,
         repo=repo,
         now=now,
-        policy=AiReviewAdmissionPolicy(heartbeat_window_seconds=15, fanout_after_seconds=10),
+        policy=AiReviewAdmissionPolicy(heartbeat_window_seconds=5, fanout_after_seconds=10),
     )
     row = await repo.get_ai_review(result.review_public_id)
     assert row is not None
     assert row["fanout_after"] == now + timedelta(seconds=10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_admission_policy_rejects_invalid_fanout_window() -> None:
+    """``fanout_after_seconds <= heartbeat_window_seconds`` raises ValueError.
+
+    Given the Q17 cross-plan invariant requires
+    ``fanout_after > heartbeat_window``,
+    When AiReviewAdmissionPolicy is constructed with the relation flipped
+    (less-than) or equal,
+    Then ``__post_init__`` raises ValueError before the offending policy
+    can reach :meth:`AiReviewService.create_review`.
+    """
+    with pytest.raises(ValueError, match="fanout_after_seconds"):
+        AiReviewAdmissionPolicy(heartbeat_window_seconds=15, fanout_after_seconds=10)
+    with pytest.raises(ValueError, match="fanout_after_seconds"):
+        AiReviewAdmissionPolicy(heartbeat_window_seconds=15, fanout_after_seconds=15)
+    with pytest.raises(ValueError, match="heartbeat_window_seconds"):
+        AiReviewAdmissionPolicy(heartbeat_window_seconds=0, fanout_after_seconds=30)
 
 
 @pytest.mark.asyncio
@@ -572,3 +597,108 @@ async def test_skips_busy_candidate_picks_next_idle(
     assert idle_row is not None
     assert idle_row["active_reviews_count"] == 1
     assert busy_pid != idle_pid
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_signal_envelope_with_nan_raises_value_error(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Non-finite floats in ``signal_envelope`` -> ValueError before any DB write.
+
+    Given a configured AiReviewService and an envelope containing ``NaN``,
+    When create_review runs admission control,
+    Then it raises ValueError because ``allow_nan=False`` rejects the
+    serialisation, and no review row is inserted.
+    """
+    svc = AiReviewService.get_instance()
+    now = _now()
+    ids = await _seed_eligible_delegate(repo, as_of=now)
+    bad_request = AiReviewCreateRequest(
+        user_public_id=ids["user_public_id"],
+        operator_public_id=ids["operator_public_id"],
+        wallet_public_id=ids["wallet_public_id"],
+        instrument_public_id=ids["instrument_public_id"],
+        strategy_public_id=str(uuid7()),
+        signal_envelope={"side": "buy", "qty": float("nan")},
+        instrument_metadata={"requires_ai_review": True},
+        deadline_seconds=15,
+        session_id=str(uuid7()),
+        sequence_id=42,
+    )
+    with pytest.raises(ValueError):
+        await svc.create_review(bad_request, repo=repo, now=now)
+    delegate_row = await repo.get_ai_delegate_by_user_public_id(ids["user_public_id"])
+    assert delegate_row is not None
+    assert delegate_row["active_reviews_count"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_signal_envelope_over_16kb_raises_too_large(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Canonical-JSON > 16KB -> :class:`SignalEnvelopeTooLargeError`.
+
+    Given an envelope whose canonical form exceeds the Plan A v1.4
+    risk-register cap,
+    When create_review runs,
+    Then it raises SignalEnvelopeTooLargeError BEFORE the eligibility query
+    so the bitemporal store is never touched and the delegate counter
+    stays at 0.
+    """
+    svc = AiReviewService.get_instance()
+    now = _now()
+    ids = await _seed_eligible_delegate(repo, as_of=now)
+    oversized = "x" * (MAX_SIGNAL_ENVELOPE_BYTES + 100)
+    bad_request = AiReviewCreateRequest(
+        user_public_id=ids["user_public_id"],
+        operator_public_id=ids["operator_public_id"],
+        wallet_public_id=ids["wallet_public_id"],
+        instrument_public_id=ids["instrument_public_id"],
+        strategy_public_id=str(uuid7()),
+        signal_envelope={"side": "buy", "blob": oversized},
+        instrument_metadata={"requires_ai_review": True},
+        deadline_seconds=15,
+        session_id=str(uuid7()),
+        sequence_id=42,
+    )
+    with pytest.raises(SignalEnvelopeTooLargeError):
+        await svc.create_review(bad_request, repo=repo, now=now)
+    delegate_row = await repo.get_ai_delegate_by_user_public_id(ids["user_public_id"])
+    assert delegate_row is not None
+    assert delegate_row["active_reviews_count"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_envelope_at_16kb_boundary_succeeds(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Canonical-JSON exactly at the cap is admitted (boundary is inclusive).
+
+    Given a payload sized so the canonical JSON serialises to exactly
+    :data:`MAX_SIGNAL_ENVELOPE_BYTES` bytes,
+    When create_review runs,
+    Then the row is persisted (the guard is ``> max``, not ``>= max``).
+    """
+    svc = AiReviewService.get_instance()
+    now = _now()
+    ids = await _seed_eligible_delegate(repo, as_of=now)
+    overhead = len(b'{"blob":""}')
+    payload_chars = MAX_SIGNAL_ENVELOPE_BYTES - overhead
+    request = AiReviewCreateRequest(
+        user_public_id=ids["user_public_id"],
+        operator_public_id=ids["operator_public_id"],
+        wallet_public_id=ids["wallet_public_id"],
+        instrument_public_id=ids["instrument_public_id"],
+        strategy_public_id=str(uuid7()),
+        signal_envelope={"blob": "x" * payload_chars},
+        instrument_metadata={"requires_ai_review": True},
+        deadline_seconds=15,
+        session_id=str(uuid7()),
+        sequence_id=42,
+    )
+    result = await svc.create_review(request, repo=repo, now=now)
+    row = await repo.get_ai_review(result.review_public_id)
+    assert row is not None

@@ -3315,14 +3315,16 @@ class Repository(ABC):
     ) -> list[AiDelegateRow]:
         """Plan A v1.4 Q10 + Plan D §3.1.a — eligible AI-delegate candidates.
 
-        Returns the ``ai_delegates`` rows whose users are members of
-        ``operator_public_id`` and whose ``last_seen_at`` falls inside the
-        heartbeat window (``as_of - heartbeat_window_seconds``, ``as_of``],
-        ordered by ``last_seen_at DESC``. Pre-checks that the operator
-        actually holds a matching active scope grant (instrument-direct OR
-        underlying-expanded via ``InstrumentUnderlyingMapping``) for the
-        ``(wallet, instrument)`` tuple — when no grant exists the list is
-        empty regardless of how many delegates are live.
+        Returns the ``ai_delegates`` rows whose users are active members of
+        ``operator_public_id`` (``users.is_active = TRUE``,
+        ``users.role = AI_DELEGATE``) and whose ``last_seen_at`` falls inside
+        the heartbeat window (``as_of - heartbeat_window_seconds``,
+        ``as_of``], ordered by ``last_seen_at DESC``. Pre-checks that the
+        operator actually holds a matching active scope grant
+        (instrument-direct OR underlying-expanded via
+        ``InstrumentUnderlyingMapping``) for the ``(wallet, instrument)``
+        tuple — when no grant exists the list is empty regardless of how
+        many delegates are live.
 
         Used by :meth:`AiReviewService.create_review` admission control to
         compose the candidate list passed to
@@ -9866,6 +9868,7 @@ class SQLAlchemyRepository(Repository):
                         )
                         .where(
                             User.role == UserRole.AI_DELEGATE.value,
+                            User.is_active.is_(True),
                             UserOperatorMembership.operator_public_id == operator_public_id,
                             AiDelegate.last_seen_at.is_not(None),
                             AiDelegate.last_seen_at > threshold,

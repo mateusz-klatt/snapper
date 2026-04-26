@@ -70,6 +70,17 @@ scanner has at least one window's worth of evidence the delegate is gone
 before re-dispatch fires.
 """
 
+MAX_SIGNAL_ENVELOPE_BYTES = 16 * 1024
+"""Plan A v1.4 §3 + risk register — server-side cap on the canonical JSON size.
+
+Plan A v1.4 line 516: ``Max signal_envelope payload: 16KB (matches §3
+server-side limit). Bridge enforces defensively after JSON parse``. The
+truncation guard belongs in :meth:`AiReviewService.create_review` per the
+risk-register entry at plan line 1444. Oversize envelopes raise
+:class:`SignalEnvelopeTooLargeError` BEFORE INSERT so the caller can
+surface a structured failure rather than mutating the bitemporal store.
+"""
+
 ERROR_REVIEW_NOT_FOUND = "review_not_found"
 """Plan A Q14 envelope error code — caller passed an unknown review_id."""
 
@@ -151,6 +162,18 @@ class DelegateBusyError(Exception):
     """
 
 
+class SignalEnvelopeTooLargeError(Exception):
+    """Caller-supplied ``signal_envelope`` exceeds the Plan A 16KB cap.
+
+    Raised by :meth:`AiReviewService.create_review` BEFORE any DB write
+    when the canonical-JSON serialisation of the envelope exceeds
+    :data:`MAX_SIGNAL_ENVELOPE_BYTES`. Plan A v1.4 risk-register entry
+    pins the truncation guard to the service layer (line 1444) so the
+    bridge + strategy boundary inputs are double-defended without coupling
+    storage code to caller-side trust.
+    """
+
+
 @dataclass(slots=True, frozen=True)
 class AiReviewCreateRequest:
     """Strategy-side payload for :meth:`AiReviewService.create_review`.
@@ -202,12 +225,29 @@ class AiReviewAdmissionPolicy:
     Cross-plan invariant: ``fanout_after_seconds`` MUST exceed
     ``heartbeat_window_seconds`` so the offline scanner has at least one
     window's worth of evidence the delegate is gone before re-dispatch
-    fires. Tests override these for fast-clock liveness scenarios; the
-    defaults match the Plan A v1.4 cross-plan locks.
+    fires. The invariant is enforced at construction via
+    :meth:`__post_init__`; oversights at call sites surface as
+    ``ValueError`` rather than as silently misordered timeouts. Tests
+    override these for fast-clock liveness scenarios while keeping the
+    invariant; the defaults match the Plan A v1.4 cross-plan locks.
     """
 
     heartbeat_window_seconds: int = DEFAULT_HEARTBEAT_WINDOW_SECONDS
     fanout_after_seconds: int = DEFAULT_FANOUT_AFTER_SECONDS
+
+    def __post_init__(self) -> None:
+        """Enforce ``fanout_after_seconds > heartbeat_window_seconds`` (Q17 lock)."""
+        if self.heartbeat_window_seconds <= 0:
+            raise ValueError(
+                f"heartbeat_window_seconds must be positive; "
+                f"got {self.heartbeat_window_seconds}."
+            )
+        if self.fanout_after_seconds <= self.heartbeat_window_seconds:
+            raise ValueError(
+                f"fanout_after_seconds ({self.fanout_after_seconds}) must be "
+                f"strictly greater than heartbeat_window_seconds "
+                f"({self.heartbeat_window_seconds}) per Plan A Q17 cross-plan lock."
+            )
 
 
 _DEFAULT_AI_REVIEW_ADMISSION_POLICY = AiReviewAdmissionPolicy()
@@ -235,18 +275,34 @@ class AiReviewCreated:
     selected_delegate_public_id: str
 
 
+def _serialize_signal_envelope_canonical(envelope: JsonObject) -> bytes:
+    """Canonical JSON bytes for hashing + size enforcement.
+
+    ``allow_nan=False`` rejects ``NaN`` / ``Infinity`` at this point: those
+    values are not valid JSON and round-trip differently between SQLite's
+    ``JSON`` text storage and PostgreSQL ``JSONB``, so a downstream
+    consumer reconstructing the envelope from the column would see a
+    different hash than the one stored on the audit-event payload.
+    ``sort_keys=True`` + tight separators give a stable canonical form so
+    two equivalent envelopes hash identically regardless of build order.
+    """
+    return json.dumps(
+        envelope,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
 def _signal_envelope_hash(envelope: JsonObject) -> str:
     """Canonical SHA-256 hex digest of the signal envelope.
 
     Stored in the ``ai_reviews.signal_snapshot_hash`` column AND on the
     ``ai_review_events.created`` payload so a consumer reconstructing the
     audit trail can confirm the envelope it sees matches the one the
-    review was created from. ``sort_keys=True`` makes the hash stable
-    against dict-ordering differences across Python versions or libraries
-    that build the envelope.
+    review was created from.
     """
-    canonical = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return hashlib.sha256(_serialize_signal_envelope_canonical(envelope)).hexdigest()
 
 
 class AiReviewService:
@@ -390,7 +446,19 @@ class AiReviewService:
                 instrument scope.
             DelegateBusyError: Eligible delegates exist but every one
                 already has an in-flight review (Q10 caps each at one).
+            SignalEnvelopeTooLargeError: ``request.signal_envelope``
+                serialises to more than :data:`MAX_SIGNAL_ENVELOPE_BYTES`
+                of canonical JSON (Plan A v1.4 risk-register guard).
+            ValueError: ``request.signal_envelope`` contains
+                non-finite floats (``NaN`` / ``Infinity``) — not valid
+                JSON, would corrupt audit-trail reconstruction.
         """
+        canonical_envelope = _serialize_signal_envelope_canonical(request.signal_envelope)
+        if len(canonical_envelope) > MAX_SIGNAL_ENVELOPE_BYTES:
+            raise SignalEnvelopeTooLargeError(
+                f"signal_envelope canonical size {len(canonical_envelope)} bytes "
+                f"exceeds {MAX_SIGNAL_ENVELOPE_BYTES}-byte cap (Plan A v1.4)."
+            )
         wall_clock = now if now is not None else datetime.now(UTC)
         candidates = await repo.list_eligible_delegates_for_ai_review(
             operator_public_id=request.operator_public_id,
@@ -410,7 +478,7 @@ class AiReviewService:
 
         review_public_id = str(uuid7())
         event_public_id = str(uuid7())
-        envelope_hash = _signal_envelope_hash(request.signal_envelope)
+        envelope_hash = hashlib.sha256(canonical_envelope).hexdigest()
         deadline = wall_clock + timedelta(seconds=request.deadline_seconds)
         fanout_after = wall_clock + timedelta(seconds=policy.fanout_after_seconds)
         candidate_ids = [candidate["public_id"] for candidate in candidates]
