@@ -546,25 +546,47 @@ ZMQ-WebSocket bridge still starts, so the frontend receives live data from
 a separately-running engine. Useful when broker/strategies/executors run
 on different hosts.
 
-**Single-instance constraint (Phase 2 #1, AI-review fanout):** the
-supported deployment topology is currently **exactly one FastAPI
-process per cluster**. Multi-worker uvicorn (multiple FastAPI
-processes sharing a broker) is NOT a supported production path
-until the Phase 2 follow-up lands. Reason: each FastAPI process
-runs its own ``AiReviewService.start_bus_listener`` which
-re-publishes ``bus.caps_violation_after_ai_approve`` events as the
-external ``ai_reviews.*.caps_violation`` WS frame; under
-multi-worker uvicorn each subscriber would re-publish the same
-internal event and connected clients would receive N duplicate
-frames per N processes. The companion ``bus.delegate_offline``
-branch is unaffected because the handler runs an idempotent DB
-CAS UPDATE so only one process wins per row. Tracked Phase 2
-remediation paths: add a per-bus-event idempotency claim column on
-the ``ai_reviews`` row (CAS-protected re-publish), OR partition the
-caps re-publish to a single dedicated worker. The constraint is
-also documented in ``AiReviewService.start_bus_listener``'s
-docstring + on the ``SERVER_API_ONLY`` env var row in
-``docs/configuration.md`` + ``docs/cli.md``.
+**Multi-instance deployment (Plan D Phase 2 #8 — AI-review fanout dedup):**
+multi-worker uvicorn is now a supported production topology. The
+shared ZMQ XPUB-XSUB broker delivers every internal bus event to
+every FastAPI worker's ``AiReviewService.start_bus_listener``;
+each subscribed topic has its own dedup story so connected
+clients see exactly one external WS frame per source event
+regardless of worker count:
+
+- ``bus.delegate_offline`` is idempotent at the DB layer — the
+  handler runs a per-row ``atomic_dispatch_fanout_with_audit`` CAS
+  UPDATE, so only one worker wins per affected review row even when
+  every worker receives the bus event.
+- ``bus.ai_review_decision`` is process-local — the handler resolves
+  an ``asyncio.Future`` from the per-worker registry populated by
+  the worker that ran ``create_review`` for the strategy await loop.
+  Other workers stash the event in a bounded pending-resolution
+  cache (1024-entry hard cap, 30s TTL); cache memory across the
+  cluster is bounded by ``N × 1024`` entries even at peak.
+- ``bus.caps_violation_after_ai_approve`` is gated by deterministic
+  partitioning. ``handle_caps_violation_bus_message`` short-circuits
+  on ``ShardOwnership.owns(msg.review_public_id)``; exactly one
+  worker (the SHA-256 owner of the review row) re-publishes the
+  external ``ai_reviews.*.caps_violation`` frame. Other workers
+  observe the bus event, log a debug skip, and return False.
+  ``instance_count == 1`` (default deployment) makes
+  ``ShardOwnership.owns`` return True unconditionally so behaviour
+  is byte-identical to single-worker.
+
+The same partitioning primitive backs the Trade Runtime Phase 4
+shard ownership; AI-review reuses it via the
+``set_shard_ownership(ShardOwnership(coordinator_instance_id,
+coordinator_instance_count))`` injection seam wired by the FastAPI
+lifespan after the publisher seam and before the bus listener
+starts.
+
+**Operational scaling:** raise
+``SNAPPER_COORDINATOR_INSTANCE_COUNT`` to N and start N FastAPI
+workers each with a distinct ``SNAPPER_COORDINATOR_INSTANCE_ID`` in
+``[0, N)`` (or use the ``--instance-id`` / ``--instance-count`` CLI
+flags). Each worker subscribes to every bus topic; only the SHA-256
+owner runs the caps-violation external fanout.
 
 ## Execution Plans
 

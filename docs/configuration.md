@@ -40,7 +40,7 @@ DB_URL=postgresql+asyncpg://user:password@localhost:5432/snapper
 | `SERVER_RELOAD` | `false` | Auto-reload for development |
 | `SERVER_PROXY_HEADERS` | `true` | Enable proxy header parsing in uvicorn |
 | `SERVER_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted proxy IPs/CIDRs for forwarded headers |
-| `SERVER_API_ONLY` | `false` | Skip process autostart; serve API + WS bridge only (separate-engine boots). **Note:** running multiple FastAPI processes in parallel is currently single-instance-only for the AI-review caps_violation fanout (see `docs/architecture.md` -> Deployment Modes; tracked Phase 2 follow-up will add per-bus-event idempotency claims to lift this constraint) |
+| `SERVER_API_ONLY` | `false` | Skip process autostart; serve API + WS bridge only (separate-engine boots). Multi-worker uvicorn (multiple FastAPI processes sharing a broker) is supported — see `docs/architecture.md` Deployment Modes for the AI-review fanout dedup contract under N>1 (Plan D Phase 2 #8). Set `SNAPPER_COORDINATOR_INSTANCE_ID` + `SNAPPER_COORDINATOR_INSTANCE_COUNT` per worker to enable the shared partitioning. |
 | `TELEMETRY_RECORDING_ENABLED` | `false` | Record pings, heartbeats, and GET reads to `telemetry` table. High volume — enable for debugging only |
 
 ### ZeroMQ
