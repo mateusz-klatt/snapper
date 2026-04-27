@@ -55,6 +55,22 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _decision_audit_event(
+    *, review_id: str, delegate_pid: str, occurred_at: datetime
+) -> dict[str, object]:
+    """Build the audit row expected by the combined resolve primitive."""
+    return {
+        "public_id": str(uuid7()),
+        "review_public_id": review_id,
+        "event_type": "decision_recorded",
+        "actor_delegate_public_id": delegate_pid,
+        "previous_status": "pending",
+        "new_status": "resolved_approved",
+        "payload": {"decision": "approve", "rationale": None},
+        "occurred_at": occurred_at,
+    }
+
+
 async def _seed_delegate(
     repo: SQLAlchemyRepository,
     *,
@@ -197,13 +213,16 @@ async def test_supersede_review_terminal_state_returns_false(
         repo, user_public_id=str(uuid7()), last_seen_at=now, creation_time=now
     )
     review_id = await _seed_review(repo, selected_delegate_public_id=delegate_pid, as_of=now)
-    await repo.atomic_resolve_ai_review(
+    await repo.atomic_resolve_review_with_audit_and_counter(
         review_public_id=review_id,
         decision="approve",
         responding_delegate_public_id=delegate_pid,
         rationale=None,
         resolution_mode="pick_one_primary",
         new_status="resolved_approved",
+        audit_event=_decision_audit_event(
+            review_id=review_id, delegate_pid=delegate_pid, occurred_at=now
+        ),
         now=now,
     )
     won = await svc.supersede_review(
@@ -612,14 +631,14 @@ async def test_reaper_tick_skips_row_lost_to_peer_decision(
         deadline_offset_seconds=60,
     )
 
-    async def _stub_atomic_timeout(*, review_public_id: str, now: datetime) -> None:
-        del review_public_id, now
+    async def _stub_atomic_timeout(**kw: object) -> None:
+        del kw
         fut: asyncio.Future[None] = asyncio.Future()
         fut.set_result(None)
         await fut
         return None
 
-    monkeypatch.setattr(repo, "atomic_timeout_ai_review", _stub_atomic_timeout)
+    monkeypatch.setattr(repo, "atomic_timeout_review_with_audit_and_counter", _stub_atomic_timeout)
     transitioned = await svc._reaper_tick(repo=repo, now=now)
     assert transitioned == 0
     assert (
@@ -660,14 +679,14 @@ async def test_offline_scanner_skips_row_lost_to_peer_dispatch(
         deadline_offset_seconds=300,
     )
 
-    async def _stub_dispatch(*, review_public_id: str, now: datetime) -> None:
-        del review_public_id, now
+    async def _stub_dispatch(**kw: object) -> None:
+        del kw
         fut: asyncio.Future[None] = asyncio.Future()
         fut.set_result(None)
         await fut
         return None
 
-    monkeypatch.setattr(repo, "atomic_dispatch_fanout", _stub_dispatch)
+    monkeypatch.setattr(repo, "atomic_dispatch_fanout_with_audit", _stub_dispatch)
     dispatched = await svc._offline_scanner_tick(repo=repo, now=now)
     assert dispatched == 0
     assert (

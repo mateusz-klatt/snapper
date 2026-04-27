@@ -16,7 +16,7 @@ from uuid import uuid7
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.dml import Update
-from sqlalchemy.sql.expression import Select  # local import; only used here
+from sqlalchemy.sql.expression import Select
 
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AiDelegate
@@ -411,28 +411,6 @@ async def test_insert_and_get_ai_review_round_trip(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
-async def test_insert_ai_review_event_returns_event_id(tmp_path: Path) -> None:
-    """Event insert returns the assigned ``public_id``."""
-    repo = await _build_repo(tmp_path)
-    now = _now()
-    event_id = str(uuid7())
-    returned = await repo.insert_ai_review_event(
-        {
-            "public_id": event_id,
-            "review_public_id": str(uuid7()),
-            "event_type": "decision_recorded",
-            "actor_delegate_public_id": str(uuid7()),
-            "previous_status": "pending",
-            "new_status": "resolved_approved",
-            "payload": {"decision": "approve"},
-            "occurred_at": now,
-        }
-    )
-    assert returned == event_id
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(TEST_TIMEOUT)
 async def test_get_ai_delegate_by_user_public_id_returns_none_when_unknown(
     tmp_path: Path,
 ) -> None:
@@ -533,323 +511,6 @@ async def _seed_pending_for_atomic(
         }
     )
     return review_pid, delegate_pid
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(TEST_TIMEOUT)
-async def test_atomic_resolve_returns_none_for_unknown_review(tmp_path: Path) -> None:
-    """Atomic resolve with an unknown id returns None.
-
-    Given a fresh repository with no reviews,
-    When ``atomic_resolve_ai_review`` is called for an unknown id,
-    Then it returns ``None`` (Step 1 short-circuit).
-    """
-    repo = await _build_repo(tmp_path, "atomic_unknown.db")
-    result = await repo.atomic_resolve_ai_review(
-        review_public_id="ghost",
-        decision="approve",
-        responding_delegate_public_id=str(uuid7()),
-        rationale=None,
-        resolution_mode="pick_one_primary",
-        new_status="resolved_approved",
-        now=datetime.now(UTC),
-    )
-    assert result is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(TEST_TIMEOUT)
-async def test_atomic_resolve_returns_none_when_already_terminal(tmp_path: Path) -> None:
-    """Atomic resolve returns None when status already terminal.
-
-    Given a review row resolved in a prior call,
-    When ``atomic_resolve_ai_review`` is called again,
-    Then it returns ``None`` (the already-terminal status guard fires).
-    """
-    repo = await _build_repo(tmp_path, "atomic_terminal.db")
-    now = datetime.now(UTC)
-    review_pid, delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
-    first = await repo.atomic_resolve_ai_review(
-        review_public_id=review_pid,
-        decision="approve",
-        responding_delegate_public_id=delegate_pid,
-        rationale=None,
-        resolution_mode="pick_one_primary",
-        new_status="resolved_approved",
-        now=now,
-    )
-    assert first is not None
-    second = await repo.atomic_resolve_ai_review(
-        review_public_id=review_pid,
-        decision="approve",
-        responding_delegate_public_id=delegate_pid,
-        rationale=None,
-        resolution_mode="pick_one_primary",
-        new_status="resolved_approved",
-        now=now,
-    )
-    assert second is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(TEST_TIMEOUT)
-async def test_atomic_resolve_returns_none_when_deadline_elapsed(tmp_path: Path) -> None:
-    """Atomic resolve returns None when deadline has already elapsed.
-
-    Given a pending review whose deadline is in the past,
-    When ``atomic_resolve_ai_review`` is called,
-    Then it returns ``None`` (the deadline-gate guard fires).
-    """
-    repo = await _build_repo(tmp_path, "atomic_late.db")
-    seed_at = datetime.now(UTC) - timedelta(seconds=120)
-    review_pid, delegate_pid = await _seed_pending_for_atomic(
-        repo, as_of=seed_at, deadline_offset=60
-    )
-    result = await repo.atomic_resolve_ai_review(
-        review_public_id=review_pid,
-        decision="approve",
-        responding_delegate_public_id=delegate_pid,
-        rationale=None,
-        resolution_mode="pick_one_primary",
-        new_status="resolved_approved",
-        now=datetime.now(UTC),
-    )
-    assert result is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(TEST_TIMEOUT)
-async def test_atomic_resolve_with_for_update_falls_back_on_not_implemented(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """SQLite without ``SELECT FOR UPDATE`` falls back to plain SELECT.
-
-    Given a session executor that raises NotImplementedError on the
-        with_for_update path,
-    When ``atomic_resolve_ai_review`` is called,
-    Then it retries without the lock and still wins the transition.
-    """
-    repo = await _build_repo(tmp_path, "atomic_for_update_fallback.db")
-    now = datetime.now(UTC)
-    review_pid, delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
-
-    original_with_for_update = Select.with_for_update
-
-    def _raise_not_implemented(self: Select) -> Select:
-        raise NotImplementedError("test fallback")
-
-    monkeypatch.setattr(Select, "with_for_update", _raise_not_implemented)
-    try:
-        result = await repo.atomic_resolve_ai_review(
-            review_public_id=review_pid,
-            decision="approve",
-            responding_delegate_public_id=delegate_pid,
-            rationale=None,
-            resolution_mode="pick_one_primary",
-            new_status="resolved_approved",
-            now=now,
-        )
-    finally:
-        monkeypatch.setattr(Select, "with_for_update", original_with_for_update)
-    assert result is not None
-    assert result["previous_status"] == "pending"
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(TEST_TIMEOUT)
-async def test_atomic_resolve_rowcount_zero_returns_none(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Atomic resolve returns None when the UPDATE rowcount is 0.
-
-    Given a stub session.execute that returns a result with rowcount=0,
-    When ``atomic_resolve_ai_review`` runs the UPDATE step,
-    Then it returns ``None`` even though the pre-snapshot looked eligible.
-    """
-    repo = await _build_repo(tmp_path, "atomic_rowcount0.db")
-    now = datetime.now(UTC)
-    review_pid, delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
-
-    original_execute = AsyncSession.execute
-
-    async def _stub_execute(self: _Any, statement: _Any, *a: _Any, **kw: _Any) -> _Any:
-        result = await original_execute(self, statement, *a, **kw)
-
-        if isinstance(statement, Update):
-
-            class _Wrap:
-                rowcount = 0
-
-                def __init__(self, inner: _Any) -> None:
-                    self._inner = inner
-
-                def __getattr__(self, name: str) -> _Any:
-                    return getattr(self._inner, name)
-
-            return _Wrap(result)
-        return result
-
-    monkeypatch.setattr(AsyncSession, "execute", _stub_execute)
-    try:
-        result = await repo.atomic_resolve_ai_review(
-            review_public_id=review_pid,
-            decision="approve",
-            responding_delegate_public_id=delegate_pid,
-            rationale=None,
-            resolution_mode="pick_one_primary",
-            new_status="resolved_approved",
-            now=now,
-        )
-    finally:
-        monkeypatch.setattr(AsyncSession, "execute", original_execute)
-    assert result is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(TEST_TIMEOUT)
-async def test_atomic_timeout_returns_none_for_unknown_review(tmp_path: Path) -> None:
-    """Timeout for an unknown id is a no-op.
-
-    Given a fresh repository,
-    When ``atomic_timeout_ai_review`` is called for an unknown id,
-    Then it returns ``None``.
-    """
-    repo = await _build_repo(tmp_path, "timeout_unknown.db")
-    result = await repo.atomic_timeout_ai_review(
-        review_public_id="ghost",
-        now=datetime.now(UTC),
-    )
-    assert result is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(TEST_TIMEOUT)
-async def test_atomic_timeout_returns_none_when_already_terminal(tmp_path: Path) -> None:
-    """Timeout returns None when row already terminal.
-
-    Given a row already resolved by atomic_resolve,
-    When ``atomic_timeout_ai_review`` runs,
-    Then it returns ``None``.
-    """
-    repo = await _build_repo(tmp_path, "timeout_terminal.db")
-    now = datetime.now(UTC)
-    review_pid, delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
-    await repo.atomic_resolve_ai_review(
-        review_public_id=review_pid,
-        decision="approve",
-        responding_delegate_public_id=delegate_pid,
-        rationale=None,
-        resolution_mode="pick_one_primary",
-        new_status="resolved_approved",
-        now=now,
-    )
-    result = await repo.atomic_timeout_ai_review(
-        review_public_id=review_pid,
-        now=now,
-    )
-    assert result is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(TEST_TIMEOUT)
-async def test_atomic_timeout_wins_for_pending_row(tmp_path: Path) -> None:
-    """Atomic timeout flips a pending row to ``timeout``.
-
-    Given a pending review row,
-    When ``atomic_timeout_ai_review`` is called,
-    Then the row's status becomes ``timeout`` and the result returns
-        the captured selected_delegate_public_id + dispatch_version.
-    """
-    repo = await _build_repo(tmp_path, "timeout_win.db")
-    now = datetime.now(UTC)
-    review_pid, delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
-    result = await repo.atomic_timeout_ai_review(
-        review_public_id=review_pid,
-        now=now,
-    )
-    assert result is not None
-    assert result["selected_delegate_public_id"] == delegate_pid
-    assert result["previous_status"] == "pending"
-    row = await repo.get_ai_review(review_pid)
-    assert row is not None
-    assert row["status"] == "timeout"
-    assert row["resolution_mode"] == "timeout_no_response"
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(TEST_TIMEOUT)
-async def test_atomic_timeout_rowcount_zero_returns_none(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Atomic timeout returns None on UPDATE rowcount=0.
-
-    Given a stub that forces UPDATE rowcount=0,
-    When ``atomic_timeout_ai_review`` is called,
-    Then it returns ``None`` rather than raising.
-    """
-    repo = await _build_repo(tmp_path, "timeout_rowcount0.db")
-    now = datetime.now(UTC)
-    review_pid, _ = await _seed_pending_for_atomic(repo, as_of=now)
-
-    original_execute = AsyncSession.execute
-
-    async def _stub(self: _Any, statement: _Any, *a: _Any, **kw: _Any) -> _Any:
-        result = await original_execute(self, statement, *a, **kw)
-
-        if isinstance(statement, Update):
-
-            class _Wrap:
-                rowcount = 0
-
-                def __init__(self, inner: _Any) -> None:
-                    self._inner = inner
-
-                def __getattr__(self, name: str) -> _Any:
-                    return getattr(self._inner, name)
-
-            return _Wrap(result)
-        return result
-
-    monkeypatch.setattr(AsyncSession, "execute", _stub)
-    try:
-        result = await repo.atomic_timeout_ai_review(
-            review_public_id=review_pid,
-            now=now,
-        )
-    finally:
-        monkeypatch.setattr(AsyncSession, "execute", original_execute)
-    assert result is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(TEST_TIMEOUT)
-async def test_decrement_counter_returns_false_when_already_decremented(
-    tmp_path: Path,
-) -> None:
-    """Decrement returns False on the second call.
-
-    Given a review whose counter slot was claimed by a prior decrement,
-    When ``decrement_delegate_active_count_for_review`` is called again,
-    Then it returns ``False`` (the CAS predicate misses).
-    """
-    repo = await _build_repo(tmp_path, "decrement_idempotent.db")
-    now = datetime.now(UTC)
-    review_pid, delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
-    first = await repo.decrement_delegate_active_count_for_review(
-        review_public_id=review_pid,
-        selected_delegate_public_id=delegate_pid,
-        now=now,
-    )
-    assert first is True
-    second = await repo.decrement_delegate_active_count_for_review(
-        review_public_id=review_pid,
-        selected_delegate_public_id=delegate_pid,
-        now=now,
-    )
-    assert second is False
 
 
 async def _seed_user_row(
@@ -1540,37 +1201,649 @@ async def test_claim_and_insert_returns_none_for_empty_candidate_list(
     assert await repo.get_ai_review(review_id) is None
 
 
-@pytest.mark.asyncio
-@pytest.mark.timeout(TEST_TIMEOUT)
-async def test_atomic_supersede_unknown_id_returns_none(tmp_path: Path) -> None:
-    """Unknown review_id -> ``atomic_supersede_ai_review`` returns ``None``.
+def _audit_event_for(
+    *,
+    review_pid: str,
+    event_type: str,
+    new_status: str,
+    actor_delegate_public_id: str | None,
+    payload: dict[str, _Any],
+    occurred_at: datetime,
+    previous_status: str = "pending",
+) -> dict[str, _Any]:
+    """Build a minimal :class:`AiReviewEventInsertRow` for the combined primitives.
 
-    Given an empty repository,
-    When atomic_supersede_ai_review runs against a public_id that does
-    not exist,
-    Then it returns None at the SELECT-step pre_row guard.
+    The combined-primitive tests below all need a complete
+    ``AiReviewEventInsertRow`` payload but the ``previous_status`` field
+    is overwritten by the primitive's SELECT-FOR-UPDATE result so the
+    sentinel passed here is irrelevant for correctness — kept "pending"
+    for readability.
     """
-    repo = await _build_repo(tmp_path, "supersede_unknown.db")
-    result = await repo.atomic_supersede_ai_review(review_public_id="ghost-id", now=_now())
-    assert result is None
+    return {
+        "public_id": str(uuid7()),
+        "review_public_id": review_pid,
+        "event_type": event_type,
+        "actor_delegate_public_id": actor_delegate_public_id,
+        "previous_status": previous_status,
+        "new_status": new_status,
+        "payload": payload,
+        "occurred_at": occurred_at,
+    }
+
+
+async def _fetch_audit_event_payloads(
+    repo: SQLAlchemyRepository, *, review_pid: str
+) -> list[dict[str, _Any]]:
+    """Read every ``ai_review_events`` row for ``review_pid`` ordered by ``occurred_at``."""
+    async with repo.session() as s:
+        rows = (
+            await s.execute(
+                __import__("sqlalchemy")
+                .select(
+                    AiReviewEvent.event_type,
+                    AiReviewEvent.previous_status,
+                    AiReviewEvent.new_status,
+                    AiReviewEvent.payload,
+                    AiReviewEvent.occurred_at,
+                    AiReviewEvent.actor_delegate_public_id,
+                )
+                .where(AiReviewEvent.review_public_id == review_pid)
+                .order_by(AiReviewEvent.occurred_at.asc())
+            )
+        ).all()
+    return [
+        {
+            "event_type": str(r[0]),
+            "previous_status": str(r[1]) if r[1] is not None else None,
+            "new_status": str(r[2]),
+            "payload": dict(r[3]),
+            "occurred_at": r[4],
+            "actor_delegate_public_id": r[5],
+        }
+        for r in rows
+    ]
+
+
+async def _fetch_delegate_counter(
+    repo: SQLAlchemyRepository, *, delegate_pid: str
+) -> tuple[int, datetime | None]:
+    """Return ``(active_reviews_count, ai_reviews.counter_decremented_at)`` for the test row."""
+    async with repo.session() as s:
+        delegate = (
+            await s.execute(
+                __import__("sqlalchemy")
+                .select(AiDelegate.active_reviews_count)
+                .where(AiDelegate.public_id == delegate_pid)
+            )
+        ).scalar_one()
+        decremented = (
+            await s.execute(
+                __import__("sqlalchemy")
+                .select(AiReview.counter_decremented_at)
+                .where(AiReview.selected_delegate_public_id == delegate_pid)
+            )
+        ).scalar_one_or_none()
+    return int(delegate), decremented
+
+
+async def _seed_pending_with_active_counter(
+    repo: SQLAlchemyRepository, *, as_of: datetime, deadline_offset: int = 60
+) -> tuple[str, str]:
+    """Seed a delegate with ``active_reviews_count = 1`` + a pending review row."""
+    review_pid, delegate_pid = await _seed_pending_for_atomic(
+        repo, as_of=as_of, deadline_offset=deadline_offset
+    )
+    async with repo.session() as s:
+        await s.execute(
+            __import__("sqlalchemy")
+            .update(AiDelegate)
+            .where(AiDelegate.public_id == delegate_pid)
+            .values(active_reviews_count=1, updated_at=as_of)
+        )
+        await s.commit()
+    return review_pid, delegate_pid
 
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
-async def test_atomic_supersede_rowcount_zero_returns_none(
+async def test_combined_resolve_with_audit_and_counter_atomic_happy_path(
+    tmp_path: Path,
+) -> None:
+    """Plan D Phase 2 #8 — combined resolve + audit + counter happens in ONE transaction.
+
+    Given a pending review with the delegate's counter elevated to 1,
+    When :meth:`atomic_resolve_review_with_audit_and_counter` wins the CAS,
+    Then the row flips to ``resolved_approved``, the audit event lands with
+    ``previous_status='pending'`` (captured BY the primitive, not the caller),
+    and the delegate counter is decremented to 0 with
+    ``counter_decremented_at`` non-NULL.
+    """
+    repo = await _build_repo(tmp_path, "combined_resolve.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
+    audit = _audit_event_for(
+        review_pid=review_pid,
+        event_type="decision_recorded",
+        new_status="resolved_approved",
+        actor_delegate_public_id=delegate_pid,
+        payload={"decision": "approve", "rationale": None},
+        occurred_at=now,
+        previous_status="ignored-sentinel",
+    )
+    result = await repo.atomic_resolve_review_with_audit_and_counter(
+        review_public_id=review_pid,
+        decision="approve",
+        responding_delegate_public_id=delegate_pid,
+        rationale=None,
+        resolution_mode="pick_one_primary",
+        new_status="resolved_approved",
+        audit_event=audit,
+        now=now,
+    )
+    assert result is not None
+    assert result["selected_delegate_public_id"] == delegate_pid
+    assert result["previous_status"] == "pending"
+    row = await repo.get_ai_review(review_pid)
+    assert row is not None
+    assert row["status"] == "resolved_approved"
+    audit_rows = await _fetch_audit_event_payloads(repo, review_pid=review_pid)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["event_type"] == "decision_recorded"
+    assert audit_rows[0]["previous_status"] == "pending"
+    counter, decremented_at = await _fetch_delegate_counter(repo, delegate_pid=delegate_pid)
+    assert counter == 0
+    assert decremented_at is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_combined_resolve_returns_none_when_already_terminal(tmp_path: Path) -> None:
+    """Combined resolve no-ops on already-terminal rows + writes nothing.
+
+    Given a row already resolved by a prior call,
+    When :meth:`atomic_resolve_review_with_audit_and_counter` is called,
+    Then it returns ``None``, no second audit event lands, and the
+    delegate counter is not double-decremented.
+    """
+    repo = await _build_repo(tmp_path, "combined_resolve_terminal.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
+    first_audit = _audit_event_for(
+        review_pid=review_pid,
+        event_type="decision_recorded",
+        new_status="resolved_approved",
+        actor_delegate_public_id=delegate_pid,
+        payload={"decision": "approve"},
+        occurred_at=now,
+    )
+    await repo.atomic_resolve_review_with_audit_and_counter(
+        review_public_id=review_pid,
+        decision="approve",
+        responding_delegate_public_id=delegate_pid,
+        rationale=None,
+        resolution_mode="pick_one_primary",
+        new_status="resolved_approved",
+        audit_event=first_audit,
+        now=now,
+    )
+    second_audit = _audit_event_for(
+        review_pid=review_pid,
+        event_type="decision_recorded",
+        new_status="resolved_approved",
+        actor_delegate_public_id=delegate_pid,
+        payload={"decision": "approve"},
+        occurred_at=now,
+    )
+    second = await repo.atomic_resolve_review_with_audit_and_counter(
+        review_public_id=review_pid,
+        decision="approve",
+        responding_delegate_public_id=delegate_pid,
+        rationale=None,
+        resolution_mode="pick_one_primary",
+        new_status="resolved_approved",
+        audit_event=second_audit,
+        now=now,
+    )
+    assert second is None
+    audit_rows = await _fetch_audit_event_payloads(repo, review_pid=review_pid)
+    assert len(audit_rows) == 1
+    counter, _ = await _fetch_delegate_counter(repo, delegate_pid=delegate_pid)
+    assert counter == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_combined_resolve_returns_none_when_deadline_elapsed(tmp_path: Path) -> None:
+    """Combined resolve respects the deadline gate (no transition past deadline)."""
+    repo = await _build_repo(tmp_path, "combined_resolve_late.db")
+    seed_at = datetime.now(UTC) - timedelta(seconds=120)
+    review_pid, delegate_pid = await _seed_pending_with_active_counter(
+        repo, as_of=seed_at, deadline_offset=60
+    )
+    audit = _audit_event_for(
+        review_pid=review_pid,
+        event_type="decision_recorded",
+        new_status="resolved_approved",
+        actor_delegate_public_id=delegate_pid,
+        payload={"decision": "approve"},
+        occurred_at=datetime.now(UTC),
+    )
+    result = await repo.atomic_resolve_review_with_audit_and_counter(
+        review_public_id=review_pid,
+        decision="approve",
+        responding_delegate_public_id=delegate_pid,
+        rationale=None,
+        resolution_mode="pick_one_primary",
+        new_status="resolved_approved",
+        audit_event=audit,
+        now=datetime.now(UTC),
+    )
+    assert result is None
+    audit_rows = await _fetch_audit_event_payloads(repo, review_pid=review_pid)
+    assert len(audit_rows) == 0
+    counter, decremented = await _fetch_delegate_counter(repo, delegate_pid=delegate_pid)
+    assert counter == 1
+    assert decremented is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_combined_timeout_with_audit_and_counter_atomic_happy_path(
+    tmp_path: Path,
+) -> None:
+    """Plan D Phase 2 #8 — combined timeout + audit + counter atomically transitions."""
+    repo = await _build_repo(tmp_path, "combined_timeout.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
+    audit = _audit_event_for(
+        review_pid=review_pid,
+        event_type="timeout_marked",
+        new_status="timeout",
+        actor_delegate_public_id=None,
+        payload={"trigger": "test"},
+        occurred_at=now,
+    )
+    result = await repo.atomic_timeout_review_with_audit_and_counter(
+        review_public_id=review_pid,
+        audit_event=audit,
+        now=now,
+    )
+    assert result is not None
+    assert result["selected_delegate_public_id"] == delegate_pid
+    assert result["previous_status"] == "pending"
+    row = await repo.get_ai_review(review_pid)
+    assert row is not None
+    assert row["status"] == "timeout"
+    assert row["resolution_mode"] == "timeout_no_response"
+    audit_rows = await _fetch_audit_event_payloads(repo, review_pid=review_pid)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["event_type"] == "timeout_marked"
+    counter, decremented = await _fetch_delegate_counter(repo, delegate_pid=delegate_pid)
+    assert counter == 0
+    assert decremented is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_combined_timeout_returns_none_when_already_terminal(tmp_path: Path) -> None:
+    """Combined timeout no-ops on already-terminal rows."""
+    repo = await _build_repo(tmp_path, "combined_timeout_terminal.db")
+    now = datetime.now(UTC)
+    review_pid, _delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
+    await repo.atomic_timeout_review_with_audit_and_counter(
+        review_public_id=review_pid,
+        audit_event=_audit_event_for(
+            review_pid=review_pid,
+            event_type="timeout_marked",
+            new_status="timeout",
+            actor_delegate_public_id=None,
+            payload={"trigger": "first"},
+            occurred_at=now,
+        ),
+        now=now,
+    )
+    second = await repo.atomic_timeout_review_with_audit_and_counter(
+        review_public_id=review_pid,
+        audit_event=_audit_event_for(
+            review_pid=review_pid,
+            event_type="timeout_marked",
+            new_status="timeout",
+            actor_delegate_public_id=None,
+            payload={"trigger": "second"},
+            occurred_at=now,
+        ),
+        now=now,
+    )
+    assert second is None
+    audit_rows = await _fetch_audit_event_payloads(repo, review_pid=review_pid)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["payload"]["trigger"] == "first"
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_combined_supersede_with_audit_and_counter_atomic_happy_path(
+    tmp_path: Path,
+) -> None:
+    """Plan D Phase 2 #8 — combined supersede + audit + counter atomically transitions."""
+    repo = await _build_repo(tmp_path, "combined_supersede.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
+    audit = _audit_event_for(
+        review_pid=review_pid,
+        event_type="superseded",
+        new_status="superseded",
+        actor_delegate_public_id=None,
+        payload={"reason": "strategy abandoned"},
+        occurred_at=now,
+    )
+    result = await repo.atomic_supersede_review_with_audit_and_counter(
+        review_public_id=review_pid,
+        audit_event=audit,
+        now=now,
+    )
+    assert result is not None
+    assert result["selected_delegate_public_id"] == delegate_pid
+    row = await repo.get_ai_review(review_pid)
+    assert row is not None
+    assert row["status"] == "superseded"
+    assert row["resolution_mode"] == "superseded_by_strategy"
+    audit_rows = await _fetch_audit_event_payloads(repo, review_pid=review_pid)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["payload"]["reason"] == "strategy abandoned"
+    counter, _ = await _fetch_delegate_counter(repo, delegate_pid=delegate_pid)
+    assert counter == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_combined_supersede_returns_none_when_already_terminal(tmp_path: Path) -> None:
+    """Combined supersede no-ops on already-terminal rows."""
+    repo = await _build_repo(tmp_path, "combined_supersede_terminal.db")
+    now = datetime.now(UTC)
+    review_pid, _delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
+    await repo.atomic_supersede_review_with_audit_and_counter(
+        review_public_id=review_pid,
+        audit_event=_audit_event_for(
+            review_pid=review_pid,
+            event_type="superseded",
+            new_status="superseded",
+            actor_delegate_public_id=None,
+            payload={"reason": "first"},
+            occurred_at=now,
+        ),
+        now=now,
+    )
+    second = await repo.atomic_supersede_review_with_audit_and_counter(
+        review_public_id=review_pid,
+        audit_event=_audit_event_for(
+            review_pid=review_pid,
+            event_type="superseded",
+            new_status="superseded",
+            actor_delegate_public_id=None,
+            payload={"reason": "second"},
+            occurred_at=now,
+        ),
+        now=now,
+    )
+    assert second is None
+    audit_rows = await _fetch_audit_event_payloads(repo, review_pid=review_pid)
+    assert len(audit_rows) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_combined_resolve_audit_uses_actual_previous_status_not_caller_sentinel(
+    tmp_path: Path,
+) -> None:
+    """Plan D Phase 2 #8 / Finding B — primitive overrides caller-supplied previous_status.
+
+    The audit-event row's ``previous_status`` field MUST come from the
+    SELECT-FOR-UPDATE inside the primitive's transaction, not from the
+    caller's ``audit_event["previous_status"]`` value (which could be
+    stale if a peer transitioned mid-flight). This test passes a
+    deliberately-wrong sentinel ('fanout_dispatched') for a row that's
+    actually in 'pending' and verifies the audit row records 'pending'.
+    """
+    repo = await _build_repo(tmp_path, "combined_resolve_audit_truth.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
+    await repo.atomic_resolve_review_with_audit_and_counter(
+        review_public_id=review_pid,
+        decision="approve",
+        responding_delegate_public_id=delegate_pid,
+        rationale=None,
+        resolution_mode="pick_one_primary",
+        new_status="resolved_approved",
+        audit_event=_audit_event_for(
+            review_pid=review_pid,
+            event_type="decision_recorded",
+            new_status="resolved_approved",
+            actor_delegate_public_id=delegate_pid,
+            payload={"decision": "approve"},
+            occurred_at=now,
+            previous_status="fanout_dispatched",
+        ),
+        now=now,
+    )
+    audit_rows = await _fetch_audit_event_payloads(repo, review_pid=review_pid)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["previous_status"] == "pending", (
+        "Phase 2 #8 Finding B: primitive must capture previous_status from SELECT-FOR-UPDATE "
+        "rather than trust the caller-supplied audit_event['previous_status'] sentinel"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_combined_dispatch_fanout_with_audit_atomic_happy_path(tmp_path: Path) -> None:
+    """Plan D Phase 2 #8 — combined dispatch fanout + audit happens in ONE transaction.
+
+    Given a pending review past fanout_after,
+    When :meth:`atomic_dispatch_fanout_with_audit` wins the CAS,
+    Then the row flips to ``fanout_dispatched`` with version+1, AND the
+    audit-event row is appended with ``payload.dispatch_version`` matching
+    the post-UPDATE version (NOT whatever the caller put in the payload
+    field).
+    """
+    repo = await _build_repo(tmp_path, "combined_fanout.db")
+    now = datetime.now(UTC)
+    review_pid, _delegate_pid = await _seed_pending_for_atomic(repo, as_of=now)
+    audit = _audit_event_for(
+        review_pid=review_pid,
+        event_type="fanout_dispatched",
+        new_status="fanout_dispatched",
+        actor_delegate_public_id=None,
+        payload={"trigger": "test", "dispatch_version": 99},
+        occurred_at=now,
+    )
+    new_version = await repo.atomic_dispatch_fanout_with_audit(
+        review_public_id=review_pid,
+        audit_event=audit,
+        now=now,
+    )
+    assert new_version == 1
+    row = await repo.get_ai_review(review_pid)
+    assert row is not None
+    assert row["status"] == "fanout_dispatched"
+    audit_rows = await _fetch_audit_event_payloads(repo, review_pid=review_pid)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["payload"]["dispatch_version"] == 1, (
+        "Phase 2 #8: primitive must overwrite caller's payload.dispatch_version with "
+        "the actual post-UPDATE incremented version"
+    )
+    assert audit_rows[0]["payload"]["trigger"] == "test"
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_combined_dispatch_fanout_returns_none_for_non_pending_row(
+    tmp_path: Path,
+) -> None:
+    """Combined dispatch_fanout returns None when row is not pending (peer race)."""
+    repo = await _build_repo(tmp_path, "combined_fanout_race.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
+    await repo.atomic_resolve_review_with_audit_and_counter(
+        review_public_id=review_pid,
+        decision="approve",
+        responding_delegate_public_id=delegate_pid,
+        rationale=None,
+        resolution_mode="pick_one_primary",
+        new_status="resolved_approved",
+        audit_event=_audit_event_for(
+            review_pid=review_pid,
+            event_type="decision_recorded",
+            new_status="resolved_approved",
+            actor_delegate_public_id=delegate_pid,
+            payload={"decision": "approve"},
+            occurred_at=now,
+        ),
+        now=now,
+    )
+    audit = _audit_event_for(
+        review_pid=review_pid,
+        event_type="fanout_dispatched",
+        new_status="fanout_dispatched",
+        actor_delegate_public_id=None,
+        payload={"trigger": "test", "dispatch_version": 0},
+        occurred_at=now,
+    )
+    new_version = await repo.atomic_dispatch_fanout_with_audit(
+        review_public_id=review_pid,
+        audit_event=audit,
+        now=now,
+    )
+    assert new_version is None
+    audit_rows = await _fetch_audit_event_payloads(repo, review_pid=review_pid)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["event_type"] == "decision_recorded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_combined_resolve_with_for_update_falls_back_on_not_implemented(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """UPDATE rowcount=0 -> ``atomic_supersede_ai_review`` returns ``None``.
+    """SQLite without ``SELECT FOR UPDATE`` falls back to plain SELECT.
 
-    Given a stub that forces UPDATE rowcount=0 (peer transitioned the
-    row between SELECT and CAS UPDATE),
-    When atomic_supersede_ai_review is called,
-    Then it returns None rather than crashing on the post-UPDATE SELECT.
+    Plan D Phase 2 #8 — the new combined primitives share
+    ``_select_for_update_pre_state`` which catches NotImplementedError on
+    engines without row-level locking and falls back to a plain SELECT
+    (the connection-level write lock provides equivalent serialisation
+    on SQLite).
+
+    Given a session executor that raises NotImplementedError on the
+    with_for_update path,
+    When the combined resolve primitive runs,
+    Then it retries without the lock and still wins the transition.
     """
-    repo = await _build_repo(tmp_path, "supersede_rowcount0.db")
-    now = _now()
-    review_pid, _ = await _seed_pending_for_atomic(repo, as_of=now)
+    repo = await _build_repo(tmp_path, "combined_for_update_fallback.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
+    original_with_for_update = Select.with_for_update
+
+    def _raise_not_implemented(self: Select) -> Select:
+        raise NotImplementedError("test fallback")
+
+    monkeypatch.setattr(Select, "with_for_update", _raise_not_implemented)
+    try:
+        result = await repo.atomic_resolve_review_with_audit_and_counter(
+            review_public_id=review_pid,
+            decision="approve",
+            responding_delegate_public_id=delegate_pid,
+            rationale=None,
+            resolution_mode="pick_one_primary",
+            new_status="resolved_approved",
+            audit_event=_audit_event_for(
+                review_pid=review_pid,
+                event_type="decision_recorded",
+                new_status="resolved_approved",
+                actor_delegate_public_id=delegate_pid,
+                payload={"decision": "approve"},
+                occurred_at=now,
+            ),
+            now=now,
+        )
+    finally:
+        monkeypatch.setattr(Select, "with_for_update", original_with_for_update)
+    assert result is not None
+    assert result["previous_status"] == "pending"
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_combined_decrement_in_session_no_op_when_counter_already_claimed(
+    tmp_path: Path,
+) -> None:
+    """Counter-claim CAS short-circuits when ``counter_decremented_at`` is already set.
+
+    Plan D Phase 2 #8 — the helper :meth:`_decrement_delegate_counter_in_session`
+    uses a CAS UPDATE with predicate ``counter_decremented_at IS NULL``.
+    A peer that already claimed the slot leaves the predicate False, so
+    the second caller's UPDATE rowcount is 0 and the helper returns
+    False without touching the delegate counter (preventing a
+    double-decrement).
+
+    Given a review row whose counter_decremented_at is pre-populated,
+    When the combined supersede primitive tries to claim the slot,
+    Then the supersede transition still wins (status is set), the
+    audit event lands, but the delegate counter is NOT decremented
+    (since the slot was already claimed before this call).
+    """
+    repo = await _build_repo(tmp_path, "combined_decrement_already_claimed.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
+    async with repo.session() as s:
+        await s.execute(
+            __import__("sqlalchemy")
+            .update(AiReview)
+            .where(AiReview.public_id == review_pid)
+            .values(counter_decremented_at=now, updated_at=now)
+        )
+        await s.commit()
+    result = await repo.atomic_supersede_review_with_audit_and_counter(
+        review_public_id=review_pid,
+        audit_event=_audit_event_for(
+            review_pid=review_pid,
+            event_type="superseded",
+            new_status="superseded",
+            actor_delegate_public_id=None,
+            payload={"reason": "test"},
+            occurred_at=now,
+        ),
+        now=now,
+    )
+    assert result is not None
+    counter, _ = await _fetch_delegate_counter(repo, delegate_pid=delegate_pid)
+    assert counter == 1, (
+        "delegate counter must NOT be decremented again when the per-review "
+        "counter_decremented_at slot was already claimed by a peer"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_combined_resolve_rowcount_zero_rolls_back_and_returns_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Combined resolve rolls back + returns None when UPDATE rowcount is 0.
+
+    Plan D Phase 2 #8 — covers the rollback branch where the SELECT
+    pre-state passed all gates (status pending, deadline > now) but the
+    subsequent UPDATE found zero matching rows (peer transitioned the
+    row in the SELECT-then-UPDATE gap on engines without row locks).
+
+    Given a stub that forces every UPDATE to report rowcount=0,
+    When the combined resolve primitive runs,
+    Then it rolls back, returns None, and writes neither the audit row
+    nor the counter decrement.
+    """
+    repo = await _build_repo(tmp_path, "combined_resolve_rowcount0.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
     original_execute = AsyncSession.execute
 
     async def _stub(self: _Any, statement: _Any, *a: _Any, **kw: _Any) -> _Any:
@@ -1591,28 +1864,43 @@ async def test_atomic_supersede_rowcount_zero_returns_none(
 
     monkeypatch.setattr(AsyncSession, "execute", _stub)
     try:
-        result = await repo.atomic_supersede_ai_review(review_public_id=review_pid, now=now)
+        result = await repo.atomic_resolve_review_with_audit_and_counter(
+            review_public_id=review_pid,
+            decision="approve",
+            responding_delegate_public_id=delegate_pid,
+            rationale=None,
+            resolution_mode="pick_one_primary",
+            new_status="resolved_approved",
+            audit_event=_audit_event_for(
+                review_pid=review_pid,
+                event_type="decision_recorded",
+                new_status="resolved_approved",
+                actor_delegate_public_id=delegate_pid,
+                payload={"decision": "approve"},
+                occurred_at=now,
+            ),
+            now=now,
+        )
     finally:
         monkeypatch.setattr(AsyncSession, "execute", original_execute)
     assert result is None
+    audit_rows = await _fetch_audit_event_payloads(repo, review_pid=review_pid)
+    assert len(audit_rows) == 0
+    counter, decremented = await _fetch_delegate_counter(repo, delegate_pid=delegate_pid)
+    assert counter == 1
+    assert decremented is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
-async def test_atomic_dispatch_fanout_rowcount_zero_returns_none(
+async def test_combined_timeout_rowcount_zero_rolls_back_and_returns_none(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """UPDATE rowcount=0 -> ``atomic_dispatch_fanout`` returns ``None``.
-
-    Given a stub that forces UPDATE rowcount=0 (peer transitioned the
-    row away from 'pending' between snapshot and CAS),
-    When atomic_dispatch_fanout is called,
-    Then it returns None and does not crash on the post-UPDATE SELECT.
-    """
-    repo = await _build_repo(tmp_path, "dispatch_rowcount0.db")
-    now = _now()
-    review_pid, _ = await _seed_pending_for_atomic(repo, as_of=now)
+    """Combined timeout rolls back + returns None when UPDATE rowcount is 0."""
+    repo = await _build_repo(tmp_path, "combined_timeout_rowcount0.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
     original_execute = AsyncSession.execute
 
     async def _stub(self: _Any, statement: _Any, *a: _Any, **kw: _Any) -> _Any:
@@ -1633,7 +1921,71 @@ async def test_atomic_dispatch_fanout_rowcount_zero_returns_none(
 
     monkeypatch.setattr(AsyncSession, "execute", _stub)
     try:
-        result = await repo.atomic_dispatch_fanout(review_public_id=review_pid, now=now)
+        result = await repo.atomic_timeout_review_with_audit_and_counter(
+            review_public_id=review_pid,
+            audit_event=_audit_event_for(
+                review_pid=review_pid,
+                event_type="timeout_marked",
+                new_status="timeout",
+                actor_delegate_public_id=None,
+                payload={"trigger": "test"},
+                occurred_at=now,
+            ),
+            now=now,
+        )
     finally:
         monkeypatch.setattr(AsyncSession, "execute", original_execute)
     assert result is None
+    counter, decremented = await _fetch_delegate_counter(repo, delegate_pid=delegate_pid)
+    assert counter == 1
+    assert decremented is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_combined_supersede_rowcount_zero_rolls_back_and_returns_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Combined supersede rolls back + returns None when UPDATE rowcount is 0."""
+    repo = await _build_repo(tmp_path, "combined_supersede_rowcount0.db")
+    now = datetime.now(UTC)
+    review_pid, delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
+    original_execute = AsyncSession.execute
+
+    async def _stub(self: _Any, statement: _Any, *a: _Any, **kw: _Any) -> _Any:
+        result = await original_execute(self, statement, *a, **kw)
+        if isinstance(statement, Update):
+
+            class _Wrap:
+                rowcount = 0
+
+                def __init__(self, inner: _Any) -> None:
+                    self._inner = inner
+
+                def __getattr__(self, name: str) -> _Any:
+                    return getattr(self._inner, name)
+
+            return _Wrap(result)
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", _stub)
+    try:
+        result = await repo.atomic_supersede_review_with_audit_and_counter(
+            review_public_id=review_pid,
+            audit_event=_audit_event_for(
+                review_pid=review_pid,
+                event_type="superseded",
+                new_status="superseded",
+                actor_delegate_public_id=None,
+                payload={"reason": "test"},
+                occurred_at=now,
+            ),
+            now=now,
+        )
+    finally:
+        monkeypatch.setattr(AsyncSession, "execute", original_execute)
+    assert result is None
+    counter, decremented = await _fetch_delegate_counter(repo, delegate_pid=delegate_pid)
+    assert counter == 1
+    assert decremented is None

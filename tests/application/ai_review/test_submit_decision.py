@@ -91,6 +91,29 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _decision_audit_event(
+    *,
+    review_id: str,
+    delegate_pid: str,
+    decision: AiReviewDecisionEnum,
+    occurred_at: datetime,
+    rationale: str | None,
+) -> dict[str, object]:
+    """Build the audit row expected by the combined resolve primitive."""
+    return {
+        "public_id": str(uuid7()),
+        "review_public_id": review_id,
+        "event_type": "decision_recorded",
+        "actor_delegate_public_id": delegate_pid,
+        "previous_status": "pending",
+        "new_status": (
+            "resolved_approved" if decision is AiReviewDecisionEnum.APPROVE else "resolved_rejected"
+        ),
+        "payload": {"decision": decision.value, "rationale": rationale},
+        "occurred_at": occurred_at,
+    }
+
+
 async def _seed_delegate(
     repo: SQLAlchemyRepository, *, user_public_id: str, as_of: datetime
 ) -> str:
@@ -468,13 +491,20 @@ async def test_late_decision_after_already_terminal_skips_timeout_path(
         as_of=seed_at,
         deadline_offset_seconds=60,
     )
-    await repo.atomic_resolve_ai_review(
+    await repo.atomic_resolve_review_with_audit_and_counter(
         review_public_id=review_id,
         decision="approve",
         responding_delegate_public_id=delegate_pid,
         rationale="early",
         resolution_mode="pick_one_primary",
         new_status="resolved_approved",
+        audit_event=_decision_audit_event(
+            review_id=review_id,
+            delegate_pid=delegate_pid,
+            decision=AiReviewDecisionEnum.APPROVE,
+            occurred_at=seed_at + timedelta(seconds=10),
+            rationale="early",
+        ),
         now=seed_at + timedelta(seconds=10),
     )
     other_user = str(uuid7())
@@ -605,7 +635,7 @@ async def test_late_decision_lost_to_concurrent_resolve_falls_through_to_peer(
 ) -> None:
     """Deadline-passed + already-terminal-by-peer: returns peer-resolved.
 
-    Exercises the ``atomic_timeout_ai_review`` returns-None branch in the
+    Exercises the combined timeout primitive returns-None branch in the
     submit_decision late-decision path: the caller observes the deadline
     has elapsed but the timeout transition has nothing to do because a peer
     decision got there first.
@@ -625,13 +655,20 @@ async def test_late_decision_lost_to_concurrent_resolve_falls_through_to_peer(
         as_of=seed_at,
         deadline_offset_seconds=60,
     )
-    await repo.atomic_resolve_ai_review(
+    await repo.atomic_resolve_review_with_audit_and_counter(
         review_public_id=review_id,
         decision="approve",
         responding_delegate_public_id=delegate_pid,
         rationale=None,
         resolution_mode="pick_one_primary",
         new_status="resolved_approved",
+        audit_event=_decision_audit_event(
+            review_id=review_id,
+            delegate_pid=delegate_pid,
+            decision=AiReviewDecisionEnum.APPROVE,
+            occurred_at=seed_at + timedelta(seconds=10),
+            rationale=None,
+        ),
         now=seed_at + timedelta(seconds=10),
     )
     other_user = str(uuid7())
@@ -654,7 +691,7 @@ async def test_atomic_resolve_returns_none_falls_through_to_peer(
     repo: SQLAlchemyRepository,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When ``atomic_resolve_ai_review`` returns ``None`` mid-flight, we re-read.
+    """When the combined resolve primitive returns ``None`` mid-flight, we re-read.
 
     Simulates a concurrent peer resolving between the initial scope check and
     the atomic UPDATE. The submit_decision path must re-read and surface
@@ -673,7 +710,7 @@ async def test_atomic_resolve_returns_none_falls_through_to_peer(
         repo, selected_delegate_public_id=delegate_pid, as_of=now
     )
 
-    original_atomic = repo.atomic_resolve_ai_review
+    original_atomic = repo.atomic_resolve_review_with_audit_and_counter
 
     async def _atomic_then_peer(**kw: object) -> None:
         del kw
@@ -684,11 +721,21 @@ async def test_atomic_resolve_returns_none_falls_through_to_peer(
             rationale="peer beat us",
             resolution_mode="pick_one_primary",
             new_status="resolved_rejected",
+            audit_event={
+                "public_id": str(uuid7()),
+                "review_public_id": review_id,
+                "event_type": "decision_recorded",
+                "actor_delegate_public_id": delegate_pid,
+                "previous_status": "pending",
+                "new_status": "resolved_rejected",
+                "payload": {"decision": "reject", "rationale": "peer beat us"},
+                "occurred_at": now,
+            },
             now=now,
         )
         return None
 
-    monkeypatch.setattr(repo, "atomic_resolve_ai_review", _atomic_then_peer)
+    monkeypatch.setattr(repo, "atomic_resolve_review_with_audit_and_counter", _atomic_then_peer)
 
     result = await svc.submit_decision(
         review_public_id=review_id,
@@ -737,7 +784,7 @@ async def test_late_decision_atomic_timeout_returns_none_still_returns_expired(
         del kw
         return None
 
-    monkeypatch.setattr(repo, "atomic_timeout_ai_review", _timeout_returns_none)
+    monkeypatch.setattr(repo, "atomic_timeout_review_with_audit_and_counter", _timeout_returns_none)
     result = await svc.submit_decision(
         review_public_id=review_id,
         caller_user_public_id=user_pid,
@@ -787,7 +834,7 @@ async def test_atomic_resolve_returns_none_then_row_disappeared(
             return None
         return await original_get(rid)
 
-    monkeypatch.setattr(repo, "atomic_resolve_ai_review", _resolve_returns_none)
+    monkeypatch.setattr(repo, "atomic_resolve_review_with_audit_and_counter", _resolve_returns_none)
     monkeypatch.setattr(repo, "get_ai_review", _get_then_disappear)
 
     result = await svc.submit_decision(
@@ -875,7 +922,7 @@ async def test_submit_decision_does_not_publish_on_terminal_shortcut(
 
     Terminal-state shortcuts return ``decision_already_recorded`` or
     ``review_already_resolved_by_peer`` WITHOUT touching
-    atomic_resolve_ai_review (no commit, no state change). The
+    the combined resolve primitive (no commit, no state change). The
     publisher therefore must not fire — there is no fresh decision to
     fan out and the original decision's bus event already fired.
 

@@ -64,6 +64,29 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _decision_audit_event(
+    *,
+    review_id: str,
+    delegate_pid: str,
+    decision: AiReviewDecisionEnum,
+    occurred_at: datetime,
+    rationale: str | None,
+) -> dict[str, object]:
+    """Build the audit row expected by the combined resolve primitive."""
+    return {
+        "public_id": str(uuid7()),
+        "review_public_id": review_id,
+        "event_type": "decision_recorded",
+        "actor_delegate_public_id": delegate_pid,
+        "previous_status": "pending",
+        "new_status": (
+            "resolved_approved" if decision is AiReviewDecisionEnum.APPROVE else "resolved_rejected"
+        ),
+        "payload": {"decision": decision.value, "rationale": rationale},
+        "occurred_at": occurred_at,
+    }
+
+
 async def _seed_eligible_setup(repo: SQLAlchemyRepository, *, as_of: datetime) -> dict[str, str]:
     """Seed user + role + membership + grant + live delegate for create_review."""
     user_public_id = str(uuid7())
@@ -210,13 +233,20 @@ async def _resolve_review_after_delay(
     new_status = (
         "resolved_approved" if decision is AiReviewDecisionEnum.APPROVE else "resolved_rejected"
     )
-    await repo.atomic_resolve_ai_review(
+    await repo.atomic_resolve_review_with_audit_and_counter(
         review_public_id=review_id,
         decision=decision.value,
         responding_delegate_public_id=delegate_pid,
         rationale="background",
         resolution_mode="pick_one_primary",
         new_status=new_status,
+        audit_event=_decision_audit_event(
+            review_id=review_id,
+            delegate_pid=delegate_pid,
+            decision=decision,
+            occurred_at=datetime.now(UTC),
+            rationale="background",
+        ),
         now=datetime.now(UTC),
     )
     return review_id
@@ -476,13 +506,20 @@ async def test_future_resolved_externally_skips_remaining_poll(
                     )
                 )
             ).first()
-        await repo.atomic_resolve_ai_review(
+        await repo.atomic_resolve_review_with_audit_and_counter(
             review_public_id=row[0] if row else "",
             decision="approve",
             responding_delegate_public_id=ids["delegate_public_id"],
             rationale="fast",
             resolution_mode="pick_one_primary",
             new_status="resolved_approved",
+            audit_event=_decision_audit_event(
+                review_id=row[0] if row else "",
+                delegate_pid=ids["delegate_public_id"],
+                decision=AiReviewDecisionEnum.APPROVE,
+                occurred_at=datetime.now(UTC),
+                rationale="fast",
+            ),
             now=datetime.now(UTC),
         )
         svc = AiReviewService.get_instance()
@@ -586,13 +623,20 @@ async def test_timeout_review_skips_when_already_terminal(
     request = _make_request(ids, deadline_seconds=10)
     svc = AiReviewService.get_instance()
     creation = await svc.create_review(request, repo=repo)
-    await repo.atomic_resolve_ai_review(
+    await repo.atomic_resolve_review_with_audit_and_counter(
         review_public_id=creation.review_public_id,
         decision="approve",
         responding_delegate_public_id=ids["delegate_public_id"],
         rationale="peer",
         resolution_mode="pick_one_primary",
         new_status="resolved_approved",
+        audit_event=_decision_audit_event(
+            review_id=creation.review_public_id,
+            delegate_pid=ids["delegate_public_id"],
+            decision=AiReviewDecisionEnum.APPROVE,
+            occurred_at=now,
+            rationale="peer",
+        ),
         now=now,
     )
     won = await svc.timeout_review(

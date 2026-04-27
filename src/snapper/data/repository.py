@@ -3132,17 +3132,6 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def insert_ai_review_event(self, row: AiReviewEventInsertRow) -> str:
-        """APPEND :class:`AiReviewEvent` row; returns ``public_id``.
-
-        Append-only — never UPDATE. Used by every state transition
-        in :class:`AiReviewService`: ``created`` /
-        ``fanout_dispatched`` / ``decision_recorded`` /
-        ``timeout_marked`` / ``superseded`` / ``counter_*``.
-        """
-        ...
-
-    @abstractmethod
     async def get_ai_delegate_by_user_public_id(self, user_public_id: str) -> AiDelegateRow | None:
         """Lookup operational :class:`AiDelegate` row by FK to users.
 
@@ -3188,119 +3177,6 @@ class Repository(ABC):
         - ``authenticate`` frame (post-reauth).
         - ``system.heartbeat.client`` frame (cross-plan lock per
           Q17 v1.4: ``heartbeat_interval ≤ window/2``, default 7s).
-        """
-        ...
-
-    @abstractmethod
-    async def atomic_resolve_ai_review(
-        self,
-        *,
-        review_public_id: str,
-        decision: str,
-        responding_delegate_public_id: str,
-        rationale: str | None,
-        resolution_mode: str,
-        new_status: str,
-        now: datetime,
-    ) -> AtomicResolveResult | None:
-        """Atomic CAS UPDATE pending/fanout_dispatched -> resolved.
-
-        Plan D §3.2 step 5 — single UPDATE with the CAS predicate
-        ``status IN ('pending', 'fanout_dispatched') AND deadline > NOW()``.
-        Returns the captured ``selected_delegate_public_id`` +
-        ``dispatch_version`` + ``previous_status`` when the caller wins the
-        transition; ``None`` when a peer beat them OR the deadline already
-        elapsed (in which case the caller falls through to the inline
-        timeout shortcut at Q9 step 3.5).
-
-        The terminal-state CHECK constraint
-        ``ck_ai_reviews_status_consistency`` enforces non-NULL
-        ``decision`` + ``responding_delegate_public_id`` +
-        ``resolution_mode`` + ``resolved_at`` on the new row, so the
-        caller must supply all four — there is no partial transition.
-
-        Args:
-            review_public_id: UUID7 of the ``ai_reviews`` row.
-            decision: ``"approve"`` or ``"reject"``.
-            responding_delegate_public_id: ``ai_delegates.public_id`` of the
-                delegate whose decision wins.
-            rationale: Optional free-text (≤4096 chars; caller validates).
-            resolution_mode: One of
-                :class:`snapper.core.types.AiReviewResolutionModeEnum`
-                values.
-            new_status: ``"resolved_approved"`` or ``"resolved_rejected"`` —
-                must match the ``decision`` per the status-consistency
-                CHECK constraint.
-            now: Wall-clock used for both the deadline comparison and the
-                ``resolved_at`` / ``updated_at`` columns.
-
-        Returns:
-            :class:`AtomicResolveResult` on a winning transition; ``None``
-            when status is already terminal OR ``deadline <= now``.
-        """
-        ...
-
-    @abstractmethod
-    async def atomic_timeout_ai_review(
-        self,
-        *,
-        review_public_id: str,
-        now: datetime,
-    ) -> AtomicResolveResult | None:
-        """Atomic CAS UPDATE pending/fanout_dispatched -> timeout.
-
-        Plan D §3.3 — used both by the reaper loop AND by the inline
-        late-decision shortcut in :meth:`AiReviewService.submit_decision`
-        (Q9 step 3.5). The CAS predicate is identical to
-        :meth:`atomic_resolve_ai_review` minus the ``deadline > now`` clause:
-        a row is eligible for timeout regardless of its deadline (the reaper
-        only fires for rows whose ``deadline < now``, but the predicate is
-        not enforced at the SQL level so the inline shortcut works too).
-
-        Args:
-            review_public_id: UUID7 of the ``ai_reviews`` row.
-            now: Wall-clock for ``resolved_at`` / ``updated_at``.
-
-        Returns:
-            :class:`AtomicResolveResult` on a winning transition; ``None``
-            when the row was already terminal.
-        """
-        ...
-
-    @abstractmethod
-    async def decrement_delegate_active_count_for_review(
-        self,
-        *,
-        review_public_id: str,
-        selected_delegate_public_id: str,
-        now: datetime,
-    ) -> bool:
-        """Q10 v1.2 writable-CTE counter primitive.
-
-        Decrements ``ai_delegates.active_reviews_count`` exactly once per
-        review by claiming the ``ai_reviews.counter_decremented_at`` slot
-        first. Returns ``True`` when this caller won the claim and the
-        decrement was applied; ``False`` when a peer (concurrent decision /
-        reaper / supersede) had already decremented for the same review.
-
-        Implemented as two statements within one transaction so SQLite (no
-        UPDATE-FROM-CTE before 3.33) and Postgres (writable CTE) both work.
-        The claim UPDATE is single-row CAS (``WHERE counter_decremented_at
-        IS NULL``); the delegate UPDATE wraps the decrement in
-        ``GREATEST(... - 1, 0)`` so the counter floors at zero even if
-        bookkeeping has drifted.
-
-        Args:
-            review_public_id: UUID7 of the ``ai_reviews`` row whose
-                ``counter_decremented_at`` slot we are trying to claim.
-            selected_delegate_public_id: ``ai_delegates.public_id`` to
-                decrement on a successful claim.
-            now: Wall-clock for ``counter_decremented_at`` /
-                ``updated_at``.
-
-        Returns:
-            ``True`` if this call won the claim and the decrement was
-            applied; ``False`` if a peer already decremented.
         """
         ...
 
@@ -3396,32 +3272,6 @@ class Repository(ABC):
         Returns:
             The claimed ``ai_delegates.public_id`` on success; ``None``
             when every candidate's CAS lost (all busy).
-        """
-        ...
-
-    @abstractmethod
-    async def atomic_supersede_ai_review(
-        self,
-        *,
-        review_public_id: str,
-        now: datetime,
-    ) -> AtomicResolveResult | None:
-        """Plan D §3 strategy-abandon path: pending/fanout_dispatched -> superseded.
-
-        CAS UPDATE that mirrors :meth:`atomic_resolve_ai_review` minus
-        the decision/responding_delegate fields and the deadline gate:
-        a strategy may abandon its review even after the deadline
-        elapsed (the timeout shortcut applies only when a delegate is
-        trying to land a late decision; the strategy itself is free to
-        give up at any time before terminal state).
-
-        Args:
-            review_public_id: UUID7 of the ``ai_reviews`` row.
-            now: Wall-clock used for ``resolved_at`` / ``updated_at``.
-
-        Returns:
-            :class:`AtomicResolveResult` on a winning transition;
-            ``None`` when the row was already terminal.
         """
         ...
 
@@ -3535,29 +3385,180 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def atomic_dispatch_fanout(
+    async def atomic_resolve_review_with_audit_and_counter(
         self,
         *,
         review_public_id: str,
+        decision: str,
+        responding_delegate_public_id: str,
+        rationale: str | None,
+        resolution_mode: str,
+        new_status: str,
+        audit_event: AiReviewEventInsertRow,
         now: datetime,
-    ) -> int | None:
-        """Plan D §3.4 / §3.5 atomic CAS: pending -> fanout_dispatched (+ version bump).
+    ) -> AtomicResolveResult | None:
+        """Plan D Phase 2 #8 — single-transaction resolve + audit + counter decrement.
 
-        Single-row UPDATE with ``WHERE status='pending'`` predicate
-        + ``RETURNING dispatch_version`` semantics so callers can tell
-        whether THEY landed the transition or a peer beat them. The
-        dispatch_version is incremented atomically so the bridge can
-        dedup re-fanouts triggered by §3.4 Layer 2 racing §3.5
-        Layer 1 for the same review.
+        Closes the Phase 1 #3 deferred Finding A: the legacy 3-call sequence
+        ``atomic_resolve_ai_review`` -> ``insert_ai_review_event`` ->
+        ``decrement_delegate_active_count_for_review`` ran across THREE
+        separate DB transactions, so a process crash between any two left
+        the row in an inconsistent state (terminal status without audit row
+        OR terminal status + audit but counter still elevated, blocking
+        future admission control for the responding delegate).
+
+        Folds every step into ONE transaction:
+
+        1. ``SELECT ... FOR UPDATE`` on the ``ai_reviews`` row to capture
+           ``previous_status`` + ``deadline`` + ``dispatch_version`` AND
+           hold the row lock against concurrent peers. Closes Finding B
+           (the previous_status SELECT-then-CAS race) on engines that
+           support row locking; SQLite serialises the entire transaction
+           via the connection-level write lock so the same invariant
+           holds.
+        2. CAS UPDATE ``ai_reviews`` from non-terminal to ``new_status``
+           with the deadline gate. Returns ``None`` when peer beat us
+           OR deadline elapsed.
+        3. INSERT the audit-event row using the captured
+           ``previous_status`` (the caller's ``audit_event["previous_status"]``
+           is overwritten by the actual SELECT-FOR-UPDATE value so a
+           concurrent transition cannot record a stale predecessor).
+        4. Counter decrement claim: CAS UPDATE
+           ``ai_reviews.counter_decremented_at`` from NULL to ``now``.
+        5. Counter decrement: UPDATE
+           ``ai_delegates.active_reviews_count`` via ``GREATEST(... - 1, 0)``
+           on the claim winner.
+        6. ``COMMIT``.
+
+        Caller MUST still publish the post-commit bus event +
+        external WS frame; this primitive owns only the DB-side
+        atomicity.
 
         Args:
             review_public_id: UUID7 of the ``ai_reviews`` row.
-            now: Wall-clock for ``updated_at``.
+            decision: ``"approve"`` or ``"reject"`` per Plan A Q9.
+            responding_delegate_public_id: ``ai_delegates.public_id`` of
+                the responding delegate (also wins the audit event's
+                actor field if the caller threads it onto
+                ``audit_event``).
+            rationale: Optional free-text decision rationale.
+            resolution_mode: One of
+                :class:`snapper.core.types.AiReviewResolutionModeEnum`
+                values.
+            new_status: ``"resolved_approved"`` or ``"resolved_rejected"``
+                — must match the ``decision`` per the
+                ``ck_ai_reviews_status_consistency`` constraint.
+            audit_event: :class:`AiReviewEventInsertRow` with at minimum
+                ``public_id``, ``review_public_id``, ``event_type``,
+                ``actor_delegate_public_id``, ``new_status``, ``payload``,
+                ``occurred_at``. The ``previous_status`` field is
+                OVERWRITTEN by the SELECT-FOR-UPDATE result so callers
+                can pass any sentinel value.
+            now: Wall-clock used for ``resolved_at`` / ``updated_at`` /
+                ``counter_decremented_at`` and for the deadline gate
+                comparison.
+
+        Returns:
+            :class:`AtomicResolveResult` (with the captured
+            ``previous_status``) on a winning transition; ``None`` when
+            the row was already terminal OR ``deadline <= now``.
+        """
+        ...
+
+    @abstractmethod
+    async def atomic_timeout_review_with_audit_and_counter(
+        self,
+        *,
+        review_public_id: str,
+        audit_event: AiReviewEventInsertRow,
+        now: datetime,
+    ) -> AtomicResolveResult | None:
+        """Plan D Phase 2 #8 — single-transaction timeout + audit + counter decrement.
+
+        Mirrors :meth:`atomic_resolve_review_with_audit_and_counter` minus
+        the deadline gate and the decision/responding_delegate fields:
+        used by the strategy await-loop's late-decision shortcut (Plan A
+        Q9 step 3.5), the reaper tick (Plan D §3.3), and the offline
+        scanner's terminal-state branches.
+
+        Args:
+            review_public_id: UUID7 of the ``ai_reviews`` row.
+            audit_event: :class:`AiReviewEventInsertRow`. The
+                ``previous_status`` field is OVERWRITTEN by the
+                SELECT-FOR-UPDATE result.
+            now: Wall-clock used for ``resolved_at`` / ``updated_at`` /
+                ``counter_decremented_at``.
+
+        Returns:
+            :class:`AtomicResolveResult` on a winning transition;
+            ``None`` when the row was already terminal.
+        """
+        ...
+
+    @abstractmethod
+    async def atomic_supersede_review_with_audit_and_counter(
+        self,
+        *,
+        review_public_id: str,
+        audit_event: AiReviewEventInsertRow,
+        now: datetime,
+    ) -> AtomicResolveResult | None:
+        """Plan D Phase 2 #8 — single-transaction supersede + audit + counter decrement.
+
+        Mirrors :meth:`atomic_timeout_review_with_audit_and_counter`
+        with ``new_status='superseded'`` + ``resolution_mode='superseded_by_strategy'``.
+        Used by the strategy-abandon path (Plan D §3 supersede).
+
+        Args:
+            review_public_id: UUID7 of the ``ai_reviews`` row.
+            audit_event: :class:`AiReviewEventInsertRow`. The
+                ``previous_status`` field is OVERWRITTEN by the
+                SELECT-FOR-UPDATE result.
+            now: Wall-clock used for ``resolved_at`` / ``updated_at`` /
+                ``counter_decremented_at``.
+
+        Returns:
+            :class:`AtomicResolveResult` on a winning transition;
+            ``None`` when the row was already terminal.
+        """
+        ...
+
+    @abstractmethod
+    async def atomic_dispatch_fanout_with_audit(
+        self,
+        *,
+        review_public_id: str,
+        audit_event: AiReviewEventInsertRow,
+        now: datetime,
+    ) -> int | None:
+        """Plan D Phase 2 #8 — single-transaction fanout dispatch + audit.
+
+        Closes the Phase 1 #3 deferred Finding A on the §3.4 / §3.5
+        fanout dispatch path: the legacy 2-call sequence
+        ``atomic_dispatch_fanout`` -> ``insert_ai_review_event`` ran
+        across TWO separate transactions, so a crash between them left
+        the row in ``fanout_dispatched`` without the matching
+        ``fanout_dispatched`` audit-event row.
+
+        Folds both steps into ONE transaction. The ``audit_event``'s
+        ``payload`` field has its ``dispatch_version`` slot OVERWRITTEN
+        by the actual incremented version returned from the UPDATE so
+        callers cannot record a stale version on the audit row even if
+        the row gets re-fanned out concurrently from §3.4 racing §3.5.
+
+        Args:
+            review_public_id: UUID7 of the ``ai_reviews`` row.
+            audit_event: :class:`AiReviewEventInsertRow`. The
+                ``payload["dispatch_version"]`` slot is OVERWRITTEN by
+                the UPDATE-incremented version (any caller-supplied
+                value is replaced).
+            now: Wall-clock used for ``updated_at`` /
+                ``occurred_at``.
 
         Returns:
             The new ``dispatch_version`` on a winning CAS transition;
-            ``None`` when the row was no longer ``pending`` at update
-            time (peer fanout or terminal transition won).
+            ``None`` when the row was no longer ``pending`` (peer
+            fanout or terminal transition won).
         """
         ...
 
@@ -9733,14 +9734,6 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             return review.public_id
 
-    async def insert_ai_review_event(self, row: AiReviewEventInsertRow) -> str:
-        """APPEND :class:`AiReviewEvent` row; returns ``public_id``."""
-        async with self.session() as s:
-            event = AiReviewEvent(**row)
-            s.add(event)
-            await s.commit()
-            return event.public_id
-
     async def get_ai_delegate_by_user_public_id(self, user_public_id: str) -> AiDelegateRow | None:
         """Lookup operational :class:`AiDelegate` row by user_public_id."""
         async with self.session() as s:
@@ -9795,173 +9788,6 @@ class SQLAlchemyRepository(Repository):
                 .values(last_seen_at=last_seen_at, updated_at=last_seen_at)
             )
             await s.commit()
-
-    async def atomic_resolve_ai_review(
-        self,
-        *,
-        review_public_id: str,
-        decision: str,
-        responding_delegate_public_id: str,
-        rationale: str | None,
-        resolution_mode: str,
-        new_status: str,
-        now: datetime,
-    ) -> AtomicResolveResult | None:
-        """Atomic CAS UPDATE pending/fanout_dispatched -> resolved.
-
-        Captures ``previous_status`` BEFORE the UPDATE in the same
-        transaction so the row's pre-state is recorded in the audit-event
-        row the caller writes next. SELECT-FOR-UPDATE on the candidate row
-        is used on engines that support it (Postgres) to serialise the
-        read-then-CAS over concurrent peers.
-        """
-        async with self.session() as s:
-            select_stmt = select(
-                AiReview.status, AiReview.deadline, AiReview.dispatch_version
-            ).where(AiReview.public_id == review_public_id)
-            try:
-                pre_row = (await s.execute(select_stmt.with_for_update())).first()
-            except NotImplementedError:
-                pre_row = (await s.execute(select_stmt)).first()
-            if pre_row is None:
-                return None
-            previous_status, deadline, dispatch_version = pre_row
-            if previous_status not in (
-                "pending",
-                "fanout_dispatched",
-            ):
-                return None
-            if deadline <= now:
-                return None
-            update_stmt = (
-                update(AiReview)
-                .where(
-                    AiReview.public_id == review_public_id,
-                    AiReview.status.in_(("pending", "fanout_dispatched")),
-                    AiReview.deadline > now,
-                )
-                .values(
-                    status=new_status,
-                    decision=decision,
-                    responding_delegate_public_id=responding_delegate_public_id,
-                    rationale=rationale,
-                    resolution_mode=resolution_mode,
-                    resolved_at=now,
-                    updated_at=now,
-                )
-            )
-            result = await s.execute(update_stmt)
-            await s.commit()
-            if int(cast(Any, result).rowcount or 0) == 0:
-                return None
-            selected = (
-                await s.execute(
-                    select(AiReview.selected_delegate_public_id).where(
-                        AiReview.public_id == review_public_id
-                    )
-                )
-            ).scalar_one()
-            return AtomicResolveResult(
-                selected_delegate_public_id=selected,
-                dispatch_version=int(dispatch_version),
-                previous_status=str(previous_status),
-            )
-
-    async def atomic_timeout_ai_review(
-        self,
-        *,
-        review_public_id: str,
-        now: datetime,
-    ) -> AtomicResolveResult | None:
-        """Atomic CAS UPDATE pending/fanout_dispatched -> timeout.
-
-        Mirrors :meth:`atomic_resolve_ai_review` minus the deadline gate
-        and the decision/responding-delegate fields. Returns ``None`` when
-        the row was already terminal (lost race against a peer decision).
-        """
-        async with self.session() as s:
-            pre_row = (
-                await s.execute(
-                    select(AiReview.status, AiReview.dispatch_version).where(
-                        AiReview.public_id == review_public_id
-                    )
-                )
-            ).first()
-            if pre_row is None:
-                return None
-            previous_status, dispatch_version = pre_row
-            if previous_status not in ("pending", "fanout_dispatched"):
-                return None
-            update_stmt = (
-                update(AiReview)
-                .where(
-                    AiReview.public_id == review_public_id,
-                    AiReview.status.in_(("pending", "fanout_dispatched")),
-                )
-                .values(
-                    status="timeout",
-                    resolution_mode="timeout_no_response",
-                    resolved_at=now,
-                    updated_at=now,
-                )
-            )
-            result = await s.execute(update_stmt)
-            await s.commit()
-            if int(cast(Any, result).rowcount or 0) == 0:
-                return None
-            selected = (
-                await s.execute(
-                    select(AiReview.selected_delegate_public_id).where(
-                        AiReview.public_id == review_public_id
-                    )
-                )
-            ).scalar_one()
-            return AtomicResolveResult(
-                selected_delegate_public_id=selected,
-                dispatch_version=int(dispatch_version),
-                previous_status=str(previous_status),
-            )
-
-    async def decrement_delegate_active_count_for_review(
-        self,
-        *,
-        review_public_id: str,
-        selected_delegate_public_id: str,
-        now: datetime,
-    ) -> bool:
-        """Q10 v1.2 writable-CTE counter primitive (two-statement form).
-
-        Single transaction wraps both statements so the claim + decrement
-        are atomic relative to other peers. The claim UPDATE uses a CAS
-        predicate (``counter_decremented_at IS NULL``) so only one caller
-        wins; subsequent callers see ``rowcount == 0`` and return early.
-        ``GREATEST(... - 1, 0)`` is portable to SQLite via ``MAX`` — the
-        local helper composes both via SQLAlchemy's ``func.max``.
-        """
-        async with self.session() as s:
-            claim_stmt = (
-                update(AiReview)
-                .where(
-                    AiReview.public_id == review_public_id,
-                    AiReview.counter_decremented_at.is_(None),
-                )
-                .values(counter_decremented_at=now, updated_at=now)
-            )
-            claim_result = await s.execute(claim_stmt)
-            if int(cast(Any, claim_result).rowcount or 0) == 0:
-                await s.commit()
-                return False
-            decrement_stmt = (
-                update(AiDelegate)
-                .where(AiDelegate.public_id == selected_delegate_public_id)
-                .values(
-                    active_reviews_count=func.max(AiDelegate.active_reviews_count - 1, 0),
-                    updated_at=now,
-                )
-            )
-            await s.execute(decrement_stmt)
-            await s.commit()
-            return True
 
     async def list_eligible_delegates_for_ai_review(
         self,
@@ -10097,62 +9923,6 @@ class SQLAlchemyRepository(Repository):
                 await s.commit()
                 return candidate_id
             return None
-
-    async def atomic_supersede_ai_review(
-        self,
-        *,
-        review_public_id: str,
-        now: datetime,
-    ) -> AtomicResolveResult | None:
-        """Plan D §3 strategy-abandon CAS UPDATE.
-
-        Mirrors :meth:`atomic_resolve_ai_review` minus the deadline
-        gate and the decision/responding_delegate fields. Returns
-        ``None`` when the row was already terminal so the service can
-        skip the audit-event + counter-decrement steps cleanly.
-        """
-        async with self.session() as s:
-            pre_row = (
-                await s.execute(
-                    select(AiReview.status, AiReview.dispatch_version).where(
-                        AiReview.public_id == review_public_id
-                    )
-                )
-            ).first()
-            if pre_row is None:
-                return None
-            previous_status, dispatch_version = pre_row
-            if previous_status not in ("pending", "fanout_dispatched"):
-                return None
-            update_stmt = (
-                update(AiReview)
-                .where(
-                    AiReview.public_id == review_public_id,
-                    AiReview.status.in_(("pending", "fanout_dispatched")),
-                )
-                .values(
-                    status="superseded",
-                    resolution_mode="superseded_by_strategy",
-                    resolved_at=now,
-                    updated_at=now,
-                )
-            )
-            result = await s.execute(update_stmt)
-            await s.commit()
-            if int(cast(Any, result).rowcount or 0) == 0:
-                return None
-            selected = (
-                await s.execute(
-                    select(AiReview.selected_delegate_public_id).where(
-                        AiReview.public_id == review_public_id
-                    )
-                )
-            ).scalar_one()
-            return AtomicResolveResult(
-                selected_delegate_public_id=selected,
-                dispatch_version=int(dispatch_version),
-                previous_status=str(previous_status),
-            )
 
     async def list_expired_pending_reviews(
         self,
@@ -10299,13 +10069,264 @@ class SQLAlchemyRepository(Repository):
                 for r in rows
             ]
 
-    async def atomic_dispatch_fanout(
+    async def _select_for_update_pre_state(
+        self,
+        s: AsyncSession,
+        review_public_id: str,
+        *,
+        with_deadline: bool,
+    ) -> tuple[str, datetime | None, int] | None:
+        """Helper for the combined terminal-transition primitives.
+
+        SELECT-FOR-UPDATE on the ``ai_reviews`` row to capture
+        ``previous_status`` (+ ``deadline`` when the resolve path needs
+        the gate) + ``dispatch_version``. PG holds the row lock for the
+        rest of the open transaction so concurrent peers serialise; the
+        SQLite fallback degrades to a plain SELECT (the connection-level
+        write lock provides equivalent serialisation). Returns ``None``
+        when the row does not exist OR is already terminal so callers
+        can short-circuit without the UPDATE.
+        """
+        cols = (
+            (AiReview.status, AiReview.deadline, AiReview.dispatch_version)
+            if with_deadline
+            else (AiReview.status, AiReview.dispatch_version)
+        )
+        select_stmt = select(*cols).where(AiReview.public_id == review_public_id)
+        try:
+            pre_row = (await s.execute(select_stmt.with_for_update())).first()
+        except NotImplementedError:
+            pre_row = (await s.execute(select_stmt)).first()
+        if pre_row is None:
+            return None
+        if with_deadline:
+            previous_status, deadline, dispatch_version = pre_row
+        else:
+            previous_status, dispatch_version = pre_row
+            deadline = None
+        if previous_status not in ("pending", "fanout_dispatched"):
+            return None
+        return str(previous_status), deadline, int(dispatch_version)
+
+    async def _decrement_delegate_counter_in_session(
+        self,
+        s: AsyncSession,
+        *,
+        review_public_id: str,
+        selected_delegate_public_id: str,
+        now: datetime,
+    ) -> bool:
+        """Helper for the combined terminal-transition primitives.
+
+        Reuses the Q10 v1.2 ``counter_decremented_at`` CAS pattern from
+        :meth:`decrement_delegate_active_count_for_review` but operates
+        on the open session instead of opening its own transaction so
+        the entire terminal-transition + audit-event + counter chain
+        commits or rolls back atomically. Returns ``True`` when this
+        caller won the claim; ``False`` when a peer (concurrent
+        decision / reaper / supersede) had already decremented for the
+        same review.
+        """
+        claim_stmt = (
+            update(AiReview)
+            .where(
+                AiReview.public_id == review_public_id,
+                AiReview.counter_decremented_at.is_(None),
+            )
+            .values(counter_decremented_at=now, updated_at=now)
+        )
+        claim_result = await s.execute(claim_stmt)
+        if int(cast(Any, claim_result).rowcount or 0) == 0:
+            return False
+        decrement_stmt = (
+            update(AiDelegate)
+            .where(AiDelegate.public_id == selected_delegate_public_id)
+            .values(
+                active_reviews_count=func.max(AiDelegate.active_reviews_count - 1, 0),
+                updated_at=now,
+            )
+        )
+        await s.execute(decrement_stmt)
+        return True
+
+    async def atomic_resolve_review_with_audit_and_counter(
         self,
         *,
         review_public_id: str,
+        decision: str,
+        responding_delegate_public_id: str,
+        rationale: str | None,
+        resolution_mode: str,
+        new_status: str,
+        audit_event: AiReviewEventInsertRow,
+        now: datetime,
+    ) -> AtomicResolveResult | None:
+        """Single-transaction resolve + audit + counter decrement (Plan D Phase 2 #8)."""
+        async with self.session() as s:
+            pre = await self._select_for_update_pre_state(s, review_public_id, with_deadline=True)
+            if pre is None:
+                return None
+            previous_status, deadline, dispatch_version = pre
+            if deadline is None or deadline <= now:
+                return None
+            update_stmt = (
+                update(AiReview)
+                .where(
+                    AiReview.public_id == review_public_id,
+                    AiReview.status.in_(("pending", "fanout_dispatched")),
+                    AiReview.deadline > now,
+                )
+                .values(
+                    status=new_status,
+                    decision=decision,
+                    responding_delegate_public_id=responding_delegate_public_id,
+                    rationale=rationale,
+                    resolution_mode=resolution_mode,
+                    resolved_at=now,
+                    updated_at=now,
+                )
+            )
+            result = await s.execute(update_stmt)
+            if int(cast(Any, result).rowcount or 0) == 0:
+                await s.rollback()
+                return None
+            selected = (
+                await s.execute(
+                    select(AiReview.selected_delegate_public_id).where(
+                        AiReview.public_id == review_public_id
+                    )
+                )
+            ).scalar_one()
+            audit_payload = dict(audit_event)
+            audit_payload["previous_status"] = previous_status
+            s.add(AiReviewEvent(**audit_payload))
+            await self._decrement_delegate_counter_in_session(
+                s,
+                review_public_id=review_public_id,
+                selected_delegate_public_id=str(selected),
+                now=now,
+            )
+            await s.commit()
+            return AtomicResolveResult(
+                selected_delegate_public_id=str(selected),
+                dispatch_version=dispatch_version,
+                previous_status=previous_status,
+            )
+
+    async def atomic_timeout_review_with_audit_and_counter(
+        self,
+        *,
+        review_public_id: str,
+        audit_event: AiReviewEventInsertRow,
+        now: datetime,
+    ) -> AtomicResolveResult | None:
+        """Single-transaction timeout + audit + counter decrement (Plan D Phase 2 #8)."""
+        async with self.session() as s:
+            pre = await self._select_for_update_pre_state(s, review_public_id, with_deadline=False)
+            if pre is None:
+                return None
+            previous_status, _deadline, dispatch_version = pre
+            update_stmt = (
+                update(AiReview)
+                .where(
+                    AiReview.public_id == review_public_id,
+                    AiReview.status.in_(("pending", "fanout_dispatched")),
+                )
+                .values(
+                    status="timeout",
+                    resolution_mode="timeout_no_response",
+                    resolved_at=now,
+                    updated_at=now,
+                )
+            )
+            result = await s.execute(update_stmt)
+            if int(cast(Any, result).rowcount or 0) == 0:
+                await s.rollback()
+                return None
+            selected = (
+                await s.execute(
+                    select(AiReview.selected_delegate_public_id).where(
+                        AiReview.public_id == review_public_id
+                    )
+                )
+            ).scalar_one()
+            audit_payload = dict(audit_event)
+            audit_payload["previous_status"] = previous_status
+            s.add(AiReviewEvent(**audit_payload))
+            await self._decrement_delegate_counter_in_session(
+                s,
+                review_public_id=review_public_id,
+                selected_delegate_public_id=str(selected),
+                now=now,
+            )
+            await s.commit()
+            return AtomicResolveResult(
+                selected_delegate_public_id=str(selected),
+                dispatch_version=dispatch_version,
+                previous_status=previous_status,
+            )
+
+    async def atomic_supersede_review_with_audit_and_counter(
+        self,
+        *,
+        review_public_id: str,
+        audit_event: AiReviewEventInsertRow,
+        now: datetime,
+    ) -> AtomicResolveResult | None:
+        """Single-transaction supersede + audit + counter decrement (Plan D Phase 2 #8)."""
+        async with self.session() as s:
+            pre = await self._select_for_update_pre_state(s, review_public_id, with_deadline=False)
+            if pre is None:
+                return None
+            previous_status, _deadline, dispatch_version = pre
+            update_stmt = (
+                update(AiReview)
+                .where(
+                    AiReview.public_id == review_public_id,
+                    AiReview.status.in_(("pending", "fanout_dispatched")),
+                )
+                .values(
+                    status="superseded",
+                    resolution_mode="superseded_by_strategy",
+                    resolved_at=now,
+                    updated_at=now,
+                )
+            )
+            result = await s.execute(update_stmt)
+            if int(cast(Any, result).rowcount or 0) == 0:
+                await s.rollback()
+                return None
+            selected = (
+                await s.execute(
+                    select(AiReview.selected_delegate_public_id).where(
+                        AiReview.public_id == review_public_id
+                    )
+                )
+            ).scalar_one()
+            audit_payload = dict(audit_event)
+            audit_payload["previous_status"] = previous_status
+            s.add(AiReviewEvent(**audit_payload))
+            await self._decrement_delegate_counter_in_session(
+                s,
+                review_public_id=review_public_id,
+                selected_delegate_public_id=str(selected),
+                now=now,
+            )
+            await s.commit()
+            return AtomicResolveResult(
+                selected_delegate_public_id=str(selected),
+                dispatch_version=dispatch_version,
+                previous_status=previous_status,
+            )
+
+    async def atomic_dispatch_fanout_with_audit(
+        self,
+        *,
+        review_public_id: str,
+        audit_event: AiReviewEventInsertRow,
         now: datetime,
     ) -> int | None:
-        """Plan D §3.4 / §3.5 atomic CAS: pending -> fanout_dispatched."""
+        """Single-transaction fanout dispatch + audit insert (Plan D Phase 2 #8)."""
         async with self.session() as s:
             update_stmt = (
                 update(AiReview)
@@ -10320,15 +10341,27 @@ class SQLAlchemyRepository(Repository):
                 )
             )
             result = await s.execute(update_stmt)
-            await s.commit()
             if int(cast(Any, result).rowcount or 0) == 0:
+                await s.rollback()
                 return None
-            new_version = (
-                await s.execute(
-                    select(AiReview.dispatch_version).where(AiReview.public_id == review_public_id)
-                )
-            ).scalar_one()
-            return int(new_version)
+            new_version = int(
+                (
+                    await s.execute(
+                        select(AiReview.dispatch_version).where(
+                            AiReview.public_id == review_public_id
+                        )
+                    )
+                ).scalar_one()
+            )
+            audit_payload = dict(audit_event)
+            payload_field: dict[str, Any] = dict(
+                cast(dict[str, Any], audit_payload.get("payload") or {})
+            )
+            payload_field["dispatch_version"] = new_version
+            audit_payload["payload"] = payload_field
+            s.add(AiReviewEvent(**audit_payload))
+            await s.commit()
+            return new_version
 
 
 _repository_cache: dict[str, Repository] = {}

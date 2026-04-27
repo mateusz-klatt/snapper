@@ -970,28 +970,20 @@ class AiReviewService:
             )
 
         if review["deadline"] <= wall_clock:
-            timeout_result = await repo.atomic_timeout_ai_review(
+            await repo.atomic_timeout_review_with_audit_and_counter(
                 review_public_id=review_public_id,
+                audit_event={
+                    "public_id": str(uuid7()),
+                    "review_public_id": review_public_id,
+                    "event_type": AiReviewEventTypeEnum.TIMEOUT_MARKED.value,
+                    "actor_delegate_public_id": None,
+                    "previous_status": AiReviewStatusEnum.PENDING.value,
+                    "new_status": AiReviewStatusEnum.TIMEOUT.value,
+                    "payload": {"trigger": "submit_decision_late"},
+                    "occurred_at": wall_clock,
+                },
                 now=wall_clock,
             )
-            if timeout_result is not None:
-                await repo.insert_ai_review_event(
-                    {
-                        "public_id": str(uuid7()),
-                        "review_public_id": review_public_id,
-                        "event_type": AiReviewEventTypeEnum.TIMEOUT_MARKED.value,
-                        "actor_delegate_public_id": None,
-                        "previous_status": timeout_result["previous_status"],
-                        "new_status": AiReviewStatusEnum.TIMEOUT.value,
-                        "payload": {"trigger": "submit_decision_late"},
-                        "occurred_at": wall_clock,
-                    }
-                )
-                await repo.decrement_delegate_active_count_for_review(
-                    review_public_id=review_public_id,
-                    selected_delegate_public_id=timeout_result["selected_delegate_public_id"],
-                    now=wall_clock,
-                )
             return AiReviewDecisionResult(
                 error_code=ERROR_REVIEW_EXPIRED,
                 message="Deadline elapsed before the decision arrived.",
@@ -1011,13 +1003,26 @@ class AiReviewService:
             selected_delegate_public_id=review["selected_delegate_public_id"],
             responding_delegate_public_id=delegate_public_id,
         )
-        atomic = await repo.atomic_resolve_ai_review(
+        atomic = await repo.atomic_resolve_review_with_audit_and_counter(
             review_public_id=review_public_id,
             decision=decision.value,
             responding_delegate_public_id=delegate_public_id,
             rationale=rationale,
             resolution_mode=resolution_mode.value,
             new_status=new_status.value,
+            audit_event={
+                "public_id": str(uuid7()),
+                "review_public_id": review_public_id,
+                "event_type": AiReviewEventTypeEnum.DECISION_RECORDED.value,
+                "actor_delegate_public_id": delegate_public_id,
+                "previous_status": review["status"],
+                "new_status": new_status.value,
+                "payload": {
+                    "decision": decision.value,
+                    "rationale": rationale,
+                },
+                "occurred_at": wall_clock,
+            },
             now=wall_clock,
         )
         if atomic is None:
@@ -1028,26 +1033,6 @@ class AiReviewService:
                 decision=decision,
             )
 
-        await repo.insert_ai_review_event(
-            {
-                "public_id": str(uuid7()),
-                "review_public_id": review_public_id,
-                "event_type": AiReviewEventTypeEnum.DECISION_RECORDED.value,
-                "actor_delegate_public_id": delegate_public_id,
-                "previous_status": atomic["previous_status"],
-                "new_status": new_status.value,
-                "payload": {
-                    "decision": decision.value,
-                    "rationale": rationale,
-                },
-                "occurred_at": wall_clock,
-            }
-        )
-        await repo.decrement_delegate_active_count_for_review(
-            review_public_id=review_public_id,
-            selected_delegate_public_id=atomic["selected_delegate_public_id"],
-            now=wall_clock,
-        )
         logger.info(
             "ai_review decision recorded",
             review_public_id=review_public_id,
@@ -1306,28 +1291,22 @@ class AiReviewService:
             supersede) had already transitioned the row.
         """
         wall_clock = now if now is not None else datetime.now(UTC)
-        atomic = await repo.atomic_timeout_ai_review(
-            review_public_id=review_public_id, now=wall_clock
-        )
-        if atomic is None:
-            return False
-        await repo.insert_ai_review_event(
-            {
+        atomic = await repo.atomic_timeout_review_with_audit_and_counter(
+            review_public_id=review_public_id,
+            audit_event={
                 "public_id": str(uuid7()),
                 "review_public_id": review_public_id,
                 "event_type": AiReviewEventTypeEnum.TIMEOUT_MARKED.value,
                 "actor_delegate_public_id": None,
-                "previous_status": atomic["previous_status"],
+                "previous_status": AiReviewStatusEnum.PENDING.value,
                 "new_status": AiReviewStatusEnum.TIMEOUT.value,
                 "payload": {"trigger": "strategy_await_loop"},
                 "occurred_at": wall_clock,
-            }
-        )
-        await repo.decrement_delegate_active_count_for_review(
-            review_public_id=review_public_id,
-            selected_delegate_public_id=atomic["selected_delegate_public_id"],
+            },
             now=wall_clock,
         )
+        if atomic is None:
+            return False
         logger.info(
             "ai_review timeout (strategy await loop)",
             review_public_id=review_public_id,
@@ -1370,28 +1349,22 @@ class AiReviewService:
             transitioned the row.
         """
         wall_clock = now if now is not None else datetime.now(UTC)
-        atomic = await repo.atomic_supersede_ai_review(
-            review_public_id=review_public_id, now=wall_clock
-        )
-        if atomic is None:
-            return False
-        await repo.insert_ai_review_event(
-            {
+        atomic = await repo.atomic_supersede_review_with_audit_and_counter(
+            review_public_id=review_public_id,
+            audit_event={
                 "public_id": str(uuid7()),
                 "review_public_id": review_public_id,
                 "event_type": AiReviewEventTypeEnum.SUPERSEDED.value,
                 "actor_delegate_public_id": None,
-                "previous_status": atomic["previous_status"],
+                "previous_status": AiReviewStatusEnum.PENDING.value,
                 "new_status": AiReviewStatusEnum.SUPERSEDED.value,
                 "payload": {"reason": reason},
                 "occurred_at": wall_clock,
-            }
-        )
-        await repo.decrement_delegate_active_count_for_review(
-            review_public_id=review_public_id,
-            selected_delegate_public_id=atomic["selected_delegate_public_id"],
+            },
             now=wall_clock,
         )
+        if atomic is None:
+            return False
         logger.info(
             "ai_review superseded",
             review_public_id=review_public_id,
@@ -1423,28 +1396,22 @@ class AiReviewService:
         candidates = await repo.list_expired_pending_reviews(now=wall_clock)
         transitioned = 0
         for candidate in candidates:
-            atomic = await repo.atomic_timeout_ai_review(
-                review_public_id=candidate["public_id"], now=wall_clock
-            )
-            if atomic is None:
-                continue
-            await repo.insert_ai_review_event(
-                {
+            atomic = await repo.atomic_timeout_review_with_audit_and_counter(
+                review_public_id=candidate["public_id"],
+                audit_event={
                     "public_id": str(uuid7()),
                     "review_public_id": candidate["public_id"],
                     "event_type": AiReviewEventTypeEnum.TIMEOUT_MARKED.value,
                     "actor_delegate_public_id": None,
-                    "previous_status": atomic["previous_status"],
+                    "previous_status": candidate["status"],
                     "new_status": AiReviewStatusEnum.TIMEOUT.value,
                     "payload": {"trigger": "reaper_tick"},
                     "occurred_at": wall_clock,
-                }
-            )
-            await repo.decrement_delegate_active_count_for_review(
-                review_public_id=candidate["public_id"],
-                selected_delegate_public_id=atomic["selected_delegate_public_id"],
+                },
                 now=wall_clock,
             )
+            if atomic is None:
+                continue
             transitioned += 1
         if transitioned > 0:
             logger.info("ai_review reaper tick", transitioned=transitioned)
@@ -1549,13 +1516,9 @@ class AiReviewService:
         """
         dispatched = 0
         for candidate in candidates:
-            new_version = await repo.atomic_dispatch_fanout(
-                review_public_id=candidate["public_id"], now=now
-            )
-            if new_version is None:
-                continue
-            await repo.insert_ai_review_event(
-                {
+            new_version = await repo.atomic_dispatch_fanout_with_audit(
+                review_public_id=candidate["public_id"],
+                audit_event={
                     "public_id": str(uuid7()),
                     "review_public_id": candidate["public_id"],
                     "event_type": AiReviewEventTypeEnum.FANOUT_DISPATCHED.value,
@@ -1564,11 +1527,14 @@ class AiReviewService:
                     "new_status": AiReviewStatusEnum.FANOUT_DISPATCHED.value,
                     "payload": {
                         "trigger": trigger,
-                        "dispatch_version": new_version,
+                        "dispatch_version": 0,
                     },
                     "occurred_at": now,
-                }
+                },
+                now=now,
             )
+            if new_version is None:
+                continue
             dispatched += 1
         if dispatched > 0:
             logger.info("ai_review fanout dispatched", trigger=trigger, count=dispatched)
