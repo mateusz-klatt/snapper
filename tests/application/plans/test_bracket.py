@@ -57,6 +57,7 @@ def _make_bracket_plan(
         last_evaluated_at=None,
         last_error=None,
         idempotency_key=None,
+        cancel_idempotency_key=None,
     )
 
 

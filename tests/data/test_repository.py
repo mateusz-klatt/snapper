@@ -6121,6 +6121,247 @@ async def test_update_execution_plan_status_not_found(tmp_path: Path) -> None:
     assert result is None
 
 
+def _claim_cancel_plan_payload(now: datetime, status: str = "active") -> dict[str, Any]:
+    """Insert payload for the cancel-claim repo tests."""
+    return {
+        "plan_type": "manual_once",
+        "created_by_user_id": "user-1",
+        "created_via": "ui",
+        "instrument_public_id": "inst-1",
+        "exchange": "kraken",
+        "mode": "live",
+        "shard_key": "kraken:BTC-USD:live",
+        "wallet_public_id": "wallet-1",
+        "operator_public_id": "op-1",
+        "total_quantity": 1.0,
+        "side": "buy",
+        "params": {},
+        "status": status,
+        "created_at": now,
+        "session_id": "s1",
+        "sequence_id": 1,
+        "timestamp": now,
+    }
+
+
+@pytest.mark.asyncio
+async def test_claim_execution_plan_cancel_claims_when_actionable(tmp_path: Path) -> None:
+    """Given an active plan, When claiming, Then outcome=claimed + key persisted."""
+    db_path = tmp_path / "claim_cancel.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_execution_plan(_claim_cancel_plan_payload(now))
+    later = datetime(2026, 6, 1, tzinfo=UTC)
+    result = await r.claim_execution_plan_cancel(
+        public_id=pid,
+        idempotency_key="key-A",
+        bus_time=later,
+        session_id="s2",
+        sequence_id=2,
+        cancel_requested_at=later,
+    )
+    assert result["outcome"] == "claimed"
+    assert result["plan"] is not None
+    assert result["plan"]["status"] == "cancel_requested"
+    assert result["plan"]["cancel_idempotency_key"] == "key-A"
+
+
+@pytest.mark.asyncio
+async def test_claim_execution_plan_cancel_replay_on_matching_key(tmp_path: Path) -> None:
+    """Given a plan already cancelled with a key, When same key claims, Then replay."""
+    db_path = tmp_path / "claim_replay.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_execution_plan(_claim_cancel_plan_payload(now))
+    later = datetime(2026, 6, 1, tzinfo=UTC)
+    await r.claim_execution_plan_cancel(
+        public_id=pid,
+        idempotency_key="key-A",
+        bus_time=later,
+        session_id="s2",
+        sequence_id=2,
+        cancel_requested_at=later,
+    )
+    even_later = datetime(2026, 6, 1, 0, 1, tzinfo=UTC)
+    result = await r.claim_execution_plan_cancel(
+        public_id=pid,
+        idempotency_key="key-A",
+        bus_time=even_later,
+        session_id="s3",
+        sequence_id=3,
+        cancel_requested_at=even_later,
+    )
+    assert result["outcome"] == "replay"
+    assert result["plan"] is not None
+    assert result["plan"]["cancel_idempotency_key"] == "key-A"
+
+
+@pytest.mark.asyncio
+async def test_claim_execution_plan_cancel_key_mismatch_blocks_overwrite(tmp_path: Path) -> None:
+    """Given a plan claimed with key-A, When key-B claims, Then key_mismatch (no overwrite)."""
+    db_path = tmp_path / "claim_mismatch.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_execution_plan(_claim_cancel_plan_payload(now))
+    later = datetime(2026, 6, 1, tzinfo=UTC)
+    await r.claim_execution_plan_cancel(
+        public_id=pid,
+        idempotency_key="key-A",
+        bus_time=later,
+        session_id="s2",
+        sequence_id=2,
+        cancel_requested_at=later,
+    )
+    even_later = datetime(2026, 6, 1, 0, 2, tzinfo=UTC)
+    result = await r.claim_execution_plan_cancel(
+        public_id=pid,
+        idempotency_key="key-B",
+        bus_time=even_later,
+        session_id="s3",
+        sequence_id=3,
+        cancel_requested_at=even_later,
+    )
+    assert result["outcome"] == "key_mismatch"
+    current = await r.get_execution_plan(pid, as_of=even_later)
+    assert current is not None
+    assert current["cancel_idempotency_key"] == "key-A"
+
+
+@pytest.mark.asyncio
+async def test_claim_execution_plan_cancel_key_mismatch_precedence_over_terminal(
+    tmp_path: Path,
+) -> None:
+    """R5 final: ``key_mismatch`` precedence over ``terminal``.
+
+    Given: a plan that ran to terminal under key-A,
+    When: caller B claims with key-B,
+    Then: outcome=``key_mismatch`` (not ``terminal``). The Plan B v1.2
+        §2.3 idempotency contract: a different cancel key targeting a
+        plan that already claimed one MUST surface as
+        ``idempotency_key_conflict``, even if the plan has since
+        moved to a terminal status.
+    """
+    db_path = tmp_path / "claim_mismatch_terminal.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_execution_plan(_claim_cancel_plan_payload(now))
+    later = datetime(2026, 6, 1, tzinfo=UTC)
+    await r.claim_execution_plan_cancel(
+        public_id=pid,
+        idempotency_key="key-A",
+        bus_time=later,
+        session_id="s2",
+        sequence_id=2,
+        cancel_requested_at=later,
+    )
+    await r.update_execution_plan_status(
+        public_id=pid,
+        new_status="cancelled",
+        bus_time=datetime(2026, 6, 1, 0, 0, 30, tzinfo=UTC),
+        session_id="s3",
+        sequence_id=3,
+    )
+    even_later = datetime(2026, 6, 1, 0, 1, tzinfo=UTC)
+    result = await r.claim_execution_plan_cancel(
+        public_id=pid,
+        idempotency_key="key-B",
+        bus_time=even_later,
+        session_id="s4",
+        sequence_id=4,
+        cancel_requested_at=even_later,
+    )
+    assert result["outcome"] == "key_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_claim_execution_plan_cancel_terminal_outcome(tmp_path: Path) -> None:
+    """Given a terminal plan, When claiming, Then outcome=terminal."""
+    db_path = tmp_path / "claim_terminal.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_execution_plan(_claim_cancel_plan_payload(now, status="cancelled"))
+    later = datetime(2026, 6, 1, tzinfo=UTC)
+    result = await r.claim_execution_plan_cancel(
+        public_id=pid,
+        idempotency_key="key-X",
+        bus_time=later,
+        session_id="s2",
+        sequence_id=2,
+        cancel_requested_at=later,
+    )
+    assert result["outcome"] == "terminal"
+    assert result["plan"] is not None
+    assert result["plan"]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_claim_execution_plan_cancel_in_progress_outcome(tmp_path: Path) -> None:
+    """Given a cancel-requested plan w/ no key, When claiming, Then outcome=in_progress."""
+    db_path = tmp_path / "claim_inprog.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_execution_plan(
+        _claim_cancel_plan_payload(now, status="cancel_requested")
+    )
+    later = datetime(2026, 6, 1, tzinfo=UTC)
+    result = await r.claim_execution_plan_cancel(
+        public_id=pid,
+        idempotency_key="key-X",
+        bus_time=later,
+        session_id="s2",
+        sequence_id=2,
+        cancel_requested_at=later,
+    )
+    assert result["outcome"] == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_claim_execution_plan_cancel_not_found_outcome(tmp_path: Path) -> None:
+    """Given no matching plan, When claiming, Then outcome=not_found."""
+    db_path = tmp_path / "claim_notfound.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    result = await r.claim_execution_plan_cancel(
+        public_id="nonexistent",
+        idempotency_key="key-X",
+        bus_time=datetime.now(UTC),
+        session_id="s1",
+        sequence_id=1,
+        cancel_requested_at=datetime.now(UTC),
+    )
+    assert result["outcome"] == "not_found"
+    assert result["plan"] is None
+
+
+@pytest.mark.asyncio
+async def test_claim_execution_plan_cancel_admits_keyless_caller(tmp_path: Path) -> None:
+    """Given an active plan, When caller passes None key, Then claim succeeds without key."""
+    db_path = tmp_path / "claim_keyless.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_execution_plan(_claim_cancel_plan_payload(now))
+    later = datetime(2026, 6, 1, tzinfo=UTC)
+    result = await r.claim_execution_plan_cancel(
+        public_id=pid,
+        idempotency_key=None,
+        bus_time=later,
+        session_id="s2",
+        sequence_id=2,
+        cancel_requested_at=later,
+    )
+    assert result["outcome"] == "claimed"
+    assert result["plan"] is not None
+    assert result["plan"]["status"] == "cancel_requested"
+    assert result["plan"]["cancel_idempotency_key"] is None
+
+
 @pytest.mark.asyncio
 async def test_get_active_execution_plans(tmp_path: Path) -> None:
     """Given plans with various statuses, When querying active, Then only actionable returned."""

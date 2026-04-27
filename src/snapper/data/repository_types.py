@@ -962,6 +962,7 @@ class ExecutionPlanRow(TypedDict):
     last_evaluated_at: datetime | None
     last_error: str | None
     idempotency_key: str | None
+    cancel_idempotency_key: str | None
 
 
 class ExecutionPlanInsertRow(TypedDict, total=False):
@@ -986,9 +987,39 @@ class ExecutionPlanInsertRow(TypedDict, total=False):
     position_cycle_public_id: str | None
     expires_at: datetime | None
     idempotency_key: str | None
+    cancel_idempotency_key: str | None
     session_id: str
     sequence_id: int
     timestamp: datetime
+
+
+class CancelClaimResult(TypedDict):
+    """Discriminated result of :meth:`Repository.claim_execution_plan_cancel`.
+
+    The CAS-style cancel claim returns this structured shape so the
+    service layer can dispatch on ``outcome`` without re-reading the
+    plan or interpreting raw exceptions. Plan B v1.2 §1.4.
+
+    ``outcome`` values:
+
+    - ``claimed`` — caller's key was atomically written; ``plan``
+      carries the new SCD2 row.
+    - ``replay`` — active row already carries the caller's key; the
+      caller is an idempotent retry. ``plan`` carries the existing
+      row (callers short-circuit without emitting another cancel
+      command).
+    - ``key_mismatch`` — active row has a DIFFERENT non-null cancel
+      idempotency key; caller's key cannot claim this plan.
+    - ``in_progress`` — status is ``cancel_requested`` with no caller
+      key match; another caller (REST or different MCP key) is in
+      flight. ``plan`` carries the active row.
+    - ``terminal`` — plan is in a terminal status. ``plan`` carries
+      the active row so the caller can surface the final state.
+    - ``not_found`` — no active row exists at ``bus_time``.
+    """
+
+    outcome: str
+    plan: ExecutionPlanRow | None
 
 
 class ExecutionPlanCheckpointRow(TypedDict):

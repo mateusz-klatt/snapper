@@ -29,6 +29,7 @@ from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from typing import cast
 from uuid import uuid7
 
 from fastapi import HTTPException
@@ -40,11 +41,21 @@ from sqlalchemy.exc import IntegrityError
 from snapper.application.ai_review.citation import validate_ai_review_citation
 from snapper.application.ai_review.service import ERROR_DECISION_ALREADY_RECORDED
 from snapper.application.ai_review.service import get_ai_review_service
+from snapper.application.plans.cancel_service import PlanAlreadyTerminalError
+from snapper.application.plans.cancel_service import PlanCancelEmitError
+from snapper.application.plans.cancel_service import PlanCancelIdempotencyKeyMismatchError
+from snapper.application.plans.cancel_service import PlanCancelInProgressError
+from snapper.application.plans.cancel_service import PlanConcurrentChangeError
+from snapper.application.plans.cancel_service import PlanNotFoundError
+from snapper.application.plans.cancel_service import PlansCancelService
+from snapper.application.plans.cancel_service import PlanScopeError
+from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.core.types import AiReviewDecisionEnum
@@ -61,6 +72,7 @@ from snapper.mcp.auth import ensure_operator_in_claims
 from snapper.mcp.auth import validate_user_wallet_scope
 from snapper.mcp.error_envelope import to_call_tool_result
 from snapper.mcp.output_sanitizer import sanitize_output
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 _MCP_SOURCE_SURFACE = "mcp"
 _MCP_TOOL_STREAM = "rest.mcp"
@@ -192,6 +204,7 @@ def _get_repository_or_raise(repository_getter: Callable[[], Repository | None])
 
 
 _LIST_ORDERS_LIMIT_CAP = 200
+_CANCEL_IDEMPOTENCY_KEY_MAX = 64
 
 
 def _envelope_for_permission_check(
@@ -323,6 +336,48 @@ def _serialize_position_row(row: PositionRow) -> dict[str, Any]:
         "realized_pnl": row["realized_pnl"],
         "position_cycle_public_id": row["position_cycle_public_id"],
         "wallet_public_id": row["wallet_public_id"],
+    }
+
+
+def _serialize_execution_plan_row(row: dict[str, Any]) -> dict[str, Any]:
+    """JSON-serialise an :class:`ExecutionPlanRow` for MCP envelope details.
+
+    Plan B v1.2 §2.3 ``cancel_order`` returns the updated plan after
+    the SCD2 transition. ``timestamp``, ``created_at``,
+    ``cancel_requested_at`` and friends are :class:`datetime` natively;
+    JSON encoding requires ISO-8601 strings.
+    """
+
+    def _iso(value: datetime | None) -> str | None:
+        return value.isoformat() if value is not None else None
+
+    return {
+        "public_id": row["public_id"],
+        "timestamp": _iso(row["timestamp"]),
+        "session_id": row["session_id"],
+        "sequence_id": row["sequence_id"],
+        "plan_type": row["plan_type"],
+        "status": row["status"],
+        "instrument_public_id": row["instrument_public_id"],
+        "exchange": row["exchange"],
+        "mode": row["mode"],
+        "shard_key": row["shard_key"],
+        "wallet_public_id": row["wallet_public_id"],
+        "operator_public_id": row["operator_public_id"],
+        "side": row["side"],
+        "total_quantity": row["total_quantity"],
+        "filled_quantity": row["filled_quantity"],
+        "created_at": _iso(row["created_at"]),
+        "started_at": _iso(row["started_at"]),
+        "completed_at": _iso(row["completed_at"]),
+        "expires_at": _iso(row["expires_at"]),
+        "cancel_requested_at": _iso(row["cancel_requested_at"]),
+        "last_evaluated_at": _iso(row["last_evaluated_at"]),
+        "last_error": row["last_error"],
+        "idempotency_key": row["idempotency_key"],
+        "cancel_idempotency_key": row.get("cancel_idempotency_key"),
+        "parent_plan_public_id": row["parent_plan_public_id"],
+        "position_cycle_public_id": row["position_cycle_public_id"],
     }
 
 
@@ -576,6 +631,7 @@ def register_mcp_tools(
     repository_getter: Callable[[], Repository | None],
     caps_enforcer_getter: Callable[[], TradingCapsEnforcer | None],
     claims_getter: Callable[[], TokenClaims],
+    tracker_getter: Callable[[], SequenceTracker | None] | None = None,
 ) -> None:
     """Register every MCP tool on the passed-in :class:`FastMCP` server.
 
@@ -595,7 +651,15 @@ def register_mcp_tools(
             pre-lifespan).
         claims_getter: Zero-arg callable returning the authenticated
             :class:`TokenClaims` from the current MCP call's context.
+        tracker_getter: Optional zero-arg callable returning the shared
+            :class:`SequenceTracker` (typically ``app.state.rest_tracker``)
+            for write tools that emit sequenced rows. ``None`` falls
+            back to a per-call :class:`SequenceTracker` instance — fine
+            for MCP write paths because each call has its own envelope
+            scope and the existing partial-unique idempotency indices
+            (Plan B v1.2 §1.4) prevent cross-call collisions.
     """
+    _tracker_getter: Callable[[], SequenceTracker | None] = tracker_getter or (lambda: None)
 
     @mcp_server.tool()
     async def list_instruments(exchange: str) -> dict[str, Any]:
@@ -1137,5 +1201,171 @@ def register_mcp_tools(
             success=True,
             error_code=None,
             message=f"Position cycle found in status {cycle_row['status']!r}.",
+            details=details,
+        )
+
+    @mcp_server.tool()
+    async def cancel_order(
+        plan_public_id: str,
+        idempotency_key: str,
+    ) -> CallToolResult:
+        """Cancel an active execution plan (Plan B §2.3).
+
+        WRITE operation. Wraps :class:`PlansCancelService` for the MCP
+        transport so callers reuse the same cancel-by-plan-public-id
+        algorithm REST goes through, without HTTP/CSRF coupling. Same
+        ``idempotency_key`` on retries returns the current plan state
+        without re-executing the cancel; a different key targeting a
+        plan that has already claimed one surfaces as
+        ``error_code="idempotency_key_conflict"``.
+
+        Args:
+            plan_public_id: UUID7 of the execution plan. NOT the
+                command_public_id — execution plans hold the cancel
+                lifecycle state. Multi-child plans (bracket orders,
+                trailing stops) cancel their entire plan tree
+                atomically through the existing executor flow.
+            idempotency_key: Caller-generated dedup key. Generate ONCE
+                per cancel intent; reuse unchanged on retries (UUID4/7
+                convention). Must be non-empty.
+
+        Returns:
+            Plan A Q14 envelope. On success ``details`` carries the
+            updated ``ExecutionPlanRow`` (datetime fields ISO-8601
+            stringified). Failure paths surface as one of:
+            ``order_not_found`` (plan missing OR caller out of scope —
+            anti-enumeration collapse), ``already_terminal`` (plan in a
+            terminal status), ``cancel_in_progress`` (plan already in
+            ``cancel_requested`` with a different key),
+            ``idempotency_key_conflict`` (different key claimed first),
+            ``caps_violation``, or ``service_unavailable`` (lifespan
+            not ready / cancel command emit failed).
+        """
+        claims = claims_getter()
+        permission_envelope = _envelope_for_permission_check(claims, Permission.CANCEL_ORDERS)
+        if permission_envelope is not None:
+            return permission_envelope
+        repo_or_envelope = _envelope_for_repository(repository_getter)
+        if isinstance(repo_or_envelope, CallToolResult):
+            return repo_or_envelope
+        repo = repo_or_envelope
+        enforcer = caps_enforcer_getter()
+        if enforcer is None:
+            return to_call_tool_result(
+                success=False,
+                error_code="service_unavailable",
+                message=(
+                    "Caps enforcer not yet initialized; MCP cancel "
+                    "dispatched before lifespan startup."
+                ),
+                details=sanitize_output({}),
+            )
+        if not idempotency_key or len(idempotency_key) > _CANCEL_IDEMPOTENCY_KEY_MAX:
+            return to_call_tool_result(
+                success=False,
+                error_code="invalid_argument",
+                message=(
+                    f"idempotency_key must be 1-{_CANCEL_IDEMPOTENCY_KEY_MAX} chars; "
+                    "matches the execution_plans.cancel_idempotency_key column width."
+                ),
+                details=sanitize_output(
+                    {
+                        "idempotency_key_length": len(idempotency_key) if idempotency_key else 0,
+                        "max_length": _CANCEL_IDEMPOTENCY_KEY_MAX,
+                    }
+                ),
+            )
+        principal = AuthPrincipal(
+            username=claims.username,
+            role=claims.role,
+            user_public_id=claims.user_public_id or claims.username,
+            operator_public_ids=list(claims.operator_public_ids),
+            primary_operator_public_id=claims.primary_operator_public_id or "",
+        )
+        tracker = _tracker_getter() or SequenceTracker()
+        try:
+            updated = await PlansCancelService.cancel_by_plan_public_id(
+                plan_public_id=plan_public_id,
+                idempotency_key=idempotency_key,
+                principal=principal,
+                repo=repo,
+                tracker=tracker,
+                caps_enforcer=enforcer,
+            )
+        except (PlanNotFoundError, PlanScopeError):
+            return to_call_tool_result(
+                success=False,
+                error_code="order_not_found",
+                message="No execution plan found for the given plan_public_id.",
+                details=sanitize_output({"plan_public_id": plan_public_id}),
+            )
+        except PlanAlreadyTerminalError as exc:
+            return to_call_tool_result(
+                success=False,
+                error_code="already_terminal",
+                message=f"Plan is already in terminal status {exc.status!r}.",
+                details=sanitize_output({"plan_public_id": plan_public_id, "status": exc.status}),
+            )
+        except PlanCancelInProgressError:
+            return to_call_tool_result(
+                success=False,
+                error_code="cancel_in_progress",
+                message=(
+                    "Plan cancel already in progress with a different "
+                    "idempotency_key; retry with the original key or wait."
+                ),
+                details=sanitize_output({"plan_public_id": plan_public_id}),
+            )
+        except PlanCancelIdempotencyKeyMismatchError:
+            return to_call_tool_result(
+                success=False,
+                error_code="idempotency_key_conflict",
+                message=(
+                    "Plan already has a different cancel_idempotency_key; "
+                    "use the original key to obtain the cancel state."
+                ),
+                details=sanitize_output({"plan_public_id": plan_public_id}),
+            )
+        except PlanConcurrentChangeError:
+            return to_call_tool_result(
+                success=False,
+                error_code="service_unavailable",
+                message=(
+                    "Plan status changed concurrently before the cancel could be claimed; "
+                    "retry to surface the post-race state."
+                ),
+                details=sanitize_output({"plan_public_id": plan_public_id}),
+            )
+        except CapsViolationError as exc:
+            return to_call_tool_result(
+                success=False,
+                error_code="caps_violation",
+                message="Caps enforcer rejected the cancel.",
+                details=sanitize_output(
+                    {
+                        "plan_public_id": plan_public_id,
+                        "cap_type": exc.cap_type,
+                        "attempted": exc.attempted,
+                        "limit": exc.limit,
+                    }
+                ),
+            )
+        except PlanCancelEmitError:
+            return to_call_tool_result(
+                success=False,
+                error_code="service_unavailable",
+                message=(
+                    "Failed to emit cancel command; plan compensated to "
+                    "failed. Executor recovery will re-emit on restart."
+                ),
+                details=sanitize_output({"plan_public_id": plan_public_id}),
+            )
+        details = sanitize_output(
+            {"plan": _serialize_execution_plan_row(cast(dict[str, Any], updated))}
+        )
+        return to_call_tool_result(
+            success=True,
+            error_code=None,
+            message=f"Cancel claimed; plan now in status {updated['status']!r}.",
             details=details,
         )

@@ -33,6 +33,7 @@ SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "snapper"
 CANONICAL_SITES: set[tuple[str, str]] = {
     ("src/snapper/application/engine/service.py", "_send_order"),
     ("src/snapper/application/plans/service.py", "_emit_trade_command"),
+    ("src/snapper/application/plans/cancel_service.py", "_execute_cancel"),
     ("src/snapper/server/order_routes.py", "create_order"),
     ("src/snapper/server/order_routes.py", "_cancel_plan"),
     ("src/snapper/server/trailing_stop_routes.py", "cancel_trailing_stop"),
@@ -44,6 +45,7 @@ CANONICAL_SITES: set[tuple[str, str]] = {
 SITE_POLICY: dict[tuple[str, str], str] = {
     ("src/snapper/application/engine/service.py", "_send_order"): "ownership",
     ("src/snapper/application/plans/service.py", "_emit_trade_command"): "none",
+    ("src/snapper/application/plans/cancel_service.py", "_execute_cancel"): "none",
     ("src/snapper/server/order_routes.py", "create_order"): "none",
     ("src/snapper/server/order_routes.py", "_cancel_plan"): "none",
     ("src/snapper/server/trailing_stop_routes.py", "cancel_trailing_stop"): "none",

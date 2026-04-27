@@ -678,6 +678,7 @@ def create_app() -> FastAPI:
         settings_service_getter=lambda: getattr(app.state, "settings_service", None),
         repository_getter=get_repository_dependency,
         caps_enforcer_getter=_safe_get_caps_enforcer,
+        tracker_getter=lambda: getattr(app.state, "rest_tracker", None),
     )
     app.state.mcp_sub_app = mcp_sub_app
     app.mount("/api/mcp", mcp_sub_app)

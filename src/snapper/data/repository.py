@@ -142,6 +142,7 @@ from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import AlertListCursor
 from snapper.data.repository_types import AtomicResolveResult
+from snapper.data.repository_types import CancelClaimResult
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CheckpointUpsertRow
@@ -1625,6 +1626,7 @@ class Repository(ABC):
         completed_at: datetime | None = None,
         cancel_requested_at: datetime | None = None,
         last_evaluated_at: datetime | None = None,
+        cancel_idempotency_key: str | None = None,
     ) -> int | None:
         """SCD2 close-and-insert for plan status transition.
 
@@ -1640,9 +1642,64 @@ class Repository(ABC):
             completed_at: When plan completed.
             cancel_requested_at: When cancel was requested.
             last_evaluated_at: Last evaluation timestamp.
+            cancel_idempotency_key: Plan B v1.2 §1.4 — caller-supplied
+                dedup key for the cancel transition. ``None`` preserves
+                the existing column value on the new SCD2 row;
+                non-``None`` writes the supplied key (used by
+                :class:`PlansCancelService` to claim cancel idempotency).
 
         Returns:
             New row id, or None if no active row found.
+        """
+        ...
+
+    @abstractmethod
+    async def claim_execution_plan_cancel(
+        self,
+        public_id: str,
+        idempotency_key: str | None,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+        cancel_requested_at: datetime,
+    ) -> CancelClaimResult:
+        """Atomically claim the cancel transition with CAS-style preconditions.
+
+        Plan B v1.2 §1.4 — locks the active execution-plan row, verifies
+        the precondition (no key claimed yet, or matching caller key),
+        and only then performs the SCD2 close-and-insert with the
+        caller's ``idempotency_key`` written on the new row. Avoids the
+        race window in :meth:`update_execution_plan_status` where two
+        callers reading at different ``bus_time`` instants would both
+        see an actionable row, both transition, and the second blindly
+        overwrite the first's claim.
+
+        Args:
+            public_id: Plan public identifier.
+            idempotency_key: Caller-supplied dedup key. ``None`` is
+                accepted (REST-shaped legacy callers); only non-``None``
+                keys are persisted on the new SCD2 row and only
+                non-``None`` keys block cross-caller key reuse via the
+                partial-unique index.
+            bus_time: Timestamp for the SCD2 close-and-insert.
+            session_id: Producer session identifier.
+            sequence_id: Monotonic sequence counter.
+            cancel_requested_at: Wall-clock instant the caller's
+                cancel intent fired (for the new SCD2 row's
+                ``cancel_requested_at`` column).
+
+        Returns:
+            :class:`CancelClaimResult` discriminating the outcome —
+            ``claimed`` for a successful CAS transition,
+            ``replay`` when the active row already carries the same
+            key (idempotent retry; caller short-circuits without
+            emitting another cancel command),
+            ``key_mismatch`` when the active row has a different
+            non-null key,
+            ``in_progress`` when status is ``cancel_requested`` with
+            no caller-key match,
+            ``terminal`` when the plan is already terminal,
+            ``not_found`` when no active row exists.
         """
         ...
 
@@ -7384,6 +7441,7 @@ class SQLAlchemyRepository(Repository):
             last_evaluated_at=p.last_evaluated_at,
             last_error=p.last_error,
             idempotency_key=p.idempotency_key,
+            cancel_idempotency_key=p.cancel_idempotency_key,
         )
 
     async def insert_execution_plan(
@@ -7412,6 +7470,7 @@ class SQLAlchemyRepository(Repository):
                 position_cycle_public_id=row.get("position_cycle_public_id"),
                 expires_at=row.get("expires_at"),
                 idempotency_key=row.get("idempotency_key"),
+                cancel_idempotency_key=row.get("cancel_idempotency_key"),
                 session_id=row["session_id"],
                 sequence_id=row["sequence_id"],
                 timestamp=row["timestamp"],
@@ -7482,6 +7541,7 @@ class SQLAlchemyRepository(Repository):
         completed_at: datetime | None = None,
         cancel_requested_at: datetime | None = None,
         last_evaluated_at: datetime | None = None,
+        cancel_idempotency_key: str | None = None,
     ) -> int | None:
         """SCD2 close-and-insert for plan status transition."""
         async with self.session() as s:
@@ -7543,6 +7603,11 @@ class SQLAlchemyRepository(Repository):
                 ),
                 last_error=last_error,
                 idempotency_key=existing.idempotency_key,
+                cancel_idempotency_key=(
+                    cancel_idempotency_key
+                    if cancel_idempotency_key is not None
+                    else existing.cancel_idempotency_key
+                ),
                 session_id=session_id,
                 sequence_id=sequence_id,
                 timestamp=bus_time,
@@ -7553,6 +7618,92 @@ class SQLAlchemyRepository(Repository):
             return new_plan.id
 
     _ACTIONABLE_STATUSES = ("pending", "armed", "active", "paused", "cancel_requested")
+    _CANCEL_TERMINAL_STATUSES: frozenset[str] = frozenset(
+        {"completed", "cancelled", "failed", "expired"}
+    )
+
+    async def claim_execution_plan_cancel(
+        self,
+        public_id: str,
+        idempotency_key: str | None,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+        cancel_requested_at: datetime,
+    ) -> CancelClaimResult:
+        """Atomically claim the cancel transition under FOR UPDATE lock."""
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(ExecutionPlan)
+                        .where(
+                            ExecutionPlan.public_id == public_id,
+                            *where_active(ExecutionPlan, bus_time),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                return CancelClaimResult(outcome="not_found", plan=None)
+            existing_key = existing.cancel_idempotency_key
+            existing_dict = self._plan_row_to_dict(existing)
+            if (
+                idempotency_key is not None
+                and existing_key is not None
+                and existing_key == idempotency_key
+            ):
+                return CancelClaimResult(outcome="replay", plan=existing_dict)
+            if existing_key is not None and existing_key != idempotency_key:
+                return CancelClaimResult(outcome="key_mismatch", plan=existing_dict)
+            if existing.status in self._CANCEL_TERMINAL_STATUSES:
+                return CancelClaimResult(outcome="terminal", plan=existing_dict)
+            if existing.status == "cancel_requested":
+                return CancelClaimResult(outcome="in_progress", plan=existing_dict)
+            await s.execute(
+                update(ExecutionPlan)
+                .where(ExecutionPlan.id == existing.id)
+                .values(known_to=bus_time)
+            )
+            new_plan = ExecutionPlan(
+                public_id=existing.public_id,
+                plan_type=existing.plan_type,
+                created_by_user_id=existing.created_by_user_id,
+                created_by_strategy=existing.created_by_strategy,
+                created_via=existing.created_via,
+                instrument_public_id=existing.instrument_public_id,
+                exchange=existing.exchange,
+                mode=existing.mode,
+                shard_key=existing.shard_key,
+                wallet_public_id=existing.wallet_public_id,
+                operator_public_id=existing.operator_public_id,
+                total_quantity=existing.total_quantity,
+                filled_quantity=existing.filled_quantity,
+                side=existing.side,
+                parent_plan_public_id=existing.parent_plan_public_id,
+                position_cycle_public_id=existing.position_cycle_public_id,
+                params=existing.params,
+                status="cancel_requested",
+                created_at=existing.created_at,
+                started_at=existing.started_at,
+                completed_at=existing.completed_at,
+                expires_at=existing.expires_at,
+                cancel_requested_at=cancel_requested_at,
+                last_evaluated_at=existing.last_evaluated_at,
+                last_error=existing.last_error,
+                idempotency_key=existing.idempotency_key,
+                cancel_idempotency_key=idempotency_key,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=bus_time,
+            )
+            s.add(new_plan)
+            await s.commit()
+            await s.refresh(new_plan)
+            return CancelClaimResult(outcome="claimed", plan=self._plan_row_to_dict(new_plan))
 
     async def get_active_execution_plans(
         self,
@@ -7785,6 +7936,7 @@ class SQLAlchemyRepository(Repository):
                 last_evaluated_at=existing.last_evaluated_at,
                 last_error=existing.last_error,
                 idempotency_key=existing.idempotency_key,
+                cancel_idempotency_key=existing.cancel_idempotency_key,
                 session_id=session_id,
                 sequence_id=sequence_id,
                 timestamp=bus_time,

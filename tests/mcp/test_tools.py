@@ -26,7 +26,9 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from sqlalchemy.exc import IntegrityError
 
+from snapper.application.plans import cancel_service
 from snapper.application.trade.caps_enforcer import CapsViolationError
+from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
@@ -1433,3 +1435,333 @@ class TestGetPositionCycleTool:
         )
         envelope = _decode_envelope(result)
         assert envelope["error_code"] == "service_unavailable"
+
+
+_PLAN_ROW_FIXTURE: dict[str, Any] = {
+    "public_id": "plan-1",
+    "timestamp": datetime.now(UTC),
+    "session_id": "s",
+    "sequence_id": 5,
+    "plan_type": "manual_once",
+    "created_by_user_id": "user-1",
+    "created_by_strategy": None,
+    "created_via": "api",
+    "instrument_public_id": "inst-1",
+    "exchange": "kraken",
+    "mode": "live",
+    "shard_key": "kraken.BTC-USD.live",
+    "wallet_public_id": "wallet-1",
+    "operator_public_id": "op-1",
+    "side": "buy",
+    "total_quantity": 1.0,
+    "filled_quantity": 0.0,
+    "parent_plan_public_id": None,
+    "position_cycle_public_id": None,
+    "params": {},
+    "status": "cancel_requested",
+    "created_at": datetime.now(UTC),
+    "started_at": None,
+    "completed_at": None,
+    "expires_at": None,
+    "cancel_requested_at": datetime.now(UTC),
+    "last_evaluated_at": None,
+    "last_error": None,
+    "idempotency_key": "create-key",
+    "cancel_idempotency_key": "cancel-key-1",
+}
+
+
+class TestCancelOrderTool:
+    """Plan B Phase 3 — coverage for the ``cancel_order`` MCP write tool."""
+
+    @staticmethod
+    def _enforcer_admit() -> Any:
+
+        @asynccontextmanager
+        async def _admit(submission: Any) -> Any:
+            del submission
+            yield None
+
+        enforcer = MagicMock(spec=TradingCapsEnforcer)
+        enforcer.guard = _admit
+        return enforcer
+
+    @pytest.mark.asyncio
+    async def test_happy_path_returns_updated_plan(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Cancel succeeds → envelope carries the updated plan row."""
+        plan = _PLAN_ROW_FIXTURE.copy()
+
+        async def _ok(**kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            return plan
+
+        repo = AsyncMock()
+        server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
+        monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _ok)
+        result = await server._tool_manager.call_tool(
+            "cancel_order",
+            {"plan_public_id": "plan-1", "idempotency_key": "k-1"},
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is True
+        assert envelope["details"]["plan"]["public_id"] == "plan-1"
+        assert envelope["details"]["plan"]["status"] == "cancel_requested"
+        assert envelope["details"]["plan"]["cancel_idempotency_key"] == "cancel-key-1"
+
+    @pytest.mark.asyncio
+    async def test_empty_idempotency_key_returns_invalid_argument(self) -> None:
+        """Empty key → invalid_argument envelope, no service call."""
+        repo = AsyncMock()
+        server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
+        result = await server._tool_manager.call_tool(
+            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": ""}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "invalid_argument"
+
+    @pytest.mark.asyncio
+    async def test_role_without_cancel_orders_returns_permission_denied(self) -> None:
+        """Plan B §5 — permission failure surfaces as Plan A Q14 envelope."""
+        repo = AsyncMock()
+        saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
+        ROLE_PERMISSIONS[UserRole.VIEWER] = set()
+        server = FastMCP("test")
+        register_mcp_tools(
+            server,
+            repository_getter=lambda: repo,
+            caps_enforcer_getter=lambda: self._enforcer_admit(),
+            claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
+        )
+        try:
+            result = await server._tool_manager.call_tool(
+                "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+            )
+            envelope = _decode_envelope(result)
+            assert envelope["error_code"] == "permission_denied"
+        finally:
+            if saved is not None:
+                ROLE_PERMISSIONS[UserRole.VIEWER] = saved
+
+    @pytest.mark.asyncio
+    async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
+        """Plan B §5 — pre-lifespan repository surfaces structured envelope."""
+        server = _build_server(repository=None, caps_enforcer=self._enforcer_admit())
+        result = await server._tool_manager.call_tool(
+            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "service_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_pre_lifespan_caps_enforcer_returns_service_unavailable(self) -> None:
+        """Caps enforcer not yet wired → service_unavailable envelope."""
+        repo = AsyncMock()
+        server = _build_server(repository=repo, caps_enforcer=None)
+        result = await server._tool_manager.call_tool(
+            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "service_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_plan_not_found_returns_order_not_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """:class:`PlanNotFoundError` → ``order_not_found`` envelope."""
+
+        async def _miss(**kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            raise cancel_service.PlanNotFoundError("plan-missing")
+
+        repo = AsyncMock()
+        server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
+        monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _miss)
+        result = await server._tool_manager.call_tool(
+            "cancel_order", {"plan_public_id": "plan-missing", "idempotency_key": "k"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "order_not_found"
+
+    @pytest.mark.asyncio
+    async def test_scope_error_collapses_to_order_not_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """:class:`PlanScopeError` collapses to ``order_not_found`` (anti-enum)."""
+
+        async def _scope(**kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            raise cancel_service.PlanScopeError("plan-other-tenant")
+
+        repo = AsyncMock()
+        server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
+        monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _scope)
+        result = await server._tool_manager.call_tool(
+            "cancel_order", {"plan_public_id": "plan-other-tenant", "idempotency_key": "k"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "order_not_found"
+
+    @pytest.mark.asyncio
+    async def test_terminal_plan_returns_already_terminal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Terminal plan → ``already_terminal`` envelope with status detail."""
+
+        async def _term(**kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            raise cancel_service.PlanAlreadyTerminalError("plan-1", "cancelled")
+
+        repo = AsyncMock()
+        server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
+        monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _term)
+        result = await server._tool_manager.call_tool(
+            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "already_terminal"
+        assert envelope["details"]["status"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_cancel_in_progress_returns_specific_code(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """:class:`PlanCancelInProgressError` → ``cancel_in_progress`` envelope."""
+
+        async def _inprog(**kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            raise cancel_service.PlanCancelInProgressError("plan-1")
+
+        repo = AsyncMock()
+        server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
+        monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _inprog)
+        result = await server._tool_manager.call_tool(
+            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k-new"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "cancel_in_progress"
+
+    @pytest.mark.asyncio
+    async def test_idempotency_key_mismatch_returns_conflict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Different key on a plan that has one → ``idempotency_key_conflict``."""
+
+        async def _conflict(**kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            raise cancel_service.PlanCancelIdempotencyKeyMismatchError("plan-1")
+
+        repo = AsyncMock()
+        server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
+        monkeypatch.setattr(
+            cancel_service.PlansCancelService, "cancel_by_plan_public_id", _conflict
+        )
+        result = await server._tool_manager.call_tool(
+            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k-B"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "idempotency_key_conflict"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_change_returns_service_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R1: SCD2 race → ``service_unavailable`` (caller can retry to learn post-race state)."""
+
+        async def _race(**kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            raise cancel_service.PlanConcurrentChangeError("plan-1")
+
+        repo = AsyncMock()
+        server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
+        monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _race)
+        result = await server._tool_manager.call_tool(
+            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "service_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_oversize_idempotency_key_returns_invalid_argument(self) -> None:
+        """R1: idempotency_key > 64 chars rejected at MCP boundary as invalid_argument.
+
+        Plan B v1.2 §1.4: ``execution_plans.cancel_idempotency_key`` is
+        ``String(64)``. Without this guard PostgreSQL surfaces a raw
+        DataError that escapes the Plan A Q14 envelope.
+        """
+        repo = AsyncMock()
+        server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
+        result = await server._tool_manager.call_tool(
+            "cancel_order",
+            {"plan_public_id": "plan-1", "idempotency_key": "x" * 65},
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "invalid_argument"
+        assert envelope["details"]["max_length"] == 64
+
+    @pytest.mark.asyncio
+    async def test_caps_violation_returns_caps_violation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """:class:`CapsViolationError` → ``caps_violation`` envelope with detail."""
+
+        async def _caps(**kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            raise CapsViolationError(
+                cap_type="cancel_rate", attempted=11, limit=10, detail="too many"
+            )
+
+        repo = AsyncMock()
+        server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
+        monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _caps)
+        result = await server._tool_manager.call_tool(
+            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "caps_violation"
+        assert envelope["details"]["cap_type"] == "cancel_rate"
+        assert envelope["details"]["attempted"] == 11
+        assert envelope["details"]["limit"] == 10
+
+    @pytest.mark.asyncio
+    async def test_emit_failure_collapses_to_service_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """:class:`PlanCancelEmitError` → ``service_unavailable`` envelope."""
+
+        async def _emit_fail(**kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            raise cancel_service.PlanCancelEmitError("plan-1", RuntimeError("bus down"))
+
+        repo = AsyncMock()
+        server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
+        monkeypatch.setattr(
+            cancel_service.PlansCancelService, "cancel_by_plan_public_id", _emit_fail
+        )
+        result = await server._tool_manager.call_tool(
+            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "service_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_serialised_plan_datetime_fields_are_iso_strings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Plan B §5 — JSON envelope cannot carry raw datetimes; ISO strings."""
+        plan = _PLAN_ROW_FIXTURE.copy()
+
+        async def _ok(**kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            return plan
+
+        repo = AsyncMock()
+        server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
+        monkeypatch.setattr(cancel_service.PlansCancelService, "cancel_by_plan_public_id", _ok)
+        result = await server._tool_manager.call_tool(
+            "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
+        )
+        envelope = _decode_envelope(result)
+        plan_payload = envelope["details"]["plan"]
+        assert isinstance(plan_payload["timestamp"], str) and "T" in plan_payload["timestamp"]
+        assert isinstance(plan_payload["created_at"], str)
+        assert isinstance(plan_payload["cancel_requested_at"], str)

@@ -38,6 +38,7 @@ from snapper.auth.tokens import get_token_manager
 from snapper.data.repository import Repository
 from snapper.mcp.rate_limiting import PrincipalRateLimitMiddleware
 from snapper.mcp.tools import register_mcp_tools
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 _MCP_SERVER_NAME = "snapper"
 _MCP_SERVER_VERSION = "0.1.0"
@@ -300,6 +301,7 @@ def build_mcp_app(
     settings_service_getter: Callable[[], SettingsService | None],
     repository_getter: Callable[[], Repository | None] | None = None,
     caps_enforcer_getter: Callable[[], TradingCapsEnforcer | None] | None = None,
+    tracker_getter: Callable[[], SequenceTracker | None] | None = None,
 ) -> Starlette:
     """Return the Starlette sub-app to be mounted under ``/api/mcp``.
 
@@ -335,6 +337,16 @@ def build_mcp_app(
             in ``guard(submission)`` against this enforcer so
             per-user caps apply to MCP-initiated writes identically
             to REST-initiated writes.
+        tracker_getter: Zero-arg callable returning the shared
+            :class:`SequenceTracker` (typically the FastAPI app's
+            ``app.state.rest_tracker``). Plan B v1.2 §1.4
+            ``cancel_order`` write tool emits a sequenced cancel
+            ``TradeCommand`` through this tracker so MCP-initiated
+            cancels share session_id / sequence_id parity with
+            REST-initiated cancels. ``None`` falls back to a per-call
+            tracker — fine for stateless deployments because the
+            partial-unique cancel-idempotency-key index prevents
+            cross-call replay collisions.
 
     Returns:
         A Starlette sub-app ready for ``FastAPI.mount("/api/mcp",...)``.
@@ -349,6 +361,7 @@ def build_mcp_app(
         mcp_server,
         repository_getter=repository_getter or (lambda: None),
         caps_enforcer_getter=caps_enforcer_getter or (lambda: None),
+        tracker_getter=tracker_getter or (lambda: None),
         claims_getter=get_current_claims,
     )
     downstream = mcp_server.streamable_http_app()
