@@ -1668,6 +1668,7 @@ class TestResourcePermissions:
             "settings",
             "backtests",
             "ai-integration",
+            "ai-reviews",
             "notifications",
         }
         assert set(RESOURCE_PERMISSIONS.keys()) == expected

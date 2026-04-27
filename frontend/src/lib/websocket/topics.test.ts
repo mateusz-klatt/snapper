@@ -10,6 +10,7 @@ import {
   SIGNALS_TOPIC_PREFIX,
   STRATEGY_TOPIC_PREFIX,
   HEARTBEATS_TOPIC_PREFIX,
+  AI_REVIEWS_TOPIC_PREFIX,
 } from './topics'
 import {
   createCandle,
@@ -182,6 +183,9 @@ describe('topics', () => {
     it('exports HEARTBEATS_TOPIC_PREFIX', () => {
       expect(HEARTBEATS_TOPIC_PREFIX).toBe('system.heartbeats.')
     })
+    it('exports AI_REVIEWS_TOPIC_PREFIX', () => {
+      expect(AI_REVIEWS_TOPIC_PREFIX).toBe('ai_reviews.')
+    })
   })
   describe('getSubscriptionTopics', () => {
     it('returns array of valid subscription prefixes', () => {
@@ -194,10 +198,14 @@ describe('topics', () => {
         'signals.',
         'strategy.',
         'system.heartbeats.',
+        'ai_reviews.',
       ])
     })
-    it('returns 6 topics', () => {
-      expect(getSubscriptionTopics()).toHaveLength(6)
+    it('returns 7 topics', () => {
+      expect(getSubscriptionTopics()).toHaveLength(7)
+    })
+    it('includes ai_reviews prefix so AI delegate consumers receive request/decision_ack/caps_violation frames', () => {
+      expect(getSubscriptionTopics()).toContain(AI_REVIEWS_TOPIC_PREFIX)
     })
   })
 })

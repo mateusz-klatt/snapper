@@ -3289,6 +3289,58 @@ describe('cacheWsTicketFromResponse', () => {
       })
       await expect(apiClient.deactivateAiDelegate('d-1')).rejects.toThrow('database is locked')
     })
+    it('listPendingAiReviews returns validated pending list with no params', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          items: [
+            {
+              review_public_id: 'r-1',
+              selected_delegate_public_id: 'del-1',
+              wallet_public_id: 'wal-1',
+              dispatch_version: 0,
+              status: 'pending',
+              deadline: '2026-04-27T10:05:00Z',
+              fanout_after: '2026-04-27T10:00:00Z',
+            },
+          ],
+          count: 1,
+        }),
+      })
+      const result = await apiClient.listPendingAiReviews()
+
+      expect(result.count).toBe(1)
+      expect(result.items[0].review_public_id).toBe('r-1')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringMatching(/\/api\/ai-reviews\/pending$/),
+        expect.any(Object)
+      )
+    })
+    it('listPendingAiReviews appends wallet_public_id and limit query params', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ items: [], count: 0 }),
+      })
+      await apiClient.listPendingAiReviews({ wallet_public_id: 'wal-77', limit: 25 })
+      const calledUrl = mockFetch.mock.calls[0][0] as string
+
+      expect(calledUrl).toContain('wallet_public_id=wal-77')
+      expect(calledUrl).toContain('limit=25')
+    })
+    it('listPendingAiReviews throws APIError on 422 (non-delegate caller)', async () => {
+      const jsonFn = async () => ({ detail: 'not_a_delegate' })
+
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Content',
+        json: jsonFn,
+        clone: () => ({ json: jsonFn }),
+      })
+      await expect(apiClient.listPendingAiReviews()).rejects.toThrow('not_a_delegate')
+    })
   })
   describe('patchJSON helper', () => {
     it('sends PATCH with body', async () => {

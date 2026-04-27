@@ -145,3 +145,17 @@ export function isSignal(msg: WebSocketMessages): msg is SignalData {
 export function isHeartbeat(msg: WebSocketMessages): msg is HeartbeatData {
   return msg.type === 'heartbeat'
 }
+
+export function isAiReviewRequest(msg: WebSocketMessages): msg is AiReviewRequestFrameData {
+  return msg.type === 'ai_review.request'
+}
+
+export function isAiReviewDecisionAck(msg: WebSocketMessages): msg is AiReviewDecisionAckFrameData {
+  return msg.type === 'ai_review.decision_ack'
+}
+
+export function isAiReviewCapsViolation(
+  msg: WebSocketMessages
+): msg is AiReviewCapsViolationFrameData {
+  return msg.type === 'ai_review.caps_violation'
+}

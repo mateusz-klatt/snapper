@@ -15,6 +15,7 @@ import { useHashSubpath } from '../hooks/useHashRouting'
 import { Health } from '../features/health/Health'
 import { Admin } from '../features/admin/Admin'
 import { AIIntegration } from '../features/ai-integration/AIIntegration'
+import { AiReviewInbox } from '../features/ai-reviews/AiReviewInbox'
 import { Settings } from '../features/settings/Settings'
 
 interface AppRoutesProps {
@@ -122,6 +123,14 @@ export function AppRoutes({ activeTab }: Readonly<AppRoutesProps>): React.ReactE
         <ErrorBoundary componentName='AI Integration'>
           <ProtectedRoute resource='ai-integration'>
             <AIIntegration />
+          </ProtectedRoute>
+        </ErrorBoundary>
+      )
+    case 'ai-reviews':
+      return (
+        <ErrorBoundary componentName='AI Reviews'>
+          <ProtectedRoute resource='ai-reviews'>
+            <AiReviewInbox />
           </ProtectedRoute>
         </ErrorBoundary>
       )

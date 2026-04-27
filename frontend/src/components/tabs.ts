@@ -6,6 +6,7 @@ import {
   ClipboardList,
   Gauge,
   HeartPulse,
+  Inbox,
   LayoutDashboard,
   Settings,
   Shield,
@@ -26,6 +27,7 @@ type TabType =
   | 'health'
   | 'admin'
   | 'ai-integration'
+  | 'ai-reviews'
   | 'settings'
 interface TabConfig {
   id: TabType
@@ -45,5 +47,6 @@ export const ALL_TABS: readonly TabConfig[] = [
   { id: 'health', label: 'Health', icon: HeartPulse },
   { id: 'admin', label: 'Administration', icon: Shield },
   { id: 'ai-integration', label: 'AI Integration', icon: Zap },
+  { id: 'ai-reviews', label: 'AI Reviews', icon: Inbox },
   { id: 'settings', label: 'Settings', icon: Settings },
 ] as const

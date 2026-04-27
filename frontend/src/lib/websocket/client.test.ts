@@ -38,6 +38,7 @@ vi.mock('./topics', () => ({
   ORDERS_EVENTS_PREFIX: 'orders.events.',
   SIGNALS_TOPIC_PREFIX: 'signals.',
   HEARTBEATS_TOPIC_PREFIX: 'system.heartbeats.',
+  AI_REVIEWS_TOPIC_PREFIX: 'ai_reviews.',
   getSubscriptionTopics: vi.fn(() => [
     'market.',
     'orders.commands.',
@@ -45,6 +46,7 @@ vi.mock('./topics', () => ({
     'signals.',
     'strategy.',
     'system.heartbeats.',
+    'ai_reviews.',
   ]),
 }))
 vi.mock('./reconnect', () => ({

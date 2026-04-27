@@ -1065,7 +1065,7 @@ class TestGenerateIosPermissions:
         assert "Generated" in captured.out
         assert "23 permissions" in captured.out
         assert "4 roles" in captured.out
-        assert "13 resources" in captured.out
+        assert "14 resources" in captured.out
 
     def test_includes_all_roles(self, tmp_path: Path) -> None:
         """Generated file includes viewer, operatorRole, and admin roles.
@@ -2184,7 +2184,7 @@ class TestGeneratePermissions:
         assert "Generated" in captured.out
         assert "23 permissions" in captured.out
         assert "4 roles" in captured.out
-        assert "13 resources" in captured.out
+        assert "14 resources" in captured.out
 
     def test_includes_all_roles(self, tmp_path: Path) -> None:
         """Generated file includes viewer, operator, and admin roles."""

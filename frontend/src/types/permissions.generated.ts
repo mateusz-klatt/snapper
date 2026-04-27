@@ -53,5 +53,6 @@ export const RESOURCE_ACCESS: Record<string, readonly UserRole[]> = {
   'settings': ['admin'],
   'backtests': ['ai_delegate', 'viewer', 'operator', 'admin'],
   'ai-integration': ['operator', 'admin'],
+  'ai-reviews': ['ai_delegate', 'operator', 'admin'],
   'notifications': ['viewer', 'operator', 'admin'],
 } as const

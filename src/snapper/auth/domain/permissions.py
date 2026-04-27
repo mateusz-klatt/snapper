@@ -62,6 +62,7 @@ RESOURCE_PERMISSIONS: dict[str, Permission | None] = {
     "settings": Permission.CONFIGURE_SYSTEM,
     "backtests": Permission.READ_BACKTESTS,
     "ai-integration": Permission.MANAGE_PROCESSES,
+    "ai-reviews": Permission.READ_SIGNALS,
     "notifications": Permission.READ_NOTIFICATIONS,
 }
 

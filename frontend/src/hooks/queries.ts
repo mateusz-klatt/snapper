@@ -4,6 +4,11 @@ import { apiClient, APIError } from '../lib/apiClient'
 import { useAppStore } from '../stores/app'
 import { useAuth } from '../stores/auth'
 import {
+  type AiReviewActivityFrame,
+  AI_REVIEW_ACTIVITY_QUERY_KEY_ROOT,
+  aiReviewActivityQueryKey,
+} from '../stores/wsDispatcher'
+import {
   safeOrderFromAPI,
   safeExecutionFromAPI,
   safeSignalFromAPI,
@@ -97,6 +102,11 @@ const queryKeys = {
   featureFlags: () => ['feature-flags'] as const,
   aiDelegates: () => ['ai-delegates'] as const,
   aiDelegate: (publicId: string) => ['ai-delegates', publicId] as const,
+  pendingAiReviews: (
+    userPublicId: string | null,
+    walletPublicId: string | null,
+    limit: number | null
+  ) => ['ai-reviews', 'pending', userPublicId, walletPublicId, limit] as const,
 }
 
 export const useSystemStatus = () => {
@@ -924,3 +934,90 @@ export const useDeactivateAiDelegate = () => {
     },
   })
 }
+
+const PENDING_AI_REVIEWS_REFETCH_MS = 5_000
+
+/**
+ * Plan D §7 / Plan A §5.2 — list pending CONSULT reviews for the
+ * authenticated AI delegate.
+ *
+ * Gated by ``role === 'ai_delegate'`` because the REST endpoint
+ * (`GET /api/ai-reviews/pending`) returns 422 for any other role:
+ * the snapshot is keyed by ``AuthPrincipal.delegate_public_id`` which
+ * is only populated for delegate principals. Pre-empting the call
+ * client-side keeps non-delegate UIs free of misleading 422 errors.
+ *
+ * Refetches every 5s plus on window focus so the inbox stays
+ * eventually consistent with the WS-driven activity stream after
+ * disconnect / reconnect.
+ */
+export const usePendingAiReviews = (
+  params: Readonly<{ walletPublicId?: string | null; limit?: number }> = {}
+) => {
+  const { isAuthenticated, user } = useAuth()
+  const walletPublicId = params.walletPublicId ?? null
+  const limit = params.limit ?? null
+  const isDelegate = user?.role === 'ai_delegate'
+  const userPublicId = user?.public_id ?? null
+
+  return useQuery({
+    queryKey: queryKeys.pendingAiReviews(userPublicId, walletPublicId, limit),
+    queryFn: () =>
+      apiClient.listPendingAiReviews({
+        wallet_public_id: walletPublicId ?? undefined,
+        limit: limit ?? undefined,
+      }),
+    enabled: isAuthenticated && isDelegate && userPublicId !== null,
+    refetchInterval: PENDING_AI_REVIEWS_REFETCH_MS,
+    refetchOnWindowFocus: true,
+    throwOnError: false,
+  })
+}
+
+/**
+ * Read-only view onto the WS-driven AI review activity ring buffer
+ * maintained by :class:`WSDispatcher`.
+ *
+ * The dispatcher merges :data:`AiReviewRequestFrameData`,
+ * :data:`AiReviewDecisionAckFrameData`, and
+ * :data:`AiReviewCapsViolationFrameData` envelopes into the
+ * ``['ai-review-activity']`` cache deduped by
+ * ``(type, review_public_id, dispatch_version)`` and capped at
+ * :data:`AI_REVIEW_ACTIVITY_RING_CAP`.
+ *
+ * Unlike :func:`usePendingAiReviews` this hook does not gate by role
+ * because non-delegate sockets receive zero ai_reviews frames anyway
+ * (the WS scope filter at ``snapper.interface.websocket.scope_filter``
+ * drops them), so the cache stays empty for non-delegates without
+ * extra logic here.
+ */
+export const useAiReviewActivity = () => {
+  const queryClient = useQueryClient()
+  const { user } = useAuth()
+  const userPublicId = user?.public_id ?? null
+  const queryKey = React.useMemo(() => aiReviewActivityQueryKey(userPublicId), [userPublicId])
+  const subscribe = React.useCallback(
+    (notify: () => void) => {
+      const unsubscribe = queryClient.getQueryCache().subscribe(event => {
+        const eventKey = event.query.queryKey
+
+        if (eventKey[0] === AI_REVIEW_ACTIVITY_QUERY_KEY_ROOT && eventKey[1] === userPublicId) {
+          notify()
+        }
+      })
+
+      return unsubscribe
+    },
+    [queryClient, userPublicId]
+  )
+  const getSnapshot = React.useCallback(
+    () =>
+      (queryClient.getQueryData(queryKey) ??
+        EMPTY_AI_REVIEW_ACTIVITY) as readonly AiReviewActivityFrame[],
+    [queryClient, queryKey]
+  )
+
+  return React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+}
+
+const EMPTY_AI_REVIEW_ACTIVITY: readonly AiReviewActivityFrame[] = []

@@ -1,9 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { QueryClient } from '@tanstack/react-query'
-import { WSDispatcher, getDispatcher, resetDispatcher } from './wsDispatcher'
+import {
+  WSDispatcher,
+  getDispatcher,
+  resetDispatcher,
+  AI_REVIEW_ACTIVITY_RING_CAP,
+  aiReviewActivityQueryKey,
+  type AiReviewActivityFrame,
+} from './wsDispatcher'
 import WebSocketClient from '../lib/websocket/client'
 import { useMarketStore } from './market'
 import { useAppStore } from './app'
+import { useAuthStore } from './auth'
 import type {
   OrderData,
   ExecutionData,
@@ -11,6 +19,9 @@ import type {
   CandleData,
   TradeData,
   HeartbeatData,
+  AiReviewRequestFrameData,
+  AiReviewDecisionAckFrameData,
+  AiReviewCapsViolationFrameData,
 } from '../types/ws'
 
 vi.mock('./market', () => ({
@@ -20,6 +31,11 @@ vi.mock('./market', () => ({
 }))
 vi.mock('./app', () => ({
   useAppStore: {
+    getState: vi.fn(),
+  },
+}))
+vi.mock('./auth', () => ({
+  useAuthStore: {
     getState: vi.fn(),
   },
 }))
@@ -76,6 +92,9 @@ describe('WSDispatcher', () => {
     }
 
     vi.mocked(useAppStore.getState).mockReturnValue(mockAppStore as never)
+    vi.mocked(useAuthStore.getState).mockReturnValue({
+      user: { public_id: 'user-1' },
+    } as never)
     resetDispatcher()
   })
   afterEach(() => {
@@ -1796,6 +1815,235 @@ describe('WSDispatcher', () => {
 
       expect(liveCached).toHaveLength(1)
       expect(histCached).toHaveLength(0)
+    })
+  })
+  describe('ai_review.* activity stream (Plan D Phase 2 #11)', () => {
+    function makeRequest(
+      reviewPublicId: string,
+      dispatchVersion = 0,
+      timestamp: string = '2026-04-27T10:00:00Z'
+    ): AiReviewRequestFrameData {
+      return {
+        type: 'ai_review.request',
+        sequence_id: 1,
+        public_id: `pub-${reviewPublicId}-${dispatchVersion}`,
+        timestamp,
+        session_id: 'sess-1',
+        review_public_id: reviewPublicId,
+        user_public_id: 'user-1',
+        strategy_public_id: 'strat-1',
+        wallet_public_id: 'wal-1',
+        instrument_public_id: 'inst-1',
+        selected_delegate_public_id: 'del-1',
+        deadline: '2026-04-27T10:05:00Z',
+        signal_envelope: {},
+        instrument_metadata: {},
+        dispatch_version: dispatchVersion,
+      } as unknown as AiReviewRequestFrameData
+    }
+
+    function makeDecisionAck(
+      reviewPublicId: string,
+      decision: 'approve' | 'reject' = 'approve'
+    ): AiReviewDecisionAckFrameData {
+      return {
+        type: 'ai_review.decision_ack',
+        sequence_id: 2,
+        public_id: `pub-ack-${reviewPublicId}`,
+        timestamp: '2026-04-27T10:01:00Z',
+        session_id: 'sess-1',
+        review_public_id: reviewPublicId,
+        user_public_id: 'user-1',
+        strategy_public_id: 'strat-1',
+        wallet_public_id: 'wal-1',
+        instrument_public_id: 'inst-1',
+        responding_delegate_public_id: 'del-1',
+        decision,
+        new_status: 'resolved_approved',
+        resolution_mode: 'race_to_first',
+        rationale: 'looks good',
+        dispatch_version: 0,
+      } as unknown as AiReviewDecisionAckFrameData
+    }
+
+    function makeCapsViolation(reviewPublicId: string): AiReviewCapsViolationFrameData {
+      return {
+        type: 'ai_review.caps_violation',
+        sequence_id: 3,
+        public_id: `pub-cv-${reviewPublicId}`,
+        timestamp: '2026-04-27T10:02:00Z',
+        session_id: 'sess-1',
+        review_public_id: reviewPublicId,
+        user_public_id: 'user-1',
+        strategy_public_id: 'strat-1',
+        wallet_public_id: 'wal-1',
+        instrument_public_id: 'inst-1',
+        cap_type: 'max_daily_notional_usd',
+        attempted: 50000,
+        limit: 10000,
+        dispatch_version: 0,
+      } as unknown as AiReviewCapsViolationFrameData
+    }
+
+    it('registers handlers for all 3 ai_review external frame discriminators', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      expect(mockWsClient.onMessage).toHaveBeenCalledWith('ai_review.request', expect.any(Function))
+      expect(mockWsClient.onMessage).toHaveBeenCalledWith(
+        'ai_review.decision_ack',
+        expect.any(Function)
+      )
+      expect(mockWsClient.onMessage).toHaveBeenCalledWith(
+        'ai_review.caps_violation',
+        expect.any(Function)
+      )
+    })
+
+    it('appends a request frame to the cache buffer', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      messageHandlers.get('ai_review.request')?.(makeRequest('rev-1'))
+      const cached = queryClient.getQueryData<AiReviewActivityFrame[]>(
+        aiReviewActivityQueryKey('user-1') as unknown as string[]
+      )
+
+      expect(cached).toHaveLength(1)
+      expect(cached?.[0]?.type).toBe('ai_review.request')
+      expect(cached?.[0]?.review_public_id).toBe('rev-1')
+    })
+
+    it('appends decision_ack and caps_violation frames in arrival order', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      messageHandlers.get('ai_review.request')?.(makeRequest('rev-1'))
+      messageHandlers.get('ai_review.decision_ack')?.(makeDecisionAck('rev-1'))
+      messageHandlers.get('ai_review.caps_violation')?.(makeCapsViolation('rev-1'))
+      const cached = queryClient.getQueryData<AiReviewActivityFrame[]>(
+        aiReviewActivityQueryKey('user-1') as unknown as string[]
+      )
+
+      expect(cached?.map(f => f.type)).toEqual([
+        'ai_review.request',
+        'ai_review.decision_ack',
+        'ai_review.caps_violation',
+      ])
+    })
+
+    it('dedupes by (type, review_public_id, dispatch_version) — same triple is dropped', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const handler = messageHandlers.get('ai_review.caps_violation')
+
+      handler?.(makeCapsViolation('rev-1'))
+      handler?.(makeCapsViolation('rev-1'))
+      handler?.(makeCapsViolation('rev-1'))
+      const cached = queryClient.getQueryData<AiReviewActivityFrame[]>(
+        aiReviewActivityQueryKey('user-1') as unknown as string[]
+      )
+
+      expect(cached).toHaveLength(1)
+    })
+
+    it('does NOT dedupe across different dispatch_version (Plan A Q18 re-fanout)', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      messageHandlers.get('ai_review.request')?.(makeRequest('rev-1', 0))
+      messageHandlers.get('ai_review.request')?.(makeRequest('rev-1', 1))
+      const cached = queryClient.getQueryData<AiReviewActivityFrame[]>(
+        aiReviewActivityQueryKey('user-1') as unknown as string[]
+      )
+
+      expect(cached).toHaveLength(2)
+      expect(cached?.map(f => (f as AiReviewRequestFrameData).dispatch_version)).toEqual([0, 1])
+    })
+
+    it('does NOT dedupe across different frame types for the same review', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      messageHandlers.get('ai_review.request')?.(makeRequest('rev-1'))
+      messageHandlers.get('ai_review.decision_ack')?.(makeDecisionAck('rev-1'))
+      const cached = queryClient.getQueryData<AiReviewActivityFrame[]>(
+        aiReviewActivityQueryKey('user-1') as unknown as string[]
+      )
+
+      expect(cached).toHaveLength(2)
+    })
+
+    it('caps the ring buffer at AI_REVIEW_ACTIVITY_RING_CAP, dropping oldest', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const handler = messageHandlers.get('ai_review.request')
+      const overflow = AI_REVIEW_ACTIVITY_RING_CAP + 5
+
+      for (let i = 0; i < overflow; i++) {
+        handler?.(makeRequest(`rev-${i}`))
+      }
+
+      const cached = queryClient.getQueryData<AiReviewActivityFrame[]>(
+        aiReviewActivityQueryKey('user-1') as unknown as string[]
+      )
+
+      expect(cached).toHaveLength(AI_REVIEW_ACTIVITY_RING_CAP)
+      expect(cached?.[0]?.review_public_id).toBe('rev-5')
+      expect(cached?.[cached.length - 1]?.review_public_id).toBe(`rev-${overflow - 1}`)
+    })
+
+    it('ignores envelopes whose type is not one of the three ai_review frames', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      messageHandlers.get('ai_review.request')?.({
+        type: 'something.else',
+        review_public_id: 'rev-1',
+        dispatch_version: 0,
+      } as unknown as AiReviewRequestFrameData)
+      const cached = queryClient.getQueryData<AiReviewActivityFrame[]>(
+        aiReviewActivityQueryKey('user-1') as unknown as string[]
+      )
+
+      expect(cached ?? []).toHaveLength(0)
+    })
+
+    it('scopes the activity buffer by user public_id (logout/login isolation)', () => {
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      messageHandlers.get('ai_review.request')?.(makeRequest('rev-A'))
+
+      vi.mocked(useAuthStore.getState).mockReturnValue({
+        user: { public_id: 'user-2' },
+      } as never)
+      messageHandlers.get('ai_review.request')?.(makeRequest('rev-B'))
+
+      const userOneCache = queryClient.getQueryData<AiReviewActivityFrame[]>(
+        aiReviewActivityQueryKey('user-1') as unknown as string[]
+      )
+      const userTwoCache = queryClient.getQueryData<AiReviewActivityFrame[]>(
+        aiReviewActivityQueryKey('user-2') as unknown as string[]
+      )
+
+      expect(userOneCache?.map(f => f.review_public_id)).toEqual(['rev-A'])
+      expect(userTwoCache?.map(f => f.review_public_id)).toEqual(['rev-B'])
+    })
+
+    it('writes to the null user-key when no authenticated user is present', () => {
+      vi.mocked(useAuthStore.getState).mockReturnValue({ user: null } as never)
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      messageHandlers.get('ai_review.request')?.(makeRequest('rev-orphan'))
+      const cached = queryClient.getQueryData<AiReviewActivityFrame[]>(
+        aiReviewActivityQueryKey(null) as unknown as string[]
+      )
+
+      expect(cached?.[0]?.review_public_id).toBe('rev-orphan')
     })
   })
 })

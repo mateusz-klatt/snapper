@@ -2,6 +2,7 @@ import { QueryClient } from '@tanstack/react-query'
 import WebSocketClient from '../lib/websocket/client'
 import { useMarketStore } from './market'
 import { useAppStore } from './app'
+import { useAuthStore } from './auth'
 import {
   type WebSocketMessages,
   type PongWithRtt,
@@ -9,6 +10,9 @@ import {
   type OrderData,
   type ExecutionData,
   type SignalData,
+  type AiReviewCapsViolationFrameData,
+  type AiReviewDecisionAckFrameData,
+  type AiReviewRequestFrameData,
   isOrder,
   isExecution,
   isSignal,
@@ -16,12 +20,55 @@ import {
   isTick,
   isTrade,
   isHeartbeat,
+  isAiReviewRequest,
+  isAiReviewDecisionAck,
+  isAiReviewCapsViolation,
 } from '../types/ws'
 import {
   orderDataFromEnvelope,
   executionDataFromEnvelope,
   signalDataFromEnvelope,
 } from '../lib/transforms'
+
+export type AiReviewActivityFrame =
+  | AiReviewRequestFrameData
+  | AiReviewDecisionAckFrameData
+  | AiReviewCapsViolationFrameData
+
+export const AI_REVIEW_ACTIVITY_QUERY_KEY_ROOT = 'ai-review-activity'
+export const AI_REVIEW_ACTIVITY_RING_CAP = 1024
+
+/**
+ * Compose the per-user cache key for the AI review activity ring buffer.
+ *
+ * The user public_id is folded into the key so that a logout/login
+ * cycle in the same browser tab cannot leak delegate A's frames into
+ * delegate B's view: the QueryClient is a process-singleton that is
+ * NOT cleared on logout (orders / signals / etc share this trade-off,
+ * but those caches are overwritten by the next REST refetch; the
+ * activity ring is WS-driven and would otherwise stay populated
+ * indefinitely after a logout).
+ *
+ * ``null`` is the "unauthenticated" sentinel; frames written under
+ * this key are intentionally orphaned because no logged-in delegate
+ * should ever read them.
+ */
+export function aiReviewActivityQueryKey(userPublicId: string | null): readonly unknown[] {
+  return [AI_REVIEW_ACTIVITY_QUERY_KEY_ROOT, userPublicId]
+}
+
+/**
+ * Dedup key per Plan A Q18 — `(type, review_public_id, dispatch_version)`.
+ *
+ * The triple is the protocol-level uniqueness contract: two frames with
+ * the same triple are by-construction the same logical event (e.g. a
+ * caps-violation re-fanout from a different worker). Collapsing on
+ * `review_public_id` alone would incorrectly merge a v0 request with
+ * a later v1 re-dispatch.
+ */
+function aiReviewActivityDedupKey(frame: AiReviewActivityFrame): string {
+  return `${frame.type}|${frame.review_public_id}|${frame.dispatch_version}`
+}
 
 type UnsubscribeFn = () => void
 interface DispatcherConfig {
@@ -59,6 +106,9 @@ export class WSDispatcher {
       client.onMessage('trade', this.handleTradeMessage.bind(this)),
       client.onMessage('heartbeat', this.handleHeartbeatMessage.bind(this)),
       client.onMessage('pong', this.handlePongMessage.bind(this)),
+      client.onMessage('ai_review.request', this.handleAiReviewActivityMessage.bind(this)),
+      client.onMessage('ai_review.decision_ack', this.handleAiReviewActivityMessage.bind(this)),
+      client.onMessage('ai_review.caps_violation', this.handleAiReviewActivityMessage.bind(this)),
       client.onMessage('subscription_success', () => {
         useAppStore.getState().setSubscribedTopics(client.getSubscribedTopics())
       }),
@@ -334,6 +384,35 @@ export class WSDispatcher {
     if (rtt !== undefined) {
       useAppStore.getState().setConnectionLag(rtt)
     }
+  }
+  private handleAiReviewActivityMessage(message: WebSocketMessages): void {
+    if (
+      !isAiReviewRequest(message) &&
+      !isAiReviewDecisionAck(message) &&
+      !isAiReviewCapsViolation(message)
+    ) {
+      return
+    }
+
+    this.mergeAiReviewActivity(message)
+  }
+  private mergeAiReviewActivity(frame: AiReviewActivityFrame): void {
+    const userPublicId = useAuthStore.getState().user?.public_id ?? null
+    const queryKey = aiReviewActivityQueryKey(userPublicId)
+    const existing = this.queryClient.getQueryData<AiReviewActivityFrame[]>(queryKey) ?? []
+    const dedupKey = aiReviewActivityDedupKey(frame)
+
+    if (existing.some(item => aiReviewActivityDedupKey(item) === dedupKey)) {
+      return
+    }
+
+    const appended = [...existing, frame]
+    const trimmed =
+      appended.length > AI_REVIEW_ACTIVITY_RING_CAP
+        ? appended.slice(-AI_REVIEW_ACTIVITY_RING_CAP)
+        : appended
+
+    this.queryClient.setQueryData<AiReviewActivityFrame[]>(queryKey, trimmed)
   }
   getClient(): WebSocketClient | null {
     return this.wsClient

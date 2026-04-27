@@ -98,6 +98,7 @@ export const ORDERS_EVENTS_PREFIX = 'orders.events.'
 export const SIGNALS_TOPIC_PREFIX = 'signals.'
 export const STRATEGY_TOPIC_PREFIX = 'strategy.'
 export const HEARTBEATS_TOPIC_PREFIX = 'system.heartbeats.'
+export const AI_REVIEWS_TOPIC_PREFIX = 'ai_reviews.'
 
 export function getSubscriptionTopics(): string[] {
   return [
@@ -107,5 +108,6 @@ export function getSubscriptionTopics(): string[] {
     SIGNALS_TOPIC_PREFIX,
     STRATEGY_TOPIC_PREFIX,
     HEARTBEATS_TOPIC_PREFIX,
+    AI_REVIEWS_TOPIC_PREFIX,
   ]
 }

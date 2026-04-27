@@ -50,6 +50,9 @@ vi.mock('../features/admin/Admin', () => ({
 vi.mock('../features/ai-integration/AIIntegration', () => ({
   AIIntegration: () => <div data-testid='ai-integration'>AI Integration Component</div>,
 }))
+vi.mock('../features/ai-reviews/AiReviewInbox', () => ({
+  AiReviewInbox: () => <div data-testid='ai-reviews'>AI Reviews Component</div>,
+}))
 vi.mock('../features/settings/Settings', () => ({
   Settings: () => <div data-testid='settings'>Settings Component</div>,
 }))
@@ -160,6 +163,12 @@ describe('AppRoutes', () => {
     renderWithProviders(<AppRoutes activeTab='ai-integration' />)
     await waitFor(() => {
       expect(screen.getByTestId('ai-integration')).toBeTruthy()
+    })
+  })
+  it('renders AiReviewInbox component for ai-reviews tab', async () => {
+    renderWithProviders(<AppRoutes activeTab='ai-reviews' />)
+    await waitFor(() => {
+      expect(screen.getByTestId('ai-reviews')).toBeTruthy()
     })
   })
   it('renders Settings component for settings tab', async () => {

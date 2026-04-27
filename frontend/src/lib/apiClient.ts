@@ -40,7 +40,9 @@ import {
   DelegateListResponseSchema,
   DelegateResponseSchema,
   DelegateCreatedResponseSchema,
+  PendingReviewListResponseSchema,
 } from './schemas/api.generated.zod'
+import type { PendingReviewListResponse } from './schemas/api.generated.zod'
 import type {
   ScopeGrantListResponse,
   ScopeGrantResponse,
@@ -966,6 +968,31 @@ class APIClient {
     const data = await this.postJSON(`/api/ai-delegates/${encodeURIComponent(publicId)}/deactivate`)
 
     return validateResponse(data, DelegateResponseSchema, '/ai-delegates/{id}/deactivate')
+  }
+  async listPendingAiReviews(
+    params: Readonly<{ wallet_public_id?: string; limit?: number }> = {}
+  ): Promise<PendingReviewListResponse> {
+    const search = new URLSearchParams()
+
+    if (params.wallet_public_id !== undefined) {
+      search.set('wallet_public_id', params.wallet_public_id)
+    }
+
+    if (params.limit !== undefined) {
+      search.set('limit', String(params.limit))
+    }
+
+    const qs = search.toString()
+    const path = qs ? `/api/ai-reviews/pending?${qs}` : '/api/ai-reviews/pending'
+    const response = await this.request(path, { method: 'GET' })
+
+    if (!response.ok) {
+      await this.raiseHttpError(response)
+    }
+
+    const data = await response.json()
+
+    return validateResponse(data, PendingReviewListResponseSchema, '/ai-reviews/pending')
   }
 }
 

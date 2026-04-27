@@ -12,6 +12,7 @@ export type ValidTab =
   | 'health'
   | 'admin'
   | 'ai-integration'
+  | 'ai-reviews'
   | 'settings'
 const VALID_TABS: ValidTab[] = [
   'overview',
@@ -25,6 +26,7 @@ const VALID_TABS: ValidTab[] = [
   'health',
   'admin',
   'ai-integration',
+  'ai-reviews',
   'settings',
 ]
 
