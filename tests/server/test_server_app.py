@@ -27,6 +27,7 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ExchangeEnum
 from snapper.infrastructure.rest.tracker import get_rest_call_tracker
 from snapper.infrastructure.rest.tracker import reset_rest_call_tracker_for_tests
@@ -63,6 +64,7 @@ def _make_ai_review_service_mock() -> MagicMock:
     return MagicMock(
         set_msg_publisher=MagicMock(),
         set_repository_factory=MagicMock(),
+        set_shard_ownership=MagicMock(),
         start_bus_listener=AsyncMock(),
         stop_bus_listener=AsyncMock(),
     )
@@ -291,6 +293,8 @@ class TestLifespan:
         api_only_settings.server_api_only = True
         api_only_settings.zmq_broker_xsub = "tcp://test-broker-xsub:7500"
         api_only_settings.zmq_broker_xpub = "tcp://test-broker-xpub:7501"
+        api_only_settings.coordinator_instance_id = 0
+        api_only_settings.coordinator_instance_count = 1
         with (
             patch("snapper.server.app.discover_processes"),
             patch(
@@ -599,6 +603,15 @@ class TestLifespan:
             async with lifespan(mock_app):
                 pass
         mock_ai_review_service.set_msg_publisher.assert_called_once_with(user_publisher)
+        ownership_calls = [
+            call.args[0]
+            for call in mock_ai_review_service.set_shard_ownership.call_args_list
+            if call.args and isinstance(call.args[0], ShardOwnership)
+        ]
+        assert len(ownership_calls) == 1, (
+            f"expected exactly one ShardOwnership startup injection (clear-on-shutdown "
+            f"is None), got call list={mock_ai_review_service.set_shard_ownership.call_args_list!r}"
+        )
 
     @pytest.mark.asyncio
     async def test_lifespan_injects_ws_auth_manager_publisher(self) -> None:
@@ -1255,6 +1268,8 @@ class TestLifespan:
         mock_app.state.manager = mock_manager
         api_only_settings = MagicMock()
         api_only_settings.server_api_only = True
+        api_only_settings.coordinator_instance_id = 0
+        api_only_settings.coordinator_instance_count = 1
         with (
             patch("snapper.server.app.discover_processes"),
             patch(

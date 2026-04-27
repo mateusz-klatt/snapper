@@ -18,6 +18,7 @@ from uuid import uuid7
 import pytest
 
 from snapper.application.ai_review.service import AiReviewService
+from snapper.core.partitioning import ShardOwnership
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import AiReviewCapsViolationFrameData
@@ -288,6 +289,189 @@ async def test_external_frame_preserves_routing_fields() -> None:
     assert forwarded.strategy_public_id == msg.strategy_public_id
     assert forwarded.wallet_public_id == msg.wallet_public_id
     assert forwarded.instrument_public_id == msg.instrument_public_id
+
+
+def _find_owner_and_non_owner_instances(
+    review_public_id: str, instance_count: int
+) -> tuple[ShardOwnership, ShardOwnership]:
+    """Return (owner, non-owner) :class:`ShardOwnership` for a review id.
+
+    Plan D Phase 2 #8 ownership tests need both sides of the partition for
+    one specific review id so the gating gate can be exercised symmetrically
+    without relying on hash-luck. Walks every instance id in
+    ``[0, instance_count)`` and picks one matching pair.
+    """
+    owner: ShardOwnership | None = None
+    non_owner: ShardOwnership | None = None
+    for candidate in range(instance_count):
+        ownership = ShardOwnership(instance_id=candidate, instance_count=instance_count)
+        if ownership.owns(review_public_id):
+            if owner is None:
+                owner = ownership
+        elif non_owner is None:
+            non_owner = ownership
+        if owner is not None and non_owner is not None:
+            return owner, non_owner
+    raise AssertionError(
+        f"could not find owner+non-owner pair for review_public_id={review_public_id!r} "
+        f"at instance_count={instance_count}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_publishes_when_no_shard_ownership_injected_legacy_compat() -> None:
+    """Plan D Phase 2 #8 — pre-lifespan / pre-P2-8 single-instance behaviour.
+
+    The lifespan injects :class:`ShardOwnership` AFTER the publisher seam
+    but BEFORE the bus listener subscribes. Under partial-startup races,
+    test fixtures, and in-process tools that exercise the handler before
+    ``set_shard_ownership`` is wired, the gate must default-open so we
+    keep the legacy single-instance behaviour. ``None`` MUST publish.
+
+    Given a service with a publisher but no ShardOwnership injected,
+    When handle_caps_violation_bus_message is invoked,
+    Then the publish path runs and returns True.
+    """
+    svc = AiReviewService.get_instance()
+    publisher = _make_publisher()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    assert svc.shard_ownership is None
+    msg = _make_event()
+    result = await svc.handle_caps_violation_bus_message(msg)
+    assert result is True
+    publisher.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_publishes_when_instance_count_is_one_unconditional_owner() -> None:
+    """``instance_count == 1`` makes :meth:`ShardOwnership.owns` trivially True.
+
+    Default deployment (no SNAPPER_COORDINATOR_INSTANCE_COUNT override) is
+    instance_count=1 — the gate must be a deterministic no-op so behaviour
+    is byte-identical to pre-P2-8a.
+
+    Given a service with ShardOwnership(0, 1),
+    When the handler is invoked,
+    Then the external WS publish runs and returns True.
+    """
+    svc = AiReviewService.get_instance()
+    publisher = _make_publisher()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    svc.set_shard_ownership(ShardOwnership(instance_id=0, instance_count=1))
+    msg = _make_event()
+    result = await svc.handle_caps_violation_bus_message(msg)
+    assert result is True
+    publisher.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_publishes_when_owner_under_multi_instance() -> None:
+    """Multi-instance deployment — the owning worker re-publishes.
+
+    Given a review_public_id whose hash partitions to instance 0 of N,
+    When the handler runs on instance 0,
+    Then the external WS frame is published and the call returns True.
+    """
+    svc = AiReviewService.get_instance()
+    publisher = _make_publisher()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    review_pid = str(uuid7())
+    owner, _non_owner = _find_owner_and_non_owner_instances(review_pid, instance_count=4)
+    svc.set_shard_ownership(owner)
+    msg = _make_event(review_public_id=review_pid)
+    result = await svc.handle_caps_violation_bus_message(msg)
+    assert result is True
+    publisher.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_skips_when_non_owner_under_multi_instance() -> None:
+    """Multi-instance deployment — the non-owning worker short-circuits.
+
+    Plan D Phase 2 #8 — the dedup invariant: exactly one worker per review
+    row publishes the external frame. Non-owners MUST return False without
+    invoking the publisher, otherwise N workers would N-duplicate the WS
+    frame to every connected subscriber.
+
+    Given a review_public_id whose hash partitions to instance 0 of 4,
+    When the handler runs on a non-owner instance,
+    Then publisher.send is never invoked and the handler returns False.
+    """
+    svc = AiReviewService.get_instance()
+    publisher = _make_publisher()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    review_pid = str(uuid7())
+    _owner, non_owner = _find_owner_and_non_owner_instances(review_pid, instance_count=4)
+    svc.set_shard_ownership(non_owner)
+    msg = _make_event(review_public_id=review_pid)
+    result = await svc.handle_caps_violation_bus_message(msg)
+    assert result is False
+    publisher.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_clearing_shard_ownership_restores_legacy_publish_behaviour() -> None:
+    """``set_shard_ownership(None)`` reopens the publish path.
+
+    Tests + shutdown paths clear the seam to drop references. Once cleared,
+    the handler must fall back to the legacy "publish unconditionally"
+    behaviour so test fixtures that exercise the handler post-shutdown do
+    not silently swallow events.
+
+    Given a service that previously had a non-owner ShardOwnership,
+    When set_shard_ownership(None) is called and the handler runs,
+    Then publish proceeds and returns True regardless of the prior state.
+    """
+    svc = AiReviewService.get_instance()
+    publisher = _make_publisher()
+    svc.set_msg_publisher(cast(MessagePublisher, publisher))
+    review_pid = str(uuid7())
+    _owner, non_owner = _find_owner_and_non_owner_instances(review_pid, instance_count=4)
+    svc.set_shard_ownership(non_owner)
+    svc.set_shard_ownership(None)
+    msg = _make_event(review_public_id=review_pid)
+    result = await svc.handle_caps_violation_bus_message(msg)
+    assert result is True
+    publisher.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ownership_split_partitions_distinct_review_ids_across_workers() -> None:
+    """End-to-end dedup invariant for the multi-worker partitioning.
+
+    Across ``instance_count=4`` workers, every review_public_id is
+    published by exactly one worker.
+
+    Drives N independent service singletons (clear-instance per simulated
+    worker), each configured with a distinct ShardOwnership. For each of
+    32 distinct review_public_ids we count how many workers publish the
+    external frame. The invariant is **exactly one** per review id —
+    matches the deterministic SHA-256 mod partitioning and proves the
+    gate's correctness at the cluster level.
+
+    Given 4 simulated workers + 32 distinct review ids,
+    When each worker handles each review id,
+    Then exactly one worker publishes per review id (32 publishes total).
+    """
+    instance_count = 4
+    review_ids = [str(uuid7()) for _ in range(32)]
+    publish_counts = dict.fromkeys(review_ids, 0)
+    for instance_id in range(instance_count):
+        AiReviewService.clear_instance()
+        worker_svc = AiReviewService.get_instance()
+        worker_publisher = _make_publisher()
+        worker_svc.set_msg_publisher(cast(MessagePublisher, worker_publisher))
+        worker_svc.set_shard_ownership(
+            ShardOwnership(instance_id=instance_id, instance_count=instance_count)
+        )
+        for review_id in review_ids:
+            msg = _make_event(review_public_id=review_id)
+            published = await worker_svc.handle_caps_violation_bus_message(msg)
+            if published:
+                publish_counts[review_id] += 1
+    assert all(
+        count == 1 for count in publish_counts.values()
+    ), f"dedup invariant broken: per-review publish counts = {publish_counts}"
 
 
 @pytest.mark.asyncio

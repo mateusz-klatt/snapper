@@ -135,6 +135,7 @@ from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.config.settings_routes import router as settings_router
+from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ComponentStatusEnum
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import HealthStatus
@@ -509,9 +510,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await get_token_manager().start_admin_listener(settings.zmq_broker_xpub)
         ai_review_service = get_ai_review_service()
         ai_review_service.set_repository_factory(lambda: get_repository(settings.db_url))
+        ai_review_service.set_shard_ownership(
+            ShardOwnership(
+                instance_id=settings.coordinator_instance_id,
+                instance_count=settings.coordinator_instance_count,
+            )
+        )
         await ai_review_service.start_bus_listener(settings.zmq_broker_xpub)
         logger.info(
-            "AiReviewService bus listener subscribed to bus.delegate_offline + bus.caps_violation_after_ai_approve"
+            "AiReviewService bus listener subscribed to bus.delegate_offline + bus.caps_violation_after_ai_approve "
+            "(caps-violation fanout gated by ShardOwnership instance {}/{})",
+            settings.coordinator_instance_id,
+            settings.coordinator_instance_count,
         )
         discover_processes()
         process_factory = ProcessLauncherService(settings)
@@ -561,6 +571,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await get_token_manager().stop_admin_listener()
         await get_ai_review_service().stop_bus_listener()
         get_ai_review_service().set_repository_factory(None)
+        get_ai_review_service().set_shard_ownership(None)
         _shutdown_user_service_publisher(app)
         _clear_runtime_singletons()
         await dispose_repositories()

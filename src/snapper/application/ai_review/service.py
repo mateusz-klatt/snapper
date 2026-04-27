@@ -50,6 +50,7 @@ from loguru import logger
 from snapper.auth.scope_grant_service import ScopeGrantService
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
+from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import AiReviewDecisionEnum
 from snapper.core.types import AiReviewEventTypeEnum
 from snapper.core.types import AiReviewResolutionModeEnum
@@ -441,6 +442,51 @@ class AiReviewService:
         self._bus_listen_task: asyncio.Task[None] | None = None
         self._bus_running: bool = False
         self._bus_listener_lock: asyncio.Lock = asyncio.Lock()
+        self._shard_ownership: ShardOwnership | None = None
+
+    def set_shard_ownership(self, ownership: ShardOwnership | None) -> None:
+        """Inject the static-hash partitioning primitive used for multi-instance dedup.
+
+        Plan D Phase 2 #8 — under multi-worker uvicorn (``instance_count > 1``)
+        the shared ZMQ XPUB-XSUB broker delivers every internal bus event to
+        every worker's :meth:`start_bus_listener`. Most of our handlers are
+        already idempotent under that fanout: ``handle_delegate_offline_bus_message``
+        drives a per-row CAS, and ``handle_ai_review_decision_bus_message`` looks
+        up a process-local Future registry that only the originating worker
+        populated. The exception is :meth:`handle_caps_violation_bus_message`,
+        which on every dispatch re-publishes a fresh
+        ``ai_reviews.{user}.{strategy}.caps_violation`` external WS frame — N
+        workers would N-duplicate the frame to every connected subscriber.
+
+        ``ShardOwnership.owns(review_public_id)`` deterministically picks one
+        worker per review row to handle the caps-violation re-fanout; non-owners
+        skip the publish. ``instance_count == 1`` (default deployment) makes
+        :meth:`ShardOwnership.owns` return True unconditionally so behaviour is
+        byte-identical to pre-P2-8a single-instance.
+
+        ``None`` clears the seam (test cleanup or pre-lifespan boot). When
+        cleared, the caps-violation handler treats the absence as the legacy
+        "single-instance" mode and publishes unconditionally — the FastAPI
+        lifespan injects the real ``ShardOwnership`` immediately after the
+        publisher seam, so production code paths always observe the configured
+        primitive once startup completes.
+
+        Args:
+            ownership: Configured :class:`ShardOwnership` (built from
+                ``settings.coordinator_instance_id`` + ``coordinator_instance_count``)
+                or ``None`` to clear.
+        """
+        self._shard_ownership = ownership
+
+    @property
+    def shard_ownership(self) -> ShardOwnership | None:
+        """Expose the injected partitioning primitive for tests + diagnostics.
+
+        Returns:
+            The currently injected :class:`ShardOwnership` or ``None`` when the
+            seam has not been wired yet.
+        """
+        return self._shard_ownership
 
     def set_msg_publisher(self, publisher: MessagePublisher | None) -> None:
         """Inject the bus publisher used for ``bus.ai_review_*`` topics.
@@ -1543,6 +1589,20 @@ class AiReviewService:
         frame to the right delegate's UI dispatcher
         (Plan A §4.2 line 503).
 
+        Multi-instance dedup (Plan D Phase 2 #8): the shared ZMQ XPUB-XSUB
+        broker delivers every internal ``bus.caps_violation_after_ai_approve``
+        event to EVERY uvicorn worker's bus listener. Without dedup, N
+        workers would each re-publish a fresh external WS frame and every
+        connected subscriber would receive N duplicates. We gate the
+        re-publish on :meth:`ShardOwnership.owns` keyed by
+        ``msg.review_public_id`` so exactly one worker per review row owns
+        the external fanout. Non-owners short-circuit and return ``False``.
+        ``instance_count == 1`` (default deployment) makes
+        :meth:`ShardOwnership.owns` return True unconditionally so the gate
+        is a no-op in single-instance mode. If the ownership seam is not
+        wired (pre-lifespan boot, test fixtures), we behave as in legacy
+        single-instance mode and publish unconditionally.
+
         Best-effort: a missing publisher logs a warning instead of
         raising (mirrors :class:`ScopeGrantService` semantics — a
         singleton spun up before the FastAPI lifespan attached one
@@ -1559,14 +1619,23 @@ class AiReviewService:
 
         Args:
             msg: Decoded :class:`CapsViolationAfterAiApproveData`
-                payload published by :class:`TradingCapsEnforcer`
-                (publisher-side wiring lands in a follow-up chunk).
+                payload published by :class:`TradingCapsEnforcer`.
 
         Returns:
             ``True`` when the WS event was handed to the publisher,
-            ``False`` when the publisher slot was empty OR the publish
-            attempt raised.
+            ``False`` when this worker did not own the review row, the
+            publisher slot was empty, or the publish attempt raised.
         """
+        if self._shard_ownership is not None and not self._shard_ownership.owns(
+            msg.review_public_id
+        ):
+            logger.debug(
+                "ai_reviews caps_violation skipped (non-owner) for review_public_id={} on instance {}/{}",
+                msg.review_public_id,
+                self._shard_ownership.instance_id,
+                self._shard_ownership.instance_count,
+            )
+            return False
         if self._msg_publisher is None:
             logger.warning(
                 "ai_reviews caps_violation NOT broadcast for review_public_id={}: "
@@ -1748,23 +1817,30 @@ class AiReviewService:
         single-listener failures. Mirrors
         :meth:`WebSocketAuthManager.start_admin_listener` semantics.
 
-        Multi-instance deployment caveat: Plan D §14 anticipates each
-        process running its own bus subscriber. For the
-        ``bus.delegate_offline`` branch that is safe — the handler
-        executes a DB CAS UPDATE per affected pending review, so only
-        one process wins per row regardless of how many subscribers
-        receive the same internal event. For
-        ``bus.caps_violation_after_ai_approve`` the handler currently
-        re-publishes a fresh ``ai_reviews.*.caps_violation`` external
-        WS frame on every dispatch, which under multi-instance
-        deployment would N-duplicate the WS fanout (each WS bridge
-        subscribes to ``ai_reviews.*`` and would receive N copies of
-        the same caps event from N processes' re-publishes). The
-        single-instance Snapper deployment is the current target and
-        is unaffected; multi-instance dedup is tracked as a Phase 2
-        follow-up — likely via a per-bus-event idempotency claim
-        column on the :class:`AiReview` row, or by partitioning the
-        caps-violation re-publish to a single dedicated worker.
+        Multi-instance deployment (Plan D §14 + Plan D Phase 2 #8): each
+        worker runs its own bus subscriber. The three subscribed topics
+        each have their own dedup story:
+
+        - ``bus.delegate_offline``: the handler drives per-row CAS UPDATEs
+          (``atomic_dispatch_fanout``), so only one worker wins per affected
+          review row regardless of how many subscribers receive the event.
+          No additional gating needed.
+        - ``bus.ai_review_decision``: the handler resolves a process-local
+          :class:`asyncio.Future` populated only on the worker that ran
+          ``create_review`` for the strategy await loop. Remote workers
+          legitimately find no future and stash the event in a bounded
+          pending-resolution cache (1024-entry hard cap, 30s TTL). No
+          gating — gating on review ownership would break the fast-path
+          when the strategy worker is not the hash owner.
+        - ``bus.caps_violation_after_ai_approve``: the handler re-publishes
+          a fresh ``ai_reviews.*.caps_violation`` external WS frame on
+          every dispatch. Under multi-worker deployment N workers would
+          N-duplicate that frame to every subscriber. Plan D Phase 2 #8
+          gates the re-publish via :meth:`ShardOwnership.owns` keyed by
+          ``review_public_id`` — exactly one worker per row owns the
+          external fanout. Inject the seam via :meth:`set_shard_ownership`;
+          ``instance_count == 1`` is a deterministic no-op so single-instance
+          deployments stay byte-identical.
 
         Process-mode strategy caveat (Phase 2 #3): the FastAPI server
         lifespan calls :meth:`start_bus_listener` so the strategy
