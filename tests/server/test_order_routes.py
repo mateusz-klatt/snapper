@@ -660,3 +660,121 @@ class TestCancelOrder:
         assert "cancel_requested" in calls
         assert "failed" in calls
         client.close()
+
+
+class TestCreateOrderAiReviewCitation:
+    """Plan D Phase 2 #10 ``ai_review_public_id`` body field on POST /api/orders."""
+
+    def test_valid_citation_threads_through_to_caps_enforcer_guard(self) -> None:
+        """Plan D Phase 2 #10 — valid citation lands on the caps-guard submission.
+
+        ``ai_review_public_id`` is a runtime-only signal on
+        :class:`TradeCommandSubmission` consumed by
+        :meth:`TradingCapsEnforcer.guard` to fire
+        ``bus.caps_violation_after_ai_approve`` on cap reject; it is
+        intentionally NOT persisted on the trade_command row. The test
+        captures the submission via the enforcer to verify the field
+        threaded through ``order_routes.create_order``.
+
+        Given: a body whose ``ai_review_public_id`` matches a
+            resolved_approved row owned by the caller on the same
+            wallet,
+        When: the client POSTs the order,
+        Then: the citation passes validation AND the
+            :class:`TradeCommandSubmission` handed to
+            ``enforcer.guard`` carries ``ai_review_public_id``.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-1"))
+        repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        repo.update_execution_plan_status = AsyncMock(return_value=2)
+        repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        repo.get_ai_review = AsyncMock(
+            return_value={
+                "public_id": "review-ok-1",
+                "user_public_id": "test_user",
+                "wallet_public_id": "wallet-1",
+                "status": "resolved_approved",
+            }
+        )
+        captured: dict[str, Any] = {}
+
+        class _Ctx:
+            async def __aenter__(self) -> None:
+                return None
+
+            async def __aexit__(self, *_args: Any) -> None:
+                return None
+
+        def _guard_capturing(submission: Any) -> _Ctx:
+            captured["submission"] = submission
+            return _Ctx()
+
+        enforcer = MagicMock(spec=TradingCapsEnforcer)
+        enforcer.guard = MagicMock(side_effect=_guard_capturing)
+        body = _create_order_body()
+        body["payload"]["ai_review_public_id"] = "review-ok-1"
+        client = _create_client(repo)
+        client.app.dependency_overrides[get_caps_enforcer_dependency] = lambda: enforcer
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 200
+        repo.get_ai_review.assert_awaited_once_with("review-ok-1")
+        assert captured["submission"].ai_review_public_id == "review-ok-1"
+        client.close()
+
+    def test_unknown_citation_returns_403(self) -> None:
+        """Plan D Phase 2 #10 R1 — citing an unknown ai_review_public_id returns 403.
+
+        Given: a body whose ``ai_review_public_id`` does not exist
+            (caller fabricated the value to attempt a fanout-spam
+            attack),
+        When: the client POSTs the order,
+        Then: response is HTTP 403 and no trade-command insert fires.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        repo.get_ai_review = AsyncMock(return_value=None)
+        body = _create_order_body()
+        body["payload"]["ai_review_public_id"] = "ghost-review"
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 403
+        assert "not found" in response.json()["detail"]
+        repo.insert_execution_plan.assert_not_called()
+        repo.insert_trade_command.assert_not_called()
+        client.close()
+
+    def test_citation_owned_by_other_user_returns_403(self) -> None:
+        """Plan D Phase 2 #10 R1 — citing another user's review returns 403.
+
+        Given: a body whose ``ai_review_public_id`` row exists but is
+            owned by a different user (the cross-user fanout-spam
+            attack),
+        When: the client POSTs the order,
+        Then: response is HTTP 403 carrying the "owner mismatch"
+            detail and no trade-command insert fires.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        repo.get_ai_review = AsyncMock(
+            return_value={
+                "public_id": "review-stranger",
+                "user_public_id": "u-OTHER",
+                "wallet_public_id": "wallet-1",
+                "status": "resolved_approved",
+            }
+        )
+        body = _create_order_body()
+        body["payload"]["ai_review_public_id"] = "review-stranger"
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=body)
+        assert response.status_code == 403
+        assert "owner mismatch" in response.json()["detail"]
+        repo.insert_execution_plan.assert_not_called()
+        repo.insert_trade_command.assert_not_called()
+        client.close()

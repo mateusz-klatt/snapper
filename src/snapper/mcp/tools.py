@@ -37,6 +37,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult
 from sqlalchemy.exc import IntegrityError
 
+from snapper.application.ai_review.citation import validate_ai_review_citation
 from snapper.application.ai_review.service import ERROR_DECISION_ALREADY_RECORDED
 from snapper.application.ai_review.service import get_ai_review_service
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
@@ -213,6 +214,13 @@ async def _prepare_manual_order(
     created_at = datetime.now(UTC)
     ensure_operator_in_claims(claims, order.operator_public_id)
     await validate_user_wallet_scope(claims, order.wallet_public_id, repo, as_of=created_at)
+    if order.ai_review_public_id is not None:
+        await validate_ai_review_citation(
+            repo,
+            ai_review_public_id=order.ai_review_public_id,
+            expected_user_public_id=claims.user_public_id or claims.username,
+            expected_wallet_public_id=order.wallet_public_id,
+        )
     bus_time = dt.datetime.now(dt.UTC)
     shard_key = f"{order.exchange}.{order.instrument}.live"
     client_order_id = str(uuid7())

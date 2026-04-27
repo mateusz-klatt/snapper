@@ -663,3 +663,118 @@ class TestSubmitManualOrderTool:
         repo.list_accessible_wallets_for_operators.assert_not_called()
         repo.insert_execution_plan.assert_not_called()
         repo.insert_trade_command.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ai_review_citation_threads_through_to_caps_enforcer_guard(self) -> None:
+        """Plan D Phase 2 #10 — valid ai_review_public_id citation lands on the caps-guard submission.
+
+        ``ai_review_public_id`` is a runtime-only signal on
+        :class:`TradeCommandSubmission` consumed by
+        :meth:`TradingCapsEnforcer.guard` to fire
+        ``bus.caps_violation_after_ai_approve`` on cap reject; it is
+        intentionally NOT persisted on the trade_command row. The test
+        captures the submission via the enforcer to verify the field
+        threaded all the way through ``_prepare_manual_order``.
+
+        Given: a caller submits a manual order citing an
+            ``ai_review_public_id`` whose row exists, is owned by the
+            caller, matches the submission's wallet, and is in
+            ``status='resolved_approved'``,
+        When: ``submit_manual_order`` runs,
+        Then: the citation passes validation AND the
+            :class:`TradeCommandSubmission` handed to
+            ``enforcer.guard`` carries ``ai_review_public_id``.
+        """
+        review_pid = "review-ok-1"
+        captured: dict[str, Any] = {}
+
+        class _Ctx:
+            async def __aenter__(self) -> None:
+                return None
+
+            async def __aexit__(self, *_args: Any) -> None:
+                return None
+
+        def _guard_capturing(submission: Any) -> _Ctx:
+            captured["submission"] = submission
+            return _Ctx()
+
+        enforcer = MagicMock()
+        enforcer.guard = MagicMock(side_effect=_guard_capturing)
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-pid"))
+        repo.insert_trade_command = AsyncMock(return_value=(2, "cmd-pid"))
+        repo.get_ai_review = AsyncMock(
+            return_value={
+                "public_id": review_pid,
+                "user_public_id": "user-1",
+                "wallet_public_id": "wallet-1",
+                "status": "resolved_approved",
+            }
+        )
+        _allow_wallet(repo)
+        server = _build_server(repository=repo, caps_enforcer=enforcer)
+        await server._tool_manager.call_tool(
+            "submit_manual_order",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "instrument_public_id": "inst-1",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 1.0,
+                "wallet_public_id": "wallet-1",
+                "idempotency_key": "idem-cit-ok",
+                "ai_review_public_id": review_pid,
+            },
+        )
+        repo.get_ai_review.assert_awaited_once_with(review_pid)
+        assert captured["submission"].ai_review_public_id == review_pid
+
+    @pytest.mark.asyncio
+    async def test_ai_review_citation_owner_mismatch_rejects_before_any_write(self) -> None:
+        """Plan D Phase 2 #10 R1 — citing another user's review is rejected before any write.
+
+        Given: the caller cites an ``ai_review_public_id`` whose owner
+            is a different user (the row's ``user_public_id`` does
+            not match the caller's),
+        When: ``submit_manual_order`` runs,
+        Then: an :class:`AiReviewCitationError` surfaces (no plan
+            insert, no command insert) so the caller cannot trigger
+            ``bus.caps_violation_after_ai_approve`` fanout to an
+            unrelated delegate's UI.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.get_ai_review = AsyncMock(
+            return_value={
+                "public_id": "review-stranger",
+                "user_public_id": "u-OTHER",
+                "wallet_public_id": "wallet-1",
+                "status": "resolved_approved",
+            }
+        )
+        _allow_wallet(repo)
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        with pytest.raises(ToolError) as exc:
+            await server._tool_manager.call_tool(
+                "submit_manual_order",
+                {
+                    "exchange": "kraken",
+                    "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
+                    "side": "buy",
+                    "order_type": "market",
+                    "quantity": 1.0,
+                    "wallet_public_id": "wallet-1",
+                    "idempotency_key": "idem-cit-stranger",
+                    "ai_review_public_id": "review-stranger",
+                },
+            )
+        assert "owner mismatch" in str(exc.value)
+        repo.insert_execution_plan.assert_not_called()
+        repo.insert_trade_command.assert_not_called()

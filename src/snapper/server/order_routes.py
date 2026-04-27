@@ -26,8 +26,11 @@ from fastapi import status
 from loguru import logger
 
 from snapper.api.schemas.orders import CancelOrderCommand
+from snapper.api.schemas.orders import CreateOrderBody
 from snapper.api.schemas.orders import CreateOrderCommand
 from snapper.api.schemas.orders import ExecutionPlanResponse
+from snapper.application.ai_review.citation import AiReviewCitationError
+from snapper.application.ai_review.citation import validate_ai_review_citation
 from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
@@ -123,6 +126,34 @@ def _plan_to_data(plan: ExecutionPlanRow) -> ExecutionPlanData:
         last_error=plan["last_error"],
         idempotency_key=plan["idempotency_key"],
     )
+
+
+async def _validate_create_order_ai_review_citation(
+    *,
+    repo: Repository,
+    principal: AuthPrincipal,
+    body: CreateOrderBody,
+) -> None:
+    """Plan D Phase 2 #10 R1 — gate ``ai_review_public_id`` citations.
+
+    No-op when ``body.ai_review_public_id`` is None (the default for
+    every non-AI-mediated manual order). When set, delegates to
+    :func:`validate_ai_review_citation`; an :class:`AiReviewCitationError`
+    becomes HTTP 403 so the caller cannot use a forged citation to
+    trigger ``bus.caps_violation_after_ai_approve`` fanout to other
+    delegates' UIs.
+    """
+    if body.ai_review_public_id is None:
+        return
+    try:
+        await validate_ai_review_citation(
+            repo,
+            ai_review_public_id=body.ai_review_public_id,
+            expected_user_public_id=principal.user_public_id or principal.username,
+            expected_wallet_public_id=body.wallet_public_id,
+        )
+    except AiReviewCitationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 def _build_order_route_context(tracker: SequenceTracker) -> OrderRouteContext:
@@ -423,6 +454,8 @@ async def create_order(
         repo=repo,
         wallet_public_id=body.wallet_public_id,
     )
+
+    await _validate_create_order_ai_review_citation(repo=repo, principal=principal, body=body)
 
     shard_key = f"{body.exchange}.{body.instrument}.{body.mode}"
     sid = tracker.session_id

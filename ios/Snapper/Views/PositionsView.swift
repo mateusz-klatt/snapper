@@ -238,7 +238,8 @@ struct PositionsView: View {
                 reduceOnly: true,
                 walletPublicId: position.walletPublicId ?? "",
                 operatorPublicId: nil,
-                idempotencyKey: nil
+                idempotencyKey: nil,
+                aiReviewPublicId: nil
             )
         )
     }
