@@ -1115,3 +1115,321 @@ _EXEC_ROW_FIXTURE: dict[str, Any] = {
     "operator_public_id": "op-1",
     "liquidity_role": "taker",
 }
+
+
+_POSITION_ROW_FIXTURE: dict[str, Any] = {
+    "public_id": "pos-1",
+    "timestamp": datetime.now(UTC),
+    "session_id": "s",
+    "sequence_id": 3,
+    "instrument": "BTC-USD",
+    "instrument_public_id": "inst-1",
+    "exchange": "kraken",
+    "mode": "live",
+    "quantity": 1.5,
+    "average_price": 49500.0,
+    "unrealized_pnl": 750.0,
+    "realized_pnl": 100.0,
+    "position_cycle_public_id": "cycle-1",
+    "wallet_public_id": "wallet-1",
+}
+
+
+_POSITION_CYCLE_ROW_FIXTURE: dict[str, Any] = {
+    "public_id": "cycle-1",
+    "timestamp": datetime.now(UTC),
+    "session_id": "s",
+    "sequence_id": 4,
+    "instrument_public_id": "inst-1",
+    "exchange": "kraken",
+    "mode": "live",
+    "shard_key": "kraken.BTC-USD.live",
+    "wallet_public_id": "wallet-1",
+    "operator_public_id": "op-1",
+    "direction": "long",
+    "max_qty": 2.0,
+    "status": "open",
+    "opened_at": datetime.now(UTC),
+    "closed_at": None,
+    "opening_command_public_id": "cmd-open",
+    "closing_command_public_id": None,
+}
+
+
+class TestListPositionsTool:
+    """Plan B Phase 2 — coverage for the ``list_positions`` MCP tool."""
+
+    @staticmethod
+    def _build_repo_with_positions(
+        rows: list[dict[str, Any]],
+        accessible_wallets: list[str] | None = None,
+    ) -> Any:
+        repo = AsyncMock()
+        repo.get_positions = AsyncMock(return_value=rows)
+        if accessible_wallets is None:
+            accessible_wallets = ["wallet-1"]
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": w} for w in accessible_wallets]
+        )
+        return repo
+
+    @pytest.mark.asyncio
+    async def test_happy_path_returns_positions_envelope(self) -> None:
+        """Happy path: AI_DELEGATE caller gets a position list + count."""
+        position_row = _POSITION_ROW_FIXTURE.copy()
+        repo = self._build_repo_with_positions([position_row])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool("list_positions", {})
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is True
+        assert envelope["details"]["count"] == 1
+        assert envelope["details"]["positions"][0]["public_id"] == position_row["public_id"]
+
+    @pytest.mark.asyncio
+    async def test_serialised_timestamp_is_iso_string(self) -> None:
+        """Plan B §5 — JSON envelope cannot carry raw datetimes; ISO string."""
+        position_row = _POSITION_ROW_FIXTURE.copy()
+        repo = self._build_repo_with_positions([position_row])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool("list_positions", {})
+        envelope = _decode_envelope(result)
+        timestamp = envelope["details"]["positions"][0]["timestamp"]
+        assert isinstance(timestamp, str)
+        assert "T" in timestamp
+
+    @pytest.mark.asyncio
+    async def test_post_fetch_exchange_filter(self) -> None:
+        """``exchange`` filter prunes rows post-fetch (repo has no native filter)."""
+        kraken_row = _POSITION_ROW_FIXTURE.copy()
+        kraken_futures_row = _POSITION_ROW_FIXTURE.copy()
+        kraken_futures_row["public_id"] = "pos-2"
+        kraken_futures_row["exchange"] = "kraken_futures"
+        repo = self._build_repo_with_positions([kraken_row, kraken_futures_row])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "list_positions", {"exchange": "kraken_futures"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["details"]["count"] == 1
+        assert envelope["details"]["positions"][0]["public_id"] == "pos-2"
+
+    @pytest.mark.asyncio
+    async def test_post_fetch_instrument_filter(self) -> None:
+        """``instrument`` filter prunes rows post-fetch."""
+        btc_row = _POSITION_ROW_FIXTURE.copy()
+        eth_row = _POSITION_ROW_FIXTURE.copy()
+        eth_row["public_id"] = "pos-eth"
+        eth_row["instrument"] = "ETH-USD"
+        repo = self._build_repo_with_positions([btc_row, eth_row])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool("list_positions", {"instrument": "ETH-USD"})
+        envelope = _decode_envelope(result)
+        assert envelope["details"]["count"] == 1
+        assert envelope["details"]["positions"][0]["instrument"] == "ETH-USD"
+
+    @pytest.mark.asyncio
+    async def test_wallet_outside_scope_returns_anti_enumeration(self) -> None:
+        """Inaccessible wallet → ``position_not_found`` (anti-enumeration)."""
+        repo = self._build_repo_with_positions([], accessible_wallets=["wallet-1"])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "list_positions", {"wallet_public_id": "wallet-99"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "position_not_found"
+        repo.get_positions.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_role_without_read_positions_returns_permission_denied_envelope(self) -> None:
+        """Plan B §5 — permission failure surfaces as Plan A Q14 envelope."""
+        repo = self._build_repo_with_positions([])
+        saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
+        ROLE_PERMISSIONS[UserRole.VIEWER] = set()
+        server = FastMCP("test")
+        register_mcp_tools(
+            server,
+            repository_getter=lambda: repo,
+            caps_enforcer_getter=lambda: None,
+            claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
+        )
+        try:
+            result = await server._tool_manager.call_tool("list_positions", {})
+            envelope = _decode_envelope(result)
+            assert envelope["success"] is False
+            assert envelope["error_code"] == "permission_denied"
+        finally:
+            if saved is not None:
+                ROLE_PERMISSIONS[UserRole.VIEWER] = saved
+
+    @pytest.mark.asyncio
+    async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
+        """Plan B §5 — pre-lifespan repository surfaces structured envelope."""
+        server = _build_server(repository=None)
+        result = await server._tool_manager.call_tool("list_positions", {})
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "service_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_admin_with_no_wallet_passes_none_filter(self) -> None:
+        """ADMIN with no explicit wallet → repo gets ``wallet_public_ids=None``."""
+        repo = AsyncMock()
+        repo.get_positions = AsyncMock(return_value=[])
+        admin_claims = _make_claims(role=UserRole.ADMIN, user_public_id="admin-1")
+        server = _build_server(repository=repo, claims=admin_claims)
+        await server._tool_manager.call_tool("list_positions", {})
+        kwargs = repo.get_positions.await_args.kwargs
+        assert kwargs["wallet_public_ids"] is None
+        repo.list_accessible_wallets_for_operators.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_admin_with_in_scope_wallet_passes_single_id(self) -> None:
+        """Non-admin caller with a wallet inside scope → repo gets ``[that wallet]``."""
+        repo = self._build_repo_with_positions([], accessible_wallets=["wallet-1"])
+        server = _build_server(repository=repo)
+        await server._tool_manager.call_tool("list_positions", {"wallet_public_id": "wallet-1"})
+        kwargs = repo.get_positions.await_args.kwargs
+        assert kwargs["wallet_public_ids"] == ["wallet-1"]
+
+
+class TestGetPositionCycleTool:
+    """Plan B Phase 2 — coverage for the ``get_position_cycle`` MCP tool."""
+
+    @pytest.mark.asyncio
+    async def test_happy_path_returns_full_cycle(self) -> None:
+        """Cycle found in caller's scope → envelope carries the full row."""
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": "wallet-1"}]
+        )
+        cycle_row = _POSITION_CYCLE_ROW_FIXTURE.copy()
+        repo.get_position_cycle_by_public_id = AsyncMock(return_value=cycle_row)
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_position_cycle", {"cycle_public_id": "cycle-1"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is True
+        assert envelope["details"]["position_cycle"]["public_id"] == cycle_row["public_id"]
+        assert envelope["details"]["position_cycle"]["status"] == "open"
+
+    @pytest.mark.asyncio
+    async def test_serialised_datetime_fields_are_iso_strings(self) -> None:
+        """``timestamp``, ``opened_at``, and ``closed_at`` ISO-stringified."""
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": "wallet-1"}]
+        )
+        cycle_row = _POSITION_CYCLE_ROW_FIXTURE.copy()
+        cycle_row["closed_at"] = datetime.now(UTC)
+        repo.get_position_cycle_by_public_id = AsyncMock(return_value=cycle_row)
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_position_cycle", {"cycle_public_id": "cycle-1"}
+        )
+        envelope = _decode_envelope(result)
+        cycle = envelope["details"]["position_cycle"]
+        assert isinstance(cycle["timestamp"], str) and "T" in cycle["timestamp"]
+        assert isinstance(cycle["opened_at"], str) and "T" in cycle["opened_at"]
+        assert isinstance(cycle["closed_at"], str) and "T" in cycle["closed_at"]
+
+    @pytest.mark.asyncio
+    async def test_open_cycle_returns_null_closed_at(self) -> None:
+        """Open cycle (``closed_at=None``) emitted as JSON null."""
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": "wallet-1"}]
+        )
+        cycle_row = _POSITION_CYCLE_ROW_FIXTURE.copy()
+        cycle_row["closed_at"] = None
+        repo.get_position_cycle_by_public_id = AsyncMock(return_value=cycle_row)
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_position_cycle", {"cycle_public_id": "cycle-1"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["details"]["position_cycle"]["closed_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_cycle_returns_position_cycle_not_found(self) -> None:
+        """Cycle missing → ``position_cycle_not_found`` envelope (anti-enum)."""
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": "wallet-1"}]
+        )
+        repo.get_position_cycle_by_public_id = AsyncMock(return_value=None)
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_position_cycle", {"cycle_public_id": "cycle-missing"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "position_cycle_not_found"
+
+    @pytest.mark.asyncio
+    async def test_cycle_in_other_wallet_returns_position_cycle_not_found(self) -> None:
+        """Cycle exists but its wallet outside caller's scope → not_found."""
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": "wallet-1"}]
+        )
+        cycle_row = _POSITION_CYCLE_ROW_FIXTURE.copy()
+        cycle_row["wallet_public_id"] = "wallet-other"
+        repo.get_position_cycle_by_public_id = AsyncMock(return_value=cycle_row)
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_position_cycle", {"cycle_public_id": "cycle-1"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "position_cycle_not_found"
+
+    @pytest.mark.asyncio
+    async def test_admin_sees_any_cycle(self) -> None:
+        """ADMIN bypass: cycle in unfamiliar wallet still resolves."""
+        repo = AsyncMock()
+        cycle_row = _POSITION_CYCLE_ROW_FIXTURE.copy()
+        cycle_row["wallet_public_id"] = "wallet-other"
+        repo.get_position_cycle_by_public_id = AsyncMock(return_value=cycle_row)
+        admin_claims = _make_claims(role=UserRole.ADMIN, user_public_id="admin-1")
+        server = _build_server(repository=repo, claims=admin_claims)
+        result = await server._tool_manager.call_tool(
+            "get_position_cycle", {"cycle_public_id": "cycle-1"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is True
+        assert envelope["details"]["position_cycle"]["wallet_public_id"] == "wallet-other"
+        repo.list_accessible_wallets_for_operators.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_role_without_read_positions_returns_permission_denied_envelope(self) -> None:
+        """Plan B §5 — permission failure surfaces as Plan A Q14 envelope."""
+        repo = AsyncMock()
+        saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
+        ROLE_PERMISSIONS[UserRole.VIEWER] = set()
+        server = FastMCP("test")
+        register_mcp_tools(
+            server,
+            repository_getter=lambda: repo,
+            caps_enforcer_getter=lambda: None,
+            claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
+        )
+        try:
+            result = await server._tool_manager.call_tool(
+                "get_position_cycle", {"cycle_public_id": "cycle-1"}
+            )
+            envelope = _decode_envelope(result)
+            assert envelope["error_code"] == "permission_denied"
+        finally:
+            if saved is not None:
+                ROLE_PERMISSIONS[UserRole.VIEWER] = saved
+
+    @pytest.mark.asyncio
+    async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
+        """Plan B §5 — pre-lifespan repository surfaces structured envelope."""
+        server = _build_server(repository=None)
+        result = await server._tool_manager.call_tool(
+            "get_position_cycle", {"cycle_public_id": "cycle-1"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "service_unavailable"

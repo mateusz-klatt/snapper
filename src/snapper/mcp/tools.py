@@ -54,6 +54,8 @@ from snapper.data.repository import Repository
 from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import OrderRow
+from snapper.data.repository_types import PositionCycleRow
+from snapper.data.repository_types import PositionRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.mcp.auth import ensure_operator_in_claims
 from snapper.mcp.auth import validate_user_wallet_scope
@@ -296,6 +298,59 @@ def _serialize_execution_row(row: ExecutionRow) -> dict[str, Any]:
         "wallet_public_id": row["wallet_public_id"],
         "operator_public_id": row["operator_public_id"],
         "liquidity_role": row["liquidity_role"],
+    }
+
+
+def _serialize_position_row(row: PositionRow) -> dict[str, Any]:
+    """JSON-serialise a :class:`PositionRow` for MCP envelope details.
+
+    ``timestamp`` is a :class:`datetime` natively; downstream
+    :func:`json.dumps` (called by :func:`to_call_tool_result`) cannot
+    encode it, so it is converted to ISO-8601 string.
+    """
+    return {
+        "public_id": row["public_id"],
+        "timestamp": row["timestamp"].isoformat(),
+        "session_id": row["session_id"],
+        "sequence_id": row["sequence_id"],
+        "instrument": row["instrument"],
+        "instrument_public_id": row["instrument_public_id"],
+        "exchange": row["exchange"],
+        "mode": row["mode"],
+        "quantity": row["quantity"],
+        "average_price": row["average_price"],
+        "unrealized_pnl": row["unrealized_pnl"],
+        "realized_pnl": row["realized_pnl"],
+        "position_cycle_public_id": row["position_cycle_public_id"],
+        "wallet_public_id": row["wallet_public_id"],
+    }
+
+
+def _serialize_position_cycle_row(row: PositionCycleRow) -> dict[str, Any]:
+    """JSON-serialise a :class:`PositionCycleRow` for MCP envelope details.
+
+    All :class:`datetime` fields (``timestamp``, ``opened_at``, optional
+    ``closed_at``) are converted to ISO-8601 strings so the envelope
+    survives :func:`json.dumps` end-to-end.
+    """
+    return {
+        "public_id": row["public_id"],
+        "timestamp": row["timestamp"].isoformat(),
+        "session_id": row["session_id"],
+        "sequence_id": row["sequence_id"],
+        "instrument_public_id": row["instrument_public_id"],
+        "exchange": row["exchange"],
+        "mode": row["mode"],
+        "shard_key": row["shard_key"],
+        "wallet_public_id": row["wallet_public_id"],
+        "operator_public_id": row["operator_public_id"],
+        "direction": row["direction"],
+        "max_qty": row["max_qty"],
+        "status": row["status"],
+        "opened_at": row["opened_at"].isoformat(),
+        "closed_at": row["closed_at"].isoformat() if row["closed_at"] is not None else None,
+        "opening_command_public_id": row["opening_command_public_id"],
+        "closing_command_public_id": row["closing_command_public_id"],
     }
 
 
@@ -954,5 +1009,133 @@ def register_mcp_tools(
             success=True,
             error_code=None,
             message=f"Order found in status {order_row['status']!r}.",
+            details=details,
+        )
+
+    @mcp_server.tool()
+    async def list_positions(
+        wallet_public_id: str | None = None,
+        exchange: str | None = None,
+        instrument: str | None = None,
+    ) -> CallToolResult:
+        """List active positions with optional filters (Plan B §2.4).
+
+        Args:
+            wallet_public_id: Filter to one wallet. Caller must have
+                scope; mismatch returns an empty list with
+                ``error_code="position_not_found"`` (anti-enumeration:
+                a caller cannot tell whether the wallet exists or
+                simply isn't theirs). ``None`` returns positions across
+                every wallet the caller can see (ADMIN: every wallet;
+                non-admin: every wallet reachable through any operator
+                the caller's claims hold membership in).
+            exchange: Optional native exchange filter, applied
+                post-fetch (``Repository.get_positions`` does not push
+                exchange into SQL).
+            instrument: Optional native venue symbol filter, applied
+                post-fetch.
+
+        Returns:
+            Plan A Q14 envelope. ``details`` carries ``positions``
+            (list of ``PositionRow`` dicts with ISO-8601 ``timestamp``)
+            and ``count`` (length of the filtered list).
+        """
+        claims = claims_getter()
+        permission_envelope = _envelope_for_permission_check(claims, Permission.READ_POSITIONS)
+        if permission_envelope is not None:
+            return permission_envelope
+        repo_or_envelope = _envelope_for_repository(repository_getter)
+        if isinstance(repo_or_envelope, CallToolResult):
+            return repo_or_envelope
+        repo = repo_or_envelope
+        now = datetime.now(UTC)
+        wallet_ids, scope_violation = await _resolve_target_wallets_for_mcp(
+            claims=claims,
+            repo=repo,
+            wallet_public_id=wallet_public_id,
+            as_of=now,
+        )
+        if scope_violation:
+            return to_call_tool_result(
+                success=False,
+                error_code="position_not_found",
+                message="No positions found for the given filters.",
+                details=sanitize_output({"wallet_public_id": wallet_public_id}),
+            )
+        rows = await repo.get_positions(as_of=now, wallet_public_ids=wallet_ids)
+        filtered = [
+            r
+            for r in rows
+            if (exchange is None or r["exchange"] == exchange)
+            and (instrument is None or r["instrument"] == instrument)
+        ]
+        details = sanitize_output(
+            {
+                "positions": [_serialize_position_row(r) for r in filtered],
+                "count": len(filtered),
+            }
+        )
+        return to_call_tool_result(
+            success=True,
+            error_code=None,
+            message=f"Returned {len(filtered)} matching positions.",
+            details=details,
+        )
+
+    @mcp_server.tool()
+    async def get_position_cycle(cycle_public_id: str) -> CallToolResult:
+        """Fetch a position cycle by its public_id (Plan B §2.5).
+
+        Position cycles are Snapper's canonical "open→close lifetime"
+        record for a position on a given (instrument, exchange, mode,
+        wallet) shard. A position can have multiple cycles
+        (open→reduce→close→reopen→close); use this tool for the full
+        lifecycle audit trail.
+
+        Args:
+            cycle_public_id: UUID7 of the position cycle.
+
+        Returns:
+            Plan A Q14 envelope. On success ``details`` carries the
+            full ``PositionCycleRow`` (datetime fields ISO-8601
+            stringified). When the cycle is unknown OR not in the
+            caller's wallet scope, returns
+            ``error_code="position_cycle_not_found"`` (anti-enumeration).
+        """
+        claims = claims_getter()
+        permission_envelope = _envelope_for_permission_check(claims, Permission.READ_POSITIONS)
+        if permission_envelope is not None:
+            return permission_envelope
+        repo_or_envelope = _envelope_for_repository(repository_getter)
+        if isinstance(repo_or_envelope, CallToolResult):
+            return repo_or_envelope
+        repo = repo_or_envelope
+        now = datetime.now(UTC)
+        accessible_wallets, _ = await _resolve_target_wallets_for_mcp(
+            claims=claims,
+            repo=repo,
+            wallet_public_id=None,
+            as_of=now,
+        )
+        cycle_row = await repo.get_position_cycle_by_public_id(cycle_public_id, as_of=now)
+        if cycle_row is None or (
+            accessible_wallets is not None
+            and cycle_row["wallet_public_id"] not in accessible_wallets
+        ):
+            return to_call_tool_result(
+                success=False,
+                error_code="position_cycle_not_found",
+                message="No position cycle found for the given cycle_public_id.",
+                details=sanitize_output({"cycle_public_id": cycle_public_id}),
+            )
+        details = sanitize_output(
+            {
+                "position_cycle": _serialize_position_cycle_row(cycle_row),
+            }
+        )
+        return to_call_tool_result(
+            success=True,
+            error_code=None,
+            message=f"Position cycle found in status {cycle_row['status']!r}.",
             details=details,
         )
