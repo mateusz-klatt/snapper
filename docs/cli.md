@@ -41,9 +41,11 @@ separate process). Multi-worker uvicorn (multiple FastAPI processes
 sharing a broker) is supported — see the AI-review fanout dedup
 contract in `docs/architecture.md` (Deployment Modes); set
 `SNAPPER_COORDINATOR_INSTANCE_ID` + `SNAPPER_COORDINATOR_INSTANCE_COUNT`
-(or `--instance-id` / `--instance-count`) per worker to enable the
-shared partitioning that prevents duplicate caps-violation WS frames
-under N>1.
+per worker (env vars only — `snapper server` does not expose
+per-worker CLI flags; the `--instance-id` / `--instance-count` flags
+in the table below are on `snapper trade-zmq`) to enable the shared
+partitioning that prevents duplicate caps-violation WS frames under
+N>1.
 
 **Examples:**
 

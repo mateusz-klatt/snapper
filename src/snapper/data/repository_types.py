@@ -1832,7 +1832,7 @@ class AiReviewEventInsertRow(TypedDict, total=False):
     occurred_at: datetime
 
 
-class AtomicResolveResult(TypedDict):
+class AtomicResolveResult(TypedDict, total=False):
     """Return shape for the AI-review terminal-transition primitives.
 
     Plan D §3.2 step 5 / Phase 2 #8 — atomic single-transaction UPDATE of
@@ -1845,11 +1845,27 @@ class AtomicResolveResult(TypedDict):
     ``selected_delegate_public_id`` + ``dispatch_version`` are surfaced to
     the service layer so the post-commit bus event + external WS frame
     can carry the same identity.
+
+    ``resolution_mode`` is populated ONLY by
+    :meth:`Repository.atomic_resolve_review_with_audit_and_counter` —
+    derived inside the primitive from the locked ``previous_status`` +
+    ``selected_delegate_public_id`` so the value the service publishes
+    on the post-commit bus event + WS frame matches what the row +
+    audit row hold (closes the Phase 2 #8 R3 MAJOR where the service
+    computed ``resolution_mode`` from a pre-transaction snapshot of
+    ``status``; if a peer flipped the row from ``pending`` to
+    ``fanout_dispatched`` between the read and the lock, the published
+    ``resolution_mode`` could disagree with the actual transition). The
+    timeout + supersede primitives leave it absent because their
+    ``resolution_mode`` is fixed by the transition target
+    (``timeout_no_response`` / ``superseded_by_strategy``) and the
+    service does not depend on the primitive returning it.
     """
 
     selected_delegate_public_id: str
     dispatch_version: int
     previous_status: str
+    resolution_mode: str
 
 
 class PendingReviewSummary(TypedDict):

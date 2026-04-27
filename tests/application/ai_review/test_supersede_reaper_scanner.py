@@ -218,7 +218,6 @@ async def test_supersede_review_terminal_state_returns_false(
         decision="approve",
         responding_delegate_public_id=delegate_pid,
         rationale=None,
-        resolution_mode="pick_one_primary",
         new_status="resolved_approved",
         audit_event=_decision_audit_event(
             review_id=review_id, delegate_pid=delegate_pid, occurred_at=now

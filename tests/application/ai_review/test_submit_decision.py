@@ -496,7 +496,6 @@ async def test_late_decision_after_already_terminal_skips_timeout_path(
         decision="approve",
         responding_delegate_public_id=delegate_pid,
         rationale="early",
-        resolution_mode="pick_one_primary",
         new_status="resolved_approved",
         audit_event=_decision_audit_event(
             review_id=review_id,
@@ -660,7 +659,6 @@ async def test_late_decision_lost_to_concurrent_resolve_falls_through_to_peer(
         decision="approve",
         responding_delegate_public_id=delegate_pid,
         rationale=None,
-        resolution_mode="pick_one_primary",
         new_status="resolved_approved",
         audit_event=_decision_audit_event(
             review_id=review_id,
@@ -719,7 +717,6 @@ async def test_atomic_resolve_returns_none_falls_through_to_peer(
             decision="reject",
             responding_delegate_public_id=delegate_pid,
             rationale="peer beat us",
-            resolution_mode="pick_one_primary",
             new_status="resolved_rejected",
             audit_event={
                 "public_id": str(uuid7()),

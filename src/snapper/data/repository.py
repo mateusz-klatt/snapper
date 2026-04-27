@@ -3393,7 +3393,6 @@ class Repository(ABC):
         decision: str,
         responding_delegate_public_id: str,
         rationale: str | None,
-        resolution_mode: str,
         new_status: str,
         audit_event: AiReviewEventInsertRow,
         now: datetime,
@@ -3445,9 +3444,6 @@ class Repository(ABC):
                 actor field if the caller threads it onto
                 ``audit_event``).
             rationale: Optional free-text decision rationale.
-            resolution_mode: One of
-                :class:`snapper.core.types.AiReviewResolutionModeEnum`
-                values.
             new_status: ``"resolved_approved"`` or ``"resolved_rejected"``
                 — must match the ``decision`` per the
                 ``ck_ai_reviews_status_consistency`` constraint.
@@ -3564,6 +3560,40 @@ class Repository(ABC):
             fanout or terminal transition won).
         """
         ...
+
+
+def _derive_resolve_resolution_mode(
+    *,
+    previous_status: str,
+    selected_delegate_public_id: str,
+    responding_delegate_public_id: str,
+) -> str:
+    """Plan A Q4 — derive ``resolution_mode`` for the resolve transition.
+
+    Mirrors the Plan A Q4 + Plan D §3.2 v1.4 enum resolution rules:
+
+    - ``pending`` + selected==responding -> ``pick_one_primary`` (most
+      common path: the originally-selected delegate responds within
+      the natural fanout window).
+    - ``fanout_dispatched`` + selected==responding -> ``secondary_after_fanout``
+      (the originally-selected delegate came back online after
+      fanout had already fired to peers).
+    - ``fanout_dispatched`` + selected!=responding -> ``fanout_first_responder``
+      (a different eligible delegate won the fanout race).
+
+    Lives at the repository module level (not on a service or enum
+    class) so the resolve primitive can derive it INSIDE its own
+    SELECT-FOR-UPDATE transaction without crossing a layer boundary
+    or duplicating the Plan A Q4 rules. Closes the Phase 2 #8 R3
+    MAJOR where the service computed ``resolution_mode`` from a
+    pre-snapshot ``status`` that could disagree with the actually-locked
+    predecessor under concurrent fanout.
+    """
+    if previous_status == "pending":
+        return "pick_one_primary"
+    if responding_delegate_public_id == selected_delegate_public_id:
+        return "secondary_after_fanout"
+    return "fanout_first_responder"
 
 
 def _register_sqlite_fk_pragma(engine: Any) -> None:
@@ -10078,22 +10108,42 @@ class SQLAlchemyRepository(Repository):
         review_public_id: str,
         *,
         with_deadline: bool,
-    ) -> tuple[str, datetime | None, int] | None:
+    ) -> tuple[str, datetime | None, int, str] | None:
         """Helper for the combined terminal-transition primitives.
 
         SELECT-FOR-UPDATE on the ``ai_reviews`` row to capture
         ``previous_status`` (+ ``deadline`` when the resolve path needs
-        the gate) + ``dispatch_version``. PG holds the row lock for the
-        rest of the open transaction so concurrent peers serialise; the
-        SQLite fallback degrades to a plain SELECT (the connection-level
-        write lock provides equivalent serialisation). Returns ``None``
-        when the row does not exist OR is already terminal so callers
-        can short-circuit without the UPDATE.
+        the gate) + ``dispatch_version`` + ``selected_delegate_public_id``.
+        PG holds the row lock for the rest of the open transaction so
+        concurrent peers serialise; the SQLite fallback degrades to a
+        plain SELECT, but the callers bind the subsequent UPDATE to
+        ``status == previous_status`` so a peer that flips the row in
+        the read-then-CAS gap on engines without row locking simply
+        loses the rowcount=0 race + the primitive rolls back rather
+        than recording a stale predecessor (closes the Phase 2 #8 R3
+        MAJOR on the SQLite predecessor race). Returns ``None`` when
+        the row does not exist OR is already terminal so callers can
+        short-circuit without the UPDATE.
+
+        ``selected_delegate_public_id`` is captured here so the resolve
+        primitive can derive ``resolution_mode`` inside the locked
+        transaction (closes the Phase 2 #8 R3 MAJOR on the
+        ``resolution_mode`` SELECT-then-CAS race) without a second
+        SELECT after the UPDATE.
         """
         cols = (
-            (AiReview.status, AiReview.deadline, AiReview.dispatch_version)
+            (
+                AiReview.status,
+                AiReview.deadline,
+                AiReview.dispatch_version,
+                AiReview.selected_delegate_public_id,
+            )
             if with_deadline
-            else (AiReview.status, AiReview.dispatch_version)
+            else (
+                AiReview.status,
+                AiReview.dispatch_version,
+                AiReview.selected_delegate_public_id,
+            )
         )
         select_stmt = select(*cols).where(AiReview.public_id == review_public_id)
         try:
@@ -10103,13 +10153,13 @@ class SQLAlchemyRepository(Repository):
         if pre_row is None:
             return None
         if with_deadline:
-            previous_status, deadline, dispatch_version = pre_row
+            previous_status, deadline, dispatch_version, selected = pre_row
         else:
-            previous_status, dispatch_version = pre_row
+            previous_status, dispatch_version, selected = pre_row
             deadline = None
         if previous_status not in ("pending", "fanout_dispatched"):
             return None
-        return str(previous_status), deadline, int(dispatch_version)
+        return str(previous_status), deadline, int(dispatch_version), str(selected)
 
     async def _decrement_delegate_counter_in_session(
         self,
@@ -10162,24 +10212,43 @@ class SQLAlchemyRepository(Repository):
         decision: str,
         responding_delegate_public_id: str,
         rationale: str | None,
-        resolution_mode: str,
         new_status: str,
         audit_event: AiReviewEventInsertRow,
         now: datetime,
     ) -> AtomicResolveResult | None:
-        """Single-transaction resolve + audit + counter decrement (Plan D Phase 2 #8)."""
+        """Single-transaction resolve + audit + counter decrement (Plan D Phase 2 #8).
+
+        ``resolution_mode`` is derived INSIDE the primitive from the
+        SELECT-FOR-UPDATE-captured ``previous_status`` +
+        ``selected_delegate_public_id`` so the row UPDATE, audit-event
+        row, and the value returned to the service all match the
+        actually-locked transition (closes the R3 MAJOR where the
+        service computed ``resolution_mode`` from a pre-snapshot
+        ``status`` that could disagree with the lock-time predecessor
+        if a peer flipped pending -> fanout_dispatched in the gap).
+        The UPDATE is bound to ``status == previous_status`` (the
+        captured value) so even on engines without row locking
+        (SQLite plain-SELECT fallback), a peer transition between the
+        SELECT and the UPDATE drops rowcount to 0 + the primitive
+        rolls back rather than recording a stale predecessor.
+        """
         async with self.session() as s:
             pre = await self._select_for_update_pre_state(s, review_public_id, with_deadline=True)
             if pre is None:
                 return None
-            previous_status, deadline, dispatch_version = pre
+            previous_status, deadline, dispatch_version, selected = pre
             if deadline is None or deadline <= now:
                 return None
+            resolution_mode = _derive_resolve_resolution_mode(
+                previous_status=previous_status,
+                selected_delegate_public_id=selected,
+                responding_delegate_public_id=responding_delegate_public_id,
+            )
             update_stmt = (
                 update(AiReview)
                 .where(
                     AiReview.public_id == review_public_id,
-                    AiReview.status.in_(("pending", "fanout_dispatched")),
+                    AiReview.status == previous_status,
                     AiReview.deadline > now,
                 )
                 .values(
@@ -10196,27 +10265,21 @@ class SQLAlchemyRepository(Repository):
             if int(cast(Any, result).rowcount or 0) == 0:
                 await s.rollback()
                 return None
-            selected = (
-                await s.execute(
-                    select(AiReview.selected_delegate_public_id).where(
-                        AiReview.public_id == review_public_id
-                    )
-                )
-            ).scalar_one()
             audit_payload = dict(audit_event)
             audit_payload["previous_status"] = previous_status
             s.add(AiReviewEvent(**audit_payload))
             await self._decrement_delegate_counter_in_session(
                 s,
                 review_public_id=review_public_id,
-                selected_delegate_public_id=str(selected),
+                selected_delegate_public_id=selected,
                 now=now,
             )
             await s.commit()
             return AtomicResolveResult(
-                selected_delegate_public_id=str(selected),
+                selected_delegate_public_id=selected,
                 dispatch_version=dispatch_version,
                 previous_status=previous_status,
+                resolution_mode=resolution_mode,
             )
 
     async def atomic_timeout_review_with_audit_and_counter(
@@ -10226,17 +10289,25 @@ class SQLAlchemyRepository(Repository):
         audit_event: AiReviewEventInsertRow,
         now: datetime,
     ) -> AtomicResolveResult | None:
-        """Single-transaction timeout + audit + counter decrement (Plan D Phase 2 #8)."""
+        """Single-transaction timeout + audit + counter decrement (Plan D Phase 2 #8).
+
+        UPDATE is bound to ``status == previous_status`` (the captured
+        value) so a peer transition in the SELECT-then-CAS gap on
+        engines without row locking causes rowcount=0 + rollback
+        rather than overwriting a row whose actual predecessor differs
+        from the audit-event ``previous_status`` we are about to
+        record.
+        """
         async with self.session() as s:
             pre = await self._select_for_update_pre_state(s, review_public_id, with_deadline=False)
             if pre is None:
                 return None
-            previous_status, _deadline, dispatch_version = pre
+            previous_status, _deadline, dispatch_version, selected = pre
             update_stmt = (
                 update(AiReview)
                 .where(
                     AiReview.public_id == review_public_id,
-                    AiReview.status.in_(("pending", "fanout_dispatched")),
+                    AiReview.status == previous_status,
                 )
                 .values(
                     status="timeout",
@@ -10249,25 +10320,18 @@ class SQLAlchemyRepository(Repository):
             if int(cast(Any, result).rowcount or 0) == 0:
                 await s.rollback()
                 return None
-            selected = (
-                await s.execute(
-                    select(AiReview.selected_delegate_public_id).where(
-                        AiReview.public_id == review_public_id
-                    )
-                )
-            ).scalar_one()
             audit_payload = dict(audit_event)
             audit_payload["previous_status"] = previous_status
             s.add(AiReviewEvent(**audit_payload))
             await self._decrement_delegate_counter_in_session(
                 s,
                 review_public_id=review_public_id,
-                selected_delegate_public_id=str(selected),
+                selected_delegate_public_id=selected,
                 now=now,
             )
             await s.commit()
             return AtomicResolveResult(
-                selected_delegate_public_id=str(selected),
+                selected_delegate_public_id=selected,
                 dispatch_version=dispatch_version,
                 previous_status=previous_status,
             )
@@ -10279,17 +10343,22 @@ class SQLAlchemyRepository(Repository):
         audit_event: AiReviewEventInsertRow,
         now: datetime,
     ) -> AtomicResolveResult | None:
-        """Single-transaction supersede + audit + counter decrement (Plan D Phase 2 #8)."""
+        """Single-transaction supersede + audit + counter decrement (Plan D Phase 2 #8).
+
+        UPDATE is bound to ``status == previous_status`` (the captured
+        value) for the same predecessor-race reason as
+        :meth:`atomic_timeout_review_with_audit_and_counter`.
+        """
         async with self.session() as s:
             pre = await self._select_for_update_pre_state(s, review_public_id, with_deadline=False)
             if pre is None:
                 return None
-            previous_status, _deadline, dispatch_version = pre
+            previous_status, _deadline, dispatch_version, selected = pre
             update_stmt = (
                 update(AiReview)
                 .where(
                     AiReview.public_id == review_public_id,
-                    AiReview.status.in_(("pending", "fanout_dispatched")),
+                    AiReview.status == previous_status,
                 )
                 .values(
                     status="superseded",
@@ -10302,25 +10371,18 @@ class SQLAlchemyRepository(Repository):
             if int(cast(Any, result).rowcount or 0) == 0:
                 await s.rollback()
                 return None
-            selected = (
-                await s.execute(
-                    select(AiReview.selected_delegate_public_id).where(
-                        AiReview.public_id == review_public_id
-                    )
-                )
-            ).scalar_one()
             audit_payload = dict(audit_event)
             audit_payload["previous_status"] = previous_status
             s.add(AiReviewEvent(**audit_payload))
             await self._decrement_delegate_counter_in_session(
                 s,
                 review_public_id=review_public_id,
-                selected_delegate_public_id=str(selected),
+                selected_delegate_public_id=selected,
                 now=now,
             )
             await s.commit()
             return AtomicResolveResult(
-                selected_delegate_public_id=str(selected),
+                selected_delegate_public_id=selected,
                 dispatch_version=dispatch_version,
                 previous_status=previous_status,
             )

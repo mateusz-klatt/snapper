@@ -998,17 +998,11 @@ class AiReviewService:
             if decision == AiReviewDecisionEnum.APPROVE
             else AiReviewStatusEnum.RESOLVED_REJECTED
         )
-        resolution_mode = self._resolution_mode_for(
-            previous_status=review["status"],
-            selected_delegate_public_id=review["selected_delegate_public_id"],
-            responding_delegate_public_id=delegate_public_id,
-        )
         atomic = await repo.atomic_resolve_review_with_audit_and_counter(
             review_public_id=review_public_id,
             decision=decision.value,
             responding_delegate_public_id=delegate_public_id,
             rationale=rationale,
-            resolution_mode=resolution_mode.value,
             new_status=new_status.value,
             audit_event={
                 "public_id": str(uuid7()),
@@ -1033,18 +1027,20 @@ class AiReviewService:
                 decision=decision,
             )
 
+        resolution_mode_value = atomic["resolution_mode"]
+        resolution_mode = AiReviewResolutionModeEnum(resolution_mode_value)
         logger.info(
             "ai_review decision recorded",
             review_public_id=review_public_id,
             decision=decision.value,
-            resolution_mode=resolution_mode.value,
+            resolution_mode=resolution_mode_value,
         )
         await self._publish_decision_bus_event(
             review_public_id=review_public_id,
             responding_delegate_public_id=delegate_public_id,
             decision=decision.value,
             new_status=new_status.value,
-            resolution_mode=resolution_mode.value,
+            resolution_mode=resolution_mode_value,
             dispatch_version=int(atomic["dispatch_version"]),
             wall_clock=wall_clock,
         )
@@ -1057,7 +1053,7 @@ class AiReviewService:
             responding_delegate_public_id=delegate_public_id,
             decision=decision.value,
             new_status=new_status.value,
-            resolution_mode=resolution_mode.value,
+            resolution_mode=resolution_mode_value,
             rationale=rationale,
             dispatch_version=int(atomic["dispatch_version"]),
             wall_clock=wall_clock,
@@ -1727,27 +1723,6 @@ class AiReviewService:
             repo=repo,
             now=msg.last_seen_at,
         )
-
-    @staticmethod
-    def _resolution_mode_for(
-        *,
-        previous_status: str,
-        selected_delegate_public_id: str,
-        responding_delegate_public_id: str,
-    ) -> AiReviewResolutionModeEnum:
-        """Plan A Q4 — pick the resolution_mode the row's transition implies.
-
-        - ``pending`` + selected==responding -> PICK_ONE_PRIMARY (most common).
-        - ``fanout_dispatched`` + selected==responding -> SECONDARY_AFTER_FANOUT
-          (selected delegate came back online after fanout fired).
-        - ``fanout_dispatched`` + selected!=responding -> FANOUT_FIRST_RESPONDER
-          (different eligible delegate won the fanout race).
-        """
-        if previous_status == AiReviewStatusEnum.PENDING.value:
-            return AiReviewResolutionModeEnum.PICK_ONE_PRIMARY
-        if responding_delegate_public_id == selected_delegate_public_id:
-            return AiReviewResolutionModeEnum.SECONDARY_AFTER_FANOUT
-        return AiReviewResolutionModeEnum.FANOUT_FIRST_RESPONDER
 
     def set_repository_factory(self, repository_factory: Callable[[], Repository] | None) -> None:
         """Inject the repository factory used by the bus listener path.

@@ -584,9 +584,12 @@ starts.
 **Operational scaling:** raise
 ``SNAPPER_COORDINATOR_INSTANCE_COUNT`` to N and start N FastAPI
 workers each with a distinct ``SNAPPER_COORDINATOR_INSTANCE_ID`` in
-``[0, N)`` (or use the ``--instance-id`` / ``--instance-count`` CLI
-flags). Each worker subscribes to every bus topic; only the SHA-256
-owner runs the caps-violation external fanout.
+``[0, N)`` (env vars only — ``snapper server`` does not expose
+per-worker CLI flags; the ``--instance-id`` / ``--instance-count``
+CLI flags exist on ``snapper trade-zmq`` for the Trade Runtime
+Phase 4 coordinator partitioning, not on the FastAPI server). Each
+worker subscribes to every bus topic; only the SHA-256 owner runs
+the caps-violation external fanout.
 
 ## Execution Plans
 

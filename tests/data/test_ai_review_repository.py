@@ -1335,7 +1335,6 @@ async def test_combined_resolve_with_audit_and_counter_atomic_happy_path(
         decision="approve",
         responding_delegate_public_id=delegate_pid,
         rationale=None,
-        resolution_mode="pick_one_primary",
         new_status="resolved_approved",
         audit_event=audit,
         now=now,
@@ -1381,7 +1380,6 @@ async def test_combined_resolve_returns_none_when_already_terminal(tmp_path: Pat
         decision="approve",
         responding_delegate_public_id=delegate_pid,
         rationale=None,
-        resolution_mode="pick_one_primary",
         new_status="resolved_approved",
         audit_event=first_audit,
         now=now,
@@ -1399,7 +1397,6 @@ async def test_combined_resolve_returns_none_when_already_terminal(tmp_path: Pat
         decision="approve",
         responding_delegate_public_id=delegate_pid,
         rationale=None,
-        resolution_mode="pick_one_primary",
         new_status="resolved_approved",
         audit_event=second_audit,
         now=now,
@@ -1433,7 +1430,6 @@ async def test_combined_resolve_returns_none_when_deadline_elapsed(tmp_path: Pat
         decision="approve",
         responding_delegate_public_id=delegate_pid,
         rationale=None,
-        resolution_mode="pick_one_primary",
         new_status="resolved_approved",
         audit_event=audit,
         now=datetime.now(UTC),
@@ -1613,7 +1609,6 @@ async def test_combined_resolve_audit_uses_actual_previous_status_not_caller_sen
         decision="approve",
         responding_delegate_public_id=delegate_pid,
         rationale=None,
-        resolution_mode="pick_one_primary",
         new_status="resolved_approved",
         audit_event=_audit_event_for(
             review_pid=review_pid,
@@ -1689,7 +1684,6 @@ async def test_combined_dispatch_fanout_returns_none_for_non_pending_row(
         decision="approve",
         responding_delegate_public_id=delegate_pid,
         rationale=None,
-        resolution_mode="pick_one_primary",
         new_status="resolved_approved",
         audit_event=_audit_event_for(
             review_pid=review_pid,
@@ -1754,7 +1748,6 @@ async def test_combined_resolve_with_for_update_falls_back_on_not_implemented(
             decision="approve",
             responding_delegate_public_id=delegate_pid,
             rationale=None,
-            resolution_mode="pick_one_primary",
             new_status="resolved_approved",
             audit_event=_audit_event_for(
                 review_pid=review_pid,
@@ -1869,7 +1862,6 @@ async def test_combined_resolve_rowcount_zero_rolls_back_and_returns_none(
             decision="approve",
             responding_delegate_public_id=delegate_pid,
             rationale=None,
-            resolution_mode="pick_one_primary",
             new_status="resolved_approved",
             audit_event=_audit_event_for(
                 review_pid=review_pid,

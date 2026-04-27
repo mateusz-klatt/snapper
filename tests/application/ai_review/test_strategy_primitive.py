@@ -238,7 +238,6 @@ async def _resolve_review_after_delay(
         decision=decision.value,
         responding_delegate_public_id=delegate_pid,
         rationale="background",
-        resolution_mode="pick_one_primary",
         new_status=new_status,
         audit_event=_decision_audit_event(
             review_id=review_id,
@@ -511,7 +510,6 @@ async def test_future_resolved_externally_skips_remaining_poll(
             decision="approve",
             responding_delegate_public_id=ids["delegate_public_id"],
             rationale="fast",
-            resolution_mode="pick_one_primary",
             new_status="resolved_approved",
             audit_event=_decision_audit_event(
                 review_id=row[0] if row else "",
@@ -628,7 +626,6 @@ async def test_timeout_review_skips_when_already_terminal(
         decision="approve",
         responding_delegate_public_id=ids["delegate_public_id"],
         rationale="peer",
-        resolution_mode="pick_one_primary",
         new_status="resolved_approved",
         audit_event=_decision_audit_event(
             review_id=creation.review_public_id,
