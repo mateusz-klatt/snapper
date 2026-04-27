@@ -51,6 +51,7 @@ from uuid import uuid7
 from loguru import logger
 from sqlalchemy import Select
 from sqlalchemy import and_
+from sqlalchemy import case
 from sqlalchemy import create_engine as create_sync_engine
 from sqlalchemy import delete
 from sqlalchemy import desc
@@ -3288,8 +3289,8 @@ class Repository(ABC):
         drive per-row atomic timeouts. The reaper trusts that any row
         observed here may already have raced against a peer decision /
         supersede / earlier reaper tick by the time the per-row
-        :meth:`atomic_timeout_ai_review` fires; the CAS shape of that
-        method is the actual correctness guarantee.
+        :meth:`atomic_timeout_review_with_audit_and_counter` fires; the
+        CAS shape of that method is the actual correctness guarantee.
 
         Args:
             now: Wall-clock the reaper is reaping against.
@@ -10142,7 +10143,10 @@ class SQLAlchemyRepository(Repository):
             update(AiDelegate)
             .where(AiDelegate.public_id == selected_delegate_public_id)
             .values(
-                active_reviews_count=func.max(AiDelegate.active_reviews_count - 1, 0),
+                active_reviews_count=case(
+                    (AiDelegate.active_reviews_count > 0, AiDelegate.active_reviews_count - 1),
+                    else_=0,
+                ),
                 updated_at=now,
             )
         )

@@ -1376,9 +1376,9 @@ class AiReviewService:
         """Plan D §3.3 single-tick reaper iteration.
 
         Snapshots up to N expired pending/fanout_dispatched reviews,
-        then per-row drives the existing
-        :meth:`Repository.atomic_timeout_ai_review` CAS + audit-event
-        + counter-decrement primitives shared with
+        then per-row drives the
+        :meth:`Repository.atomic_timeout_review_with_audit_and_counter`
+        single-transaction CAS + audit + counter primitive shared with
         :meth:`submit_decision`. Returns the number of rows that won
         the per-row CAS this tick (rows that lost — because a peer
         decision or earlier reaper landed first — are silently
@@ -1788,9 +1788,9 @@ class AiReviewService:
         each have their own dedup story:
 
         - ``bus.delegate_offline``: the handler drives per-row CAS UPDATEs
-          (``atomic_dispatch_fanout``), so only one worker wins per affected
-          review row regardless of how many subscribers receive the event.
-          No additional gating needed.
+          (``atomic_dispatch_fanout_with_audit``), so only one worker wins
+          per affected review row regardless of how many subscribers
+          receive the event. No additional gating needed.
         - ``bus.ai_review_decision``: the handler resolves a process-local
           :class:`asyncio.Future` populated only on the worker that ran
           ``create_review`` for the strategy await loop. Remote workers

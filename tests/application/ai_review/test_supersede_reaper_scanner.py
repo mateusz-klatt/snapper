@@ -587,9 +587,10 @@ async def test_supersede_review_unknown_id_returns_false(
     Given a configured AiReviewService and an empty repository,
     When supersede_review runs against a review_public_id that does
     not exist,
-    Then it returns False (the underlying atomic_supersede_ai_review
-    short-circuits at the SELECT-step pre_row=None guard) without
-    raising and without appending an audit event.
+    Then it returns False (the underlying
+    atomic_supersede_review_with_audit_and_counter short-circuits at
+    the SELECT-FOR-UPDATE pre_row=None guard) without raising and
+    without appending an audit event.
     """
     svc = AiReviewService.get_instance()
     won = await svc.supersede_review(
@@ -606,15 +607,16 @@ async def test_supersede_review_unknown_id_returns_false(
 async def test_reaper_tick_skips_row_lost_to_peer_decision(
     repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If atomic_timeout_ai_review returns None, the reaper logs the loss + continues.
+    """If the combined timeout primitive returns None, the reaper logs the loss + continues.
 
     Plan D §3.3 "drop-the-lease" guarantee: a row observed in the
     expired snapshot may already have raced against a peer decision
     by the time the per-row CAS fires. The reaper must not crash —
     it should simply skip the row and report 0 transitions.
 
-    Given an expired pending review and a stubbed atomic_timeout that
-    always returns None (simulating peer-won race),
+    Given an expired pending review and a stubbed
+    atomic_timeout_review_with_audit_and_counter that always returns
+    None (simulating peer-won race),
     When _reaper_tick runs,
     Then it returns 0 and the row stays pending (no audit event
     appended).
@@ -652,14 +654,15 @@ async def test_reaper_tick_skips_row_lost_to_peer_decision(
 async def test_offline_scanner_skips_row_lost_to_peer_dispatch(
     repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If atomic_dispatch_fanout returns None, the scanner skips the row.
+    """If the combined dispatch primitive returns None, the scanner skips the row.
 
     The §3.4 / §3.5 paths share the same per-row dispatch helper, so
-    a stubbed ``atomic_dispatch_fanout`` exercises the loss-to-peer
-    branch for both code paths.
+    a stubbed ``atomic_dispatch_fanout_with_audit`` exercises the
+    loss-to-peer branch for both code paths.
 
     Given a pending review past fanout_after with an offline delegate
-    AND a stubbed atomic_dispatch_fanout that always returns None,
+    AND a stubbed atomic_dispatch_fanout_with_audit that always returns
+    None,
     When _offline_scanner_tick runs,
     Then it returns 0 and no audit event is appended for the row.
     """

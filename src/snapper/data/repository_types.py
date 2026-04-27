@@ -1833,13 +1833,18 @@ class AiReviewEventInsertRow(TypedDict, total=False):
 
 
 class AtomicResolveResult(TypedDict):
-    """Return shape for :meth:`Repository.atomic_resolve_ai_review`.
+    """Return shape for the AI-review terminal-transition primitives.
 
-    Plan D §3.2 step 5 — atomic UPDATE of ``ai_reviews`` from non-terminal to
-    a resolved/terminal state. ``previous_status`` is captured BEFORE the
-    UPDATE so the audit-event row records the actual transition the caller
-    won; ``selected_delegate_public_id`` + ``dispatch_version`` are needed
-    for the post-commit bus event + Q10 counter decrement.
+    Plan D §3.2 step 5 / Phase 2 #8 — atomic single-transaction UPDATE of
+    ``ai_reviews`` from non-terminal to a resolved / timeout / superseded
+    state via :meth:`Repository.atomic_resolve_review_with_audit_and_counter`,
+    :meth:`Repository.atomic_timeout_review_with_audit_and_counter`, or
+    :meth:`Repository.atomic_supersede_review_with_audit_and_counter`. The
+    ``previous_status`` is captured BY the primitive's SELECT-FOR-UPDATE
+    so the audit-event row records the actual transition the caller won;
+    ``selected_delegate_public_id`` + ``dispatch_version`` are surfaced to
+    the service layer so the post-commit bus event + external WS frame
+    can carry the same identity.
     """
 
     selected_delegate_public_id: str
