@@ -429,31 +429,50 @@ class TestStartStopBusListener:
         explicitly :meth:`stop_bus_listener` first. We log a warning when
         the second call's topic set is wider than the running set so the
         misuse is visible in operations.
+
+        The warning assertion uses a loguru sink (``caplog`` does not
+        intercept loguru) so a future refactor that silently drops the
+        warning is caught by CI.
         """
+        from loguru import logger
+
         svc = AiReviewService.get_instance()
+        warnings: list[str] = []
+
+        def _sink(message: object) -> None:
+            warnings.append(str(message))
+
+        handler_id = logger.add(_sink, level="WARNING")
 
         async def _never() -> None:
             await asyncio.Event().wait()
 
-        with (
-            patch.object(svc, "_bus_listen_loop", side_effect=_never),
-            patch("snapper.application.ai_review.service.zmq.asyncio.Context") as mock_ctx,
-            patch("snapper.application.ai_review.service.ValidatedSubscriber") as mock_sub,
-        ):
-            mock_ctx.return_value.socket.return_value = MagicMock()
-            mock_ctx.return_value.term = MagicMock()
-            sub_instance = MagicMock()
-            mock_sub.return_value = sub_instance
-            await svc.start_bus_listener(
-                "tcp://127.0.0.1:7501",
-                topics=("bus.ai_review_decision",),
+        try:
+            with (
+                patch.object(svc, "_bus_listen_loop", side_effect=_never),
+                patch("snapper.application.ai_review.service.zmq.asyncio.Context") as mock_ctx,
+                patch("snapper.application.ai_review.service.ValidatedSubscriber") as mock_sub,
+            ):
+                mock_ctx.return_value.socket.return_value = MagicMock()
+                mock_ctx.return_value.term = MagicMock()
+                sub_instance = MagicMock()
+                mock_sub.return_value = sub_instance
+                await svc.start_bus_listener(
+                    "tcp://127.0.0.1:7501",
+                    topics=("bus.ai_review_decision",),
+                )
+                await asyncio.sleep(0)
+                initial_subscribe_count = sub_instance.subscribe.call_count
+                await svc.start_bus_listener("tcp://127.0.0.1:7501")
+                assert sub_instance.subscribe.call_count == initial_subscribe_count
+            assert svc._bus_subscribed_topics == ("bus.ai_review_decision",)
+            assert any("widening requires explicit stop_bus_listener" in msg for msg in warnings), (
+                f"expected topic-widening warning to fire on the second start_bus_listener call; "
+                f"captured warnings: {warnings!r}"
             )
-            await asyncio.sleep(0)
-            initial_subscribe_count = sub_instance.subscribe.call_count
-            await svc.start_bus_listener("tcp://127.0.0.1:7501")
-            assert sub_instance.subscribe.call_count == initial_subscribe_count
-        assert svc._bus_subscribed_topics == ("bus.ai_review_decision",)
-        await svc.stop_bus_listener()
+        finally:
+            logger.remove(handler_id)
+            await svc.stop_bus_listener()
 
     @pytest.mark.asyncio
     async def test_stop_clears_subscribed_topics_so_restart_can_widen(self) -> None:

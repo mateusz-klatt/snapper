@@ -10,8 +10,9 @@ the Plan A §7.1 fast-path even when launched via
 """
 
 import asyncio
+from collections.abc import Awaitable
+from collections.abc import Callable
 from collections.abc import Iterator
-from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -209,12 +210,11 @@ def test_main_async_path_uses_listener_wrapper(monkeypatch: pytest.MonkeyPatch) 
     (proving the wrapper sits between asyncio.run and the strategy
     method).
     """
-    captured: dict[str, Any] = {}
+    captured: dict[str, object] = {}
 
-    async def _wrapper(method: Any) -> Any:
+    async def _wrapper(method: Callable[[], Awaitable[object]]) -> None:
         captured["wrapper_called_with"] = method
         await asyncio.sleep(0)
-        return None
 
     class _Instance:
         async def start(self) -> None:
