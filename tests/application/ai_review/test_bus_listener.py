@@ -381,6 +381,145 @@ class TestStartStopBusListener:
         svc = AiReviewService.get_instance()
         await svc.stop_bus_listener()
 
+    @pytest.mark.asyncio
+    async def test_topics_param_restricts_subscription_to_decision_only(self) -> None:
+        """Plan D Phase 2 #9 — subprocess strategies pass topics=(decision,) only.
+
+        The subprocess listener wired by ``snapper.server.process_runner`` must
+        subscribe ONLY to ``bus.ai_review_decision`` so the strategy primitive's
+        in-subprocess Future fast-path can resolve. The other 2 topics
+        (``bus.delegate_offline`` + ``bus.caps_violation_after_ai_approve``)
+        belong exclusively to the FastAPI server's lifespan-wired listener;
+        a subprocess that subscribed to them would either skip-with-warning
+        on every event (delegate_offline needs a repository factory) OR
+        N-duplicate the external WS frame (caps_violation re-publishes
+        unconditionally when ShardOwnership is unwired in the subprocess).
+        """
+        svc = AiReviewService.get_instance()
+
+        async def _never() -> None:
+            await asyncio.Event().wait()
+
+        with (
+            patch.object(svc, "_bus_listen_loop", side_effect=_never),
+            patch("snapper.application.ai_review.service.zmq.asyncio.Context") as mock_ctx,
+            patch("snapper.application.ai_review.service.ValidatedSubscriber") as mock_sub,
+        ):
+            mock_ctx.return_value.socket.return_value = MagicMock()
+            mock_ctx.return_value.term = MagicMock()
+            sub_instance = MagicMock()
+            mock_sub.return_value = sub_instance
+            await svc.start_bus_listener(
+                "tcp://127.0.0.1:7501",
+                topics=("bus.ai_review_decision",),
+            )
+            subscribed = {call.args[0] for call in sub_instance.subscribe.call_args_list}
+        assert subscribed == {"bus.ai_review_decision"}
+        assert svc._bus_subscribed_topics == ("bus.ai_review_decision",)
+        await svc.stop_bus_listener()
+
+    @pytest.mark.asyncio
+    async def test_topic_widening_logs_warning_and_does_not_re_subscribe(self) -> None:
+        """Restricted-then-full second start logs a warning + leaves restricted in place.
+
+        Topic widening between calls is NOT supported in place — the second
+        ``start_bus_listener`` call observes the running task + returns
+        without re-subscribing (the existing idempotency guard). The new
+        topics simply do not get added. Callers that need to widen MUST
+        explicitly :meth:`stop_bus_listener` first. We log a warning when
+        the second call's topic set is wider than the running set so the
+        misuse is visible in operations.
+        """
+        svc = AiReviewService.get_instance()
+
+        async def _never() -> None:
+            await asyncio.Event().wait()
+
+        with (
+            patch.object(svc, "_bus_listen_loop", side_effect=_never),
+            patch("snapper.application.ai_review.service.zmq.asyncio.Context") as mock_ctx,
+            patch("snapper.application.ai_review.service.ValidatedSubscriber") as mock_sub,
+        ):
+            mock_ctx.return_value.socket.return_value = MagicMock()
+            mock_ctx.return_value.term = MagicMock()
+            sub_instance = MagicMock()
+            mock_sub.return_value = sub_instance
+            await svc.start_bus_listener(
+                "tcp://127.0.0.1:7501",
+                topics=("bus.ai_review_decision",),
+            )
+            await asyncio.sleep(0)
+            initial_subscribe_count = sub_instance.subscribe.call_count
+            await svc.start_bus_listener("tcp://127.0.0.1:7501")
+            assert sub_instance.subscribe.call_count == initial_subscribe_count
+        assert svc._bus_subscribed_topics == ("bus.ai_review_decision",)
+        await svc.stop_bus_listener()
+
+    @pytest.mark.asyncio
+    async def test_stop_clears_subscribed_topics_so_restart_can_widen(self) -> None:
+        """After ``stop_bus_listener``, ``_bus_subscribed_topics`` resets to empty.
+
+        Closes the topic-widening footgun: a caller that wants to widen the
+        topic set MUST stop first. After stop the tracking attribute is
+        empty so a follow-up start cleanly applies the new (wider) topic
+        set.
+        """
+        svc = AiReviewService.get_instance()
+
+        async def _never() -> None:
+            await asyncio.Event().wait()
+
+        with (
+            patch.object(svc, "_bus_listen_loop", side_effect=_never),
+            patch("snapper.application.ai_review.service.zmq.asyncio.Context") as mock_ctx,
+            patch("snapper.application.ai_review.service.ValidatedSubscriber") as mock_sub,
+        ):
+            mock_ctx.return_value.socket.return_value = MagicMock()
+            mock_ctx.return_value.term = MagicMock()
+            mock_sub.return_value = MagicMock()
+            await svc.start_bus_listener(
+                "tcp://127.0.0.1:7501",
+                topics=("bus.ai_review_decision",),
+            )
+            assert svc._bus_subscribed_topics == ("bus.ai_review_decision",)
+            await svc.stop_bus_listener()
+        assert svc._bus_subscribed_topics == ()
+
+    @pytest.mark.asyncio
+    async def test_default_topics_param_subscribes_to_all_three(self) -> None:
+        """``topics=None`` (default) preserves the 3-topic FastAPI lifespan behaviour.
+
+        Regression pin: the FastAPI lifespan continues to call
+        ``start_bus_listener(zmq_broker_xpub)`` without a ``topics`` argument
+        and must keep subscribing to the full 3-topic set. The
+        ``test_subscribes_to_three_topics`` covers the same invariant
+        through a different path; this test pins it via the explicit
+        ``None`` default.
+        """
+        svc = AiReviewService.get_instance()
+
+        async def _never() -> None:
+            await asyncio.Event().wait()
+
+        with (
+            patch.object(svc, "_bus_listen_loop", side_effect=_never),
+            patch("snapper.application.ai_review.service.zmq.asyncio.Context") as mock_ctx,
+            patch("snapper.application.ai_review.service.ValidatedSubscriber") as mock_sub,
+        ):
+            mock_ctx.return_value.socket.return_value = MagicMock()
+            mock_ctx.return_value.term = MagicMock()
+            sub_instance = MagicMock()
+            mock_sub.return_value = sub_instance
+            await svc.start_bus_listener("tcp://127.0.0.1:7501", topics=None)
+            subscribed = {call.args[0] for call in sub_instance.subscribe.call_args_list}
+        assert subscribed == {
+            "bus.delegate_offline",
+            "bus.caps_violation_after_ai_approve",
+            "bus.ai_review_decision",
+        }
+        assert set(svc._bus_subscribed_topics) == subscribed
+        await svc.stop_bus_listener()
+
 
 class TestBusListenLoop:
     """End-to-end loop behaviour: recv → dispatch → continue on None."""

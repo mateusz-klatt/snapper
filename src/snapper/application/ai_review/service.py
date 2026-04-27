@@ -442,6 +442,7 @@ class AiReviewService:
         self._bus_listen_task: asyncio.Task[None] | None = None
         self._bus_running: bool = False
         self._bus_listener_lock: asyncio.Lock = asyncio.Lock()
+        self._bus_subscribed_topics: tuple[str, ...] = ()
         self._shard_ownership: ShardOwnership | None = None
 
     def set_shard_ownership(self, ownership: ShardOwnership | None) -> None:
@@ -1740,7 +1741,12 @@ class AiReviewService:
         """
         self._repository_factory = repository_factory
 
-    async def start_bus_listener(self, zmq_broker_xpub: str) -> None:
+    async def start_bus_listener(
+        self,
+        zmq_broker_xpub: str,
+        *,
+        topics: tuple[str, ...] | None = None,
+    ) -> None:
         """Open the AI-review bus subscriber and start the dispatch task.
 
         Subscribes to ``bus.delegate_offline`` (Q17 layer-1 fast-path
@@ -1783,26 +1789,58 @@ class AiReviewService:
           ``instance_count == 1`` is a deterministic no-op so single-instance
           deployments stay byte-identical.
 
-        Process-mode strategy caveat (Phase 2 #3): the FastAPI server
-        lifespan calls :meth:`start_bus_listener` so the strategy
-        primitive's fast-path future resolution (Plan A §7.1) works
-        for strategies that share the server's event loop (thread
-        mode). Strategies launched via
-        :class:`ProcessLauncherService` in ``ProcessModeEnum.PROCESS``
-        run in a separate subprocess that does not invoke this
-        listener wiring; their futures live in the subprocess
-        registry, but only the server process subscribes. Result:
-        process-mode strategies fall back to the DB-poll path
-        (correct, just slower than fast-path). Subprocess listener
-        wiring is a separate Phase 2 follow-up.
+        Process-mode strategy support (Plan D Phase 2 #9): subprocess
+        strategies launched via :class:`ProcessLauncherService` in
+        ``ProcessModeEnum.PROCESS`` run in a separate Python interpreter
+        that does NOT invoke the FastAPI lifespan. The subprocess entry
+        point (:mod:`snapper.server.process_runner`) calls this method
+        with ``topics=(_BUS_AI_REVIEW_DECISION_TOPIC,)`` so the
+        subprocess's :class:`AiReviewService` singleton's per-process
+        ``_futures`` registry can be resolved by the bus event when the
+        delegate submits a decision (Plan A §7.1 fast-path closure for
+        process-mode). Subprocess does NOT subscribe to the other 2
+        topics: the ``delegate_offline`` handler needs a repository
+        factory the subprocess lacks (would log warning + skip on
+        every event), and the ``caps_violation_after_ai_approve``
+        handler re-publishes external WS frames that the subprocess
+        MUST NOT duplicate (the FastAPI server with ShardOwnership
+        gating owns that fanout).
 
         Args:
             zmq_broker_xpub: Address of the broker's XPUB endpoint.
                 Empty string skips the listener entirely (test mode +
                 ``SERVER_API_ONLY`` boots).
+            topics: Optional restriction on which bus topics to
+                subscribe to. ``None`` (the default) subscribes to all
+                3 topics — the FastAPI lifespan path. Subprocess
+                callers pass ``(_BUS_AI_REVIEW_DECISION_TOPIC,)`` to
+                limit the subscription to the strategy-await fast-path
+                only. Topic widening between calls is NOT supported in
+                place: a caller that started a restricted listener must
+                :meth:`stop_bus_listener` first before re-starting with
+                a wider topic set, otherwise the second call observes
+                the running task + returns without re-subscribing.
         """
+        topic_set = (
+            (
+                _BUS_DELEGATE_OFFLINE_TOPIC,
+                _BUS_CAPS_VIOLATION_TOPIC,
+                _BUS_AI_REVIEW_DECISION_TOPIC,
+            )
+            if topics is None
+            else topics
+        )
         async with self._bus_listener_lock:
             if self._bus_listen_task is not None and not self._bus_listen_task.done():
+                missing = tuple(t for t in topic_set if t not in self._bus_subscribed_topics)
+                if missing:
+                    logger.warning(
+                        "AiReviewService.start_bus_listener: requested topics {} but listener "
+                        "already running with {}; widening requires explicit stop_bus_listener "
+                        "first. Missing topics will NOT be subscribed by this call.",
+                        topic_set,
+                        self._bus_subscribed_topics,
+                    )
                 return
             if self._bus_listen_task is not None:
                 await self._reap_bus_listener_unlocked()
@@ -1814,16 +1852,14 @@ class AiReviewService:
             apply_hwm(raw_sub_socket, rcvhwm=HWM_AUDIT)
             raw_sub_socket.connect(zmq_broker_xpub)
             self._bus_subscriber = ValidatedSubscriber(raw_sub_socket)
-            self._bus_subscriber.subscribe(_BUS_DELEGATE_OFFLINE_TOPIC)
-            self._bus_subscriber.subscribe(_BUS_CAPS_VIOLATION_TOPIC)
-            self._bus_subscriber.subscribe(_BUS_AI_REVIEW_DECISION_TOPIC)
+            for topic in topic_set:
+                self._bus_subscriber.subscribe(topic)
+            self._bus_subscribed_topics = tuple(topic_set)
             self._bus_running = True
             self._bus_listen_task = asyncio.create_task(self._bus_listen_loop())
             logger.info(
-                "AiReviewService: bus listener subscribed to {} + {} + {} on {}",
-                _BUS_DELEGATE_OFFLINE_TOPIC,
-                _BUS_CAPS_VIOLATION_TOPIC,
-                _BUS_AI_REVIEW_DECISION_TOPIC,
+                "AiReviewService: bus listener subscribed to {} on {}",
+                self._bus_subscribed_topics,
                 zmq_broker_xpub,
             )
 
@@ -1856,6 +1892,7 @@ class AiReviewService:
         self._bus_listen_task = None
         self._bus_subscriber = None
         self._bus_zmq_context = None
+        self._bus_subscribed_topics = ()
         if task is not None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
