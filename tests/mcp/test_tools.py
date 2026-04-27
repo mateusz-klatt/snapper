@@ -12,6 +12,7 @@ Tests invoke tools directly through FastMCP's tool manager so the
 same dispatch path a real MCP client exercises is under test.
 """
 
+import json
 from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime
@@ -778,3 +779,339 @@ class TestSubmitManualOrderTool:
         assert "owner mismatch" in str(exc.value)
         repo.insert_execution_plan.assert_not_called()
         repo.insert_trade_command.assert_not_called()
+
+
+class TestListOrdersTool:
+    """Plan B Phase 1 — coverage for the ``list_orders`` MCP tool."""
+
+    @staticmethod
+    def _build_repo_with_orders(
+        rows: list[dict[str, Any]],
+        total: int,
+        accessible_wallets: list[str] | None = None,
+    ) -> Any:
+        repo = AsyncMock()
+        repo.get_orders = AsyncMock(return_value=rows)
+        repo.get_orders_total_count = AsyncMock(return_value=total)
+        if accessible_wallets is None:
+            accessible_wallets = ["wallet-1"]
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": w} for w in accessible_wallets]
+        )
+        return repo
+
+    @pytest.mark.asyncio
+    async def test_admit_returns_envelope_with_total_and_orders(self) -> None:
+        """Happy path: AI_DELEGATE caller gets order list + total_count."""
+        order_row = _ORDER_ROW_FIXTURE.copy()
+        repo = self._build_repo_with_orders([order_row], total=42)
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool("list_orders", {"limit": 10, "offset": 0})
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is True
+        assert envelope["details"]["total_count"] == 42
+        assert envelope["details"]["orders"][0]["public_id"] == order_row["public_id"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_status_returns_invalid_argument(self) -> None:
+        """Invalid status enum → invalid_argument envelope, no repo call."""
+        repo = self._build_repo_with_orders([], total=0)
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool("list_orders", {"status": "bogus"})
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "invalid_argument"
+        repo.get_orders.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_negative_limit_returns_invalid_argument(self) -> None:
+        """Negative limit/offset → invalid_argument."""
+        repo = self._build_repo_with_orders([], total=0)
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool("list_orders", {"limit": -1, "offset": 0})
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "invalid_argument"
+
+    @pytest.mark.asyncio
+    async def test_wallet_outside_scope_returns_anti_enumeration(self) -> None:
+        """Inaccessible wallet → ``order_not_found`` (anti-enumeration)."""
+        repo = self._build_repo_with_orders([], total=0, accessible_wallets=["wallet-1"])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "list_orders", {"wallet_public_id": "wallet-99"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "order_not_found"
+        repo.get_orders.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_role_without_read_orders_returns_permission_denied_envelope(self) -> None:
+        """Plan B §5 — permission failure surfaces as Plan A Q14 envelope.
+
+        Given: a viewer-shaped role with READ_ORDERS removed from its
+            permission set,
+        When: the tool dispatches,
+        Then: the envelope flag is ``permission_denied`` (NOT a raw
+            FastMCP ``ToolError`` from a bare PermissionError).
+        """
+        repo = self._build_repo_with_orders([], total=0)
+        saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
+        ROLE_PERMISSIONS[UserRole.VIEWER] = set()
+        server = FastMCP("test")
+        register_mcp_tools(
+            server,
+            repository_getter=lambda: repo,
+            caps_enforcer_getter=lambda: None,
+            claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
+        )
+        try:
+            result = await server._tool_manager.call_tool("list_orders", {})
+            envelope = _decode_envelope(result)
+            assert envelope["success"] is False
+            assert envelope["error_code"] == "permission_denied"
+        finally:
+            if saved is not None:
+                ROLE_PERMISSIONS[UserRole.VIEWER] = saved
+
+    @pytest.mark.asyncio
+    async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
+        """Plan B §5 — pre-lifespan repository surfaces structured envelope."""
+        server = _build_server(repository=None)
+        result = await server._tool_manager.call_tool("list_orders", {})
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "service_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_limit_clamps_to_cap(self) -> None:
+        """Caller passing limit=10000 is clamped to the 200 ceiling."""
+        repo = self._build_repo_with_orders([], total=0)
+        server = _build_server(repository=repo)
+        await server._tool_manager.call_tool("list_orders", {"limit": 10000})
+        kwargs = repo.get_orders.await_args.kwargs
+        assert kwargs["limit"] == 200
+
+    @pytest.mark.asyncio
+    async def test_admin_with_no_wallet_passes_none_filter(self) -> None:
+        """ADMIN with no explicit wallet → repo gets ``wallet_public_ids=None``."""
+        repo = AsyncMock()
+        repo.get_orders = AsyncMock(return_value=[])
+        repo.get_orders_total_count = AsyncMock(return_value=0)
+        admin_claims = _make_claims(role=UserRole.ADMIN, user_public_id="admin-1")
+        server = _build_server(repository=repo, claims=admin_claims)
+        await server._tool_manager.call_tool("list_orders", {})
+        kwargs = repo.get_orders.await_args.kwargs
+        assert kwargs["wallet_public_ids"] is None
+        repo.list_accessible_wallets_for_operators.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_admin_with_explicit_wallet_passes_single_id(self) -> None:
+        """ADMIN with explicit ``wallet_public_id`` skips the accessible lookup."""
+        repo = AsyncMock()
+        repo.get_orders = AsyncMock(return_value=[])
+        repo.get_orders_total_count = AsyncMock(return_value=0)
+        admin_claims = _make_claims(role=UserRole.ADMIN, user_public_id="admin-1")
+        server = _build_server(repository=repo, claims=admin_claims)
+        await server._tool_manager.call_tool(
+            "list_orders", {"wallet_public_id": "wallet-admin-target"}
+        )
+        kwargs = repo.get_orders.await_args.kwargs
+        assert kwargs["wallet_public_ids"] == ["wallet-admin-target"]
+        repo.list_accessible_wallets_for_operators.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_admin_with_in_scope_wallet_passes_single_id(self) -> None:
+        """Non-admin caller with a wallet inside scope → repo gets ``[that wallet]``."""
+        repo = self._build_repo_with_orders([], total=0, accessible_wallets=["wallet-1"])
+        server = _build_server(repository=repo)
+        await server._tool_manager.call_tool("list_orders", {"wallet_public_id": "wallet-1"})
+        kwargs = repo.get_orders.await_args.kwargs
+        assert kwargs["wallet_public_ids"] == ["wallet-1"]
+
+
+class TestGetOrderStatusTool:
+    """Plan B Phase 1 — coverage for the ``get_order_status`` MCP tool."""
+
+    @pytest.mark.asyncio
+    async def test_returns_full_envelope_with_executions(self) -> None:
+        """Happy path: order found → envelope carries order + execution_history."""
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": "wallet-1"}]
+        )
+        repo.get_trade_command_by_public_id = AsyncMock(
+            return_value={
+                "public_id": "cmd-1",
+                "plan_public_id": "plan-1",
+                "wallet_public_id": "wallet-1",
+            }
+        )
+        order_row = _ORDER_ROW_FIXTURE.copy()
+        repo.get_order_by_command_public_id = AsyncMock(return_value=order_row)
+        repo.get_executions_for_order = AsyncMock(return_value=[_EXEC_ROW_FIXTURE.copy()])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_order_status", {"command_public_id": "cmd-1"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is True
+        assert envelope["details"]["order"]["public_id"] == order_row["public_id"]
+        assert len(envelope["details"]["execution_history"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_command_returns_order_not_found(self) -> None:
+        """Unknown command → ``order_not_found`` envelope (anti-enumeration)."""
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": "wallet-1"}]
+        )
+        repo.get_trade_command_by_public_id = AsyncMock(return_value=None)
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_order_status", {"command_public_id": "cmd-missing"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "order_not_found"
+
+    @pytest.mark.asyncio
+    async def test_command_in_other_wallet_returns_order_not_found(self) -> None:
+        """Command exists but its wallet is outside caller's scope."""
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": "wallet-1"}]
+        )
+        repo.get_trade_command_by_public_id = AsyncMock(
+            return_value={
+                "public_id": "cmd-x",
+                "plan_public_id": "plan-x",
+                "wallet_public_id": "wallet-other",
+            }
+        )
+        repo.get_order_by_command_public_id = AsyncMock(return_value=None)
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_order_status", {"command_public_id": "cmd-x"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "order_not_found"
+        repo.get_order_by_command_public_id.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_role_without_read_orders_returns_permission_denied_envelope(self) -> None:
+        """Plan B §5 — get_order_status permission failure also envelope-wrapped."""
+        repo = AsyncMock()
+        saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
+        ROLE_PERMISSIONS[UserRole.VIEWER] = set()
+        server = FastMCP("test")
+        register_mcp_tools(
+            server,
+            repository_getter=lambda: repo,
+            caps_enforcer_getter=lambda: None,
+            claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
+        )
+        try:
+            result = await server._tool_manager.call_tool(
+                "get_order_status", {"command_public_id": "cmd-x"}
+            )
+            envelope = _decode_envelope(result)
+            assert envelope["error_code"] == "permission_denied"
+        finally:
+            if saved is not None:
+                ROLE_PERMISSIONS[UserRole.VIEWER] = saved
+
+    @pytest.mark.asyncio
+    async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
+        """Plan B §5 — get_order_status pre-lifespan also envelope-wrapped."""
+        server = _build_server(repository=None)
+        result = await server._tool_manager.call_tool(
+            "get_order_status", {"command_public_id": "cmd-x"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["error_code"] == "service_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_pending_dispatch_returns_synthetic_envelope(self) -> None:
+        """Command exists but order not ACK'd → ``status='pending_dispatch'``."""
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": "wallet-1"}]
+        )
+        repo.get_trade_command_by_public_id = AsyncMock(
+            return_value={
+                "public_id": "cmd-pending",
+                "plan_public_id": "plan-pending",
+                "wallet_public_id": "wallet-1",
+            }
+        )
+        repo.get_order_by_command_public_id = AsyncMock(return_value=None)
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_order_status", {"command_public_id": "cmd-pending"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is True
+        assert envelope["details"]["status"] == "pending_dispatch"
+        assert envelope["details"]["plan_public_id"] == "plan-pending"
+        assert envelope["details"]["execution_history"] == []
+        repo.get_executions_for_order.assert_not_called()
+
+
+def _decode_envelope(result: Any) -> dict[str, Any]:
+    """Pull the JSON envelope out of a ``CallToolResult``."""
+    if isinstance(result, tuple):
+        result = result[1]
+    text_blocks = [c.text for c in result.content if hasattr(c, "text")]
+    payload = "\n".join(text_blocks)
+    decoded: dict[str, Any] = json.loads(payload)
+    return decoded
+
+
+_ORDER_ROW_FIXTURE: dict[str, Any] = {
+    "public_id": "order-1",
+    "timestamp": datetime.now(UTC),
+    "session_id": "s",
+    "sequence_id": 1,
+    "instrument": "BTC-USD",
+    "exchange": "kraken",
+    "mode": "live",
+    "client_order_id": "cid",
+    "exchange_order_id": "ex",
+    "created_at": datetime.now(UTC),
+    "updated_at": None,
+    "side": "buy",
+    "order_type": "limit",
+    "price": 50000.0,
+    "size": 1.0,
+    "filled_size": 0.0,
+    "average_price": None,
+    "status": "open",
+    "time_in_force": None,
+    "error": None,
+    "leverage": None,
+    "reduce_only": False,
+    "wallet_public_id": "wallet-1",
+    "operator_public_id": "op-1",
+    "plan_public_id": "plan-1",
+}
+
+
+_EXEC_ROW_FIXTURE: dict[str, Any] = {
+    "public_id": "exe-1",
+    "timestamp": datetime.now(UTC),
+    "session_id": "s",
+    "sequence_id": 2,
+    "trade_id": "trade-1",
+    "exchange_order_id": "ex",
+    "client_order_id": "cid",
+    "instrument": "BTC-USD",
+    "exchange": "kraken",
+    "side": "buy",
+    "size": 0.5,
+    "price": 50000.0,
+    "fee": 0.0,
+    "fee_asset": "USD",
+    "status": "ok",
+    "executed_at": datetime.now(UTC),
+    "wallet_public_id": "wallet-1",
+    "operator_public_id": "op-1",
+    "liquidity_role": "taker",
+}

@@ -189,6 +189,7 @@ class OrderInsertRow(TypedDict):
     mode: NotRequired[str]
     leverage: NotRequired[int | None]
     reduce_only: NotRequired[bool]
+    plan_public_id: NotRequired[str | None]
 
 
 class ExecutionInsertRow(TypedDict):
@@ -238,6 +239,7 @@ class OrderRow(TypedDict):
     reduce_only: bool
     wallet_public_id: str | None
     operator_public_id: str | None
+    plan_public_id: str | None
 
 
 class ExecutionRow(TypedDict):
@@ -333,6 +335,7 @@ class TradeCommandRow(TypedDict):
     operator_public_id: str | None
     user_public_id: str | None
     source_surface: str
+    plan_public_id: NotRequired[str | None]
 
 
 class UserTradingCapsRow(TypedDict):

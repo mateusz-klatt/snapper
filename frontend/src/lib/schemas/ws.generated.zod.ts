@@ -391,6 +391,7 @@ export const OrderDataSchema = z
     wallet_public_id: z.string(),
     operator_public_id: z.string().nullable(),
     user_public_id: z.string().nullable(),
+    plan_public_id: z.string().nullable(),
   })
   .strict()
 

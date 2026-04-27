@@ -152,6 +152,7 @@ export type UpdatedAt = string | null;
 export type Leverage = number | null;
 export type OperatorPublicId4 = string | null;
 export type UserPublicId2 = string | null;
+export type PlanPublicId = string | null;
 export type Type21 = "order_event";
 export type Exchange5 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Event1 = "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced";
@@ -631,6 +632,7 @@ export interface OrderData {
   wallet_public_id?: string;
   operator_public_id?: OperatorPublicId4;
   user_public_id?: UserPublicId2;
+  plan_public_id?: PlanPublicId;
 }
 export interface OrderEventData {
   type: Type21;

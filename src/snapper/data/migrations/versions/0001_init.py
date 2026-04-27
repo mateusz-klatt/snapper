@@ -469,6 +469,20 @@ def upgrade() -> None:
         postgresql_where=text("exchange_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE_PG),
     )
     op.create_index("ix_orders_plan_public_id", "orders", ["plan_public_id"])
+    op.create_index(
+        "ix_orders_wallet_public_id_created_at",
+        "orders",
+        ["wallet_public_id", "created_at"],
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_orders_status_created_at",
+        "orders",
+        ["status", "created_at"],
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
     op.create_table(
         "executions",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),

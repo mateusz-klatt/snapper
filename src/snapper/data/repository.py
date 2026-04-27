@@ -885,6 +885,7 @@ class Repository(ABC):
         as_of: datetime,
         symbol: str | None = None,
         exchange: str | None = None,
+        status: str | None = None,
         wallet_public_ids: list[str] | None = None,
     ) -> list[OrderRow]:
         """Retrieve orders with optional filters and pagination.
@@ -895,6 +896,10 @@ class Repository(ABC):
             as_of: Point-in-time for temporal query.
             symbol: Optional native symbol filter.
             exchange: Optional exchange filter.
+            status: Optional ``OrderStatusEnum`` filter pushed INTO SQL
+                (Plan B v1.2 §1.4 — was post-fetch in v1.0 which broke
+                pagination because limit/offset clipped before the
+                filter could discard non-matching rows).
             wallet_public_ids: Optional wallet scope filter for
                 multi-tenant scoping. When ``None``, no wallet filter is
                 applied (ADMIN sees all). When a non-empty list, only
@@ -902,7 +907,111 @@ class Repository(ABC):
 
         Returns:
             Order dicts ordered by created_at DESC, denormalized with
-            instrument and symbol info.
+            instrument and symbol info plus ``plan_public_id`` (Plan B
+            v1.2 §1.4 — needed by MCP ``get_order_status`` to resolve
+            the parent execution plan without a second round-trip).
+        """
+        ...
+
+    @abstractmethod
+    async def get_orders_total_count(
+        self,
+        as_of: datetime,
+        symbol: str | None = None,
+        exchange: str | None = None,
+        status: str | None = None,
+        wallet_public_ids: list[str] | None = None,
+    ) -> int:
+        """Count orders matching the same filter shape as :meth:`get_orders`.
+
+        Used by MCP ``list_orders`` to surface total-count alongside the
+        offset/limit page so callers can size pagination without extra
+        round-trips. Filter shape MUST mirror :meth:`get_orders` so the
+        count is the exact pre-pagination cardinality.
+
+        Args:
+            as_of: Point-in-time for temporal query.
+            symbol: Optional native symbol filter.
+            exchange: Optional exchange filter.
+            status: Optional ``OrderStatusEnum`` filter (SQL).
+            wallet_public_ids: Optional wallet scope filter (same
+                semantics as :meth:`get_orders`).
+
+        Returns:
+            Count of matching orders.
+        """
+        ...
+
+    @abstractmethod
+    async def get_order_by_command_public_id(
+        self,
+        command_public_id: str,
+        as_of: datetime,
+    ) -> OrderRow | None:
+        """Resolve an order from its triggering trade-command public_id.
+
+        ``Order`` rows do NOT carry ``command_public_id`` directly
+        (Plan B v1.2 §1.4 / Sonnet N3); the link is via the parent
+        ``execution_plan``: ``trade_commands.public_id == :command``
+        AND ``trade_commands.plan_public_id == orders.plan_public_id``.
+        Implementation issues an internal JOIN on those columns.
+
+        Returns ``None`` when:
+
+        - The trade command does not exist (caller's responsibility to
+          distinguish from "command exists but order not yet ACK'd" by
+          calling :meth:`get_trade_command_by_public_id` first), OR
+        - The trade command exists but no order has been written for
+          its ``plan_public_id`` yet (the exchange has not ACK'd the
+          submission). Callers surface this as a ``pending_dispatch``
+          synthetic envelope using the command row's ``plan_public_id``.
+
+        Args:
+            command_public_id: UUID7 of the ``trade_commands`` row.
+            as_of: Point-in-time for temporal query.
+        """
+        ...
+
+    @abstractmethod
+    async def get_trade_command_by_public_id(
+        self,
+        command_public_id: str,
+        as_of: datetime,
+    ) -> TradeCommandRow | None:
+        """Fetch a single trade command row by its public_id.
+
+        Used by MCP ``get_order_status`` to disambiguate "command not
+        found" from "command exists but order not ACK'd" — a
+        :meth:`get_order_by_command_public_id` ``None`` could mean
+        either, and the synthetic ``pending_dispatch`` envelope needs
+        the command's ``plan_public_id`` + wallet scope to populate.
+
+        Args:
+            command_public_id: UUID7 of the ``trade_commands`` row.
+            as_of: Point-in-time for temporal query.
+        """
+        ...
+
+    @abstractmethod
+    async def get_executions_for_order(
+        self,
+        order_public_id: str,
+        as_of: datetime,
+    ) -> list[ExecutionRow]:
+        """Return every execution row belonging to a single order.
+
+        Plan B v1.2 §1.4 fix per Codex MAJOR: filtering the generic
+        :meth:`get_executions` result by ``order_public_id`` would
+        silently omit fills if the wallet had ``limit`` newer fills on
+        unrelated orders. SQL-side filter is the only correct shape.
+
+        Args:
+            order_public_id: UUID7 of the parent ``orders`` row.
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Executions ordered by ``timestamp ASC`` (oldest first) so
+            the chronological fill history is the natural read order.
         """
         ...
 
@@ -4060,6 +4169,7 @@ class SQLAlchemyRepository(Repository):
         time_in_force = order_row.get("time_in_force")
         leverage = order_row.get("leverage")
         reduce_only = order_row.get("reduce_only", False)
+        plan_public_id = order_row.get("plan_public_id")
         async with self.session() as s:
             order = Order(
                 instrument_public_id=order_row["instrument_public_id"],
@@ -4082,6 +4192,7 @@ class SQLAlchemyRepository(Repository):
                 error=None,
                 leverage=leverage,
                 reduce_only=reduce_only,
+                plan_public_id=plan_public_id,
                 session_id=order_row["session_id"],
                 sequence_id=order_row["sequence_id"],
             )
@@ -4665,9 +4776,16 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
         symbol: str | None = None,
         exchange: str | None = None,
+        status: str | None = None,
         wallet_public_ids: list[str] | None = None,
     ) -> list[OrderRow]:
-        """Retrieve orders with optional filters and pagination."""
+        """Retrieve orders with optional filters and pagination.
+
+        Plan B Phase 1: ``status`` is pushed INTO SQL (was post-fetch in
+        v1.0; broke pagination per Codex BLOCKER + Sonnet N5). ``OrderRow``
+        now carries ``plan_public_id`` so the MCP ``get_order_status`` tool
+        can resolve the parent execution plan without a second round-trip.
+        """
         async with self.session() as s:
             query = (
                 select(Order, Instrument, Symbol)
@@ -4699,6 +4817,8 @@ class SQLAlchemyRepository(Repository):
                 query = query.where(Instrument.symbol_public_id == sym_subq)
             if exchange:
                 query = query.where(Instrument.exchange == exchange)
+            if status is not None:
+                query = query.where(Order.status == status)
             query = query.order_by(desc(Order.created_at)).offset(offset).limit(limit)
             result = await s.execute(query)
             return [
@@ -4727,8 +4847,237 @@ class SQLAlchemyRepository(Repository):
                     "reduce_only": order.reduce_only,
                     "wallet_public_id": order.wallet_public_id,
                     "operator_public_id": order.operator_public_id,
+                    "plan_public_id": order.plan_public_id,
                 }
                 for order, inst, sym in result.all()
+            ]
+
+    async def get_orders_total_count(
+        self,
+        as_of: datetime,
+        symbol: str | None = None,
+        exchange: str | None = None,
+        status: str | None = None,
+        wallet_public_ids: list[str] | None = None,
+    ) -> int:
+        """Count orders matching :meth:`get_orders` filter shape."""
+        async with self.session() as s:
+            query = (
+                select(func.count(Order.id))
+                .select_from(Order)
+                .join(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .where(*where_active(Order, as_of))
+            )
+            if wallet_public_ids is not None:
+                query = query.where(Order.wallet_public_id.in_(wallet_public_ids))
+            if symbol:
+                s_ts, s_kt = where_active(Symbol, as_of)
+                sym_subq = (
+                    select(Symbol.public_id)
+                    .where(Symbol.native_symbol == symbol, s_ts, s_kt)
+                    .scalar_subquery()
+                )
+                query = query.where(Instrument.symbol_public_id == sym_subq)
+            if exchange:
+                query = query.where(Instrument.exchange == exchange)
+            if status is not None:
+                query = query.where(Order.status == status)
+            result = await s.execute(query)
+            count = result.scalar_one_or_none()
+            return int(count or 0)
+
+    async def get_order_by_command_public_id(
+        self,
+        command_public_id: str,
+        as_of: datetime,
+    ) -> OrderRow | None:
+        """Resolve an order by traversing trade_commands.plan_public_id."""
+        async with self.session() as s:
+            query = (
+                select(Order, Instrument, Symbol)
+                .select_from(TradeCommand)
+                .join(
+                    Order,
+                    and_(
+                        Order.plan_public_id == TradeCommand.plan_public_id,
+                        *where_active(Order, as_of),
+                    ),
+                )
+                .join(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(
+                    TradeCommand.public_id == command_public_id,
+                    *where_active(TradeCommand, as_of),
+                )
+                .order_by(desc(Order.created_at))
+                .limit(1)
+            )
+            result = await s.execute(query)
+            row = result.first()
+            if row is None:
+                return None
+            order, inst, sym = row
+            return {
+                "public_id": order.public_id,
+                "timestamp": order.timestamp,
+                "session_id": order.session_id,
+                "sequence_id": order.sequence_id,
+                "instrument": sym.native_symbol,
+                "exchange": inst.exchange,
+                "mode": order.mode,
+                "client_order_id": order.client_order_id or "",
+                "exchange_order_id": order.exchange_order_id,
+                "created_at": order.created_at,
+                "updated_at": order.updated_at,
+                "side": order.side,
+                "order_type": order.order_type,
+                "price": order.price,
+                "size": order.size,
+                "filled_size": order.filled_size,
+                "average_price": order.average_price,
+                "status": order.status,
+                "time_in_force": order.time_in_force,
+                "error": order.error,
+                "leverage": order.leverage,
+                "reduce_only": order.reduce_only,
+                "wallet_public_id": order.wallet_public_id,
+                "operator_public_id": order.operator_public_id,
+                "plan_public_id": order.plan_public_id,
+            }
+
+    async def get_trade_command_by_public_id(
+        self,
+        command_public_id: str,
+        as_of: datetime,
+    ) -> TradeCommandRow | None:
+        """Fetch a single trade-command row by public_id."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(TradeCommand)
+                .where(
+                    TradeCommand.public_id == command_public_id,
+                    *where_active(TradeCommand, as_of),
+                )
+                .limit(1)
+            )
+            cmd = result.scalars().first()
+            if cmd is None:
+                return None
+            return {
+                "public_id": cmd.public_id,
+                "timestamp": cmd.timestamp,
+                "session_id": cmd.session_id,
+                "sequence_id": cmd.sequence_id,
+                "command_type": cmd.command_type,
+                "shard_key": cmd.shard_key,
+                "exchange": cmd.exchange,
+                "instrument": cmd.instrument,
+                "mode": cmd.mode,
+                "strategy_id": cmd.strategy_id,
+                "client_order_id": cmd.client_order_id,
+                "venue_client_id": cmd.venue_client_id,
+                "idempotency_key": cmd.idempotency_key,
+                "side": cmd.side,
+                "order_type": cmd.order_type,
+                "quantity": cmd.quantity,
+                "price": cmd.price,
+                "leverage": cmd.leverage,
+                "reduce_only": cmd.reduce_only,
+                "status": cmd.status,
+                "attempt_count": cmd.attempt_count,
+                "last_error": cmd.last_error,
+                "created_at": cmd.created_at,
+                "dispatched_at": cmd.dispatched_at,
+                "acked_at": cmd.acked_at,
+                "terminal_at": cmd.terminal_at,
+                "exchange_order_id": cmd.exchange_order_id,
+                "supersedes_command_id": cmd.supersedes_command_id,
+                "correlation_id": cmd.correlation_id,
+                "wallet_public_id": cmd.wallet_public_id,
+                "operator_public_id": cmd.operator_public_id,
+                "user_public_id": cmd.user_public_id,
+                "source_surface": cmd.source_surface,
+                "plan_public_id": cmd.plan_public_id,
+            }
+
+    async def get_executions_for_order(
+        self,
+        order_public_id: str,
+        as_of: datetime,
+    ) -> list[ExecutionRow]:
+        """SQL-filtered executions for a single order; oldest-first."""
+        async with self.session() as s:
+            query = (
+                select(Execution, Order, Instrument, Symbol)
+                .join(
+                    Order,
+                    and_(
+                        Execution.order_public_id == Order.public_id,
+                        *where_active(Order, as_of),
+                    ),
+                )
+                .join(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(
+                    Execution.order_public_id == order_public_id,
+                    *where_active(Execution, as_of),
+                )
+                .order_by(Execution.timestamp.asc())
+            )
+            result = await s.execute(query)
+            return [
+                {
+                    "public_id": exe.public_id,
+                    "timestamp": exe.timestamp,
+                    "session_id": exe.session_id,
+                    "sequence_id": exe.sequence_id,
+                    "trade_id": exe.trade_id,
+                    "exchange_order_id": order.exchange_order_id,
+                    "client_order_id": order.client_order_id or "",
+                    "instrument": sym.native_symbol,
+                    "exchange": inst.exchange,
+                    "side": exe.side,
+                    "size": exe.size,
+                    "price": exe.price,
+                    "fee": exe.fee,
+                    "fee_asset": exe.fee_asset,
+                    "status": exe.status,
+                    "executed_at": exe.executed_at or exe.timestamp,
+                    "wallet_public_id": exe.wallet_public_id,
+                    "operator_public_id": exe.operator_public_id,
+                    "liquidity_role": getattr(exe, "liquidity_role", "unknown"),
+                }
+                for exe, order, inst, sym in result.all()
             ]
 
     async def get_executions(
@@ -4855,6 +5204,7 @@ class SQLAlchemyRepository(Repository):
                     "reduce_only": order.reduce_only,
                     "wallet_public_id": order.wallet_public_id,
                     "operator_public_id": order.operator_public_id,
+                    "plan_public_id": order.plan_public_id,
                 }
                 for order, inst, sym in result.all()
             ]
@@ -5624,6 +5974,7 @@ class SQLAlchemyRepository(Repository):
                         "operator_public_id": cmd.operator_public_id,
                         "user_public_id": cmd.user_public_id,
                         "source_surface": cmd.source_surface,
+                        "plan_public_id": cmd.plan_public_id,
                     }
                 )
             return rows
@@ -5680,6 +6031,7 @@ class SQLAlchemyRepository(Repository):
                         "operator_public_id": cmd.operator_public_id,
                         "user_public_id": cmd.user_public_id,
                         "source_surface": cmd.source_surface,
+                        "plan_public_id": cmd.plan_public_id,
                     }
                 )
             return rows
@@ -5747,6 +6099,7 @@ class SQLAlchemyRepository(Repository):
                         "operator_public_id": cmd.operator_public_id,
                         "user_public_id": cmd.user_public_id,
                         "source_surface": cmd.source_surface,
+                        "plan_public_id": cmd.plan_public_id,
                     }
                 )
             return rows

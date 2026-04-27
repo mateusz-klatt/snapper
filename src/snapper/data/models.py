@@ -329,6 +329,20 @@ class Order(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
+        Index(
+            "ix_orders_wallet_public_id_created_at",
+            "wallet_public_id",
+            "created_at",
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_orders_status_created_at",
+            "status",
+            "created_at",
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     mode: Mapped[str] = mapped_column(String(8), default="live", server_default="live")

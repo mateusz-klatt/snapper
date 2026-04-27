@@ -465,6 +465,7 @@ export interface Order {
   walletPublicId?: string
   operatorPublicId?: string | null
   userPublicId?: string | null
+  planPublicId?: string | null
 }
 
 /**

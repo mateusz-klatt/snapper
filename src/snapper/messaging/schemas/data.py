@@ -287,6 +287,7 @@ class OrderData(StrictDataSchema[Literal["order"]]):
     wallet_public_id: str = ""
     operator_public_id: str | None = None
     user_public_id: str | None = None
+    plan_public_id: str | None = None
 
 
 class PositionData(StrictDataSchema[Literal["position"]]):

@@ -425,6 +425,7 @@ export const OrderDataSchema = z
     wallet_public_id: z.string(),
     operator_public_id: z.string().nullable().optional(),
     user_public_id: z.string().nullable().optional(),
+    plan_public_id: z.string().nullable().optional(),
   })
   .strict()
 

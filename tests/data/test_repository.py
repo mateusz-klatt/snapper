@@ -7160,3 +7160,280 @@ async def test_get_undispatched_commands_offset_skips_rows(tmp_path: Path) -> No
     page2 = await r.get_undispatched_commands(as_of=datetime.now(UTC), limit=2, offset=2)
     assert [row["client_order_id"] for row in page1] == ["cid-o0", "cid-o1"]
     assert [row["client_order_id"] for row in page2] == ["cid-o2", "cid-o3"]
+
+
+_TEST_WALLET_A = "00000000-0000-7000-8000-000000000001"
+_TEST_WALLET_B = "00000000-0000-7000-8000-000000000002"
+
+
+async def _insert_order_with_status(
+    r: SQLAlchemyRepository,
+    *,
+    inst_pid: str,
+    status: str,
+    seq: int,
+    wallet_public_id: str = _TEST_WALLET_A,
+    plan_public_id: str | None = None,
+    now: datetime | None = None,
+) -> str:
+    """Insert an order with the given status + plan link; return public_id."""
+    inserted_at = now if now is not None else datetime.now(UTC)
+    _, order_pid = await r.insert_order(
+        instrument_public_id=inst_pid,
+        wallet_public_id=wallet_public_id,
+        client_order_id=f"cid-{seq}",
+        exchange_order_id=f"ex-{seq}",
+        created_at=inserted_at,
+        side="buy",
+        order_type="limit",
+        price=50000.0,
+        size=1.0,
+        status=status,
+        session_id="s-test",
+        sequence_id=seq,
+        timestamp=inserted_at,
+        plan_public_id=plan_public_id,
+    )
+    return order_pid
+
+
+@pytest.mark.asyncio
+async def test_get_orders_filters_by_status_via_sql(tmp_path: Path) -> None:
+    """Plan B Phase 1 — ``get_orders(status=...)`` pushes the filter into SQL.
+
+    Given: 3 orders inserted with statuses ['open', 'open', 'filled'],
+    When: ``get_orders(limit=10, status='filled', ...)`` is called,
+    Then: only the single 'filled' row comes back.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=10)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=11)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="filled", seq=12)
+    rows = await r.get_orders(limit=10, offset=0, as_of=datetime.now(UTC), status="filled")
+    assert [row["status"] for row in rows] == ["filled"]
+
+
+@pytest.mark.asyncio
+async def test_get_orders_total_count_mirrors_filter_shape(tmp_path: Path) -> None:
+    """``get_orders_total_count`` matches the ``get_orders`` filter set.
+
+    Given: 4 orders across two wallets and two statuses,
+    When: ``get_orders_total_count(status='open', wallet_public_ids=[A])`` is called,
+    Then: returns the pre-pagination cardinality (here: 2).
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=20)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=21)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="filled", seq=22)
+    await _insert_order_with_status(
+        r, inst_pid=inst_pid, status="open", seq=23, wallet_public_id=_TEST_WALLET_B
+    )
+    total = await r.get_orders_total_count(
+        as_of=datetime.now(UTC),
+        status="open",
+        wallet_public_ids=[_TEST_WALLET_A],
+    )
+    assert total == 2
+
+
+@pytest.mark.asyncio
+async def test_get_orders_total_count_unfiltered_counts_everything(tmp_path: Path) -> None:
+    """No-filter call counts every active order (no wallet narrowing)."""
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=30)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="filled", seq=31)
+    total = await r.get_orders_total_count(as_of=datetime.now(UTC))
+    assert total == 2
+
+
+@pytest.mark.asyncio
+async def test_get_orders_total_count_filters_by_symbol_and_exchange(tmp_path: Path) -> None:
+    """Symbol + exchange filters narrow the count via SQL JOIN subquery."""
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=50)
+    total_match = await r.get_orders_total_count(
+        as_of=datetime.now(UTC), symbol="BTC-USD", exchange="kraken"
+    )
+    assert total_match == 1
+    total_miss = await r.get_orders_total_count(as_of=datetime.now(UTC), exchange="zonda")
+    assert total_miss == 0
+
+
+@pytest.mark.asyncio
+async def test_get_orders_returns_plan_public_id(tmp_path: Path) -> None:
+    """Plan B Phase 1 — ``OrderRow`` carries ``plan_public_id``.
+
+    Used by MCP ``get_order_status`` to resolve the parent execution
+    plan without a second round-trip.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    plan_pid = "00000000-0000-7000-8000-0000000a0001"
+    await _insert_order_with_status(
+        r, inst_pid=inst_pid, status="open", seq=40, plan_public_id=plan_pid
+    )
+    rows = await r.get_orders(limit=10, offset=0, as_of=datetime.now(UTC))
+    assert rows[0]["plan_public_id"] == plan_pid
+
+
+@pytest.mark.asyncio
+async def test_get_order_by_command_public_id_returns_matching_order(tmp_path: Path) -> None:
+    """Lookup by ``trade_commands.public_id`` resolves the linked order."""
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    plan_pid = "00000000-0000-7000-8000-0000000b0001"
+    now = datetime.now(UTC)
+    _, cmd_pid = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-100",
+            "venue_client_id": "vcid-100",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-100",
+            "session_id": "s-test",
+            "sequence_id": 100,
+            "timestamp": now,
+            "plan_public_id": plan_pid,
+        }
+    )
+    await _insert_order_with_status(
+        r, inst_pid=inst_pid, status="open", seq=101, plan_public_id=plan_pid, now=now
+    )
+    found = await r.get_order_by_command_public_id(cmd_pid, as_of=datetime.now(UTC))
+    assert found is not None
+    assert found["plan_public_id"] == plan_pid
+    assert found["status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_get_order_by_command_public_id_returns_none_when_unknown(tmp_path: Path) -> None:
+    """Unknown command_public_id returns None (caller surfaces order_not_found)."""
+    r, _, _ = await _seed_full_repo(tmp_path)
+    found = await r.get_order_by_command_public_id(
+        "00000000-0000-7000-8000-fffffffff999", as_of=datetime.now(UTC)
+    )
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_get_order_by_command_public_id_returns_none_when_not_acked(tmp_path: Path) -> None:
+    """Command exists but no order yet → returns None (pending_dispatch case)."""
+    r, _, _ = await _seed_full_repo(tmp_path)
+    plan_pid = "00000000-0000-7000-8000-0000000b9999"
+    now = datetime.now(UTC)
+    _, cmd_pid = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-pending",
+            "venue_client_id": "vcid-pending",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-pending",
+            "session_id": "s-test",
+            "sequence_id": 200,
+            "timestamp": now,
+            "plan_public_id": plan_pid,
+        }
+    )
+    found = await r.get_order_by_command_public_id(cmd_pid, as_of=now)
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_get_trade_command_by_public_id_returns_row(tmp_path: Path) -> None:
+    """Direct command lookup carries plan_public_id for synthetic envelopes."""
+    r, _, _ = await _seed_full_repo(tmp_path)
+    plan_pid = "00000000-0000-7000-8000-0000000c0001"
+    now = datetime.now(UTC)
+    _, cmd_pid = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-cmd",
+            "venue_client_id": "vcid-cmd",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-cmd",
+            "session_id": "s-test",
+            "sequence_id": 300,
+            "timestamp": now,
+            "plan_public_id": plan_pid,
+            "wallet_public_id": _TEST_WALLET_A,
+        }
+    )
+    row = await r.get_trade_command_by_public_id(cmd_pid, as_of=now)
+    assert row is not None
+    assert row["plan_public_id"] == plan_pid
+    assert row["wallet_public_id"] == _TEST_WALLET_A
+
+
+@pytest.mark.asyncio
+async def test_get_trade_command_by_public_id_returns_none_when_unknown(tmp_path: Path) -> None:
+    """Unknown command_public_id returns None."""
+    r, _, _ = await _seed_full_repo(tmp_path)
+    row = await r.get_trade_command_by_public_id(
+        "00000000-0000-7000-8000-ffffffff0000", as_of=datetime.now(UTC)
+    )
+    assert row is None
+
+
+@pytest.mark.asyncio
+async def test_get_executions_for_order_filters_in_sql(tmp_path: Path) -> None:
+    """Order-scoped executions query: SQL-side filter, oldest-first.
+
+    Given: 3 executions on order A and 2 on order B,
+    When: ``get_executions_for_order(order_A_pid)`` is called,
+    Then: only order A's 3 executions return, oldest-first.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    order_a_pid = await _insert_order_with_status(
+        r, inst_pid=inst_pid, status="filled", seq=400, now=now
+    )
+    order_b_pid = await _insert_order_with_status(
+        r, inst_pid=inst_pid, status="filled", seq=401, now=now
+    )
+    for i, oid in enumerate([order_a_pid, order_a_pid, order_a_pid, order_b_pid, order_b_pid]):
+        await r.insert_execution(
+            order_public_id=oid,
+            wallet_public_id=_TEST_WALLET_A,
+            side="buy",
+            size=0.1,
+            price=50000.0,
+            fee=0.0,
+            fee_asset="USD",
+            status="ok",
+            session_id="s-test",
+            sequence_id=500 + i,
+            timestamp=now + timedelta(seconds=i),
+            exec_id=f"exec-{i}",
+        )
+    rows = await r.get_executions_for_order(order_a_pid, as_of=now + timedelta(seconds=10))
+    assert len(rows) == 3
+    timestamps = [row["timestamp"] for row in rows]
+    assert timestamps == sorted(timestamps)

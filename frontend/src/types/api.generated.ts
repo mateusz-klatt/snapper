@@ -2263,6 +2263,7 @@ export type Components = {
             wallet_public_id: string;
             operator_public_id?: string | null;
             user_public_id?: string | null;
+            plan_public_id?: string | null;
         };
         OrderListResponse: {
             type: "order_list";

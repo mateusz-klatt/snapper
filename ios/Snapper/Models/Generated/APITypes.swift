@@ -2103,6 +2103,7 @@ struct OrderData: Codable, Sendable {
     let walletPublicId: String?
     let operatorPublicId: String?
     let userPublicId: String?
+    let planPublicId: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -2132,6 +2133,7 @@ struct OrderData: Codable, Sendable {
         case walletPublicId = "wallet_public_id"
         case operatorPublicId = "operator_public_id"
         case userPublicId = "user_public_id"
+        case planPublicId = "plan_public_id"
     }
 }
 
