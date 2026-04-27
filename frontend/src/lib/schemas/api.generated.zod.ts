@@ -982,6 +982,7 @@ export const CreateOrderBodySchema = z
     wallet_public_id: z.string(),
     operator_public_id: z.string().nullable().optional(),
     idempotency_key: z.string().nullable().optional(),
+    ai_review_public_id: z.string().nullable().optional(),
   })
   .strict()
 

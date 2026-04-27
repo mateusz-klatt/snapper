@@ -63,6 +63,29 @@ _SQLITE_CONSTRAINT_UNIQUE_EXTCODE = 2067
 
 
 @dataclass(frozen=True)
+class _ManualOrderInput:
+    """Input bundle for :func:`_prepare_manual_order`.
+
+    Plan D Phase 2 #10 — extracted to keep the helper signature under
+    the project's 13-parameter cap after adding ``ai_review_public_id``
+    for the AI-mediated manual-order flow. All fields mirror the
+    matching MCP ``submit_manual_order`` tool parameters one-to-one.
+    """
+
+    exchange: str
+    instrument: str
+    instrument_public_id: str
+    side: str
+    order_type: str
+    quantity: float
+    wallet_public_id: str
+    idempotency_key: str
+    price: float | None
+    operator_public_id: str | None
+    ai_review_public_id: str | None
+
+
+@dataclass(frozen=True)
 class _PreparedManualOrder:
     """Precomputed context for the MCP manual-order tool."""
 
@@ -181,65 +204,57 @@ async def _prepare_manual_order(
     repository_getter: Callable[[], Repository | None],
     caps_enforcer_getter: Callable[[], TradingCapsEnforcer | None],
     claims_getter: Callable[[], TokenClaims],
-    exchange: str,
-    instrument: str,
-    instrument_public_id: str,
-    side: str,
-    order_type: str,
-    quantity: float,
-    wallet_public_id: str,
-    idempotency_key: str,
-    price: float | None,
-    operator_public_id: str | None,
+    order: _ManualOrderInput,
 ) -> _PreparedManualOrder:
     """Validate access and precompute immutable rows for manual-order dispatch."""
     claims = claims_getter()
     _require_permission(claims, Permission.CREATE_ORDERS)
     repo, enforcer = _get_write_dependencies(repository_getter, caps_enforcer_getter)
     created_at = datetime.now(UTC)
-    ensure_operator_in_claims(claims, operator_public_id)
-    await validate_user_wallet_scope(claims, wallet_public_id, repo, as_of=created_at)
+    ensure_operator_in_claims(claims, order.operator_public_id)
+    await validate_user_wallet_scope(claims, order.wallet_public_id, repo, as_of=created_at)
     bus_time = dt.datetime.now(dt.UTC)
-    shard_key = f"{exchange}.{instrument}.live"
+    shard_key = f"{order.exchange}.{order.instrument}.live"
     client_order_id = str(uuid7())
-    resolved_operator_public_id = operator_public_id or claims.primary_operator_public_id
+    resolved_operator_public_id = order.operator_public_id or claims.primary_operator_public_id
     user_public_id = claims.user_public_id or claims.username
     submission = TradeCommandSubmission(
         user_public_id=claims.user_public_id,
         operator_public_id=resolved_operator_public_id,
-        wallet_public_id=wallet_public_id,
-        instrument_public_id=instrument_public_id,
+        wallet_public_id=order.wallet_public_id,
+        instrument_public_id=order.instrument_public_id,
         command_type="create",
-        side=side,
-        order_type=order_type,
-        quantity=Decimal(str(quantity)),
-        price=Decimal(str(price)) if price is not None else None,
+        side=order.side,
+        order_type=order.order_type,
+        quantity=Decimal(str(order.quantity)),
+        price=Decimal(str(order.price)) if order.price is not None else None,
         source_surface=_MCP_SOURCE_SURFACE,
-        idempotency_key=idempotency_key,
+        idempotency_key=order.idempotency_key,
+        ai_review_public_id=order.ai_review_public_id,
     )
     plan_row: ExecutionPlanInsertRow = {
         "plan_type": "manual_once",
         "created_by_user_id": user_public_id,
         "created_via": "api",
-        "instrument_public_id": instrument_public_id,
-        "exchange": exchange,
+        "instrument_public_id": order.instrument_public_id,
+        "exchange": order.exchange,
         "mode": "live",
         "shard_key": shard_key,
-        "wallet_public_id": wallet_public_id,
+        "wallet_public_id": order.wallet_public_id,
         "operator_public_id": resolved_operator_public_id,
-        "total_quantity": quantity,
-        "side": side,
+        "total_quantity": order.quantity,
+        "side": order.side,
         "params": {
-            "order_type": order_type,
-            "side": side,
+            "order_type": order.order_type,
+            "side": order.side,
             "child_client_order_id": client_order_id,
-            "native_instrument": instrument,
-            "venue_order_type": order_type,
-            **({"price": price} if price is not None else {}),
+            "native_instrument": order.instrument,
+            "venue_order_type": order.order_type,
+            **({"price": order.price} if order.price is not None else {}),
         },
         "status": "pending",
         "created_at": created_at,
-        "idempotency_key": idempotency_key,
+        "idempotency_key": order.idempotency_key,
         "session_id": _MCP_TOOL_STREAM,
         "sequence_id": 1,
         "timestamp": bus_time,
@@ -249,15 +264,15 @@ async def _prepare_manual_order(
         enforcer=enforcer,
         submission=submission,
         plan_row=plan_row,
-        exchange=exchange,
-        instrument=instrument,
-        side=side,
-        order_type=order_type,
-        quantity=quantity,
-        price=price,
+        exchange=order.exchange,
+        instrument=order.instrument,
+        side=order.side,
+        order_type=order.order_type,
+        quantity=order.quantity,
+        price=order.price,
         created_at=created_at,
         bus_time=bus_time,
-        wallet_public_id=wallet_public_id,
+        wallet_public_id=order.wallet_public_id,
         operator_public_id=resolved_operator_public_id,
         user_public_id=user_public_id,
         shard_key=shard_key,
@@ -411,6 +426,7 @@ def register_mcp_tools(
         idempotency_key: str,
         price: float | None = None,
         operator_public_id: str | None = None,
+        ai_review_public_id: str | None = None,
     ) -> dict[str, Any]:
         """Submit a single manual order — wraps REST ``create_order`` via MCP.
 
@@ -436,6 +452,14 @@ def register_mcp_tools(
                 types.
             operator_public_id: Optional operator scope. Omit to
                 inherit the caller's primary operator.
+            ai_review_public_id: Plan D §3.6 / Plan D Phase 2 #10 —
+                Optional UUID7 of the ``ai_reviews`` row that
+                AI-approved this trade. When set, a
+                :class:`CapsViolationError` raised inside
+                :meth:`TradingCapsEnforcer.guard` triggers a
+                ``bus.caps_violation_after_ai_approve`` publish so
+                :class:`AiReviewService` can re-fanout the rejection
+                to the delegate's UI.
 
         Returns:
             Dict with ``plan_public_id`` (UUID7), ``command_public_id``
@@ -450,10 +474,7 @@ def register_mcp_tools(
                 MCP client as a tool error. Same error_code /
                 cap_type / attempted / limit shape as REST 422.
         """
-        prepared = await _prepare_manual_order(
-            repository_getter=repository_getter,
-            caps_enforcer_getter=caps_enforcer_getter,
-            claims_getter=claims_getter,
+        order = _ManualOrderInput(
             exchange=exchange,
             instrument=instrument,
             instrument_public_id=instrument_public_id,
@@ -464,6 +485,13 @@ def register_mcp_tools(
             idempotency_key=idempotency_key,
             price=price,
             operator_public_id=operator_public_id,
+            ai_review_public_id=ai_review_public_id,
+        )
+        prepared = await _prepare_manual_order(
+            repository_getter=repository_getter,
+            caps_enforcer_getter=caps_enforcer_getter,
+            claims_getter=claims_getter,
+            order=order,
         )
         async with prepared.enforcer.guard(prepared.submission):
             plan_public_id = await _insert_execution_plan_or_raise_conflict(

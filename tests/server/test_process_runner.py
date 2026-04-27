@@ -20,6 +20,7 @@ from unittest.mock import patch
 import pytest
 
 from snapper.application.ai_review.service import AiReviewService
+from snapper.server import process_runner
 from snapper.server.process_runner import _ai_review_decision_listener
 from snapper.server.process_runner import _await_result_with_listener
 from snapper.server.process_runner import _run_async_method_with_listener
@@ -239,7 +240,6 @@ def test_main_async_path_uses_listener_wrapper(monkeypatch: pytest.MonkeyPatch) 
         ),
         patch("snapper.server.process_runner.setup_logging"),
     ):
-        from snapper.server import process_runner
 
         exit_code = process_runner.main()
     assert exit_code == 0

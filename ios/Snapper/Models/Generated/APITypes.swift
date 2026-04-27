@@ -4373,6 +4373,7 @@ struct CreateOrderBody: Codable, Sendable {
     let walletPublicId: String
     let operatorPublicId: String?
     let idempotencyKey: String?
+    let aiReviewPublicId: String?
 
     enum CodingKeys: String, CodingKey {
         case instrument
@@ -4391,6 +4392,7 @@ struct CreateOrderBody: Codable, Sendable {
         case walletPublicId = "wallet_public_id"
         case operatorPublicId = "operator_public_id"
         case idempotencyKey = "idempotency_key"
+        case aiReviewPublicId = "ai_review_public_id"
     }
 }
 

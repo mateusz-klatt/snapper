@@ -3316,6 +3316,7 @@ export type Components = {
             wallet_public_id: string;
             operator_public_id?: string | null;
             idempotency_key?: string | null;
+            ai_review_public_id?: string | null;
         };
         CancelOrderCommand: {
             type?: "cancel_order_command";

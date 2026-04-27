@@ -461,6 +461,7 @@ async def create_order(
         price=Decimal(str(body.price)) if body.price is not None else None,
         source_surface="rest",
         idempotency_key=body.idempotency_key,
+        ai_review_public_id=body.ai_review_public_id,
     )
     plan_public_id: str | None = None
     try:

@@ -30,6 +30,13 @@ class CreateOrderBody(StrictBody):
         wallet_public_id: Target wallet UUID.
         operator_public_id: Optional operator identity.
         idempotency_key: Optional idempotency key for dedup.
+        ai_review_public_id: Optional UUID7 of the ``ai_reviews`` row that
+            AI-approved this trade. When set, a caps rejection inside
+            :meth:`TradingCapsEnforcer.guard` triggers a
+            ``bus.caps_violation_after_ai_approve`` publish so
+            :class:`AiReviewService` can re-fanout the rejection to the
+            delegate's UI (Plan D §3.6 / Plan D Phase 2 #10). Default
+            ``None`` keeps every existing manual-order caller untouched.
     """
 
     instrument: str
@@ -48,6 +55,7 @@ class CreateOrderBody(StrictBody):
     wallet_public_id: str
     operator_public_id: str | None = None
     idempotency_key: str | None = None
+    ai_review_public_id: str | None = None
 
 
 class CreateOrderCommand(

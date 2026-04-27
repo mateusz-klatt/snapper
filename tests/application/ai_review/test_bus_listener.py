@@ -22,6 +22,7 @@ from unittest.mock import patch
 from uuid import uuid7
 
 import pytest
+from loguru import logger
 
 from snapper.application.ai_review.service import AiReviewService
 from snapper.messaging.schemas.data import AiReviewDecisionData
@@ -434,8 +435,6 @@ class TestStartStopBusListener:
         intercept loguru) so a future refactor that silently drops the
         warning is caught by CI.
         """
-        from loguru import logger
-
         svc = AiReviewService.get_instance()
         warnings: list[str] = []
 
