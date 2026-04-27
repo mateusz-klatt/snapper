@@ -3427,8 +3427,10 @@ class Repository(ABC):
         4. Counter decrement claim: CAS UPDATE
            ``ai_reviews.counter_decremented_at`` from NULL to ``now``.
         5. Counter decrement: UPDATE
-           ``ai_delegates.active_reviews_count`` via ``GREATEST(... - 1, 0)``
-           on the claim winner.
+           ``ai_delegates.active_reviews_count`` via portable
+           ``CASE WHEN active_reviews_count > 0 THEN active_reviews_count - 1
+           ELSE 0 END`` on the claim winner (works on both SQLite and
+           PostgreSQL).
         6. ``COMMIT``.
 
         Caller MUST still publish the post-commit bus event +
