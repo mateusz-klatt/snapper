@@ -867,6 +867,21 @@ export const WsStatsConfigSchema = z
   })
   .strict()
 
+export const WsTokenDataSchema = z
+  .object({
+    type: z.literal('ws_token'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    topic: z.string().nullable().optional(),
+    message: z.string(),
+    ws_token: z.string(),
+    ws_token_exp: z.iso.datetime(),
+    expires_in: z.number().int(),
+  })
+  .strict()
+
 export const ZmqBridgeStatsSchema = z
   .object({
     active_topics: z.number().int(),
@@ -1758,6 +1773,18 @@ export const WalletResponseSchema = z
     session_id: z.string(),
     topic: z.string().nullable().optional(),
     payload: WalletInfoSchema,
+  })
+  .strict()
+
+export const WsTokenResponseSchema = z
+  .object({
+    type: z.literal('ws_token_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    topic: z.string().nullable().optional(),
+    payload: WsTokenDataSchema,
   })
   .strict()
 
@@ -2905,6 +2932,7 @@ export type ValidationError = z.infer<typeof ValidationErrorSchema>
 export type WalletInfo = z.infer<typeof WalletInfoSchema>
 export type WebSocketStats = z.infer<typeof WebSocketStatsSchema>
 export type WsStatsConfig = z.infer<typeof WsStatsConfigSchema>
+export type WsTokenData = z.infer<typeof WsTokenDataSchema>
 export type ZmqBridgeStats = z.infer<typeof ZmqBridgeStatsSchema>
 export type ZmqComponents = z.infer<typeof ZmqComponentsSchema>
 export type ZmqConfig = z.infer<typeof ZmqConfigSchema>
@@ -2991,6 +3019,7 @@ export type UpdateUserBody = z.infer<typeof UpdateUserBodySchema>
 export type HTTPValidationError = z.infer<typeof HTTPValidationErrorSchema>
 export type WalletListResponse = z.infer<typeof WalletListResponseSchema>
 export type WalletResponse = z.infer<typeof WalletResponseSchema>
+export type WsTokenResponse = z.infer<typeof WsTokenResponseSchema>
 export type WsStatsData = z.infer<typeof WsStatsDataSchema>
 export type ZmqHealthData = z.infer<typeof ZmqHealthDataSchema>
 export type LoginRequest = z.infer<typeof LoginRequestSchema>

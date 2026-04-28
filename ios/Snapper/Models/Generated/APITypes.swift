@@ -3936,6 +3936,52 @@ struct WsStatsResponse: Codable, Sendable {
     }
 }
 
+struct WsTokenData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let topic: String?
+    let message: String
+    let wsToken: String
+    let wsTokenExp: Date
+    let expiresIn: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case topic
+        case message
+        case wsToken = "ws_token"
+        case wsTokenExp = "ws_token_exp"
+        case expiresIn = "expires_in"
+    }
+}
+
+struct WsTokenResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let topic: String?
+    let payload: WsTokenData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case topic
+        case payload
+    }
+}
+
 struct ZmqBridgeStats: Codable, Sendable {
     let activeTopics: Int
     let subscriberTasks: Int

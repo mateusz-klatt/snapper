@@ -36,6 +36,22 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/ws_token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: Operations["issue_ws_token_api_auth_ws_token_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/me": {
         parameters: {
             query?: never;
@@ -3114,6 +3130,27 @@ export type Components = {
             topic?: string | null;
             payload: Components["schemas"]["WsStatsData"];
         };
+        WsTokenData: {
+            type: "ws_token";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            topic?: string | null;
+            message: string;
+            ws_token: string;
+            ws_token_exp: string;
+            expires_in: number;
+        };
+        WsTokenResponse: {
+            type: "ws_token_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            topic?: string | null;
+            payload: Components["schemas"]["WsTokenData"];
+        };
         ZmqBridgeStats: {
             active_topics: number;
             subscriber_tasks: number;
@@ -3641,6 +3678,25 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["RefreshResponse"];
+                };
+            };
+        };
+    };
+    issue_ws_token_api_auth_ws_token_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["WsTokenResponse"];
                 };
             };
         };
