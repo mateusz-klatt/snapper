@@ -223,14 +223,28 @@ class TestBridgeEnvelopeSpec:
         assert "type" not in envelope_fields
         assert "  readonly type:" not in declaration
 
-    def test_phase_one_envelope_has_four_base_provenance_fields(self) -> None:
-        """The Phase 1 envelope mirrors the 4 base StrictDataSchema fields."""
+    def test_envelope_mirrors_strict_data_schema_fields(self) -> None:
+        """The envelope mirrors every StrictDataSchema field except ``type``.
+
+        The set adapts automatically as ``StrictDataSchema`` evolves —
+        the topic-on-data work extended the base from 4 fields to 5
+        without further generator changes. Pinning against the live
+        Pydantic schema instead of a hard-coded set keeps the
+        derivation contract honest as the base evolves.
+        """
         envelope_fields, declaration = _bridge_envelope_spec()
-        assert envelope_fields == frozenset({"sequence_id", "public_id", "timestamp", "session_id"})
+        expected = frozenset(name for name in StrictDataSchema.model_fields if name != "type")
+        assert envelope_fields == expected
         for field in envelope_fields:
             assert (
                 f"readonly {field}:" in declaration
             ), f"envelope declaration missing field {field}"
+
+    def test_envelope_includes_topic_field(self) -> None:
+        """Post-Phase-2 envelope carries ``topic: string | null`` reflecting the publisher chokepoint."""
+        envelope_fields, declaration = _bridge_envelope_spec()
+        assert "topic" in envelope_fields
+        assert "readonly topic: string | null;" in declaration
 
     def test_field_order_matches_strict_data_schema_declaration_order(self) -> None:
         """Pydantic dataclass-field order is preserved in the declaration."""
@@ -317,16 +331,14 @@ class TestGenerateBridgeWireContract:
         assert content.startswith(_BRIDGE_HEADER)
         assert "/**" not in content, "v1 generator must NOT emit per-interface JSDoc"
 
-    def test_envelope_interface_emitted_with_4_fields(self, tmp_path: Path) -> None:
-        """Phase 1 envelope has exactly the 4 base provenance fields."""
+    def test_envelope_interface_includes_derived_fields(self, tmp_path: Path) -> None:
+        """The emitted envelope block matches the dynamically-derived spec exactly."""
         output_path = tmp_path / "wire-contract.ts"
         content = generate_bridge_wire_contract(output_path)
         _, envelope_declaration = _bridge_envelope_spec()
         assert envelope_declaration in content
         envelope_block = content.split("export interface FrameEnvelope {")[1].split("}", 1)[0]
-        assert (
-            "topic" not in envelope_block
-        ), "Phase 1 envelope MUST NOT include `topic`; that lands in Phase 2"
+        assert "readonly topic: string | null;" in envelope_block
 
     def test_creates_parent_directory(self, tmp_path: Path) -> None:
         """The emitter creates the output directory tree if missing."""

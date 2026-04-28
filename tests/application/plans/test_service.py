@@ -1,6 +1,7 @@
 """Tests for PlanExecutorService."""
 
 import asyncio
+import json
 from datetime import UTC
 from datetime import datetime
 from types import SimpleNamespace
@@ -2346,6 +2347,39 @@ class TestLogDecisionPublishesEvent:
         payload = fake_publisher.send_multipart.await_args.kwargs["payload"]
         assert b'"plan_public_id":"019dbb34-f439-77bd-afa8-ee5321d60309"' in payload
         assert b"execution_plan_public_id" not in payload
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_published_payload_carries_decision_topic(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """The published payload carries ``topic`` matching the decision topic.
+
+        Phase 2 chokepoint contract: every production publish call site
+        routes serialization through ``StrictDataSchema.publish_to`` so
+        downstream consumers see the routing key on the payload itself.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="decision-pid-T")
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        fake_publisher = AsyncMock()
+        service._publisher = fake_publisher
+
+        await service._log_decision(
+            plan_public_id="019dbb34-f439-77bd-afa8-ee5321d60310",
+            decision_type="evaluator",
+            trigger_type="tick",
+            reason="sl_hit",
+            importance="action",
+        )
+
+        call_kwargs = fake_publisher.send_multipart.await_args.kwargs
+        decision_topic = "plans.decisions.019dbb34-f439-77bd-afa8-ee5321d60310"
+        assert call_kwargs["topic"] == decision_topic
+        as_dict = json.loads(call_kwargs["payload"])
+        assert as_dict["topic"] == decision_topic
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")

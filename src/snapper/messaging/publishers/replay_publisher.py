@@ -191,7 +191,7 @@ class ReplayPublisher:
                     f"market.{event.exchange}.{event.instrument}"
                     f".candles.{self._config.timeframe}"
                 )
-                await socket.send_multipart([topic.encode(), data.model_dump_json().encode()])
+                await socket.send_multipart([topic.encode(), data.publish_to(topic)])
                 self._drain.on_publish()
         self._drain.mark_done_publishing()
         try:

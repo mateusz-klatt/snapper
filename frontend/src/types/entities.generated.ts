@@ -28,6 +28,7 @@ export interface AiReviewCapsViolationFrame {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   reviewPublicId: string
   userPublicId: string
   strategyPublicId: string
@@ -48,6 +49,7 @@ export interface AiReviewDecisionAckFrame {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   reviewPublicId: string
   userPublicId: string
   strategyPublicId: string
@@ -70,6 +72,7 @@ export interface AiReviewDecision {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   reviewPublicId: string
   respondingDelegatePublicId: string
   decision: string
@@ -87,6 +90,7 @@ export interface AiReviewRequestFrame {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   reviewPublicId: string
   userPublicId: string
   strategyPublicId: string
@@ -108,6 +112,7 @@ export interface AlertEvent {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   userPublicId: string
   operatorPublicId?: string | null
   walletPublicId?: string | null
@@ -131,6 +136,7 @@ export interface BacktestProgress {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   runPublicId: string
   walletPublicId: string
   event: 'started' | 'progress' | 'milestone' | 'completed' | 'failed' | 'cancelled'
@@ -152,6 +158,7 @@ export interface Candle {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   instrument: string
   exchange: Exchange
   timeframe: string
@@ -174,6 +181,7 @@ export interface CapsViolationAfterAiApprove {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   reviewPublicId: string
   userPublicId: string
   strategyPublicId: string
@@ -194,6 +202,7 @@ export interface ContinuousCandle {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   openAt: Date
   timeframe: string
   open: number
@@ -216,6 +225,7 @@ export interface Contract {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   instrumentPublicId: string
   nativeSymbol: string
   exchange: string
@@ -235,6 +245,7 @@ export interface DelegateOffline {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   userPublicId: string
   delegatePublicId: string
   lastSeenAt: Date
@@ -249,6 +260,7 @@ export interface Execution {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   tradeId?: string | null
   exchangeOrderId?: string | null
   clientOrderId: string
@@ -278,6 +290,7 @@ export interface ExecutionPlan {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   planType: string
   status: string
   instrumentPublicId: string
@@ -306,6 +319,7 @@ export interface ExecutionPlanDecisionEvent {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   decisionPublicId: string
   planPublicId: string
   decisionType: string
@@ -323,6 +337,7 @@ export interface FrontMonth {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   instrumentPublicId: string
   nativeSymbol: string
   exchange: string
@@ -340,6 +355,7 @@ export interface FundingAccrual {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   instrument: string
   exchange: Exchange2
   mode: Mode
@@ -361,6 +377,7 @@ export interface Heartbeat {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   component: string
   sequence: number
   status: 'healthy' | 'warning' | 'error'
@@ -377,6 +394,7 @@ export interface InstrumentCapability {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   instrumentPublicId: string
   exchange: string
   supportedOrderTypes: string[]
@@ -405,6 +423,7 @@ export interface InstrumentDetail {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   instrumentPublicId: string
   symbolPublicId: string
   symbol: string
@@ -425,6 +444,7 @@ export interface OrderCancel {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   exchange: Exchange2
   instrument: string
   exchangeOrderId: string
@@ -443,6 +463,7 @@ export interface Order {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   exchangeOrderId?: string | null
   clientOrderId: string
   instrument: string
@@ -477,6 +498,7 @@ export interface OrderEvent {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   exchangeOrderId: string
   clientOrderId: string
   exchange: Exchange2
@@ -497,6 +519,7 @@ export interface OrderReplace {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   exchange: Exchange2
   instrument: string
   exchangeOrderId: string
@@ -517,6 +540,7 @@ export interface OrderRequest {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   strategyId: string
   exchange: Exchange2
   instrument: string
@@ -544,6 +568,7 @@ export interface Position {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   instrument: string
   instrumentPublicId?: string
   exchange: Exchange2
@@ -565,6 +590,7 @@ export interface ReplayEnd {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
 }
 
 /**
@@ -576,6 +602,7 @@ export interface ReplayStart {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   startedAt?: Date | null
 }
 
@@ -588,6 +615,7 @@ export interface ScopeRevoked {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   grantPublicId: string
   operatorPublicId: string
   walletPublicId: string
@@ -608,6 +636,7 @@ export interface SettingChanged {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   key: string
   value: string
   category: string
@@ -623,6 +652,7 @@ export interface Signal {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   instrument: string
   exchange: Exchange2
   side: TradeSide
@@ -645,6 +675,7 @@ export interface SymbolAliasUpdate {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   event: string
   action: string
 }
@@ -658,6 +689,7 @@ export interface Tick {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   instrument: string
   exchange: Exchange
   volume: number
@@ -677,6 +709,7 @@ export interface Trade {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   instrument: string
   exchange: Exchange
   executedAt?: Date | null
@@ -695,6 +728,7 @@ export interface UnderlyingAsset {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   ticker: string
   name: string
   assetClass: string
@@ -711,6 +745,7 @@ export interface UnderlyingInstrument {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   instrumentPublicId: string
   nativeSymbol: string
   exchange: string
@@ -728,6 +763,7 @@ export interface UserDeactivated {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   userPublicId: string
   deactivatedAt: Date
   reason?: string | null
@@ -742,6 +778,7 @@ export interface VenueFeeSchedule {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   exchange: string
   instrumentPublicId: string | null
   feeTier: string
@@ -779,6 +816,7 @@ export interface Login {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   payload: Record<string, unknown>
 }
 
@@ -791,6 +829,7 @@ export interface RefreshToken {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   payload: Record<string, unknown>
 }
 
@@ -803,6 +842,7 @@ export interface CreateUser {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   payload: Record<string, unknown>
 }
 
@@ -815,6 +855,7 @@ export interface UpdateUser {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   payload: Record<string, unknown>
 }
 
@@ -827,6 +868,7 @@ export interface DeactivateUser {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   payload: Record<string, unknown>
 }
 
@@ -839,6 +881,7 @@ export interface ChangePassword {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   payload: Record<string, unknown>
 }
 
@@ -851,6 +894,7 @@ export interface AdminResetPassword {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   payload: Record<string, unknown>
 }
 
@@ -863,6 +907,7 @@ export interface RemoveSetting {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   payload: Record<string, unknown>
 }
 
@@ -875,6 +920,7 @@ export interface DelegateCreate {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   payload: Record<string, unknown>
 }
 
@@ -887,6 +933,7 @@ export interface DelegateCapsUpdate {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   payload: Record<string, unknown>
 }
 
@@ -899,6 +946,7 @@ export interface DelegateDeactivate {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   payload: Record<string, unknown>
 }
 
@@ -920,6 +968,7 @@ export interface BacktestCompare {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   payload: Record<string, unknown>
 }
 
@@ -932,6 +981,7 @@ export interface ProcessCreate {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   payload: Record<string, unknown>
 }
 
@@ -944,5 +994,6 @@ export interface ProcessStart {
   publicId: string
   timestamp: Date
   sessionId: string
+  topic?: string | null
   payload: Record<string, unknown>
 }

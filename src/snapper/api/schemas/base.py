@@ -81,12 +81,21 @@ class StrictDataSchema[TypeT: str](StrictBody):
     Producers must obtain these from a SequenceTracker before creating the
     event. This ensures every event is complete and identifiable from birth.
 
+    The optional ``topic`` field is populated at publish time by
+    :meth:`publish_to` — the chokepoint every production ZMQ publish call
+    site MUST use. Consumers receiving frames over WebSocket can therefore
+    rely on ``topic`` being populated for data frames published to a topic;
+    REST-only items and control frames leave it ``None``.
+
     Attributes:
         type: Payload item type discriminator for routing and deserialization.
         sequence_id: Per-table monotonic counter for gap detection.
         public_id: Unique identifier (UUID7), generated at creation time.
         timestamp: Bus arrival timestamp (UTC), generated once at creation.
         session_id: Producer session identifier for provenance tracking.
+        topic: Routing key the payload is broadcast on. Stamped by
+            :meth:`publish_to` at the publish call site; ``None`` on REST-only
+            items and control frames that aren't broadcast.
     """
 
     type: TypeT
@@ -94,6 +103,7 @@ class StrictDataSchema[TypeT: str](StrictBody):
     public_id: str
     timestamp: datetime
     session_id: str
+    topic: str | None = None
 
     def to_json(self) -> str:
         """Serialize to JSON string for ZMQ transport.
@@ -114,6 +124,27 @@ class StrictDataSchema[TypeT: str](StrictBody):
             Typed instance.
         """
         return cls.model_validate_json(data)
+
+    def publish_to(self, topic: str) -> bytes:
+        """Return UTF-8 JSON bytes with the topic field stamped for ZMQ publish.
+
+        Every production ZMQ publish call site MUST use this helper instead
+        of ``self.to_json().encode("utf-8")`` or
+        ``self.model_dump_json().encode()``. It is the single point where
+        the published payload's ``topic`` field is populated, so consumers
+        across the stack (frontend, iOS, bridge, future strategies) can
+        rely on the routing key being available without reverse-engineering
+        it from domain fields.
+
+        Args:
+            topic: The ZMQ topic the payload is being published to.
+                Becomes the value of the serialized ``topic`` field; any
+                topic preset on the producer-side instance is overwritten.
+
+        Returns:
+            UTF-8-encoded JSON bytes ready for ``send_multipart``.
+        """
+        return self.model_copy(update={"topic": topic}).to_json().encode("utf-8")
 
 
 class PayloadRequest[TypeT: str, PayloadT](StrictDataSchema[TypeT]):

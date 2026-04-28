@@ -820,9 +820,10 @@ class PlanExecutorService(RegisterableProcess):
                 public_id=str(uuid7()),
                 timestamp=triggered_at,
             )
+            decision_topic = plans_decisions_topic(plan_public_id)
             await self._publisher.send_multipart(
-                topic=plans_decisions_topic(plan_public_id),
-                payload=event.to_json().encode("utf-8"),
+                topic=decision_topic,
+                payload=event.publish_to(decision_topic),
             )
         except Exception as exc:
             logger.warning(

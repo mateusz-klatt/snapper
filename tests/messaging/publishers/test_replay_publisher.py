@@ -340,3 +340,61 @@ class TestReplayPublisher:
             await publisher.start()
 
         mock_ctx.term.assert_called_once()
+
+    @pytest.mark.timeout(15)
+    async def test_published_candle_carries_topic_field(self) -> None:
+        """Real (non-warmup) candle payloads carry ``topic`` matching the wire topic.
+
+        Phase 2 chokepoint contract: the replay publisher routes every
+        ``StrictDataSchema``-derived send through ``publish_to(topic)``,
+        so consumers see the routing key on the payload itself instead
+        of having to read the ZMQ frame header.
+        """
+        broker, endpoints = await allocate_replay_endpoints()
+        try:
+            repo = AsyncMock()
+            repo.get_candles = AsyncMock(return_value=[_candle_row(NOW, 100)])
+            config = _make_config()
+            drain = DrainCoordinator()
+            ready = asyncio.Event()
+            publisher = ReplayPublisher(
+                local_xsub=endpoints.xsub,
+                repository=repo,
+                config=config,
+                snapshot_as_of=NOW,
+                drain=drain,
+                subscriber_ready=ready,
+            )
+            expected_topic = "market.kraken.BTC-USD.candles.1h"
+            ctx = zmq.asyncio.Context()
+            sub = ctx.socket(zmq.SUB)
+            sub.connect(broker.xpub_endpoint)
+            sub.setsockopt(zmq.SUBSCRIBE, expected_topic.encode())
+            try:
+                async with asyncio.timeout(3.0):
+                    await broker.wait_for_subscription(b"market.")
+                publish_task = asyncio.create_task(publisher.start())
+                seen_real_with_topic = False
+                async with asyncio.timeout(10.0):
+                    while not seen_real_with_topic:
+                        topic_bytes, payload = await sub.recv_multipart()
+                        topic_str = topic_bytes.decode()
+                        data = json.loads(payload.decode())
+                        if data["public_id"] == WARMUP_PUBLIC_ID:
+                            ready.set()
+                            drain.mark_done_publishing()
+                            continue
+                        assert data["topic"] == expected_topic, (
+                            f"replay-published candle on topic {topic_str!r} carries "
+                            f"data['topic']={data.get('topic')!r}; expected stamped value"
+                        )
+                        seen_real_with_topic = True
+                        drain.on_processed()
+                drain.drained.set()
+                await asyncio.wait_for(publish_task, timeout=2.0)
+            finally:
+                sub.setsockopt(zmq.LINGER, 0)
+                sub.close()
+                ctx.term()
+        finally:
+            await asyncio.wait_for(broker.stop(), timeout=2.0)

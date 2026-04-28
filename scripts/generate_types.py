@@ -1039,7 +1039,8 @@ def generate_zod_object_schema(schema: dict[str, Any], definitions: dict[str, An
     fields = []
     for name, prop in properties.items():
         has_default = "default" in prop
-        is_required = name in required_fields or has_default
+        default_is_none = has_default and prop.get("default") is None
+        is_required = name in required_fields or (has_default and not default_is_none)
         zod_type = json_type_to_zod(prop, is_required, definitions)
         if not is_required:
             zod_type = f"{zod_type}.optional()"

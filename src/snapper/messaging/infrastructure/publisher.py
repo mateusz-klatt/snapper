@@ -70,7 +70,10 @@ class MessagePublisher:
 
     Wraps a ValidatedPublisher and sends already-complete events
     (with session_id and sequence_id set by the producer) to the
-    specified stream_key. No stamping or model_copy occurs here.
+    specified stream_key. The ``send`` method routes serialization
+    through :meth:`StrictDataSchema.publish_to`, which stamps the
+    ``topic`` field onto the payload via ``model_copy`` before
+    encoding — the producer-side instance stays unchanged.
 
     Exposes the tracker property so producers can obtain session_id
     and allocate sequence_id before constructing the event.
@@ -96,14 +99,18 @@ class MessagePublisher:
         """Serialize and send a complete event payload.
 
         The data object must already have session_id and sequence_id
-        set by the producer. This method only serializes and sends.
+        set by the producer. The ``topic`` field on the serialized
+        payload is stamped here via the chokepoint helper, so every
+        downstream consumer sees the routing key alongside the domain
+        fields without reverse-engineering it.
 
         Args:
-            stream_key: Routing key (ZMQ topic or logical channel).
+            stream_key: Routing key (ZMQ topic or logical channel);
+                also stamped onto the payload as the ``topic`` field.
             data: Complete payload item with provenance already set.
             flags: Optional ZMQ send flags (e.g. zmq.NOBLOCK).
         """
-        payload = data.to_json().encode("utf-8")
+        payload = data.publish_to(stream_key)
         await self._publisher.send_multipart(stream_key, payload, flags=flags)
 
     @property

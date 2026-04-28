@@ -1412,6 +1412,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             user_public_id: string;
             operator_public_id?: string | null;
             wallet_public_id?: string | null;
@@ -1431,6 +1432,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["AlertEventInfo"];
         };
         AlertHistoryResponse: {
@@ -1439,6 +1441,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["AlertEventInfo"][];
             count: number;
             next_cursor?: string | null;
@@ -1449,6 +1452,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             name: string;
             class_path: string;
             method: string;
@@ -1464,6 +1468,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["AvailableProcess"][];
             count: number;
         };
@@ -1473,6 +1478,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             wallet_public_id: string;
             run_a_public_id: string;
             run_b_public_id: string;
@@ -1486,6 +1492,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BacktestComparisonDetailResponseData"];
         };
         BacktestComparisonDetailResponseData: {
@@ -1494,6 +1501,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             comparison: Components["schemas"]["BacktestComparisonData"];
             run_a: Components["schemas"]["BacktestRunData"];
             run_b: Components["schemas"]["BacktestRunData"];
@@ -1508,6 +1516,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BacktestComparisonData"][];
             count: number;
         };
@@ -1517,6 +1526,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BacktestComparisonData"];
         };
         BacktestEquityPointInline: {
@@ -1532,6 +1542,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BacktestEquityPointInline"][];
             count: number;
         };
@@ -1541,6 +1552,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             run_public_id: string;
             event_type: string;
             detail?: {
@@ -1553,6 +1565,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BacktestEventData"][];
             count: number;
         };
@@ -1583,6 +1596,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             wallet_public_id: string;
             strategy_name: string;
             strategy_params: Record<string, unknown>;
@@ -1608,6 +1622,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             wallet_public_id: string;
             strategy_name: string;
             strategy_params: Record<string, unknown>;
@@ -1634,6 +1649,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BacktestRunDetailData"];
         };
         BacktestRunListResponse: {
@@ -1642,6 +1658,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BacktestRunData"][];
             count: number;
         };
@@ -1651,6 +1668,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BacktestRunData"];
         };
         BacktestSignalData: {
@@ -1659,6 +1677,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             run_public_id: string;
             signal_time: string;
             signal_type: string;
@@ -1674,6 +1693,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BacktestSignalData"][];
             count: number;
         };
@@ -1683,6 +1703,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             run_public_id: string;
             executed_at: string;
             instrument: string;
@@ -1700,6 +1721,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BacktestTradeData"][];
             count: number;
         };
@@ -1709,6 +1731,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             name: string;
             enabled: boolean;
             running: boolean;
@@ -1730,6 +1753,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ConfiguredProcess"][];
             count: number;
         };
@@ -1746,6 +1770,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             open_at: string;
             timeframe: string;
             open: number;
@@ -1764,6 +1789,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ContinuousCandleData"][];
             count: number;
         };
@@ -1773,6 +1799,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ContinuousCandleData"][];
             count: number;
             failed_roll: Components["schemas"]["RollPointDetail"];
@@ -1784,6 +1811,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             instrument_public_id: string;
             native_symbol: string;
             exchange: string;
@@ -1799,6 +1827,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ContractData"][];
             count: number;
         };
@@ -1808,6 +1837,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["CredentialSummary"][];
             count: number;
         };
@@ -1817,6 +1847,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["CredentialSummary"];
         };
         CredentialSummary: {
@@ -1825,6 +1856,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             wallet_public_id: string;
             exchange: string;
             credential_type: string;
@@ -1849,6 +1881,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["DelegateCreatedPayload"];
         };
         DelegateListResponse: {
@@ -1857,6 +1890,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["DelegateRead"][];
             count: number;
         };
@@ -1876,6 +1910,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["DelegateRead"];
         };
         DeviceAlertPrefBody: {
@@ -1895,6 +1930,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             device_public_id: string;
             alert_type: string;
             operator_public_id?: string | null;
@@ -1912,6 +1948,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["DeviceAlertPrefInfo"][];
             count: number;
         };
@@ -1921,6 +1958,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["DeviceAlertPrefInfo"];
         };
         EquityOverlayPoint: {
@@ -1934,6 +1972,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: string[];
             count: number;
         };
@@ -1943,6 +1982,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             trade_id?: string | null;
             exchange_order_id?: string | null;
             client_order_id: string;
@@ -1968,6 +2008,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ExecutionData"][];
             count: number;
         };
@@ -1977,6 +2018,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             plan_type: string;
             status: string;
             instrument_public_id: string;
@@ -2003,6 +2045,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ExecutionPlanData"];
         };
         FeatureFlagsPayload: {
@@ -2014,6 +2057,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["FeatureFlagsPayload"];
         };
         FrontMonthData: {
@@ -2022,6 +2066,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             instrument_public_id: string;
             native_symbol: string;
             exchange: string;
@@ -2035,6 +2080,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["FrontMonthData"];
         };
         GapDetectionStats: {
@@ -2059,6 +2105,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["HandoverScopeGrantResult"];
         };
         HandoverScopeGrantResult: {
@@ -2071,6 +2118,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             status: "healthy" | "warning" | "error";
             version: string;
             connections: Components["schemas"]["ConnectionStats"];
@@ -2083,6 +2131,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["HealthCheckData"];
         };
         HealthTopics: {
@@ -2094,6 +2143,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             instrument_public_id: string;
             symbol_public_id: string;
             symbol: string;
@@ -2110,6 +2160,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["InstrumentDetailData"][];
             count: number;
         };
@@ -2119,6 +2170,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: string[];
             count: number;
         };
@@ -2135,6 +2187,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             message: string;
             expires_in: number;
             user: Components["schemas"]["UserProfile"];
@@ -2147,6 +2200,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["LoginData"];
         };
         MessageResponse: {
@@ -2155,6 +2209,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: string;
         };
         MetricDiffRow: {
@@ -2170,6 +2225,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             user_public_id: string;
             device_token: string;
             device_id: string;
@@ -2186,6 +2242,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["NotificationDeviceInfo"][];
             count: number;
         };
@@ -2195,6 +2252,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["NotificationDeviceInfo"];
         };
         NotificationMetricsData: {
@@ -2203,6 +2261,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             delivery_success_total: number;
             delivery_failed_total: number;
             delivery_410_unregistered_total: number;
@@ -2215,6 +2274,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["NotificationMetricsData"];
         };
         OperatorInfo: {
@@ -2223,6 +2283,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             label: string;
             description?: string | null;
         };
@@ -2232,6 +2293,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["OperatorInfo"][];
             count: number;
         };
@@ -2241,6 +2303,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             exchange_order_id?: string | null;
             client_order_id: string;
             instrument: string;
@@ -2271,6 +2334,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["OrderData"][];
             count: number;
         };
@@ -2280,6 +2344,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["OrphanSweepResultData"];
         };
         OrphanSweepResultData: {
@@ -2288,6 +2353,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             closed_count: number;
             closed_cycle_ids: string[];
         };
@@ -2310,6 +2376,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             cycle_public_id: string;
             shard_key: string;
             instrument_public_id: string;
@@ -2328,6 +2395,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["PositionCycleData"][];
             count: number;
         };
@@ -2337,6 +2405,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             instrument: string;
             instrument_public_id: string;
             exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
@@ -2354,6 +2423,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["PositionData"][];
             count: number;
         };
@@ -2367,6 +2437,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             status: "created";
             process: Components["schemas"]["ProcessCreatedInfo"];
         };
@@ -2376,6 +2447,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ProcessCreateData"];
         };
         ProcessCreatedInfo: {
@@ -2388,6 +2460,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             process_name: string;
             status: "running" | "succeeded" | "failed" | "cancelled";
             role: "core" | "task" | "strategy" | "backtest";
@@ -2405,6 +2478,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ProcessRun"][];
             count: number;
         };
@@ -2414,6 +2488,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             name: string;
             description: string;
             class_path: string;
@@ -2429,6 +2504,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ProcessSchemaData"];
         };
         ProcessStartData: {
@@ -2437,6 +2513,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             status: "success" | "already_running" | "error";
             name: string;
             process_public_id?: string | null;
@@ -2448,6 +2525,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ProcessStartData"];
         };
         ProcessStatus: {
@@ -2464,6 +2542,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             status: "success" | "not_running" | "error";
             name: string;
             message?: string | null;
@@ -2474,6 +2553,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ProcessStopData"];
         };
         ProcessSummaryData: {
@@ -2482,6 +2562,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             feeds: Components["schemas"]["ProcessCategoryCount"];
             strategies: Components["schemas"]["ProcessCategoryCount"];
             executors: Components["schemas"]["ProcessCategoryCount"];
@@ -2493,6 +2574,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ProcessSummaryData"];
         };
         PushBetaConfigRead: {
@@ -2501,6 +2583,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             enabled: boolean;
             user_public_ids: string[];
         };
@@ -2510,6 +2593,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["PushBetaConfigRead"];
         };
         RefreshData: {
@@ -2518,6 +2602,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             message: string;
             ws_token: string;
             ws_token_exp: string;
@@ -2532,6 +2617,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["RefreshData"];
         };
         RegisterDeviceBody: {
@@ -2547,6 +2633,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["RegisterDeviceBody"];
         };
         RelationshipTypeEnum: "exact" | "derivative" | "proxy";
@@ -2556,6 +2643,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             exchanges: {
                 [key: string]: Components["schemas"]["RestRateExchangeStats"];
             };
@@ -2573,6 +2661,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["RestRateData"];
         };
         RevokeScopeGrantResponse: {
@@ -2581,6 +2670,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ScopeGrantInfo"];
         };
         RollPointDetail: {
@@ -2594,6 +2684,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             operator_public_id: string;
             wallet_public_id: string;
             granted_by_user_public_id: string;
@@ -2609,6 +2700,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ScopeGrantInfo"][];
             count: number;
         };
@@ -2618,6 +2710,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ScopeGrantInfo"];
         };
         SettingCategoriesResponse: {
@@ -2626,6 +2719,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: string[];
             count: number;
         };
@@ -2635,6 +2729,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["SettingRead"][];
             count: number;
         };
@@ -2644,6 +2739,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             key: string;
             value: string;
             category: string;
@@ -2657,6 +2753,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["SettingRead"];
         };
         SignalData: {
@@ -2665,6 +2762,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             instrument: string;
             exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
             side: "buy" | "sell";
@@ -2689,6 +2787,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["SignalData"][];
             count: number;
         };
@@ -2698,6 +2797,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["StrategyProcess"][];
             count: number;
         };
@@ -2707,6 +2807,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             name: string;
             running: boolean;
             enabled: boolean;
@@ -2738,6 +2839,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             trader: Components["schemas"]["ProcessStatus"];
             backtests: {
                 [key: string]: Components["schemas"]["ProcessStatus"];
@@ -2750,6 +2852,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["SystemStatusData"];
         };
         TopicMetricSnapshot: {
@@ -2782,6 +2885,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             plan_public_id: string;
             status: string;
             trailing_pct: number;
@@ -2797,6 +2901,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["TrailingStopStateData"];
         };
         UnderlyingAssetData: {
@@ -2805,6 +2910,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             ticker: string;
             name: string;
             asset_class: string;
@@ -2817,6 +2923,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["UnderlyingAssetData"][];
             count: number;
         };
@@ -2826,6 +2933,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             instrument_public_id: string;
             native_symbol: string;
             exchange: string;
@@ -2839,6 +2947,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["UnderlyingInstrumentData"][];
             count: number;
         };
@@ -2848,6 +2957,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["DeviceAlertPrefBody"];
         };
         UpdateUserAlertDefaultCommand: {
@@ -2856,6 +2966,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["UserAlertDefaultBody"];
         };
         UserAlertDefaultBody: {
@@ -2869,6 +2980,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             user_public_id: string;
             alert_type: string;
             enabled: boolean;
@@ -2880,6 +2992,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["UserAlertDefaultInfo"][];
             count: number;
         };
@@ -2889,6 +3002,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["UserAlertDefaultInfo"];
         };
         UserListResponse: {
@@ -2897,6 +3011,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["UserProfile"][];
             count: number;
         };
@@ -2906,6 +3021,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             username: string;
             email?: string | null;
             role: Components["schemas"]["UserRole"];
@@ -2921,6 +3037,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["UserProfile"];
         };
         UserRole: "ai_delegate" | "viewer" | "operator" | "admin";
@@ -2937,6 +3054,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             label: string;
             description?: string | null;
             is_paper: boolean;
@@ -2947,6 +3065,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["WalletInfo"][];
             count: number;
         };
@@ -2956,6 +3075,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["WalletInfo"];
         };
         WebSocketStats: {
@@ -2975,6 +3095,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             websocket: Components["schemas"]["WebSocketStats"];
             zmq_bridge: Components["schemas"]["ZmqBridgeStats"];
             connections: Components["schemas"]["ConnectionStats"];
@@ -2990,6 +3111,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["WsStatsData"];
         };
         ZmqBridgeStats: {
@@ -3011,6 +3133,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             status: "healthy" | "warning" | "error";
             components: Components["schemas"]["ZmqComponents"];
             config: Components["schemas"]["ZmqConfig"];
@@ -3026,6 +3149,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ZmqHealthData"];
         };
         LoginRequest: {
@@ -3034,6 +3158,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["LoginBody"];
         };
         LoginBody: {
@@ -3047,6 +3172,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["RefreshTokenPayload"];
         };
         RefreshTokenPayload: {
@@ -3059,6 +3185,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["CreateUserBody"];
         };
         CreateUserBody: {
@@ -3074,6 +3201,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["UpdateUserBody"];
         };
         UpdateUserBody: {
@@ -3087,6 +3215,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["DeactivateUserBody"];
         };
         DeactivateUserBody: {
@@ -3098,6 +3227,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ChangePasswordBody"];
         };
         ChangePasswordBody: {
@@ -3110,6 +3240,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["AdminResetPasswordBody"];
         };
         AdminResetPasswordBody: {
@@ -3121,6 +3252,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["SettingUpdateBody"];
         };
         SettingUpdateBody: {
@@ -3134,6 +3266,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["PushBetaUsersBody"];
         };
         PushBetaUsersBody: {
@@ -3146,6 +3279,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["RemoveSettingBody"];
         };
         RemoveSettingBody: Record<string, never>;
@@ -3155,6 +3289,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["DelegateCreateBody"];
         };
         DelegateCreateBody: {
@@ -3169,6 +3304,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["DelegateCapsUpdateBody"];
         };
         DelegateCapsUpdateBody: {
@@ -3180,6 +3316,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["DelegateDeactivateBody"];
         };
         DelegateDeactivateBody: {
@@ -3195,6 +3332,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BacktestCreateBody"];
         };
         BacktestCreateBody: {
@@ -3217,6 +3355,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BacktestCompareBody"];
         };
         BacktestCompareBody: {
@@ -3232,6 +3371,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BacktestCancelBody"];
         };
         BacktestCancelBody: {
@@ -3243,6 +3383,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["CreateCredentialBody"];
         };
         CreateCredentialBody: {
@@ -3259,6 +3400,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["RotateCredentialBody"];
         };
         RotateCredentialBody: {
@@ -3273,6 +3415,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BracketCreateBody"];
         };
         BracketCreateBody: {
@@ -3287,6 +3430,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["BracketCancelBody"];
         };
         BracketCancelBody: {
@@ -3298,6 +3442,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["CreateOrderBody"];
         };
         CreateOrderBody: {
@@ -3325,6 +3470,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["CancelOrderBody"];
         };
         CancelOrderBody: {
@@ -3336,6 +3482,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ProcessCreateBody"];
         };
         ProcessCreateBody: {
@@ -3352,6 +3499,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["ProcessStartBody"];
         };
         ProcessStartBody: {
@@ -3364,6 +3512,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["CreateScopeGrantBody"];
         };
         CreateScopeGrantBody: {
@@ -3380,6 +3529,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["HandoverScopeGrantBody"];
         };
         HandoverScopeGrantBody: {
@@ -3393,6 +3543,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["RevokeScopeGrantBody"];
         };
         RevokeScopeGrantBody: {
@@ -3404,6 +3555,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["TrailingStopCreateBody"];
         };
         TrailingStopCreateBody: {
@@ -3418,6 +3570,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["TrailingStopCancelBody"];
         };
         TrailingStopCancelBody: {
@@ -3429,6 +3582,7 @@ export type Components = {
             public_id: string;
             timestamp: string;
             session_id: string;
+            topic?: string | null;
             payload: Components["schemas"]["CreateWalletBody"];
         };
         CreateWalletBody: {

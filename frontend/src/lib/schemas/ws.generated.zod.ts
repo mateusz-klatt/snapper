@@ -12,6 +12,7 @@ export const WsMessageBaseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
   })
   .strict()
 
@@ -22,6 +23,7 @@ export const AiReviewCapsViolationFrameDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     review_public_id: z.string(),
     user_public_id: z.string(),
     strategy_public_id: z.string(),
@@ -41,6 +43,7 @@ export const AiReviewDecisionAckFrameDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     review_public_id: z.string(),
     user_public_id: z.string(),
     strategy_public_id: z.string(),
@@ -62,6 +65,7 @@ export const AiReviewDecisionDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     review_public_id: z.string(),
     responding_delegate_public_id: z.string(),
     decision: z.string(),
@@ -80,10 +84,11 @@ export const BacktestProgressDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     run_public_id: z.string(),
     wallet_public_id: z.string(),
     event: z.enum(['started', 'progress', 'milestone', 'completed', 'failed', 'cancelled']),
-    milestone: z.enum(['25pct', '50pct', '75pct']).nullable(),
+    milestone: z.enum(['25pct', '50pct', '75pct']).nullable().optional(),
     candles_done: z.number().int(),
     total_candles: z.number().int().nullable(),
     signals_count: z.number().int(),
@@ -100,6 +105,7 @@ export const CandleDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument: z.string(),
     exchange: z.enum([
       'kraken',
@@ -116,8 +122,8 @@ export const CandleDataSchema = z
     low: z.number(),
     close: z.number(),
     volume: z.number(),
-    vwap: z.number().nullable(),
-    trades: z.number().int().nullable(),
+    vwap: z.number().nullable().optional(),
+    trades: z.number().int().nullable().optional(),
   })
   .strict()
 
@@ -128,6 +134,7 @@ export const CapsViolationAfterAiApproveDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     review_public_id: z.string(),
     user_public_id: z.string(),
     strategy_public_id: z.string(),
@@ -147,6 +154,7 @@ export const ContinuousCandleDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     open_at: z.iso.datetime(),
     timeframe: z.string(),
     open: z.number(),
@@ -168,6 +176,7 @@ export const ContractDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument_public_id: z.string(),
     native_symbol: z.string(),
     exchange: z.string(),
@@ -186,6 +195,7 @@ export const DelegateOfflineDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     user_public_id: z.string(),
     delegate_public_id: z.string(),
     last_seen_at: z.iso.datetime(),
@@ -199,8 +209,9 @@ export const ExecutionDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
-    trade_id: z.string().nullable(),
-    exchange_order_id: z.string().nullable(),
+    topic: z.string().nullable().optional(),
+    trade_id: z.string().nullable().optional(),
+    exchange_order_id: z.string().nullable().optional(),
     client_order_id: z.string(),
     instrument: z.string(),
     exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
@@ -214,8 +225,8 @@ export const ExecutionDataSchema = z
     status: z.enum(['filled', 'partial']),
     executed_at: z.iso.datetime(),
     wallet_public_id: z.string(),
-    operator_public_id: z.string().nullable(),
-    user_public_id: z.string().nullable(),
+    operator_public_id: z.string().nullable().optional(),
+    user_public_id: z.string().nullable().optional(),
     liquidity_role: z.string(),
   })
   .strict()
@@ -227,6 +238,7 @@ export const ExecutionPlanDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     plan_type: z.string(),
     status: z.string(),
     instrument_public_id: z.string(),
@@ -254,6 +266,7 @@ export const ExecutionPlanDecisionEventDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     decision_public_id: z.string(),
     plan_public_id: z.string(),
     decision_type: z.string(),
@@ -270,6 +283,7 @@ export const FrontMonthDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument_public_id: z.string(),
     native_symbol: z.string(),
     exchange: z.string(),
@@ -286,6 +300,7 @@ export const FundingAccrualDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument: z.string(),
     exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
     mode: z.enum(['live', 'paper']),
@@ -306,6 +321,7 @@ export const InstrumentCapabilityDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument_public_id: z.string(),
     exchange: z.string(),
     supported_order_types: z.array(z.string()),
@@ -333,6 +349,7 @@ export const InstrumentDetailDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument_public_id: z.string(),
     symbol_public_id: z.string(),
     symbol: z.string(),
@@ -352,13 +369,14 @@ export const OrderCancelDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
     instrument: z.string(),
     exchange_order_id: z.string(),
     client_order_id: z.string(),
     wallet_public_id: z.string(),
-    operator_public_id: z.string().nullable(),
-    user_public_id: z.string().nullable(),
+    operator_public_id: z.string().nullable().optional(),
+    user_public_id: z.string().nullable().optional(),
   })
   .strict()
 
@@ -369,7 +387,8 @@ export const OrderDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
-    exchange_order_id: z.string().nullable(),
+    topic: z.string().nullable().optional(),
+    exchange_order_id: z.string().nullable().optional(),
     client_order_id: z.string(),
     instrument: z.string(),
     exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
@@ -379,19 +398,19 @@ export const OrderDataSchema = z
     order_type: z.enum(['market', 'limit', 'stop', 'stop_limit']),
     size: z.number(),
     filled_size: z.number(),
-    price: z.number().nullable(),
-    average_price: z.number().nullable(),
-    reason: z.string().nullable(),
-    time_in_force: z.string().nullable(),
-    error: z.string().nullable(),
+    price: z.number().nullable().optional(),
+    average_price: z.number().nullable().optional(),
+    reason: z.string().nullable().optional(),
+    time_in_force: z.string().nullable().optional(),
+    error: z.string().nullable().optional(),
     created_at: z.iso.datetime(),
-    updated_at: z.iso.datetime().nullable(),
-    leverage: z.number().int().nullable(),
+    updated_at: z.iso.datetime().nullable().optional(),
+    leverage: z.number().int().nullable().optional(),
     reduce_only: z.boolean(),
     wallet_public_id: z.string(),
-    operator_public_id: z.string().nullable(),
-    user_public_id: z.string().nullable(),
-    plan_public_id: z.string().nullable(),
+    operator_public_id: z.string().nullable().optional(),
+    user_public_id: z.string().nullable().optional(),
+    plan_public_id: z.string().nullable().optional(),
   })
   .strict()
 
@@ -402,15 +421,16 @@ export const OrderEventDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     exchange_order_id: z.string(),
     client_order_id: z.string(),
     exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
     instrument: z.string(),
     event: z.enum(['submitted', 'accepted', 'rejected', 'cancelled', 'expired', 'replaced']),
-    reason: z.string().nullable(),
+    reason: z.string().nullable().optional(),
     wallet_public_id: z.string(),
-    operator_public_id: z.string().nullable(),
-    user_public_id: z.string().nullable(),
+    operator_public_id: z.string().nullable().optional(),
+    user_public_id: z.string().nullable().optional(),
   })
   .strict()
 
@@ -421,15 +441,16 @@ export const OrderReplaceDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
     instrument: z.string(),
     exchange_order_id: z.string(),
     client_order_id: z.string(),
-    new_quantity: z.number().nullable(),
-    new_price: z.number().nullable(),
+    new_quantity: z.number().nullable().optional(),
+    new_price: z.number().nullable().optional(),
     wallet_public_id: z.string(),
-    operator_public_id: z.string().nullable(),
-    user_public_id: z.string().nullable(),
+    operator_public_id: z.string().nullable().optional(),
+    user_public_id: z.string().nullable().optional(),
   })
   .strict()
 
@@ -440,6 +461,7 @@ export const OrderRequestDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     strategy_id: z.string(),
     exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
     instrument: z.string(),
@@ -447,15 +469,15 @@ export const OrderRequestDataSchema = z
     side: z.enum(['buy', 'sell']),
     order_type: z.enum(['market', 'limit', 'stop', 'stop_limit']),
     quantity: z.number(),
-    price: z.number().nullable(),
+    price: z.number().nullable().optional(),
     client_order_id: z.string(),
-    signaled_at: z.iso.datetime().nullable(),
-    strategy_tag: z.string().nullable(),
-    leverage: z.number().int().nullable(),
+    signaled_at: z.iso.datetime().nullable().optional(),
+    strategy_tag: z.string().nullable().optional(),
+    leverage: z.number().int().nullable().optional(),
     reduce_only: z.boolean(),
     wallet_public_id: z.string(),
-    operator_public_id: z.string().nullable(),
-    user_public_id: z.string().nullable(),
+    operator_public_id: z.string().nullable().optional(),
+    user_public_id: z.string().nullable().optional(),
   })
   .strict()
 
@@ -466,6 +488,7 @@ export const PositionDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument: z.string(),
     instrument_public_id: z.string(),
     exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
@@ -474,7 +497,7 @@ export const PositionDataSchema = z
     average_price: z.number(),
     unrealized_pnl: z.number(),
     realized_pnl: z.number(),
-    position_cycle_public_id: z.string().nullable(),
+    position_cycle_public_id: z.string().nullable().optional(),
     wallet_public_id: z.string(),
   })
   .strict()
@@ -486,6 +509,7 @@ export const ReplayEndDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
   })
   .strict()
 
@@ -496,7 +520,8 @@ export const ReplayStartDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
-    started_at: z.iso.datetime().nullable(),
+    topic: z.string().nullable().optional(),
+    started_at: z.iso.datetime().nullable().optional(),
   })
   .strict()
 
@@ -507,15 +532,16 @@ export const ScopeRevokedDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     grant_public_id: z.string(),
     operator_public_id: z.string(),
     wallet_public_id: z.string(),
     scope_kind: z.enum(['underlying', 'instrument']),
-    underlying_public_id: z.string().nullable(),
-    instrument_public_id: z.string().nullable(),
+    underlying_public_id: z.string().nullable().optional(),
+    instrument_public_id: z.string().nullable().optional(),
     revoked_at: z.iso.datetime(),
-    revoked_by_user_public_id: z.string().nullable(),
-    reason: z.string().nullable(),
+    revoked_by_user_public_id: z.string().nullable().optional(),
+    reason: z.string().nullable().optional(),
   })
   .strict()
 
@@ -526,10 +552,11 @@ export const SettingChangedDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     key: z.string(),
     value: z.string(),
     category: z.string(),
-    updated_by: z.string().nullable(),
+    updated_by: z.string().nullable().optional(),
   })
   .strict()
 
@@ -540,17 +567,18 @@ export const SignalDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument: z.string(),
     exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
     side: z.enum(['buy', 'sell']),
     strength: z.number(),
     reason: z.string(),
-    price: z.number().nullable(),
-    strategy_name: z.string().nullable(),
+    price: z.number().nullable().optional(),
+    strategy_name: z.string().nullable().optional(),
     fired_at: z.iso.datetime(),
     wallet_public_id: z.string(),
-    operator_public_id: z.string().nullable(),
-    user_public_id: z.string().nullable(),
+    operator_public_id: z.string().nullable().optional(),
+    user_public_id: z.string().nullable().optional(),
   })
   .strict()
 
@@ -561,6 +589,7 @@ export const SymbolAliasUpdateDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     event: z.literal('symbol_aliases_updated'),
     action: z.literal('clear_cache'),
   })
@@ -573,6 +602,7 @@ export const TickDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument: z.string(),
     exchange: z.enum([
       'kraken',
@@ -583,11 +613,11 @@ export const TickDataSchema = z
       'polygon',
     ]),
     volume: z.number(),
-    bid: z.number().nullable(),
-    ask: z.number().nullable(),
-    last: z.number().nullable(),
+    bid: z.number().nullable().optional(),
+    ask: z.number().nullable().optional(),
+    last: z.number().nullable().optional(),
     is_delayed: z.boolean(),
-    is_extended_hours: z.boolean().nullable(),
+    is_extended_hours: z.boolean().nullable().optional(),
   })
   .strict()
 
@@ -598,6 +628,7 @@ export const TradeDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument: z.string(),
     exchange: z.enum([
       'kraken',
@@ -607,11 +638,11 @@ export const TradeDataSchema = z
       'walutomat',
       'polygon',
     ]),
-    executed_at: z.iso.datetime().nullable(),
+    executed_at: z.iso.datetime().nullable().optional(),
     price: z.number(),
     volume: z.number(),
-    side: z.string().nullable(),
-    trade_id: z.string().nullable(),
+    side: z.string().nullable().optional(),
+    trade_id: z.string().nullable().optional(),
   })
   .strict()
 
@@ -622,6 +653,7 @@ export const UnderlyingAssetDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     ticker: z.string(),
     name: z.string(),
     asset_class: z.string(),
@@ -637,6 +669,7 @@ export const UnderlyingInstrumentDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument_public_id: z.string(),
     native_symbol: z.string(),
     exchange: z.string(),
@@ -653,9 +686,10 @@ export const UserDeactivatedDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     user_public_id: z.string(),
     deactivated_at: z.iso.datetime(),
-    reason: z.string().nullable(),
+    reason: z.string().nullable().optional(),
   })
   .strict()
 
@@ -666,6 +700,7 @@ export const VenueFeeScheduleDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     exchange: z.string(),
     instrument_public_id: z.string().nullable(),
     fee_tier: z.string(),
@@ -685,6 +720,7 @@ export const WSAuthExpiredResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
   })
   .strict()
 
@@ -695,7 +731,8 @@ export const WSAuthFailedResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
-    reason: z.string().nullable(),
+    topic: z.string().nullable().optional(),
+    reason: z.string().nullable().optional(),
   })
   .strict()
 
@@ -706,6 +743,7 @@ export const WSAuthOkResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     exp: z.iso.datetime(),
   })
   .strict()
@@ -717,6 +755,7 @@ export const WSAuthRequiredResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     timeout: z.number().int(),
   })
   .strict()
@@ -728,6 +767,7 @@ export const WSAuthenticateRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     ws_token: z.string(),
   })
   .strict()
@@ -739,6 +779,7 @@ export const WSErrorResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     message: z.string(),
   })
   .strict()
@@ -750,6 +791,7 @@ export const WSGetSubscriptionsRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
   })
   .strict()
 
@@ -760,6 +802,7 @@ export const WSPingRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
   })
   .strict()
 
@@ -770,6 +813,7 @@ export const WSPongResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     active_connections: z.number().int(),
   })
   .strict()
@@ -781,6 +825,7 @@ export const WSReauthOkResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     exp: z.iso.datetime(),
   })
   .strict()
@@ -792,6 +837,7 @@ export const WSReauthRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     ws_token: z.string(),
   })
   .strict()
@@ -803,6 +849,7 @@ export const WSReauthRequiredResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     deadline: z.iso.datetime(),
   })
   .strict()
@@ -814,6 +861,7 @@ export const WSSubscribeRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     topics: z.array(z.string()),
   })
   .strict()
@@ -825,12 +873,13 @@ export const WSSubscriptionSuccessResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     action: z.enum(['subscribe', 'unsubscribe']),
     status: z.enum(['subscribed', 'unsubscribed', 'partial', 'denied', 'no_topics']),
     topics: z.array(z.string()),
     denied_topics: z.array(z.string()),
     active_subscriptions: z.array(z.string()),
-    message: z.string().nullable(),
+    message: z.string().nullable().optional(),
   })
   .strict()
 
@@ -841,6 +890,7 @@ export const WSSubscriptionsListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     subscriptions: z.array(z.string()),
     available_topics: z.array(z.string()),
     total_available: z.number().int(),
@@ -854,6 +904,7 @@ export const WSUnsubscribeRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     topics: z.array(z.string()),
   })
   .strict()
@@ -867,9 +918,10 @@ export const WSAuthCompleteResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     available_topics: z.array(z.string()),
     user_role: UserRoleSchema,
-    session_expires_at: z.iso.datetime().nullable(),
+    session_expires_at: z.iso.datetime().nullable().optional(),
     ws_token_exp: z.iso.datetime(),
   })
   .strict()
@@ -883,6 +935,7 @@ export const AiReviewRequestFrameDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     review_public_id: z.string(),
     user_public_id: z.string(),
     strategy_public_id: z.string(),
@@ -903,9 +956,10 @@ export const AlertEventDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     user_public_id: z.string(),
-    operator_public_id: z.string().nullable(),
-    wallet_public_id: z.string().nullable(),
+    operator_public_id: z.string().nullable().optional(),
+    wallet_public_id: z.string().nullable().optional(),
     alert_type: z.enum([
       'order_fill_full',
       'order_rejected',
@@ -917,10 +971,10 @@ export const AlertEventDataSchema = z
     is_safety_critical: z.boolean(),
     title: z.string().min(1).max(160),
     body: z.string().min(1).max(512),
-    payload: z.record(z.string(), z.any()).nullable(),
-    dedup_key: z.string().max(128).nullable(),
-    thread_key: z.string().max(64).nullable(),
-    source_topic: z.string().nullable(),
+    payload: z.record(z.string(), z.any()).nullable().optional(),
+    dedup_key: z.string().max(128).nullable().optional(),
+    thread_key: z.string().max(64).nullable().optional(),
+    source_topic: z.string().nullable().optional(),
   })
   .strict()
 
@@ -931,6 +985,7 @@ export const HeartbeatDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     component: z.string(),
     sequence: z.number().int(),
     status: z.enum(['healthy', 'warning', 'error']),

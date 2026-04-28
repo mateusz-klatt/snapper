@@ -304,6 +304,7 @@ struct AlertEventInfo: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let userPublicId: String
     let operatorPublicId: String?
     let walletPublicId: String?
@@ -323,6 +324,7 @@ struct AlertEventInfo: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case userPublicId = "user_public_id"
         case operatorPublicId = "operator_public_id"
         case walletPublicId = "wallet_public_id"
@@ -344,6 +346,7 @@ struct AlertEventResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: AlertEventInfo
 
     enum CodingKeys: String, CodingKey {
@@ -352,6 +355,7 @@ struct AlertEventResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -362,6 +366,7 @@ struct AlertHistoryResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [AlertEventInfo]
     let count: Int
     let nextCursor: String?
@@ -372,6 +377,7 @@ struct AlertHistoryResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
         case nextCursor = "next_cursor"
@@ -384,6 +390,7 @@ struct AvailableProcess: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let name: String
     let classPath: String
     let method: String
@@ -399,6 +406,7 @@ struct AvailableProcess: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case name
         case classPath = "class_path"
         case method
@@ -416,6 +424,7 @@ struct AvailableProcessesResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [AvailableProcess]
     let count: Int
 
@@ -425,6 +434,7 @@ struct AvailableProcessesResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -436,6 +446,7 @@ struct BacktestComparisonData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let walletPublicId: String
     let runAPublicId: String
     let runBPublicId: String
@@ -449,6 +460,7 @@ struct BacktestComparisonData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case walletPublicId = "wallet_public_id"
         case runAPublicId = "run_a_public_id"
         case runBPublicId = "run_b_public_id"
@@ -464,6 +476,7 @@ struct BacktestComparisonDetailResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: BacktestComparisonDetailResponseData
 
     enum CodingKeys: String, CodingKey {
@@ -472,6 +485,7 @@ struct BacktestComparisonDetailResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -482,6 +496,7 @@ struct BacktestComparisonDetailResponseData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let comparison: BacktestComparisonData
     let runA: BacktestRunData
     let runB: BacktestRunData
@@ -496,6 +511,7 @@ struct BacktestComparisonDetailResponseData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case comparison
         case runA = "run_a"
         case runB = "run_b"
@@ -512,6 +528,7 @@ struct BacktestComparisonListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [BacktestComparisonData]
     let count: Int
 
@@ -521,6 +538,7 @@ struct BacktestComparisonListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -532,6 +550,7 @@ struct BacktestComparisonResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: BacktestComparisonData
 
     enum CodingKeys: String, CodingKey {
@@ -540,6 +559,7 @@ struct BacktestComparisonResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -566,6 +586,7 @@ struct BacktestEquityPointListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [BacktestEquityPointInline]
     let count: Int
 
@@ -575,6 +596,7 @@ struct BacktestEquityPointListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -586,6 +608,7 @@ struct BacktestEventData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let runPublicId: String
     let eventType: String
     let detail: [String: AnyCodable]?
@@ -596,6 +619,7 @@ struct BacktestEventData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case runPublicId = "run_public_id"
         case eventType = "event_type"
         case detail
@@ -608,6 +632,7 @@ struct BacktestEventListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [BacktestEventData]
     let count: Int
 
@@ -617,6 +642,7 @@ struct BacktestEventListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -672,6 +698,7 @@ struct BacktestRunData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let walletPublicId: String
     let strategyName: String
     let strategyParams: JsonObject?
@@ -697,6 +724,7 @@ struct BacktestRunData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case walletPublicId = "wallet_public_id"
         case strategyName = "strategy_name"
         case strategyParams = "strategy_params"
@@ -724,6 +752,7 @@ struct BacktestRunDetailData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let walletPublicId: String
     let strategyName: String
     let strategyParams: JsonObject?
@@ -750,6 +779,7 @@ struct BacktestRunDetailData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case walletPublicId = "wallet_public_id"
         case strategyName = "strategy_name"
         case strategyParams = "strategy_params"
@@ -778,6 +808,7 @@ struct BacktestRunDetailResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: BacktestRunDetailData
 
     enum CodingKeys: String, CodingKey {
@@ -786,6 +817,7 @@ struct BacktestRunDetailResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -796,6 +828,7 @@ struct BacktestRunListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [BacktestRunData]
     let count: Int
 
@@ -805,6 +838,7 @@ struct BacktestRunListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -816,6 +850,7 @@ struct BacktestRunResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: BacktestRunData
 
     enum CodingKeys: String, CodingKey {
@@ -824,6 +859,7 @@ struct BacktestRunResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -834,6 +870,7 @@ struct BacktestSignalData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let runPublicId: String
     let signalTime: Date
     let signalType: String
@@ -847,6 +884,7 @@ struct BacktestSignalData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case runPublicId = "run_public_id"
         case signalTime = "signal_time"
         case signalType = "signal_type"
@@ -862,6 +900,7 @@ struct BacktestSignalListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [BacktestSignalData]
     let count: Int
 
@@ -871,6 +910,7 @@ struct BacktestSignalListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -882,6 +922,7 @@ struct BacktestTradeData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let runPublicId: String
     let executedAt: Date
     let instrument: String
@@ -899,6 +940,7 @@ struct BacktestTradeData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case runPublicId = "run_public_id"
         case executedAt = "executed_at"
         case instrument
@@ -918,6 +960,7 @@ struct BacktestTradeListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [BacktestTradeData]
     let count: Int
 
@@ -927,6 +970,7 @@ struct BacktestTradeListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -938,6 +982,7 @@ struct ConfiguredProcess: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let name: String
     let enabled: Bool
     let running: Bool
@@ -959,6 +1004,7 @@ struct ConfiguredProcess: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case name
         case enabled
         case running
@@ -982,6 +1028,7 @@ struct ConfiguredProcessesResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [ConfiguredProcess]
     let count: Int
 
@@ -991,6 +1038,7 @@ struct ConfiguredProcessesResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -1018,6 +1066,7 @@ struct ContinuousCandleData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let openAt: Date
     let timeframe: String
     let open: Double
@@ -1036,6 +1085,7 @@ struct ContinuousCandleData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case openAt = "open_at"
         case timeframe
         case open
@@ -1056,6 +1106,7 @@ struct ContinuousCandleListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [ContinuousCandleData]
     let count: Int
 
@@ -1065,6 +1116,7 @@ struct ContinuousCandleListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -1076,6 +1128,7 @@ struct ContinuousSeriesPartialResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [ContinuousCandleData]
     let count: Int
     let failedRoll: RollPointDetail
@@ -1087,6 +1140,7 @@ struct ContinuousSeriesPartialResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
         case failedRoll = "failed_roll"
@@ -1100,6 +1154,7 @@ struct ContractData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let instrumentPublicId: String
     let nativeSymbol: String
     let exchange: String
@@ -1115,6 +1170,7 @@ struct ContractData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case instrumentPublicId = "instrument_public_id"
         case nativeSymbol = "native_symbol"
         case exchange
@@ -1132,6 +1188,7 @@ struct ContractListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [ContractData]
     let count: Int
 
@@ -1141,6 +1198,7 @@ struct ContractListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -1152,6 +1210,7 @@ struct CredentialListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [CredentialSummary]
     let count: Int
 
@@ -1161,6 +1220,7 @@ struct CredentialListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -1172,6 +1232,7 @@ struct CredentialResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: CredentialSummary
 
     enum CodingKeys: String, CodingKey {
@@ -1180,6 +1241,7 @@ struct CredentialResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -1190,6 +1252,7 @@ struct CredentialSummary: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let walletPublicId: String
     let exchange: String
     let credentialType: String
@@ -1201,6 +1264,7 @@ struct CredentialSummary: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case walletPublicId = "wallet_public_id"
         case exchange
         case credentialType = "credential_type"
@@ -1244,6 +1308,7 @@ struct DelegateCreatedResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: DelegateCreatedPayload
 
     enum CodingKeys: String, CodingKey {
@@ -1252,6 +1317,7 @@ struct DelegateCreatedResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -1262,6 +1328,7 @@ struct DelegateListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [DelegateRead]
     let count: Int
 
@@ -1271,6 +1338,7 @@ struct DelegateListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -1304,6 +1372,7 @@ struct DelegateResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: DelegateRead
 
     enum CodingKeys: String, CodingKey {
@@ -1312,6 +1381,7 @@ struct DelegateResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -1346,6 +1416,7 @@ struct DeviceAlertPrefInfo: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let devicePublicId: String
     let alertType: String
     let operatorPublicId: String?
@@ -1363,6 +1434,7 @@ struct DeviceAlertPrefInfo: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case devicePublicId = "device_public_id"
         case alertType = "alert_type"
         case operatorPublicId = "operator_public_id"
@@ -1382,6 +1454,7 @@ struct DeviceAlertPrefListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [DeviceAlertPrefInfo]
     let count: Int
 
@@ -1391,6 +1464,7 @@ struct DeviceAlertPrefListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -1402,6 +1476,7 @@ struct DeviceAlertPrefResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: DeviceAlertPrefInfo
 
     enum CodingKeys: String, CodingKey {
@@ -1410,6 +1485,7 @@ struct DeviceAlertPrefResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -1432,6 +1508,7 @@ struct ExchangeListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [String]
     let count: Int
 
@@ -1441,6 +1518,7 @@ struct ExchangeListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -1452,6 +1530,7 @@ struct ExecutionData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let tradeId: String?
     let exchangeOrderId: String?
     let clientOrderId: String
@@ -1477,6 +1556,7 @@ struct ExecutionData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case tradeId = "trade_id"
         case exchangeOrderId = "exchange_order_id"
         case clientOrderId = "client_order_id"
@@ -1504,6 +1584,7 @@ struct ExecutionListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [ExecutionData]
     let count: Int
 
@@ -1513,6 +1594,7 @@ struct ExecutionListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -1524,6 +1606,7 @@ struct ExecutionPlanData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let planType: String
     let status: String
     let instrumentPublicId: String
@@ -1548,6 +1631,7 @@ struct ExecutionPlanData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case planType = "plan_type"
         case status
         case instrumentPublicId = "instrument_public_id"
@@ -1574,6 +1658,7 @@ struct ExecutionPlanResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: ExecutionPlanData
 
     enum CodingKeys: String, CodingKey {
@@ -1582,6 +1667,7 @@ struct ExecutionPlanResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -1600,6 +1686,7 @@ struct FeatureFlagsResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: FeatureFlagsPayload
 
     enum CodingKeys: String, CodingKey {
@@ -1608,6 +1695,7 @@ struct FeatureFlagsResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -1618,6 +1706,7 @@ struct FrontMonthData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let instrumentPublicId: String
     let nativeSymbol: String
     let exchange: String
@@ -1631,6 +1720,7 @@ struct FrontMonthData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case instrumentPublicId = "instrument_public_id"
         case nativeSymbol = "native_symbol"
         case exchange
@@ -1646,6 +1736,7 @@ struct FrontMonthResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: FrontMonthData
 
     enum CodingKeys: String, CodingKey {
@@ -1654,6 +1745,7 @@ struct FrontMonthResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -1694,6 +1786,7 @@ struct HandoverScopeGrantResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: HandoverScopeGrantResult
 
     enum CodingKeys: String, CodingKey {
@@ -1702,6 +1795,7 @@ struct HandoverScopeGrantResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -1722,6 +1816,7 @@ struct HealthCheckData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let status: String
     let version: String
     let connections: ConnectionStats
@@ -1734,6 +1829,7 @@ struct HealthCheckData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case status
         case version
         case connections
@@ -1748,6 +1844,7 @@ struct HealthCheckResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: HealthCheckData
 
     enum CodingKeys: String, CodingKey {
@@ -1756,6 +1853,7 @@ struct HealthCheckResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -1770,6 +1868,7 @@ struct InstrumentDetailData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let instrumentPublicId: String
     let symbolPublicId: String
     let symbol: String
@@ -1786,6 +1885,7 @@ struct InstrumentDetailData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case instrumentPublicId = "instrument_public_id"
         case symbolPublicId = "symbol_public_id"
         case symbol
@@ -1804,6 +1904,7 @@ struct InstrumentDetailListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [InstrumentDetailData]
     let count: Int
 
@@ -1813,6 +1914,7 @@ struct InstrumentDetailListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -1824,6 +1926,7 @@ struct InstrumentListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [String]
     let count: Int
 
@@ -1833,6 +1936,7 @@ struct InstrumentListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -1847,6 +1951,7 @@ struct LoginData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let message: String
     let expiresIn: Int
     let user: UserProfile
@@ -1859,6 +1964,7 @@ struct LoginData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case message
         case expiresIn = "expires_in"
         case user
@@ -1873,6 +1979,7 @@ struct LoginResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: LoginData
 
     enum CodingKeys: String, CodingKey {
@@ -1881,6 +1988,7 @@ struct LoginResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -1891,6 +1999,7 @@ struct MessageResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: String
 
     enum CodingKeys: String, CodingKey {
@@ -1899,6 +2008,7 @@ struct MessageResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -1925,6 +2035,7 @@ struct NotificationDeviceInfo: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let userPublicId: String
     let deviceToken: String
     let deviceId: String
@@ -1941,6 +2052,7 @@ struct NotificationDeviceInfo: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case userPublicId = "user_public_id"
         case deviceToken = "device_token"
         case deviceId = "device_id"
@@ -1959,6 +2071,7 @@ struct NotificationDeviceListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [NotificationDeviceInfo]
     let count: Int
 
@@ -1968,6 +2081,7 @@ struct NotificationDeviceListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -1979,6 +2093,7 @@ struct NotificationDeviceResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: NotificationDeviceInfo
 
     enum CodingKeys: String, CodingKey {
@@ -1987,6 +2102,7 @@ struct NotificationDeviceResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -1997,6 +2113,7 @@ struct NotificationMetricsData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let deliverySuccessTotal: Int
     let deliveryFailedTotal: Int
     let delivery410UnregisteredTotal: Int
@@ -2009,6 +2126,7 @@ struct NotificationMetricsData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case deliverySuccessTotal = "delivery_success_total"
         case deliveryFailedTotal = "delivery_failed_total"
         case delivery410UnregisteredTotal = "delivery_410_unregistered_total"
@@ -2023,6 +2141,7 @@ struct NotificationMetricsResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: NotificationMetricsData
 
     enum CodingKeys: String, CodingKey {
@@ -2031,6 +2150,7 @@ struct NotificationMetricsResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -2041,6 +2161,7 @@ struct OperatorInfo: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let label: String
     let description: String?
 
@@ -2050,6 +2171,7 @@ struct OperatorInfo: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case label
         case description
     }
@@ -2061,6 +2183,7 @@ struct OperatorListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [OperatorInfo]
     let count: Int
 
@@ -2070,6 +2193,7 @@ struct OperatorListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -2081,6 +2205,7 @@ struct OrderData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let exchangeOrderId: String?
     let clientOrderId: String
     let instrument: String
@@ -2111,6 +2236,7 @@ struct OrderData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case exchangeOrderId = "exchange_order_id"
         case clientOrderId = "client_order_id"
         case instrument
@@ -2143,6 +2269,7 @@ struct OrderListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [OrderData]
     let count: Int
 
@@ -2152,6 +2279,7 @@ struct OrderListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -2163,6 +2291,7 @@ struct OrphanSweepResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: OrphanSweepResultData
 
     enum CodingKeys: String, CodingKey {
@@ -2171,6 +2300,7 @@ struct OrphanSweepResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -2181,6 +2311,7 @@ struct OrphanSweepResultData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let closedCount: Int
     let closedCycleIds: [String]
 
@@ -2190,6 +2321,7 @@ struct OrphanSweepResultData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case closedCount = "closed_count"
         case closedCycleIds = "closed_cycle_ids"
     }
@@ -2226,6 +2358,7 @@ struct PositionCycleData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let cyclePublicId: String
     let shardKey: String
     let instrumentPublicId: String
@@ -2244,6 +2377,7 @@ struct PositionCycleData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case cyclePublicId = "cycle_public_id"
         case shardKey = "shard_key"
         case instrumentPublicId = "instrument_public_id"
@@ -2264,6 +2398,7 @@ struct PositionCycleListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [PositionCycleData]
     let count: Int
 
@@ -2273,6 +2408,7 @@ struct PositionCycleListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -2284,6 +2420,7 @@ struct PositionData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let instrument: String
     let instrumentPublicId: String?
     let exchange: String
@@ -2301,6 +2438,7 @@ struct PositionData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case instrument
         case instrumentPublicId = "instrument_public_id"
         case exchange
@@ -2320,6 +2458,7 @@ struct PositionListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [PositionData]
     let count: Int
 
@@ -2329,6 +2468,7 @@ struct PositionListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -2345,6 +2485,7 @@ struct ProcessCreateData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let status: String
     let process: ProcessCreatedInfo
 
@@ -2354,6 +2495,7 @@ struct ProcessCreateData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case status
         case process
     }
@@ -2365,6 +2507,7 @@ struct ProcessCreateResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: ProcessCreateData
 
     enum CodingKeys: String, CodingKey {
@@ -2373,6 +2516,7 @@ struct ProcessCreateResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -2388,6 +2532,7 @@ struct ProcessRun: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let processName: String
     let status: String
     let role: String
@@ -2405,6 +2550,7 @@ struct ProcessRun: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case processName = "process_name"
         case status
         case role
@@ -2424,6 +2570,7 @@ struct ProcessRunsResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [ProcessRun]
     let count: Int
 
@@ -2433,6 +2580,7 @@ struct ProcessRunsResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -2444,6 +2592,7 @@ struct ProcessSchemaData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let name: String
     let description: String
     let classPath: String
@@ -2459,6 +2608,7 @@ struct ProcessSchemaData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case name
         case description
         case classPath = "class_path"
@@ -2476,6 +2626,7 @@ struct ProcessSchemaResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: ProcessSchemaData
 
     enum CodingKeys: String, CodingKey {
@@ -2484,6 +2635,7 @@ struct ProcessSchemaResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -2494,6 +2646,7 @@ struct ProcessStartData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let status: String
     let name: String
     let processPublicId: String?
@@ -2505,6 +2658,7 @@ struct ProcessStartData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case status
         case name
         case processPublicId = "process_public_id"
@@ -2518,6 +2672,7 @@ struct ProcessStartResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: ProcessStartData
 
     enum CodingKeys: String, CodingKey {
@@ -2526,6 +2681,7 @@ struct ProcessStartResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -2554,6 +2710,7 @@ struct ProcessStopData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let status: String
     let name: String
     let message: String?
@@ -2564,6 +2721,7 @@ struct ProcessStopData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case status
         case name
         case message
@@ -2576,6 +2734,7 @@ struct ProcessStopResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: ProcessStopData
 
     enum CodingKeys: String, CodingKey {
@@ -2584,6 +2743,7 @@ struct ProcessStopResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -2594,6 +2754,7 @@ struct ProcessSummaryData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let feeds: ProcessCategoryCount
     let strategies: ProcessCategoryCount
     let executors: ProcessCategoryCount
@@ -2605,6 +2766,7 @@ struct ProcessSummaryData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case feeds
         case strategies
         case executors
@@ -2618,6 +2780,7 @@ struct ProcessSummaryResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: ProcessSummaryData
 
     enum CodingKeys: String, CodingKey {
@@ -2626,6 +2789,7 @@ struct ProcessSummaryResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -2636,6 +2800,7 @@ struct PushBetaConfigRead: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let enabled: Bool
     let userPublicIds: [String]
 
@@ -2645,6 +2810,7 @@ struct PushBetaConfigRead: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case enabled
         case userPublicIds = "user_public_ids"
     }
@@ -2656,6 +2822,7 @@ struct PushBetaConfigResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: PushBetaConfigRead
 
     enum CodingKeys: String, CodingKey {
@@ -2664,6 +2831,7 @@ struct PushBetaConfigResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -2674,6 +2842,7 @@ struct RefreshData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let message: String
     let wsToken: String
     let wsTokenExp: Date
@@ -2688,6 +2857,7 @@ struct RefreshData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case message
         case wsToken = "ws_token"
         case wsTokenExp = "ws_token_exp"
@@ -2704,6 +2874,7 @@ struct RefreshResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: RefreshData
 
     enum CodingKeys: String, CodingKey {
@@ -2712,6 +2883,7 @@ struct RefreshResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -2738,6 +2910,7 @@ struct RegisterDeviceCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: RegisterDeviceBody
 
     enum CodingKeys: String, CodingKey {
@@ -2746,6 +2919,7 @@ struct RegisterDeviceCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -2756,6 +2930,7 @@ struct RestRateData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let exchanges: [String: RestRateExchangeStats]
 
     enum CodingKeys: String, CodingKey {
@@ -2764,6 +2939,7 @@ struct RestRateData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case exchanges
     }
 }
@@ -2790,6 +2966,7 @@ struct RestRateResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: RestRateData
 
     enum CodingKeys: String, CodingKey {
@@ -2798,6 +2975,7 @@ struct RestRateResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -2808,6 +2986,7 @@ struct RevokeScopeGrantResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: ScopeGrantInfo
 
     enum CodingKeys: String, CodingKey {
@@ -2816,6 +2995,7 @@ struct RevokeScopeGrantResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -2838,6 +3018,7 @@ struct ScopeGrantInfo: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let operatorPublicId: String
     let walletPublicId: String
     let grantedByUserPublicId: String
@@ -2853,6 +3034,7 @@ struct ScopeGrantInfo: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case operatorPublicId = "operator_public_id"
         case walletPublicId = "wallet_public_id"
         case grantedByUserPublicId = "granted_by_user_public_id"
@@ -2870,6 +3052,7 @@ struct ScopeGrantListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [ScopeGrantInfo]
     let count: Int
 
@@ -2879,6 +3062,7 @@ struct ScopeGrantListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -2890,6 +3074,7 @@ struct ScopeGrantResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: ScopeGrantInfo
 
     enum CodingKeys: String, CodingKey {
@@ -2898,6 +3083,7 @@ struct ScopeGrantResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -2908,6 +3094,7 @@ struct SettingCategoriesResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [String]
     let count: Int
 
@@ -2917,6 +3104,7 @@ struct SettingCategoriesResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -2928,6 +3116,7 @@ struct SettingListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [SettingRead]
     let count: Int
 
@@ -2937,6 +3126,7 @@ struct SettingListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -2948,6 +3138,7 @@ struct SettingRead: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let key: String
     let value: String
     let category: String
@@ -2961,6 +3152,7 @@ struct SettingRead: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case key
         case value
         case category
@@ -2976,6 +3168,7 @@ struct SettingResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: SettingRead
 
     enum CodingKeys: String, CodingKey {
@@ -2984,6 +3177,7 @@ struct SettingResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -2994,6 +3188,7 @@ struct SignalData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let instrument: String
     let exchange: String
     let side: String
@@ -3012,6 +3207,7 @@ struct SignalData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case instrument
         case exchange
         case side
@@ -3046,6 +3242,7 @@ struct SignalListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [SignalData]
     let count: Int
 
@@ -3055,6 +3252,7 @@ struct SignalListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -3066,6 +3264,7 @@ struct StrategyListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [StrategyProcess]
     let count: Int
 
@@ -3075,6 +3274,7 @@ struct StrategyListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -3086,6 +3286,7 @@ struct StrategyProcess: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let name: String
     let running: Bool
     let enabled: Bool
@@ -3097,6 +3298,7 @@ struct StrategyProcess: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case name
         case running
         case enabled
@@ -3146,6 +3348,7 @@ struct SystemStatusData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let trader: ProcessStatus
     let backtests: [String: ProcessStatus]
     let strategies: [StrategyStatusPayload]?
@@ -3156,6 +3359,7 @@ struct SystemStatusData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case trader
         case backtests
         case strategies
@@ -3168,6 +3372,7 @@ struct SystemStatusResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: SystemStatusData
 
     enum CodingKeys: String, CodingKey {
@@ -3176,6 +3381,7 @@ struct SystemStatusResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3238,6 +3444,7 @@ struct TrailingStopStateData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let planPublicId: String
     let status: String
     let trailingPct: Double
@@ -3253,6 +3460,7 @@ struct TrailingStopStateData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case planPublicId = "plan_public_id"
         case status
         case trailingPct = "trailing_pct"
@@ -3270,6 +3478,7 @@ struct TrailingStopStateResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: TrailingStopStateData
 
     enum CodingKeys: String, CodingKey {
@@ -3278,6 +3487,7 @@ struct TrailingStopStateResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3288,6 +3498,7 @@ struct UnderlyingAssetData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let ticker: String
     let name: String
     let assetClass: String
@@ -3300,6 +3511,7 @@ struct UnderlyingAssetData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case ticker
         case name
         case assetClass = "asset_class"
@@ -3314,6 +3526,7 @@ struct UnderlyingAssetListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [UnderlyingAssetData]
     let count: Int
 
@@ -3323,6 +3536,7 @@ struct UnderlyingAssetListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -3334,6 +3548,7 @@ struct UnderlyingInstrumentData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let instrumentPublicId: String
     let nativeSymbol: String
     let exchange: String
@@ -3347,6 +3562,7 @@ struct UnderlyingInstrumentData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case instrumentPublicId = "instrument_public_id"
         case nativeSymbol = "native_symbol"
         case exchange
@@ -3362,6 +3578,7 @@ struct UnderlyingInstrumentListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [UnderlyingInstrumentData]
     let count: Int
 
@@ -3371,6 +3588,7 @@ struct UnderlyingInstrumentListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -3382,6 +3600,7 @@ struct UpdateDevicePrefCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: DeviceAlertPrefBody
 
     enum CodingKeys: String, CodingKey {
@@ -3390,6 +3609,7 @@ struct UpdateDevicePrefCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3400,6 +3620,7 @@ struct UpdateUserAlertDefaultCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: UserAlertDefaultBody
 
     enum CodingKeys: String, CodingKey {
@@ -3408,6 +3629,7 @@ struct UpdateUserAlertDefaultCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3430,6 +3652,7 @@ struct UserAlertDefaultInfo: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let userPublicId: String
     let alertType: String
     let enabled: Bool
@@ -3441,6 +3664,7 @@ struct UserAlertDefaultInfo: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case userPublicId = "user_public_id"
         case alertType = "alert_type"
         case enabled
@@ -3454,6 +3678,7 @@ struct UserAlertDefaultListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [UserAlertDefaultInfo]
     let count: Int
 
@@ -3463,6 +3688,7 @@ struct UserAlertDefaultListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -3474,6 +3700,7 @@ struct UserAlertDefaultResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: UserAlertDefaultInfo
 
     enum CodingKeys: String, CodingKey {
@@ -3482,6 +3709,7 @@ struct UserAlertDefaultResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3492,6 +3720,7 @@ struct UserListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [UserProfile]
     let count: Int
 
@@ -3501,6 +3730,7 @@ struct UserListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -3512,6 +3742,7 @@ struct UserProfile: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let username: String
     let email: String?
     let role: UserRole
@@ -3527,6 +3758,7 @@ struct UserProfile: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case username
         case email
         case role
@@ -3544,6 +3776,7 @@ struct UserResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: UserProfile
 
     enum CodingKeys: String, CodingKey {
@@ -3552,6 +3785,7 @@ struct UserResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3570,6 +3804,7 @@ struct WalletInfo: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let label: String
     let description: String?
     let isPaper: Bool
@@ -3580,6 +3815,7 @@ struct WalletInfo: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case label
         case description
         case isPaper = "is_paper"
@@ -3592,6 +3828,7 @@ struct WalletListResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: [WalletInfo]
     let count: Int
 
@@ -3601,6 +3838,7 @@ struct WalletListResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
         case count
     }
@@ -3612,6 +3850,7 @@ struct WalletResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: WalletInfo
 
     enum CodingKeys: String, CodingKey {
@@ -3620,6 +3859,7 @@ struct WalletResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3652,6 +3892,7 @@ struct WsStatsData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let websocket: WebSocketStats
     let zmqBridge: ZmqBridgeStats
     let connections: ConnectionStats
@@ -3665,6 +3906,7 @@ struct WsStatsData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case websocket
         case zmqBridge = "zmq_bridge"
         case connections
@@ -3680,6 +3922,7 @@ struct WsStatsResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: WsStatsData
 
     enum CodingKeys: String, CodingKey {
@@ -3688,6 +3931,7 @@ struct WsStatsResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3730,6 +3974,7 @@ struct ZmqHealthData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let status: String
     let components: ZmqComponents
     let config: ZmqConfig
@@ -3743,6 +3988,7 @@ struct ZmqHealthData: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case status
         case components
         case config
@@ -3758,6 +4004,7 @@ struct ZmqHealthResponse: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: ZmqHealthData
 
     enum CodingKeys: String, CodingKey {
@@ -3766,6 +4013,7 @@ struct ZmqHealthResponse: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3776,6 +4024,7 @@ struct LoginRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: LoginBody
 
     enum CodingKeys: String, CodingKey {
@@ -3784,6 +4033,7 @@ struct LoginRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3806,6 +4056,7 @@ struct RefreshTokenRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: RefreshTokenPayload
 
     enum CodingKeys: String, CodingKey {
@@ -3814,6 +4065,7 @@ struct RefreshTokenRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3834,6 +4086,7 @@ struct CreateUserRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: CreateUserBody
 
     enum CodingKeys: String, CodingKey {
@@ -3842,6 +4095,7 @@ struct CreateUserRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3868,6 +4122,7 @@ struct UpdateUserRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: UpdateUserBody
 
     enum CodingKeys: String, CodingKey {
@@ -3876,6 +4131,7 @@ struct UpdateUserRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3898,6 +4154,7 @@ struct DeactivateUserRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: DeactivateUserBody
 
     enum CodingKeys: String, CodingKey {
@@ -3906,6 +4163,7 @@ struct DeactivateUserRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3920,6 +4178,7 @@ struct ChangePasswordRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: ChangePasswordBody
 
     enum CodingKeys: String, CodingKey {
@@ -3928,6 +4187,7 @@ struct ChangePasswordRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3948,6 +4208,7 @@ struct AdminResetPasswordRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: AdminResetPasswordBody
 
     enum CodingKeys: String, CodingKey {
@@ -3956,6 +4217,7 @@ struct AdminResetPasswordRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3974,6 +4236,7 @@ struct SettingUpdate: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: SettingUpdateBody
 
     enum CodingKeys: String, CodingKey {
@@ -3982,6 +4245,7 @@ struct SettingUpdate: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -3998,6 +4262,7 @@ struct UpdatePushBetaUsersCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: PushBetaUsersBody
 
     enum CodingKeys: String, CodingKey {
@@ -4006,6 +4271,7 @@ struct UpdatePushBetaUsersCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4026,6 +4292,7 @@ struct RemoveSettingRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: RemoveSettingBody
 
     enum CodingKeys: String, CodingKey {
@@ -4034,6 +4301,7 @@ struct RemoveSettingRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4047,6 +4315,7 @@ struct DelegateCreateRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: DelegateCreateBody
 
     enum CodingKeys: String, CodingKey {
@@ -4055,6 +4324,7 @@ struct DelegateCreateRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4079,6 +4349,7 @@ struct DelegateCapsUpdateRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: DelegateCapsUpdateBody
 
     enum CodingKeys: String, CodingKey {
@@ -4087,6 +4358,7 @@ struct DelegateCapsUpdateRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4101,6 +4373,7 @@ struct DelegateDeactivateRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: DelegateDeactivateBody
 
     enum CodingKeys: String, CodingKey {
@@ -4109,6 +4382,7 @@ struct DelegateDeactivateRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4128,6 +4402,7 @@ struct BacktestCreateCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: BacktestCreateBody
 
     enum CodingKeys: String, CodingKey {
@@ -4136,6 +4411,7 @@ struct BacktestCreateCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4176,6 +4452,7 @@ struct BacktestCompareRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: BacktestCompareBody
 
     enum CodingKeys: String, CodingKey {
@@ -4184,6 +4461,7 @@ struct BacktestCompareRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4210,6 +4488,7 @@ struct BacktestCancelCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: BacktestCancelBody
 
     enum CodingKeys: String, CodingKey {
@@ -4218,6 +4497,7 @@ struct BacktestCancelCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4232,6 +4512,7 @@ struct CreateCredentialCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: CreateCredentialBody
 
     enum CodingKeys: String, CodingKey {
@@ -4240,6 +4521,7 @@ struct CreateCredentialCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4264,6 +4546,7 @@ struct RotateCredentialCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: RotateCredentialBody
 
     enum CodingKeys: String, CodingKey {
@@ -4272,6 +4555,7 @@ struct RotateCredentialCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4292,6 +4576,7 @@ struct BracketCreateCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: BracketCreateBody
 
     enum CodingKeys: String, CodingKey {
@@ -4300,6 +4585,7 @@ struct BracketCreateCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4324,6 +4610,7 @@ struct BracketCancelCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: BracketCancelBody
 
     enum CodingKeys: String, CodingKey {
@@ -4332,6 +4619,7 @@ struct BracketCancelCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4346,6 +4634,7 @@ struct CreateOrderCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: CreateOrderBody
 
     enum CodingKeys: String, CodingKey {
@@ -4354,6 +4643,7 @@ struct CreateOrderCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4404,6 +4694,7 @@ struct CancelOrderCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: CancelOrderBody
 
     enum CodingKeys: String, CodingKey {
@@ -4412,6 +4703,7 @@ struct CancelOrderCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4426,6 +4718,7 @@ struct ProcessCreateRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: ProcessCreateBody
 
     enum CodingKeys: String, CodingKey {
@@ -4434,6 +4727,7 @@ struct ProcessCreateRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4453,6 +4747,7 @@ struct ProcessStartRequest: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: ProcessStartBody
 
     enum CodingKeys: String, CodingKey {
@@ -4461,6 +4756,7 @@ struct ProcessStartRequest: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4476,6 +4772,7 @@ struct CreateScopeGrantCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: CreateScopeGrantBody
 
     enum CodingKeys: String, CodingKey {
@@ -4484,6 +4781,7 @@ struct CreateScopeGrantCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4512,6 +4810,7 @@ struct HandoverScopeGrantCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: HandoverScopeGrantBody
 
     enum CodingKeys: String, CodingKey {
@@ -4520,6 +4819,7 @@ struct HandoverScopeGrantCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4542,6 +4842,7 @@ struct RevokeScopeGrantCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: RevokeScopeGrantBody
 
     enum CodingKeys: String, CodingKey {
@@ -4550,6 +4851,7 @@ struct RevokeScopeGrantCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4564,6 +4866,7 @@ struct TrailingStopCreateCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: TrailingStopCreateBody
 
     enum CodingKeys: String, CodingKey {
@@ -4572,6 +4875,7 @@ struct TrailingStopCreateCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4596,6 +4900,7 @@ struct TrailingStopCancelCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: TrailingStopCancelBody
 
     enum CodingKeys: String, CodingKey {
@@ -4604,6 +4909,7 @@ struct TrailingStopCancelCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }
@@ -4618,6 +4924,7 @@ struct CreateWalletCommand: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
+    let topic: String?
     let payload: CreateWalletBody
 
     enum CodingKeys: String, CodingKey {
@@ -4626,6 +4933,7 @@ struct CreateWalletCommand: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+        case topic
         case payload
     }
 }

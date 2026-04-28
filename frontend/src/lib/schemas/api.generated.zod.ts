@@ -12,6 +12,7 @@ export const BacktestComparisonDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     wallet_public_id: z.string(),
     run_a_public_id: z.string(),
     run_b_public_id: z.string(),
@@ -38,6 +39,7 @@ export const BacktestEventDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     run_public_id: z.string(),
     event_type: z.string(),
     detail: z.record(z.string(), z.unknown()).optional(),
@@ -51,6 +53,7 @@ export const BacktestSignalDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     run_public_id: z.string(),
     signal_time: z.iso.datetime(),
     signal_type: z.string(),
@@ -67,6 +70,7 @@ export const BacktestTradeDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     run_public_id: z.string(),
     executed_at: z.iso.datetime(),
     instrument: z.string(),
@@ -97,6 +101,7 @@ export const ContinuousCandleDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     open_at: z.iso.datetime(),
     timeframe: z.string(),
     open: z.number(),
@@ -118,6 +123,7 @@ export const ContractDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument_public_id: z.string(),
     native_symbol: z.string(),
     exchange: z.string(),
@@ -136,6 +142,7 @@ export const CredentialSummarySchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     wallet_public_id: z.string(),
     exchange: z.string(),
     credential_type: z.string(),
@@ -170,6 +177,7 @@ export const DeviceAlertPrefInfoSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     device_public_id: z.string(),
     alert_type: z.string(),
     operator_public_id: z.string().nullable().optional(),
@@ -198,6 +206,7 @@ export const ExchangeListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(z.string()),
     count: z.number().int(),
   })
@@ -210,6 +219,7 @@ export const ExecutionDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     trade_id: z.string().nullable().optional(),
     exchange_order_id: z.string().nullable().optional(),
     client_order_id: z.string(),
@@ -238,6 +248,7 @@ export const ExecutionPlanDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     plan_type: z.string(),
     status: z.string(),
     instrument_public_id: z.string(),
@@ -271,6 +282,7 @@ export const FrontMonthDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument_public_id: z.string(),
     native_symbol: z.string(),
     exchange: z.string(),
@@ -303,6 +315,7 @@ export const InstrumentDetailDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument_public_id: z.string(),
     symbol_public_id: z.string(),
     symbol: z.string(),
@@ -322,6 +335,7 @@ export const InstrumentListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(z.string()),
     count: z.number().int(),
   })
@@ -336,6 +350,7 @@ export const MessageResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.string(),
   })
   .strict()
@@ -357,6 +372,7 @@ export const NotificationDeviceInfoSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     user_public_id: z.string(),
     device_token: z.string(),
     device_id: z.string(),
@@ -376,6 +392,7 @@ export const NotificationMetricsDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     delivery_success_total: z.number().int(),
     delivery_failed_total: z.number().int(),
     delivery_410_unregistered_total: z.number().int(),
@@ -391,6 +408,7 @@ export const OperatorInfoSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     label: z.string(),
     description: z.string().nullable().optional(),
   })
@@ -403,6 +421,7 @@ export const OrderDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     exchange_order_id: z.string().nullable().optional(),
     client_order_id: z.string(),
     instrument: z.string(),
@@ -436,6 +455,7 @@ export const OrphanSweepResultDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     closed_count: z.number().int(),
     closed_cycle_ids: z.array(z.string()),
   })
@@ -460,6 +480,7 @@ export const PositionCycleDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     cycle_public_id: z.string(),
     shard_key: z.string(),
     instrument_public_id: z.string(),
@@ -481,6 +502,7 @@ export const PositionDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument: z.string(),
     instrument_public_id: z.string(),
     exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
@@ -515,6 +537,7 @@ export const ProcessStartDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     status: z.enum(['success', 'already_running', 'error']),
     name: z.string(),
     process_public_id: z.string().nullable().optional(),
@@ -540,6 +563,7 @@ export const ProcessStopDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     status: z.enum(['success', 'not_running', 'error']),
     name: z.string(),
     message: z.string().nullable().optional(),
@@ -553,6 +577,7 @@ export const PushBetaConfigReadSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     enabled: z.boolean(),
     user_public_ids: z.array(z.string()),
   })
@@ -595,6 +620,7 @@ export const ScopeGrantInfoSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     operator_public_id: z.string(),
     wallet_public_id: z.string(),
     granted_by_user_public_id: z.string(),
@@ -613,6 +639,7 @@ export const SettingCategoriesResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(z.string()),
     count: z.number().int(),
   })
@@ -625,6 +652,7 @@ export const SettingReadSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     key: z.string(),
     value: z.string(),
     category: z.string(),
@@ -641,6 +669,7 @@ export const SignalDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument: z.string(),
     exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
     side: z.enum(['buy', 'sell']),
@@ -671,6 +700,7 @@ export const StrategyProcessSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     name: z.string(),
     running: z.boolean(),
     enabled: z.boolean(),
@@ -722,6 +752,7 @@ export const TrailingStopStateDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     plan_public_id: z.string(),
     status: z.string(),
     trailing_pct: z.number(),
@@ -740,6 +771,7 @@ export const UnderlyingAssetDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     ticker: z.string(),
     name: z.string(),
     asset_class: z.string(),
@@ -755,6 +787,7 @@ export const UnderlyingInstrumentDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     instrument_public_id: z.string(),
     native_symbol: z.string(),
     exchange: z.string(),
@@ -785,6 +818,7 @@ export const UserAlertDefaultInfoSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     user_public_id: z.string(),
     alert_type: z.string(),
     enabled: z.boolean(),
@@ -811,6 +845,7 @@ export const WalletInfoSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     label: z.string(),
     description: z.string().nullable().optional(),
     is_paper: z.boolean(),
@@ -1048,6 +1083,7 @@ export const BacktestComparisonListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(BacktestComparisonDataSchema),
     count: z.number().int(),
   })
@@ -1060,6 +1096,7 @@ export const BacktestComparisonResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: BacktestComparisonDataSchema,
   })
   .strict()
@@ -1071,6 +1108,7 @@ export const BacktestEquityPointListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(BacktestEquityPointInlineSchema),
     count: z.number().int(),
   })
@@ -1083,6 +1121,7 @@ export const BacktestEventListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(BacktestEventDataSchema),
     count: z.number().int(),
   })
@@ -1095,6 +1134,7 @@ export const BacktestSignalListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(BacktestSignalDataSchema),
     count: z.number().int(),
   })
@@ -1107,6 +1147,7 @@ export const BacktestTradeListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(BacktestTradeDataSchema),
     count: z.number().int(),
   })
@@ -1119,6 +1160,7 @@ export const ContinuousCandleListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(ContinuousCandleDataSchema),
     count: z.number().int(),
   })
@@ -1131,6 +1173,7 @@ export const ContractListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(ContractDataSchema),
     count: z.number().int(),
   })
@@ -1143,6 +1186,7 @@ export const CredentialListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(CredentialSummarySchema),
     count: z.number().int(),
   })
@@ -1155,6 +1199,7 @@ export const CredentialResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: CredentialSummarySchema,
   })
   .strict()
@@ -1166,6 +1211,7 @@ export const UpdateDevicePrefCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: DeviceAlertPrefBodySchema,
   })
   .strict()
@@ -1177,6 +1223,7 @@ export const DeviceAlertPrefListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(DeviceAlertPrefInfoSchema),
     count: z.number().int(),
   })
@@ -1189,6 +1236,7 @@ export const DeviceAlertPrefResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: DeviceAlertPrefInfoSchema,
   })
   .strict()
@@ -1200,6 +1248,7 @@ export const ExecutionListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(ExecutionDataSchema),
     count: z.number().int(),
   })
@@ -1212,6 +1261,7 @@ export const ExecutionPlanResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: ExecutionPlanDataSchema,
   })
   .strict()
@@ -1223,6 +1273,7 @@ export const FeatureFlagsResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: FeatureFlagsPayloadSchema,
   })
   .strict()
@@ -1234,6 +1285,7 @@ export const FrontMonthResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: FrontMonthDataSchema,
   })
   .strict()
@@ -1252,6 +1304,7 @@ export const InstrumentDetailListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(InstrumentDetailDataSchema),
     count: z.number().int(),
   })
@@ -1266,6 +1319,7 @@ export const NotificationDeviceListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(NotificationDeviceInfoSchema),
     count: z.number().int(),
   })
@@ -1278,6 +1332,7 @@ export const NotificationDeviceResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: NotificationDeviceInfoSchema,
   })
   .strict()
@@ -1289,6 +1344,7 @@ export const NotificationMetricsResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: NotificationMetricsDataSchema,
   })
   .strict()
@@ -1300,6 +1356,7 @@ export const OperatorListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(OperatorInfoSchema),
     count: z.number().int(),
   })
@@ -1312,6 +1369,7 @@ export const OrderListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(OrderDataSchema),
     count: z.number().int(),
   })
@@ -1324,6 +1382,7 @@ export const OrphanSweepResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: OrphanSweepResultDataSchema,
   })
   .strict()
@@ -1342,6 +1401,7 @@ export const PositionCycleListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(PositionCycleDataSchema),
     count: z.number().int(),
   })
@@ -1354,6 +1414,7 @@ export const PositionListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(PositionDataSchema),
     count: z.number().int(),
   })
@@ -1366,6 +1427,7 @@ export const ProcessSummaryDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     feeds: ProcessCategoryCountSchema,
     strategies: ProcessCategoryCountSchema,
     executors: ProcessCategoryCountSchema,
@@ -1380,6 +1442,7 @@ export const ProcessCreateDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     status: z.literal('created'),
     process: ProcessCreatedInfoSchema,
   })
@@ -1392,6 +1455,7 @@ export const ProcessStartResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: ProcessStartDataSchema,
   })
   .strict()
@@ -1403,6 +1467,7 @@ export const ProcessStopResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: ProcessStopDataSchema,
   })
   .strict()
@@ -1414,6 +1479,7 @@ export const PushBetaConfigResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: PushBetaConfigReadSchema,
   })
   .strict()
@@ -1425,6 +1491,7 @@ export const RegisterDeviceCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: RegisterDeviceBodySchema,
   })
   .strict()
@@ -1436,6 +1503,7 @@ export const RestRateDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     exchanges: z.record(z.string(), RestRateExchangeStatsSchema),
   })
   .strict()
@@ -1447,6 +1515,7 @@ export const ContinuousSeriesPartialResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(ContinuousCandleDataSchema),
     count: z.number().int(),
     failed_roll: RollPointDetailSchema,
@@ -1468,6 +1537,7 @@ export const RevokeScopeGrantResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: ScopeGrantInfoSchema,
   })
   .strict()
@@ -1479,6 +1549,7 @@ export const ScopeGrantListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(ScopeGrantInfoSchema),
     count: z.number().int(),
   })
@@ -1491,6 +1562,7 @@ export const ScopeGrantResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: ScopeGrantInfoSchema,
   })
   .strict()
@@ -1502,6 +1574,7 @@ export const SettingListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(SettingReadSchema),
     count: z.number().int(),
   })
@@ -1514,6 +1587,7 @@ export const SettingResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: SettingReadSchema,
   })
   .strict()
@@ -1525,6 +1599,7 @@ export const SignalListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(SignalDataSchema),
     count: z.number().int(),
   })
@@ -1537,6 +1612,7 @@ export const StrategyListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(StrategyProcessSchema),
     count: z.number().int(),
   })
@@ -1549,6 +1625,7 @@ export const TrailingStopStateResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: TrailingStopStateDataSchema,
   })
   .strict()
@@ -1560,6 +1637,7 @@ export const UnderlyingAssetListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(UnderlyingAssetDataSchema),
     count: z.number().int(),
   })
@@ -1572,6 +1650,7 @@ export const UnderlyingInstrumentListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(UnderlyingInstrumentDataSchema),
     count: z.number().int(),
   })
@@ -1584,6 +1663,7 @@ export const UpdateUserAlertDefaultCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: UserAlertDefaultBodySchema,
   })
   .strict()
@@ -1595,6 +1675,7 @@ export const UserAlertDefaultListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(UserAlertDefaultInfoSchema),
     count: z.number().int(),
   })
@@ -1607,6 +1688,7 @@ export const UserAlertDefaultResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: UserAlertDefaultInfoSchema,
   })
   .strict()
@@ -1618,6 +1700,7 @@ export const UserProfileSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     username: z.string(),
     email: z.string().nullable().optional(),
     role: UserRoleSchema,
@@ -1660,6 +1743,7 @@ export const WalletListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(WalletInfoSchema),
     count: z.number().int(),
   })
@@ -1672,6 +1756,7 @@ export const WalletResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: WalletInfoSchema,
   })
   .strict()
@@ -1683,6 +1768,7 @@ export const WsStatsDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     websocket: WebSocketStatsSchema,
     zmq_bridge: ZmqBridgeStatsSchema,
     connections: ConnectionStatsSchema,
@@ -1699,6 +1785,7 @@ export const ZmqHealthDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     status: z.enum(['healthy', 'warning', 'error']),
     components: ZmqComponentsSchema,
     config: ZmqConfigSchema,
@@ -1715,6 +1802,7 @@ export const LoginRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: LoginBodySchema,
   })
   .strict()
@@ -1726,6 +1814,7 @@ export const RefreshTokenRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: RefreshTokenPayloadSchema,
   })
   .strict()
@@ -1737,6 +1826,7 @@ export const DeactivateUserRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: DeactivateUserBodySchema,
   })
   .strict()
@@ -1748,6 +1838,7 @@ export const ChangePasswordRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: ChangePasswordBodySchema,
   })
   .strict()
@@ -1759,6 +1850,7 @@ export const AdminResetPasswordRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: AdminResetPasswordBodySchema,
   })
   .strict()
@@ -1770,6 +1862,7 @@ export const SettingUpdateSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: SettingUpdateBodySchema,
   })
   .strict()
@@ -1781,6 +1874,7 @@ export const UpdatePushBetaUsersCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: PushBetaUsersBodySchema,
   })
   .strict()
@@ -1792,6 +1886,7 @@ export const RemoveSettingRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: RemoveSettingBodySchema,
   })
   .strict()
@@ -1803,6 +1898,7 @@ export const DelegateDeactivateRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: DelegateDeactivateBodySchema,
   })
   .strict()
@@ -1814,6 +1910,7 @@ export const BacktestCompareRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: BacktestCompareBodySchema,
   })
   .strict()
@@ -1825,6 +1922,7 @@ export const BacktestCancelCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: BacktestCancelBodySchema,
   })
   .strict()
@@ -1836,6 +1934,7 @@ export const CreateCredentialCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: CreateCredentialBodySchema,
   })
   .strict()
@@ -1847,6 +1946,7 @@ export const RotateCredentialCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: RotateCredentialBodySchema,
   })
   .strict()
@@ -1858,6 +1958,7 @@ export const BracketCreateCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: BracketCreateBodySchema,
   })
   .strict()
@@ -1869,6 +1970,7 @@ export const BracketCancelCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: BracketCancelBodySchema,
   })
   .strict()
@@ -1880,6 +1982,7 @@ export const CreateOrderCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: CreateOrderBodySchema,
   })
   .strict()
@@ -1891,6 +1994,7 @@ export const CancelOrderCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: CancelOrderBodySchema,
   })
   .strict()
@@ -1902,6 +2006,7 @@ export const CreateScopeGrantCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: CreateScopeGrantBodySchema,
   })
   .strict()
@@ -1913,6 +2018,7 @@ export const HandoverScopeGrantCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: HandoverScopeGrantBodySchema,
   })
   .strict()
@@ -1924,6 +2030,7 @@ export const RevokeScopeGrantCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: RevokeScopeGrantBodySchema,
   })
   .strict()
@@ -1935,6 +2042,7 @@ export const TrailingStopCreateCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: TrailingStopCreateBodySchema,
   })
   .strict()
@@ -1946,6 +2054,7 @@ export const TrailingStopCancelCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: TrailingStopCancelBodySchema,
   })
   .strict()
@@ -1957,6 +2066,7 @@ export const CreateWalletCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: CreateWalletBodySchema,
   })
   .strict()
@@ -1968,6 +2078,7 @@ export const HealthCheckDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     status: z.enum(['healthy', 'warning', 'error']),
     version: z.string(),
     connections: ConnectionStatsSchema,
@@ -1985,6 +2096,7 @@ export const ProcessSummaryResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: ProcessSummaryDataSchema,
   })
   .strict()
@@ -1996,6 +2108,7 @@ export const ProcessCreateResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: ProcessCreateDataSchema,
   })
   .strict()
@@ -2007,6 +2120,7 @@ export const RestRateResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: RestRateDataSchema,
   })
   .strict()
@@ -2018,6 +2132,7 @@ export const HandoverScopeGrantResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: HandoverScopeGrantResultSchema,
   })
   .strict()
@@ -2029,6 +2144,7 @@ export const LoginDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     message: z.string(),
     expires_in: z.number().int(),
     user: UserProfileSchema,
@@ -2044,6 +2160,7 @@ export const RefreshDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     message: z.string(),
     ws_token: z.string(),
     ws_token_exp: z.iso.datetime(),
@@ -2061,6 +2178,7 @@ export const UserListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(UserProfileSchema),
     count: z.number().int(),
   })
@@ -2073,6 +2191,7 @@ export const UserResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: UserProfileSchema,
   })
   .strict()
@@ -2084,6 +2203,7 @@ export const CreateUserRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: CreateUserBodySchema,
   })
   .strict()
@@ -2095,6 +2215,7 @@ export const UpdateUserRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: UpdateUserBodySchema,
   })
   .strict()
@@ -2106,6 +2227,7 @@ export const WsStatsResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: WsStatsDataSchema,
   })
   .strict()
@@ -2117,6 +2239,7 @@ export const ZmqHealthResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: ZmqHealthDataSchema,
   })
   .strict()
@@ -2128,6 +2251,7 @@ export const HealthCheckResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: HealthCheckDataSchema,
   })
   .strict()
@@ -2148,6 +2272,7 @@ export const AlertEventInfoSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     user_public_id: z.string(),
     operator_public_id: z.string().nullable().optional(),
     wallet_public_id: z.string().nullable().optional(),
@@ -2170,6 +2295,7 @@ export const AvailableProcessSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     name: z.string(),
     class_path: z.string(),
     method: z.string(),
@@ -2212,6 +2338,7 @@ export const BacktestRunDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     wallet_public_id: z.string(),
     strategy_name: z.string(),
     strategy_params: z.record(z.string(), z.any()),
@@ -2240,6 +2367,7 @@ export const ConfiguredProcessSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     name: z.string(),
     enabled: z.boolean(),
     running: z.boolean(),
@@ -2273,6 +2401,7 @@ export const ProcessRunSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     process_name: z.string(),
     status: z.enum(['running', 'succeeded', 'failed', 'cancelled']),
     role: z.enum(['core', 'task', 'strategy', 'backtest']),
@@ -2293,6 +2422,7 @@ export const ProcessSchemaDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     name: z.string(),
     description: z.string(),
     class_path: z.string(),
@@ -2361,6 +2491,7 @@ export const LoginResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: LoginDataSchema,
   })
   .strict()
@@ -2372,6 +2503,7 @@ export const RefreshResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: RefreshDataSchema,
   })
   .strict()
@@ -2383,6 +2515,7 @@ export const AlertEventResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: AlertEventInfoSchema,
   })
   .strict()
@@ -2394,6 +2527,7 @@ export const AlertHistoryResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(AlertEventInfoSchema),
     count: z.number().int(),
     next_cursor: z.string().nullable().optional(),
@@ -2407,6 +2541,7 @@ export const AvailableProcessesResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(AvailableProcessSchema),
     count: z.number().int(),
   })
@@ -2419,6 +2554,7 @@ export const BacktestRunDetailDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     wallet_public_id: z.string(),
     strategy_name: z.string(),
     strategy_params: z.record(z.string(), z.any()),
@@ -2448,6 +2584,7 @@ export const BacktestComparisonDetailResponseDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     comparison: BacktestComparisonDataSchema,
     run_a: BacktestRunDataSchema,
     run_b: BacktestRunDataSchema,
@@ -2465,6 +2602,7 @@ export const BacktestRunListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(BacktestRunDataSchema),
     count: z.number().int(),
   })
@@ -2477,6 +2615,7 @@ export const BacktestRunResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: BacktestRunDataSchema,
   })
   .strict()
@@ -2488,6 +2627,7 @@ export const ConfiguredProcessesResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(ConfiguredProcessSchema),
     count: z.number().int(),
   })
@@ -2528,6 +2668,7 @@ export const ProcessRunsResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(ProcessRunSchema),
     count: z.number().int(),
   })
@@ -2540,6 +2681,7 @@ export const ProcessSchemaResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: ProcessSchemaDataSchema,
   })
   .strict()
@@ -2551,6 +2693,7 @@ export const SystemStatusDataSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     trader: ProcessStatusSchema,
     backtests: z.record(z.string(), ProcessStatusSchema),
     strategies: z.array(StrategyStatusPayloadSchema),
@@ -2564,6 +2707,7 @@ export const BacktestCreateCommandSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: BacktestCreateBodySchema,
   })
   .strict()
@@ -2575,6 +2719,7 @@ export const ProcessCreateRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: ProcessCreateBodySchema,
   })
   .strict()
@@ -2586,6 +2731,7 @@ export const ProcessStartRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: ProcessStartBodySchema,
   })
   .strict()
@@ -2597,6 +2743,7 @@ export const BacktestRunDetailResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: BacktestRunDetailDataSchema,
   })
   .strict()
@@ -2608,6 +2755,7 @@ export const BacktestComparisonDetailResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: BacktestComparisonDetailResponseDataSchema,
   })
   .strict()
@@ -2629,6 +2777,7 @@ export const DelegateListResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: z.array(DelegateReadSchema),
     count: z.number().int(),
   })
@@ -2641,6 +2790,7 @@ export const DelegateResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: DelegateReadSchema,
   })
   .strict()
@@ -2652,6 +2802,7 @@ export const DelegateCreateRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: DelegateCreateBodySchema,
   })
   .strict()
@@ -2663,6 +2814,7 @@ export const DelegateCapsUpdateRequestSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: DelegateCapsUpdateBodySchema,
   })
   .strict()
@@ -2674,6 +2826,7 @@ export const SystemStatusResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: SystemStatusDataSchema,
   })
   .strict()
@@ -2685,6 +2838,7 @@ export const DelegateCreatedResponseSchema = z
     public_id: z.string(),
     timestamp: z.iso.datetime(),
     session_id: z.string(),
+    topic: z.string().nullable().optional(),
     payload: DelegateCreatedPayloadSchema,
   })
   .strict()
