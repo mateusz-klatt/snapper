@@ -1765,3 +1765,412 @@ class TestCancelOrderTool:
         assert isinstance(plan_payload["timestamp"], str) and "T" in plan_payload["timestamp"]
         assert isinstance(plan_payload["created_at"], str)
         assert isinstance(plan_payload["cancel_requested_at"], str)
+
+
+_SIGNAL_ROW_FIXTURE: dict[str, Any] = {
+    "public_id": "sig-1",
+    "timestamp": datetime(2026, 4, 28, 10, 0, 0, tzinfo=UTC),
+    "session_id": "s",
+    "sequence_id": 5,
+    "instrument": "BTC-USD",
+    "exchange": "kraken",
+    "side": "buy",
+    "strength": 0.75,
+    "reason": "rsi_oversold",
+    "strategy_name": "mean_reversion",
+    "price": 50000.0,
+    "fired_at": datetime(2026, 4, 28, 9, 59, 30, tzinfo=UTC),
+    "wallet_public_id": "wallet-1",
+    "operator_public_id": "op-1",
+}
+
+
+_CANDLE_ROW_FIXTURE: dict[str, Any] = {
+    "open_at": datetime(2026, 4, 28, 9, 0, 0, tzinfo=UTC),
+    "timeframe": "1h",
+    "open": 49000.0,
+    "high": 50500.0,
+    "low": 48800.0,
+    "close": 50000.0,
+    "volume": 12.5,
+    "vwap": 49600.0,
+    "trades": 314,
+    "public_id": "candle-1",
+    "timestamp": datetime(2026, 4, 28, 10, 0, 0, tzinfo=UTC),
+    "session_id": "s",
+    "sequence_id": 6,
+}
+
+
+class TestGetOhlcvTool:
+    """Plan B Phase 4 — coverage for the ``get_ohlcv`` MCP tool."""
+
+    @staticmethod
+    def _build_repo_with_candles(rows: list[dict[str, Any]]) -> Any:
+        repo = AsyncMock()
+        repo.get_candles = AsyncMock(return_value=rows)
+        return repo
+
+    @pytest.mark.asyncio
+    async def test_latest_as_of_returns_descending_envelope(self) -> None:
+        """Both since/until omitted → latest-as-of mode; envelope shape."""
+        candle = _CANDLE_ROW_FIXTURE.copy()
+        repo = self._build_repo_with_candles([candle])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_ohlcv",
+            {"exchange": "kraken", "instrument": "BTC-USD", "timeframe": "1h"},
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is True
+        assert envelope["details"]["mode"] == "latest_as_of"
+        candles = envelope["details"]["candles"]
+        assert len(candles) == 1
+        row = candles[0]
+        assert isinstance(row, list) and len(row) == 6
+        assert row[0] == candle["open_at"].isoformat()
+        repo.get_candles.assert_awaited_once()
+        kwargs = repo.get_candles.await_args.kwargs
+        assert kwargs["start"] is None and kwargs["end"] is None
+        assert kwargs["order"] == "desc"
+        assert kwargs["limit"] == 200
+
+    @pytest.mark.asyncio
+    async def test_range_mode_uses_ascending_order(self) -> None:
+        """Both since/until supplied → range mode; ASC order, parsed bounds."""
+        candle = _CANDLE_ROW_FIXTURE.copy()
+        repo = self._build_repo_with_candles([candle])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_ohlcv",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "timeframe": "1h",
+                "since": "2026-04-28T08:00:00Z",
+                "until": "2026-04-28T12:00:00Z",
+            },
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is True
+        assert envelope["details"]["mode"] == "range"
+        kwargs = repo.get_candles.await_args.kwargs
+        assert kwargs["start"] == datetime(2026, 4, 28, 8, 0, 0, tzinfo=UTC)
+        assert kwargs["end"] == datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
+        assert kwargs["order"] == "asc"
+
+    @pytest.mark.asyncio
+    async def test_invalid_timeframe_returns_invalid_argument(self) -> None:
+        """Unknown timeframe → invalid_argument with allowed list in details."""
+        repo = self._build_repo_with_candles([])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_ohlcv",
+            {"exchange": "kraken", "instrument": "BTC-USD", "timeframe": "30s"},
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "invalid_argument"
+        assert envelope["details"]["timeframe"] == "30s"
+        assert "1m" in envelope["details"]["allowed_timeframes"]
+        repo.get_candles.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_partial_range_returns_invalid_argument(self) -> None:
+        """Only one of since/until set → invalid_argument."""
+        repo = self._build_repo_with_candles([])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_ohlcv",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "timeframe": "1h",
+                "since": "2026-04-28T08:00:00Z",
+            },
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "invalid_argument"
+        repo.get_candles.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unix_integer_string_since_rejected(self) -> None:
+        """Bare Unix-integer since → invalid_argument (non-ISO 8601)."""
+        repo = self._build_repo_with_candles([])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_ohlcv",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "timeframe": "1h",
+                "since": "1745000000",
+                "until": "1745020000",
+            },
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "invalid_argument"
+        repo.get_candles.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_negative_limit_returns_invalid_argument(self) -> None:
+        """Negative limit → invalid_argument."""
+        repo = self._build_repo_with_candles([])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "get_ohlcv",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "timeframe": "1h",
+                "limit": -1,
+            },
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "invalid_argument"
+        repo.get_candles.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_limit_above_cap_is_clamped(self) -> None:
+        """limit=5000 is clamped to _OHLCV_LIMIT_CAP=1000."""
+        repo = self._build_repo_with_candles([])
+        server = _build_server(repository=repo)
+        await server._tool_manager.call_tool(
+            "get_ohlcv",
+            {
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "timeframe": "1h",
+                "limit": 5000,
+            },
+        )
+        kwargs = repo.get_candles.await_args.kwargs
+        assert kwargs["limit"] == 1000
+
+    @pytest.mark.asyncio
+    async def test_role_without_read_market_data_returns_permission_denied(self) -> None:
+        """VIEWER without READ_MARKET_DATA → permission_denied envelope."""
+        repo = self._build_repo_with_candles([])
+        saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
+        ROLE_PERMISSIONS[UserRole.VIEWER] = set()
+        server = FastMCP("test")
+        register_mcp_tools(
+            server,
+            repository_getter=lambda: repo,
+            caps_enforcer_getter=lambda: None,
+            claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
+        )
+        try:
+            result = await server._tool_manager.call_tool(
+                "get_ohlcv",
+                {"exchange": "kraken", "instrument": "BTC-USD", "timeframe": "1h"},
+            )
+            envelope = _decode_envelope(result)
+            assert envelope["success"] is False
+            assert envelope["error_code"] == "permission_denied"
+        finally:
+            if saved is not None:
+                ROLE_PERMISSIONS[UserRole.VIEWER] = saved
+
+    @pytest.mark.asyncio
+    async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
+        """Pre-lifespan repository → service_unavailable envelope."""
+        server = _build_server(repository=None)
+        result = await server._tool_manager.call_tool(
+            "get_ohlcv",
+            {"exchange": "kraken", "instrument": "BTC-USD", "timeframe": "1h"},
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "service_unavailable"
+
+
+class TestListRecentSignalsTool:
+    """Plan B Phase 4 — coverage for the ``list_recent_signals`` MCP tool."""
+
+    @staticmethod
+    def _build_repo_with_signals(
+        rows: list[dict[str, Any]],
+        accessible_wallets: list[str] | None = None,
+    ) -> Any:
+        repo = AsyncMock()
+        repo.get_signals = AsyncMock(return_value=rows)
+        if accessible_wallets is None:
+            accessible_wallets = ["wallet-1"]
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": w} for w in accessible_wallets]
+        )
+        return repo
+
+    @pytest.mark.asyncio
+    async def test_happy_path_returns_signals_envelope(self) -> None:
+        """Valid AI_DELEGATE call → signals list + count."""
+        signal = _SIGNAL_ROW_FIXTURE.copy()
+        repo = self._build_repo_with_signals([signal])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is True
+        assert envelope["details"]["count"] == 1
+        assert envelope["details"]["signals"][0]["public_id"] == signal["public_id"]
+
+    @pytest.mark.asyncio
+    async def test_serialised_datetime_fields_are_iso_strings(self) -> None:
+        """Plan B §5 — datetimes surface as ISO-8601 strings."""
+        signal = _SIGNAL_ROW_FIXTURE.copy()
+        repo = self._build_repo_with_signals([signal])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
+        )
+        envelope = _decode_envelope(result)
+        sig = envelope["details"]["signals"][0]
+        assert isinstance(sig["fired_at"], str) and "T" in sig["fired_at"]
+        assert isinstance(sig["timestamp"], str) and "T" in sig["timestamp"]
+
+    @pytest.mark.asyncio
+    async def test_missing_since_returns_invalid_argument(self) -> None:
+        """Empty since → invalid_argument (since is REQUIRED)."""
+        repo = self._build_repo_with_signals([])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool("list_recent_signals", {"since": ""})
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "invalid_argument"
+        repo.get_signals.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_iso_since_returns_invalid_argument(self) -> None:
+        """Unparseable since → invalid_argument."""
+        repo = self._build_repo_with_signals([])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool("list_recent_signals", {"since": "yesterday"})
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "invalid_argument"
+        repo.get_signals.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_negative_limit_returns_invalid_argument(self) -> None:
+        """Negative limit → invalid_argument."""
+        repo = self._build_repo_with_signals([])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "list_recent_signals",
+            {"since": "2026-04-28T00:00:00Z", "limit": -5},
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "invalid_argument"
+        repo.get_signals.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_wallet_outside_scope_returns_anti_enumeration(self) -> None:
+        """Inaccessible wallet → signal_not_found (anti-enumeration)."""
+        repo = self._build_repo_with_signals([], accessible_wallets=["wallet-1"])
+        server = _build_server(repository=repo)
+        result = await server._tool_manager.call_tool(
+            "list_recent_signals",
+            {"since": "2026-04-28T00:00:00Z", "wallet_public_id": "wallet-99"},
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "signal_not_found"
+        repo.get_signals.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_role_without_read_signals_returns_permission_denied(self) -> None:
+        """VIEWER without READ_SIGNALS → permission_denied envelope."""
+        repo = self._build_repo_with_signals([])
+        saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
+        ROLE_PERMISSIONS[UserRole.VIEWER] = set()
+        server = FastMCP("test")
+        register_mcp_tools(
+            server,
+            repository_getter=lambda: repo,
+            caps_enforcer_getter=lambda: None,
+            claims_getter=lambda: _make_claims(role=UserRole.VIEWER),
+        )
+        try:
+            result = await server._tool_manager.call_tool(
+                "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
+            )
+            envelope = _decode_envelope(result)
+            assert envelope["success"] is False
+            assert envelope["error_code"] == "permission_denied"
+        finally:
+            if saved is not None:
+                ROLE_PERMISSIONS[UserRole.VIEWER] = saved
+
+    @pytest.mark.asyncio
+    async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
+        """Pre-lifespan repository → service_unavailable envelope."""
+        server = _build_server(repository=None)
+        result = await server._tool_manager.call_tool(
+            "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
+        )
+        envelope = _decode_envelope(result)
+        assert envelope["success"] is False
+        assert envelope["error_code"] == "service_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_admin_with_no_wallet_passes_none_filter(self) -> None:
+        """ADMIN with no wallet hint → repo gets ``wallet_public_ids=None``."""
+        repo = AsyncMock()
+        repo.get_signals = AsyncMock(return_value=[])
+        admin_claims = _make_claims(role=UserRole.ADMIN, user_public_id="admin-1")
+        server = FastMCP("test")
+        register_mcp_tools(
+            server,
+            repository_getter=lambda: repo,
+            caps_enforcer_getter=lambda: None,
+            claims_getter=lambda: admin_claims,
+        )
+        await server._tool_manager.call_tool(
+            "list_recent_signals", {"since": "2026-04-28T00:00:00Z"}
+        )
+        kwargs = repo.get_signals.await_args.kwargs
+        assert kwargs["wallet_public_ids"] is None
+        assert kwargs["limit"] == 50
+
+    @pytest.mark.asyncio
+    async def test_limit_above_cap_is_clamped(self) -> None:
+        """limit=500 is clamped to _LIST_SIGNALS_LIMIT_CAP=200."""
+        repo = self._build_repo_with_signals([])
+        server = _build_server(repository=repo)
+        await server._tool_manager.call_tool(
+            "list_recent_signals",
+            {"since": "2026-04-28T00:00:00Z", "limit": 500},
+        )
+        kwargs = repo.get_signals.await_args.kwargs
+        assert kwargs["limit"] == 200
+
+
+class TestParseIso8601UtcHelper:
+    """Direct unit coverage for the ``_parse_iso8601_utc`` helper."""
+
+    def test_z_suffix_parses_as_utc(self) -> None:
+        """``"...Z"`` is normalised to ``+00:00`` before parsing."""
+        from snapper.mcp.tools import _parse_iso8601_utc
+
+        parsed = _parse_iso8601_utc("2026-04-28T10:00:00Z")
+        assert parsed == datetime(2026, 4, 28, 10, 0, 0, tzinfo=UTC)
+
+    def test_explicit_offset_preserved(self) -> None:
+        """``"+00:00"`` round-trips losslessly."""
+        from snapper.mcp.tools import _parse_iso8601_utc
+
+        parsed = _parse_iso8601_utc("2026-04-28T10:00:00+00:00")
+        assert parsed == datetime(2026, 4, 28, 10, 0, 0, tzinfo=UTC)
+
+    def test_garbage_raises_value_error(self) -> None:
+        """Unparseable input raises ``ValueError``."""
+        from snapper.mcp.tools import _parse_iso8601_utc
+
+        with pytest.raises(ValueError):
+            _parse_iso8601_utc("yesterday")

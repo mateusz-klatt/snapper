@@ -62,11 +62,13 @@ from snapper.core.types import AiReviewDecisionEnum
 from snapper.core.types import OrderStatusEnum
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import Repository
+from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import PositionCycleRow
 from snapper.data.repository_types import PositionRow
+from snapper.data.repository_types import SignalRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.mcp.auth import ensure_operator_in_claims
 from snapper.mcp.auth import validate_user_wallet_scope
@@ -204,7 +206,34 @@ def _get_repository_or_raise(repository_getter: Callable[[], Repository | None])
 
 
 _LIST_ORDERS_LIMIT_CAP = 200
+_LIST_SIGNALS_LIMIT_CAP = 200
+_OHLCV_LIMIT_CAP = 1000
 _CANCEL_IDEMPOTENCY_KEY_MAX = 64
+_VALID_OHLCV_TIMEFRAMES: frozenset[str] = frozenset({"1m", "5m", "15m", "1h", "4h", "1d"})
+
+
+def _parse_iso8601_utc(value: str) -> datetime:
+    """Parse an ISO-8601 UTC timestamp string into a timezone-aware datetime.
+
+    Accepts canonical UTC suffixes (``"Z"`` or ``"+00:00"``) as the
+    Snapper backend's existing public-OSS bridge emits. Bare Unix
+    integers (e.g. ``"1745000000"``) are rejected — callers must
+    supply ISO-8601 explicitly so the wire contract stays stable.
+
+    Args:
+        value: Caller-supplied timestamp string. The empty string is
+            rejected to keep the malformed-input branch consistent
+            with the broader Plan A Q14 envelope semantics.
+
+    Returns:
+        Timezone-aware :class:`datetime` parsed from ``value``.
+
+    Raises:
+        ValueError: if ``value`` cannot be parsed as ISO-8601 (caught
+            by the calling tool wrapper and surfaced as
+            ``invalid_argument``).
+    """
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def _envelope_for_permission_check(
@@ -407,6 +436,52 @@ def _serialize_position_cycle_row(row: PositionCycleRow) -> dict[str, Any]:
         "opening_command_public_id": row["opening_command_public_id"],
         "closing_command_public_id": row["closing_command_public_id"],
     }
+
+
+def _serialize_signal_row(row: SignalRow) -> dict[str, Any]:
+    """JSON-serialise a :class:`SignalRow` for MCP envelope details.
+
+    ``timestamp`` and ``fired_at`` are :class:`datetime` natively;
+    converted to ISO-8601 strings so :func:`json.dumps` can encode
+    the envelope end-to-end.
+    """
+    return {
+        "public_id": row["public_id"],
+        "timestamp": row["timestamp"].isoformat(),
+        "session_id": row["session_id"],
+        "sequence_id": row["sequence_id"],
+        "instrument": row["instrument"],
+        "exchange": row["exchange"],
+        "side": row["side"],
+        "strength": row["strength"],
+        "reason": row["reason"],
+        "strategy_name": row["strategy_name"],
+        "price": row["price"],
+        "fired_at": row["fired_at"].isoformat(),
+        "wallet_public_id": row["wallet_public_id"],
+        "operator_public_id": row["operator_public_id"],
+    }
+
+
+def _serialize_candle_row(row: CandleRow) -> list[Any]:
+    """JSON-serialise a :class:`CandleRow` as an OHLCV tuple.
+
+    Emits a six-element list ``[open_at_iso, open, high, low, close,
+    volume]``. The compact tuple shape — rather than a per-field
+    dict — keeps the OHLCV envelope sized for typical 200-candle
+    windows without inflating each row with redundant identity
+    columns the caller does not need (``public_id`` /
+    ``session_id`` / ``timeframe`` are constant across the
+    requested window).
+    """
+    return [
+        row["open_at"].isoformat(),
+        row["open"],
+        row["high"],
+        row["low"],
+        row["close"],
+        row["volume"],
+    ]
 
 
 async def _resolve_target_wallets_for_mcp(
@@ -1367,5 +1442,231 @@ def register_mcp_tools(
             success=True,
             error_code=None,
             message=f"Cancel claimed; plan now in status {updated['status']!r}.",
+            details=details,
+        )
+
+    @mcp_server.tool()
+    async def get_ohlcv(
+        exchange: str,
+        instrument: str,
+        timeframe: str,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 200,
+    ) -> CallToolResult:
+        """Fetch OHLCV candles for a venue + instrument.
+
+        Two query modes:
+
+        - **Range** — both ``since`` and ``until`` supplied. Returns
+          every candle whose ``open_at`` falls inside the closed
+          window, in ASC chronological order, up to ``limit``.
+        - **Latest-as-of** — both ``since`` and ``until`` ``None``.
+          Returns the most recent ``limit`` candles in DESC order.
+
+        Mixed modes (only one of ``since`` / ``until`` supplied) are
+        rejected with ``error_code="invalid_argument"`` because the
+        repository's range scan demands both bounds.
+
+        Args:
+            exchange: Canonical exchange name (e.g. ``kraken``,
+                ``kraken_equities``).
+            instrument: Native venue symbol (e.g. ``BTC-USD``).
+            timeframe: One of ``"1m"``, ``"5m"``, ``"15m"``, ``"1h"``,
+                ``"4h"``, ``"1d"``. Other values surface as
+                ``invalid_argument``.
+            since: Optional ISO 8601 UTC timestamp string. Bare Unix
+                integer strings (e.g. ``"1745000000"``) are rejected.
+            until: Optional ISO 8601 UTC timestamp string. If
+                supplied, ``since`` must also be supplied.
+            limit: Maximum candles. Default 200, clamped to
+                ``_OHLCV_LIMIT_CAP`` (1000). Negative values surface
+                as ``invalid_argument``.
+
+        Returns:
+            Plan A Q14 envelope. ``details`` carries ``candles``
+            (list of ``[open_at_iso, open, high, low, close, volume]``
+            tuples) and ``mode`` (``"range"`` / ``"latest_as_of"``).
+            Market-data is public — ``READ_MARKET_DATA`` is the only
+            permission gate; no wallet scope filter applies.
+        """
+        claims = claims_getter()
+        permission_envelope = _envelope_for_permission_check(claims, Permission.READ_MARKET_DATA)
+        if permission_envelope is not None:
+            return permission_envelope
+        repo_or_envelope = _envelope_for_repository(repository_getter)
+        if isinstance(repo_or_envelope, CallToolResult):
+            return repo_or_envelope
+        repo = repo_or_envelope
+        if limit < 0:
+            return to_call_tool_result(
+                success=False,
+                error_code="invalid_argument",
+                message="limit must be a non-negative integer.",
+                details=sanitize_output({"limit": limit}),
+            )
+        if timeframe not in _VALID_OHLCV_TIMEFRAMES:
+            return to_call_tool_result(
+                success=False,
+                error_code="invalid_argument",
+                message=(
+                    "timeframe must be one of the supported intervals "
+                    "(see details.allowed_timeframes)."
+                ),
+                details=sanitize_output(
+                    {
+                        "timeframe": timeframe,
+                        "allowed_timeframes": sorted(_VALID_OHLCV_TIMEFRAMES),
+                    }
+                ),
+            )
+        if (since is None) != (until is None):
+            return to_call_tool_result(
+                success=False,
+                error_code="invalid_argument",
+                message=(
+                    "since and until must be supplied together for range mode; "
+                    "omit both for latest-as-of mode."
+                ),
+                details=sanitize_output({"since": since, "until": until}),
+            )
+        try:
+            parsed_since = _parse_iso8601_utc(since) if since is not None else None
+            parsed_until = _parse_iso8601_utc(until) if until is not None else None
+        except ValueError as exc:
+            return to_call_tool_result(
+                success=False,
+                error_code="invalid_argument",
+                message=(
+                    "since and until must be ISO 8601 UTC strings (e.g. '2026-01-01T00:00:00Z')."
+                ),
+                details=sanitize_output({"since": since, "until": until, "error": str(exc)}),
+            )
+        clamped_limit = min(limit, _OHLCV_LIMIT_CAP)
+        range_mode = parsed_since is not None
+        order = "asc" if range_mode else "desc"
+        now = datetime.now(UTC)
+        rows = await repo.get_candles(
+            instrument=instrument,
+            timeframe=timeframe,
+            start=parsed_since,
+            end=parsed_until,
+            exchange=cast(Any, exchange),
+            as_of=now,
+            limit=clamped_limit,
+            order=order,
+        )
+        details = sanitize_output(
+            {
+                "candles": [_serialize_candle_row(row) for row in rows],
+                "mode": "range" if range_mode else "latest_as_of",
+            }
+        )
+        return to_call_tool_result(
+            success=True,
+            error_code=None,
+            message=f"Returned {len(rows)} candles.",
+            details=details,
+        )
+
+    @mcp_server.tool()
+    async def list_recent_signals(
+        since: str,
+        instrument: str | None = None,
+        strategy: str | None = None,
+        exchange: str | None = None,
+        wallet_public_id: str | None = None,
+        limit: int = 50,
+    ) -> CallToolResult:
+        """List recent strategy signals fired after a watermark.
+
+        Args:
+            since: REQUIRED ISO 8601 UTC timestamp string. Filters to
+                signals fired strictly after this watermark. Bare
+                Unix integer strings rejected. Recommended ≤24h
+                window for tractable response sizes.
+            instrument: Optional native venue symbol filter.
+            strategy: Optional strategy-name filter.
+            exchange: Optional canonical exchange filter.
+            wallet_public_id: Optional wallet filter. Caller must
+                have scope; mismatch returns the structured
+                ``signal_not_found`` envelope (anti-enumeration —
+                callers cannot tell whether the wallet exists or
+                simply isn't theirs). ``None`` returns signals across
+                every wallet the caller can see.
+            limit: Maximum rows. Default 50, clamped to
+                ``_LIST_SIGNALS_LIMIT_CAP`` (200). Negative values
+                surface as ``invalid_argument``.
+
+        Returns:
+            Plan A Q14 envelope. ``details`` carries ``signals``
+            (list of ``SignalRow`` dicts ordered by ``fired_at``
+            descending) and ``count`` (length of the returned list).
+        """
+        claims = claims_getter()
+        permission_envelope = _envelope_for_permission_check(claims, Permission.READ_SIGNALS)
+        if permission_envelope is not None:
+            return permission_envelope
+        repo_or_envelope = _envelope_for_repository(repository_getter)
+        if isinstance(repo_or_envelope, CallToolResult):
+            return repo_or_envelope
+        repo = repo_or_envelope
+        if limit < 0:
+            return to_call_tool_result(
+                success=False,
+                error_code="invalid_argument",
+                message="limit must be a non-negative integer.",
+                details=sanitize_output({"limit": limit}),
+            )
+        if not since:
+            return to_call_tool_result(
+                success=False,
+                error_code="invalid_argument",
+                message="since is required (ISO 8601 UTC timestamp).",
+                details=sanitize_output({"since": since}),
+            )
+        try:
+            parsed_since = _parse_iso8601_utc(since)
+        except ValueError as exc:
+            return to_call_tool_result(
+                success=False,
+                error_code="invalid_argument",
+                message=("since must be an ISO 8601 UTC string (e.g. '2026-04-25T10:00:00Z')."),
+                details=sanitize_output({"since": since, "error": str(exc)}),
+            )
+        clamped_limit = min(limit, _LIST_SIGNALS_LIMIT_CAP)
+        now = datetime.now(UTC)
+        wallet_ids, scope_violation = await _resolve_target_wallets_for_mcp(
+            claims=claims,
+            repo=repo,
+            wallet_public_id=wallet_public_id,
+            as_of=now,
+        )
+        if scope_violation:
+            return to_call_tool_result(
+                success=False,
+                error_code="signal_not_found",
+                message="No signals found for the given filters.",
+                details=sanitize_output({"wallet_public_id": wallet_public_id}),
+            )
+        rows = await repo.get_signals(
+            since=parsed_since,
+            limit=clamped_limit,
+            as_of=now,
+            instrument=instrument,
+            strategy=strategy,
+            exchange=exchange,
+            wallet_public_ids=wallet_ids,
+        )
+        details = sanitize_output(
+            {
+                "signals": [_serialize_signal_row(row) for row in rows],
+                "count": len(rows),
+            }
+        )
+        return to_call_tool_result(
+            success=True,
+            error_code=None,
+            message=f"Returned {len(rows)} matching signals.",
             details=details,
         )

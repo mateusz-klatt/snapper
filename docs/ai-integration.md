@@ -329,18 +329,58 @@ curl -X POST http://localhost:8000/api/mcp \
 
 ## Available tools
 
-Phase A ships two tools (expand in Phase B/C):
+Read-only tools surface the delegate's order book, position state,
+and venue market data; write tools (`submit_manual_order`,
+`cancel_order`, `submit_ai_review_decision`) gate on the
+caps enforcer + per-tool permissions.
 
 - **`list_instruments(exchange: str)`** — returns sorted instrument
     symbols visible to the delegate's operator for the given exchange.
     Read-only; requires `READ_MARKET_DATA` permission (AI_DELEGATE
     role satisfies).
 
+- **`list_orders(wallet_public_id?, status?, exchange?, instrument?,
+    limit=50, offset=0)`** — paged read of the delegate's order
+    history within accessible wallets. Requires `READ_ORDERS`. Plan B
+    Q14 envelope; surfaces `order_not_found` for inaccessible wallets
+    (anti-enumeration).
+
+- **`get_order_status(command_public_id: str)`** — single-order
+    lookup keyed by the trade-command public id returned from
+    `submit_manual_order`. Requires `READ_ORDERS`.
+
+- **`list_positions(wallet_public_id?, exchange?, instrument?)`** —
+    active positions across the caller's accessible wallets. Requires
+    `READ_POSITIONS`.
+
+- **`get_position_cycle(cycle_public_id: str)`** — full open→close
+    audit trail for a position cycle. Requires `READ_POSITIONS`.
+
+- **`get_ohlcv(exchange, instrument, timeframe, since?, until?,
+    limit=200)`** — OHLCV candles for a venue + instrument. Range
+    mode (both `since` + `until` ISO 8601 UTC) returns chronological
+    candles in the closed window; latest-as-of mode (both omitted)
+    returns the most recent `limit` candles in DESC order. Allowed
+    timeframes: `1m`, `5m`, `15m`, `1h`, `4h`, `1d`. Requires
+    `READ_MARKET_DATA`; market data is public so no wallet scope
+    applies.
+
+- **`list_recent_signals(since, instrument?, strategy?, exchange?,
+    wallet_public_id?, limit=50)`** — strategy signals fired after
+    a watermark, ordered by `fired_at` DESC. `since` is REQUIRED ISO
+    8601 UTC. Requires `READ_SIGNALS`; surfaces `signal_not_found`
+    on wallet scope violation (anti-enumeration).
+
 - **`submit_manual_order(exchange, instrument, side, quantity,
     price?, mode?)`** — enqueues a trade command under the
     delegate's user_public_id with `source_surface='mcp'` + the
     caps check from `TradingCapsEnforcer.guard`. Fails closed on
     any cap violation.
+
+- **`cancel_order(plan_public_id, idempotency_key)`** — cancels an
+    active execution plan via the same `PlansCancelService` REST
+    goes through. Idempotent: same `idempotency_key` on retry
+    returns the current plan state without re-executing.
 
 The tool catalog is discoverable via the MCP `tools/list` JSON-RPC
 method:
