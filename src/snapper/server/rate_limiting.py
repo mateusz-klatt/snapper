@@ -39,6 +39,13 @@ ACCOUNT_CHANGE_RATE_LIMIT = "5/hour"
 ACCOUNT_RESET_RATE_LIMIT = "10/hour"
 """Maximum admin password reset attempts per IP within one hour."""
 
+WS_TOKEN_RATE_LIMIT = "10/minute"
+"""Maximum WebSocket-token issuance requests per IP within one minute.
+
+Sized to comfortably accommodate the watch client's normal cadence
+(one mint per ws_token TTL, plus reauth-on-near-expiry) while
+capping reconnect-storm burst minting from a single source."""
+
 _LOGIN_RATE_LIMIT_ITEM: RateLimitItem = parse(LOGIN_RATE_LIMIT)
 
 

@@ -42,6 +42,9 @@ from snapper.auth.schemas.responses import RefreshData
 from snapper.auth.schemas.responses import RefreshResponse
 from snapper.auth.schemas.responses import UserListResponse
 from snapper.auth.schemas.responses import UserResponse
+from snapper.auth.schemas.responses import WsTokenData
+from snapper.auth.schemas.responses import WsTokenResponse
+from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
 from snapper.data.repository import Repository
@@ -52,6 +55,7 @@ from snapper.server.json_body import openapi_schema
 from snapper.server.json_body import optional_json_body
 from snapper.server.rate_limiting import ACCOUNT_CHANGE_RATE_LIMIT
 from snapper.server.rate_limiting import ACCOUNT_RESET_RATE_LIMIT
+from snapper.server.rate_limiting import WS_TOKEN_RATE_LIMIT
 from snapper.server.rate_limiting import clear_failed_login_attempts
 from snapper.server.rate_limiting import enforce_failed_login_rate_limit
 from snapper.server.rate_limiting import limiter
@@ -458,6 +462,110 @@ async def refresh_token(
     )
     return RefreshResponse(
         payload=refresh_data,
+        session_id=sid,
+        sequence_id=seq,
+        public_id=str(uuid7()),
+        timestamp=ts,
+    )
+
+
+def _get_authenticated_token_claims(
+    request: Request,
+    _user: Annotated[AuthPrincipal, Depends(require_authentication)],
+) -> TokenClaims:
+    """Surface the access-token claims attached by ``get_current_user``.
+
+    The :func:`get_current_user` dependency stores the verified
+    :class:`TokenClaims` on ``request.state.token_data`` after a
+    successful Bearer / cookie auth. This dependency lifts that
+    state into a route-level parameter so handlers can pull the
+    session-id (``sid``) without reaching into ``request.state``
+    directly. Routes that need the session-id chain
+    ``Depends(_get_authenticated_token_claims)`` after
+    ``Depends(require_authentication)``; the latter is also passed
+    here so test suites can override this dependency in isolation
+    without short-circuiting the auth chain.
+
+    Args:
+        request: FastAPI request whose ``state.token_data`` is read.
+        _user: Authenticated principal (forces the auth chain to run
+            before we look at ``request.state``).
+
+    Returns:
+        The :class:`TokenClaims` attached during authentication.
+
+    Raises:
+        HTTPException: 500 if the auth chain succeeded but
+            ``request.state.token_data`` is unset or of the wrong
+            type — points at a regression in the auth chain itself.
+    """
+    claims = getattr(request.state, "token_data", None)
+    if not isinstance(claims, TokenClaims):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Authenticated request is missing token claims state",
+        )
+    return claims
+
+
+@router.post("/ws_token")
+@limiter.limit(WS_TOKEN_RATE_LIMIT)
+async def issue_ws_token(
+    request: Request,
+    current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
+    token_claims: Annotated[TokenClaims, Depends(_get_authenticated_token_claims)],
+) -> WsTokenResponse:
+    """Mint a one-shot WebSocket token without rotating refresh JWTs.
+
+    Authenticates the caller via the access bearer (header or cookie)
+    via :func:`require_authentication` and returns a fresh ws_token
+    bound to the access JWT's session. Unlike ``POST /api/auth/refresh``
+    this route does NOT rotate the refresh-token pair, which lets a
+    long-running monitor client mint ws_tokens on its own cadence
+    without colliding with a sibling MCP server that holds the same
+    refresh credential.
+
+    Per-IP rate limited at ``WS_TOKEN_RATE_LIMIT`` to cap reconnect-
+    storm minting from a single source. The TTL of the returned
+    ws_token is dictated by ``AppSettings.ws_token_ttl_seconds`` and
+    surfaces both as ``ws_token_exp`` (absolute) and ``expires_in``
+    (relative seconds) for client convenience.
+
+    Args:
+        request: FastAPI request (provides REST tracker provenance).
+        current_user: Authenticated principal from the access bearer.
+        token_claims: Access-token claims surfaced by
+            :func:`_get_authenticated_token_claims`; supplies the
+            session-id used to bind the minted ws_token.
+
+    Returns:
+        WsTokenResponse wrapping a single :class:`WsTokenData` payload
+        with the fresh token, absolute expiration, and seconds-to-expiry.
+
+    Raises:
+        HTTPException: 401 from :func:`require_authentication` when
+            the access bearer is absent or invalid; 429 from the
+            limiter when the per-IP minute budget is exhausted.
+    """
+    ws_token_service = get_ws_token_service()
+    ws_token_result = ws_token_service.generate(
+        user_id=current_user.username,
+        session_id=token_claims.sid,
+    )
+    sid, seq, _pid, ts = _mint_provenance(request)
+    expires_in = max(0, int((ws_token_result.expires_at - ts).total_seconds()))
+    ws_token_data = WsTokenData(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=str(uuid7()),
+        timestamp=ts,
+        message="ws_token issued",
+        ws_token=ws_token_result.token,
+        ws_token_exp=ws_token_result.expires_at,
+        expires_in=expires_in,
+    )
+    return WsTokenResponse(
+        payload=ws_token_data,
         session_id=sid,
         sequence_id=seq,
         public_id=str(uuid7()),

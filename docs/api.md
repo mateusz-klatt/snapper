@@ -68,7 +68,10 @@ Content-Type: application/json
 
 Refresh session tokens. The `refresh_token` cookie is sent automatically by
 the browser. Returns new tokens in cookies plus a WebSocket authentication
-token in the response body. This is the only way to obtain a `ws_token`.
+token in the response body. Long-running clients that already hold a valid
+access token and only need a fresh `ws_token` should call
+[`POST /api/auth/ws_token`](#post-apiauthws_token) instead — that route does
+not rotate the refresh-token pair.
 
 **Request:**
 
@@ -93,6 +96,49 @@ POST /api/auth/refresh
     }
 }
 ```
+
+### POST /api/auth/ws_token
+
+Mint a one-shot WebSocket authentication token without rotating the
+caller's refresh-token pair. Authenticates via the access bearer
+(header or cookie) and returns a fresh `ws_token` bound to the
+access JWT's session. Per-source-IP rate-limited so a reconnect
+storm cannot exhaust the token store.
+
+Use this route when a long-running client (e.g. a push-wakeup
+monitor) needs to mint successive `ws_token`s on its own cadence
+without rotating the refresh-token pair shared with sibling
+processes.
+
+**Request:**
+
+```http
+POST /api/auth/ws_token
+Authorization: Bearer <access_token>
+```
+
+**Response (200):**
+
+```json
+{
+    "type": "ws_token_response",
+    "payload": {
+        "type": "ws_token",
+        "message": "ws_token issued",
+        "ws_token": "eyJhbGciOi...",
+        "ws_token_exp": "2026-01-18T12:30:00Z",
+        "expires_in": 900
+    }
+}
+```
+
+`expires_in` mirrors `ws_token_exp` as relative seconds for clients
+that prefer relative-deadline math.
+
+**Errors:**
+
+- `401 Unauthorized` — access bearer is absent, expired, or invalid.
+- `429 Too Many Requests` — per-source-IP minute budget exhausted.
 
 ### POST /api/auth/logout
 

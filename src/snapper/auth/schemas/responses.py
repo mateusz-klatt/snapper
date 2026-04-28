@@ -81,6 +81,43 @@ class RefreshResponse(PayloadResponse[Literal["refresh_response"], RefreshData])
     type: Literal["refresh_response"] = "refresh_response"
 
 
+class WsTokenData(StrictDataSchema[Literal["ws_token"]]):
+    """WebSocket-token issuance payload.
+
+    Returned by the dedicated ``POST /api/auth/ws_token`` route. The
+    route authenticates an access bearer (no cookie path required for
+    headless clients) and mints a one-shot WebSocket token without
+    rotating the caller's refresh JWT — letting long-running monitor
+    clients reauth WebSocket sessions while leaving the refresh-token
+    pair untouched.
+
+    Attributes:
+        type: Payload item type discriminator.
+        message: Success message.
+        ws_token: One-shot WebSocket authentication token.
+        ws_token_exp: WebSocket token expiration time.
+        expires_in: WebSocket token TTL in seconds (mirror of
+            ``ws_token_exp``; convenience for clients that prefer
+            relative-deadline math).
+    """
+
+    type: Literal["ws_token"] = "ws_token"
+    message: str
+    ws_token: str
+    ws_token_exp: datetime
+    expires_in: int
+
+
+class WsTokenResponse(PayloadResponse[Literal["ws_token_response"], WsTokenData]):
+    """WebSocket-token issuance REST response envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["ws_token_response"] = "ws_token_response"
+
+
 class UserResponse(PayloadResponse[Literal["user_response"], UserProfile]):
     """Single user response wrapper.
 
