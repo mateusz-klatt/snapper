@@ -34,6 +34,7 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.mcp.server import TOKEN_CLAIMS_CTX
 from snapper.mcp.server import get_current_claims
+from snapper.mcp.tools import _parse_iso8601_utc
 from snapper.mcp.tools import register_mcp_tools
 
 
@@ -2156,21 +2157,15 @@ class TestParseIso8601UtcHelper:
 
     def test_z_suffix_parses_as_utc(self) -> None:
         """``"...Z"`` is normalised to ``+00:00`` before parsing."""
-        from snapper.mcp.tools import _parse_iso8601_utc
-
         parsed = _parse_iso8601_utc("2026-04-28T10:00:00Z")
         assert parsed == datetime(2026, 4, 28, 10, 0, 0, tzinfo=UTC)
 
     def test_explicit_offset_preserved(self) -> None:
         """``"+00:00"`` round-trips losslessly."""
-        from snapper.mcp.tools import _parse_iso8601_utc
-
         parsed = _parse_iso8601_utc("2026-04-28T10:00:00+00:00")
         assert parsed == datetime(2026, 4, 28, 10, 0, 0, tzinfo=UTC)
 
     def test_garbage_raises_value_error(self) -> None:
         """Unparseable input raises ``ValueError``."""
-        from snapper.mcp.tools import _parse_iso8601_utc
-
         with pytest.raises(ValueError):
             _parse_iso8601_utc("yesterday")
