@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-cov ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-cov ts-bridge bridge-regen bridge-check ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -447,6 +447,21 @@ ui-test:
 
 ui-cov:
 	$(PNPM) test:coverage
+
+ts-bridge:
+	$(info Regenerating bridge wire-contract types into the working tree...)
+	$(GENSCRIPT) --bridge
+	$(info Generated integrations/snapper-mcp/src/generated/wire-contract.ts)
+
+bridge-regen: ts-bridge
+	$(info Running bridge stack against freshly-regenerated working tree...)
+	cd integrations/snapper-mcp && npm ci && npm run typecheck && npm run lint && npm run test && npm run stdout-gate
+
+bridge-check:
+	$(info Verifying bridge wire-contract working-tree file is consistent with current backend schemas...)
+	@$(VENV_PY) -m scripts.bridge_check.check_drift
+	@$(VENV_PY) -m scripts.bridge_check.check_oss_prose
+	cd integrations/snapper-mcp && npm ci && npm run typecheck && npm run lint && npm run test && npm run stdout-gate
 
 docs-pdf:
 	$(VENV_PY) scripts/build_docs_pdf.py
