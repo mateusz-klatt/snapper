@@ -182,6 +182,46 @@ snapper list-users          # List users
 snapper reset-password      # Reset password
 ```
 
+### Local AI delegate PAT (for `@mateusz-klatt/snapper-mcp` bridge)
+
+After `make dev-backend` is running and the seed has provisioned the `admin`
+user (per `dev.toml`), mint a long-lived AI delegate PAT into a JSON file
+the bridge consumes via `--config=PATH`:
+
+```bash
+snapper dev-mint-pat        # writes data/dev-pat.json (mode 0600)
+```
+
+Wire your `~/.claude.json` mcpServers entry once with the file path:
+
+```json
+"snapper-local": {
+  "command": "node",
+  "args": [
+    "/path/to/snapper-mcp/dist/index.js",
+    "--config=/path/to/snapper/data/dev-pat.json"
+  ]
+}
+```
+
+After `rm data/snapper.db && make dev-backend && snapper dev-mint-pat` the
+bridge picks up the refreshed token automatically — no manual edits to
+`~/.claude.json` per DB wipe. CLI flags + environment overrides:
+
+```text
+--base-url URL        SNAPPER_DEV_BASE_URL          (default http://localhost:8000)
+--admin-username USER SNAPPER_DEV_ADMIN_USERNAME    (default admin)
+--admin-password PASS SNAPPER_DEV_ADMIN_PASSWORD    (default matches dev.toml)
+--output PATH         SNAPPER_DEV_PAT_OUTPUT        (default data/dev-pat.json)
+--label LABEL                                         (default "Local Dev MCP")
+```
+
+The script drives production REST endpoints (`POST /api/auth/login` +
+`POST /api/ai-delegates`) so the seeded delegate exercises the same code
+path the AI Integration UI uses. Tokens never appear in stderr — HTTP
+error bodies are passed through a JWT-shape redaction helper before
+printing.
+
 ### Market Data
 
 ```bash

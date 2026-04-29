@@ -100,6 +100,7 @@ from snapper.application.updaters.symbols.zonda import ZondaSymbolUpdaterService
 from snapper.application.updaters.underlying_updater import UnderlyingUpdater
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
+from snapper.cli.dev_pat import dev_mint_pat
 from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
@@ -2015,3 +2016,6 @@ def notify() -> None:
             zmq_ctx.term()
 
     asyncio.run(_run())
+
+
+app.command(name="dev-mint-pat")(dev_mint_pat)
