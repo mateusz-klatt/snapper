@@ -943,6 +943,31 @@ def test_sqlalchemy_repository_pool_setup_sqlite_memory() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sqlalchemy_repository_forgets_closed_aiosqlite_connections(
+    tmp_path: Path,
+) -> None:
+    """Closed file-backed SQLite sessions must not accumulate in the tracker.
+
+    Given: file-backed SQLite uses NullPool and opens one aiosqlite
+        worker connection per session,
+    When: sessions are opened and closed repeatedly,
+    Then: the shutdown tracker forgets each closed connection instead
+        of retaining dead connection objects for the process lifetime.
+    """
+    repo_module._live_aiosqlite_connections.clear()
+    db_path = tmp_path / "tracked-connections.db"
+    sa_repo = repo.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    try:
+        for _ in range(3):
+            async with sa_repo.session() as session:
+                await session.execute(text("select 1"))
+            assert repo_module._live_aiosqlite_connections == {}
+    finally:
+        await sa_repo.engine.dispose()
+        repo_module._live_aiosqlite_connections.clear()
+
+
+@pytest.mark.asyncio
 async def test_sqlalchemy_session_rolls_back_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test SQLAlchemyRepository session rolls back on exception.
 

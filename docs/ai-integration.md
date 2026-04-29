@@ -231,7 +231,9 @@ In any Claude Code session:
 Claude Code prompts for two required values plus one optional value
 at install time:
 
-- **Snapper API URL** -- your backend's `/api/mcp` endpoint.
+- **Snapper API URL** -- your backend's `/api/mcp` endpoint. The
+  `@mateusz-klatt/snapper-mcp` bridge accepts the value with or without
+  a trailing slash and normalizes it before connecting.
 - **Access token** -- the `access_token` from the `delegate_created`
   response (or paste from the Settings -> AI Delegates config-snippet
   generator).
@@ -280,7 +282,7 @@ In `~/.cursor/config.json`:
 {
   "mcpServers": {
     "snapper": {
-      "url": "https://snapper.example.com/api/mcp",
+      "url": "https://snapper.example.com/api/mcp/",
       "headers": {
         "Authorization": "Bearer <access-token>"
       }
@@ -302,7 +304,7 @@ token expires (15 minutes by default). Use the refresh token via
 {
   "mcpServers": {
     "snapper": {
-      "serverUrl": "https://snapper.example.com/api/mcp",
+      "serverUrl": "https://snapper.example.com/api/mcp/",
       "auth": { "type": "bearer", "token": "<access-token>" }
     }
   }
@@ -318,7 +320,7 @@ Quick reachability check:
 curl http://localhost:8000/api/settings/features
 
 # Hello-world MCP initialise
-curl -X POST http://localhost:8000/api/mcp \
+curl -X POST http://localhost:8000/api/mcp/ \
   -H "Authorization: Bearer <access-token>" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
@@ -386,7 +388,7 @@ The tool catalog is discoverable via the MCP `tools/list` JSON-RPC
 method:
 
 ```bash
-curl -X POST http://localhost:8000/api/mcp \
+curl -X POST http://localhost:8000/api/mcp/ \
   -H "Authorization: Bearer <access-token>" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \

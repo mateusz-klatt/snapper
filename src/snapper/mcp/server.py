@@ -23,6 +23,7 @@ from typing import Any
 
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -356,6 +357,7 @@ def build_mcp_app(
         instructions=f"Snapper MCP endpoint (v{_MCP_SERVER_VERSION}).",
         stateless_http=True,
         streamable_http_path="/",
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
     register_mcp_tools(
         mcp_server,

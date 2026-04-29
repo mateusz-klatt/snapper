@@ -366,6 +366,46 @@ class TestMCPAppComposition:
         assert hasattr(app, "routes")
         assert hasattr(app, "user_middleware")
 
+    def test_reverse_proxy_host_header_reaches_fastmcp_transport(self) -> None:
+        """Production Host headers must not trip FastMCP localhost protection.
+
+        Given: a mounted MCP app handling a request for the public
+            ``snapper.ch`` host,
+        When: a valid bearer initializes the streamable HTTP transport,
+        Then: FastMCP accepts the request instead of returning
+            ``421 Invalid Host header``.
+        """
+        svc = _make_settings_service(enabled=True)
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
+        claims = _make_token_claims()
+        with patch("snapper.mcp.server.get_token_manager") as mock_get:
+            token_manager = Mock()
+            token_manager.verify_token_with_reason = AsyncMock(
+                return_value=VerifyOutcome(claims=claims, rejection_reason=None)
+            )
+            mock_get.return_value = token_manager
+            with TestClient(app) as client:
+                response = client.post(
+                    "/",
+                    headers={
+                        "Accept": "application/json, text/event-stream",
+                        "Authorization": f"Bearer {_TEST_TOKEN_PLACEHOLDER}",
+                        "Host": "snapper.ch",
+                    },
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-03-26",
+                            "capabilities": {},
+                            "clientInfo": {"name": "pytest", "version": "1"},
+                        },
+                    },
+                )
+        assert response.status_code == 200
+        assert "Invalid Host header" not in response.text
+
     def test_settings_service_getter_invoked_per_request(self) -> None:
         """Getter is called lazily at request time, not at build time.
 

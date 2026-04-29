@@ -3785,6 +3785,12 @@ def _register_sqlite_fk_pragma(engine: Any) -> None:
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
+    @event.listens_for(engine, "close")
+    def _forget_sqlite_connection(dbapi_connection: Any, _connection_record: Any) -> None:
+        driver_connection = getattr(dbapi_connection, "driver_connection", None)
+        if driver_connection is not None:
+            _live_aiosqlite_connections.pop(id(driver_connection), None)
+
 
 class SQLAlchemyRepository(Repository):
     """Async SQLAlchemy repository for SQLite and PostgreSQL.
