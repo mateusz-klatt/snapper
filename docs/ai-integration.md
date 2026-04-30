@@ -2,17 +2,16 @@
 
 Snapper exposes a **Model Context Protocol (MCP)** endpoint at
 `/api/mcp` so Claude Desktop, Cursor, Windsurf, or a plain `curl` client
-can authenticate with a **scoped bearer token pair** and call a narrow
-set of trading + market-data tools. The surface is vendor-neutral — no
-Anthropic or OpenAI SDK is bundled in Snapper core. Phase A (this
-document) ships the server-side surface; Phase B adds an npm wrapper
-for Claude Desktop, Phase C adds a first-class Claude Code channel.
+can authenticate with a long-lived AI delegate access JWT and call a
+narrow set of trading + market-data tools. The surface is
+vendor-neutral — no Anthropic or OpenAI SDK is bundled in Snapper
+core.
 
 This doc covers:
 
 1. [Feature flag](#feature-flag)
 2. [Creating an AI delegate](#creating-an-ai-delegate)
-3. [Token types: rotating vs long-lived](#token-types-rotating-vs-long-lived)
+3. [Token model](#token-model)
 4. [Client configuration examples](#client-configuration-examples)
 5. [Available tools](#available-tools)
 6. [Safety caps](#safety-caps)
@@ -101,13 +100,10 @@ immediately — Snapper never re-serves them:
       "created_by_user_public_id": "<operator-id>",
       "created_at": "2026-04-20T00:00:00Z",
       "is_active": true,
-      "caps": { "max_open_orders": 3, "max_daily_notional_usd": 1000.0, ... },
-      "token_kind": "rotating"
+      "caps": { "max_open_orders": 3, "max_daily_notional_usd": 1000.0 }
     },
-    "access_token": "<jwt>",
-    "refresh_token": "<jwt>",
-    "expires_in": 900,
-    "token_kind": "rotating"
+    "access_token": "<jwt-with-10y-exp>",
+    "expires_in": 315360000
   }
 }
 ```
@@ -115,104 +111,27 @@ immediately — Snapper never re-serves them:
 Other endpoints on `/api/ai-delegates`:
 
 - `GET /api/ai-delegates` — list the caller's delegates (no
-    tokens re-served). Each list item carries `token_kind` so the
-    UI can render a PAT badge without a follow-up fetch.
+    tokens re-served).
 - `GET /api/ai-delegates/{id}` — single delegate detail.
 - `PATCH /api/ai-delegates/{id}` — update caps (SCD2 close+insert).
-    `label`/`username` are immutable post-mint. `token_kind` is
-    derived from the live token inventory and cannot be changed
-    post-creation — operators who need to switch between rotating
-    and long-lived must deactivate + recreate the delegate.
+    `label`/`username` are immutable post-mint.
 - `POST /api/ai-delegates/{id}/deactivate` — kill switch. Publishes
     `admin.user_deactivated` on the bus; every Snapper instance
     disconnects matching WebSocket sessions and evicts the token from
-    every LRU within one bus round-trip. Works identically on
-    rotating and long-lived delegates.
+    every LRU within one bus round-trip.
 
 ---
 
-## Token types: rotating vs long-lived
+## Token model
 
-At delegate-creation time the operator picks one of two token modes
-via the `long_lived: bool` field on `DelegateCreateBody` (default
-`false`). The choice is permanent for that delegate — rotate by
-deactivating + recreating with the other setting.
-
-### Rotating (default)
-
-- 15-minute access-token TTL + 7-day refresh-token TTL (30 days with
-    `remember_me`, not exposed to delegate creation today).
-- MCP bridge holds both JWTs in-memory; on 401 `invalid_bearer_token`
-    the bridge calls `POST /api/auth/refresh?return_tokens=true`
-    with the refresh JWT and updates the in-memory pair.
-- Single-flight rotation — N concurrent 401s share ONE refresh call.
-- **Recommended for** remote / shared-host deployments where the
-    short-lived access token cap is a meaningful risk reducer.
-
-### Long-lived PAT (opt-in)
-
-- Single access-token JWT with a ~10-year `exp`, no refresh token.
-    Response carries `access_token` + `refresh_token: null` +
-    `token_kind: "long_lived"`.
-- MCP bridge never calls `/api/auth/refresh`. On 401
-    `invalid_bearer_token` the 401 surfaces verbatim to the MCP host
-    with a stderr hint pointing the operator at the Snapper UI to
-    regenerate the delegate.
-- **Recommended for** local `localhost` MCP clients where the
-    refresh-token dance adds operator friction without security
-    benefit (single-operator, single-machine, trust boundary is the
-    machine itself).
-- **Requires** `@mateusz-klatt/snapper-mcp` bridge **v0.2.0 or
-    newer** — v0.1.0 treated `SNAPPER_REFRESH_TOKEN` as required and
-    refuses to start without it.
-
-### Kill switch parity
-
-Both modes revoke via the same path: `POST /api/ai-delegates/{id}/deactivate`
-flips `users.is_active=False`, publishes `admin.user_deactivated` on
-the bus, and every Snapper instance evicts the delegate's
-`user_active_tokens` row(s) from the verify-cache within one
-round-trip. The 10-year PAT expiry is a ceiling, not a commitment —
-revocation takes effect instantly.
-
-### Example: creating a PAT delegate
-
-```bash
-curl -X POST http://localhost:8000/api/ai-delegates \
-  -H "Authorization: Bearer <operator-jwt>" \
-  -H "Content-Type: application/json" \
-  -H "X-CSRF-Token: <csrf>" \
-  -d '{
-    "session_id": "cli",
-    "sequence_id": 1,
-    "public_id": "'$(uuidgen)'",
-    "timestamp": "2026-04-24T00:00:00Z",
-    "payload": {
-      "label": "Local Claude",
-      "long_lived": true,
-      "caps": { "max_open_orders": 3, "max_daily_notional_usd": 1000.0 }
-    }
-  }'
-```
-
-Response:
-
-```json
-{
-  "type": "delegate_created_response",
-  "payload": {
-    "delegate": { "...": "...", "token_kind": "long_lived" },
-    "access_token": "<jwt-with-10y-exp>",
-    "refresh_token": null,
-    "expires_in": 315360000,
-    "token_kind": "long_lived"
-  }
-}
-```
-
-Paste only `access_token` as `SNAPPER_ACCESS_TOKEN` into your MCP
-client config; leave `SNAPPER_REFRESH_TOKEN` unset. The Settings UI
-snippet generator emits the correct env block automatically.
+Each AI delegate mints a single long-lived (~10-year) access JWT.
+The same token authenticates both the proxy MCP server and the
+optional push-wakeup watch monitor. Revocation works instantly:
+`POST /api/ai-delegates/{id}/deactivate` flips
+`users.is_active=False`, publishes `admin.user_deactivated` on the
+bus, and every Snapper instance evicts the delegate's
+`user_active_tokens` row from the verify-cache within one bus
+round-trip. The 10-year `exp` is a ceiling, not a commitment.
 
 ---
 
@@ -260,19 +179,17 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
       "args": ["-y", "@mateusz-klatt/snapper-mcp"],
       "env": {
         "SNAPPER_BASE_URL": "https://snapper.example.com/api/mcp",
-        "SNAPPER_ACCESS_TOKEN": "<copied-from-create-response>",
-        "SNAPPER_REFRESH_TOKEN": "<copied-from-create-response>"
+        "SNAPPER_ACCESS_TOKEN": "<copied-from-create-response>"
       }
     }
   }
 }
 ```
 
-For long-lived PAT delegates, omit `SNAPPER_REFRESH_TOKEN` or set it
-to `""`. The `@mateusz-klatt/snapper-mcp` npm wrapper handles
-access-token refresh via `POST /api/auth/refresh` on 401 so the
-agent session doesn't interrupt mid-conversation when running with
-a rotating delegate.
+The `@mateusz-klatt/snapper-mcp` npm wrapper presents the access
+token as a Bearer header on every request. On 401 the bridge
+surfaces the auth failure to the MCP host once per session;
+recovery is via recreating the AI delegate in Snapper.
 
 ### Cursor
 

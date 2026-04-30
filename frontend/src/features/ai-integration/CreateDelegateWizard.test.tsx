@@ -38,12 +38,9 @@ const mockPayload: DelegateCreatedPayload = {
       max_cancels_per_minute: null,
       max_order_quantity_per_instrument: null,
     },
-    token_kind: 'rotating',
   },
   access_token: 'access-xyz',
-  refresh_token: 'refresh-xyz',
   expires_in: 900,
-  token_kind: 'rotating',
 }
 
 const envelope = { payload: mockPayload }
@@ -98,7 +95,6 @@ describe('CreateDelegateWizard', () => {
         max_cancels_per_minute: null,
       },
       operator_public_id: null,
-      long_lived: false,
     })
     expect(screen.getByText(/Save these credentials now/)).toBeInTheDocument()
   })
@@ -130,46 +126,7 @@ describe('CreateDelegateWizard', () => {
         max_cancels_per_minute: 20,
       },
       operator_public_id: 'op-1',
-      long_lived: false,
     })
-  })
-
-  it('submits long_lived=true when the PAT checkbox is ticked on Step 2', async () => {
-    const user = userEvent.setup()
-
-    mockMutation.mutateAsync.mockResolvedValueOnce(envelope)
-    render(<CreateDelegateWizard open onClose={vi.fn()} />)
-    await fillLabelAndAdvance('pat-bot')
-    await act(async () => {
-      await user.click(screen.getByLabelText(/Long-lived token/))
-    })
-    await act(async () => {
-      await user.click(screen.getByRole('button', { name: 'Next' }))
-    })
-    expect(screen.getByText(/Long-lived PAT/)).toBeInTheDocument()
-    await act(async () => {
-      await user.click(screen.getByRole('button', { name: /Create delegate/ }))
-    })
-    expect(mockMutation.mutateAsync).toHaveBeenCalledWith(
-      expect.objectContaining({ long_lived: true, label: 'pat-bot' })
-    )
-  })
-
-  it('submits long_lived=false by default (checkbox untouched)', async () => {
-    const user = userEvent.setup()
-
-    mockMutation.mutateAsync.mockResolvedValueOnce(envelope)
-    render(<CreateDelegateWizard open onClose={vi.fn()} />)
-    await fillLabelAndAdvance('rotating')
-    await act(async () => {
-      await user.click(screen.getByRole('button', { name: 'Next' }))
-    })
-    await act(async () => {
-      await user.click(screen.getByRole('button', { name: /Create delegate/ }))
-    })
-    expect(mockMutation.mutateAsync).toHaveBeenCalledWith(
-      expect.objectContaining({ long_lived: false })
-    )
   })
 
   it('parses per-instrument JSON caps', async () => {

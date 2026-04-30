@@ -86,10 +86,8 @@ class WsTokenData(StrictDataSchema[Literal["ws_token"]]):
 
     Returned by the dedicated ``POST /api/auth/ws_token`` route. The
     route authenticates an access bearer (no cookie path required for
-    headless clients) and mints a one-shot WebSocket token without
-    rotating the caller's refresh JWT — letting long-running monitor
-    clients reauth WebSocket sessions while leaving the refresh-token
-    pair untouched.
+    headless clients) and mints a one-shot WebSocket token from the
+    access JWT's session.
 
     Attributes:
         type: Payload item type discriminator.

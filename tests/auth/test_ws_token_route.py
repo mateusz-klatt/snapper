@@ -1,10 +1,9 @@
 """HTTP-surface tests for ``POST /api/auth/ws_token``.
 
-Covers the dedicated ws_token-issuance route added so long-running
-WebSocket clients can mint one-shot tokens without rotating the
-caller's refresh JWT pair. The route authenticates via the access
-bearer (header or cookie), pulls the session-id from the verified
-access-token claims, and delegates token minting to
+Covers the ws_token-issuance route used by long-running WebSocket
+clients to mint one-shot tokens. The route authenticates via the
+access bearer (header or cookie), pulls the session-id from the
+verified access-token claims, and delegates token minting to
 :class:`WsTokenService`.
 
 These tests exercise:

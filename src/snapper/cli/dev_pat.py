@@ -5,8 +5,8 @@ the AI Integration UI uses, then writes the minted JWT to a JSON file consumed
 by snapper-mcp's --config=PATH flag. Lets the dev-iteration cycle
 ``rm data/snapper.db && make dev-backend && snapper dev-mint-pat`` regenerate
 working credentials without browser clicks; ``~/.claude.json`` mcpServers
-entry references the file via --config=PATH and picks up the refreshed token
-on the next bridge spawn.
+entry references the file via --config=PATH and picks up the freshly
+minted token on the next bridge spawn.
 """
 
 import base64
@@ -175,10 +175,10 @@ def _create_delegate(
     sequence_id: int,
     session_id: str,
 ) -> str:
-    """Drive POST /api/ai-delegates with long_lived=true and return the minted JWT."""
+    """Drive POST /api/ai-delegates and return the minted long-lived JWT."""
     body = _stamp_provenance(
         "delegate_create_request",
-        {"label": label, "long_lived": True},
+        {"label": label},
         sequence_id=sequence_id,
         session_id=session_id,
     )
@@ -240,8 +240,6 @@ def _write_pat_file(output: Path, base_url: str, jwt: str) -> None:
     payload = {
         "SNAPPER_BASE_URL": f"{base_url}/api/mcp",
         "SNAPPER_ACCESS_TOKEN": jwt,
-        "SNAPPER_REFRESH_TOKEN": "",
-        "SNAPPER_WATCH_ACCESS_TOKEN": jwt,
     }
     body = json.dumps(payload, indent=2) + "\n"
     parent = output.parent
@@ -298,10 +296,10 @@ def dev_mint_pat(
     """Mint a long-lived dev AI delegate via production REST and write to JSON.
 
     Flow: POST /api/auth/login?return_tokens=true (admin creds) -> Bearer
-    token -> POST /api/ai-delegates with {long_lived: true} -> long-lived
-    JWT -> atomic 0600 write to --output. Bridge picks up the file via
-    --config=PATH on next spawn; operator's ~/.claude.json mcpServers entry
-    only needs the file path, never the token bytes.
+    token -> POST /api/ai-delegates -> long-lived JWT -> atomic 0600
+    write to --output. Bridge picks up the file via --config=PATH on
+    next spawn; operator's ~/.claude.json mcpServers entry only needs
+    the file path, never the token bytes.
 
     All error paths exit 1 with a stderr message; tokens are redacted via
     JWT-shape regex before any HTTP error body reaches stderr.

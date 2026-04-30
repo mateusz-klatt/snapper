@@ -4,8 +4,9 @@ This module defines request/response schemas for the
 ``/api/ai-delegates`` CRUD surface. Delegates are
 class:`~snapper.auth.domain.roles.UserRole.AI_DELEGATE` users an
 operator creates so an MCP-compatible client can authenticate to
-Snapper with a scoped bearer token pair instead of the operator's
-primary credentials.
+Snapper with a scoped bearer token instead of the operator's
+primary credentials. Each delegate mints a single long-lived
+access JWT bound to the delegate's scope grants.
 Envelopes follow the standard Snapper pattern
 (:class:`~snapper.api.schemas.base.PayloadRequest` /
 class:`~snapper.api.schemas.base.PayloadResponse`) so provenance
@@ -82,14 +83,6 @@ class DelegateCreateBody(StrictBody):
             must be in the caller's claim set. ``None`` defers
             to the caller's primary operator so simple callers
             don't need to know their membership set.
-        long_lived: When ``True`` the delegate receives a single
-            long-lived access token (no refresh token), suitable
-            for local MCP clients where the operator prefers a
-            paste-once token over the rotating 15-min access +
-            7-day refresh pair. Defaults to ``False`` so existing
-            integrations see no behaviour change. Kill switch
-            (``POST /api/ai-delegates/{id}/deactivate``) works
-            identically on long-lived tokens.
     """
 
     label: str = Field(..., min_length=1, max_length=48, description="Delegate label")
@@ -103,13 +96,6 @@ class DelegateCreateBody(StrictBody):
             "Null defers to the caller's primary operator."
         ),
     )
-    long_lived: bool = Field(
-        False,
-        description=(
-            "When true, issue a non-rotating long-lived access token (no refresh). "
-            "Defaults to false — existing rotating behaviour."
-        ),
-    )
 
 
 class DelegateCreateRequest(PayloadRequest[Literal["delegate_create_request"], DelegateCreateBody]):
@@ -121,11 +107,11 @@ class DelegateCreateRequest(PayloadRequest[Literal["delegate_create_request"], D
 class DelegateRead(StrictBody):
     """Public projection of a delegate used by list/detail reads.
 
-    The ``access_token`` + ``refresh_token`` fields are NEVER set
-    on list/detail responses — only the POST-create response
-    includes them (once, in :class:`DelegateCreatedPayload`).
-    Once issued, the tokens live only in the client (env var /
-    keychain); Snapper never re-serves them.
+    The ``access_token`` field is NEVER set on list/detail
+    responses — only the POST-create response includes it (once,
+    in :class:`DelegateCreatedPayload`). Once issued, the token
+    lives only in the client (env var / keychain); Snapper never
+    re-serves it.
 
     Attributes:
         public_id: Delegate user's UUID7 public identifier.
@@ -136,13 +122,6 @@ class DelegateRead(StrictBody):
         is_active: Flipped to ``False`` on
             ``POST /api/ai-delegates/{id}/deactivate``.
         caps: Current trading caps (always populated).
-        token_kind: ``"rotating"`` (default — 15-min access + 7-day
-            refresh pair) or ``"long_lived"`` (single access token
-            with ~10y expiry, no refresh token issued). Computed
-            from the live ``user_active_tokens`` inventory: a
-            delegate with any active refresh row is ``rotating``;
-            otherwise ``long_lived``. Frontend renders a "PAT"
-            badge when ``long_lived``.
     """
 
     public_id: str
@@ -152,44 +131,25 @@ class DelegateRead(StrictBody):
     created_at: datetime
     is_active: bool
     caps: DelegateCapsBody
-    token_kind: Literal["rotating", "long_lived"]
 
 
 class DelegateCreatedPayload(StrictBody):
-    """Create-delegate response body — the ONLY place tokens surface.
+    """Create-delegate response body — the ONLY place the access token surfaces.
 
     Returned from ``POST /api/ai-delegates``. The operator must
-    copy the tokens out of the response within their session; the
-    list + detail endpoints deliberately do not re-serve them.
+    copy the access token out of the response within their session;
+    the list + detail endpoints deliberately do not re-serve it.
 
     Attributes:
-        delegate: The newly-minted :class:`DelegateRead`
-            projection.
-        access_token: Freshly-minted JWT — operator copies into
-            the MCP client config.
-        refresh_token: Freshly-minted refresh JWT, OR ``None`` when
-            the caller opted into ``long_lived`` mode. Clients must
-            treat ``None`` as "no rotation expected" and stop
-            calling ``POST /api/auth/refresh``.
-        expires_in: Access-token lifetime in seconds. For rotating
-            delegates this matches the standard short TTL; for
-            long-lived delegates this is the ~10-year window
-            (approximately ``3650 * 86400`` seconds). Mirrors the
-            :class:`~snapper.auth.schemas.tokens.TokenPair` shape so
-            CLI clients that also handle login responses can share
-            deserialisation code.
-        token_kind: ``"rotating"`` (default) or ``"long_lived"``.
-            Mirrors the freshly-minted delegate's
-            :attr:`DelegateRead.token_kind`; surfaced here so the
-            frontend can branch config-snippet generation without a
-            follow-up GET.
+        delegate: The newly-minted :class:`DelegateRead` projection.
+        access_token: Freshly-minted long-lived JWT — operator copies
+            into the MCP client config.
+        expires_in: Access-token lifetime in seconds (~10 years).
     """
 
     delegate: DelegateRead
     access_token: str
-    refresh_token: str | None
     expires_in: int
-    token_kind: Literal["rotating", "long_lived"]
 
 
 class DelegateResponse(PayloadResponse[Literal["delegate_response"], DelegateRead]):

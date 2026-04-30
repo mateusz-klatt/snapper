@@ -122,7 +122,7 @@ window is a ceiling, not a commitment.
 class LongLivedTokenResult:
     """Result of minting a long-lived (PAT-style) delegate access token.
 
-    Returned by :meth:`TokenManager.create_long_lived_access_token`.
+    Returned by :meth:`TokenManager.create_delegate_access_token`.
     Distinct from :class:`~snapper.auth.schemas.tokens.TokenPair`
     because there is no refresh token — callers would otherwise have
     to check for a sentinel value on every use. A dedicated result
@@ -301,14 +301,14 @@ class TokenManager:
             expires_in=int(access_token_expires.total_seconds()),
         )
 
-    def create_long_lived_access_token(
+    def create_delegate_access_token(
         self,
         user: AuthPrincipal,
         issued_at: datetime,
         *,
         session_id: str | None = None,
     ) -> LongLivedTokenResult:
-        """Mint a non-rotating long-lived (PAT-style) access token.
+        """Mint a long-lived (PAT-style) AI delegate access token.
 
         Distinct from :meth:`create_tokens` in three ways:
         (1) no refresh token is issued;

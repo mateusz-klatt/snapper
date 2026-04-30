@@ -7,8 +7,8 @@ AI_DELEGATE users and cannot manage other delegates — the
 ``role_hierarchy`` dict in ``require_role`` puts AI_DELEGATE
 below VIEWER.
 Routes
-    ``POST /api/ai-delegates`` — atomic create returning a
-      one-shot access+refresh pair.
+    ``POST /api/ai-delegates`` — atomic create returning the
+      delegate's freshly-minted long-lived access JWT.
     ``GET /api/ai-delegates`` — list the caller's delegates.
     ``GET /api/ai-delegates/{id}`` — single-delegate detail.
     ``PATCH /api/ai-delegates/{id}`` — SCD2-close+insert new
@@ -166,12 +166,11 @@ async def create_delegate(
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     _flag: Annotated[None, Depends(require_ai_integration_enabled)] = None,
 ) -> DelegateCreatedResponse:
-    """Atomically create a new AI delegate + mint its token pair.
+    """Atomically create a new AI delegate + mint its long-lived access JWT.
 
-    The response carries the access + refresh JWT pair ONCE. The
-    operator must copy the tokens into their MCP client config
-    within the HTTP session; Snapper will not re-serve them on
-    the list or detail endpoints.
+    The response carries the access JWT ONCE. The operator must copy
+    the token into their MCP client config within the HTTP session;
+    Snapper will not re-serve it on the list or detail endpoints.
 
     Args:
         request: FastAPI request (for the REST tracker).

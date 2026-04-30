@@ -20,7 +20,6 @@ interface WizardState {
   step: WizardStep
   label: string
   operatorPublicId: string
-  longLived: boolean
   caps: CapsFormState
   capsError: string | null
   createdPayload: DelegateCreatedPayload | null
@@ -37,7 +36,6 @@ const INITIAL_STATE: WizardState = {
   step: 'identity',
   label: '',
   operatorPublicId: '',
-  longLived: false,
   caps: INITIAL_CAPS,
   capsError: null,
   createdPayload: null,
@@ -46,7 +44,6 @@ const INITIAL_STATE: WizardState = {
 type WizardAction =
   | { type: 'set-label'; value: string }
   | { type: 'set-operator'; value: string }
-  | { type: 'set-long-lived'; value: boolean }
   | { type: 'set-cap'; key: keyof CapsFormState; value: string }
   | { type: 'goto'; step: WizardStep }
   | { type: 'set-caps-error'; error: string | null }
@@ -59,8 +56,6 @@ function reducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, label: action.value }
     case 'set-operator':
       return { ...state, operatorPublicId: action.value }
-    case 'set-long-lived':
-      return { ...state, longLived: action.value }
     case 'set-cap':
       return {
         ...state,
@@ -181,7 +176,6 @@ export function CreateDelegateWizard({
       caps: parsedCaps,
       operator_public_id:
         state.operatorPublicId.trim() === '' ? null : state.operatorPublicId.trim(),
-      long_lived: state.longLived,
     }
 
     try {
@@ -223,11 +217,9 @@ export function CreateDelegateWizard({
         {state.step === 'scope-and-caps' && (
           <ScopeAndCapsStep
             operatorPublicId={state.operatorPublicId}
-            longLived={state.longLived}
             caps={state.caps}
             capsError={state.capsError}
             onOperatorChange={value => dispatch({ type: 'set-operator', value })}
-            onLongLivedChange={value => dispatch({ type: 'set-long-lived', value })}
             onCapChange={(key, value) => dispatch({ type: 'set-cap', key, value })}
             onBack={() => dispatch({ type: 'goto', step: 'identity' })}
             onNext={advanceToReview}
@@ -239,7 +231,6 @@ export function CreateDelegateWizard({
           <ReviewStep
             label={state.label}
             operatorPublicId={state.operatorPublicId}
-            longLived={state.longLived}
             caps={state.caps}
             isPending={mutation.isPending}
             onBack={() => dispatch({ type: 'goto', step: 'scope-and-caps' })}
@@ -328,22 +319,18 @@ function IdentityStep({
 
 function ScopeAndCapsStep({
   operatorPublicId,
-  longLived,
   caps,
   capsError,
   onOperatorChange,
-  onLongLivedChange,
   onCapChange,
   onBack,
   onNext,
   readOnly,
 }: Readonly<{
   operatorPublicId: string
-  longLived: boolean
   caps: CapsFormState
   capsError: string | null
   onOperatorChange: (v: string) => void
-  onLongLivedChange: (v: boolean) => void
   onCapChange: (k: keyof CapsFormState, v: string) => void
   onBack: () => void
   onNext: () => void
@@ -365,27 +352,6 @@ function ScopeAndCapsStep({
             placeholder='Leave empty to inherit caller primary operator'
             className='w-full px-3 py-2 rounded-lg border border-dark-600 bg-alpine-50 font-mono text-xs'
           />
-        </div>
-        <div className='pt-2 flex items-start gap-2'>
-          <input
-            id='wizard-long-lived'
-            type='checkbox'
-            checked={longLived}
-            onChange={e => onLongLivedChange(e.target.checked)}
-            disabled={readOnly}
-            aria-describedby='wizard-long-lived-description'
-            className='mt-1'
-          />
-          <div className='text-sm'>
-            <label htmlFor='wizard-long-lived' className='font-medium cursor-pointer'>
-              Long-lived token (PAT-style)
-            </label>
-            <p id='wizard-long-lived-description' className='text-muted-700 text-xs mt-0.5'>
-              Issues a single access token with ~10-year expiry and no refresh token. Recommended
-              for local MCP clients where refresh-token rotation is friction. Revoke by deactivating
-              this delegate. Default: off (rotating 15-min access + 7-day refresh pair).
-            </p>
-          </div>
         </div>
       </section>
 
@@ -470,7 +436,6 @@ function ScopeAndCapsStep({
 function ReviewStep({
   label,
   operatorPublicId,
-  longLived,
   caps,
   isPending,
   onBack,
@@ -479,7 +444,6 @@ function ReviewStep({
 }: Readonly<{
   label: string
   operatorPublicId: string
-  longLived: boolean
   caps: CapsFormState
   isPending: boolean
   onBack: () => void
@@ -489,10 +453,6 @@ function ReviewStep({
   const rows: [string, string][] = [
     ['Label', label],
     ['Operator public_id', operatorPublicId.trim() || '(caller primary operator)'],
-    [
-      'Token type',
-      longLived ? 'Long-lived PAT (~10y, no refresh)' : 'Rotating (15m access + 7d refresh)',
-    ],
     ['Max open orders', caps.maxOpenOrders.trim() || '(default)'],
     ['Max daily notional USD', caps.maxDailyNotionalUsd.trim() || '(default)'],
     ['Max cancels per minute', caps.maxCancelsPerMinute.trim() || '(default)'],

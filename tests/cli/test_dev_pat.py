@@ -59,9 +59,7 @@ def _delegate_created_response(
             "label": "Local Dev MCP",
             "operator_public_id": "01970000-0000-7000-8000-00000000000a",
             "is_active": True,
-            "token_kind": "long_lived",
             "access_token": access_token,
-            "refresh_token": None,
         },
         "sequence_id": 2,
         "public_id": "01970000-0000-7000-8000-000000000002",
@@ -207,13 +205,9 @@ class TestDevMintPatHappyPath:
         assert set(document.keys()) == {
             "SNAPPER_BASE_URL",
             "SNAPPER_ACCESS_TOKEN",
-            "SNAPPER_REFRESH_TOKEN",
-            "SNAPPER_WATCH_ACCESS_TOKEN",
         }
         assert document["SNAPPER_BASE_URL"] == f"{DEFAULT_BASE_URL}/api/mcp"
         assert document["SNAPPER_ACCESS_TOKEN"] == "DELEGATE_LONG_LIVED_TOKEN"
-        assert document["SNAPPER_REFRESH_TOKEN"] == ""
-        assert document["SNAPPER_WATCH_ACCESS_TOKEN"] == "DELEGATE_LONG_LIVED_TOKEN"
 
     def test_request_envelope_shapes_match_payload_request_contract(
         self,
@@ -251,7 +245,7 @@ class TestDevMintPatHappyPath:
         assert delegate_req.headers.get("Authorization") == "Bearer ADMIN_ACCESS_TOKEN"
         delegate_body = json.loads(delegate_req.content)
         assert delegate_body["type"] == "delegate_create_request"
-        assert delegate_body["payload"] == {"label": "Local Dev MCP", "long_lived": True}
+        assert delegate_body["payload"] == {"label": "Local Dev MCP"}
         for required_field in ("sequence_id", "public_id", "timestamp", "session_id"):
             assert required_field in delegate_body, f"delegate envelope missing {required_field}"
 

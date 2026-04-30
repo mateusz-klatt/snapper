@@ -66,7 +66,6 @@ const createdDelegate: DelegateRead = {
     max_cancels_per_minute: null,
     max_order_quantity_per_instrument: null,
   },
-  token_kind: 'rotating',
 }
 
 const emptyList: DelegateListResponse = {
@@ -88,9 +87,7 @@ const createdResponse: DelegateCreatedResponse = {
   payload: {
     delegate: createdDelegate,
     access_token: 'access-token-xyz',
-    refresh_token: 'refresh-token-xyz',
     expires_in: 900,
-    token_kind: 'rotating',
   },
 }
 
@@ -168,19 +165,23 @@ describe('AIIntegration — end-to-end create flow', () => {
         max_cancels_per_minute: null,
       },
       operator_public_id: null,
-      long_lived: false,
     })
 
     await waitFor(() => {
       expect(screen.getByText(/Save these credentials now/)).toBeInTheDocument()
     })
 
-    const snippet = screen.getByLabelText(/\.mcp-config\.json/) as HTMLTextAreaElement
+    const snippet = screen.getByLabelText(/\.mcp\.json/) as HTMLTextAreaElement
+    const parsedSnippet = JSON.parse(snippet.value) as {
+      mcpServers: { snapper: { env: Record<string, string> } }
+    }
 
     expect(snippet.value).toContain('SNAPPER_ACCESS_TOKEN')
     expect(snippet.value).toContain('access-token-xyz')
-    expect(snippet.value).toContain('SNAPPER_REFRESH_TOKEN')
-    expect(snippet.value).toContain('refresh-token-xyz')
+    expect(Object.keys(parsedSnippet.mcpServers.snapper.env).sort()).toEqual([
+      'SNAPPER_ACCESS_TOKEN',
+      'SNAPPER_BASE_URL',
+    ])
     expect(snippet.value).toContain('/api/mcp')
 
     const clipboardSpy = vi.spyOn(navigator.clipboard, 'writeText')
@@ -204,7 +205,7 @@ describe('AIIntegration — end-to-end create flow', () => {
       expect(screen.queryByRole('heading', { name: 'Create AI delegate' })).not.toBeInTheDocument()
     })
 
-    expect(screen.queryByLabelText(/\.mcp-config\.json/)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/\.mcp\.json/)).not.toBeInTheDocument()
 
     await waitFor(() => {
       expect(mockApiClient.listAiDelegates.mock.calls.length).toBeGreaterThanOrEqual(2)

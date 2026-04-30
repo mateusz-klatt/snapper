@@ -515,15 +515,11 @@ async def issue_ws_token(
     current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
     token_claims: Annotated[TokenClaims, Depends(_get_authenticated_token_claims)],
 ) -> WsTokenResponse:
-    """Mint a one-shot WebSocket token without rotating refresh JWTs.
+    """Mint a one-shot WebSocket token from the access JWT's session.
 
     Authenticates the caller via the access bearer (header or cookie)
     via :func:`require_authentication` and returns a fresh ws_token
-    bound to the access JWT's session. Unlike ``POST /api/auth/refresh``
-    this route does NOT rotate the refresh-token pair, which lets a
-    long-running monitor client mint ws_tokens on its own cadence
-    without colliding with a sibling MCP server that holds the same
-    refresh credential.
+    bound to the access JWT's session.
 
     Per-IP rate limited at ``WS_TOKEN_RATE_LIMIT`` to cap reconnect-
     storm minting from a single source. The TTL of the returned

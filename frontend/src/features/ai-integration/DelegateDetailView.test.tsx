@@ -36,7 +36,6 @@ const buildDelegate = (overrides: Partial<DelegateRead> = {}): DelegateRead => (
     max_cancels_per_minute: null,
     max_order_quantity_per_instrument: null,
   },
-  token_kind: 'rotating',
   ...overrides,
 })
 
@@ -81,22 +80,6 @@ describe('DelegateDetailView', () => {
     expect(screen.getByText('Active')).toBeInTheDocument()
     expect(screen.getByText('5')).toBeInTheDocument()
     expect(screen.getByText('10000')).toBeInTheDocument()
-  })
-
-  it('renders a PAT badge next to the label when token_kind is long_lived', () => {
-    const delegate = buildDelegate({ token_kind: 'long_lived' })
-
-    mockUseAiDelegate.mockReturnValue({ data: { payload: delegate }, isLoading: false })
-    render(<DelegateDetailView publicId={delegate.public_id} onBack={vi.fn()} />)
-    expect(screen.getByText('PAT')).toBeInTheDocument()
-  })
-
-  it('does NOT render a PAT badge when token_kind is rotating', () => {
-    const delegate = buildDelegate()
-
-    mockUseAiDelegate.mockReturnValue({ data: { payload: delegate }, isLoading: false })
-    render(<DelegateDetailView publicId={delegate.public_id} onBack={vi.fn()} />)
-    expect(screen.queryByText('PAT')).not.toBeInTheDocument()
   })
 
   it('renders per-instrument caps JSON when present', () => {
