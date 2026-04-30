@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-cov ts-bridge bridge-regen bridge-check ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full py-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-cov ts-bridge bridge-regen bridge-check ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -9,6 +9,7 @@ help:
 	$(info pre-refresh Sync pre-commit hooks with pyproject versions)
 	$(info py-refresh  Refresh Python dependencies [upgrade to latest])
 	$(info refresh     Refresh pre-commit, Python, and UI dependencies)
+	$(info update      Refresh deps, local tools, and Dockerfile tool pins)
 	$(info setup-full  Install system deps + setup [Linux/macOS only])
 	$(info )
 	$(info Quality Gates:)
@@ -186,6 +187,8 @@ setup:
 setup-full: system-deps setup
 
 py-refresh:
+	$(info Upgrading local Poetry tool...)
+	$(PYRUN) pip install --upgrade poetry
 	$(info Clearing Poetry cache...)
 	-$(PYRUN) poetry cache clear --all -n .
 	$(info Bumping Python dependency constraints to latest available versions...)
@@ -196,6 +199,12 @@ py-refresh:
 
 refresh: py-refresh ui-refresh pre-refresh
 	$(info All dependencies refreshed!)
+
+sync-docker-tool-pins:
+	$(VENV_PY) scripts/update_tool_pins.py
+
+update: refresh sync-docker-tool-pins
+	$(info All dependencies and Docker build-tool pins refreshed!)
 
 pre-refresh:
 	$(info Synchronizing pre-commit hook versions from pyproject.toml...)

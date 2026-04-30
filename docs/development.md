@@ -24,6 +24,9 @@ make ui-setup
 
 # Synchronize pre-commit hooks
 make pre-refresh
+
+# Refresh dependencies, local tools, and Dockerfile tool pins
+make update
 ```
 
 ## Quality Gates

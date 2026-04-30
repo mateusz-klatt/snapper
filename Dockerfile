@@ -1,7 +1,8 @@
 FROM node:25-alpine AS ui-build
+ARG COREPACK_VERSION=0.34.0
 WORKDIR /app
 
-RUN (corepack --version 2>/dev/null || npm install -g --force --ignore-scripts corepack) && corepack enable
+RUN (corepack --version 2>/dev/null || npm install -g --force --ignore-scripts corepack@${COREPACK_VERSION}) && corepack enable
 
 COPY frontend/package.json frontend/pnpm-lock.yaml ./frontend/
 WORKDIR /app/frontend
@@ -11,6 +12,7 @@ COPY frontend/ /app/frontend/
 RUN pnpm build
 
 FROM python:3.14-slim AS py-build
+ARG POETRY_VERSION=2.3.4
 
 ENV PIP_NO_CACHE_DIR=1
 WORKDIR /app
@@ -24,17 +26,22 @@ COPY pyproject.toml poetry.lock README.md ./
 COPY src/ ./src/
 COPY *proprietary/data/seed/ ./src/snapper/data/seed/
 
-RUN python -m pip install --upgrade pip poetry \
- && poetry config virtualenvs.create false \
- && poetry install --only=main,cloud --no-root \
- && pip wheel --wheel-dir /wheels .
+RUN python -m venv /opt/poetry \
+ && /opt/poetry/bin/pip install --only-binary :all: poetry==${POETRY_VERSION} \
+ && python -m venv /opt/appenv \
+ && /opt/poetry/bin/poetry config virtualenvs.create false \
+ && /opt/poetry/bin/poetry config installer.only-binary :all: \
+ && VIRTUAL_ENV=/opt/appenv PATH="/opt/appenv/bin:$PATH" /opt/poetry/bin/poetry install --only=main,cloud --no-root \
+ && VIRTUAL_ENV=/opt/appenv PATH="/opt/appenv/bin:$PATH" /opt/appenv/bin/pip wheel --no-deps --wheel-dir /wheels . \
+ && VIRTUAL_ENV=/opt/appenv PATH="/opt/appenv/bin:$PATH" /opt/appenv/bin/pip install --no-index --find-links=/wheels --only-binary :all: --no-deps --no-compile snapper==0.1.0
 
 FROM python:3.14-slim AS api
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    SERVER_HOST=0.0.0.0
+    SERVER_HOST=0.0.0.0 \
+    PATH=/opt/appenv/bin:$PATH
 
 WORKDIR /app
 
@@ -47,9 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG UID=888
 RUN adduser --disabled-password --gecos '' --no-create-home --uid "$UID" snapper
 
-COPY --from=py-build /wheels /wheels
-RUN python -m pip install --upgrade pip \
- && pip install --no-index --find-links=/wheels --no-compile /wheels/*.whl
+COPY --from=py-build /opt/appenv /opt/appenv
 
 COPY --from=ui-build /app/frontend/dist ./frontend/dist
 
