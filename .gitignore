@@ -42,6 +42,7 @@ data/archive/
 data/kraken/
 data/walutomat/
 data/zonda/
+data/snapper-mcp-local-plugin/
 
 # Frontend
 frontend/node_modules/
