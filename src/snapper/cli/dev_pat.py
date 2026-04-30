@@ -106,7 +106,7 @@ def _decode_jwt_exp(jwt: str) -> str | None:
         padded = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
         decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
         claims = json.loads(decoded)
-    except (ValueError, json.JSONDecodeError):
+    except ValueError:
         return None
     exp = claims.get("exp") if isinstance(claims, dict) else None
     if not isinstance(exp, (int, float)):

@@ -168,6 +168,12 @@ class TestBridgeRenderType:
         with pytest.raises(ValueError, match="non-null members"):
             _bridge_render_type(prop, {})
 
+    def test_anyof_with_non_object_member_raises(self) -> None:
+        """Malformed anyOf members are rejected before nullable-union rendering."""
+        prop = {"anyOf": [{"type": "string"}, "null"]}
+        with pytest.raises(ValueError, match="malformed anyOf"):
+            _bridge_render_type(prop, {})
+
 
 class TestBridgeResolveRef:
     """Ref resolution against the backend ``$defs`` map."""

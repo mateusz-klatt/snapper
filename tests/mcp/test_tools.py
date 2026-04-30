@@ -34,6 +34,7 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.mcp.server import TOKEN_CLAIMS_CTX
 from snapper.mcp.server import get_current_claims
+from snapper.mcp.tools import _map_cancel_exception_to_envelope
 from snapper.mcp.tools import _parse_iso8601_utc
 from snapper.mcp.tools import register_mcp_tools
 
@@ -104,6 +105,16 @@ class TestGetCurrentClaims:
         """Unset ContextVar → RuntimeError signals middleware misconfiguration."""
         with pytest.raises(RuntimeError, match="misconfigured"):
             get_current_claims()
+
+
+class TestCancelEnvelopeMapping:
+    """Coverage for the cancel-service exception-to-envelope mapper."""
+
+    def test_reraises_unknown_exception(self) -> None:
+        """Unknown exceptions are re-raised so real bugs do not get masked."""
+        exc = RuntimeError("boom")
+        with pytest.raises(RuntimeError, match="boom"):
+            _map_cancel_exception_to_envelope(exc, "plan-1")
 
 
 class TestListInstrumentsTool:

@@ -81,6 +81,7 @@ _MCP_TOOL_STREAM = "rest.mcp"
 
 _PG_UNIQUE_VIOLATION_SQLSTATE = "23505"
 _SQLITE_CONSTRAINT_UNIQUE_EXTCODE = 2067
+_ORDER_STATUS_VALUES: frozenset[str] = frozenset(member.value for member in OrderStatusEnum)
 
 
 @dataclass(frozen=True)
@@ -700,6 +701,676 @@ async def _compensate_failed_plan_insert(
         )
 
 
+@dataclass(frozen=True)
+class _ToolAccess:
+    """Claims and repository resolved for one MCP tool invocation."""
+
+    claims: TokenClaims
+    repo: Repository
+
+
+def _require_tool_access(
+    *,
+    claims_getter: Callable[[], TokenClaims],
+    repository_getter: Callable[[], Repository | None],
+    permission: Permission,
+) -> _ToolAccess:
+    """Resolve claims and repository, raising on permission or lifecycle errors."""
+    claims = claims_getter()
+    _require_permission(claims, permission)
+    repo = _get_repository_or_raise(repository_getter)
+    return _ToolAccess(claims=claims, repo=repo)
+
+
+def _get_tool_access_or_envelope(
+    *,
+    claims_getter: Callable[[], TokenClaims],
+    repository_getter: Callable[[], Repository | None],
+    permission: Permission,
+) -> _ToolAccess | CallToolResult:
+    """Resolve claims and repository, returning an error envelope when unavailable."""
+    claims = claims_getter()
+    permission_envelope = _envelope_for_permission_check(claims, permission)
+    if permission_envelope is not None:
+        return permission_envelope
+    repo_or_envelope = _envelope_for_repository(repository_getter)
+    if isinstance(repo_or_envelope, CallToolResult):
+        return repo_or_envelope
+    return _ToolAccess(claims=claims, repo=repo_or_envelope)
+
+
+def _invalid_argument_result(message: str, details: dict[str, Any]) -> CallToolResult:
+    """Return the standard invalid-argument MCP envelope."""
+    return to_call_tool_result(
+        success=False,
+        error_code="invalid_argument",
+        message=message,
+        details=sanitize_output(details),
+    )
+
+
+def _wallet_scope_not_found_result(
+    *,
+    error_code: str,
+    message: str,
+    wallet_public_id: str | None,
+) -> CallToolResult:
+    """Collapse wallet-scope mismatches into the entity-specific not-found envelope."""
+    return to_call_tool_result(
+        success=False,
+        error_code=error_code,
+        message=message,
+        details=sanitize_output({"wallet_public_id": wallet_public_id}),
+    )
+
+
+async def _resolve_wallet_ids_or_envelope(
+    *,
+    claims: TokenClaims,
+    repo: Repository,
+    wallet_public_id: str | None,
+    as_of: datetime,
+    error_code: str,
+    message: str,
+) -> tuple[list[str] | None, CallToolResult | None]:
+    """Resolve wallet scope or return the corresponding anti-enumeration envelope."""
+    wallet_ids, scope_violation = await _resolve_target_wallets_for_mcp(
+        claims=claims,
+        repo=repo,
+        wallet_public_id=wallet_public_id,
+        as_of=as_of,
+    )
+    if not scope_violation:
+        return wallet_ids, None
+    return (
+        None,
+        _wallet_scope_not_found_result(
+            error_code=error_code,
+            message=message,
+            wallet_public_id=wallet_public_id,
+        ),
+    )
+
+
+def _build_cancel_principal(claims: TokenClaims) -> AuthPrincipal:
+    """Project MCP token claims into the cancel-service principal payload."""
+    return AuthPrincipal(
+        username=claims.username,
+        role=claims.role,
+        user_public_id=claims.user_public_id or claims.username,
+        operator_public_ids=list(claims.operator_public_ids),
+        primary_operator_public_id=claims.primary_operator_public_id or "",
+    )
+
+
+def _map_cancel_exception_to_envelope(exc: Exception, plan_public_id: str) -> CallToolResult:
+    """Map cancel-service domain exceptions into MCP error envelopes."""
+    if isinstance(exc, (PlanNotFoundError, PlanScopeError)):
+        return to_call_tool_result(
+            success=False,
+            error_code="order_not_found",
+            message="No execution plan found for the given plan_public_id.",
+            details=sanitize_output({"plan_public_id": plan_public_id}),
+        )
+    if isinstance(exc, PlanAlreadyTerminalError):
+        return to_call_tool_result(
+            success=False,
+            error_code="already_terminal",
+            message=f"Plan is already in terminal status {exc.status!r}.",
+            details=sanitize_output({"plan_public_id": plan_public_id, "status": exc.status}),
+        )
+    if isinstance(exc, PlanCancelInProgressError):
+        return to_call_tool_result(
+            success=False,
+            error_code="cancel_in_progress",
+            message=(
+                "Plan cancel already in progress with a different "
+                "idempotency_key; retry with the original key or wait."
+            ),
+            details=sanitize_output({"plan_public_id": plan_public_id}),
+        )
+    if isinstance(exc, PlanCancelIdempotencyKeyMismatchError):
+        return to_call_tool_result(
+            success=False,
+            error_code="idempotency_key_conflict",
+            message=(
+                "Plan already has a different cancel_idempotency_key; "
+                "use the original key to obtain the cancel state."
+            ),
+            details=sanitize_output({"plan_public_id": plan_public_id}),
+        )
+    if isinstance(exc, PlanConcurrentChangeError):
+        return to_call_tool_result(
+            success=False,
+            error_code="service_unavailable",
+            message=(
+                "Plan status changed concurrently before the cancel could be claimed; "
+                "retry to surface the post-race state."
+            ),
+            details=sanitize_output({"plan_public_id": plan_public_id}),
+        )
+    if isinstance(exc, CapsViolationError):
+        return to_call_tool_result(
+            success=False,
+            error_code="caps_violation",
+            message="Caps enforcer rejected the cancel.",
+            details=sanitize_output(
+                {
+                    "plan_public_id": plan_public_id,
+                    "cap_type": exc.cap_type,
+                    "attempted": exc.attempted,
+                    "limit": exc.limit,
+                }
+            ),
+        )
+    if isinstance(exc, PlanCancelEmitError):
+        return to_call_tool_result(
+            success=False,
+            error_code="service_unavailable",
+            message=(
+                "Failed to emit cancel command; plan compensated to "
+                "failed. Executor recovery will re-emit on restart."
+            ),
+            details=sanitize_output({"plan_public_id": plan_public_id}),
+        )
+    raise exc
+
+
+async def _list_instruments_tool(
+    *,
+    repository_getter: Callable[[], Repository | None],
+    claims_getter: Callable[[], TokenClaims],
+    exchange: str,
+) -> dict[str, Any]:
+    """Run the MCP instrument-listing read path."""
+    access = _require_tool_access(
+        claims_getter=claims_getter,
+        repository_getter=repository_getter,
+        permission=Permission.READ_MARKET_DATA,
+    )
+    rows = await access.repo.get_exchange_instruments(exchange, as_of=datetime.now(UTC))
+    sanitized: dict[str, Any] = sanitize_output({"exchange": exchange, "instruments": sorted(rows)})
+    return sanitized
+
+
+async def _submit_ai_review_decision_tool(
+    *,
+    repository_getter: Callable[[], Repository | None],
+    claims_getter: Callable[[], TokenClaims],
+    review_id: str,
+    decision: str,
+    rationale: str | None,
+) -> CallToolResult:
+    """Run the AI-review decision MCP path."""
+    access = _require_tool_access(
+        claims_getter=claims_getter,
+        repository_getter=repository_getter,
+        permission=Permission.CREATE_ORDERS,
+    )
+    try:
+        decision_enum = AiReviewDecisionEnum(decision)
+    except ValueError:
+        return to_call_tool_result(
+            success=False,
+            error_code="invalid_decision",
+            message=(
+                "decision must be 'approve' or 'reject'; got an "
+                "unrecognised value (see details.decision)."
+            ),
+            details=sanitize_output({"decision": decision}),
+        )
+    result = await get_ai_review_service().submit_decision(
+        review_public_id=review_id,
+        caller_user_public_id=access.claims.user_public_id,
+        decision=decision_enum,
+        rationale=rationale,
+        repo=access.repo,
+        scope_grant_service=get_scope_grant_service(),
+    )
+    details: dict[str, Any] = dict(result.details)
+    if result.status is not None:
+        details["status"] = result.status.value
+    if result.resolution_mode is not None:
+        details["resolution_mode"] = result.resolution_mode.value
+    if result.dispatch_version is not None:
+        details["dispatch_version"] = result.dispatch_version
+    idempotent_retry = result.error_code == ERROR_DECISION_ALREADY_RECORDED
+    return to_call_tool_result(
+        success=result.error_code is None or idempotent_retry,
+        error_code=result.error_code,
+        message=result.message,
+        details=sanitize_output(details),
+    )
+
+
+async def _list_orders_tool(
+    *,
+    repository_getter: Callable[[], Repository | None],
+    claims_getter: Callable[[], TokenClaims],
+    wallet_public_id: str | None,
+    status: str | None,
+    exchange: str | None,
+    instrument: str | None,
+    limit: int,
+    offset: int,
+) -> CallToolResult:
+    """Run the list-orders MCP read path."""
+    access = _get_tool_access_or_envelope(
+        claims_getter=claims_getter,
+        repository_getter=repository_getter,
+        permission=Permission.READ_ORDERS,
+    )
+    if isinstance(access, CallToolResult):
+        return access
+    if limit < 0 or offset < 0:
+        return _invalid_argument_result(
+            "limit and offset must be non-negative integers.",
+            {"limit": limit, "offset": offset},
+        )
+    if status is not None and status not in _ORDER_STATUS_VALUES:
+        return _invalid_argument_result(
+            "status must be one of OrderStatusEnum members (see details.allowed_status).",
+            {"status": status, "allowed_status": sorted(_ORDER_STATUS_VALUES)},
+        )
+    now = datetime.now(UTC)
+    wallet_ids, scope_envelope = await _resolve_wallet_ids_or_envelope(
+        claims=access.claims,
+        repo=access.repo,
+        wallet_public_id=wallet_public_id,
+        as_of=now,
+        error_code="order_not_found",
+        message="No orders found for the given filters.",
+    )
+    if scope_envelope is not None:
+        return scope_envelope
+    clamped_limit = min(limit, _LIST_ORDERS_LIMIT_CAP)
+    rows = await access.repo.get_orders(
+        limit=clamped_limit,
+        offset=offset,
+        as_of=now,
+        symbol=instrument,
+        exchange=exchange,
+        status=status,
+        wallet_public_ids=wallet_ids,
+    )
+    total = await access.repo.get_orders_total_count(
+        as_of=now,
+        symbol=instrument,
+        exchange=exchange,
+        status=status,
+        wallet_public_ids=wallet_ids,
+    )
+    return to_call_tool_result(
+        success=True,
+        error_code=None,
+        message=f"Returned {len(rows)} of {total} matching orders.",
+        details=sanitize_output(
+            {
+                "orders": [_serialize_order_row(row) for row in rows],
+                "total_count": total,
+            }
+        ),
+    )
+
+
+async def _get_order_status_tool(
+    *,
+    repository_getter: Callable[[], Repository | None],
+    claims_getter: Callable[[], TokenClaims],
+    command_public_id: str,
+) -> CallToolResult:
+    """Run the get-order-status MCP read path."""
+    access = _get_tool_access_or_envelope(
+        claims_getter=claims_getter,
+        repository_getter=repository_getter,
+        permission=Permission.READ_ORDERS,
+    )
+    if isinstance(access, CallToolResult):
+        return access
+    now = datetime.now(UTC)
+    accessible_wallets, _ = await _resolve_target_wallets_for_mcp(
+        claims=access.claims,
+        repo=access.repo,
+        wallet_public_id=None,
+        as_of=now,
+    )
+    command_row = await access.repo.get_trade_command_by_public_id(command_public_id, as_of=now)
+    if command_row is None:
+        return to_call_tool_result(
+            success=False,
+            error_code="order_not_found",
+            message="No trade command found for the given command_public_id.",
+            details=sanitize_output({"command_public_id": command_public_id}),
+        )
+    if accessible_wallets is not None and command_row["wallet_public_id"] not in accessible_wallets:
+        return to_call_tool_result(
+            success=False,
+            error_code="order_not_found",
+            message="No trade command found for the given command_public_id.",
+            details=sanitize_output({"command_public_id": command_public_id}),
+        )
+    order_row = await access.repo.get_order_by_command_public_id(command_public_id, as_of=now)
+    if order_row is None:
+        return to_call_tool_result(
+            success=True,
+            error_code=None,
+            message="Trade command exists but exchange has not acknowledged the order yet.",
+            details=sanitize_output(
+                {
+                    "command_public_id": command_public_id,
+                    "plan_public_id": command_row["plan_public_id"],
+                    "wallet_public_id": command_row["wallet_public_id"],
+                    "status": "pending_dispatch",
+                    "execution_history": [],
+                }
+            ),
+        )
+    executions = await access.repo.get_executions_for_order(
+        order_public_id=order_row["public_id"], as_of=now
+    )
+    return to_call_tool_result(
+        success=True,
+        error_code=None,
+        message=f"Order found in status {order_row['status']!r}.",
+        details=sanitize_output(
+            {
+                "order": _serialize_order_row(order_row),
+                "execution_history": [
+                    _serialize_execution_row(execution) for execution in executions
+                ],
+            }
+        ),
+    )
+
+
+async def _list_positions_tool(
+    *,
+    repository_getter: Callable[[], Repository | None],
+    claims_getter: Callable[[], TokenClaims],
+    wallet_public_id: str | None,
+    exchange: str | None,
+    instrument: str | None,
+) -> CallToolResult:
+    """Run the list-positions MCP read path."""
+    access = _get_tool_access_or_envelope(
+        claims_getter=claims_getter,
+        repository_getter=repository_getter,
+        permission=Permission.READ_POSITIONS,
+    )
+    if isinstance(access, CallToolResult):
+        return access
+    now = datetime.now(UTC)
+    wallet_ids, scope_envelope = await _resolve_wallet_ids_or_envelope(
+        claims=access.claims,
+        repo=access.repo,
+        wallet_public_id=wallet_public_id,
+        as_of=now,
+        error_code="position_not_found",
+        message="No positions found for the given filters.",
+    )
+    if scope_envelope is not None:
+        return scope_envelope
+    rows = await access.repo.get_positions(as_of=now, wallet_public_ids=wallet_ids)
+    filtered = [
+        row
+        for row in rows
+        if (exchange is None or row["exchange"] == exchange)
+        and (instrument is None or row["instrument"] == instrument)
+    ]
+    return to_call_tool_result(
+        success=True,
+        error_code=None,
+        message=f"Returned {len(filtered)} matching positions.",
+        details=sanitize_output(
+            {
+                "positions": [_serialize_position_row(row) for row in filtered],
+                "count": len(filtered),
+            }
+        ),
+    )
+
+
+async def _get_position_cycle_tool(
+    *,
+    repository_getter: Callable[[], Repository | None],
+    claims_getter: Callable[[], TokenClaims],
+    cycle_public_id: str,
+) -> CallToolResult:
+    """Run the get-position-cycle MCP read path."""
+    access = _get_tool_access_or_envelope(
+        claims_getter=claims_getter,
+        repository_getter=repository_getter,
+        permission=Permission.READ_POSITIONS,
+    )
+    if isinstance(access, CallToolResult):
+        return access
+    now = datetime.now(UTC)
+    accessible_wallets, _ = await _resolve_target_wallets_for_mcp(
+        claims=access.claims,
+        repo=access.repo,
+        wallet_public_id=None,
+        as_of=now,
+    )
+    cycle_row = await access.repo.get_position_cycle_by_public_id(cycle_public_id, as_of=now)
+    if cycle_row is None or (
+        accessible_wallets is not None and cycle_row["wallet_public_id"] not in accessible_wallets
+    ):
+        return to_call_tool_result(
+            success=False,
+            error_code="position_cycle_not_found",
+            message="No position cycle found for the given cycle_public_id.",
+            details=sanitize_output({"cycle_public_id": cycle_public_id}),
+        )
+    return to_call_tool_result(
+        success=True,
+        error_code=None,
+        message=f"Position cycle found in status {cycle_row['status']!r}.",
+        details=sanitize_output({"position_cycle": _serialize_position_cycle_row(cycle_row)}),
+    )
+
+
+async def _cancel_order_tool(
+    *,
+    repository_getter: Callable[[], Repository | None],
+    caps_enforcer_getter: Callable[[], TradingCapsEnforcer | None],
+    claims_getter: Callable[[], TokenClaims],
+    tracker_getter: Callable[[], SequenceTracker | None],
+    plan_public_id: str,
+    idempotency_key: str,
+) -> CallToolResult:
+    """Run the cancel-order MCP write path."""
+    access = _get_tool_access_or_envelope(
+        claims_getter=claims_getter,
+        repository_getter=repository_getter,
+        permission=Permission.CANCEL_ORDERS,
+    )
+    if isinstance(access, CallToolResult):
+        return access
+    enforcer = caps_enforcer_getter()
+    if enforcer is None:
+        return to_call_tool_result(
+            success=False,
+            error_code="service_unavailable",
+            message=(
+                "Caps enforcer not yet initialized; MCP cancel "
+                "dispatched before lifespan startup."
+            ),
+            details=sanitize_output({}),
+        )
+    if not idempotency_key or len(idempotency_key) > _CANCEL_IDEMPOTENCY_KEY_MAX:
+        return _invalid_argument_result(
+            (
+                f"idempotency_key must be 1-{_CANCEL_IDEMPOTENCY_KEY_MAX} chars; "
+                "matches the execution_plans.cancel_idempotency_key column width."
+            ),
+            {
+                "idempotency_key_length": len(idempotency_key) if idempotency_key else 0,
+                "max_length": _CANCEL_IDEMPOTENCY_KEY_MAX,
+            },
+        )
+    tracker = tracker_getter() or SequenceTracker()
+    try:
+        updated = await PlansCancelService.cancel_by_plan_public_id(
+            plan_public_id=plan_public_id,
+            idempotency_key=idempotency_key,
+            principal=_build_cancel_principal(access.claims),
+            repo=access.repo,
+            tracker=tracker,
+            caps_enforcer=enforcer,
+        )
+    except (
+        PlanAlreadyTerminalError,
+        PlanCancelEmitError,
+        PlanCancelIdempotencyKeyMismatchError,
+        PlanCancelInProgressError,
+        PlanConcurrentChangeError,
+        PlanNotFoundError,
+        PlanScopeError,
+        CapsViolationError,
+    ) as exc:
+        return _map_cancel_exception_to_envelope(exc, plan_public_id)
+    return to_call_tool_result(
+        success=True,
+        error_code=None,
+        message=f"Cancel claimed; plan now in status {updated['status']!r}.",
+        details=sanitize_output(
+            {"plan": _serialize_execution_plan_row(cast(dict[str, Any], updated))}
+        ),
+    )
+
+
+async def _get_ohlcv_tool(
+    *,
+    repository_getter: Callable[[], Repository | None],
+    claims_getter: Callable[[], TokenClaims],
+    exchange: str,
+    instrument: str,
+    timeframe: str,
+    since: str | None,
+    until: str | None,
+    limit: int,
+) -> CallToolResult:
+    """Run the OHLCV MCP read path."""
+    access = _get_tool_access_or_envelope(
+        claims_getter=claims_getter,
+        repository_getter=repository_getter,
+        permission=Permission.READ_MARKET_DATA,
+    )
+    if isinstance(access, CallToolResult):
+        return access
+    if limit < 0:
+        return _invalid_argument_result("limit must be a non-negative integer.", {"limit": limit})
+    if timeframe not in _VALID_OHLCV_TIMEFRAMES:
+        return _invalid_argument_result(
+            "timeframe must be one of the supported intervals (see details.allowed_timeframes).",
+            {"timeframe": timeframe, "allowed_timeframes": sorted(_VALID_OHLCV_TIMEFRAMES)},
+        )
+    if (since is None) != (until is None):
+        return _invalid_argument_result(
+            (
+                "since and until must be supplied together for range mode; "
+                "omit both for latest-as-of mode."
+            ),
+            {"since": since, "until": until},
+        )
+    try:
+        parsed_since = _parse_iso8601_utc(since) if since is not None else None
+        parsed_until = _parse_iso8601_utc(until) if until is not None else None
+    except ValueError as exc:
+        return _invalid_argument_result(
+            "since and until must be ISO 8601 UTC strings (e.g. '2026-01-01T00:00:00Z').",
+            {"since": since, "until": until, "error": str(exc)},
+        )
+    range_mode = parsed_since is not None
+    rows = await access.repo.get_candles(
+        instrument=instrument,
+        timeframe=timeframe,
+        start=parsed_since,
+        end=parsed_until,
+        exchange=cast(Any, exchange),
+        as_of=datetime.now(UTC),
+        limit=min(limit, _OHLCV_LIMIT_CAP),
+        order="asc" if range_mode else "desc",
+    )
+    return to_call_tool_result(
+        success=True,
+        error_code=None,
+        message=f"Returned {len(rows)} candles.",
+        details=sanitize_output(
+            {
+                "candles": [_serialize_candle_row(row) for row in rows],
+                "mode": "range" if range_mode else "latest_as_of",
+            }
+        ),
+    )
+
+
+async def _list_recent_signals_tool(
+    *,
+    repository_getter: Callable[[], Repository | None],
+    claims_getter: Callable[[], TokenClaims],
+    since: str,
+    instrument: str | None,
+    strategy: str | None,
+    exchange: str | None,
+    wallet_public_id: str | None,
+    limit: int,
+) -> CallToolResult:
+    """Run the recent-signals MCP read path."""
+    access = _get_tool_access_or_envelope(
+        claims_getter=claims_getter,
+        repository_getter=repository_getter,
+        permission=Permission.READ_SIGNALS,
+    )
+    if isinstance(access, CallToolResult):
+        return access
+    if limit < 0:
+        return _invalid_argument_result("limit must be a non-negative integer.", {"limit": limit})
+    if not since:
+        return _invalid_argument_result(
+            "since is required (ISO 8601 UTC timestamp).",
+            {"since": since},
+        )
+    try:
+        parsed_since = _parse_iso8601_utc(since)
+    except ValueError as exc:
+        return _invalid_argument_result(
+            "since must be an ISO 8601 UTC string (e.g. '2026-04-25T10:00:00Z').",
+            {"since": since, "error": str(exc)},
+        )
+    now = datetime.now(UTC)
+    wallet_ids, scope_envelope = await _resolve_wallet_ids_or_envelope(
+        claims=access.claims,
+        repo=access.repo,
+        wallet_public_id=wallet_public_id,
+        as_of=now,
+        error_code="signal_not_found",
+        message="No signals found for the given filters.",
+    )
+    if scope_envelope is not None:
+        return scope_envelope
+    rows = await access.repo.get_signals(
+        since=parsed_since,
+        limit=min(limit, _LIST_SIGNALS_LIMIT_CAP),
+        as_of=now,
+        instrument=instrument,
+        strategy=strategy,
+        exchange=exchange,
+        wallet_public_ids=wallet_ids,
+    )
+    return to_call_tool_result(
+        success=True,
+        error_code=None,
+        message=f"Returned {len(rows)} matching signals.",
+        details=sanitize_output(
+            {
+                "signals": [_serialize_signal_row(row) for row in rows],
+                "count": len(rows),
+            }
+        ),
+    )
+
+
 def register_mcp_tools(
     mcp_server: FastMCP,
     *,
@@ -757,14 +1428,11 @@ def register_mcp_tools(
             RuntimeError: if the repository singleton is not yet
                 initialized (lifespan-not-ready).
         """
-        claims = claims_getter()
-        _require_permission(claims, Permission.READ_MARKET_DATA)
-        repo = _get_repository_or_raise(repository_getter)
-        rows = await repo.get_exchange_instruments(exchange, as_of=datetime.now(UTC))
-        sanitized: dict[str, Any] = sanitize_output(
-            {"exchange": exchange, "instruments": sorted(rows)}
+        return await _list_instruments_tool(
+            repository_getter=repository_getter,
+            claims_getter=claims_getter,
+            exchange=exchange,
         )
-        return sanitized
 
     @mcp_server.tool()
     async def submit_manual_order(
@@ -914,45 +1582,12 @@ def register_mcp_tools(
                 FastMCP NEVER sees an exception for a known
                 :class:`AiReviewDecisionResult` outcome.
         """
-        claims = claims_getter()
-        _require_permission(claims, Permission.CREATE_ORDERS)
-        repo = _get_repository_or_raise(repository_getter)
-        try:
-            decision_enum = AiReviewDecisionEnum(decision)
-        except ValueError:
-            sanitized_invalid: dict[str, Any] = sanitize_output({"decision": decision})
-            return to_call_tool_result(
-                success=False,
-                error_code="invalid_decision",
-                message=(
-                    "decision must be 'approve' or 'reject'; got an "
-                    "unrecognised value (see details.decision)."
-                ),
-                details=sanitized_invalid,
-            )
-        result = await get_ai_review_service().submit_decision(
-            review_public_id=review_id,
-            caller_user_public_id=claims.user_public_id,
-            decision=decision_enum,
+        return await _submit_ai_review_decision_tool(
+            repository_getter=repository_getter,
+            claims_getter=claims_getter,
+            review_id=review_id,
+            decision=decision,
             rationale=rationale,
-            repo=repo,
-            scope_grant_service=get_scope_grant_service(),
-        )
-        details: dict[str, Any] = dict(result.details)
-        if result.status is not None:
-            details["status"] = result.status.value
-        if result.resolution_mode is not None:
-            details["resolution_mode"] = result.resolution_mode.value
-        if result.dispatch_version is not None:
-            details["dispatch_version"] = result.dispatch_version
-        idempotent_retry = result.error_code == ERROR_DECISION_ALREADY_RECORDED
-        success = result.error_code is None or idempotent_retry
-        sanitized_details: dict[str, Any] = sanitize_output(details)
-        return to_call_tool_result(
-            success=success,
-            error_code=result.error_code,
-            message=result.message,
-            details=sanitized_details,
         )
 
     @mcp_server.tool()
@@ -991,77 +1626,15 @@ def register_mcp_tools(
             (list of ``OrderRow`` dicts) and ``total_count`` (int —
             cardinality of matching rows BEFORE limit/offset).
         """
-        claims = claims_getter()
-        permission_envelope = _envelope_for_permission_check(claims, Permission.READ_ORDERS)
-        if permission_envelope is not None:
-            return permission_envelope
-        repo_or_envelope = _envelope_for_repository(repository_getter)
-        if isinstance(repo_or_envelope, CallToolResult):
-            return repo_or_envelope
-        repo = repo_or_envelope
-        if limit < 0 or offset < 0:
-            return to_call_tool_result(
-                success=False,
-                error_code="invalid_argument",
-                message="limit and offset must be non-negative integers.",
-                details=sanitize_output({"limit": limit, "offset": offset}),
-            )
-        if status is not None and status not in OrderStatusEnum.__members__.values():
-            return to_call_tool_result(
-                success=False,
-                error_code="invalid_argument",
-                message=(
-                    "status must be one of OrderStatusEnum members (see details.allowed_status)."
-                ),
-                details=sanitize_output(
-                    {
-                        "status": status,
-                        "allowed_status": [s.value for s in OrderStatusEnum],
-                    }
-                ),
-            )
-        clamped_limit = min(limit, _LIST_ORDERS_LIMIT_CAP)
-        now = datetime.now(UTC)
-        wallet_ids, scope_violation = await _resolve_target_wallets_for_mcp(
-            claims=claims,
-            repo=repo,
+        return await _list_orders_tool(
+            repository_getter=repository_getter,
+            claims_getter=claims_getter,
             wallet_public_id=wallet_public_id,
-            as_of=now,
-        )
-        if scope_violation:
-            return to_call_tool_result(
-                success=False,
-                error_code="order_not_found",
-                message="No orders found for the given filters.",
-                details=sanitize_output({"wallet_public_id": wallet_public_id}),
-            )
-        rows = await repo.get_orders(
-            limit=clamped_limit,
+            status=status,
+            exchange=exchange,
+            instrument=instrument,
+            limit=limit,
             offset=offset,
-            as_of=now,
-            symbol=instrument,
-            exchange=exchange,
-            status=status,
-            wallet_public_ids=wallet_ids,
-        )
-        total = await repo.get_orders_total_count(
-            as_of=now,
-            symbol=instrument,
-            exchange=exchange,
-            status=status,
-            wallet_public_ids=wallet_ids,
-        )
-        details = sanitize_output(
-            {
-                "orders": [_serialize_order_row(row) for row in rows],
-                "total_count": total,
-            }
-        )
-        return to_call_tool_result(
-            success=True,
-            error_code=None,
-            message=f"Returned {len(rows)} of {total} matching orders.",
-            details=details,
         )
 
     @mcp_server.tool()
@@ -1085,70 +1658,10 @@ def register_mcp_tools(
             unknown OR not in the caller's wallet scope, returns
             ``error_code="order_not_found"`` (anti-enumeration).
         """
-        claims = claims_getter()
-        permission_envelope = _envelope_for_permission_check(claims, Permission.READ_ORDERS)
-        if permission_envelope is not None:
-            return permission_envelope
-        repo_or_envelope = _envelope_for_repository(repository_getter)
-        if isinstance(repo_or_envelope, CallToolResult):
-            return repo_or_envelope
-        repo = repo_or_envelope
-        now = datetime.now(UTC)
-        accessible_wallets, _ = await _resolve_target_wallets_for_mcp(
-            claims=claims,
-            repo=repo,
-            wallet_public_id=None,
-            as_of=now,
-        )
-        command_row = await repo.get_trade_command_by_public_id(command_public_id, as_of=now)
-        if command_row is None:
-            return to_call_tool_result(
-                success=False,
-                error_code="order_not_found",
-                message="No trade command found for the given command_public_id.",
-                details=sanitize_output({"command_public_id": command_public_id}),
-            )
-        if (
-            accessible_wallets is not None
-            and command_row["wallet_public_id"] not in accessible_wallets
-        ):
-            return to_call_tool_result(
-                success=False,
-                error_code="order_not_found",
-                message="No trade command found for the given command_public_id.",
-                details=sanitize_output({"command_public_id": command_public_id}),
-            )
-        order_row = await repo.get_order_by_command_public_id(command_public_id, as_of=now)
-        if order_row is None:
-            details = sanitize_output(
-                {
-                    "command_public_id": command_public_id,
-                    "plan_public_id": command_row["plan_public_id"],
-                    "wallet_public_id": command_row["wallet_public_id"],
-                    "status": "pending_dispatch",
-                    "execution_history": [],
-                }
-            )
-            return to_call_tool_result(
-                success=True,
-                error_code=None,
-                message="Trade command exists but exchange has not acknowledged the order yet.",
-                details=details,
-            )
-        executions = await repo.get_executions_for_order(
-            order_public_id=order_row["public_id"], as_of=now
-        )
-        details = sanitize_output(
-            {
-                "order": _serialize_order_row(order_row),
-                "execution_history": [_serialize_execution_row(e) for e in executions],
-            }
-        )
-        return to_call_tool_result(
-            success=True,
-            error_code=None,
-            message=f"Order found in status {order_row['status']!r}.",
-            details=details,
+        return await _get_order_status_tool(
+            repository_getter=repository_getter,
+            claims_getter=claims_getter,
+            command_public_id=command_public_id,
         )
 
     @mcp_server.tool()
@@ -1179,46 +1692,12 @@ def register_mcp_tools(
             (list of ``PositionRow`` dicts with ISO-8601 ``timestamp``)
             and ``count`` (length of the filtered list).
         """
-        claims = claims_getter()
-        permission_envelope = _envelope_for_permission_check(claims, Permission.READ_POSITIONS)
-        if permission_envelope is not None:
-            return permission_envelope
-        repo_or_envelope = _envelope_for_repository(repository_getter)
-        if isinstance(repo_or_envelope, CallToolResult):
-            return repo_or_envelope
-        repo = repo_or_envelope
-        now = datetime.now(UTC)
-        wallet_ids, scope_violation = await _resolve_target_wallets_for_mcp(
-            claims=claims,
-            repo=repo,
+        return await _list_positions_tool(
+            repository_getter=repository_getter,
+            claims_getter=claims_getter,
             wallet_public_id=wallet_public_id,
-            as_of=now,
-        )
-        if scope_violation:
-            return to_call_tool_result(
-                success=False,
-                error_code="position_not_found",
-                message="No positions found for the given filters.",
-                details=sanitize_output({"wallet_public_id": wallet_public_id}),
-            )
-        rows = await repo.get_positions(as_of=now, wallet_public_ids=wallet_ids)
-        filtered = [
-            r
-            for r in rows
-            if (exchange is None or r["exchange"] == exchange)
-            and (instrument is None or r["instrument"] == instrument)
-        ]
-        details = sanitize_output(
-            {
-                "positions": [_serialize_position_row(r) for r in filtered],
-                "count": len(filtered),
-            }
-        )
-        return to_call_tool_result(
-            success=True,
-            error_code=None,
-            message=f"Returned {len(filtered)} matching positions.",
-            details=details,
+            exchange=exchange,
+            instrument=instrument,
         )
 
     @mcp_server.tool()
@@ -1241,42 +1720,10 @@ def register_mcp_tools(
             caller's wallet scope, returns
             ``error_code="position_cycle_not_found"`` (anti-enumeration).
         """
-        claims = claims_getter()
-        permission_envelope = _envelope_for_permission_check(claims, Permission.READ_POSITIONS)
-        if permission_envelope is not None:
-            return permission_envelope
-        repo_or_envelope = _envelope_for_repository(repository_getter)
-        if isinstance(repo_or_envelope, CallToolResult):
-            return repo_or_envelope
-        repo = repo_or_envelope
-        now = datetime.now(UTC)
-        accessible_wallets, _ = await _resolve_target_wallets_for_mcp(
-            claims=claims,
-            repo=repo,
-            wallet_public_id=None,
-            as_of=now,
-        )
-        cycle_row = await repo.get_position_cycle_by_public_id(cycle_public_id, as_of=now)
-        if cycle_row is None or (
-            accessible_wallets is not None
-            and cycle_row["wallet_public_id"] not in accessible_wallets
-        ):
-            return to_call_tool_result(
-                success=False,
-                error_code="position_cycle_not_found",
-                message="No position cycle found for the given cycle_public_id.",
-                details=sanitize_output({"cycle_public_id": cycle_public_id}),
-            )
-        details = sanitize_output(
-            {
-                "position_cycle": _serialize_position_cycle_row(cycle_row),
-            }
-        )
-        return to_call_tool_result(
-            success=True,
-            error_code=None,
-            message=f"Position cycle found in status {cycle_row['status']!r}.",
-            details=details,
+        return await _get_position_cycle_tool(
+            repository_getter=repository_getter,
+            claims_getter=claims_getter,
+            cycle_public_id=cycle_public_id,
         )
 
     @mcp_server.tool()
@@ -1316,133 +1763,13 @@ def register_mcp_tools(
             ``caps_violation``, or ``service_unavailable`` (lifespan
             not ready / cancel command emit failed).
         """
-        claims = claims_getter()
-        permission_envelope = _envelope_for_permission_check(claims, Permission.CANCEL_ORDERS)
-        if permission_envelope is not None:
-            return permission_envelope
-        repo_or_envelope = _envelope_for_repository(repository_getter)
-        if isinstance(repo_or_envelope, CallToolResult):
-            return repo_or_envelope
-        repo = repo_or_envelope
-        enforcer = caps_enforcer_getter()
-        if enforcer is None:
-            return to_call_tool_result(
-                success=False,
-                error_code="service_unavailable",
-                message=(
-                    "Caps enforcer not yet initialized; MCP cancel "
-                    "dispatched before lifespan startup."
-                ),
-                details=sanitize_output({}),
-            )
-        if not idempotency_key or len(idempotency_key) > _CANCEL_IDEMPOTENCY_KEY_MAX:
-            return to_call_tool_result(
-                success=False,
-                error_code="invalid_argument",
-                message=(
-                    f"idempotency_key must be 1-{_CANCEL_IDEMPOTENCY_KEY_MAX} chars; "
-                    "matches the execution_plans.cancel_idempotency_key column width."
-                ),
-                details=sanitize_output(
-                    {
-                        "idempotency_key_length": len(idempotency_key) if idempotency_key else 0,
-                        "max_length": _CANCEL_IDEMPOTENCY_KEY_MAX,
-                    }
-                ),
-            )
-        principal = AuthPrincipal(
-            username=claims.username,
-            role=claims.role,
-            user_public_id=claims.user_public_id or claims.username,
-            operator_public_ids=list(claims.operator_public_ids),
-            primary_operator_public_id=claims.primary_operator_public_id or "",
-        )
-        tracker = _tracker_getter() or SequenceTracker()
-        try:
-            updated = await PlansCancelService.cancel_by_plan_public_id(
-                plan_public_id=plan_public_id,
-                idempotency_key=idempotency_key,
-                principal=principal,
-                repo=repo,
-                tracker=tracker,
-                caps_enforcer=enforcer,
-            )
-        except (PlanNotFoundError, PlanScopeError):
-            return to_call_tool_result(
-                success=False,
-                error_code="order_not_found",
-                message="No execution plan found for the given plan_public_id.",
-                details=sanitize_output({"plan_public_id": plan_public_id}),
-            )
-        except PlanAlreadyTerminalError as exc:
-            return to_call_tool_result(
-                success=False,
-                error_code="already_terminal",
-                message=f"Plan is already in terminal status {exc.status!r}.",
-                details=sanitize_output({"plan_public_id": plan_public_id, "status": exc.status}),
-            )
-        except PlanCancelInProgressError:
-            return to_call_tool_result(
-                success=False,
-                error_code="cancel_in_progress",
-                message=(
-                    "Plan cancel already in progress with a different "
-                    "idempotency_key; retry with the original key or wait."
-                ),
-                details=sanitize_output({"plan_public_id": plan_public_id}),
-            )
-        except PlanCancelIdempotencyKeyMismatchError:
-            return to_call_tool_result(
-                success=False,
-                error_code="idempotency_key_conflict",
-                message=(
-                    "Plan already has a different cancel_idempotency_key; "
-                    "use the original key to obtain the cancel state."
-                ),
-                details=sanitize_output({"plan_public_id": plan_public_id}),
-            )
-        except PlanConcurrentChangeError:
-            return to_call_tool_result(
-                success=False,
-                error_code="service_unavailable",
-                message=(
-                    "Plan status changed concurrently before the cancel could be claimed; "
-                    "retry to surface the post-race state."
-                ),
-                details=sanitize_output({"plan_public_id": plan_public_id}),
-            )
-        except CapsViolationError as exc:
-            return to_call_tool_result(
-                success=False,
-                error_code="caps_violation",
-                message="Caps enforcer rejected the cancel.",
-                details=sanitize_output(
-                    {
-                        "plan_public_id": plan_public_id,
-                        "cap_type": exc.cap_type,
-                        "attempted": exc.attempted,
-                        "limit": exc.limit,
-                    }
-                ),
-            )
-        except PlanCancelEmitError:
-            return to_call_tool_result(
-                success=False,
-                error_code="service_unavailable",
-                message=(
-                    "Failed to emit cancel command; plan compensated to "
-                    "failed. Executor recovery will re-emit on restart."
-                ),
-                details=sanitize_output({"plan_public_id": plan_public_id}),
-            )
-        details = sanitize_output(
-            {"plan": _serialize_execution_plan_row(cast(dict[str, Any], updated))}
-        )
-        return to_call_tool_result(
-            success=True,
-            error_code=None,
-            message=f"Cancel claimed; plan now in status {updated['status']!r}.",
-            details=details,
+        return await _cancel_order_tool(
+            repository_getter=repository_getter,
+            caps_enforcer_getter=caps_enforcer_getter,
+            claims_getter=claims_getter,
+            tracker_getter=_tracker_getter,
+            plan_public_id=plan_public_id,
+            idempotency_key=idempotency_key,
         )
 
     @mcp_server.tool()
@@ -1490,83 +1817,15 @@ def register_mcp_tools(
             Market-data is public — ``READ_MARKET_DATA`` is the only
             permission gate; no wallet scope filter applies.
         """
-        claims = claims_getter()
-        permission_envelope = _envelope_for_permission_check(claims, Permission.READ_MARKET_DATA)
-        if permission_envelope is not None:
-            return permission_envelope
-        repo_or_envelope = _envelope_for_repository(repository_getter)
-        if isinstance(repo_or_envelope, CallToolResult):
-            return repo_or_envelope
-        repo = repo_or_envelope
-        if limit < 0:
-            return to_call_tool_result(
-                success=False,
-                error_code="invalid_argument",
-                message="limit must be a non-negative integer.",
-                details=sanitize_output({"limit": limit}),
-            )
-        if timeframe not in _VALID_OHLCV_TIMEFRAMES:
-            return to_call_tool_result(
-                success=False,
-                error_code="invalid_argument",
-                message=(
-                    "timeframe must be one of the supported intervals "
-                    "(see details.allowed_timeframes)."
-                ),
-                details=sanitize_output(
-                    {
-                        "timeframe": timeframe,
-                        "allowed_timeframes": sorted(_VALID_OHLCV_TIMEFRAMES),
-                    }
-                ),
-            )
-        if (since is None) != (until is None):
-            return to_call_tool_result(
-                success=False,
-                error_code="invalid_argument",
-                message=(
-                    "since and until must be supplied together for range mode; "
-                    "omit both for latest-as-of mode."
-                ),
-                details=sanitize_output({"since": since, "until": until}),
-            )
-        try:
-            parsed_since = _parse_iso8601_utc(since) if since is not None else None
-            parsed_until = _parse_iso8601_utc(until) if until is not None else None
-        except ValueError as exc:
-            return to_call_tool_result(
-                success=False,
-                error_code="invalid_argument",
-                message=(
-                    "since and until must be ISO 8601 UTC strings (e.g. '2026-01-01T00:00:00Z')."
-                ),
-                details=sanitize_output({"since": since, "until": until, "error": str(exc)}),
-            )
-        clamped_limit = min(limit, _OHLCV_LIMIT_CAP)
-        range_mode = parsed_since is not None
-        order = "asc" if range_mode else "desc"
-        now = datetime.now(UTC)
-        rows = await repo.get_candles(
+        return await _get_ohlcv_tool(
+            repository_getter=repository_getter,
+            claims_getter=claims_getter,
+            exchange=exchange,
             instrument=instrument,
             timeframe=timeframe,
-            start=parsed_since,
-            end=parsed_until,
-            exchange=cast(Any, exchange),
-            as_of=now,
-            limit=clamped_limit,
-            order=order,
-        )
-        details = sanitize_output(
-            {
-                "candles": [_serialize_candle_row(row) for row in rows],
-                "mode": "range" if range_mode else "latest_as_of",
-            }
-        )
-        return to_call_tool_result(
-            success=True,
-            error_code=None,
-            message=f"Returned {len(rows)} candles.",
-            details=details,
+            since=since,
+            until=until,
+            limit=limit,
         )
 
     @mcp_server.tool()
@@ -1603,70 +1862,13 @@ def register_mcp_tools(
             (list of ``SignalRow`` dicts ordered by ``fired_at``
             descending) and ``count`` (length of the returned list).
         """
-        claims = claims_getter()
-        permission_envelope = _envelope_for_permission_check(claims, Permission.READ_SIGNALS)
-        if permission_envelope is not None:
-            return permission_envelope
-        repo_or_envelope = _envelope_for_repository(repository_getter)
-        if isinstance(repo_or_envelope, CallToolResult):
-            return repo_or_envelope
-        repo = repo_or_envelope
-        if limit < 0:
-            return to_call_tool_result(
-                success=False,
-                error_code="invalid_argument",
-                message="limit must be a non-negative integer.",
-                details=sanitize_output({"limit": limit}),
-            )
-        if not since:
-            return to_call_tool_result(
-                success=False,
-                error_code="invalid_argument",
-                message="since is required (ISO 8601 UTC timestamp).",
-                details=sanitize_output({"since": since}),
-            )
-        try:
-            parsed_since = _parse_iso8601_utc(since)
-        except ValueError as exc:
-            return to_call_tool_result(
-                success=False,
-                error_code="invalid_argument",
-                message=("since must be an ISO 8601 UTC string (e.g. '2026-04-25T10:00:00Z')."),
-                details=sanitize_output({"since": since, "error": str(exc)}),
-            )
-        clamped_limit = min(limit, _LIST_SIGNALS_LIMIT_CAP)
-        now = datetime.now(UTC)
-        wallet_ids, scope_violation = await _resolve_target_wallets_for_mcp(
-            claims=claims,
-            repo=repo,
-            wallet_public_id=wallet_public_id,
-            as_of=now,
-        )
-        if scope_violation:
-            return to_call_tool_result(
-                success=False,
-                error_code="signal_not_found",
-                message="No signals found for the given filters.",
-                details=sanitize_output({"wallet_public_id": wallet_public_id}),
-            )
-        rows = await repo.get_signals(
-            since=parsed_since,
-            limit=clamped_limit,
-            as_of=now,
+        return await _list_recent_signals_tool(
+            repository_getter=repository_getter,
+            claims_getter=claims_getter,
+            since=since,
             instrument=instrument,
             strategy=strategy,
             exchange=exchange,
-            wallet_public_ids=wallet_ids,
-        )
-        details = sanitize_output(
-            {
-                "signals": [_serialize_signal_row(row) for row in rows],
-                "count": len(rows),
-            }
-        )
-        return to_call_tool_result(
-            success=True,
-            error_code=None,
-            message=f"Returned {len(rows)} matching signals.",
-            details=details,
+            wallet_public_id=wallet_public_id,
+            limit=limit,
         )

@@ -30,8 +30,8 @@ from scripts.generate_types import _BRIDGE_OUTPUT_DEFAULT
 _FORBIDDEN_PATTERNS: dict[str, re.Pattern[str]] = {
     "plan-letter": re.compile(r"Plan [A-Z]"),
     "paragraph-anchor": re.compile(r"§"),
-    "q-reference": re.compile(r"\bQ[0-9]+\b"),
-    "phase-reference": re.compile(r"Phase [0-9]"),
+    "q-reference": re.compile(r"\bQ\d+\b"),
+    "phase-reference": re.compile(r"Phase \d+"),
     "snapper-src-path": re.compile(r"src/snapper/"),
     "frontend-src-path": re.compile(r"frontend/src/"),
     "proprietary-path": re.compile(r"proprietary/"),

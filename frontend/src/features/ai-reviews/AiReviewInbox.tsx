@@ -86,58 +86,70 @@ function PendingReviewsSection({
     fanout_after: string | Date
   }>
 }>): React.ReactElement {
+  let content: React.ReactNode
+
+  if (loading) {
+    content = (
+      <div className='flex items-center gap-2 text-muted-500 text-sm'>
+        <Loader2 className='w-4 h-4 animate-spin' />
+        Loading pending reviews…
+      </div>
+    )
+  } else if (error !== null) {
+    content = (
+      <div className='p-3 rounded-lg bg-loss-50 border border-loss-200 text-loss-800 text-sm'>
+        Failed to load pending reviews: {error.message}
+      </div>
+    )
+  } else if (items.length === 0) {
+    content = (
+      <EmptyState
+        icon={<MailOpen className='w-5 h-5' />}
+        title='No pending reviews'
+        message='New CONSULT requests routed to this delegate will appear here.'
+      />
+    )
+  } else {
+    content = (
+      <div className='overflow-x-auto border border-dark-600 rounded-lg'>
+        <table className='min-w-full text-sm'>
+          <thead className='bg-dark-700 text-muted-700 text-left'>
+            <tr>
+              <th className='px-4 py-2 font-semibold'>Review</th>
+              <th className='px-4 py-2 font-semibold'>Wallet</th>
+              <th className='px-4 py-2 font-semibold'>Status</th>
+              <th className='px-4 py-2 font-semibold'>Dispatch</th>
+              <th className='px-4 py-2 font-semibold'>Deadline</th>
+            </tr>
+          </thead>
+          <tbody className='divide-y divide-dark-600'>
+            {items.map(item => (
+              <tr
+                key={item.review_public_id}
+                data-testid={`pending-review-row-${item.review_public_id}`}
+              >
+                <td className='px-4 py-2 font-mono text-xs'>{item.review_public_id}</td>
+                <td className='px-4 py-2 font-mono text-xs'>{item.wallet_public_id}</td>
+                <td className='px-4 py-2'>{item.status}</td>
+                <td className='px-4 py-2 font-mono text-xs'>v{item.dispatch_version}</td>
+                <td className='px-4 py-2 text-muted-600'>
+                  {new Date(item.deadline).toLocaleString()}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
   return (
     <section>
       <div className='flex items-center gap-2 mb-3'>
         <InboxIcon className='w-4 h-4 text-brand-600' />
         <h2 className='text-sm font-semibold text-muted-800'>Pending reviews</h2>
       </div>
-      {loading ? (
-        <div className='flex items-center gap-2 text-muted-500 text-sm'>
-          <Loader2 className='w-4 h-4 animate-spin' />
-          Loading pending reviews…
-        </div>
-      ) : error !== null ? (
-        <div className='p-3 rounded-lg bg-loss-50 border border-loss-200 text-loss-800 text-sm'>
-          Failed to load pending reviews: {error.message}
-        </div>
-      ) : items.length === 0 ? (
-        <EmptyState
-          icon={<MailOpen className='w-5 h-5' />}
-          title='No pending reviews'
-          message='New CONSULT requests routed to this delegate will appear here.'
-        />
-      ) : (
-        <div className='overflow-x-auto border border-dark-600 rounded-lg'>
-          <table className='min-w-full text-sm'>
-            <thead className='bg-dark-700 text-muted-700 text-left'>
-              <tr>
-                <th className='px-4 py-2 font-semibold'>Review</th>
-                <th className='px-4 py-2 font-semibold'>Wallet</th>
-                <th className='px-4 py-2 font-semibold'>Status</th>
-                <th className='px-4 py-2 font-semibold'>Dispatch</th>
-                <th className='px-4 py-2 font-semibold'>Deadline</th>
-              </tr>
-            </thead>
-            <tbody className='divide-y divide-dark-600'>
-              {items.map(item => (
-                <tr
-                  key={item.review_public_id}
-                  data-testid={`pending-review-row-${item.review_public_id}`}
-                >
-                  <td className='px-4 py-2 font-mono text-xs'>{item.review_public_id}</td>
-                  <td className='px-4 py-2 font-mono text-xs'>{item.wallet_public_id}</td>
-                  <td className='px-4 py-2'>{item.status}</td>
-                  <td className='px-4 py-2 font-mono text-xs'>v{item.dispatch_version}</td>
-                  <td className='px-4 py-2 text-muted-600'>
-                    {new Date(item.deadline).toLocaleString()}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      {content}
     </section>
   )
 }
@@ -149,6 +161,38 @@ function ActivitySection({
   frames: ReadonlyArray<Parameters<typeof AiReviewActivityRow>[0]['frame']>
   totalBuffered: number
 }>): React.ReactElement {
+  let summary = 'No frames received'
+
+  if (totalBuffered > 0) {
+    summary = `Showing ${frames.length} of ${totalBuffered} buffered`
+  }
+
+  let content: React.ReactNode
+
+  if (frames.length === 0) {
+    content = (
+      <EmptyState
+        icon={<Activity className='w-5 h-5' />}
+        title='No activity yet'
+        message='AI review request, decision, and caps-violation frames will stream in here.'
+      />
+    )
+  } else {
+    content = (
+      <ul
+        data-testid='ai-review-activity-list'
+        className='border border-dark-600 rounded-lg bg-alpine-50 dark:bg-dark-800'
+      >
+        {frames.map(frame => (
+          <AiReviewActivityRow
+            key={`${frame.type}|${frame.review_public_id}|${frame.dispatch_version}`}
+            frame={frame}
+          />
+        ))}
+      </ul>
+    )
+  }
+
   return (
     <section>
       <div className='flex items-center justify-between mb-3'>
@@ -156,31 +200,9 @@ function ActivitySection({
           <Activity className='w-4 h-4 text-brand-600' />
           <h2 className='text-sm font-semibold text-muted-800'>Recent activity</h2>
         </div>
-        <span className='text-xs text-muted-500'>
-          {totalBuffered === 0
-            ? 'No frames received'
-            : `Showing ${frames.length} of ${totalBuffered} buffered`}
-        </span>
+        <span className='text-xs text-muted-500'>{summary}</span>
       </div>
-      {frames.length === 0 ? (
-        <EmptyState
-          icon={<Activity className='w-5 h-5' />}
-          title='No activity yet'
-          message='AI review request, decision, and caps-violation frames will stream in here.'
-        />
-      ) : (
-        <ul
-          data-testid='ai-review-activity-list'
-          className='border border-dark-600 rounded-lg bg-alpine-50 dark:bg-dark-800'
-        >
-          {frames.map(frame => (
-            <AiReviewActivityRow
-              key={`${frame.type}|${frame.review_public_id}|${frame.dispatch_version}`}
-              frame={frame}
-            />
-          ))}
-        </ul>
-      )}
+      {content}
     </section>
   )
 }

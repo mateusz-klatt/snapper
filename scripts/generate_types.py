@@ -54,6 +54,7 @@ from snapper.server.app import create_app
 JsonValue = dict[str, Any] | list[Any] | str | int | float | bool | None
 
 _DEFS_REF_PREFIX = "#/definitions/"
+_LEGACY_DEFS_REF_PREFIX = "#/$defs/"
 _COMPONENTS_REF_PREFIX = "#/components/schemas/"
 _WS_SCHEMAS_FILE = "ws-schemas.json"
 _OPENAPI_FILE = "openapi.json"
@@ -142,8 +143,12 @@ def fix_refs_pydantic(obj: JsonValue) -> JsonValue:
     if isinstance(obj, dict):
         result: dict[str, JsonValue] = {}
         for key, value in obj.items():
-            if key == "$ref" and isinstance(value, str) and value.startswith("#/$defs/"):
-                result[key] = value.replace("#/$defs/", _DEFS_REF_PREFIX)
+            if (
+                key == "$ref"
+                and isinstance(value, str)
+                and value.startswith(_LEGACY_DEFS_REF_PREFIX)
+            ):
+                result[key] = value.replace(_LEGACY_DEFS_REF_PREFIX, _DEFS_REF_PREFIX)
             else:
                 result[key] = fix_refs_pydantic(value)
         return result
@@ -1912,13 +1917,49 @@ def _bridge_resolve_ref(ref: str, defs: dict[str, Any]) -> dict[str, Any]:
     Raises:
         ValueError: When the ref cannot be resolved or has an unsupported shape.
     """
-    if not ref.startswith(_DEFS_REF_PREFIX) and not ref.startswith("#/$defs/"):
+    if not ref.startswith(_DEFS_REF_PREFIX) and not ref.startswith(_LEGACY_DEFS_REF_PREFIX):
         raise ValueError(f"Bridge emitter cannot resolve non-local ref: {ref}")
     name = ref.rsplit("/", 1)[-1]
     if name not in defs:
         raise ValueError(f"Bridge emitter missing $defs entry for {name}")
     resolved: dict[str, Any] = defs[name]
     return resolved
+
+
+def _bridge_render_any_of(members: object, defs: dict[str, Any], prop: dict[str, Any]) -> str:
+    """Render a nullable anyOf union with one non-null member."""
+    if not isinstance(members, list) or not all(isinstance(member, dict) for member in members):
+        raise ValueError(f"Bridge emitter cannot map malformed anyOf: {prop}")
+    non_null = [member for member in members if member.get("type") != "null"]
+    has_null = any(member.get("type") == "null" for member in members)
+    if len(non_null) != 1:
+        raise ValueError(
+            f"Bridge emitter cannot map anyOf with {len(non_null)} non-null members: {prop}"
+        )
+    rendered = _bridge_render_type(non_null[0], defs)
+    return f"{rendered} | null" if has_null else rendered
+
+
+def _bridge_render_const(const_value: object, prop: dict[str, Any]) -> str:
+    """Render a string JSON-Schema const as a TypeScript string literal."""
+    if isinstance(const_value, str):
+        return f'"{const_value}"'
+    raise ValueError(f"Bridge emitter only supports string const values: {prop}")
+
+
+def _bridge_render_enum(members: object, prop: dict[str, Any]) -> str:
+    """Render a string enum as a TypeScript string-literal union."""
+    if not isinstance(members, list) or not all(isinstance(member, str) for member in members):
+        raise ValueError(f"Bridge emitter only supports string enums: {prop}")
+    return " | ".join(f'"{member}"' for member in members)
+
+
+def _bridge_render_array(prop: dict[str, Any], defs: dict[str, Any]) -> str:
+    """Render an array schema whose items are another supported property schema."""
+    items = prop.get("items")
+    if not isinstance(items, dict):
+        raise ValueError(f"Bridge emitter requires items dict on array: {prop}")
+    return f"readonly {_bridge_render_type(items, defs)}[]"
 
 
 def _bridge_render_type(prop: dict[str, Any], defs: dict[str, Any]) -> str:
@@ -1941,27 +1982,13 @@ def _bridge_render_type(prop: dict[str, Any], defs: dict[str, Any]) -> str:
         return _bridge_render_type(resolved, defs)
 
     if "anyOf" in prop:
-        members = prop["anyOf"]
-        non_null = [m for m in members if m.get("type") != "null"]
-        has_null = any(m.get("type") == "null" for m in members)
-        if len(non_null) != 1:
-            raise ValueError(
-                f"Bridge emitter cannot map anyOf with {len(non_null)} non-null members: {prop}"
-            )
-        rendered = _bridge_render_type(non_null[0], defs)
-        return f"{rendered} | null" if has_null else rendered
+        return _bridge_render_any_of(prop["anyOf"], defs, prop)
 
     if "const" in prop:
-        const_value = prop["const"]
-        if isinstance(const_value, str):
-            return f'"{const_value}"'
-        raise ValueError(f"Bridge emitter only supports string const values: {prop}")
+        return _bridge_render_const(prop["const"], prop)
 
     if "enum" in prop:
-        members = prop["enum"]
-        if not all(isinstance(m, str) for m in members):
-            raise ValueError(f"Bridge emitter only supports string enums: {prop}")
-        return " | ".join(f'"{m}"' for m in members)
+        return _bridge_render_enum(prop["enum"], prop)
 
     schema_type = prop.get("type")
     if schema_type == "string":
@@ -1971,10 +1998,7 @@ def _bridge_render_type(prop: dict[str, Any], defs: dict[str, Any]) -> str:
     if schema_type == "boolean":
         return "boolean"
     if schema_type == "array":
-        items = prop.get("items")
-        if not isinstance(items, dict):
-            raise ValueError(f"Bridge emitter requires items dict on array: {prop}")
-        return f"readonly {_bridge_render_type(items, defs)}[]"
+        return _bridge_render_array(prop, defs)
     if schema_type == "object":
         return "Readonly<Record<string, unknown>>"
 
@@ -2025,7 +2049,7 @@ def _bridge_envelope_spec() -> tuple[frozenset[str], str]:
     """
     schema = StrictDataSchema.model_json_schema(mode="serialization")
     properties: dict[str, Any] = schema.get("properties", {})
-    defs: dict[str, Any] = schema.get("$defs", {})
+    defs: dict[str, Any] = schema.get(_DEFS_KEY, {})
     field_names: list[str] = []
     field_lines: list[str] = []
     for name, prop in properties.items():
@@ -2063,7 +2087,7 @@ def _bridge_render_class(
         prepared for joining.
     """
     schema: dict[str, Any] = model.model_json_schema(mode="serialization")
-    defs: dict[str, Any] = schema.get("$defs", {})
+    defs: dict[str, Any] = schema.get(_DEFS_KEY, {})
     properties: dict[str, Any] = schema.get("properties", {})
 
     lines: list[str] = [f"export interface {name} extends FrameEnvelope {{\n"]
