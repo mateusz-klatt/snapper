@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+from scripts.ui_refresh import _current_corepack_version
 from scripts.ui_refresh import ensure_corepack_installed
 from scripts.ui_refresh import get_dependency_spec
 from scripts.ui_refresh import install_dependencies
@@ -19,6 +20,7 @@ from scripts.ui_refresh import remove_lock_file
 from scripts.ui_refresh import remove_node_modules
 from scripts.ui_refresh import restore_dependency_spec
 from scripts.ui_refresh import run_cmd
+from scripts.ui_refresh import upgrade_corepack
 from scripts.ui_refresh import upgrade_dependencies
 from scripts.ui_refresh import upgrade_package_manager
 from scripts.ui_refresh import write_package_json
@@ -311,6 +313,133 @@ class TestUpgradePackageManager:
             assert "Could not determine" in captured.out
 
 
+class TestUpgradeCorepack:
+    """Test suite for corepack upgrade behavior during UI refresh."""
+
+    def test_upgrades_corepack_to_latest_version(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Latest corepack is installed when current version differs."""
+        with patch("scripts.ui_refresh.run_cmd") as mock_run:
+            mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="0.35.0\n"),
+                subprocess.CompletedProcess([], 0, stdout="0.34.0\n"),
+                subprocess.CompletedProcess([], 0),
+                subprocess.CompletedProcess([], 0),
+            ]
+
+            upgrade_corepack()
+
+        assert mock_run.call_args_list == [
+            call(["npm", "view", "corepack", "version"], capture_output=True, text=True),
+            call(["corepack", "--version"], capture_output=True, text=True, check=True),
+            call(["npm", "install", "-g", "--ignore-scripts", "corepack@0.35.0"], check=True),
+            call(["corepack", "enable"], check=True),
+        ]
+        captured = capsys.readouterr()
+        assert "Upgrading corepack to 0.35.0 (current: 0.34.0)" in captured.out
+
+    def test_skips_upgrade_when_already_at_latest(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """No global install runs when the local corepack already matches latest."""
+        with patch("scripts.ui_refresh.run_cmd") as mock_run:
+            mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="0.34.0\n"),
+                subprocess.CompletedProcess([], 0, stdout="0.34.0\n"),
+                subprocess.CompletedProcess([], 0),
+            ]
+
+            upgrade_corepack()
+
+        assert mock_run.call_args_list == [
+            call(["npm", "view", "corepack", "version"], capture_output=True, text=True),
+            call(["corepack", "--version"], capture_output=True, text=True, check=True),
+            call(["corepack", "enable"], check=True),
+        ]
+        captured = capsys.readouterr()
+        assert "corepack already at 0.34.0, skipping upgrade" in captured.out
+
+    def test_warns_and_continues_when_install_fails(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A failed global install logs a warning and still enables corepack.
+
+        Reproduces the EACCES scenario where the global npm prefix is owned by
+        root and ``npm install -g`` is invoked without elevated privileges:
+        the upgrade is skipped, but the broader refresh pipeline continues.
+        """
+
+        def side_effect(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            _ = kwargs
+            if args == ["npm", "view", "corepack", "version"]:
+                return subprocess.CompletedProcess(args, 0, stdout="0.35.0\n")
+            if args == ["corepack", "--version"]:
+                return subprocess.CompletedProcess(args, 0, stdout="0.34.0\n")
+            if args[:3] == ["npm", "install", "-g"]:
+                raise subprocess.CalledProcessError(243, args)
+            return subprocess.CompletedProcess(args, 0)
+
+        with patch("scripts.ui_refresh.run_cmd", side_effect=side_effect) as mock_run:
+            upgrade_corepack()
+
+        assert mock_run.call_args_list[-1] == call(["corepack", "enable"], check=True)
+        captured = capsys.readouterr()
+        assert "Warning: corepack upgrade failed (exit 243)" in captured.out
+        assert "continuing with current version 0.34.0" in captured.out
+
+    def test_handles_unknown_current_version_when_install_fails(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Warning surfaces 'unknown' when corepack --version itself is unusable."""
+
+        def side_effect(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            _ = kwargs
+            if args == ["npm", "view", "corepack", "version"]:
+                return subprocess.CompletedProcess(args, 0, stdout="0.35.0\n")
+            if args == ["corepack", "--version"]:
+                raise FileNotFoundError()
+            if args[:3] == ["npm", "install", "-g"]:
+                raise subprocess.CalledProcessError(1, args)
+            return subprocess.CompletedProcess(args, 0)
+
+        with patch("scripts.ui_refresh.run_cmd", side_effect=side_effect):
+            upgrade_corepack()
+
+        captured = capsys.readouterr()
+        assert "Upgrading corepack to 0.35.0 (current: unknown)" in captured.out
+        assert "continuing with current version unknown" in captured.out
+
+    def test_returns_none_when_corepack_version_output_is_empty(self) -> None:
+        """Empty stdout from corepack --version is treated as unavailable."""
+        with patch("scripts.ui_refresh.run_cmd") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="\n")
+
+            assert _current_corepack_version() is None
+
+    def test_returns_none_when_corepack_version_call_fails(self) -> None:
+        """A non-zero corepack --version exit yields None rather than raising."""
+        with patch("scripts.ui_refresh.run_cmd") as mock_run:
+            mock_run.side_effect = subprocess.CalledProcessError(1, ["corepack", "--version"])
+
+            assert _current_corepack_version() is None
+
+    def test_skips_upgrade_when_latest_version_is_unknown(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Empty npm output leaves corepack enabled but skips the upgrade step."""
+        with patch("scripts.ui_refresh.run_cmd") as mock_run:
+            mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0),
+            ]
+
+            upgrade_corepack()
+
+        assert mock_run.call_args_list == [
+            call(["npm", "view", "corepack", "version"], capture_output=True, text=True),
+            call(["corepack", "enable"], check=True),
+        ]
+        captured = capsys.readouterr()
+        assert "Could not determine latest corepack version" in captured.out
+
+
 class TestUpgradeDependencies:
     """Test suite for UpgradeDependencies functionality."""
 
@@ -599,6 +728,7 @@ class TestRefreshUi:
         """
         with (
             patch("scripts.ui_refresh.ensure_corepack_installed"),
+            patch("scripts.ui_refresh.upgrade_corepack"),
             patch("scripts.ui_refresh.upgrade_package_manager"),
             patch("scripts.ui_refresh.upgrade_dependencies"),
             patch("scripts.ui_refresh.remove_lock_file"),

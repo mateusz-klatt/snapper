@@ -17,6 +17,8 @@ from typing import Any
 from typing import cast
 
 IS_WINDOWS = sys.platform == "win32"
+COREPACK_PACKAGE = "corepack"
+PNPM_PACKAGE = "pnpm"
 
 
 def read_package_json(package_json: Path) -> dict[str, Any]:
@@ -172,19 +174,76 @@ def ensure_corepack_installed() -> None:
     run_cmd(["corepack", "enable"], check=True)
 
 
+def _latest_npm_version(package_name: str) -> str | None:
+    """Return the latest published npm version for a package."""
+    result = run_cmd(
+        ["npm", "view", package_name, "version"],
+        capture_output=True,
+        text=True,
+    )
+    latest = result.stdout.strip()
+    if not latest:
+        return None
+    return latest
+
+
+def _current_corepack_version() -> str | None:
+    """Return the locally installed corepack version, or None if unavailable."""
+    try:
+        result = run_cmd(
+            ["corepack", "--version"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    current = result.stdout.strip()
+    return current or None
+
+
+def upgrade_corepack() -> None:
+    """Upgrade corepack to its latest npm-published version and enable it.
+
+    Skips the global ``npm install`` when the local corepack already matches
+    the latest published version. If the upgrade install fails (commonly an
+    ``EACCES`` from ``npm install -g`` against a root-owned global prefix),
+    logs a warning and continues with the current corepack so the broader
+    refresh pipeline is not blocked on tooling already capable of running.
+    """
+    latest = _latest_npm_version(COREPACK_PACKAGE)
+    if latest is None:
+        print("Could not determine latest corepack version, skipping upgrade")
+        run_cmd(["corepack", "enable"], check=True)
+        return
+    current = _current_corepack_version()
+    if current == latest:
+        print(f"corepack already at {latest}, skipping upgrade")
+        run_cmd(["corepack", "enable"], check=True)
+        return
+    print(f"Upgrading corepack to {latest} (current: {current or 'unknown'})")
+    try:
+        run_cmd(
+            ["npm", "install", "-g", "--ignore-scripts", f"{COREPACK_PACKAGE}@{latest}"],
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"Warning: corepack upgrade failed (exit {exc.returncode}); "
+            f"continuing with current version {current or 'unknown'}. "
+            "Re-run with sudo or fix the npm global prefix to upgrade."
+        )
+    run_cmd(["corepack", "enable"], check=True)
+
+
 def upgrade_package_manager(ui_dir: Path) -> None:
     """Upgrade pnpm to latest and update packageManager field in package.json.
 
     Args:
         ui_dir: Path to the UI directory containing package.json.
     """
-    result = run_cmd(
-        ["npm", "view", "pnpm", "version"],
-        capture_output=True,
-        text=True,
-    )
-    latest = result.stdout.strip()
-    if not latest:
+    latest = _latest_npm_version(PNPM_PACKAGE)
+    if latest is None:
         print("Could not determine latest pnpm version, skipping packageManager update")
         return
 
@@ -260,6 +319,7 @@ def refresh_ui(root: Path | None = None) -> None:
     ui_dir = root / "frontend"
 
     ensure_corepack_installed()
+    upgrade_corepack()
     upgrade_package_manager(ui_dir)
     upgrade_dependencies(ui_dir)
     remove_lock_file(ui_dir)
