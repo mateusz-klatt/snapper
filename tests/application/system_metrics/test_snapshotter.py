@@ -1,7 +1,9 @@
 """Tests for the system metrics snapshotter."""
 
 import asyncio
+import builtins
 import gc
+import importlib
 import resource
 import tracemalloc
 from collections.abc import Generator
@@ -568,3 +570,72 @@ class TestSnapshotter:
 
         assert controller.is_active() is False
         assert controller._auto_stop_task is None
+
+
+class TestPosixResourceFallback:
+    """Coverage for the POSIX-only ``resource`` stdlib guarded import."""
+
+    def test_resource_import_error_falls_back_to_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reload the module with ``import resource`` patched to raise.
+
+        Given: the ``resource`` stdlib module is unavailable (e.g. on
+            Windows where it is POSIX-only),
+        When: the snapshotter module is reloaded so the top-level
+            try/except is re-executed,
+        Then: the module-level ``_resource`` symbol is ``None``.
+        """
+        original_import = builtins.__import__
+
+        def mock_import(name: str, *args: object, **kwargs: object) -> object:
+            """Raise ImportError for resource; pass-through for everything else."""
+            if name == "resource":
+                raise ImportError("simulated Windows: resource not available")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.__import__", mock_import)
+        importlib.reload(snapshotter)
+        try:
+            assert snapshotter._resource is None
+        finally:
+            monkeypatch.setattr("builtins.__import__", original_import)
+            importlib.reload(snapshotter)
+
+    def test_sample_limits_returns_zeros_when_resource_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows fallback path on the limits sampler.
+
+        Given: ``snapshotter._resource`` is ``None``,
+        When: ``_sample_limits_metrics`` is called,
+        Then: every limit field collapses to ``0``.
+        """
+        monkeypatch.setattr(snapshotter, "_resource", None)
+        limits = SystemMetricsSnapshotter._sample_limits_metrics()
+        assert limits == LimitsMetrics(rlimit_nproc=0, rlimit_nofile=0, rlimit_as_bytes=0)
+
+    def test_sample_saturation_returns_none_pcts_when_resource_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows fallback path on the saturation sampler.
+
+        Given: ``snapshotter._resource`` is ``None``,
+        When: ``_sample_saturation_metrics`` is called with arbitrary
+            process + limits inputs,
+        Then: both ``threads_pct`` and ``fds_pct`` collapse to ``None``.
+        """
+        monkeypatch.setattr(snapshotter, "_resource", None)
+        saturation = SystemMetricsSnapshotter._sample_saturation_metrics(
+            process_metrics=ProcessMetrics(
+                pid=1,
+                uptime_seconds=0.0,
+                status="running",
+                num_threads=8,
+                num_fds=64,
+                num_connections=0,
+            ),
+            limits_metrics=LimitsMetrics(rlimit_nproc=4096, rlimit_nofile=8192, rlimit_as_bytes=-1),
+        )
+        assert saturation["threads_pct"] is None
+        assert saturation["fds_pct"] is None

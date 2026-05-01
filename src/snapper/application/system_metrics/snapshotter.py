@@ -31,11 +31,11 @@ import asyncio
 import contextlib
 import gc
 import os
-import resource
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
+from typing import Any
 from typing import Final
 
 import psutil
@@ -55,6 +55,12 @@ from snapper.application.system_metrics.snapshot_types import SaturationMetrics
 from snapper.application.system_metrics.snapshot_types import SystemMetricsSnapshot
 from snapper.application.system_metrics.tracemalloc_controller import TracemallocController
 from snapper.data.repository import _live_aiosqlite_connections
+
+_resource: Any = None
+try:
+    import resource as _resource
+except ImportError:
+    _resource = None
 
 DEFAULT_INTERVAL_SECONDS: Final = 5.0
 _INTERVAL_ENV_VAR: Final = "SYSTEM_METRICS_INTERVAL_SECONDS"
@@ -392,12 +398,19 @@ class SystemMetricsSnapshotter:
     def _sample_limits_metrics() -> LimitsMetrics:
         """Resource limits via ``resource.getrlimit``.
 
-        Returns the soft limit (resource.getrlimit returns
-        ``(soft, hard)``).
+        Returns the soft limit (``resource.getrlimit`` returns
+        ``(soft, hard)``). The :mod:`resource` stdlib module is
+        POSIX-only; the module-level guarded import sets
+        :data:`_resource` to ``None`` on Windows so developer tooling
+        can import the snapshotter without crashing. Production target
+        is Linux; the ``_resource is None`` branch returns
+        zero-defaulted limits.
         """
-        nproc = resource.getrlimit(resource.RLIMIT_NPROC)
-        nofile = resource.getrlimit(resource.RLIMIT_NOFILE)
-        as_ = resource.getrlimit(resource.RLIMIT_AS)
+        if _resource is None:
+            return LimitsMetrics(rlimit_nproc=0, rlimit_nofile=0, rlimit_as_bytes=0)
+        nproc = _resource.getrlimit(_resource.RLIMIT_NPROC)
+        nofile = _resource.getrlimit(_resource.RLIMIT_NOFILE)
+        as_ = _resource.getrlimit(_resource.RLIMIT_AS)
         return LimitsMetrics(
             rlimit_nproc=nproc[0],
             rlimit_nofile=nofile[0],
@@ -413,13 +426,18 @@ class SystemMetricsSnapshotter:
         """Saturation as % of resource limit.
 
         ``RLIM_INFINITY`` (-1) collapses to ``None`` — division by
-        unlimited has no operator-meaningful "%".
+        unlimited has no operator-meaningful "%". On Windows the
+        module-level :data:`_resource` is ``None``; the static
+        ``RLIM_INFINITY`` constant is unavailable, so both saturation
+        fields collapse to ``None``.
         """
+        if _resource is None:
+            return SaturationMetrics(threads_pct=None, fds_pct=None)
         threads_pct: float | None = None
-        if limits_metrics["rlimit_nproc"] not in (resource.RLIM_INFINITY, 0):
+        if limits_metrics["rlimit_nproc"] not in (_resource.RLIM_INFINITY, 0):
             threads_pct = process_metrics["num_threads"] / limits_metrics["rlimit_nproc"]
         fds_pct: float | None = None
-        if limits_metrics["rlimit_nofile"] not in (resource.RLIM_INFINITY, 0):
+        if limits_metrics["rlimit_nofile"] not in (_resource.RLIM_INFINITY, 0):
             fds_pct = process_metrics["num_fds"] / limits_metrics["rlimit_nofile"]
         return SaturationMetrics(
             threads_pct=threads_pct,

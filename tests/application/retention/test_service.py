@@ -23,6 +23,7 @@ CSV-write + DB-purge integration is already covered by
 
 import asyncio
 import importlib
+import time as _time
 from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import UTC
@@ -35,6 +36,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select
 
 from snapper.application.retention import policies as policies_module
 from snapper.application.retention import service as service_module
@@ -49,6 +51,8 @@ from snapper.application.retention.service import RetentionService
 from snapper.application.retention.service import _compute_window
 from snapper.application.retention.service import _failure_result
 from snapper.data.archiver import ExportResult
+from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Telemetry
 
 
 @dataclass(slots=True)
@@ -461,9 +465,6 @@ class TestRealDatabaseBoundary:
         Then: 2026-04-30 row STAYS in DB AND is NOT in the CSV;
             2026-04-29 row is PURGED from DB AND written to the CSV.
         """
-        from snapper.data.models import KNOWN_TO_MAX
-        from snapper.data.models import Telemetry
-
         db_path = tmp_path / "snapper-test.db"
         db_url = f"sqlite+aiosqlite:///{db_path}"
 
@@ -519,8 +520,6 @@ class TestRealDatabaseBoundary:
         assert result["day_start"] == "2026-03-30"
         assert result["day_end"] == "2026-04-29"
 
-        from sqlalchemy import select
-
         inspect_repo = service_module.DatabaseRepository(db_url)
         try:
             with inspect_repo.get_session() as session:
@@ -550,9 +549,6 @@ class TestRealDatabaseBoundary:
         Then: every row is purged from DB AND each day produces a CSV
             file, totalling 30 files written.
         """
-        from snapper.data.models import KNOWN_TO_MAX
-        from snapper.data.models import Telemetry
-
         db_path = tmp_path / "snapper-backlog.db"
         db_url = f"sqlite+aiosqlite:///{db_path}"
 
@@ -595,8 +591,6 @@ class TestRealDatabaseBoundary:
         assert result["purged_rows"] == 30
         assert result["files_written"] == 30
 
-        from sqlalchemy import select
-
         inspect_repo = service_module.DatabaseRepository(db_url)
         try:
             with inspect_repo.get_session() as session:
@@ -627,7 +621,6 @@ async def test_to_thread_keeps_event_loop_responsive() -> None:
     progress: list[int] = []
 
     def _slow_export(**_kwargs: Any) -> ExportResult:
-        import time as _time
 
         _time.sleep(sleep_secs)
         return ExportResult(files_written=1, rows_exported=1, rows_purged=1)

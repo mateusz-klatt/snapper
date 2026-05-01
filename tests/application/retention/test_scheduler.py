@@ -16,6 +16,9 @@ Covers:
 
 import asyncio
 from collections.abc import Generator
+from datetime import UTC
+from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -45,9 +48,6 @@ def _clear_retention_env(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
 
 def _build_fake_summary() -> RetentionRunSummary:
     """Return an empty-results :class:`RetentionRunSummary` for assertion fixtures."""
-    from datetime import UTC
-    from datetime import datetime
-
     now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
     return RetentionRunSummary(
         run_started_at=now,
@@ -377,8 +377,6 @@ class TestSchedulerEnvDefaults:
     @pytest.mark.asyncio
     async def test_constructor_explicit_base_dir_skips_env_lookup(self) -> None:
         """Explicit ``base_dir`` arg bypasses ``RETENTION_OUTPUT_DIR`` env."""
-        from pathlib import Path
-
         fake_service = AsyncMock()
         fake_service.last_run_summary = None
 
