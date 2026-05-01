@@ -69,7 +69,12 @@ class RetentionScheduler:
             disabled = resolve_disabled(os.environ.get(_DISABLED_ENV_VAR))
         self._db_url = db_url
         self._base_dir = base_dir
-        self._service = service or RetentionService(db_url=db_url, base_dir=base_dir)
+        if service is not None:
+            self._service: RetentionService | None = service
+        elif disabled:
+            self._service = None
+        else:
+            self._service = RetentionService(db_url=db_url, base_dir=base_dir)
         self._interval_seconds = interval_seconds
         self._disabled = disabled
         self._stopping = asyncio.Event()
@@ -104,6 +109,8 @@ class RetentionScheduler:
             eager run + every subsequent tick, or ``None`` until the
             eager run completes (or always ``None`` when disabled).
         """
+        if self._service is None:
+            return None
         return self._service.last_run_summary
 
     async def start(self) -> None:
@@ -113,10 +120,11 @@ class RetentionScheduler:
         running an eager pass and without spawning the loop — the
         scheduler is parked.
         """
-        if self._disabled:
+        service = self._service
+        if self._disabled or service is None:
             logger.info("RetentionScheduler: disabled (RETENTION_DISABLED=true); skipping start")
             return
-        await self._service.run_once()
+        await service.run_once()
         self._stopping.clear()
         self._loop_task = asyncio.create_task(self._loop())
 
@@ -135,7 +143,8 @@ class RetentionScheduler:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._loop_task = None
-        await self._service.close()
+        if self._service is not None:
+            await self._service.close()
 
     async def _loop(self) -> None:
         """Sleep ``interval_seconds`` then call ``run_once``; repeat until cancelled.
@@ -145,11 +154,14 @@ class RetentionScheduler:
         ``run_once`` itself MUST NOT kill the loop. On exception the
         loop logs + sleeps again.
         """
+        service = self._service
+        if service is None:
+            return
         while not self._stopping.is_set():
             await asyncio.sleep(self._interval_seconds)
             if self._stopping.is_set():
                 return
             try:
-                await self._service.run_once()
+                await service.run_once()
             except Exception:
                 logger.exception("RetentionService.run_once raised; continuing on next tick")

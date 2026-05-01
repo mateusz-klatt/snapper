@@ -106,7 +106,12 @@ class RetentionService:
         """
         return self._last_run_summary
 
-    async def evaluate_policy(self, policy: RetentionPolicy) -> RetentionPolicyRunResult:
+    async def evaluate_policy(
+        self,
+        policy: RetentionPolicy,
+        *,
+        dry_run: bool | None = None,
+    ) -> RetentionPolicyRunResult:
         """Archive + (optionally) purge eligible rows for one policy.
 
         Computes the per-tick window per the formula in
@@ -118,6 +123,13 @@ class RetentionService:
 
         Args:
             policy: The retention rule to apply.
+            dry_run: Override for the dry-run flag — when ``None``,
+                :meth:`evaluate_policy` reads ``RETENTION_DRY_RUN`` from
+                the environment. :meth:`run_once` resolves the value
+                ONCE at run start and passes it through here so a
+                mid-run env-var flip cannot make the summary's
+                ``dry_run`` field disagree with what individual
+                policies actually ran with.
 
         Returns:
             Per-policy outcome with ``day_start`` / ``day_end`` /
@@ -131,7 +143,8 @@ class RetentionService:
                 "RetentionService: window computation failed for table=%s", policy.table
             )
             return _failure_result(policy, day_start=None, day_end=None, error=str(exc))
-        dry_run = resolve_dry_run(os.environ.get(_DRY_RUN_ENV_VAR))
+        if dry_run is None:
+            dry_run = resolve_dry_run(os.environ.get(_DRY_RUN_ENV_VAR))
         try:
             result = await asyncio.to_thread(
                 self._archiver.export,
@@ -191,7 +204,7 @@ class RetentionService:
         dry_run = resolve_dry_run(os.environ.get(_DRY_RUN_ENV_VAR))
         results: list[RetentionPolicyRunResult] = []
         for policy in RETENTION_POLICIES:
-            results.append(await self.evaluate_policy(policy))
+            results.append(await self.evaluate_policy(policy, dry_run=dry_run))
         run_completed_at = datetime.now(UTC)
         summary = RetentionRunSummary(
             run_started_at=run_started_at,

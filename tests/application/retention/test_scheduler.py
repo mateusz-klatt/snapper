@@ -204,14 +204,124 @@ class TestSchedulerLoop:
         assert fake_service.close.await_count == first_close_count + 1
 
     @pytest.mark.asyncio
-    async def test_stop_disabled_scheduler_still_closes_service(self) -> None:
-        """Disabled scheduler had no loop but still owns a service to close."""
+    async def test_stop_disabled_scheduler_with_explicit_service_still_closes(self) -> None:
+        """Disabled scheduler that was passed a service explicitly still closes it."""
         scheduler, fake_service = _build_scheduler_with_fake_service(disabled=True)
 
         await scheduler.start()
         await scheduler.stop()
 
         assert fake_service.close.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_stop_skips_close_when_service_is_none(self) -> None:
+        """Disabled scheduler without an explicit service has no close to call.
+
+        Default disabled-mode constructor path skips
+        :class:`RetentionService` construction entirely (Codex final-gate
+        BLOCKER fix); ``stop()`` MUST tolerate that no-service state.
+        """
+
+        class _NopRepo:
+            def dispose(self) -> None:
+                """No-op for the constructor's repo build."""
+                return
+
+        scheduler = RetentionScheduler(
+            db_url="sqlite+aiosqlite:///:memory:",
+            disabled=True,
+            interval_seconds=10.0,
+        )
+
+        assert scheduler._service is None
+
+        await scheduler.start()
+        await scheduler.stop()
+
+    @pytest.mark.asyncio
+    async def test_loop_returns_when_service_is_none(self) -> None:
+        """Defensive early return when ``_loop`` finds no service.
+
+        Unreachable in production because :meth:`start` guards against
+        spawning the loop when ``_service is None``, but the defensive
+        return is exercised here for mypy + 100% branch coverage.
+        """
+        scheduler = RetentionScheduler(
+            db_url="sqlite+aiosqlite:///:memory:",
+            disabled=True,
+            interval_seconds=0.01,
+        )
+
+        await scheduler._loop()
+
+
+class TestSchedulerLastRunSummaryNoService:
+    """``last_run_summary`` returns ``None`` when no service is attached."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_service_is_none(self) -> None:
+        """Disabled scheduler without explicit service has no service to proxy."""
+        scheduler = RetentionScheduler(
+            db_url="sqlite+aiosqlite:///:memory:",
+            disabled=True,
+            interval_seconds=0.01,
+        )
+
+        assert scheduler.last_run_summary is None
+
+
+class TestSchedulerConstructionDisabled:
+    """Codex final-gate BLOCKER fix: disabled scheduler skips service build."""
+
+    def test_disabled_default_skips_retention_service_construction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Disabled mode does not invoke ``RetentionService`` constructor.
+
+        Why this matters: ``RetentionService.__init__`` builds a sync
+        ``DatabaseRepository`` which loads driver-specific imports.
+        On PostgreSQL a missing ``psycopg2`` driver previously raised
+        ``ModuleNotFoundError`` even when the operator set
+        ``RETENTION_DISABLED=true`` — the disabled scheduler should not
+        require the sync DB driver to be importable at all.
+        """
+        constructor_calls = {"n": 0}
+
+        def _fake_service(**_kwargs: Any) -> Any:
+            constructor_calls["n"] += 1
+            return AsyncMock()
+
+        monkeypatch.setattr(scheduler_module, "RetentionService", _fake_service)
+
+        scheduler = RetentionScheduler(
+            db_url="postgresql+asyncpg://localhost/snapper",
+            disabled=True,
+            interval_seconds=3600.0,
+        )
+
+        assert scheduler._service is None
+        assert constructor_calls["n"] == 0
+
+    def test_active_default_constructs_retention_service(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Active mode (disabled=False) DOES construct the service."""
+        constructor_calls = {"n": 0}
+
+        def _fake_service(**_kwargs: Any) -> Any:
+            constructor_calls["n"] += 1
+            return AsyncMock()
+
+        monkeypatch.setattr(scheduler_module, "RetentionService", _fake_service)
+
+        scheduler = RetentionScheduler(
+            db_url="sqlite+aiosqlite:///:memory:",
+            disabled=False,
+            interval_seconds=3600.0,
+        )
+
+        assert scheduler._service is not None
+        assert constructor_calls["n"] == 1
 
 
 class TestSchedulerProperties:

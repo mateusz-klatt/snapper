@@ -269,6 +269,18 @@ The archiver call covers the inclusive day-range `[day_start, day_end]`,
 matching `EventArchiver.export(...)` semantics. Steady state after the
 backlog drains processes one new day per tick.
 
+Concrete example with `today_utc = 2026-05-01`, `retain_days = 1`,
+`backlog_lookback_days = 30`:
+
+- `oldest_kept_day = 2026-04-30` (rows with `timestamp` on
+  2026-04-30 stay in DB).
+- `last_eligible_day = 2026-04-29` (last day archived + purged this
+  tick).
+- `earliest_scanned_day = 2026-03-30` (oldest day touched this tick).
+- The archiver query covers
+  `[2026-03-30 00:00 UTC, 2026-04-30 00:00 UTC)` per the repository
+  semantics.
+
 The shipped default policy:
 
 | Table       | retain_days | backlog_lookback_days |

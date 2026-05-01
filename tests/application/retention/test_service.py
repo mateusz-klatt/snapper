@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC
 from datetime import date
 from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -438,6 +439,175 @@ class TestPoliciesModuleSelfValidation:
         importlib.reload(policies_module)
 
         assert any(p.table == "telemetry" for p in policies_module.RETENTION_POLICIES)
+
+
+class TestRealDatabaseBoundary:
+    """Real-DB integration tests covering the whole-day boundary contract.
+
+    Uses a tmp-path SQLite database + the actual ``EventArchiver`` so
+    the boundary formula is exercised end-to-end (DB row insert →
+    ``RetentionService.evaluate_policy`` → CSV write → DB purge).
+    """
+
+    @pytest.mark.asyncio
+    async def test_oldest_kept_day_row_stays_last_eligible_day_row_archived_and_purged(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Whole-day boundary contract with frozen ``now = 2026-05-01 12:00 UTC``.
+
+        Given: telemetry rows at 2026-04-30 13:00 UTC (oldest_kept_day)
+            and 2026-04-29 12:00 UTC (last_eligible_day),
+        When: ``evaluate_policy`` runs with ``retain_days=1``,
+        Then: 2026-04-30 row STAYS in DB AND is NOT in the CSV;
+            2026-04-29 row is PURGED from DB AND written to the CSV.
+        """
+        from snapper.data.models import KNOWN_TO_MAX
+        from snapper.data.models import Telemetry
+
+        db_path = tmp_path / "snapper-test.db"
+        db_url = f"sqlite+aiosqlite:///{db_path}"
+
+        seed_repo = service_module.DatabaseRepository(db_url)
+        seed_repo.create_all()
+        with seed_repo.get_session() as session:
+            session.add(
+                Telemetry(
+                    public_id="00000000-0000-7000-8000-000000000001",
+                    session_id="test-session",
+                    sequence_id=1,
+                    timestamp=datetime(2026, 4, 30, 13, 0, tzinfo=UTC),
+                    known_to=KNOWN_TO_MAX,
+                    transport="ws",
+                    direction="in",
+                    message_type="ping",
+                    payload=None,
+                )
+            )
+            session.add(
+                Telemetry(
+                    public_id="00000000-0000-7000-8000-000000000002",
+                    session_id="test-session",
+                    sequence_id=2,
+                    timestamp=datetime(2026, 4, 29, 12, 0, tzinfo=UTC),
+                    known_to=KNOWN_TO_MAX,
+                    transport="ws",
+                    direction="in",
+                    message_type="ping",
+                    payload=None,
+                )
+            )
+            session.commit()
+        seed_repo.dispose()
+
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> _FrozenDatetime:
+                return cls(2026, 5, 1, 12, 0, tzinfo=tz or UTC)
+
+        monkeypatch.setattr(service_module, "datetime", _FrozenDatetime)
+        monkeypatch.delenv("RETENTION_DRY_RUN", raising=False)
+
+        service = RetentionService(db_url=db_url, base_dir=tmp_path)
+        policy = RetentionPolicy(table="telemetry", retain_days=1, backlog_lookback_days=30)
+        result = await service.evaluate_policy(policy)
+        await service.close()
+
+        assert result["error"] is None
+        assert result["archived_rows"] == 1
+        assert result["purged_rows"] == 1
+        assert result["files_written"] == 1
+        assert result["day_start"] == "2026-03-30"
+        assert result["day_end"] == "2026-04-29"
+
+        from sqlalchemy import select
+
+        inspect_repo = service_module.DatabaseRepository(db_url)
+        try:
+            with inspect_repo.get_session() as session:
+                rows = session.execute(select(Telemetry)).scalars().all()
+            remaining_dates = sorted(row.timestamp.date() for row in rows)
+        finally:
+            inspect_repo.dispose()
+        assert remaining_dates == [date(2026, 4, 30)]
+
+        archived_csv = tmp_path / "archive" / "telemetry" / "2026" / "2026-04-29.csv"
+        assert archived_csv.exists()
+        csv_text = archived_csv.read_text(encoding="utf-8")
+        assert "00000000-0000-7000-8000-000000000002" in csv_text
+        assert "00000000-0000-7000-8000-000000000001" not in csv_text
+
+    @pytest.mark.asyncio
+    async def test_30_day_backlog_drained_in_one_tick(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A backlog of 30 daily rows is fully archived + purged in one tick.
+
+        Given: 30 telemetry rows, one per UTC day from 2026-03-30 to
+            2026-04-28 (all within the
+            ``[earliest_scanned_day, last_eligible_day]`` window for
+            ``retain_days=1, backlog_lookback_days=30, today=2026-05-01``),
+        When: ``evaluate_policy`` runs once,
+        Then: every row is purged from DB AND each day produces a CSV
+            file, totalling 30 files written.
+        """
+        from snapper.data.models import KNOWN_TO_MAX
+        from snapper.data.models import Telemetry
+
+        db_path = tmp_path / "snapper-backlog.db"
+        db_url = f"sqlite+aiosqlite:///{db_path}"
+
+        seed_repo = service_module.DatabaseRepository(db_url)
+        seed_repo.create_all()
+        with seed_repo.get_session() as session:
+            for i in range(30):
+                day = date(2026, 3, 30) + timedelta(days=i)
+                session.add(
+                    Telemetry(
+                        public_id=f"00000000-0000-7000-8000-{i:012d}",
+                        session_id="backlog",
+                        sequence_id=i,
+                        timestamp=datetime(day.year, day.month, day.day, 12, 0, tzinfo=UTC),
+                        known_to=KNOWN_TO_MAX,
+                        transport="ws",
+                        direction="in",
+                        message_type="ping",
+                        payload=None,
+                    )
+                )
+            session.commit()
+        seed_repo.dispose()
+
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> _FrozenDatetime:
+                return cls(2026, 5, 1, 12, 0, tzinfo=tz or UTC)
+
+        monkeypatch.setattr(service_module, "datetime", _FrozenDatetime)
+        monkeypatch.delenv("RETENTION_DRY_RUN", raising=False)
+
+        service = RetentionService(db_url=db_url, base_dir=tmp_path)
+        policy = RetentionPolicy(table="telemetry", retain_days=1, backlog_lookback_days=30)
+        result = await service.evaluate_policy(policy)
+        await service.close()
+
+        assert result["error"] is None
+        assert result["archived_rows"] == 30
+        assert result["purged_rows"] == 30
+        assert result["files_written"] == 30
+
+        from sqlalchemy import select
+
+        inspect_repo = service_module.DatabaseRepository(db_url)
+        try:
+            with inspect_repo.get_session() as session:
+                count = len(session.execute(select(Telemetry)).scalars().all())
+        finally:
+            inspect_repo.dispose()
+        assert count == 0
+
+        csv_dir = tmp_path / "archive" / "telemetry" / "2026"
+        csv_files = sorted(p.name for p in csv_dir.glob("*.csv"))
+        assert len(csv_files) == 30
 
 
 @pytest.mark.asyncio
