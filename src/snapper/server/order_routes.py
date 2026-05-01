@@ -31,6 +31,14 @@ from snapper.api.schemas.orders import CreateOrderCommand
 from snapper.api.schemas.orders import ExecutionPlanResponse
 from snapper.application.ai_review.citation import AiReviewCitationError
 from snapper.application.ai_review.citation import validate_ai_review_citation
+from snapper.application.plans.cancel_service import PlanAlreadyTerminalError
+from snapper.application.plans.cancel_service import PlanCancelEmitError
+from snapper.application.plans.cancel_service import PlanCancelIdempotencyKeyMismatchError
+from snapper.application.plans.cancel_service import PlanCancelInProgressError
+from snapper.application.plans.cancel_service import PlanConcurrentChangeError
+from snapper.application.plans.cancel_service import PlanNotFoundError
+from snapper.application.plans.cancel_service import PlansCancelService
+from snapper.application.plans.cancel_service import PlanScopeError
 from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
@@ -39,7 +47,6 @@ from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
-from snapper.core.json_types import JsonObject
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import ExecutionPlanInsertRow
@@ -68,7 +75,6 @@ _ORDER_TYPE_MAP: dict[str, str] = {
 }
 
 router = APIRouter(prefix="/orders", tags=["orders"])
-_TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "cancelled", "failed", "expired"})
 
 
 @dataclass(frozen=True)
@@ -79,18 +85,6 @@ class OrderRouteContext:
     now: datetime
     bus_time: datetime
     session_id: str
-
-
-@dataclass(frozen=True)
-class CancelPlanContext:
-    """Resolved execution-plan state for a manual cancel request."""
-
-    route_context: OrderRouteContext
-    plan: ExecutionPlanRow
-    params: JsonObject
-    child_client_order_id: str | None
-    native_instrument: str | None
-    exchange_order_id: str | None
 
 
 def _plan_to_data(plan: ExecutionPlanRow) -> ExecutionPlanData:
@@ -165,192 +159,6 @@ def _build_order_route_context(tracker: SequenceTracker) -> OrderRouteContext:
         bus_time=dt.datetime.now(dt.UTC),
         session_id=tracker.session_id,
     )
-
-
-def _json_str_param(params: JsonObject, key: str) -> str | None:
-    """Return a string JSON param or ``None`` when absent or not a string."""
-    value = params.get(key)
-    if isinstance(value, str):
-        return value
-    return None
-
-
-def _ensure_plan_not_terminal(plan: ExecutionPlanRow) -> None:
-    """Reject cancellation of already-terminal plans."""
-    if plan["status"] in _TERMINAL_STATUSES:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Plan already in terminal status: {plan['status']}",
-        )
-
-
-async def _load_cancel_plan_context(
-    repo: Repository,
-    principal: AuthPrincipal,
-    plan_public_id: str,
-    route_context: OrderRouteContext,
-) -> CancelPlanContext:
-    """Load, scope-check, and enrich a plan for cancellation."""
-    plan = await repo.get_execution_plan(plan_public_id, as_of=route_context.now)
-    if plan is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Execution plan not found",
-        )
-    await resolve_target_wallets(
-        principal=principal,
-        repo=repo,
-        wallet_public_id=plan["wallet_public_id"],
-    )
-    _ensure_plan_not_terminal(plan)
-    params = plan["params"]
-    child_client_order_id = _json_str_param(params, "child_client_order_id")
-    exchange_order_id: str | None = None
-    if child_client_order_id is not None:
-        exchange_order_id = await repo.get_exchange_order_id_for_client_order_id(
-            child_client_order_id,
-            as_of=route_context.now,
-        )
-    return CancelPlanContext(
-        route_context=route_context,
-        plan=plan,
-        params=params,
-        child_client_order_id=child_client_order_id,
-        native_instrument=_json_str_param(params, "native_instrument"),
-        exchange_order_id=exchange_order_id,
-    )
-
-
-def _cancel_requires_trade_command(context: CancelPlanContext) -> bool:
-    """Return whether the plan has enough child state to emit a cancel command."""
-    return context.child_client_order_id is not None and context.native_instrument is not None
-
-
-def _build_cancel_submission(
-    context: CancelPlanContext,
-    principal: AuthPrincipal,
-) -> TradeCommandSubmission:
-    """Build the caps-enforcer submission for a manual cancel action."""
-    order_type = _json_str_param(context.params, "venue_order_type") or "market"
-    return TradeCommandSubmission(
-        user_public_id=principal.user_public_id,
-        operator_public_id=context.plan["operator_public_id"],
-        wallet_public_id=context.plan["wallet_public_id"],
-        instrument_public_id=context.plan["instrument_public_id"],
-        command_type="cancel",
-        side=context.plan["side"],
-        order_type=order_type,
-        quantity=None,
-        price=None,
-        source_surface="rest",
-        idempotency_key=None,
-    )
-
-
-async def _request_cancel_requested_status(
-    repo: Repository,
-    plan_public_id: str,
-    route_context: OrderRouteContext,
-) -> None:
-    """Transition the plan to ``cancel_requested`` and reject concurrent races."""
-    new_id = await repo.update_execution_plan_status(
-        public_id=plan_public_id,
-        new_status="cancel_requested",
-        bus_time=route_context.bus_time,
-        session_id=route_context.session_id,
-        sequence_id=route_context.tracker.next_sequence(_REST_STREAM),
-        cancel_requested_at=route_context.now,
-    )
-    if new_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Plan status changed concurrently",
-        )
-
-
-def _build_cancel_trade_command(
-    context: CancelPlanContext,
-    principal: AuthPrincipal,
-) -> TradeCommandInsertRow:
-    """Build the venue-facing cancel TradeCommand for a child order."""
-    child_client_order_id = context.child_client_order_id
-    native_instrument = context.native_instrument
-    if child_client_order_id is None or native_instrument is None:
-        raise ValueError("Cancel command requires child_client_order_id and native_instrument")
-    route_context = context.route_context
-    return TradeCommandInsertRow(
-        command_type="cancel",
-        shard_key=context.plan["shard_key"],
-        exchange=context.plan["exchange"],
-        instrument=native_instrument,
-        mode=context.plan["mode"],
-        strategy_id="manual",
-        client_order_id=child_client_order_id,
-        venue_client_id=child_client_order_id,
-        side=context.plan["side"],
-        order_type=_json_str_param(context.params, "venue_order_type") or "market",
-        quantity=context.plan["total_quantity"],
-        price=cast(float | None, context.params.get("price")),
-        leverage=cast(int | None, context.params.get("leverage")),
-        reduce_only=False,
-        status=TradeCommandStatusEnum.CREATED,
-        created_at=route_context.now,
-        correlation_id=context.plan["public_id"],
-        session_id=route_context.session_id,
-        sequence_id=route_context.tracker.next_sequence(_REST_STREAM),
-        timestamp=route_context.bus_time,
-        wallet_public_id=context.plan["wallet_public_id"],
-        operator_public_id=context.plan["operator_public_id"],
-        user_public_id=principal.user_public_id or principal.username,
-        plan_public_id=context.plan["public_id"],
-        exchange_order_id=context.exchange_order_id,
-    )
-
-
-async def _handle_cancel_command_failure(
-    repo: Repository,
-    plan_public_id: str,
-    route_context: OrderRouteContext,
-    exc: Exception,
-) -> None:
-    """Compensate a failed cancel-command insert and re-raise as HTTP 500."""
-    logger.error("Failed to insert cancel command for plan {}: {}", plan_public_id, exc)
-    try:
-        await repo.update_execution_plan_status(
-            public_id=plan_public_id,
-            new_status="failed",
-            bus_time=route_context.bus_time,
-            session_id=route_context.session_id,
-            sequence_id=route_context.tracker.next_sequence(_REST_STREAM),
-            last_error=f"Cancel command insert failed: {exc}",
-        )
-    except Exception as compensation_exc:
-        logger.error(
-            "Failed to compensate plan {} to failed after cancel insert "
-            "error: {}; PlanExecutorService recovery re-emits the cancel "
-            "on restart",
-            plan_public_id,
-            compensation_exc,
-        )
-    raise HTTPException(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail="Failed to emit cancel command",
-    ) from exc
-
-
-async def _get_updated_plan_or_500(
-    repo: Repository,
-    plan_public_id: str,
-    bus_time: datetime,
-) -> ExecutionPlanRow:
-    """Reload the updated plan or raise HTTP 500 if it disappeared."""
-    updated = await repo.get_execution_plan(plan_public_id, as_of=bus_time)
-    if updated is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Plan updated but not found",
-        )
-    return updated
 
 
 def _build_cancel_plan_response(
@@ -624,9 +432,25 @@ async def _cancel_plan(
 ) -> ExecutionPlanResponse:
     """Shared cancel-plan logic used by the by-id and by-client-order-id routes.
 
-    Transitions the plan to ``cancel_requested`` (SCD2), inserts a
-    matching cancel ``TradeCommand`` for the active child order, and
-    returns the updated plan as a response envelope.
+    Delegates to :meth:`PlansCancelService.cancel_by_plan_public_id`
+    (Plan B Phase 3.5 unification — REST + MCP share one cancel-plan
+    code path) and maps the service's domain exceptions onto the REST
+    HTTP contract:
+
+    * :class:`PlanNotFoundError` → 404
+    * :class:`PlanScopeError` → 403 (REST does NOT collapse to 404 like
+      MCP does; the existing REST contract surfaces the distinct
+      "wallet not accessible" outcome)
+    * :class:`PlanAlreadyTerminalError` → 409 with the terminal status
+      stamped into the detail
+    * :class:`PlanCancelInProgressError` /
+      :class:`PlanConcurrentChangeError` /
+      :class:`PlanCancelIdempotencyKeyMismatchError` → 409 (the last is
+      unreachable for REST today because we pass
+      ``idempotency_key=None``, but is mapped defensively so future
+      REST callers that opt into idempotency get the conflict envelope)
+    * :class:`CapsViolationError` → 422 (unchanged contract)
+    * :class:`PlanCancelEmitError` → 500 ``Failed to emit cancel command``
 
     Args:
         repo: Repository dependency.
@@ -641,61 +465,62 @@ async def _cancel_plan(
         ExecutionPlanResponse wrapping the updated plan.
 
     Raises:
-        HTTPException: 404 if plan not found, 403 if wallet not accessible
-            409 if already terminal or a concurrent status change lost the race.
+        HTTPException: 404 if plan not found, 403 if wallet not accessible,
+            409 if already terminal or a concurrent status change lost
+            the race, 422 on caps rejection, 500 on cancel-command emit
+            failure.
     """
     route_context = _build_order_route_context(tracker)
-    context = await _load_cancel_plan_context(
-        repo=repo,
-        principal=principal,
-        plan_public_id=plan_public_id,
-        route_context=route_context,
-    )
-
-    if _cancel_requires_trade_command(context):
-        try:
-            async with caps_enforcer.guard(_build_cancel_submission(context, principal)):
-                await _request_cancel_requested_status(
-                    repo=repo,
-                    plan_public_id=plan_public_id,
-                    route_context=route_context,
-                )
-                cancel_cmd = _build_cancel_trade_command(context, principal)
-                try:
-                    await repo.insert_trade_command(cancel_cmd, ownership=None)
-                except Exception as exc:
-                    await _handle_cancel_command_failure(
-                        repo=repo,
-                        plan_public_id=plan_public_id,
-                        route_context=route_context,
-                        exc=exc,
-                    )
-        except CapsViolationError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail={
-                    "error_code": "caps_violation",
-                    "cap_type": exc.cap_type,
-                    "attempted": exc.attempted,
-                    "limit": exc.limit,
-                },
-            ) from exc
-    else:
-        await _request_cancel_requested_status(
-            repo=repo,
+    try:
+        updated = await PlansCancelService.cancel_by_plan_public_id(
             plan_public_id=plan_public_id,
-            route_context=route_context,
+            idempotency_key=None,
+            principal=principal,
+            repo=repo,
+            tracker=tracker,
+            caps_enforcer=caps_enforcer,
+            source_surface="rest",
         )
-
-    updated = await _get_updated_plan_or_500(
-        repo=repo,
-        plan_public_id=plan_public_id,
-        bus_time=route_context.bus_time,
-    )
-    return _build_cancel_plan_response(
-        updated,
-        route_context,
-    )
+    except PlanNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Execution plan not found",
+        ) from exc
+    except PlanScopeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Wallet not accessible",
+        ) from exc
+    except PlanAlreadyTerminalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Plan already in terminal status: {exc.status}",
+        ) from exc
+    except (
+        PlanCancelInProgressError,
+        PlanConcurrentChangeError,
+        PlanCancelIdempotencyKeyMismatchError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Plan status changed concurrently",
+        ) from exc
+    except CapsViolationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error_code": "caps_violation",
+                "cap_type": exc.cap_type,
+                "attempted": exc.attempted,
+                "limit": exc.limit,
+            },
+        ) from exc
+    except PlanCancelEmitError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to emit cancel command",
+        ) from exc
+    return _build_cancel_plan_response(updated, route_context)
 
 
 @router.post(

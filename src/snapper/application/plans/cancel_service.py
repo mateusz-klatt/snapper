@@ -185,8 +185,18 @@ def _json_str_param(params: JsonObject, key: str) -> str | None:
 def _build_cancel_submission(
     plan: ExecutionPlanRow,
     principal: AuthPrincipal,
+    *,
+    source_surface: str,
 ) -> TradeCommandSubmission:
-    """Build the caps-enforcer submission for the cancel action."""
+    """Build the caps-enforcer submission for the cancel action.
+
+    Args:
+        plan: SCD2-active plan row being cancelled.
+        principal: Authenticated caller used for caps attribution.
+        source_surface: Origin transport (``"mcp"`` or ``"rest"``)
+            stamped on the submission so caps audit can attribute the
+            attempt distinctly.
+    """
     order_type = _json_str_param(plan["params"], "venue_order_type") or "market"
     return TradeCommandSubmission(
         user_public_id=principal.user_public_id,
@@ -198,7 +208,7 @@ def _build_cancel_submission(
         order_type=order_type,
         quantity=None,
         price=None,
-        source_surface="mcp",
+        source_surface=source_surface,
         idempotency_key=None,
     )
 
@@ -214,15 +224,27 @@ def _build_cancel_trade_command(
     now: datetime,
     session_id: str,
     sequence_id: int,
+    source_surface: str,
 ) -> TradeCommandInsertRow:
     """Build the venue-facing cancel TradeCommand for a child order.
 
-    Stamps ``source_surface="mcp"`` so audit downstream can attribute
-    MCP-initiated cancels distinctly from REST cancels (which keep the
-    schema default ``"rest"`` via the legacy
-    :func:`snapper.server.order_routes._cancel_plan` helper). This
-    matches the convention :func:`_build_manual_order_command_row`
-    follows on the create-order MCP path.
+    Args:
+        plan: Plan being cancelled.
+        principal: Authenticated caller used for ``user_public_id``
+            attribution.
+        child_client_order_id: Child order's client ID.
+        native_instrument: Venue-native instrument identifier.
+        exchange_order_id: Venue-assigned exchange order ID, or
+            ``None`` when the venue has not yet ACK'd the original
+            order.
+        bus_time: Bus-time UTC timestamp for the SCD2 row.
+        now: Wall-clock UTC for ``created_at``.
+        session_id: Provenance session for the cancel command.
+        sequence_id: Provenance sequence for the cancel command.
+        source_surface: Origin transport (``"mcp"`` or ``"rest"``)
+            stamped on the command so audit can attribute the cancel
+            distinctly. MCP and REST callers thread their own value
+            through; the service does not assume a default.
     """
     params = plan["params"]
     return TradeCommandInsertRow(
@@ -251,7 +273,7 @@ def _build_cancel_trade_command(
         user_public_id=principal.user_public_id or principal.username,
         plan_public_id=plan["public_id"],
         exchange_order_id=exchange_order_id,
-        source_surface="mcp",
+        source_surface=source_surface,
     )
 
 
@@ -320,6 +342,7 @@ class PlansCancelService:
         repo: Repository,
         tracker: SequenceTracker,
         caps_enforcer: TradingCapsEnforcer,
+        source_surface: str = "mcp",
     ) -> ExecutionPlanRow:
         """Cancel a plan and return the updated row.
 
@@ -337,6 +360,11 @@ class PlansCancelService:
                 stamping.
             caps_enforcer: Per-user :class:`TradingCapsEnforcer` that
                 gates the cancel-command insert against user caps.
+            source_surface: Origin transport stamped on the cancel
+                ``TradeCommand`` + caps submission. Defaults to
+                ``"mcp"`` for the historical caller; the REST route
+                threads ``"rest"`` so audit attribution stays
+                surface-distinct.
 
         Returns:
             Updated :class:`ExecutionPlanRow` after the SCD2 cancel
@@ -373,6 +401,7 @@ class PlansCancelService:
             tracker=tracker,
             caps_enforcer=caps_enforcer,
             now=now,
+            source_surface=source_surface,
         )
 
     @staticmethod
@@ -385,6 +414,7 @@ class PlansCancelService:
         tracker: SequenceTracker,
         caps_enforcer: TradingCapsEnforcer,
         now: datetime,
+        source_surface: str,
     ) -> ExecutionPlanRow:
         """Run the SCD2 transition + (conditional) cancel command emit."""
         params = plan["params"]
@@ -398,7 +428,10 @@ class PlansCancelService:
                 child_client_order_id, as_of=now
             )
             try:
-                async with caps_enforcer.guard(_build_cancel_submission(plan, principal)):
+                submission = _build_cancel_submission(
+                    plan, principal, source_surface=source_surface
+                )
+                async with caps_enforcer.guard(submission):
                     replay = await PlansCancelService._claim_cancel_transition(
                         repo=repo,
                         plan_public_id=plan_public_id,
@@ -420,6 +453,7 @@ class PlansCancelService:
                         now=now,
                         session_id=session_id,
                         sequence_id=tracker.next_sequence(_CANCEL_STREAM),
+                        source_surface=source_surface,
                     )
                     try:
                         await repo.insert_trade_command(cancel_cmd, ownership=None)

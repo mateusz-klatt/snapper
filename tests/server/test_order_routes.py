@@ -8,7 +8,6 @@ from unittest.mock import ANY
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -18,13 +17,9 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
-from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
 from snapper.server.dependencies import get_caps_enforcer_dependency
-from snapper.server.order_routes import CancelPlanContext
-from snapper.server.order_routes import OrderRouteContext
-from snapper.server.order_routes import _build_cancel_trade_command
 
 
 async def _noop_lifespan(_app: FastAPI) -> AsyncGenerator[None]:
@@ -224,9 +219,7 @@ class TestCreateOrder:
         plan = _make_plan_row(status="active")
         plan["params"]["child_client_order_id"] = "child-1"
         plan["params"]["native_instrument"] = "BTC-USD"
-        cancelled = dict(plan)
-        cancelled["status"] = "cancel_requested"
-        repo.get_execution_plan = AsyncMock(side_effect=[plan, cancelled])
+        repo.get_execution_plan = AsyncMock(return_value=plan)
         repo.update_execution_plan_status = AsyncMock(return_value=1)
         repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-1")
         repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
@@ -388,47 +381,33 @@ class TestCreateOrder:
         client.close()
 
 
+def _claimed_outcome(plan_row: dict[str, Any]) -> dict[str, Any]:
+    """Build a ``CancelClaimResult`` for the ``"claimed"`` (CAS-winner) outcome.
+
+    Mirrors the typed dict shape :meth:`Repository.claim_execution_plan_cancel`
+    returns when the plan transitioned cleanly from ``active`` to
+    ``cancel_requested`` under the FOR UPDATE lock.
+    """
+    return {"outcome": "claimed", "plan": plan_row}
+
+
+def _not_found_outcome() -> dict[str, Any]:
+    """Build a ``CancelClaimResult`` for the ``"not_found"`` race-loser case."""
+    return {"outcome": "not_found", "plan": None}
+
+
 class TestCancelOrder:
     """Tests for POST /api/orders/{id}/cancel."""
 
-    def test_build_cancel_trade_command_requires_child_order_metadata(self) -> None:
-        """Missing child-order metadata raises ValueError."""
-        route_context = OrderRouteContext(
-            tracker=SequenceTracker(),
-            now=_ts(),
-            bus_time=_ts(),
-            session_id="s1",
-        )
-        plan = _make_plan_row(status="active")
-        context = CancelPlanContext(
-            route_context=route_context,
-            plan=plan,
-            params=plan["params"],
-            child_client_order_id=None,
-            native_instrument=None,
-            exchange_order_id=None,
-        )
-        principal = AuthPrincipal(
-            username="test_user",
-            role=UserRole.ADMIN,
-            user_public_id="user-1",
-        )
-        with pytest.raises(
-            ValueError,
-            match="Cancel command requires child_client_order_id and native_instrument",
-        ):
-            _build_cancel_trade_command(context, principal)
-
     def test_cancel_active_plan(self) -> None:
         """Given active plan, When cancelling, Then cancel_requested."""
+        active_row = _make_plan_row(status="active")
+        cancel_requested_row = _make_plan_row(status="cancel_requested")
         repo = AsyncMock()
-        repo.get_execution_plan = AsyncMock(
-            side_effect=[
-                _make_plan_row(status="active"),
-                _make_plan_row(status="cancel_requested"),
-            ]
+        repo.get_execution_plan = AsyncMock(side_effect=[active_row, cancel_requested_row])
+        repo.claim_execution_plan_cancel = AsyncMock(
+            return_value=_claimed_outcome(cancel_requested_row)
         )
-        repo.update_execution_plan_status = AsyncMock(return_value=2)
         client = _create_client(repo)
         response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
         assert response.status_code == 200
@@ -454,26 +433,61 @@ class TestCancelOrder:
         assert response.status_code == 409
         client.close()
 
-    def test_cancel_plan_updated_but_not_found(self) -> None:
-        """Given update succeeds but GET returns None, Then 500."""
+    def test_cancel_returns_403_when_caller_out_of_wallet_scope(self) -> None:
+        """Non-admin caller missing the plan's wallet → 403 ``Wallet not accessible``.
+
+        REST does NOT collapse :class:`PlanScopeError` to 404 like MCP
+        does (anti-enumeration is an MCP-specific contract); the legacy
+        REST contract surfaces 403 distinctly so the operator can tell
+        "wallet not yours" from "wallet does not exist."
+        """
         repo = AsyncMock()
-        repo.get_execution_plan = AsyncMock(
-            side_effect=[
-                _make_plan_row(status="active"),
-                None,
-            ]
+        repo.get_execution_plan = AsyncMock(return_value=_make_plan_row(status="active"))
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": "wallet-other"}]
         )
-        repo.update_execution_plan_status = AsyncMock(return_value=2)
+        app = create_app()
+        app.router.lifespan_context = _noop_lifespan
+        app.state.settings = MagicMock()
+
+        def skip_csrf() -> None:
+            return None
+
+        def operator_principal() -> AuthPrincipal:
+            return AuthPrincipal(
+                username="operator",
+                role=UserRole.OPERATOR,
+                user_public_id="operator-1",
+                operator_public_ids=["op-other"],
+            )
+
+        app.dependency_overrides[validate_csrf_token] = skip_csrf
+        app.dependency_overrides[require_authentication] = operator_principal
+        app.dependency_overrides[get_repository_dependency] = lambda: repo
+        client = TestClient(app)
+        response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
+        assert response.status_code == 403
+        client.close()
+
+    def test_cancel_plan_updated_but_not_found(self) -> None:
+        """Given claim succeeds but reload GET returns None, Then 500."""
+        active_row = _make_plan_row(status="active")
+        cancel_requested_row = _make_plan_row(status="cancel_requested")
+        repo = AsyncMock()
+        repo.get_execution_plan = AsyncMock(side_effect=[active_row, None])
+        repo.claim_execution_plan_cancel = AsyncMock(
+            return_value=_claimed_outcome(cancel_requested_row)
+        )
         client = _create_client(repo)
         response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
         assert response.status_code == 500
         client.close()
 
     def test_cancel_update_returns_none_concurrent(self) -> None:
-        """Given race condition (plan closed between read and update), Then 409."""
+        """Given a CAS race (plan disappeared between read and claim), Then 409."""
         repo = AsyncMock()
         repo.get_execution_plan = AsyncMock(return_value=_make_plan_row(status="active"))
-        repo.update_execution_plan_status = AsyncMock(return_value=None)
+        repo.claim_execution_plan_cancel = AsyncMock(return_value=_not_found_outcome())
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
         client = _create_client(repo)
         response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
@@ -483,21 +497,19 @@ class TestCancelOrder:
     def test_cancel_with_child_concurrent_status_change_returns_409(self) -> None:
         """409 path inside the caps-guarded cancel branch (with child_client_order_id).
 
-        Given: a plan with a child_client_order_id (has_active_children=True)
-            whose ``update_execution_plan_status`` returns ``None`` under
-            the caps guard,
+        Given: a plan with a child_client_order_id whose
+            ``claim_execution_plan_cancel`` returns ``"not_found"``
+            (race loser) under the caps guard,
         When: the cancel endpoint is hit and the caps guard admits (no
             caps row → unbounded),
-        Then: the route raises HTTP 409 inside the guard, propagating
-            through :class:`CapsViolationError` filtering — covers the
-            refactored inside-guard concurrent-change branch at
-            ``order_routes.py``.
+        Then: the route raises HTTP 409 inside the guard via
+            :class:`PlanConcurrentChangeError`.
         """
         repo = AsyncMock()
         repo.get_execution_plan = AsyncMock(
             return_value=_make_plan_row(status="active", with_child_order=True)
         )
-        repo.update_execution_plan_status = AsyncMock(return_value=None)
+        repo.claim_execution_plan_cancel = AsyncMock(return_value=_not_found_outcome())
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
         repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-42")
         client = _create_client(repo)
@@ -512,16 +524,17 @@ class TestCancelOrder:
         ``command_type='cancel'`` and the child order's ``client_order_id``
         so the outbox dispatcher publishes OrderCancelData to the venue.
         Also asserts the command hydrates the venue-assigned
-        ``exchange_order_id`` looked up via the repository.
+        ``exchange_order_id`` looked up via the repository AND the
+        ``source_surface`` is stamped as ``"rest"`` so audit can
+        distinguish REST cancels from MCP cancels.
         """
+        active_row = _make_plan_row(status="active", with_child_order=True)
+        cancel_requested_row = _make_plan_row(status="cancel_requested", with_child_order=True)
         repo = AsyncMock()
-        repo.get_execution_plan = AsyncMock(
-            side_effect=[
-                _make_plan_row(status="active", with_child_order=True),
-                _make_plan_row(status="cancel_requested", with_child_order=True),
-            ]
+        repo.get_execution_plan = AsyncMock(side_effect=[active_row, cancel_requested_row])
+        repo.claim_execution_plan_cancel = AsyncMock(
+            return_value=_claimed_outcome(cancel_requested_row)
         )
-        repo.update_execution_plan_status = AsyncMock(return_value=2)
         repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-42")
         repo.insert_trade_command = AsyncMock(return_value=(42, "cmd-cancel"))
         client = _create_client(repo)
@@ -533,24 +546,18 @@ class TestCancelOrder:
         assert inserted["client_order_id"] == "cid-child-1"
         assert inserted["plan_public_id"] == "plan-1"
         assert inserted["exchange_order_id"] == "ex-42"
+        assert inserted["source_surface"] == "rest"
         client.close()
 
     def test_cancel_before_venue_ack_emits_command_with_null_exchange_id(self) -> None:
-        """Cancel before venue ACK passes a null exchange_order_id through.
-
-        When the active Order row has not yet been assigned an exchange
-        id the repository lookup returns ``None``; the cancel command
-        must still be inserted so the venue adapter (paper/Kraken) can
-        fall back to cancelling by ``client_order_id``.
-        """
+        """Cancel before venue ACK passes a null exchange_order_id through."""
+        active_row = _make_plan_row(status="active", with_child_order=True)
+        cancel_requested_row = _make_plan_row(status="cancel_requested", with_child_order=True)
         repo = AsyncMock()
-        repo.get_execution_plan = AsyncMock(
-            side_effect=[
-                _make_plan_row(status="active", with_child_order=True),
-                _make_plan_row(status="cancel_requested", with_child_order=True),
-            ]
+        repo.get_execution_plan = AsyncMock(side_effect=[active_row, cancel_requested_row])
+        repo.claim_execution_plan_cancel = AsyncMock(
+            return_value=_claimed_outcome(cancel_requested_row)
         )
-        repo.update_execution_plan_status = AsyncMock(return_value=2)
         repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
         repo.insert_trade_command = AsyncMock(return_value=(42, "cmd-cancel"))
         client = _create_client(repo)
@@ -562,15 +569,14 @@ class TestCancelOrder:
 
     def test_cancel_by_client_order_id_resolves_plan(self) -> None:
         """Given a child client_order_id, When cancelling, Then lookup + cancel."""
+        active_row = _make_plan_row(status="active", with_child_order=True)
+        cancel_requested_row = _make_plan_row(status="cancel_requested", with_child_order=True)
         repo = AsyncMock()
         repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-1")
-        repo.get_execution_plan = AsyncMock(
-            side_effect=[
-                _make_plan_row(status="active", with_child_order=True),
-                _make_plan_row(status="cancel_requested", with_child_order=True),
-            ]
+        repo.get_execution_plan = AsyncMock(side_effect=[active_row, cancel_requested_row])
+        repo.claim_execution_plan_cancel = AsyncMock(
+            return_value=_claimed_outcome(cancel_requested_row)
         )
-        repo.update_execution_plan_status = AsyncMock(return_value=2)
         repo.insert_trade_command = AsyncMock(return_value=(42, "cmd-cancel"))
         client = _create_client(repo)
         response = client.post(
@@ -599,19 +605,20 @@ class TestCancelOrder:
     def test_cancel_with_child_order_insert_failure_marks_plan_failed(self) -> None:
         """When the cancel TradeCommand insert fails, plan transitions to failed.
 
-        Previously the insert exception was silently swallowed and the
-        plan was left stuck in ``cancel_requested`` with no venue
-        cancel ever sent. Phase 1.5 review fix: on insert failure the
-        service now transitions the plan to ``failed`` with a
-        ``last_error`` and returns HTTP 500 so the caller learns the
-        cancel did not reach the venue.
+        After the Phase 3.5 unification the SCD2 ``cancel_requested``
+        transition lives inside :meth:`Repository.claim_execution_plan_cancel`
+        (the FOR UPDATE-locked CAS); the compensate-to-failed step still
+        uses the legacy :meth:`Repository.update_execution_plan_status`
+        because compensation does not need the cancel-key claim. We
+        assert both are called: claim once for the cancel transition,
+        then update_status with ``failed`` for the compensation.
         """
+        active_row = _make_plan_row(status="active", with_child_order=True)
+        cancel_requested_row = _make_plan_row(status="cancel_requested", with_child_order=True)
         repo = AsyncMock()
-        repo.get_execution_plan = AsyncMock(
-            side_effect=[
-                _make_plan_row(status="active", with_child_order=True),
-                _make_plan_row(status="cancel_requested", with_child_order=True),
-            ]
+        repo.get_execution_plan = AsyncMock(side_effect=[active_row, cancel_requested_row])
+        repo.claim_execution_plan_cancel = AsyncMock(
+            return_value=_claimed_outcome(cancel_requested_row)
         )
         repo.update_execution_plan_status = AsyncMock(return_value=2)
         repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-42")
@@ -619,37 +626,34 @@ class TestCancelOrder:
         client = _create_client(repo)
         response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
         assert response.status_code == 500
+        repo.claim_execution_plan_cancel.assert_awaited_once()
         statuses = [
             call.kwargs["new_status"] for call in repo.update_execution_plan_status.await_args_list
         ]
-        assert "cancel_requested" in statuses
         assert "failed" in statuses
         client.close()
 
     def test_cancel_compensation_failure_still_raises_500(self) -> None:
         """If both insert and compensation update fail, route still returns 500.
 
-        Phase 1.5 review round 2 fix: a second failure in the
-        compensating ``failed`` transition must not mask the original
-        cancel-insert failure. The plan is stranded in
-        ``cancel_requested`` and the PlanExecutorService recovery loop
-        re-emits the cancel on next startup.
+        After Phase 3.5: a second failure in the compensating ``failed``
+        transition must not mask the original cancel-insert failure.
+        The plan is stranded in ``cancel_requested`` and the
+        PlanExecutorService recovery loop re-emits the cancel on next
+        startup.
         """
+        active_row = _make_plan_row(status="active", with_child_order=True)
+        cancel_requested_row = _make_plan_row(status="cancel_requested", with_child_order=True)
         repo = AsyncMock()
-        repo.get_execution_plan = AsyncMock(
-            side_effect=[
-                _make_plan_row(status="active", with_child_order=True),
-                _make_plan_row(status="cancel_requested", with_child_order=True),
-            ]
+        repo.get_execution_plan = AsyncMock(side_effect=[active_row, cancel_requested_row])
+        repo.claim_execution_plan_cancel = AsyncMock(
+            return_value=_claimed_outcome(cancel_requested_row)
         )
-
-        calls: list[str] = []
+        compensation_calls: list[str] = []
 
         async def _update_status(**kwargs: Any) -> int | None:
-            calls.append(kwargs["new_status"])
-            if kwargs["new_status"] == "failed":
-                raise RuntimeError("compensation DB error")
-            return 2
+            compensation_calls.append(kwargs["new_status"])
+            raise RuntimeError("compensation DB error")
 
         repo.update_execution_plan_status = _update_status
         repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-42")
@@ -657,8 +661,7 @@ class TestCancelOrder:
         client = _create_client(repo)
         response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
         assert response.status_code == 500
-        assert "cancel_requested" in calls
-        assert "failed" in calls
+        assert compensation_calls == ["failed"]
         client.close()
 
 
