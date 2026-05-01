@@ -316,3 +316,122 @@ The retention scheduler is single-instance only for v1. With `N>1`
 instances, `RETENTION_DISABLED=true` on `N-1` instances avoids
 double-archive / double-purge races. A coordinator-based extension is
 a future iteration.
+
+## Cluster B — per-table SCD2 stats (DB metrics)
+
+`GET /api/metrics/db/tables` returns the latest sampled per-table row
+counters for every registered event + state SCD2 table. The endpoint
+is operator telemetry: at a glance it answers "is `telemetry` growing
+as expected", "are there orders accumulating closed versions", "how
+many rows are eligible for the next retention cycle".
+
+### Cluster B endpoint
+
+`GET /api/metrics/db/tables` — `READ_SYSTEM_STATUS` permission gate.
+Returns a `DbStatsResponse` envelope wrapping a `DbStatsData` payload
+with `tables: list[TableStatsItem]` in the sampler's deterministic
+order (STATE-table block first alphabetical, EVENT-table block second
+alphabetical).
+
+### Cluster B failure / cold-start contract
+
+| State | Status | Detail | `Retry-After` |
+|---|---|---|---|
+| Snapshotter helper failed before assigning | 503 | `DB metrics snapshotter not initialized` | (none) |
+| `DB_METRICS_DISABLED=true` (operator opt-out) | 503 | `DB metrics snapshotter disabled via DB_METRICS_DISABLED` | (none) |
+| Started but no sample yet (cold-start) | 503 | `DB metrics snapshotter has not completed a sample yet` | `<interval_seconds>` |
+| Healthy | 200 | — | — |
+
+The cold-start window lasts up to `DB_METRICS_INTERVAL_SECONDS`
+(default 60s) — by design, the sampler does NOT block lifespan
+startup on the first sample (plan §11.2). Frontend dashboards must
+poll-with-backoff using the `Retry-After` header.
+
+## Snapshot fields
+
+### `TableStatsItem`
+
+| Field | Type | Notes |
+|---|---|---|
+| `table` | `str` | Table name (key in `EVENT_TABLES` or `STATE_TABLES`). |
+| `table_kind` | `"event"` \| `"state"` | Discriminates wire semantics. |
+| `total` | `int \| null` | Total row count. `null` only on per-table query failure with no prior sample to clone. |
+| `current` | `int \| null` | Active SCD2 versions (rows whose `known_to` equals the SCD2 sentinel) for state tables; `null` for event tables (no SCD2 lifecycle — reporting `0` would imply the dimension exists). |
+| `closed` | `int \| null` | Superseded SCD2 versions for state tables; `null` for event tables. |
+| `archivable` | `int \| null` | Row count in the policy retention window when a `RETENTION_POLICIES` entry applies; `null` when no policy applies (semantically distinct from `0`). |
+| `is_stale` | `bool` | `True` when the row was reused from a prior sample after a per-table query timeout or exception. |
+| `last_sampled_at` | `datetime` | UTC timestamp of the row's source sample. On a stale clone this is the original timestamp, NOT the current cycle's clock. |
+
+### `DbStatsData`
+
+| Field | Type | Notes |
+|---|---|---|
+| `snapshot_started_at` | `datetime` | When the sampler began the cycle. |
+| `snapshot_completed_at` | `datetime` | When the sampler finished the cycle. |
+| `interval_seconds` | `float` | Echo of the configured cadence. |
+| `tables` | `list[TableStatsItem]` | One entry per registered table. |
+
+## Per-kind semantics
+
+- **EVENT tables** (append-only — `ticks`, `trades`, `signals`,
+  `executions`, `telemetry`, `control`): `total = COUNT(*)`. The
+  `current` / `closed` axes are `null` because event tables have no
+  SCD2 lifecycle. `archivable` is non-null only for tables with a
+  registered policy (currently only `telemetry`).
+- **STATE tables** (SCD2-versioned — `orders`, `positions`,
+  `instruments`, etc.): `current` counts rows whose `known_to` equals
+  the SCD2 sentinel; `closed` counts superseded versions;
+  `total = current + closed` (Python addition trusted on the SCD2
+  invariant). `archivable` is `null` until a policy is registered for
+  the table.
+
+## Cluster B/C alignment
+
+The `archivable` counter computes the same window as Cluster C's
+`compute_retention_window(today_utc, policy)`: the half-open
+`timestamp >= day_start midnight UTC AND timestamp < day_end + 1d
+midnight UTC` predicate, with the policy's
+`(retain_days, backlog_lookback_days)` knobs. This means dashboard
+`archivable` and the next retention cycle's `archived_rows` MUST agree
+exactly — if they drift, one of the two has a boundary bug. The
+`tests/application/db_stats/test_cluster_alignment.py` integration
+test pins the equality contract.
+
+## Cluster B configuration
+
+| Variable | Default | Effect |
+|---|---|---|
+| `DB_METRICS_INTERVAL_SECONDS` | `60` | Sampler loop period. Empty / unparseable / `<= 0` → default. |
+| `DB_METRICS_DISABLED` | `false` | Truthy (`"1"/"true"/"yes"`, case-insensitive) parks the snapshotter entirely. PG operators with deployments lacking `psycopg2` in deps boot cleanly with this flag (the underlying repo factory is never called). |
+
+`PER_TABLE_TIMEOUT_SECONDS` is a module constant (30s, not env-
+configurable for v1). On per-table timeout, the snapshotter clones
+the prior `TableStats` with `is_stale=True`; if no prior sample
+exists the row carries all-null counters. Per-table failures NEVER
+abort the sampler tick.
+
+## Sampling order + cold-start
+
+STATE tables sample first (alphabetical by name), EVENT tables second.
+Atomic swap of `_latest_snapshot` happens at the END of the cycle —
+readers wait one full `interval_seconds` before the first 200,
+regardless of order. STATE-first ordering is for resilience to EVENT
+timeouts: if a heavy EVENT table (e.g. `ticks` at 50M rows) times
+out, STATE counters were already computed and the snapshot still
+publishes with EVENT entries marked `is_stale=True` from a prior run.
+
+## Migration `0002_telemetry_timestamp_index`
+
+Cluster B's `archivable` query on `telemetry` filters on
+`Telemetry.timestamp` (the bus-time column inherited from
+`TemporalMixin`). Without an index on that column, the query is a
+full table scan over a high-volume audit table. The
+`0002_telemetry_timestamp_index` migration adds
+`Index("ix_telemetry_timestamp", "timestamp")` so both Cluster B's
+counter and Cluster C's existing retention scan run in `O(log n)`.
+
+The PG path uses
+`op.get_context().autocommit_block()` +
+`postgresql_concurrently=True` so a live deploy can apply the
+migration without blocking writes. SQLite path runs the standard
+create/drop without the block.
