@@ -191,6 +191,7 @@ markers = [
 
 [tool.mypy]
 python_version = "3.14"
+platform = "linux"
 strict = true
 warn_unused_ignores = true
 warn_redundant_casts = true
