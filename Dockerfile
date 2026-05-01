@@ -2,7 +2,9 @@ FROM node:25-alpine AS ui-build
 ARG COREPACK_VERSION=0.34.0
 WORKDIR /app
 
-RUN (corepack --version 2>/dev/null || npm install -g --force --ignore-scripts corepack@${COREPACK_VERSION}) && corepack enable
+RUN (corepack --version 2>/dev/null || \
+        npm install -g --force --ignore-scripts "corepack@${COREPACK_VERSION}") \
+    && corepack enable
 
 COPY frontend/package.json frontend/pnpm-lock.yaml ./frontend/
 WORKDIR /app/frontend
@@ -27,13 +29,19 @@ COPY src/ ./src/
 COPY *proprietary/data/seed/ ./src/snapper/data/seed/
 
 RUN python -m venv /opt/poetry \
- && /opt/poetry/bin/pip install --only-binary :all: poetry==${POETRY_VERSION} \
+ && /opt/poetry/bin/pip install --only-binary :all: "poetry==${POETRY_VERSION}" \
  && python -m venv /opt/appenv \
  && /opt/poetry/bin/poetry config virtualenvs.create false \
  && /opt/poetry/bin/poetry config installer.only-binary :all: \
  && VIRTUAL_ENV=/opt/appenv PATH="/opt/appenv/bin:$PATH" /opt/poetry/bin/poetry install --only=main,cloud --no-root \
  && VIRTUAL_ENV=/opt/appenv PATH="/opt/appenv/bin:$PATH" /opt/appenv/bin/pip wheel --no-deps --wheel-dir /wheels . \
- && VIRTUAL_ENV=/opt/appenv PATH="/opt/appenv/bin:$PATH" /opt/appenv/bin/pip install --no-index --find-links=/wheels --only-binary :all: --no-deps --no-compile snapper==0.1.0
+ && VIRTUAL_ENV=/opt/appenv PATH="/opt/appenv/bin:$PATH" /opt/appenv/bin/pip install \
+    --no-index \
+    --find-links=/wheels \
+    --only-binary :all: \
+    --no-deps \
+    --no-compile \
+    snapper==0.1.0
 
 FROM python:3.14-slim AS api
 

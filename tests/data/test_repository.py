@@ -2458,7 +2458,7 @@ async def _seed_full_repo(tmp_path: Path) -> tuple[SQLAlchemyRepository, str, st
     db_path = tmp_path / "rest_repo.db"
     r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     await r.create_all()
-    now = datetime.now(UTC)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
     async with r.session() as s:
         sym = Symbol(
             native_symbol="BTC-USD",

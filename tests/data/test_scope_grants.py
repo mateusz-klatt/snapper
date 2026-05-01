@@ -554,7 +554,7 @@ class TestHandoverGrant:
                 underlying_public_id=ids["underlying_btc"],
             )
         )
-        with pytest.raises(ScopeGrantNotFoundError):
+        with pytest.raises(ScopeGrantNotFoundError, match="destination operator"):
             await repo.handover_grant(
                 from_grant_public_id=original["public_id"],
                 to_operator_public_id="00000000-0000-7000-8000-0000000000fe",
@@ -562,7 +562,7 @@ class TestHandoverGrant:
                 reason=None,
                 session_id="test-session",
                 sequence_id=303,
-                timestamp=datetime.now(UTC),
+                timestamp=datetime.now(UTC) + timedelta(minutes=1),
             )
 
 

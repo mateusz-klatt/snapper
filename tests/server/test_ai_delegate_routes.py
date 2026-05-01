@@ -396,11 +396,19 @@ class TestListDelegates:
         assert delegates == []
 
     @pytest.mark.asyncio
-    async def test_only_owner_delegates_are_returned(self, repo: SQLAlchemyRepository) -> None:
+    async def test_only_owner_delegates_are_returned(
+        self,
+        repo: SQLAlchemyRepository,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Delegates created by other operators don't leak into the caller's list."""
         await _seed_owner(repo, public_id="owner-mine", username="mine")
         await _seed_owner(repo, public_id="owner-other", username="other")
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        monkeypatch.setattr(
+            "snapper.application.ai_delegates.service._now_for_join",
+            lambda: datetime.now(UTC) + _td(minutes=1),
+        )
         await service.create_delegate(
             owner=_make_owner_principal("owner-mine"),
             body=DelegateCreateBody(label="Mine One", caps=DelegateCapsBody()),

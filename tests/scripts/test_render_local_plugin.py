@@ -25,6 +25,14 @@ def _write_template(repo_root: Path, name: str, content: str) -> Path:
     return target
 
 
+def _claude_settings_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Configure a temporary Claude home and return its settings path."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    return settings
+
+
 class TestRenderPlugin:
     """Coverage for ``render_plugin`` placeholder substitution."""
 
@@ -72,16 +80,73 @@ class TestRenderPlugin:
 class TestUpdateClaudeSettings:
     """Coverage for ``update_claude_settings`` patching with backup."""
 
-    def test_raises_when_settings_missing(self, tmp_path: Path) -> None:
+    def test_raises_when_settings_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         """A missing settings file fails loudly so misconfiguration surfaces."""
-        missing = tmp_path / "settings.json"
+        missing = _claude_settings_path(monkeypatch, tmp_path)
 
         with pytest.raises(FileNotFoundError, match="Claude Code settings not found"):
             update_claude_settings(missing, tmp_path / "plugin")
 
-    def test_creates_marketplace_entry_when_absent(self, tmp_path: Path) -> None:
+    def test_rejects_settings_path_outside_claude_home(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Only the configured Claude settings file can be patched."""
+        _claude_settings_path(monkeypatch, tmp_path)
+        settings = tmp_path / "other" / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps({}), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="must stay under"):
+            update_claude_settings(settings, tmp_path / "plugin")
+
+    def test_rejects_wrong_settings_filename(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The patcher is limited to the canonical Claude settings filename."""
+        _claude_settings_path(monkeypatch, tmp_path)
+        settings = tmp_path / ".claude" / "settings.local.json"
+        settings.write_text(json.dumps({}), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="must be named settings.json"):
+            update_claude_settings(settings, tmp_path / "plugin")
+
+    def test_rejects_settings_directory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The settings target must be a regular JSON file."""
+        settings = _claude_settings_path(monkeypatch, tmp_path)
+        settings.mkdir()
+
+        with pytest.raises(ValueError, match="regular file"):
+            update_claude_settings(settings, tmp_path / "plugin")
+
+    def test_rejects_non_object_settings(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The root settings payload must be a JSON object."""
+        settings = _claude_settings_path(monkeypatch, tmp_path)
+        settings.write_text(json.dumps([]), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Claude settings must be a JSON object"):
+            update_claude_settings(settings, tmp_path / "plugin")
+
+    def test_rejects_non_object_nested_settings(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Nested marketplace settings must remain JSON objects."""
+        settings = _claude_settings_path(monkeypatch, tmp_path)
+        settings.write_text(json.dumps({"extraKnownMarketplaces": []}), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="extraKnownMarketplaces"):
+            update_claude_settings(settings, tmp_path / "plugin")
+
+    def test_creates_marketplace_entry_when_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         """A settings file without the entry gains a fresh ``directory`` source."""
-        settings = tmp_path / "settings.json"
+        settings = _claude_settings_path(monkeypatch, tmp_path)
         settings.write_text(json.dumps({"permissions": {"allow": []}}), encoding="utf-8")
         plugin_dir = tmp_path / "data" / PLUGIN_DIR_NAME
 
@@ -95,9 +160,9 @@ class TestUpdateClaudeSettings:
         assert backup.exists()
         assert json.loads(backup.read_text(encoding="utf-8")) == {"permissions": {"allow": []}}
 
-    def test_updates_existing_path(self, tmp_path: Path) -> None:
+    def test_updates_existing_path(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """An existing entry with a different path is overwritten and backed up."""
-        settings = tmp_path / "settings.json"
+        settings = _claude_settings_path(monkeypatch, tmp_path)
         original = {
             "extraKnownMarketplaces": {
                 MARKETPLACE_KEY: {
@@ -114,10 +179,12 @@ class TestUpdateClaudeSettings:
         data = json.loads(settings.read_text(encoding="utf-8"))
         assert data["extraKnownMarketplaces"][MARKETPLACE_KEY]["source"]["path"] == str(plugin_dir)
 
-    def test_no_op_when_already_pointing_at_plugin(self, tmp_path: Path) -> None:
+    def test_no_op_when_already_pointing_at_plugin(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         """When the settings already match, no rewrite or backup is performed."""
-        plugin_dir = tmp_path / "data" / PLUGIN_DIR_NAME
-        settings = tmp_path / "settings.json"
+        plugin_dir = (tmp_path / "data" / PLUGIN_DIR_NAME).resolve()
+        settings = _claude_settings_path(monkeypatch, tmp_path)
         original = {
             "extraKnownMarketplaces": {
                 MARKETPLACE_KEY: {
@@ -159,12 +226,15 @@ class TestMain:
     """Coverage for the ``main`` entry-point orchestration."""
 
     def test_renders_and_patches_settings(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """A first run renders the plugin and patches the settings file."""
         repo_root = tmp_path / "repo"
         _write_template(repo_root, "plugin.json", json.dumps({"path": PLACEHOLDER}))
-        settings = tmp_path / "settings.json"
+        settings = _claude_settings_path(monkeypatch, tmp_path)
         settings.write_text(json.dumps({}), encoding="utf-8")
 
         exit_code = main(repo_root=repo_root, settings_path=settings)
@@ -188,11 +258,10 @@ class TestMain:
         """When called without arguments, ``main`` resolves defaults via the helpers."""
         repo_root = tmp_path / "repo"
         _write_template(repo_root, "plugin.json", json.dumps({"path": PLACEHOLDER}))
-        settings = tmp_path / "settings.json"
+        settings = _claude_settings_path(monkeypatch, tmp_path)
         settings.write_text(json.dumps({}), encoding="utf-8")
 
         monkeypatch.setattr("scripts.render_local_plugin._default_repo_root", lambda: repo_root)
-        monkeypatch.setattr("scripts.render_local_plugin._default_settings_path", lambda: settings)
 
         exit_code = main()
 
@@ -201,13 +270,16 @@ class TestMain:
         assert "Rendered plugin to" in captured.out
 
     def test_main_reports_no_changes_when_already_synced(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """A second run with an unchanged settings entry prints the no-op message."""
         repo_root = tmp_path / "repo"
         _write_template(repo_root, "plugin.json", json.dumps({"path": PLACEHOLDER}))
-        plugin_dir = repo_root / "data" / PLUGIN_DIR_NAME
-        settings = tmp_path / "settings.json"
+        plugin_dir = (repo_root / "data" / PLUGIN_DIR_NAME).resolve()
+        settings = _claude_settings_path(monkeypatch, tmp_path)
         settings.write_text(
             json.dumps(
                 {

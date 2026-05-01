@@ -14,6 +14,26 @@ import zmq.asyncio
 from snapper.messaging.infrastructure.broker import ZmqBrokerProcess
 
 
+async def _send_until_received(
+    pub: zmq.asyncio.Socket,
+    sub: zmq.asyncio.Socket,
+    frames: list[bytes],
+) -> list[bytes]:
+    """Send frames until the subscriber receives a broker-forwarded copy."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 3.0
+    last_timeout = TimeoutError()
+    while loop.time() < deadline:
+        await pub.send_multipart(frames)
+        try:
+            message = await asyncio.wait_for(sub.recv_multipart(), timeout=0.1)
+            return [bytes(frame) for frame in message]
+        except TimeoutError as exc:
+            last_timeout = exc
+            await asyncio.sleep(0.02)
+    raise last_timeout
+
+
 async def _start_broker(*, xpub_verbose: bool) -> ZmqBrokerProcess:
     """Start a broker on ephemeral local ports."""
     broker = ZmqBrokerProcess(
@@ -247,8 +267,7 @@ class TestBrokerXpubVerbose:
             sub.setsockopt(zmq.SUBSCRIBE, b"market.")
             async with asyncio.timeout(2.0):
                 await broker.wait_for_subscription(b"market.")
-            await pub.send_multipart([b"market.btc", b"hello"])
-            topic, payload = await asyncio.wait_for(sub.recv_multipart(), timeout=2.0)
+            topic, payload = await _send_until_received(pub, sub, [b"market.btc", b"hello"])
             assert topic == b"market.btc"
             assert payload == b"hello"
         finally:

@@ -11,13 +11,36 @@ previous settings is written next to it before any edit.
 """
 
 import json
+import shutil
 from pathlib import Path
-from typing import Any
+
+from snapper.core.json_types import JsonObject
+from snapper.core.json_types import JsonValue
 
 PLACEHOLDER = "__SNAPPER_REPO_ROOT__"
 PLUGIN_DIR_NAME = "snapper-mcp-local-plugin"
 CLAUDE_PLUGIN_SUBDIR = ".claude-plugin"
 MARKETPLACE_KEY = "snapper-mcp-local"
+CLAUDE_SETTINGS_FILENAME = "settings.json"
+
+
+def _json_object(value: object, description: str) -> JsonObject:
+    """Return a JSON object or raise a clear validation error."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{description} must be a JSON object")
+    return value
+
+
+def _get_or_create_json_object(parent: JsonObject, key: str) -> JsonObject:
+    """Return an existing nested JSON object or create an empty one."""
+    value: JsonValue | None = parent.get(key)
+    if value is None:
+        child: JsonObject = {}
+        parent[key] = child
+        return child
+    if not isinstance(value, dict):
+        raise ValueError(f"Claude settings field {key!r} must be a JSON object")
+    return value
 
 
 def render_plugin(repo_root: Path) -> Path:
@@ -59,28 +82,38 @@ def update_claude_settings(settings_path: Path, plugin_dir: Path) -> bool:
         FileNotFoundError: If ``settings_path`` does not exist — Claude Code
             must be configured at least once before this script runs.
     """
-    if not settings_path.exists():
+    resolved_path = settings_path.expanduser().resolve()
+    allowed_dir = (Path.home() / ".claude").resolve()
+    if resolved_path.parent != allowed_dir:
+        raise ValueError(f"Claude settings path must stay under {allowed_dir}")
+    if resolved_path.name != CLAUDE_SETTINGS_FILENAME:
+        raise ValueError(f"Claude settings path must be named {CLAUDE_SETTINGS_FILENAME}")
+    if not resolved_path.exists():
         raise FileNotFoundError(
-            f"Claude Code settings not found at {settings_path}; "
+            f"Claude Code settings not found at {resolved_path}; "
             "configure Claude Code at least once before running render_local_plugin."
         )
+    if not resolved_path.is_file():
+        raise ValueError(f"Claude settings path must be a regular file: {resolved_path}")
 
-    raw = settings_path.read_text(encoding="utf-8")
-    data: dict[str, Any] = json.loads(raw)
-    marketplaces = data.setdefault("extraKnownMarketplaces", {})
-    entry = marketplaces.setdefault(MARKETPLACE_KEY, {})
-    source = entry.setdefault("source", {})
+    raw = resolved_path.read_text(encoding="utf-8")
+    data = _json_object(json.loads(raw), "Claude settings")
+    marketplaces = _get_or_create_json_object(data, "extraKnownMarketplaces")
+    entry = _get_or_create_json_object(marketplaces, MARKETPLACE_KEY)
+    source = _get_or_create_json_object(entry, "source")
 
-    new_path = str(plugin_dir)
+    new_path = str(plugin_dir.expanduser().resolve())
     if source.get("source") == "directory" and source.get("path") == new_path:
         return False
 
-    backup_path = settings_path.with_suffix(settings_path.suffix + ".bak")
-    backup_path.write_text(raw, encoding="utf-8")
+    backup_path = resolved_path.with_suffix(resolved_path.suffix + ".bak")
+    shutil.copy2(resolved_path, backup_path)
 
     source["source"] = "directory"
     source["path"] = new_path
-    settings_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    with resolved_path.open("w", encoding="utf-8") as settings_file:
+        json.dump(data, settings_file, indent=2)
+        settings_file.write("\n")
     return True
 
 
