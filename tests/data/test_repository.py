@@ -7472,10 +7472,12 @@ async def test_get_orders_filters_by_status_via_sql(tmp_path: Path) -> None:
     Then: only the single 'filled' row comes back.
     """
     r, _, inst_pid = await _seed_full_repo(tmp_path)
-    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=10)
-    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=11)
-    await _insert_order_with_status(r, inst_pid=inst_pid, status="filled", seq=12)
-    rows = await r.get_orders(limit=10, offset=0, as_of=datetime.now(UTC), status="filled")
+    inserted_at = datetime(2026, 1, 1, tzinfo=UTC)
+    as_of = inserted_at + timedelta(seconds=1)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=10, now=inserted_at)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=11, now=inserted_at)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="filled", seq=12, now=inserted_at)
+    rows = await r.get_orders(limit=10, offset=0, as_of=as_of, status="filled")
     assert [row["status"] for row in rows] == ["filled"]
 
 
@@ -7488,14 +7490,21 @@ async def test_get_orders_total_count_mirrors_filter_shape(tmp_path: Path) -> No
     Then: returns the pre-pagination cardinality (here: 2).
     """
     r, _, inst_pid = await _seed_full_repo(tmp_path)
-    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=20)
-    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=21)
-    await _insert_order_with_status(r, inst_pid=inst_pid, status="filled", seq=22)
+    inserted_at = datetime(2026, 1, 1, tzinfo=UTC)
+    as_of = inserted_at + timedelta(seconds=1)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=20, now=inserted_at)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=21, now=inserted_at)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="filled", seq=22, now=inserted_at)
     await _insert_order_with_status(
-        r, inst_pid=inst_pid, status="open", seq=23, wallet_public_id=_TEST_WALLET_B
+        r,
+        inst_pid=inst_pid,
+        status="open",
+        seq=23,
+        wallet_public_id=_TEST_WALLET_B,
+        now=inserted_at,
     )
     total = await r.get_orders_total_count(
-        as_of=datetime.now(UTC),
+        as_of=as_of,
         status="open",
         wallet_public_ids=[_TEST_WALLET_A],
     )
@@ -7506,9 +7515,11 @@ async def test_get_orders_total_count_mirrors_filter_shape(tmp_path: Path) -> No
 async def test_get_orders_total_count_unfiltered_counts_everything(tmp_path: Path) -> None:
     """No-filter call counts every active order (no wallet narrowing)."""
     r, _, inst_pid = await _seed_full_repo(tmp_path)
-    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=30)
-    await _insert_order_with_status(r, inst_pid=inst_pid, status="filled", seq=31)
-    total = await r.get_orders_total_count(as_of=datetime.now(UTC))
+    inserted_at = datetime(2026, 1, 1, tzinfo=UTC)
+    as_of = inserted_at + timedelta(seconds=1)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=30, now=inserted_at)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="filled", seq=31, now=inserted_at)
+    total = await r.get_orders_total_count(as_of=as_of)
     assert total == 2
 
 
@@ -7516,12 +7527,12 @@ async def test_get_orders_total_count_unfiltered_counts_everything(tmp_path: Pat
 async def test_get_orders_total_count_filters_by_symbol_and_exchange(tmp_path: Path) -> None:
     """Symbol + exchange filters narrow the count via SQL JOIN subquery."""
     r, _, inst_pid = await _seed_full_repo(tmp_path)
-    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=50)
-    total_match = await r.get_orders_total_count(
-        as_of=datetime.now(UTC), symbol="BTC-USD", exchange="kraken"
-    )
+    inserted_at = datetime(2026, 1, 1, tzinfo=UTC)
+    as_of = inserted_at + timedelta(seconds=1)
+    await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=50, now=inserted_at)
+    total_match = await r.get_orders_total_count(as_of=as_of, symbol="BTC-USD", exchange="kraken")
     assert total_match == 1
-    total_miss = await r.get_orders_total_count(as_of=datetime.now(UTC), exchange="zonda")
+    total_miss = await r.get_orders_total_count(as_of=as_of, exchange="zonda")
     assert total_miss == 0
 
 
@@ -7534,10 +7545,16 @@ async def test_get_orders_returns_plan_public_id(tmp_path: Path) -> None:
     """
     r, _, inst_pid = await _seed_full_repo(tmp_path)
     plan_pid = "00000000-0000-7000-8000-0000000a0001"
+    inserted_at = datetime(2026, 1, 1, tzinfo=UTC)
     await _insert_order_with_status(
-        r, inst_pid=inst_pid, status="open", seq=40, plan_public_id=plan_pid
+        r,
+        inst_pid=inst_pid,
+        status="open",
+        seq=40,
+        plan_public_id=plan_pid,
+        now=inserted_at,
     )
-    rows = await r.get_orders(limit=10, offset=0, as_of=datetime.now(UTC))
+    rows = await r.get_orders(limit=10, offset=0, as_of=inserted_at + timedelta(seconds=1))
     assert rows[0]["plan_public_id"] == plan_pid
 
 

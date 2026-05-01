@@ -13,6 +13,7 @@ previous settings is written next to it before any edit.
 import json
 import shutil
 from pathlib import Path
+from typing import cast
 
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
@@ -43,6 +44,17 @@ def _get_or_create_json_object(parent: JsonObject, key: str) -> JsonObject:
     return value
 
 
+def _replace_placeholder(value: JsonValue, replacement: str) -> JsonValue:
+    """Return a JSON value with placeholder occurrences replaced in strings."""
+    if isinstance(value, str):
+        return value.replace(PLACEHOLDER, replacement)
+    if isinstance(value, list):
+        return [_replace_placeholder(item, replacement) for item in value]
+    if isinstance(value, dict):
+        return {key: _replace_placeholder(child, replacement) for key, child in value.items()}
+    return value
+
+
 def render_plugin(repo_root: Path) -> Path:
     """Render all templated JSON files into the gitignored output directory.
 
@@ -61,8 +73,12 @@ def render_plugin(repo_root: Path) -> Path:
 
     repo_root_str = str(repo_root)
     for src in sorted(template_dir.glob("*.json")):
-        rendered = src.read_text(encoding="utf-8").replace(PLACEHOLDER, repo_root_str)
-        (output_dir / src.name).write_text(rendered, encoding="utf-8")
+        template = cast(JsonValue, json.loads(src.read_text(encoding="utf-8")))
+        rendered = _replace_placeholder(template, repo_root_str)
+        (output_dir / src.name).write_text(
+            json.dumps(rendered, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     return output_root
 

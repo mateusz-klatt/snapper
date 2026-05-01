@@ -4,13 +4,13 @@ import asyncio
 import builtins
 import gc
 import importlib
-import resource
 import tracemalloc
 from collections.abc import Generator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from types import ModuleType
 from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import AsyncMock
@@ -31,6 +31,15 @@ from snapper.application.system_metrics.snapshotter import SystemMetricsSnapshot
 from snapper.application.system_metrics.snapshotter import _resolve_history_cap
 from snapper.application.system_metrics.snapshotter import _resolve_interval
 from snapper.application.system_metrics.tracemalloc_controller import TracemallocController
+
+
+def _resource_module() -> ModuleType:
+    """Return the POSIX resource module or skip on unsupported hosts."""
+    module = snapshotter._resource
+    if module is None:
+        pytest.skip("resource module is unavailable on this platform")
+    assert isinstance(module, ModuleType)
+    return module
 
 
 class TestSnapshotter:
@@ -440,16 +449,17 @@ class TestSnapshotter:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Covered by test body."""
+        resource_module = _resource_module()
 
         def fake_getrlimit(limit: int) -> tuple[int, int]:
             values = {
-                resource.RLIMIT_NPROC: (11, 12),
-                resource.RLIMIT_NOFILE: (21, 22),
-                resource.RLIMIT_AS: (31, 32),
+                resource_module.RLIMIT_NPROC: (11, 12),
+                resource_module.RLIMIT_NOFILE: (21, 22),
+                resource_module.RLIMIT_AS: (31, 32),
             }
             return values[limit]
 
-        monkeypatch.setattr(resource, "getrlimit", fake_getrlimit)
+        monkeypatch.setattr(resource_module, "getrlimit", fake_getrlimit)
 
         metrics = SystemMetricsSnapshotter._sample_limits_metrics()
 
@@ -461,6 +471,7 @@ class TestSnapshotter:
 
     def test_sample_saturation_metrics_handles_finite_infinite_and_zero_limits(self) -> None:
         """Covered by test body."""
+        resource_module = _resource_module()
         process_metrics = ProcessMetrics(
             pid=1,
             uptime_seconds=1.0,
@@ -472,17 +483,17 @@ class TestSnapshotter:
         finite_limits = LimitsMetrics(
             rlimit_nproc=20,
             rlimit_nofile=40,
-            rlimit_as_bytes=resource.RLIM_INFINITY,
+            rlimit_as_bytes=resource_module.RLIM_INFINITY,
         )
         infinite_limits = LimitsMetrics(
-            rlimit_nproc=resource.RLIM_INFINITY,
-            rlimit_nofile=resource.RLIM_INFINITY,
-            rlimit_as_bytes=resource.RLIM_INFINITY,
+            rlimit_nproc=resource_module.RLIM_INFINITY,
+            rlimit_nofile=resource_module.RLIM_INFINITY,
+            rlimit_as_bytes=resource_module.RLIM_INFINITY,
         )
         zero_limits = LimitsMetrics(
             rlimit_nproc=0,
             rlimit_nofile=0,
-            rlimit_as_bytes=resource.RLIM_INFINITY,
+            rlimit_as_bytes=resource_module.RLIM_INFINITY,
         )
 
         finite = SystemMetricsSnapshotter._sample_saturation_metrics(

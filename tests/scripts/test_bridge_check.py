@@ -148,7 +148,7 @@ class TestScanForbiddenTokens:
     ) -> None:
         """Every forbidden pattern surfaces as a finding when present."""
         target = tmp_path / "wire-contract.ts"
-        target.write_text(f"// header\n{snippet}\nexport interface X {{}}\n")
+        target.write_text(f"// header\n{snippet}\nexport interface X {{}}\n", encoding="utf-8")
         findings = check_oss_prose.scan_forbidden_tokens(target)
         assert any(
             name == pattern_name for _, name, _ in findings
@@ -177,7 +177,7 @@ class TestCheckOssProseCli:
     ) -> None:
         """Exit 1 prints FAIL + per-finding lines to stderr."""
         target = tmp_path / "wire-contract.ts"
-        target.write_text("// header\n// Plan A reference here\n")
+        target.write_text("// header\n// Plan A reference here\n", encoding="utf-8")
         exit_code = check_oss_prose.main(["--target", str(target)])
         captured = capsys.readouterr()
         assert exit_code == 1

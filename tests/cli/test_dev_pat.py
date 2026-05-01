@@ -107,6 +107,14 @@ def _build_mock_transport(
     return httpx.MockTransport(handler)
 
 
+def _assert_private_file_mode(path: Path) -> None:
+    """Assert POSIX hosts persist the requested private file mode."""
+    if os.name != "posix":
+        return
+    mode = stat.S_IMODE(path.stat().st_mode)
+    assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+
+
 @pytest.fixture
 def patch_httpx_client(monkeypatch: pytest.MonkeyPatch) -> Callable[[httpx.MockTransport], None]:
     """Patch httpx.Client so the CLI uses a MockTransport."""
@@ -198,8 +206,7 @@ class TestDevMintPatHappyPath:
 
         assert result.exit_code == 0, f"stderr={result.stderr}"
         assert output_path.exists()
-        mode = stat.S_IMODE(output_path.stat().st_mode)
-        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+        _assert_private_file_mode(output_path)
 
         document = json.loads(output_path.read_text())
         assert set(document.keys()) == {
@@ -604,7 +611,7 @@ class TestDevMintPatFileWriteHardening:
 
         assert result.exit_code == 0
         assert target.exists()
-        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        _assert_private_file_mode(target)
         assert "warn:" in result.stderr
         assert str(loose_dir) in result.stderr
 

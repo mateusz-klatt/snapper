@@ -6,10 +6,12 @@ from datetime import date
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from typing import cast
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import Table
 from typer.testing import CliRunner
 
 from snapper.cli.app import app
@@ -683,7 +685,14 @@ def _make_db_with_events(tmp_path: Path) -> tuple[DatabaseRepository, str]:
     """
     db_url = f"sqlite:///{tmp_path / 'test.db'}"
     repo = DatabaseRepository(db_url)
-    Base.metadata.create_all(repo.engine)
+    Base.metadata.create_all(
+        repo.engine,
+        tables=[
+            cast(Table, Symbol.__table__),
+            cast(Table, Instrument.__table__),
+            cast(Table, Tick.__table__),
+        ],
+    )
     ts = datetime(2024, 1, 1, tzinfo=UTC)
     with repo.get_session() as session:
         sym = Symbol(

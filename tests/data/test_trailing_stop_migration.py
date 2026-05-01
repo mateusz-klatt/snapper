@@ -213,6 +213,7 @@ class TestTrailingStopUniqueIndexMigration:
                 position_cycle_public_id=_CYCLE_ID,
             )
 
+    @pytest.mark.timeout(60)
     def test_round_trip_restores_enforcement(self, migrated_db: tuple[sa.Engine, Config]) -> None:
         """Given upgrade -> downgrade -> upgrade, the index is reinstated.
 

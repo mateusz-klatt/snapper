@@ -11,6 +11,7 @@ from scripts.render_local_plugin import PLACEHOLDER
 from scripts.render_local_plugin import PLUGIN_DIR_NAME
 from scripts.render_local_plugin import _default_repo_root
 from scripts.render_local_plugin import _default_settings_path
+from scripts.render_local_plugin import _replace_placeholder
 from scripts.render_local_plugin import main
 from scripts.render_local_plugin import render_plugin
 from scripts.render_local_plugin import update_claude_settings
@@ -41,15 +42,37 @@ class TestRenderPlugin:
         _write_template(
             tmp_path,
             "plugin.json",
-            json.dumps({"args": [f"{PLACEHOLDER}/integrations/snapper-mcp/dist/index.js"]}),
+            json.dumps(
+                {
+                    "args": [f"{PLACEHOLDER}/integrations/snapper-mcp/dist/index.js"],
+                    "enabled": True,
+                    "retries": 1,
+                }
+            ),
         )
 
         plugin_dir = render_plugin(tmp_path)
 
         rendered_path = plugin_dir / CLAUDE_PLUGIN_SUBDIR / "plugin.json"
         rendered = json.loads(rendered_path.read_text(encoding="utf-8"))
-        assert rendered == {"args": [f"{tmp_path}/integrations/snapper-mcp/dist/index.js"]}
+        assert rendered == {
+            "args": [f"{tmp_path}/integrations/snapper-mcp/dist/index.js"],
+            "enabled": True,
+            "retries": 1,
+        }
         assert plugin_dir == tmp_path / "data" / PLUGIN_DIR_NAME
+
+    def test_placeholder_replacement_preserves_windows_paths_as_json(self) -> None:
+        """Windows-style replacements remain valid JSON after rendering."""
+        rendered = _replace_placeholder(
+            {"args": [f"{PLACEHOLDER}\\integrations\\snapper-mcp\\dist\\index.js"]},
+            r"C:\projects\snapper",
+        )
+        encoded = json.dumps(rendered)
+
+        assert json.loads(encoded) == {
+            "args": [r"C:\projects\snapper\integrations\snapper-mcp\dist\index.js"]
+        }
 
     def test_renders_all_json_files_in_template_dir(self, tmp_path: Path) -> None:
         """Every JSON template in the source dir is rendered, non-JSON files are skipped."""

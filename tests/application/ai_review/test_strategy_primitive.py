@@ -182,10 +182,11 @@ async def _seed_eligible_setup(repo: SQLAlchemyRepository, *, as_of: datetime) -
         )
         await s.commit()
     delegate_public_id = str(uuid7())
+    heartbeat_at = _now()
     await repo.insert_ai_delegate(
-        public_id=delegate_public_id, user_public_id=user_public_id, as_of=as_of
+        public_id=delegate_public_id, user_public_id=user_public_id, as_of=heartbeat_at
     )
-    await repo.update_delegate_last_seen(delegate_public_id, as_of)
+    await repo.update_delegate_last_seen(delegate_public_id, heartbeat_at)
     return {
         "user_public_id": user_public_id,
         "operator_public_id": operator_public_id,
