@@ -109,6 +109,10 @@ from snapper.api.schemas.process import SystemStatusData
 from snapper.api.schemas.process import SystemStatusResponse
 from snapper.application.ai_review.service import AiReviewService
 from snapper.application.ai_review.service import get_ai_review_service
+from snapper.application.db_stats.snapshotter import DbStatsSnapshotter
+from snapper.application.db_stats.snapshotter import (
+    resolve_disabled as _resolve_db_metrics_disabled,
+)
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.retention.scheduler import RetentionScheduler
@@ -524,6 +528,53 @@ async def _stop_retention_scheduler(app: FastAPI) -> None:
     await scheduler.stop()
 
 
+async def _start_db_stats_snapshotter(app: FastAPI, *, db_url: str) -> None:
+    """Build + start the :class:`DbStatsSnapshotter` singleton.
+
+    Mirrors the B22 attribute-absent contract used for the system
+    metrics snapshotter and retention scheduler: the attribute is
+    assigned to ``app.state`` ONLY after a successful
+    :meth:`DbStatsSnapshotter.start` call. Disabled mode still
+    constructs the snapshotter and assigns it so the metrics route can
+    distinguish disabled-via-env from missing-init from
+    no-sample-yet — the underlying repo is ``None`` and the loop is
+    skipped.
+
+    Args:
+        app: FastAPI application instance whose ``state`` will hold
+            the snapshotter on successful start.
+        db_url: SQLAlchemy URL for the underlying async repository.
+    """
+    try:
+        disabled = _resolve_db_metrics_disabled(os.environ.get("DB_METRICS_DISABLED"))
+        repo = None if disabled else get_repository(db_url)
+        snapshotter = DbStatsSnapshotter(repo=repo, disabled=disabled)
+        await snapshotter.start()
+    except Exception:
+        logger.exception("DbStatsSnapshotter startup failed — DB metrics endpoint will return 503")
+        return
+    app.state.db_stats_snapshotter = snapshotter
+    if snapshotter.disabled:
+        logger.info("DbStatsSnapshotter started in disabled mode (DB_METRICS_DISABLED=true)")
+    else:
+        logger.info("DbStatsSnapshotter started (interval=%.1fs)", snapshotter.interval_seconds)
+
+
+async def _stop_db_stats_snapshotter(app: FastAPI) -> None:
+    """Stop the :class:`DbStatsSnapshotter` singleton if attached.
+
+    Tolerates partial-init state where startup failed before the
+    attribute was assigned.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    snapshotter: DbStatsSnapshotter | None = getattr(app.state, "db_stats_snapshotter", None)
+    if snapshotter is None:
+        return
+    await snapshotter.stop()
+
+
 async def _shutdown_zmq_bridge(app: FastAPI) -> None:
     """Stop ZMQ bridge and await its task during shutdown.
 
@@ -570,6 +621,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.zmq_bridge_task = None
     app.state.system_metrics_snapshotter = None
     app.state.retention_scheduler = None
+    app.state.db_stats_snapshotter = None
     try:
         settings_service = await _initialize_settings_service(settings)
         settings = get_settings_with_service(settings_service)
@@ -636,6 +688,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         app.state.zmq_bridge_task = asyncio.create_task(manager_ref.zmq_bridge.start())
         await _start_system_metrics_snapshotter(app)
         await _start_retention_scheduler(app, db_url=settings.db_url)
+        await _start_db_stats_snapshotter(app, db_url=settings.db_url)
         logger.info("Application startup complete")
         await _warn_on_tradfi_near_expiry(settings)
         mcp_sub_app = app.state.mcp_sub_app
@@ -655,6 +708,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         raise
     finally:
         logger.info("Starting application shutdown sequence")
+        await _stop_db_stats_snapshotter(app)
         await _stop_retention_scheduler(app)
         await _stop_system_metrics_snapshotter(app)
         await _shutdown_zmq_bridge(app)
