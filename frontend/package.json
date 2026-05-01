@@ -26,7 +26,7 @@
   },
   "dependencies": {
     "@radix-ui/react-select": "^2.2.6",
-    "@tanstack/react-query": "^5.100.6",
+    "@tanstack/react-query": "^5.100.7",
     "clsx": "^2.1.1",
     "lightweight-charts": "^5.2.0",
     "lucide-react": "^1.14.0",
@@ -69,7 +69,7 @@
     "json-schema-to-zod": "^2.8.1",
     "knip": "^6.9.0",
     "openapi-typescript": "^7.13.0",
-    "postcss": "^8.5.12",
+    "postcss": "^8.5.13",
     "prettier": "^3.8.3",
     "puppeteer": "^24.42.0",
     "tailwindcss": "^4.2.4",
