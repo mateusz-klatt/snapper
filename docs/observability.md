@@ -119,8 +119,8 @@ the leading indicator of a thread leak or fd leak.
 | Field                       | Type        | Description |
 |-----------------------------|-------------|-------------|
 | `aiosqlite_live_connections`| int         | `len(_live_aiosqlite_connections)` — atomic read; each entry corresponds to one OS thread under NullPool. |
-| `pool_size`                 | int \| null | SQLAlchemy pool size when using a queue pool (PG / `DB_POOL_MODE=queue`); `null` under NullPool. |
-| `pool_checked_out`          | int \| null | Pool entries currently checked out; `null` under NullPool. |
+| `pool_size`                 | int \| null | Reserved for future queue-pool instrumentation. Currently always `null` in Cluster A; will populate once the SQLAlchemy pool reflection helper lands alongside the `DB_POOL_MODE=queue` rollout. |
+| `pool_checked_out`          | int \| null | Reserved for future queue-pool instrumentation. Currently always `null` in Cluster A. |
 
 ### Top-level flags
 
@@ -160,9 +160,10 @@ Runs at every sample and degrades silently when paths are absent:
 
 - v2 default in modern Docker (kernel 5.0+, Docker Engine 20.10+):
   `/sys/fs/cgroup/memory.max`, `cpu.max`, `cpu.stat`, `memory.current`.
-- v1 fallback: `memory/memory.max_usage_in_bytes`,
-  `cpu/cpu.cfs_quota_us`, `cpu/cpu.cfs_period_us`, `cpu/cpu.stat`,
-  `memory/memory.usage_in_bytes`.
+- v1 fallback: `memory/memory.limit_in_bytes`,
+  `memory/memory.usage_in_bytes`, `cpu,cpuacct/cpu.cfs_quota_us`
+  (or the legacy `cpu/cpu.cfs_quota_us` mount), and the matching
+  `cpu.stat` file for `nr_throttled`.
 - `cgroup_version` reports the detected layout; `null` on dev hosts
   without cgroup (macOS, non-containerised Linux without unified
   hierarchy).
