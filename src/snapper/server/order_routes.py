@@ -37,6 +37,7 @@ from snapper.application.plans.cancel_service import PlanCancelIdempotencyKeyMis
 from snapper.application.plans.cancel_service import PlanCancelInProgressError
 from snapper.application.plans.cancel_service import PlanConcurrentChangeError
 from snapper.application.plans.cancel_service import PlanNotFoundError
+from snapper.application.plans.cancel_service import PlanPostCancelReloadError
 from snapper.application.plans.cancel_service import PlansCancelService
 from snapper.application.plans.cancel_service import PlanScopeError
 from snapper.application.plans.manual_once import ManualOnceEvaluator
@@ -514,6 +515,11 @@ async def _cancel_plan(
                 "attempted": exc.attempted,
                 "limit": exc.limit,
             },
+        ) from exc
+    except PlanPostCancelReloadError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Plan updated but not found",
         ) from exc
     except PlanCancelEmitError as exc:
         raise HTTPException(

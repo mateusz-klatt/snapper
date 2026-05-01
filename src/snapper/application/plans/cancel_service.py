@@ -1,11 +1,9 @@
 """Plan B v1.2 §1.4 cancel service for plan-based cancellation.
 
-Domain-level helper that wraps the existing :func:`_cancel_plan` algorithm
-from :mod:`snapper.server.order_routes` so transports beyond REST (MCP,
-strategy primitives) can issue a cancel without HTTP/CSRF coupling.
-Raises specific domain exceptions instead of :class:`HTTPException`;
-each caller maps those to its surface contract (REST 4xx, MCP Plan A
-Q14 envelope).
+Domain-level cancel facade used by both REST (post-Phase-3.5
+delegation) and MCP transports. Raises specific domain exceptions
+instead of :class:`HTTPException`; each caller maps those to its
+surface contract (REST 4xx, MCP Plan A Q14 envelope).
 
 Idempotency: :meth:`PlansCancelService.cancel_by_plan_public_id` accepts
 an optional caller-supplied ``idempotency_key`` that is persisted on the
@@ -22,9 +20,19 @@ partial-unique index ``uq_ep_active_cancel_idempotency_key`` on
 the same key from being claimed across two distinct plans
 concurrently — caught as :class:`IntegrityError` and reclassified.
 
-REST side keeps the legacy :func:`_cancel_plan` helper untouched (passes
-``idempotency_key=None`` semantics implicitly by not calling this
-service); a follow-up plan converts the REST route to delegate here too.
+Source-surface attribution: the ``source_surface`` parameter (REST
+threads ``"rest"``, MCP defaults to ``"mcp"``) is stamped on both the
+caps submission and the inserted cancel ``TradeCommand`` so audit
+downstream can attribute REST-initiated and MCP-initiated cancels
+distinctly.
+
+Sequence-stream choice: the cancel SCD2 transition + the cancel
+``TradeCommand`` are stamped from the ``service.cancel`` stream
+(``_CANCEL_STREAM``) regardless of caller — REST callers' response
+envelopes still use their REST stream via the route's response
+builder, but the venue-side audit trail is uniform across transports
+because cancels are a distinct stream class (Phase 3.5 deliberate
+unification — was per-transport in the legacy REST code).
 """
 
 import datetime as dt
@@ -172,6 +180,24 @@ class PlanCancelEmitError(PlanCancelError):
         super().__init__(f"Failed to emit cancel command for plan {plan_public_id!r}: {cause}")
         self.plan_public_id = plan_public_id
         self.__cause__ = cause
+
+
+class PlanPostCancelReloadError(PlanCancelEmitError):
+    """Plan disappeared between the cancel transition and the post-cancel reload.
+
+    Inherits from :class:`PlanCancelEmitError` so existing callers
+    (e.g. MCP) that catch the parent continue to handle this race
+    without code change. REST distinguishes it to preserve the legacy
+    ``"Plan updated but not found"`` 500 detail string.
+    """
+
+    def __init__(self, plan_public_id: str) -> None:
+        """Build the error for the rare reload-after-transition disappearance."""
+        super().__init__(
+            plan_public_id,
+            RuntimeError("Plan disappeared after cancel transition"),
+        )
+        self.plan_public_id = plan_public_id
 
 
 def _json_str_param(params: JsonObject, key: str) -> str | None:
@@ -490,9 +516,7 @@ class PlansCancelService:
                 return replay
         updated = await repo.get_execution_plan(plan_public_id, as_of=bus_time)
         if updated is None:
-            raise PlanCancelEmitError(
-                plan_public_id, RuntimeError("Plan disappeared after cancel transition")
-            )
+            raise PlanPostCancelReloadError(plan_public_id)
         return updated
 
     @staticmethod

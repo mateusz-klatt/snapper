@@ -470,7 +470,15 @@ class TestCancelOrder:
         client.close()
 
     def test_cancel_plan_updated_but_not_found(self) -> None:
-        """Given claim succeeds but reload GET returns None, Then 500."""
+        """Given claim succeeds but reload GET returns None, Then 500 + legacy detail.
+
+        REST distinguishes the rare post-cancel reload disappearance
+        from a generic emit failure by mapping
+        :class:`PlanPostCancelReloadError` to the legacy
+        ``"Plan updated but not found"`` 500 detail.
+        :class:`PlanCancelEmitError` keeps the generic
+        ``"Failed to emit cancel command"`` detail.
+        """
         active_row = _make_plan_row(status="active")
         cancel_requested_row = _make_plan_row(status="cancel_requested")
         repo = AsyncMock()
@@ -481,6 +489,7 @@ class TestCancelOrder:
         client = _create_client(repo)
         response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
         assert response.status_code == 500
+        assert response.json()["detail"] == "Plan updated but not found"
         client.close()
 
     def test_cancel_update_returns_none_concurrent(self) -> None:
@@ -626,6 +635,7 @@ class TestCancelOrder:
         client = _create_client(repo)
         response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
         assert response.status_code == 500
+        assert response.json()["detail"] == "Failed to emit cancel command"
         repo.claim_execution_plan_cancel.assert_awaited_once()
         statuses = [
             call.kwargs["new_status"] for call in repo.update_execution_plan_status.await_args_list
