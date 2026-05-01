@@ -32,6 +32,7 @@ from snapper.api.schemas.multi_tenant import WalletListResponse
 from snapper.api.schemas.multi_tenant import WalletResponse
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
+from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
@@ -113,6 +114,7 @@ async def create_wallet(
         AuthPrincipal,
         Depends(require_permission(Permission.MANAGE_WALLET_CREDENTIALS)),
     ],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
     command: Annotated[CreateWalletCommand, Depends(json_body(CreateWalletCommand))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> WalletResponse:

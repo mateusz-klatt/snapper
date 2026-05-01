@@ -157,6 +157,7 @@ class TestCreateCredential:
             result = await create_credential(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 wallet_public_id="wallet-42",
                 command=command,
                 repo=mock_repo,
@@ -196,6 +197,7 @@ class TestCreateCredential:
             await create_credential(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 wallet_public_id="wallet-42",
                 command=command,
                 repo=mock_repo,
@@ -240,6 +242,7 @@ class TestCreateCredential:
             await create_credential(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 wallet_public_id="wallet-42",
                 command=command,
                 repo=mock_repo,
@@ -274,6 +277,7 @@ class TestCreateCredential:
             await create_credential(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 wallet_public_id="wallet-42",
                 command=command,
                 repo=mock_repo,
@@ -322,6 +326,7 @@ class TestRotateCredential:
             result = await rotate_credential(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 wallet_public_id="wallet-42",
                 credential_public_id="cred-1",
                 command=command,
@@ -369,6 +374,7 @@ class TestRotateCredential:
             await rotate_credential(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 wallet_public_id="wallet-42",
                 credential_public_id="cred-missing",
                 command=command,
@@ -416,6 +422,7 @@ class TestRotateCredential:
             await rotate_credential(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 wallet_public_id="wallet-42",
                 credential_public_id="cred-1",
                 command=command,
@@ -461,6 +468,7 @@ class TestRotateCredential:
             await rotate_credential(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 wallet_public_id="wallet-42",
                 credential_public_id="cred-1",
                 command=command,
@@ -505,6 +513,7 @@ class TestRotateCredential:
             await rotate_credential(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 wallet_public_id="wallet-42",
                 credential_public_id="cred-1",
                 command=command,

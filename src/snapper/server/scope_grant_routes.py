@@ -40,6 +40,7 @@ from snapper.api.schemas.multi_tenant import ScopeGrantListResponse
 from snapper.api.schemas.multi_tenant import ScopeGrantResponse
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import require_permission
+from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
@@ -161,6 +162,7 @@ async def create_scope_grant(
     _principal: Annotated[
         AuthPrincipal, Depends(require_permission(Permission.MANAGE_SCOPE_GRANTS))
     ],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
     command: Annotated[CreateScopeGrantCommand, Depends(json_body(CreateScopeGrantCommand))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> ScopeGrantResponse:
@@ -233,6 +235,7 @@ async def handover_scope_grant(
     _principal: Annotated[
         AuthPrincipal, Depends(require_permission(Permission.MANAGE_SCOPE_GRANTS))
     ],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
     command: Annotated[HandoverScopeGrantCommand, Depends(json_body(HandoverScopeGrantCommand))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> HandoverScopeGrantResponse:
@@ -310,6 +313,7 @@ async def revoke_scope_grant(
     _principal: Annotated[
         AuthPrincipal, Depends(require_permission(Permission.MANAGE_SCOPE_GRANTS))
     ],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
     command: Annotated[RevokeScopeGrantCommand, Depends(json_body(RevokeScopeGrantCommand))],
     scope_grant_service: Annotated[ScopeGrantService, Depends(_scope_grant_service_dependency)],
 ) -> RevokeScopeGrantResponse:

@@ -186,6 +186,7 @@ class TestCreateWallet:
         result = await create_wallet(
             request=_make_request(),
             _principal=_admin_principal(),
+            _csrf=None,
             command=_make_create_wallet_command(label="firm", is_paper=False),
             repo=mock_repo,
         )
@@ -221,6 +222,7 @@ class TestCreateWallet:
             await create_wallet(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 command=_make_create_wallet_command(label="firm", is_paper=False),
                 repo=mock_repo,
             )
@@ -248,12 +250,14 @@ class TestCreateWallet:
         live = await create_wallet(
             request=_make_request(),
             _principal=_admin_principal(),
+            _csrf=None,
             command=_make_create_wallet_command(label="default", is_paper=False),
             repo=mock_repo,
         )
         paper = await create_wallet(
             request=_make_request(),
             _principal=_admin_principal(),
+            _csrf=None,
             command=_make_create_wallet_command(label="default", is_paper=True),
             repo=mock_repo,
         )

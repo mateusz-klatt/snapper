@@ -31,6 +31,7 @@ from snapper.api.schemas.multi_tenant import CredentialResponse
 from snapper.api.schemas.multi_tenant import CredentialSummary
 from snapper.api.schemas.multi_tenant import RotateCredentialCommand
 from snapper.auth.dependencies import require_permission
+from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import CredentialConflictError
@@ -144,6 +145,7 @@ async def create_credential(
         AuthPrincipal,
         Depends(require_permission(Permission.MANAGE_WALLET_CREDENTIALS)),
     ],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
     wallet_public_id: str,
     command: Annotated[CreateCredentialCommand, Depends(json_body(CreateCredentialCommand))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
@@ -212,6 +214,7 @@ async def rotate_credential(
         AuthPrincipal,
         Depends(require_permission(Permission.MANAGE_WALLET_CREDENTIALS)),
     ],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
     wallet_public_id: str,
     credential_public_id: str,
     command: Annotated[RotateCredentialCommand, Depends(json_body(RotateCredentialCommand))],

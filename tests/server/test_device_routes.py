@@ -154,6 +154,7 @@ class TestRegisterDevice:
             request=_make_request(),
             command=_register_command(),
             principal=_principal(),
+            _csrf=None,
             repo=repo,
         )
 
@@ -215,6 +216,7 @@ class TestDeleteDevice:
             request=_make_request(),
             device_public_id="dev-own",
             principal=_principal(),
+            _csrf=None,
             repo=repo,
         )
 
@@ -241,6 +243,7 @@ class TestDeleteDevice:
                 request=_make_request(),
                 device_public_id="dev-other",
                 principal=_principal(),
+                _csrf=None,
                 repo=repo,
             )
 
@@ -292,6 +295,7 @@ class TestUpdateDevicePref:
             device_public_id="dev-own",
             command=self._pref_command(enabled=False),
             principal=_principal(),
+            _csrf=None,
             repo=repo,
         )
 
@@ -316,6 +320,7 @@ class TestUpdateDevicePref:
                 device_public_id="dev-other",
                 command=self._pref_command(),
                 principal=_principal(),
+                _csrf=None,
                 repo=repo,
             )
 
@@ -336,6 +341,7 @@ class TestUpdateDevicePref:
             device_public_id="dev-own",
             command=self._pref_command(operator_public_id="op-1"),
             principal=_principal(),
+            _csrf=None,
             repo=repo,
         )
 

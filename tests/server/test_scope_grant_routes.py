@@ -256,6 +256,7 @@ class TestCreateScopeGrant:
         result = await create_scope_grant(
             request=_make_request(),
             _principal=_admin_principal(),
+            _csrf=None,
             command=_make_create_command(),
             repo=mock_repo,
         )
@@ -286,6 +287,7 @@ class TestCreateScopeGrant:
             await create_scope_grant(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 command=command,
                 repo=mock_repo,
             )
@@ -307,6 +309,7 @@ class TestCreateScopeGrant:
             await create_scope_grant(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 command=command,
                 repo=mock_repo,
             )
@@ -336,6 +339,7 @@ class TestCreateScopeGrant:
             await create_scope_grant(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 command=_make_create_command(),
                 repo=mock_repo,
             )
@@ -354,6 +358,7 @@ class TestCreateScopeGrant:
             await create_scope_grant(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 command=_make_create_command(),
                 repo=mock_repo,
             )
@@ -372,6 +377,7 @@ class TestCreateScopeGrant:
             await create_scope_grant(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 command=_make_create_command(),
                 repo=mock_repo,
             )
@@ -416,6 +422,7 @@ class TestHandoverScopeGrant:
         result = await handover_scope_grant(
             request=_make_request(),
             _principal=_admin_principal(),
+            _csrf=None,
             command=_make_handover_command(),
             repo=mock_repo,
         )
@@ -439,6 +446,7 @@ class TestHandoverScopeGrant:
             await handover_scope_grant(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 command=_make_handover_command(),
                 repo=mock_repo,
             )
@@ -457,6 +465,7 @@ class TestHandoverScopeGrant:
             await handover_scope_grant(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 command=_make_handover_command(),
                 repo=mock_repo,
             )
@@ -480,6 +489,7 @@ class TestHandoverScopeGrant:
             await handover_scope_grant(
                 request=_make_request(),
                 _principal=_admin_principal(),
+                _csrf=None,
                 command=_make_handover_command(),
                 repo=mock_repo,
             )
@@ -541,6 +551,7 @@ class TestRevokeScopeGrant:
             request=_make_request(),
             grant_public_id=target_grant,
             _principal=_admin_principal(),
+            _csrf=None,
             command=_make_revoke_command(reason="alice left"),
             scope_grant_service=service,
         )
@@ -564,6 +575,7 @@ class TestRevokeScopeGrant:
                 request=_make_request(),
                 grant_public_id="00000000-0000-7000-8000-0000000000ff",
                 _principal=_admin_principal(),
+                _csrf=None,
                 command=_make_revoke_command(),
                 scope_grant_service=service,
             )
@@ -580,6 +592,7 @@ class TestRevokeScopeGrant:
             request=_make_request(),
             grant_public_id=target_grant,
             _principal=_admin_principal(),
+            _csrf=None,
             command=_make_revoke_command(reason=None),
             scope_grant_service=service,
         )
@@ -640,6 +653,7 @@ class TestRevokeScopeGrant:
             request=_make_request(),
             grant_public_id=target_grant,
             _principal=_admin_principal(),
+            _csrf=None,
             command=_make_revoke_command(),
             scope_grant_service=service,
         )
@@ -650,6 +664,7 @@ class TestRevokeScopeGrant:
                 request=_make_request(),
                 grant_public_id=target_grant,
                 _principal=_admin_principal(),
+                _csrf=None,
                 command=_make_revoke_command(),
                 scope_grant_service=service,
             )

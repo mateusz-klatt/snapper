@@ -146,6 +146,7 @@ class TestUpdateAlertDefault:
 
         response = await update_alert_default(
             request=_make_request(),
+            _csrf=None,
             command=_update_command(enabled=False, min_priority="high"),
             principal=_principal(),
             repo=repo,
@@ -174,6 +175,7 @@ class TestUpdateAlertDefault:
 
         response = await update_alert_default(
             request=_make_request(),
+            _csrf=None,
             command=_update_command(),
             principal=_principal(user_public_id="user-bravo"),
             repo=repo,

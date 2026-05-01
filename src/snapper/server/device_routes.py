@@ -39,6 +39,7 @@ from snapper.api.schemas.devices import NotificationDeviceResponse
 from snapper.api.schemas.devices import RegisterDeviceCommand
 from snapper.api.schemas.devices import UpdateDevicePrefCommand
 from snapper.auth.dependencies import require_authentication
+from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
 from snapper.data.repository_types import DeviceAlertPrefRow
@@ -123,6 +124,7 @@ async def register_device(
     request: Request,
     command: RegisterDeviceCommand,
     principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> NotificationDeviceResponse:
     """Register or refresh the caller's APNs device token.
@@ -216,6 +218,7 @@ async def delete_device(
     request: Request,
     device_public_id: str,
     principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> MessageResponse:
     """Soft-delete a device via SCD2 close + tombstone successor.
@@ -270,6 +273,7 @@ async def update_device_pref(
     device_public_id: str,
     command: UpdateDevicePrefCommand,
     principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> DeviceAlertPrefResponse:
     """Upsert a per-(device, alert_type, scope) preference for the caller.
