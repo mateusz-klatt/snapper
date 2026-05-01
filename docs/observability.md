@@ -225,3 +225,82 @@ The ring buffer is per-process. With `N>1` instances each hosts its own
 buffer; aggregation across instances is out of scope for Cluster A.
 Operators who need cross-instance views should poll each instance
 directly until a downstream collector lands (Cluster B/C territory).
+
+# Retention
+
+Cluster C ships a **policy-driven retention loop** that periodically
+archives + purges old rows from event tables, complementing the
+existing manual `snapper archive` CLI. Policies are declarative
+(`RetentionPolicy(table, retain_days, backlog_lookback_days)`) and
+evaluated by `RetentionService` on every scheduler tick.
+
+## Endpoint
+
+| Method | Path                       | Purpose |
+|--------|----------------------------|---------|
+| GET    | `/api/metrics/retention`   | Most recent scheduler tick's per-policy summary |
+
+The route is gated by `Permission.READ_SYSTEM_STATUS` (same gate as
+the system metrics surface).
+
+### Failure / cold-start contract
+
+The route returns HTTP `503` with one of three details:
+
+- `"retention scheduler not available"` — singleton failed to start
+  at lifespan time (B22 attribute-absent contract).
+- `"retention scheduler disabled"` — the operator set
+  `RETENTION_DISABLED=true`; the scheduler is parked.
+- `"retention scheduler not yet run"` — eager run did not populate
+  the summary before the first request (defensive; should not happen
+  in production because `start()` awaits the eager `run_once`).
+
+## Policy semantics
+
+For each scheduler tick, with `today_utc = datetime.now(UTC).date()`:
+
+```
+oldest_kept_day      = today_utc - retain_days       # rows on this day stay in DB
+last_eligible_day    = oldest_kept_day - 1d          # day_end (inclusive)
+earliest_scanned_day = last_eligible_day - backlog_lookback_days  # day_start (inclusive)
+```
+
+The archiver call covers the inclusive day-range `[day_start, day_end]`,
+matching `EventArchiver.export(...)` semantics. Steady state after the
+backlog drains processes one new day per tick.
+
+The shipped default policy:
+
+| Table       | retain_days | backlog_lookback_days |
+|-------------|-------------|-----------------------|
+| `telemetry` | 1           | 30                    |
+
+## Configuration
+
+| Variable | Default | Effect |
+|---|---|---|
+| `RETENTION_INTERVAL_SECONDS` | `3600` | Scheduler loop period. Empty / unparseable / `<= 0` → default. |
+| `RETENTION_DISABLED`         | `false` | Truthy (`"1"/"true"/"yes"`, case-insensitive) parks the scheduler entirely. |
+| `RETENTION_DRY_RUN`          | `false` | Truthy forces `purge=False` on every archiver call regardless of policy. Operators flip to `true` for one cycle when adding a NEW high-volume policy to verify the window before any DB row is deleted. |
+| `RETENTION_OUTPUT_DIR`       | `data`  | Filesystem root passed to `EventArchiver`; matches the `snapper archive` CLI default. |
+
+## Roll-out checklist for a new high-volume policy
+
+1. Add the new `RetentionPolicy` entry to `RETENTION_POLICIES` in
+   `src/snapper/application/retention/policies.py`.
+2. Set `RETENTION_DRY_RUN=true` for one full interval and inspect
+   `GET /api/metrics/retention` — check that the `day_start` /
+   `day_end` window matches expectations and `archived_rows` is
+   non-zero.
+3. If the new policy targets a deeply backlogged table, run a
+   one-time `snapper archive --table=<...> --from=<old> --to=<recent>
+   --purge` to drain backlog before flipping `RETENTION_DRY_RUN=false`.
+4. Flip `RETENTION_DRY_RUN=false`. Subsequent ticks will both archive
+   AND purge.
+
+## Multi-instance note
+
+The retention scheduler is single-instance only for v1. With `N>1`
+instances, `RETENTION_DISABLED=true` on `N-1` instances avoids
+double-archive / double-purge races. A coordinator-based extension is
+a future iteration.
