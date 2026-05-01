@@ -7,8 +7,10 @@ the full backtest flow: create → run engine → persist artifacts → complete
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from datetime import tzinfo
 from pathlib import Path
 from typing import Any
+from typing import ClassVar
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -25,6 +27,31 @@ from snapper.data.repository_types import BacktestResultInsertRow
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 END = datetime(2026, 1, 31, tzinfo=UTC)
 MOCK_STRATEGIES: dict[str, Any] = {}
+
+
+class RegressingRunnerDateTime(datetime):
+    """Datetime shim that reproduces a wall-clock regression inside the runner."""
+
+    _calls: ClassVar[int] = 0
+    _times: ClassVar[tuple[datetime, ...]] = (
+        datetime(2026, 5, 1, 10, 0, 0, 200, tzinfo=UTC),
+        datetime(2026, 5, 1, 10, 0, 0, 100, tzinfo=UTC),
+    )
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset the deterministic clock sequence."""
+        cls._calls = 0
+
+    @classmethod
+    def now(cls, tz: tzinfo | None = None) -> datetime:
+        """Return the next deterministic timestamp."""
+        index = min(cls._calls, len(cls._times) - 1)
+        cls._calls += 1
+        value = cls._times[index]
+        if tz is None:
+            return value.replace(tzinfo=None)
+        return value.astimezone(tz)
 
 
 async def _setup_db(tmp_path: Path) -> tuple[repo_module.SQLAlchemyRepository, BacktestRepository]:
@@ -103,6 +130,7 @@ class TestBacktestE2ELifecycle:
         repo, bt_repo = await _setup_db(tmp_path)
         public_id = await _create_pending_run(bt_repo)
         db_url = f"sqlite+aiosqlite:///{tmp_path / 'bt_e2e.db'}"
+        RegressingRunnerDateTime.reset()
 
         with patch(
             "snapper.application.backtest.runner.get_repository", return_value=repo
@@ -111,7 +139,9 @@ class TestBacktestE2ELifecycle:
             {"sma_cross": MagicMock()},
         ), patch(
             "snapper.application.backtest.runner.DirectDbEngine"
-        ) as mock_engine_cls:
+        ) as mock_engine_cls, patch(
+            "snapper.application.backtest.runner.datetime", RegressingRunnerDateTime
+        ):
 
             mock_engine = AsyncMock()
             mock_engine.run = AsyncMock(side_effect=RuntimeError("candle fetch exploded"))
@@ -121,7 +151,7 @@ class TestBacktestE2ELifecycle:
             with pytest.raises(RuntimeError, match="candle fetch exploded"):
                 await runner.start()
 
-        now = datetime.now(UTC)
+        now = RegressingRunnerDateTime._times[0] + timedelta(seconds=1)
         run = await bt_repo.get_run(public_id, as_of=now)
         assert run is not None
         assert run["status"] == "failed"

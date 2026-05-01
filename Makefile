@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin py-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-cov ts-bridge bridge-regen bridge-check ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin py-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ts-bridge bridge-regen bridge-check ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -80,7 +80,9 @@ help:
 	$(info ui-gen-types       Generate all frontend types)
 	$(info ui-check-types     Check for uncommitted type drift [CI])
 	$(info ui-test            Run UI tests [vitest])
+	$(info ui-test-serial     Run UI tests sequentially [debugging])
 	$(info ui-cov             Run UI tests with coverage)
+	$(info ui-cov-serial      Run UI tests with coverage sequentially [debugging])
 	$(info ui-check           UI quality checks [lint + format + dead-code])
 	$(info ui-fix             UI quality fixes)
 	$(info )
@@ -459,8 +461,14 @@ ui-check-types:
 ui-test:
 	$(PNPM) test:run
 
+ui-test-serial:
+	$(PNPM) test:run:serial
+
 ui-cov:
 	$(PNPM) test:coverage
+
+ui-cov-serial:
+	$(PNPM) test:coverage:serial
 
 ts-bridge:
 	$(info Regenerating bridge wire-contract types into the working tree...)

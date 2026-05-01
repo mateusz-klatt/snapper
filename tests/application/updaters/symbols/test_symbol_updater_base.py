@@ -256,7 +256,7 @@ def test_get_last_update_timestamp_handles_invalid_value(
                 value="not-a-timestamp",
                 category="system",
                 description="Invalid value for testing",
-                timestamp=datetime.now(UTC),
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 session_id="test-session",
                 sequence_id=1,
             )

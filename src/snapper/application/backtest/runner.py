@@ -175,6 +175,7 @@ class BacktestRunnerProcess(RegisterableProcess):
         self._owned_zmq_context: zmq.asyncio.Context | None = None
         self._owned_validated_publisher: ValidatedPublisher | None = None
         self._owned_message_publisher: MessagePublisher | None = None
+        self._last_status_time: datetime | None = None
 
     @staticmethod
     def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
@@ -195,6 +196,14 @@ class BacktestRunnerProcess(RegisterableProcess):
             Dict with run_public_id.
         """
         return {"run_public_id": self._run_public_id}
+
+    def _next_status_time(self) -> datetime:
+        """Return a non-regressing timestamp for run status transitions."""
+        current = datetime.now(UTC)
+        if self._last_status_time is not None:
+            current = max(current, self._last_status_time)
+        self._last_status_time = current
+        return current
 
     def _resolve_progress_publish(self) -> PublishFn:
         """Return the PublishFn the emitter will use.
@@ -263,7 +272,7 @@ class BacktestRunnerProcess(RegisterableProcess):
         """
         repository = get_repository(self._db_url)
         bt_repo = BacktestRepository(cast(Any, repository).session_factory)
-        now = datetime.now(UTC)
+        now = self._next_status_time()
 
         run = await bt_repo.get_run(self._run_public_id, as_of=now)
         if run is None:
@@ -318,7 +327,7 @@ class BacktestRunnerProcess(RegisterableProcess):
             except IntegrityError as e:
                 if not is_single_running_conflict(e):
                     raise
-                fail_now = datetime.now(UTC)
+                fail_now = self._next_status_time()
                 conflict_task = asyncio.create_task(
                     bt_repo.update_run_status(
                         public_id=run["public_id"],
@@ -362,7 +371,7 @@ class BacktestRunnerProcess(RegisterableProcess):
             collector = ResultCollector()
             await engine.run(run["public_id"], config, collector)
             await self._persist_artifacts(bt_repo, run["public_id"], collector, config)
-            final_now = datetime.now(UTC)
+            final_now = self._next_status_time()
             await bt_repo.update_run_status(
                 public_id=run["public_id"],
                 new_status="completed",
@@ -379,7 +388,7 @@ class BacktestRunnerProcess(RegisterableProcess):
                 len(collector.equity_points),
             )
         except asyncio.CancelledError:
-            cancel_now = datetime.now(UTC)
+            cancel_now = self._next_status_time()
             cancel_task = asyncio.create_task(
                 bt_repo.update_run_status(
                     public_id=run["public_id"],
@@ -397,7 +406,7 @@ class BacktestRunnerProcess(RegisterableProcess):
             logger.info("Backtest {} cancelled", self._run_public_id[:8])
             raise
         except Exception as exc:
-            fail_now = datetime.now(UTC)
+            fail_now = self._next_status_time()
             error_msg = str(exc)[:1024]
             fail_evt_sid = self._tracker.session_id
             fail_evt_seq = self._tracker.next_sequence(_BT_EVENTS_STREAM)
