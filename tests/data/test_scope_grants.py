@@ -904,6 +904,8 @@ class TestGetUserOperatorMemberships:
         """
         ids = await _seed_world(repo)
         user_pid = "00000000-0000-7000-8000-000000000010"
+        membership_ts = datetime.now(UTC) - timedelta(minutes=1)
+        as_of = membership_ts + timedelta(seconds=1)
         async with repo.session() as s:
 
             s.add(
@@ -913,12 +915,12 @@ class TestGetUserOperatorMemberships:
                     is_primary=True,
                     session_id="test-session",
                     sequence_id=500,
-                    timestamp=datetime.now(UTC),
+                    timestamp=membership_ts,
                 )
             )
             await s.commit()
 
-        memberships = await repo.get_user_operator_memberships(user_pid, datetime.now(UTC))
+        memberships = await repo.get_user_operator_memberships(user_pid, as_of)
         assert len(memberships) == 1
         assert memberships[0]["operator_public_id"] == ids["alice"]
         assert memberships[0]["is_primary"] is True

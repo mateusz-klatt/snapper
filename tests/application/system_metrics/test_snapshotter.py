@@ -67,7 +67,8 @@ class TestSnapshotter:
         process.net_connections.return_value = [object(), object()]
         process.status.return_value = "running"
         process.num_threads.return_value = 5
-        process.num_fds.return_value = 10
+        if hasattr(process, "num_fds"):
+            process.num_fds.return_value = 10
         process.cpu_times.return_value = SimpleNamespace(user=1.25, system=0.75)
         process.cpu_percent.return_value = cpu_percent
         process.memory_info.return_value = SimpleNamespace(rss=rss, vms=vms)
@@ -319,6 +320,15 @@ class TestSnapshotter:
             "pool_size": None,
             "pool_checked_out": None,
         }
+
+    def test_sample_process_metrics_returns_zero_when_num_fds_is_unavailable(self) -> None:
+        """Windows psutil builds do not expose ``Process.num_fds``."""
+        process = self._make_process()
+        if hasattr(process, "num_fds"):
+            del process.num_fds
+        metrics = self._make_snapshotter(process=process)._sample_process_metrics()
+
+        assert metrics["num_fds"] == 0
 
     def test_build_snapshot_without_cgroup_and_inactive_tracemalloc(
         self, monkeypatch: pytest.MonkeyPatch

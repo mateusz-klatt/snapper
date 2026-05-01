@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 from uuid import uuid7
 
@@ -182,9 +183,9 @@ async def _seed_eligible_setup(repo: SQLAlchemyRepository, *, as_of: datetime) -
         )
         await s.commit()
     delegate_public_id = str(uuid7())
-    heartbeat_at = _now()
+    heartbeat_at = _now() + timedelta(minutes=10)
     await repo.insert_ai_delegate(
-        public_id=delegate_public_id, user_public_id=user_public_id, as_of=heartbeat_at
+        public_id=delegate_public_id, user_public_id=user_public_id, as_of=as_of
     )
     await repo.update_delegate_last_seen(delegate_public_id, heartbeat_at)
     return {

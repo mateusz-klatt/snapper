@@ -275,9 +275,16 @@ class SystemMetricsSnapshotter:
                 uptime_seconds=monotonic() - self._start_time,
                 status=self._process.status(),
                 num_threads=self._process.num_threads(),
-                num_fds=self._process.num_fds(),
+                num_fds=self._sample_num_fds(),
                 num_connections=num_connections,
             )
+
+    def _sample_num_fds(self) -> int:
+        """Return POSIX file descriptor count, or zero when psutil lacks it."""
+        try:
+            return int(self._process.num_fds())
+        except AttributeError:
+            return 0
 
     def _sample_cpu_metrics(self, cgroup_reading: CgroupReading | None) -> CpuMetrics:
         """CPU usage + cgroup quota / throttled counters.

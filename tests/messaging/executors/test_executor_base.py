@@ -1074,6 +1074,12 @@ class TestExecutorNonWebSocketMode:
         mock_exchange_client.supports_websocket_executions = False
         mock_exchange_client.__aenter__ = AsyncMock(return_value=mock_exchange_client)
         mock_exchange_client.__aexit__ = AsyncMock(return_value=None)
+        mock_exchange_client.get_orders = AsyncMock(return_value=[])
+        mock_repository = SimpleNamespace(
+            get_active_orders_for_recovery=AsyncMock(return_value=[]),
+        )
+        raw_socket = zmq_socket_stub(connect=MagicMock(), close=MagicMock())
+        context = SimpleNamespace(socket=MagicMock(return_value=raw_socket))
         start_called = asyncio.Event()
 
         async def mock_order_handler() -> None:
@@ -1084,15 +1090,22 @@ class TestExecutorNonWebSocketMode:
             patch.object(service, "_order_handler", side_effect=mock_order_handler),
             patch.object(service, "_heartbeat_loop", new=AsyncMock()),
             patch.object(service, "_create_exchange_client", return_value=mock_exchange_client),
-            patch(
-                "snapper.application.services.settings.get_settings_service",
-                new=AsyncMock(return_value=MagicMock()),
+            patch.object(base_module, "get_repository", return_value=mock_repository),
+            patch.object(
+                base_module, "get_settings_service", new=AsyncMock(return_value=MagicMock())
             ),
-            patch(
-                "snapper.config.settings.get_settings_with_service",
-                return_value=mock_settings,
+            patch.object(base_module, "get_settings_with_service", return_value=mock_settings),
+            patch.object(base_module.zmq.asyncio, "Context", return_value=context),
+            patch.object(
+                base_module,
+                "ValidatedSubscriber",
+                lambda socket: SimpleNamespace(close=socket.close, subscribe=lambda *_: None),
             ),
-            patch("zmq.asyncio.Context"),
+            patch.object(
+                base_module,
+                "ValidatedPublisher",
+                lambda socket: SimpleNamespace(close=socket.close),
+            ),
         ):
             task = asyncio.create_task(service_any.start())
             try:

@@ -1577,11 +1577,15 @@ class TestDelegateAccessTokens:
 
     @pytest.mark.asyncio
     async def test_delegate_read_projection_has_current_shape(
-        self, repo: SQLAlchemyRepository
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Read projections expose identity and caps without credential metadata."""
         await _seed_owner(repo, public_id="owner-pat-7", username="owner-pat-7")
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        monkeypatch.setattr(
+            "snapper.application.ai_delegates.service._now_for_join",
+            lambda: datetime.now(UTC) + _td(minutes=1),
+        )
         body = DelegateCreateBody(label="Read", caps=DelegateCapsBody())
         created = await service.create_delegate(
             owner=_make_owner_principal("owner-pat-7"), body=body
