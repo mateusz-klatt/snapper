@@ -5,6 +5,13 @@
 
 import { z } from 'zod'
 
+export const AsyncioMetricsSchema = z
+  .object({
+    active_tasks: z.number().int(),
+    pending_tasks: z.number().int(),
+  })
+  .strict()
+
 export const BacktestComparisonDataSchema = z
   .object({
     type: z.literal('backtest_comparison'),
@@ -135,6 +142,16 @@ export const ContractDataSchema = z
   })
   .strict()
 
+export const CpuMetricsSchema = z
+  .object({
+    process_percent: z.number(),
+    user_time_seconds: z.number(),
+    system_time_seconds: z.number(),
+    cgroup_quota_microseconds: z.number().int().nullable(),
+    cgroup_throttled_count: z.number().int().nullable(),
+  })
+  .strict()
+
 export const CredentialSummarySchema = z
   .object({
     type: z.literal('credential_summary'),
@@ -147,6 +164,14 @@ export const CredentialSummarySchema = z
     exchange: z.string(),
     credential_type: z.string(),
     label: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const DbInternalMetricsSchema = z
+  .object({
+    aiosqlite_live_connections: z.number().int(),
+    pool_size: z.number().int().nullable(),
+    pool_checked_out: z.number().int().nullable(),
   })
   .strict()
 
@@ -302,6 +327,14 @@ export const GapStatsSchema = z
   })
   .strict()
 
+export const GcMetricsSchema = z
+  .object({
+    collections_per_gen: z.array(z.unknown()),
+    uncollectable: z.number().int(),
+    current_objects: z.number().int(),
+  })
+  .strict()
+
 export const HealthTopicsSchema = z
   .object({
     active: z.number().int(),
@@ -342,6 +375,27 @@ export const InstrumentListResponseSchema = z
   .strict()
 
 export const JsonPrimitiveSchema = z.unknown()
+
+export const LimitsMetricsSchema = z
+  .object({
+    rlimit_nproc: z.number().int(),
+    rlimit_nofile: z.number().int(),
+    rlimit_as_bytes: z.number().int(),
+  })
+  .strict()
+
+export const MemoryMetricsSchema = z
+  .object({
+    rss_bytes: z.number().int(),
+    rss_peak_bytes: z.number().int(),
+    vms_bytes: z.number().int(),
+    python_traced_bytes: z.number().int().nullable(),
+    native_bytes: z.number().int().nullable(),
+    cgroup_limit_bytes: z.number().int().nullable(),
+    cgroup_current_bytes: z.number().int().nullable(),
+    saturation_pct: z.number().nullable(),
+  })
+  .strict()
 
 export const MessageResponseSchema = z
   .object({
@@ -530,6 +584,17 @@ export const ProcessCreatedInfoSchema = z
   })
   .strict()
 
+export const ProcessMetricsSchema = z
+  .object({
+    pid: z.number().int(),
+    uptime_seconds: z.number(),
+    status: z.string(),
+    num_threads: z.number().int(),
+    num_fds: z.number().int(),
+    num_connections: z.number().int(),
+  })
+  .strict()
+
 export const ProcessStartDataSchema = z
   .object({
     type: z.literal('process_start'),
@@ -610,6 +675,13 @@ export const RollPointDetailSchema = z
     from_contract: z.string(),
     to_contract: z.string(),
     roll_at: z.string(),
+  })
+  .strict()
+
+export const SaturationMetricsSchema = z
+  .object({
+    threads_pct: z.number().nullable(),
+    fds_pct: z.number().nullable(),
   })
   .strict()
 
@@ -728,6 +800,13 @@ export const TopicMetricSnapshotSchema = z
     last_message_ts: z.number(),
     throttle_ms: z.number().int().nullable().optional(),
     pattern: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const TracemallocStateSchema = z
+  .object({
+    active: z.boolean(),
+    requested_duration_seconds: z.number().nullable(),
   })
   .strict()
 
@@ -1538,6 +1617,50 @@ export const ContinuousSeriesPartialResponseSchema = z
   })
   .strict()
 
+export const SystemMetricsDataSchema = z
+  .object({
+    type: z.literal('system_metrics'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    topic: z.string().nullable().optional(),
+    bus_time: z.iso.datetime(),
+    process: ProcessMetricsSchema,
+    cpu: CpuMetricsSchema,
+    memory: MemoryMetricsSchema,
+    asyncio: AsyncioMetricsSchema,
+    gc: GcMetricsSchema,
+    limits: LimitsMetricsSchema,
+    saturation: SaturationMetricsSchema,
+    db_internal: DbInternalMetricsSchema,
+    tracemalloc_active: z.boolean(),
+    cgroup_version: z.enum(['v1', 'v2']).nullable(),
+  })
+  .strict()
+
+export const SystemMetricsHistoryItemSchema = z
+  .object({
+    type: z.literal('system_metrics_history_item'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    topic: z.string().nullable().optional(),
+    bus_time: z.iso.datetime(),
+    process: ProcessMetricsSchema,
+    cpu: CpuMetricsSchema,
+    memory: MemoryMetricsSchema,
+    asyncio: AsyncioMetricsSchema,
+    gc: GcMetricsSchema,
+    limits: LimitsMetricsSchema,
+    saturation: SaturationMetricsSchema,
+    db_internal: DbInternalMetricsSchema,
+    tracemalloc_active: z.boolean(),
+    cgroup_version: z.enum(['v1', 'v2']).nullable(),
+  })
+  .strict()
+
 export const HandoverScopeGrantResultSchema = z
   .object({
     closed_grant: ScopeGrantInfoSchema,
@@ -1630,6 +1753,18 @@ export const StrategyListResponseSchema = z
     topic: z.string().nullable().optional(),
     payload: z.array(StrategyProcessSchema),
     count: z.number().int(),
+  })
+  .strict()
+
+export const TracemallocStateResponseSchema = z
+  .object({
+    type: z.literal('tracemalloc_state_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    topic: z.string().nullable().optional(),
+    payload: TracemallocStateSchema,
   })
   .strict()
 
@@ -2149,6 +2284,31 @@ export const RestRateResponseSchema = z
     session_id: z.string(),
     topic: z.string().nullable().optional(),
     payload: RestRateDataSchema,
+  })
+  .strict()
+
+export const SystemMetricsResponseSchema = z
+  .object({
+    type: z.literal('system_metrics_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    topic: z.string().nullable().optional(),
+    payload: SystemMetricsDataSchema,
+  })
+  .strict()
+
+export const SystemMetricsHistoryResponseSchema = z
+  .object({
+    type: z.literal('system_metrics_history_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    topic: z.string().nullable().optional(),
+    payload: z.array(SystemMetricsHistoryItemSchema),
+    count: z.number().int(),
   })
   .strict()
 
@@ -2867,6 +3027,7 @@ export const DelegateCreatedResponseSchema = z
   .strict()
 
 // Type exports
+export type AsyncioMetrics = z.infer<typeof AsyncioMetricsSchema>
 export type BacktestComparisonData = z.infer<typeof BacktestComparisonDataSchema>
 export type BacktestEquityPointInline = z.infer<typeof BacktestEquityPointInlineSchema>
 export type BacktestEventData = z.infer<typeof BacktestEventDataSchema>
@@ -2875,7 +3036,9 @@ export type BacktestTradeData = z.infer<typeof BacktestTradeDataSchema>
 export type ConnectionStats = z.infer<typeof ConnectionStatsSchema>
 export type ContinuousCandleData = z.infer<typeof ContinuousCandleDataSchema>
 export type ContractData = z.infer<typeof ContractDataSchema>
+export type CpuMetrics = z.infer<typeof CpuMetricsSchema>
 export type CredentialSummary = z.infer<typeof CredentialSummarySchema>
+export type DbInternalMetrics = z.infer<typeof DbInternalMetricsSchema>
 export type DeviceAlertPrefBody = z.infer<typeof DeviceAlertPrefBodySchema>
 export type DeviceAlertPrefInfo = z.infer<typeof DeviceAlertPrefInfoSchema>
 export type EquityOverlayPoint = z.infer<typeof EquityOverlayPointSchema>
@@ -2885,10 +3048,13 @@ export type ExecutionPlanData = z.infer<typeof ExecutionPlanDataSchema>
 export type FeatureFlagsPayload = z.infer<typeof FeatureFlagsPayloadSchema>
 export type FrontMonthData = z.infer<typeof FrontMonthDataSchema>
 export type GapStats = z.infer<typeof GapStatsSchema>
+export type GcMetrics = z.infer<typeof GcMetricsSchema>
 export type HealthTopics = z.infer<typeof HealthTopicsSchema>
 export type InstrumentDetailData = z.infer<typeof InstrumentDetailDataSchema>
 export type InstrumentListResponse = z.infer<typeof InstrumentListResponseSchema>
 export type JsonPrimitive = z.infer<typeof JsonPrimitiveSchema>
+export type LimitsMetrics = z.infer<typeof LimitsMetricsSchema>
+export type MemoryMetrics = z.infer<typeof MemoryMetricsSchema>
 export type MessageResponse = z.infer<typeof MessageResponseSchema>
 export type MetricDiffRow = z.infer<typeof MetricDiffRowSchema>
 export type NotificationDeviceInfo = z.infer<typeof NotificationDeviceInfoSchema>
@@ -2901,6 +3067,7 @@ export type PositionCycleData = z.infer<typeof PositionCycleDataSchema>
 export type PositionData = z.infer<typeof PositionDataSchema>
 export type ProcessCategoryCount = z.infer<typeof ProcessCategoryCountSchema>
 export type ProcessCreatedInfo = z.infer<typeof ProcessCreatedInfoSchema>
+export type ProcessMetrics = z.infer<typeof ProcessMetricsSchema>
 export type ProcessStartData = z.infer<typeof ProcessStartDataSchema>
 export type ProcessStatus = z.infer<typeof ProcessStatusSchema>
 export type ProcessStopData = z.infer<typeof ProcessStopDataSchema>
@@ -2909,6 +3076,7 @@ export type RegisterDeviceBody = z.infer<typeof RegisterDeviceBodySchema>
 export type RelationshipTypeEnum = z.infer<typeof RelationshipTypeEnumSchema>
 export type RestRateExchangeStats = z.infer<typeof RestRateExchangeStatsSchema>
 export type RollPointDetail = z.infer<typeof RollPointDetailSchema>
+export type SaturationMetrics = z.infer<typeof SaturationMetricsSchema>
 export type ScopeGrantInfo = z.infer<typeof ScopeGrantInfoSchema>
 export type SettingCategoriesResponse = z.infer<typeof SettingCategoriesResponseSchema>
 export type SettingRead = z.infer<typeof SettingReadSchema>
@@ -2917,6 +3085,7 @@ export type SignalDiffEntry = z.infer<typeof SignalDiffEntrySchema>
 export type StrategyProcess = z.infer<typeof StrategyProcessSchema>
 export type SubscriptionsStats = z.infer<typeof SubscriptionsStatsSchema>
 export type TopicMetricSnapshot = z.infer<typeof TopicMetricSnapshotSchema>
+export type TracemallocState = z.infer<typeof TracemallocStateSchema>
 export type TradeDiffEntry = z.infer<typeof TradeDiffEntrySchema>
 export type TrailingStopStateData = z.infer<typeof TrailingStopStateDataSchema>
 export type UnderlyingAssetData = z.infer<typeof UnderlyingAssetDataSchema>
@@ -2993,6 +3162,8 @@ export type PushBetaConfigResponse = z.infer<typeof PushBetaConfigResponseSchema
 export type RegisterDeviceCommand = z.infer<typeof RegisterDeviceCommandSchema>
 export type RestRateData = z.infer<typeof RestRateDataSchema>
 export type ContinuousSeriesPartialResponse = z.infer<typeof ContinuousSeriesPartialResponseSchema>
+export type SystemMetricsData = z.infer<typeof SystemMetricsDataSchema>
+export type SystemMetricsHistoryItem = z.infer<typeof SystemMetricsHistoryItemSchema>
 export type HandoverScopeGrantResult = z.infer<typeof HandoverScopeGrantResultSchema>
 export type RevokeScopeGrantResponse = z.infer<typeof RevokeScopeGrantResponseSchema>
 export type ScopeGrantListResponse = z.infer<typeof ScopeGrantListResponseSchema>
@@ -3001,6 +3172,7 @@ export type SettingListResponse = z.infer<typeof SettingListResponseSchema>
 export type SettingResponse = z.infer<typeof SettingResponseSchema>
 export type SignalListResponse = z.infer<typeof SignalListResponseSchema>
 export type StrategyListResponse = z.infer<typeof StrategyListResponseSchema>
+export type TracemallocStateResponse = z.infer<typeof TracemallocStateResponseSchema>
 export type TrailingStopStateResponse = z.infer<typeof TrailingStopStateResponseSchema>
 export type UnderlyingAssetListResponse = z.infer<typeof UnderlyingAssetListResponseSchema>
 export type UnderlyingInstrumentListResponse = z.infer<
@@ -3046,6 +3218,8 @@ export type JsonObject = z.infer<typeof JsonObjectSchema>
 export type ProcessSummaryResponse = z.infer<typeof ProcessSummaryResponseSchema>
 export type ProcessCreateResponse = z.infer<typeof ProcessCreateResponseSchema>
 export type RestRateResponse = z.infer<typeof RestRateResponseSchema>
+export type SystemMetricsResponse = z.infer<typeof SystemMetricsResponseSchema>
+export type SystemMetricsHistoryResponse = z.infer<typeof SystemMetricsHistoryResponseSchema>
 export type HandoverScopeGrantResponse = z.infer<typeof HandoverScopeGrantResponseSchema>
 export type LoginData = z.infer<typeof LoginDataSchema>
 export type RefreshData = z.infer<typeof RefreshDataSchema>

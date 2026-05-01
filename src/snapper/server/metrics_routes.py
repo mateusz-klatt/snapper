@@ -1,12 +1,18 @@
-"""``GET /api/metrics/notifications`` — iOS Push Foundation ops metrics (BE-3c §D11).
+"""``/api/metrics/*`` — operator observability surface.
 
-Exposes DB-derived outbox counters + per-status totals so an oncall
-dashboard can tell at a glance whether the sidecar is keeping up or
-whether deliveries are piling up in the retry queue. Gated by
-``Permission.READ_SYSTEM_STATUS`` — the same permission the
-``critical_system_error`` rule uses for fan-out, so anyone allowed
-to see the alert also gets access to the health surface that
-explains why the alert did or didn't fire.
+Two route families, both gated by ``Permission.READ_SYSTEM_STATUS``:
+
+* ``/notifications`` — iOS Push Foundation ops metrics (BE-3c §D11).
+  DB-derived outbox counters + per-status totals so an oncall
+  dashboard can tell at a glance whether the sidecar is keeping up
+  or whether deliveries are piling up in the retry queue.
+
+* ``/system`` + ``/system/history`` + ``/system/tracemalloc/{start,stop}``
+  — process-level health metrics sampled by
+  :class:`SystemMetricsSnapshotter` into an in-memory ring buffer.
+  Surfaces CPU, memory, threads, fds, asyncio, gc, cgroup, saturation
+  %, and DB-internal pool counters so the operator can see the
+  gradient toward exhaustion before a crash.
 
 Latency percentiles (``apns_p99_latency_ms``) + sidecar heartbeat
 (``sidecar_heartbeat_seconds_since``) from the plan wishlist are
@@ -16,6 +22,7 @@ those via a small heartbeat + histogram settings table.
 """
 
 import datetime as dt
+from datetime import UTC
 from datetime import datetime
 from typing import Annotated
 from typing import Literal
@@ -23,11 +30,33 @@ from uuid import uuid7
 
 from fastapi import APIRouter
 from fastapi import Depends
+from fastapi import HTTPException
+from fastapi import Query
 from fastapi import Request
+from fastapi import status
 
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.api.schemas.system_metrics import AsyncioMetrics
+from snapper.api.schemas.system_metrics import CpuMetrics
+from snapper.api.schemas.system_metrics import DbInternalMetrics
+from snapper.api.schemas.system_metrics import GcMetrics
+from snapper.api.schemas.system_metrics import LimitsMetrics
+from snapper.api.schemas.system_metrics import MemoryMetrics
+from snapper.api.schemas.system_metrics import ProcessMetrics
+from snapper.api.schemas.system_metrics import SaturationMetrics
+from snapper.api.schemas.system_metrics import SystemMetricsData
+from snapper.api.schemas.system_metrics import SystemMetricsHistoryItem
+from snapper.api.schemas.system_metrics import SystemMetricsHistoryResponse
+from snapper.api.schemas.system_metrics import SystemMetricsResponse
+from snapper.api.schemas.system_metrics import TracemallocState
+from snapper.api.schemas.system_metrics import TracemallocStateResponse
+from snapper.application.system_metrics.snapshot_types import SystemMetricsSnapshot
+from snapper.application.system_metrics.snapshotter import SystemMetricsSnapshotter
+from snapper.application.system_metrics.tracemalloc_controller import DEFAULT_DURATION_SECONDS
+from snapper.application.system_metrics.tracemalloc_controller import clamp_duration
 from snapper.auth.dependencies import require_permission
+from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
@@ -37,6 +66,8 @@ from snapper.server.dependencies import get_repository_dependency
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
 _REST_STREAM = "rest.metrics"
+_DEFAULT_HISTORY_LIMIT = 720
+_SNAPSHOTTER_UNAVAILABLE_DETAIL = "system metrics snapshotter not available"
 
 
 class NotificationMetricsData(StrictDataSchema[Literal["notification_metrics"]]):
@@ -132,3 +163,283 @@ def _next_provenance(tracker: SequenceTracker) -> tuple[str, int, datetime, str]
     ts = dt.datetime.now(dt.UTC)
     pid = str(uuid7())
     return sid, seq, ts, pid
+
+
+def _resolve_snapshotter(request: Request) -> SystemMetricsSnapshotter:
+    """Pull the snapshotter singleton or raise 503 if unavailable.
+
+    The lifespan startup hook in :mod:`snapper.server.app` assigns the
+    attribute ONLY after a successful :meth:`SystemMetricsSnapshotter.start`
+    call. If startup raised, the attribute is left absent and routes
+    fall through to 503 (B22 — no half-initialized object can bypass
+    this fallback).
+    """
+    snapshotter: SystemMetricsSnapshotter | None = getattr(
+        request.app.state, "system_metrics_snapshotter", None
+    )
+    if snapshotter is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_SNAPSHOTTER_UNAVAILABLE_DETAIL,
+        )
+    return snapshotter
+
+
+def _build_system_metrics_data(
+    snapshot: SystemMetricsSnapshot,
+    *,
+    session_id: str,
+    sequence_id: int,
+    public_id: str,
+    timestamp: datetime,
+) -> SystemMetricsData:
+    """Map an in-memory :class:`SystemMetricsSnapshot` to the wire schema."""
+    return SystemMetricsData(
+        session_id=session_id,
+        sequence_id=sequence_id,
+        public_id=public_id,
+        timestamp=timestamp,
+        bus_time=snapshot["bus_time"],
+        process=ProcessMetrics(**snapshot["process"]),
+        cpu=CpuMetrics(**snapshot["cpu"]),
+        memory=MemoryMetrics(**snapshot["memory"]),
+        asyncio=AsyncioMetrics(**snapshot["asyncio"]),
+        gc=GcMetrics(**snapshot["gc"]),
+        limits=LimitsMetrics(**snapshot["limits"]),
+        saturation=SaturationMetrics(**snapshot["saturation"]),
+        db_internal=DbInternalMetrics(**snapshot["db_internal"]),
+        tracemalloc_active=snapshot["tracemalloc_active"],
+        cgroup_version=snapshot["cgroup_version"],
+    )
+
+
+def _build_system_metrics_history_item(
+    snapshot: SystemMetricsSnapshot,
+    *,
+    session_id: str,
+    sequence_id: int,
+    public_id: str,
+    timestamp: datetime,
+) -> SystemMetricsHistoryItem:
+    """Map an in-memory snapshot to the history-list item wire schema."""
+    return SystemMetricsHistoryItem(
+        session_id=session_id,
+        sequence_id=sequence_id,
+        public_id=public_id,
+        timestamp=timestamp,
+        bus_time=snapshot["bus_time"],
+        process=ProcessMetrics(**snapshot["process"]),
+        cpu=CpuMetrics(**snapshot["cpu"]),
+        memory=MemoryMetrics(**snapshot["memory"]),
+        asyncio=AsyncioMetrics(**snapshot["asyncio"]),
+        gc=GcMetrics(**snapshot["gc"]),
+        limits=LimitsMetrics(**snapshot["limits"]),
+        saturation=SaturationMetrics(**snapshot["saturation"]),
+        db_internal=DbInternalMetrics(**snapshot["db_internal"]),
+        tracemalloc_active=snapshot["tracemalloc_active"],
+        cgroup_version=snapshot["cgroup_version"],
+    )
+
+
+@router.get("/system")
+async def get_system_metrics(
+    request: Request,
+    _principal: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.READ_SYSTEM_STATUS)),
+    ],
+) -> SystemMetricsResponse:
+    """Return the most recent ``SystemMetricsSnapshot`` from the ring buffer.
+
+    Cold-start contract: :meth:`SystemMetricsSnapshotter.start` takes
+    one eager sample BEFORE returning, so a successfully-started
+    singleton always has at least one snapshot when the first request
+    arrives. If the snapshotter failed to start at lifespan time, the
+    attribute is absent and this route returns 503.
+
+    Args:
+        request: FastAPI request — provides app state + REST tracker.
+        _principal: Authenticated caller (permission gate enforced at
+            dependency resolution; the bound value is discarded because
+            the metrics are user-agnostic).
+
+    Returns:
+        :class:`SystemMetricsResponse` envelope wrapping the latest
+        :class:`SystemMetricsData` payload.
+
+    Raises:
+        HTTPException: 503 when the snapshotter singleton is missing.
+    """
+    snapshotter = _resolve_snapshotter(request)
+    snapshot = await snapshotter.current_snapshot()
+    if snapshot is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_SNAPSHOTTER_UNAVAILABLE_DETAIL,
+        )
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    payload_sid, payload_seq, payload_ts, payload_pid = _next_provenance(tracker)
+    payload = _build_system_metrics_data(
+        snapshot,
+        session_id=payload_sid,
+        sequence_id=payload_seq,
+        public_id=payload_pid,
+        timestamp=payload_ts,
+    )
+    envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(tracker)
+    return SystemMetricsResponse(
+        session_id=envelope_sid,
+        sequence_id=envelope_seq,
+        public_id=envelope_pid,
+        timestamp=envelope_ts,
+        payload=payload,
+    )
+
+
+@router.get("/system/history")
+async def get_system_metrics_history(
+    request: Request,
+    _principal: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.READ_SYSTEM_STATUS)),
+    ],
+    since: Annotated[datetime | None, Query()] = None,
+    until: Annotated[datetime | None, Query()] = None,
+    limit: Annotated[int, Query(gt=0, le=100000)] = _DEFAULT_HISTORY_LIMIT,
+) -> SystemMetricsHistoryResponse:
+    """Return a windowed slice of the snapshot history buffer.
+
+    Args:
+        request: FastAPI request — provides app state + REST tracker.
+        _principal: Authenticated caller (permission gate at dependency
+            resolution).
+        since: Inclusive lower bound on snapshot ``bus_time`` (ISO-8601
+            UTC). ``None`` means "from the start of the buffer".
+        until: Inclusive upper bound. ``None`` means "to now".
+        limit: Maximum snapshots returned (most-recent N within the
+            window). Default 720 (1h at the standard 5s sampling
+            interval); max 100000.
+
+    Returns:
+        :class:`SystemMetricsHistoryResponse` envelope wrapping a
+        chronologically-ordered list of
+        :class:`SystemMetricsHistoryItem` payloads.
+
+    Raises:
+        HTTPException: 503 when the snapshotter singleton is missing.
+    """
+    snapshotter = _resolve_snapshotter(request)
+    lower = since if since is not None else datetime.min.replace(tzinfo=UTC)
+    upper = until if until is not None else datetime.max.replace(tzinfo=UTC)
+    snapshots = await snapshotter.history(lower, upper, limit)
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    items: list[SystemMetricsHistoryItem] = []
+    for snap in snapshots:
+        sid, seq, ts, pid = _next_provenance(tracker)
+        items.append(
+            _build_system_metrics_history_item(
+                snap,
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+            )
+        )
+    envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(tracker)
+    return SystemMetricsHistoryResponse(
+        session_id=envelope_sid,
+        sequence_id=envelope_seq,
+        public_id=envelope_pid,
+        timestamp=envelope_ts,
+        payload=items,
+        count=len(items),
+    )
+
+
+@router.post("/system/tracemalloc/start")
+async def post_system_metrics_tracemalloc_start(
+    request: Request,
+    _principal: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.READ_SYSTEM_STATUS)),
+    ],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    duration_s: Annotated[float, Query(gt=0)] = DEFAULT_DURATION_SECONDS,
+) -> TracemallocStateResponse:
+    """Arm Python tracemalloc with an auto-stop deadline.
+
+    ``duration_s`` is clamped to ``(0, MAX_DURATION_SECONDS]`` (default
+    600s, hard max 3600s). Calling while already armed REPLACES the
+    deadline.
+
+    Args:
+        request: FastAPI request.
+        _principal: Authenticated caller (permission gate).
+        _csrf: CSRF token validation (cookie auth) — Bearer-auth
+            requests bypass per
+            :func:`snapper.auth.dependencies.validate_csrf_token`.
+        duration_s: Auto-stop deadline before tracemalloc is disarmed.
+
+    Returns:
+        :class:`TracemallocStateResponse` with ``active=True`` and the
+        clamped ``requested_duration_seconds``.
+
+    Raises:
+        HTTPException: 503 when the snapshotter singleton is missing.
+    """
+    snapshotter = _resolve_snapshotter(request)
+    clamped = clamp_duration(duration_s)
+    await snapshotter.tracemalloc.start(clamped)
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(tracker)
+    return TracemallocStateResponse(
+        session_id=envelope_sid,
+        sequence_id=envelope_seq,
+        public_id=envelope_pid,
+        timestamp=envelope_ts,
+        payload=TracemallocState(
+            active=snapshotter.tracemalloc.is_active(),
+            requested_duration_seconds=clamped,
+        ),
+    )
+
+
+@router.post("/system/tracemalloc/stop")
+async def post_system_metrics_tracemalloc_stop(
+    request: Request,
+    _principal: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.READ_SYSTEM_STATUS)),
+    ],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+) -> TracemallocStateResponse:
+    """Disarm tracemalloc + cancel any pending auto-stop deadline.
+
+    Args:
+        request: FastAPI request.
+        _principal: Authenticated caller (permission gate).
+        _csrf: CSRF token validation (cookie auth) — Bearer-auth
+            requests bypass per
+            :func:`snapper.auth.dependencies.validate_csrf_token`.
+
+    Returns:
+        :class:`TracemallocStateResponse` with ``active=False`` and
+        ``requested_duration_seconds=None``.
+
+    Raises:
+        HTTPException: 503 when the snapshotter singleton is missing.
+    """
+    snapshotter = _resolve_snapshotter(request)
+    await snapshotter.tracemalloc.stop()
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(tracker)
+    return TracemallocStateResponse(
+        session_id=envelope_sid,
+        sequence_id=envelope_seq,
+        public_id=envelope_pid,
+        timestamp=envelope_ts,
+        payload=TracemallocState(
+            active=snapshotter.tracemalloc.is_active(),
+            requested_duration_seconds=None,
+        ),
+    )

@@ -374,6 +374,16 @@ struct AlertHistoryResponse: Codable, Sendable {
     }
 }
 
+struct AsyncioMetrics: Codable, Sendable {
+    let activeTasks: Int
+    let pendingTasks: Int
+
+    enum CodingKeys: String, CodingKey {
+        case activeTasks = "active_tasks"
+        case pendingTasks = "pending_tasks"
+    }
+}
+
 struct AvailableProcess: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -1194,6 +1204,22 @@ struct ContractListResponse: Codable, Sendable {
     }
 }
 
+struct CpuMetrics: Codable, Sendable {
+    let processPercent: Double
+    let userTimeSeconds: Double
+    let systemTimeSeconds: Double
+    let cgroupQuotaMicroseconds: Int?
+    let cgroupThrottledCount: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case processPercent = "process_percent"
+        case userTimeSeconds = "user_time_seconds"
+        case systemTimeSeconds = "system_time_seconds"
+        case cgroupQuotaMicroseconds = "cgroup_quota_microseconds"
+        case cgroupThrottledCount = "cgroup_throttled_count"
+    }
+}
+
 struct CredentialListResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -1259,6 +1285,18 @@ struct CredentialSummary: Codable, Sendable {
         case exchange
         case credentialType = "credential_type"
         case label
+    }
+}
+
+struct DbInternalMetrics: Codable, Sendable {
+    let aiosqliteLiveConnections: Int
+    let poolSize: Int?
+    let poolCheckedOut: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case aiosqliteLiveConnections = "aiosqlite_live_connections"
+        case poolSize = "pool_size"
+        case poolCheckedOut = "pool_checked_out"
     }
 }
 
@@ -1760,6 +1798,18 @@ struct GapStats: Codable, Sendable {
     }
 }
 
+struct GcMetrics: Codable, Sendable {
+    let collectionsPerGen: [AnyCodable]
+    let uncollectable: Int
+    let currentObjects: Int
+
+    enum CodingKeys: String, CodingKey {
+        case collectionsPerGen = "collections_per_gen"
+        case uncollectable
+        case currentObjects = "current_objects"
+    }
+}
+
 struct HTTPValidationError: Codable, Sendable {
     let detail: [ValidationError]?
 }
@@ -1929,6 +1979,18 @@ struct InstrumentListResponse: Codable, Sendable {
 struct JsonObject: Codable, Sendable {
 }
 
+struct LimitsMetrics: Codable, Sendable {
+    let rlimitNproc: Int
+    let rlimitNofile: Int
+    let rlimitAsBytes: Int
+
+    enum CodingKeys: String, CodingKey {
+        case rlimitNproc = "rlimit_nproc"
+        case rlimitNofile = "rlimit_nofile"
+        case rlimitAsBytes = "rlimit_as_bytes"
+    }
+}
+
 struct LoginData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -1974,6 +2036,28 @@ struct LoginResponse: Codable, Sendable {
         case sessionId = "session_id"
         case topic
         case payload
+    }
+}
+
+struct MemoryMetrics: Codable, Sendable {
+    let rssBytes: Int
+    let rssPeakBytes: Int
+    let vmsBytes: Int
+    let pythonTracedBytes: Int?
+    let nativeBytes: Int?
+    let cgroupLimitBytes: Int?
+    let cgroupCurrentBytes: Int?
+    let saturationPct: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case rssBytes = "rss_bytes"
+        case rssPeakBytes = "rss_peak_bytes"
+        case vmsBytes = "vms_bytes"
+        case pythonTracedBytes = "python_traced_bytes"
+        case nativeBytes = "native_bytes"
+        case cgroupLimitBytes = "cgroup_limit_bytes"
+        case cgroupCurrentBytes = "cgroup_current_bytes"
+        case saturationPct = "saturation_pct"
     }
 }
 
@@ -2510,6 +2594,24 @@ struct ProcessCreatedInfo: Codable, Sendable {
     let template: String
 }
 
+struct ProcessMetrics: Codable, Sendable {
+    let pid: Int
+    let uptimeSeconds: Double
+    let status: String
+    let numThreads: Int
+    let numFds: Int
+    let numConnections: Int
+
+    enum CodingKeys: String, CodingKey {
+        case pid
+        case uptimeSeconds = "uptime_seconds"
+        case status
+        case numThreads = "num_threads"
+        case numFds = "num_fds"
+        case numConnections = "num_connections"
+    }
+}
+
 struct ProcessRun: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -2996,6 +3098,16 @@ struct RollPointDetail: Codable, Sendable {
     }
 }
 
+struct SaturationMetrics: Codable, Sendable {
+    let threadsPct: Double?
+    let fdsPct: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case threadsPct = "threads_pct"
+        case fdsPct = "fds_pct"
+    }
+}
+
 struct ScopeGrantInfo: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -3326,6 +3438,128 @@ struct SubscriptionsStats: Codable, Sendable {
     }
 }
 
+struct SystemMetricsData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let topic: String?
+    let busTime: Date
+    let process: ProcessMetrics
+    let cpu: CpuMetrics
+    let memory: MemoryMetrics
+    let asyncio: AsyncioMetrics
+    let gc: GcMetrics
+    let limits: LimitsMetrics
+    let saturation: SaturationMetrics
+    let dbInternal: DbInternalMetrics
+    let tracemallocActive: Bool
+    let cgroupVersion: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case topic
+        case busTime = "bus_time"
+        case process
+        case cpu
+        case memory
+        case asyncio
+        case gc
+        case limits
+        case saturation
+        case dbInternal = "db_internal"
+        case tracemallocActive = "tracemalloc_active"
+        case cgroupVersion = "cgroup_version"
+    }
+}
+
+struct SystemMetricsHistoryItem: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let topic: String?
+    let busTime: Date
+    let process: ProcessMetrics
+    let cpu: CpuMetrics
+    let memory: MemoryMetrics
+    let asyncio: AsyncioMetrics
+    let gc: GcMetrics
+    let limits: LimitsMetrics
+    let saturation: SaturationMetrics
+    let dbInternal: DbInternalMetrics
+    let tracemallocActive: Bool
+    let cgroupVersion: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case topic
+        case busTime = "bus_time"
+        case process
+        case cpu
+        case memory
+        case asyncio
+        case gc
+        case limits
+        case saturation
+        case dbInternal = "db_internal"
+        case tracemallocActive = "tracemalloc_active"
+        case cgroupVersion = "cgroup_version"
+    }
+}
+
+struct SystemMetricsHistoryResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let topic: String?
+    let payload: [SystemMetricsHistoryItem]
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case topic
+        case payload
+        case count
+    }
+}
+
+struct SystemMetricsResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let topic: String?
+    let payload: SystemMetricsData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case topic
+        case payload
+    }
+}
+
 struct SystemStatusData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -3395,6 +3629,36 @@ struct TopicMetricSnapshot: Codable, Sendable {
         case lastMessageTs = "last_message_ts"
         case throttleMs = "throttle_ms"
         case pattern
+    }
+}
+
+struct TracemallocState: Codable, Sendable {
+    let active: Bool
+    let requestedDurationSeconds: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case active
+        case requestedDurationSeconds = "requested_duration_seconds"
+    }
+}
+
+struct TracemallocStateResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let topic: String?
+    let payload: TracemallocState
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case topic
+        case payload
     }
 }
 

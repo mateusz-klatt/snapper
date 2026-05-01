@@ -22,11 +22,18 @@ DEFAULT_DURATION_SECONDS: Final = 600.0
 MAX_DURATION_SECONDS: Final = 3600.0
 
 
-def _clamp_duration(duration_s: float) -> float:
+def clamp_duration(duration_s: float) -> float:
     """Clamp ``duration_s`` to ``(0, MAX_DURATION_SECONDS]``.
 
     Negative or zero collapses to the default; values beyond the cap
     clamp to the cap.
+
+    Args:
+        duration_s: Caller-requested auto-stop deadline in seconds.
+
+    Returns:
+        Clamped deadline in seconds suitable for the controller's
+        internal sleep timer.
     """
     if duration_s <= 0:
         return DEFAULT_DURATION_SECONDS
@@ -85,7 +92,7 @@ class TracemallocController:
             duration_s: Seconds before auto-stop fires. Clamped to
                 ``(0, MAX_DURATION_SECONDS]`` (default 600, cap 3600).
         """
-        clamped = _clamp_duration(duration_s)
+        clamped = clamp_duration(duration_s)
         await self._cancel_pending_auto_stop()
         if not tracemalloc.is_tracing():
             tracemalloc.start()

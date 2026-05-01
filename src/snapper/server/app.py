@@ -114,6 +114,7 @@ from snapper.application.process_manager.registry import discover_processes
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.services.settings import SettingsService
 from snapper.application.services.settings import get_settings_service
+from snapper.application.system_metrics.snapshotter import SystemMetricsSnapshotter
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.auth.dependencies import CSRFManager
 from snapper.auth.dependencies import get_csrf_manager
@@ -430,6 +431,50 @@ async def _warn_on_tradfi_near_expiry(settings: AppSettings) -> None:
         logger.warning("TradFi expiry check failed (non-fatal): {}", exc)
 
 
+async def _start_system_metrics_snapshotter(app: FastAPI) -> None:
+    """Build + start the :class:`SystemMetricsSnapshotter` singleton.
+
+    The attribute is assigned to ``app.state`` ONLY after a successful
+    :meth:`SystemMetricsSnapshotter.start` call (B22 — no
+    half-initialized object can bypass the route layer's 503 fallback).
+    On any exception, the attribute is left absent and the route layer
+    falls through to HTTP 503 ``"system metrics snapshotter not
+    available"``. Failure does NOT block the rest of the lifespan
+    startup; the app still serves other endpoints.
+
+    Args:
+        app: FastAPI application instance whose ``state`` will hold the
+            singleton on successful start.
+    """
+    try:
+        snapshotter = SystemMetricsSnapshotter()
+        await snapshotter.start()
+    except Exception:
+        logger.exception(
+            "SystemMetricsSnapshotter startup failed — metrics endpoints will return 503"
+        )
+        return
+    app.state.system_metrics_snapshotter = snapshotter
+    logger.info("SystemMetricsSnapshotter started (eager sample buffered)")
+
+
+async def _stop_system_metrics_snapshotter(app: FastAPI) -> None:
+    """Stop the :class:`SystemMetricsSnapshotter` singleton if attached.
+
+    Tolerates partial-init state where startup failed before the
+    attribute was assigned.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    snapshotter: SystemMetricsSnapshotter | None = getattr(
+        app.state, "system_metrics_snapshotter", None
+    )
+    if snapshotter is None:
+        return
+    await snapshotter.stop()
+
+
 async def _shutdown_zmq_bridge(app: FastAPI) -> None:
     """Stop ZMQ bridge and await its task during shutdown.
 
@@ -474,6 +519,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     settings_service: SettingsService | None = None
     process_factory: ProcessLauncherService | None = None
     app.state.zmq_bridge_task = None
+    app.state.system_metrics_snapshotter = None
     try:
         settings_service = await _initialize_settings_service(settings)
         settings = get_settings_with_service(settings_service)
@@ -538,6 +584,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         app.state.plan_executor = plan_executor
         manager_ref: WebSocketConnectionManager = app.state.manager
         app.state.zmq_bridge_task = asyncio.create_task(manager_ref.zmq_bridge.start())
+        await _start_system_metrics_snapshotter(app)
         logger.info("Application startup complete")
         await _warn_on_tradfi_near_expiry(settings)
         mcp_sub_app = app.state.mcp_sub_app
@@ -557,6 +604,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         raise
     finally:
         logger.info("Starting application shutdown sequence")
+        await _stop_system_metrics_snapshotter(app)
         await _shutdown_zmq_bridge(app)
         if process_factory is not None:
             await process_factory.stop_all_processes()

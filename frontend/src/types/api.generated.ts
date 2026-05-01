@@ -1076,6 +1076,70 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/metrics/system": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: Operations["get_system_metrics_api_metrics_system_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/metrics/system/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: Operations["get_system_metrics_history_api_metrics_system_history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/metrics/system/tracemalloc/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: Operations["post_system_metrics_tracemalloc_start_api_metrics_system_tracemalloc_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/metrics/system/tracemalloc/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: Operations["post_system_metrics_tracemalloc_stop_api_metrics_system_tracemalloc_stop_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/alerts/history": {
         parameters: {
             query?: never;
@@ -1462,6 +1526,10 @@ export type Components = {
             count: number;
             next_cursor?: string | null;
         };
+        AsyncioMetrics: {
+            active_tasks: number;
+            pending_tasks: number;
+        };
         AvailableProcess: {
             type: "available_process";
             sequence_id: number;
@@ -1847,6 +1915,13 @@ export type Components = {
             payload: Components["schemas"]["ContractData"][];
             count: number;
         };
+        CpuMetrics: {
+            process_percent: number;
+            user_time_seconds: number;
+            system_time_seconds: number;
+            cgroup_quota_microseconds: number | null;
+            cgroup_throttled_count: number | null;
+        };
         CredentialListResponse: {
             type: "credential_list_response";
             sequence_id: number;
@@ -1877,6 +1952,11 @@ export type Components = {
             exchange: string;
             credential_type: string;
             label?: string | null;
+        };
+        DbInternalMetrics: {
+            aiosqlite_live_connections: number;
+            pool_size: number | null;
+            pool_checked_out: number | null;
         };
         DelegateCapsBody: {
             max_order_quantity_per_instrument?: Record<string, unknown> | null;
@@ -2109,6 +2189,15 @@ export type Components = {
             mid_stream_joins: number;
             rejected_unstamped: number;
         };
+        GcMetrics: {
+            collections_per_gen: [
+                number,
+                number,
+                number
+            ];
+            uncollectable: number;
+            current_objects: number;
+        };
         HTTPValidationError: {
             detail?: Components["schemas"]["ValidationError"][];
         };
@@ -2194,6 +2283,11 @@ export type Components = {
         JsonValue: string | number | boolean | null | Record<string, unknown>[] | {
             [key: string]: Record<string, unknown>;
         };
+        LimitsMetrics: {
+            rlimit_nproc: number;
+            rlimit_nofile: number;
+            rlimit_as_bytes: number;
+        };
         LoginData: {
             type: "login";
             sequence_id: number;
@@ -2215,6 +2309,16 @@ export type Components = {
             session_id: string;
             topic?: string | null;
             payload: Components["schemas"]["LoginData"];
+        };
+        MemoryMetrics: {
+            rss_bytes: number;
+            rss_peak_bytes: number;
+            vms_bytes: number;
+            python_traced_bytes: number | null;
+            native_bytes: number | null;
+            cgroup_limit_bytes: number | null;
+            cgroup_current_bytes: number | null;
+            saturation_pct: number | null;
         };
         MessageResponse: {
             type: "message";
@@ -2467,6 +2571,14 @@ export type Components = {
             name: string;
             template: string;
         };
+        ProcessMetrics: {
+            pid: number;
+            uptime_seconds: number;
+            status: string;
+            num_threads: number;
+            num_fds: number;
+            num_connections: number;
+        };
         ProcessRun: {
             type: "process_run";
             sequence_id: number;
@@ -2691,6 +2803,10 @@ export type Components = {
             to_contract: string;
             roll_at: string;
         };
+        SaturationMetrics: {
+            threads_pct: number | null;
+            fds_pct: number | null;
+        };
         ScopeGrantInfo: {
             type: "scope_grant_info";
             sequence_id: number;
@@ -2846,6 +2962,63 @@ export type Components = {
                 [key: string]: string[];
             };
         };
+        SystemMetricsData: {
+            type: "system_metrics";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            topic?: string | null;
+            bus_time: string;
+            process: Components["schemas"]["ProcessMetrics"];
+            cpu: Components["schemas"]["CpuMetrics"];
+            memory: Components["schemas"]["MemoryMetrics"];
+            asyncio: Components["schemas"]["AsyncioMetrics"];
+            gc: Components["schemas"]["GcMetrics"];
+            limits: Components["schemas"]["LimitsMetrics"];
+            saturation: Components["schemas"]["SaturationMetrics"];
+            db_internal: Components["schemas"]["DbInternalMetrics"];
+            tracemalloc_active: boolean;
+            cgroup_version: ("v1" | "v2") | null;
+        };
+        SystemMetricsHistoryItem: {
+            type: "system_metrics_history_item";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            topic?: string | null;
+            bus_time: string;
+            process: Components["schemas"]["ProcessMetrics"];
+            cpu: Components["schemas"]["CpuMetrics"];
+            memory: Components["schemas"]["MemoryMetrics"];
+            asyncio: Components["schemas"]["AsyncioMetrics"];
+            gc: Components["schemas"]["GcMetrics"];
+            limits: Components["schemas"]["LimitsMetrics"];
+            saturation: Components["schemas"]["SaturationMetrics"];
+            db_internal: Components["schemas"]["DbInternalMetrics"];
+            tracemalloc_active: boolean;
+            cgroup_version: ("v1" | "v2") | null;
+        };
+        SystemMetricsHistoryResponse: {
+            type: "system_metrics_history_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            topic?: string | null;
+            payload: Components["schemas"]["SystemMetricsHistoryItem"][];
+            count: number;
+        };
+        SystemMetricsResponse: {
+            type: "system_metrics_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            topic?: string | null;
+            payload: Components["schemas"]["SystemMetricsData"];
+        };
         SystemStatusData: {
             type: "system_status";
             sequence_id: number;
@@ -2880,6 +3053,19 @@ export type Components = {
             last_message_ts: number;
             throttle_ms?: number | null;
             pattern?: string | null;
+        };
+        TracemallocState: {
+            active: boolean;
+            requested_duration_seconds: number | null;
+        };
+        TracemallocStateResponse: {
+            type: "tracemalloc_state_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            topic?: string | null;
+            payload: Components["schemas"]["TracemallocState"];
         };
         TradeDiffEntry: {
             instrument: string;
@@ -6110,6 +6296,104 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["NotificationMetricsResponse"];
+                };
+            };
+        };
+    };
+    get_system_metrics_api_metrics_system_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["SystemMetricsResponse"];
+                };
+            };
+        };
+    };
+    get_system_metrics_history_api_metrics_system_history_get: {
+        parameters: {
+            query?: {
+                since?: string | null;
+                until?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["SystemMetricsHistoryResponse"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_system_metrics_tracemalloc_start_api_metrics_system_tracemalloc_start_post: {
+        parameters: {
+            query?: {
+                duration_s?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["TracemallocStateResponse"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_system_metrics_tracemalloc_stop_api_metrics_system_tracemalloc_stop_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["TracemallocStateResponse"];
                 };
             };
         };

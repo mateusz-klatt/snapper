@@ -9,7 +9,7 @@ import pytest
 from snapper.application.system_metrics.tracemalloc_controller import DEFAULT_DURATION_SECONDS
 from snapper.application.system_metrics.tracemalloc_controller import MAX_DURATION_SECONDS
 from snapper.application.system_metrics.tracemalloc_controller import TracemallocController
-from snapper.application.system_metrics.tracemalloc_controller import _clamp_duration
+from snapper.application.system_metrics.tracemalloc_controller import clamp_duration
 
 
 class TestTracemallocController:
@@ -32,9 +32,9 @@ class TestTracemallocController:
             (MAX_DURATION_SECONDS + 1.0, MAX_DURATION_SECONDS),
         ],
     )
-    def test_clamp_duration(self, duration_s: float, expected: float) -> None:
+    def testclamp_duration(self, duration_s: float, expected: float) -> None:
         """Covered by test body."""
-        assert _clamp_duration(duration_s) == pytest.approx(expected)
+        assert clamp_duration(duration_s) == pytest.approx(expected)
 
     def test_is_active_and_traced_bytes_when_inactive(self) -> None:
         """Covered by test body."""
