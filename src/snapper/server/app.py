@@ -111,6 +111,7 @@ from snapper.application.ai_review.service import AiReviewService
 from snapper.application.ai_review.service import get_ai_review_service
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
+from snapper.application.retention.scheduler import RetentionScheduler
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.services.settings import SettingsService
 from snapper.application.services.settings import get_settings_service
@@ -475,6 +476,54 @@ async def _stop_system_metrics_snapshotter(app: FastAPI) -> None:
     await snapshotter.stop()
 
 
+async def _start_retention_scheduler(app: FastAPI, *, db_url: str) -> None:
+    """Build + start the :class:`RetentionScheduler` singleton.
+
+    The attribute is assigned to ``app.state`` ONLY after a successful
+    :meth:`RetentionScheduler.start` call (B22 — no half-initialized
+    object can bypass the route layer's 503 fallback). On any
+    exception, the attribute is left absent and the route layer falls
+    through to HTTP 503. Failure does NOT block the rest of the
+    lifespan startup; the app still serves other endpoints.
+
+    Args:
+        app: FastAPI application instance whose ``state`` will hold
+            the scheduler on successful start.
+        db_url: SQLAlchemy URL for the underlying sync repository.
+    """
+    try:
+        scheduler = RetentionScheduler(db_url=db_url)
+        await scheduler.start()
+    except Exception:
+        logger.exception(
+            "RetentionScheduler startup failed — retention metrics endpoint will return 503"
+        )
+        return
+    app.state.retention_scheduler = scheduler
+    if scheduler.disabled:
+        logger.info("RetentionScheduler started in disabled mode (RETENTION_DISABLED=true)")
+    else:
+        logger.info(
+            "RetentionScheduler started (eager run buffered, interval=%.1fs)",
+            scheduler.interval_seconds,
+        )
+
+
+async def _stop_retention_scheduler(app: FastAPI) -> None:
+    """Stop the :class:`RetentionScheduler` singleton if attached.
+
+    Tolerates partial-init state where startup failed before the
+    attribute was assigned.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    scheduler: RetentionScheduler | None = getattr(app.state, "retention_scheduler", None)
+    if scheduler is None:
+        return
+    await scheduler.stop()
+
+
 async def _shutdown_zmq_bridge(app: FastAPI) -> None:
     """Stop ZMQ bridge and await its task during shutdown.
 
@@ -520,6 +569,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     process_factory: ProcessLauncherService | None = None
     app.state.zmq_bridge_task = None
     app.state.system_metrics_snapshotter = None
+    app.state.retention_scheduler = None
     try:
         settings_service = await _initialize_settings_service(settings)
         settings = get_settings_with_service(settings_service)
@@ -585,6 +635,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         manager_ref: WebSocketConnectionManager = app.state.manager
         app.state.zmq_bridge_task = asyncio.create_task(manager_ref.zmq_bridge.start())
         await _start_system_metrics_snapshotter(app)
+        await _start_retention_scheduler(app, db_url=settings.db_url)
         logger.info("Application startup complete")
         await _warn_on_tradfi_near_expiry(settings)
         mcp_sub_app = app.state.mcp_sub_app
@@ -604,6 +655,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         raise
     finally:
         logger.info("Starting application shutdown sequence")
+        await _stop_retention_scheduler(app)
         await _stop_system_metrics_snapshotter(app)
         await _shutdown_zmq_bridge(app)
         if process_factory is not None:
