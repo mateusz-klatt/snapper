@@ -1156,6 +1156,22 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/metrics/db/tables": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: Operations["get_db_table_stats_api_metrics_db_tables_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/alerts/history": {
         parameters: {
             query?: never;
@@ -1973,6 +1989,27 @@ export type Components = {
             aiosqlite_live_connections: number;
             pool_size: number | null;
             pool_checked_out: number | null;
+        };
+        DbStatsData: {
+            type: "db_stats";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            topic?: string | null;
+            snapshot_started_at: string;
+            snapshot_completed_at: string;
+            interval_seconds: number;
+            tables: Components["schemas"]["TableStatsItem"][];
+        };
+        DbStatsResponse: {
+            type: "db_stats_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            topic?: string | null;
+            payload: Components["schemas"]["DbStatsData"];
         };
         DelegateCapsBody: {
             max_order_quantity_per_instrument?: Record<string, unknown> | null;
@@ -3086,6 +3123,16 @@ export type Components = {
             session_id: string;
             topic?: string | null;
             payload: Components["schemas"]["SystemStatusData"];
+        };
+        TableStatsItem: {
+            table: string;
+            table_kind: "event" | "state";
+            total: number | null;
+            current: number | null;
+            closed: number | null;
+            archivable: number | null;
+            is_stale: boolean;
+            last_sampled_at: string;
         };
         TopicMetricSnapshot: {
             active_subscribers: number;
@@ -6459,6 +6506,25 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["RetentionRunResponse"];
+                };
+            };
+        };
+    };
+    get_db_table_stats_api_metrics_db_tables_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["DbStatsResponse"];
                 };
             };
         };

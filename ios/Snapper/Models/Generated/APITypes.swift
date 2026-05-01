@@ -204,6 +204,11 @@ enum StrategyProcessMode: String, Codable, Sendable {
     case process
 }
 
+enum TableStatsItemTableKind: String, Codable, Sendable {
+    case event
+    case state
+}
+
 enum TradeDiffEntryLeg: String, Codable, Sendable {
     case a
     case b
@@ -1297,6 +1302,52 @@ struct DbInternalMetrics: Codable, Sendable {
         case aiosqliteLiveConnections = "aiosqlite_live_connections"
         case poolSize = "pool_size"
         case poolCheckedOut = "pool_checked_out"
+    }
+}
+
+struct DbStatsData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let topic: String?
+    let snapshotStartedAt: Date
+    let snapshotCompletedAt: Date
+    let intervalSeconds: Double
+    let tables: [TableStatsItem]
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case topic
+        case snapshotStartedAt = "snapshot_started_at"
+        case snapshotCompletedAt = "snapshot_completed_at"
+        case intervalSeconds = "interval_seconds"
+        case tables
+    }
+}
+
+struct DbStatsResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let topic: String?
+    let payload: DbStatsData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case topic
+        case payload
     }
 }
 
@@ -3675,6 +3726,28 @@ struct SystemStatusResponse: Codable, Sendable {
         case sessionId = "session_id"
         case topic
         case payload
+    }
+}
+
+struct TableStatsItem: Codable, Sendable {
+    let table: String
+    let tableKind: String
+    let total: Int?
+    let current: Int?
+    let closed: Int?
+    let archivable: Int?
+    let isStale: Bool
+    let lastSampledAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case table
+        case tableKind = "table_kind"
+        case total
+        case current
+        case closed
+        case archivable
+        case isStale = "is_stale"
+        case lastSampledAt = "last_sampled_at"
     }
 }
 

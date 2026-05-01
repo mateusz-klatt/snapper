@@ -803,6 +803,19 @@ export const SubscriptionsStatsSchema = z
   })
   .strict()
 
+export const TableStatsItemSchema = z
+  .object({
+    table: z.string(),
+    table_kind: z.enum(['event', 'state']),
+    total: z.number().int().nullable(),
+    current: z.number().int().nullable(),
+    closed: z.number().int().nullable(),
+    archivable: z.number().int().nullable(),
+    is_stale: z.boolean(),
+    last_sampled_at: z.iso.datetime(),
+  })
+  .strict()
+
 export const TopicMetricSnapshotSchema = z
   .object({
     active_subscribers: z.number().int(),
@@ -1787,6 +1800,21 @@ export const StrategyListResponseSchema = z
   })
   .strict()
 
+export const DbStatsDataSchema = z
+  .object({
+    type: z.literal('db_stats'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    topic: z.string().nullable().optional(),
+    snapshot_started_at: z.iso.datetime(),
+    snapshot_completed_at: z.iso.datetime(),
+    interval_seconds: z.number(),
+    tables: z.array(TableStatsItemSchema),
+  })
+  .strict()
+
 export const TracemallocStateResponseSchema = z
   .object({
     type: z.literal('tracemalloc_state_response'),
@@ -2364,6 +2392,18 @@ export const HandoverScopeGrantResponseSchema = z
     session_id: z.string(),
     topic: z.string().nullable().optional(),
     payload: HandoverScopeGrantResultSchema,
+  })
+  .strict()
+
+export const DbStatsResponseSchema = z
+  .object({
+    type: z.literal('db_stats_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    topic: z.string().nullable().optional(),
+    payload: DbStatsDataSchema,
   })
   .strict()
 
@@ -3128,6 +3168,7 @@ export type SignalData = z.infer<typeof SignalDataSchema>
 export type SignalDiffEntry = z.infer<typeof SignalDiffEntrySchema>
 export type StrategyProcess = z.infer<typeof StrategyProcessSchema>
 export type SubscriptionsStats = z.infer<typeof SubscriptionsStatsSchema>
+export type TableStatsItem = z.infer<typeof TableStatsItemSchema>
 export type TopicMetricSnapshot = z.infer<typeof TopicMetricSnapshotSchema>
 export type TracemallocState = z.infer<typeof TracemallocStateSchema>
 export type TradeDiffEntry = z.infer<typeof TradeDiffEntrySchema>
@@ -3217,6 +3258,7 @@ export type SettingListResponse = z.infer<typeof SettingListResponseSchema>
 export type SettingResponse = z.infer<typeof SettingResponseSchema>
 export type SignalListResponse = z.infer<typeof SignalListResponseSchema>
 export type StrategyListResponse = z.infer<typeof StrategyListResponseSchema>
+export type DbStatsData = z.infer<typeof DbStatsDataSchema>
 export type TracemallocStateResponse = z.infer<typeof TracemallocStateResponseSchema>
 export type TrailingStopStateResponse = z.infer<typeof TrailingStopStateResponseSchema>
 export type UnderlyingAssetListResponse = z.infer<typeof UnderlyingAssetListResponseSchema>
@@ -3267,6 +3309,7 @@ export type RetentionRunResponse = z.infer<typeof RetentionRunResponseSchema>
 export type SystemMetricsResponse = z.infer<typeof SystemMetricsResponseSchema>
 export type SystemMetricsHistoryResponse = z.infer<typeof SystemMetricsHistoryResponseSchema>
 export type HandoverScopeGrantResponse = z.infer<typeof HandoverScopeGrantResponseSchema>
+export type DbStatsResponse = z.infer<typeof DbStatsResponseSchema>
 export type LoginData = z.infer<typeof LoginDataSchema>
 export type RefreshData = z.infer<typeof RefreshDataSchema>
 export type UserListResponse = z.infer<typeof UserListResponseSchema>

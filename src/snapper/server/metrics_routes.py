@@ -37,6 +37,9 @@ from fastapi import status
 
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.api.schemas.db_stats import DbStatsData
+from snapper.api.schemas.db_stats import DbStatsResponse
+from snapper.api.schemas.db_stats import TableStatsItem
 from snapper.api.schemas.retention import RetentionPolicyResult
 from snapper.api.schemas.retention import RetentionRunData
 from snapper.api.schemas.retention import RetentionRunResponse
@@ -54,6 +57,9 @@ from snapper.api.schemas.system_metrics import SystemMetricsHistoryResponse
 from snapper.api.schemas.system_metrics import SystemMetricsResponse
 from snapper.api.schemas.system_metrics import TracemallocState
 from snapper.api.schemas.system_metrics import TracemallocStateResponse
+from snapper.application.db_stats.snapshotter import DbStatsSnapshot
+from snapper.application.db_stats.snapshotter import DbStatsSnapshotter
+from snapper.application.db_stats.snapshotter import TableStats
 from snapper.application.retention.scheduler import RetentionScheduler
 from snapper.application.retention.service import RetentionPolicyRunResult
 from snapper.application.retention.service import RetentionRunSummary
@@ -77,6 +83,9 @@ _SNAPSHOTTER_UNAVAILABLE_DETAIL = "system metrics snapshotter not available"
 _RETENTION_UNAVAILABLE_DETAIL = "retention scheduler not available"
 _RETENTION_DISABLED_DETAIL = "retention scheduler disabled"
 _RETENTION_NOT_YET_RUN_DETAIL = "retention scheduler not yet run"
+_DB_STATS_UNAVAILABLE_DETAIL = "DB metrics snapshotter not initialized"
+_DB_STATS_DISABLED_DETAIL = "DB metrics snapshotter disabled via DB_METRICS_DISABLED"
+_DB_STATS_NOT_YET_RUN_DETAIL = "DB metrics snapshotter has not completed a sample yet"
 
 
 class NotificationMetricsData(StrictDataSchema[Literal["notification_metrics"]]):
@@ -626,4 +635,146 @@ def _build_retention_policy_result(
         purged_rows=result["purged_rows"],
         files_written=result["files_written"],
         error=result["error"],
+    )
+
+
+@router.get("/db/tables")
+async def get_db_table_stats(
+    request: Request,
+    _principal: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.READ_SYSTEM_STATUS)),
+    ],
+) -> DbStatsResponse:
+    """Return the most recent per-table row-count snapshot (Cluster B).
+
+    Args:
+        request: FastAPI request — provides app state + REST tracker.
+        _principal: Authenticated caller (permission gate enforced at
+            dependency resolution; the bound value is discarded
+            because the metrics are user-agnostic).
+
+    Returns:
+        :class:`DbStatsResponse` envelope wrapping the latest
+        :class:`DbStatsData` payload — per-table counters from the
+        most recent sampler tick.
+
+    Raises:
+        HTTPException: 503 when the snapshotter is missing (helper
+            failed to attach), disabled (operator opt-out), or has
+            not completed a sample yet (cold-start window). Only the
+            cold-start case carries a ``Retry-After`` header — the
+            other two states are not transient.
+    """
+    snapshotter = _resolve_db_stats_snapshotter(request)
+    if snapshotter.disabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_DB_STATS_DISABLED_DETAIL,
+        )
+    snapshot = snapshotter.latest_snapshot
+    if snapshot is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_DB_STATS_NOT_YET_RUN_DETAIL,
+            headers={"Retry-After": str(int(snapshotter.interval_seconds))},
+        )
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    payload_sid, payload_seq, payload_ts, payload_pid = _next_provenance(tracker)
+    payload = _build_db_stats_data(
+        snapshot,
+        session_id=payload_sid,
+        sequence_id=payload_seq,
+        public_id=payload_pid,
+        timestamp=payload_ts,
+    )
+    envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(tracker)
+    return DbStatsResponse(
+        session_id=envelope_sid,
+        sequence_id=envelope_seq,
+        public_id=envelope_pid,
+        timestamp=envelope_ts,
+        payload=payload,
+    )
+
+
+def _resolve_db_stats_snapshotter(request: Request) -> DbStatsSnapshotter:
+    """Pull the DB-stats snapshotter singleton or raise 503.
+
+    The lifespan startup hook in :mod:`snapper.server.app` assigns
+    ``app.state.db_stats_snapshotter`` ONLY after a successful
+    :meth:`DbStatsSnapshotter.start` call (B22 — no half-initialized
+    object can bypass the route layer's 503 fallback).
+
+    Args:
+        request: FastAPI request whose ``app.state`` holds the
+            singleton (or pre-set ``None`` on startup failure).
+
+    Returns:
+        The attached :class:`DbStatsSnapshotter` instance.
+
+    Raises:
+        HTTPException: 503 when no snapshotter is attached.
+    """
+    snapshotter: DbStatsSnapshotter | None = getattr(
+        request.app.state, "db_stats_snapshotter", None
+    )
+    if snapshotter is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_DB_STATS_UNAVAILABLE_DETAIL,
+        )
+    return snapshotter
+
+
+def _build_db_stats_data(
+    snapshot: DbStatsSnapshot,
+    *,
+    session_id: str,
+    sequence_id: int,
+    public_id: str,
+    timestamp: datetime,
+) -> DbStatsData:
+    """Map an in-memory :class:`DbStatsSnapshot` to the wire schema.
+
+    Args:
+        snapshot: Source snapshot captured by the sampler.
+        session_id: Envelope provenance — payload session.
+        sequence_id: Envelope provenance — payload sequence.
+        public_id: Envelope provenance — payload UUID7.
+        timestamp: Envelope provenance — payload timestamp.
+
+    Returns:
+        Wire-strict :class:`DbStatsData` payload.
+    """
+    return DbStatsData(
+        session_id=session_id,
+        sequence_id=sequence_id,
+        public_id=public_id,
+        timestamp=timestamp,
+        snapshot_started_at=snapshot.snapshot_started_at,
+        snapshot_completed_at=snapshot.snapshot_completed_at,
+        interval_seconds=snapshot.interval_seconds,
+        tables=[_build_table_stats_item(row) for row in snapshot.tables],
+    )
+
+
+def _build_table_stats_item(row: TableStats) -> TableStatsItem:
+    """Map an in-memory :class:`TableStats` row to the wire schema.
+
+    Args:
+        row: Source per-table counters captured by the sampler.
+
+    Returns:
+        Wire-strict :class:`TableStatsItem` body.
+    """
+    return TableStatsItem(
+        table=row.table,
+        table_kind=row.table_kind,
+        total=row.total,
+        current=row.current,
+        closed=row.closed,
+        archivable=row.archivable,
+        is_stale=row.is_stale,
+        last_sampled_at=row.last_sampled_at,
     )
