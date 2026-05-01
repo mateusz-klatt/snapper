@@ -1799,12 +1799,16 @@ struct GapStats: Codable, Sendable {
 }
 
 struct GcMetrics: Codable, Sendable {
-    let collectionsPerGen: [AnyCodable]
+    let collectionsGen0: Int
+    let collectionsGen1: Int
+    let collectionsGen2: Int
     let uncollectable: Int
     let currentObjects: Int
 
     enum CodingKeys: String, CodingKey {
-        case collectionsPerGen = "collections_per_gen"
+        case collectionsGen0 = "collections_gen0"
+        case collectionsGen1 = "collections_gen1"
+        case collectionsGen2 = "collections_gen2"
         case uncollectable
         case currentObjects = "current_objects"
     }

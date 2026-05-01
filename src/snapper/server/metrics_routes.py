@@ -165,6 +165,30 @@ def _next_provenance(tracker: SequenceTracker) -> tuple[str, int, datetime, str]
     return sid, seq, ts, pid
 
 
+def _normalize_utc_bound(value: datetime) -> datetime:
+    """Normalize a datetime query param to a UTC-aware bound.
+
+    FastAPI / Pydantic accepts naive ISO-8601 strings (e.g.
+    ``2026-05-01T12:00:00`` without offset) and produces a naive
+    ``datetime``. Comparing such values with the UTC-aware
+    ``bus_time`` field on snapshots raises
+    ``TypeError: can't compare offset-naive and offset-aware datetimes``
+    inside :meth:`MetricsRingBuffer.slice`. Treat naive inputs as UTC
+    (matches :func:`snapper.server.app._normalize_utc`) so the route
+    layer never propagates such a TypeError.
+
+    Args:
+        value: Caller-supplied datetime bound, possibly naive.
+
+    Returns:
+        A UTC-aware ``datetime`` safe to compare against
+        ``snapshot["bus_time"]``.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def _resolve_snapshotter(request: Request) -> SystemMetricsSnapshotter:
     """Pull the snapshotter singleton or raise 503 if unavailable.
 
@@ -204,7 +228,13 @@ def _build_system_metrics_data(
         cpu=CpuMetrics(**snapshot["cpu"]),
         memory=MemoryMetrics(**snapshot["memory"]),
         asyncio=AsyncioMetrics(**snapshot["asyncio"]),
-        gc=GcMetrics(**snapshot["gc"]),
+        gc=GcMetrics(
+            collections_gen0=snapshot["gc"]["collections_per_gen"][0],
+            collections_gen1=snapshot["gc"]["collections_per_gen"][1],
+            collections_gen2=snapshot["gc"]["collections_per_gen"][2],
+            uncollectable=snapshot["gc"]["uncollectable"],
+            current_objects=snapshot["gc"]["current_objects"],
+        ),
         limits=LimitsMetrics(**snapshot["limits"]),
         saturation=SaturationMetrics(**snapshot["saturation"]),
         db_internal=DbInternalMetrics(**snapshot["db_internal"]),
@@ -232,7 +262,13 @@ def _build_system_metrics_history_item(
         cpu=CpuMetrics(**snapshot["cpu"]),
         memory=MemoryMetrics(**snapshot["memory"]),
         asyncio=AsyncioMetrics(**snapshot["asyncio"]),
-        gc=GcMetrics(**snapshot["gc"]),
+        gc=GcMetrics(
+            collections_gen0=snapshot["gc"]["collections_per_gen"][0],
+            collections_gen1=snapshot["gc"]["collections_per_gen"][1],
+            collections_gen2=snapshot["gc"]["collections_per_gen"][2],
+            uncollectable=snapshot["gc"]["uncollectable"],
+            current_objects=snapshot["gc"]["current_objects"],
+        ),
         limits=LimitsMetrics(**snapshot["limits"]),
         saturation=SaturationMetrics(**snapshot["saturation"]),
         db_internal=DbInternalMetrics(**snapshot["db_internal"]),
@@ -329,8 +365,8 @@ async def get_system_metrics_history(
         HTTPException: 503 when the snapshotter singleton is missing.
     """
     snapshotter = _resolve_snapshotter(request)
-    lower = since if since is not None else datetime.min.replace(tzinfo=UTC)
-    upper = until if until is not None else datetime.max.replace(tzinfo=UTC)
+    lower = _normalize_utc_bound(since) if since is not None else datetime.min.replace(tzinfo=UTC)
+    upper = _normalize_utc_bound(until) if until is not None else datetime.max.replace(tzinfo=UTC)
     snapshots = await snapshotter.history(lower, upper, limit)
     tracker: SequenceTracker = request.app.state.rest_tracker
     items: list[SystemMetricsHistoryItem] = []

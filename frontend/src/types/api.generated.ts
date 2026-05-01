@@ -2190,11 +2190,9 @@ export type Components = {
             rejected_unstamped: number;
         };
         GcMetrics: {
-            collections_per_gen: [
-                number,
-                number,
-                number
-            ];
+            collections_gen0: number;
+            collections_gen1: number;
+            collections_gen2: number;
             uncollectable: number;
             current_objects: number;
         };

@@ -204,7 +204,9 @@ class TestGetSystemMetrics:
         assert response.payload.cpu.process_percent == pytest.approx(12.5)
         assert response.payload.memory.rss_bytes == 100_000_000
         assert response.payload.asyncio.active_tasks == 4
-        assert response.payload.gc.collections_per_gen == (10, 5, 1)
+        assert response.payload.gc.collections_gen0 == 10
+        assert response.payload.gc.collections_gen1 == 5
+        assert response.payload.gc.collections_gen2 == 1
         assert response.payload.limits.rlimit_nproc == 4096
         assert response.payload.saturation.threads_pct == pytest.approx(8 / 4096)
         assert response.payload.db_internal.aiosqlite_live_connections == 3
@@ -330,6 +332,29 @@ class TestGetSystemMetricsHistory:
                 limit=720,
             )
         assert exc.value.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_naive_datetime_bounds_are_normalized_to_utc(self) -> None:
+        """Naive ``since`` / ``until`` are treated as UTC, not 500 (Codex MAJOR)."""
+        snapshotter = _make_snapshotter()
+        base = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+        snapshots = [
+            _build_synthetic_snapshot(bus_time=base + timedelta(seconds=i * 5)) for i in range(3)
+        ]
+        await _populate_buffer(snapshotter, snapshots)
+
+        naive_since = datetime(2026, 5, 1, 12, 0, 0)
+        naive_until = datetime(2026, 5, 1, 12, 0, 5)
+
+        response = await get_system_metrics_history(
+            request=_make_request_with_snapshotter(snapshotter),
+            _principal=_viewer_principal(),
+            since=naive_since,
+            until=naive_until,
+            limit=720,
+        )
+
+        assert response.count == 2
 
 
 class TestPostTracemallocStart:

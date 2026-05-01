@@ -329,7 +329,9 @@ export const GapStatsSchema = z
 
 export const GcMetricsSchema = z
   .object({
-    collections_per_gen: z.array(z.unknown()),
+    collections_gen0: z.number().int(),
+    collections_gen1: z.number().int(),
+    collections_gen2: z.number().int(),
     uncollectable: z.number().int(),
     current_objects: z.number().int(),
   })

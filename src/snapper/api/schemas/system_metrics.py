@@ -88,9 +88,26 @@ class AsyncioMetrics(StrictBody):
 
 
 class GcMetrics(StrictBody):
-    """Garbage-collector counters from ``gc.get_stats`` + ``gc.get_count``."""
+    """Garbage-collector counters from ``gc.get_stats`` + ``gc.get_count``.
 
-    collections_per_gen: tuple[int, int, int]
+    The three generation counters are flat integer fields (rather than a
+    ``tuple[int, int, int]``) because the JSON-schema-driven frontend +
+    iOS code generators erase fixed-length tuple constraints into
+    ``unknown[]`` / ``[AnyCodable]``, losing the three-int contract on
+    the wire client. Flat fields preserve the contract end-to-end.
+
+    Attributes:
+        collections_gen0: Cumulative GC collection count for generation 0.
+        collections_gen1: Cumulative GC collection count for generation 1.
+        collections_gen2: Cumulative GC collection count for generation 2.
+        uncollectable: Cumulative count of objects that GC could not free.
+        current_objects: Sum of ``gc.get_count()`` across all generations
+            at sample time.
+    """
+
+    collections_gen0: int
+    collections_gen1: int
+    collections_gen2: int
     uncollectable: int
     current_objects: int
 
