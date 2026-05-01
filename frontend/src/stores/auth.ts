@@ -5,6 +5,7 @@ import type { LoginBody } from '../types/api'
 import { RESOURCE_ACCESS, ROLE_PERMISSIONS } from '../types/permissions.generated'
 import type { Permission } from '../types/permissions.generated'
 import { apiClient } from '../lib/apiClient'
+import { queryClient } from '../lib/queryClient'
 import { storeWsTicket } from '../lib/wsTicketCache'
 
 type User = Components['schemas']['UserProfile']
@@ -120,6 +121,7 @@ export const useAuthStore = create<AuthState>()(
           } finally {
             apiClient.clearCSRFToken()
             storeWsTicket(null)
+            queryClient.clear()
             set({
               user: null,
               isAuthenticated: false,
@@ -139,6 +141,7 @@ export const useAuthStore = create<AuthState>()(
 
           apiClient.clearCSRFToken()
           storeWsTicket(null)
+          queryClient.clear()
           set({
             user: null,
             isAuthenticated: false,

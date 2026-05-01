@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook } from '@testing-library/react'
 import { useAuth, useAuthStore } from './auth'
 import { apiClient } from '../lib/apiClient'
+import { queryClient } from '../lib/queryClient'
 
 vi.mock('../lib/apiClient', () => ({
   apiClient: {
@@ -14,6 +15,11 @@ vi.mock('../lib/apiClient', () => ({
 }))
 vi.mock('../lib/wsTicketCache', () => ({
   storeWsTicket: vi.fn(),
+}))
+vi.mock('../lib/queryClient', () => ({
+  queryClient: {
+    clear: vi.fn(),
+  },
 }))
 describe('auth store', () => {
   beforeEach(() => {
@@ -474,6 +480,21 @@ describe('auth store', () => {
       expect(mockWsDisconnect).toHaveBeenCalled()
       delete (window as Window & { wsDisconnectCallback?: () => void }).wsDisconnectCallback
     })
+    it('clears React Query cache on successful logout', async () => {
+      vi.mocked(apiClient.post).mockResolvedValueOnce({ ok: true } as Response)
+      const state = useAuthStore.getState()
+
+      await state.logout()
+      expect(vi.mocked(queryClient.clear)).toHaveBeenCalled()
+    })
+    it('clears React Query cache even when logout request fails', async () => {
+      vi.mocked(apiClient.post).mockRejectedValueOnce(new Error('Network error'))
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      const state = useAuthStore.getState()
+
+      await state.logout()
+      expect(vi.mocked(queryClient.clear)).toHaveBeenCalled()
+    })
   })
   describe('refreshToken', () => {
     beforeEach(() => {
@@ -778,6 +799,12 @@ describe('auth store', () => {
       state.silentLogout()
       expect(mockWsDisconnect).toHaveBeenCalled()
       delete (window as Window & { wsDisconnectCallback?: () => void }).wsDisconnectCallback
+    })
+    it('clears React Query cache on silentLogout', () => {
+      const state = useAuthStore.getState()
+
+      state.silentLogout()
+      expect(vi.mocked(queryClient.clear)).toHaveBeenCalled()
     })
   })
   describe('canAccess with unknown resource', () => {
