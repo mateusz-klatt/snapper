@@ -85,6 +85,8 @@ from snapper.core.partitioning import ShardOwnershipError
 from snapper.core.types import AllExchange
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.archive_symbols import resolve_archive_symbols
+from snapper.data.db_stats_types import TableCounters
+from snapper.data.db_stats_types import TableEntry
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AccrualLedger
 from snapper.data.models import AiDelegate
@@ -3724,6 +3726,46 @@ class Repository(ABC):
             The new ``dispatch_version`` on a winning CAS transition;
             ``None`` when the row was no longer ``pending`` (peer
             fanout or terminal transition won).
+        """
+        ...
+
+    @abstractmethod
+    async def count_table_stats(
+        self,
+        entry: TableEntry,
+        *,
+        archivable_window: tuple[date, date] | None = None,
+    ) -> TableCounters:
+        """Cluster B per-table four-counter primitive.
+
+        Returns ``TableCounters(total, current, closed, archivable)`` for
+        a single table. Per-kind semantics:
+
+        * ``entry.kind == "event"`` (append-only): ``total`` = ``COUNT(*)``;
+          ``current`` and ``closed`` are ``None`` (no SCD2 lifecycle —
+          ``0`` would imply the dimension exists). ``archivable`` is
+          ``COUNT(timestamp >= window_start AND timestamp < window_end + 1d)``
+          when ``archivable_window`` is provided, else ``None``.
+        * ``entry.kind == "state"`` (SCD2-versioned):
+          ``current = COUNT(known_to == KNOWN_TO_MAX)``,
+          ``closed = COUNT(known_to != KNOWN_TO_MAX)``,
+          ``total = current + closed`` (Python addition trusted on the
+          SCD2 invariant). ``archivable`` is the closed-only count over
+          the same half-open ``timestamp`` window when
+          ``archivable_window`` is provided, else ``None``.
+
+        Args:
+            entry: Table descriptor (name, kind, ORM model).
+            archivable_window: Inclusive ``(day_start, day_end)`` pair
+                from
+                :func:`snapper.application.retention.window.compute_retention_window`,
+                or ``None`` when no retention policy applies. The
+                concrete query emits a HALF-OPEN timestamp predicate
+                (``>= day_start midnight UTC AND < day_end + 1d midnight UTC``).
+
+        Returns:
+            :class:`TableCounters` with all four fields populated per
+            the per-kind semantics above.
         """
         ...
 
@@ -10941,6 +10983,72 @@ class SQLAlchemyRepository(Repository):
             s.add(AiReviewEvent(**audit_payload))
             await s.commit()
             return new_version
+
+    async def count_table_stats(
+        self,
+        entry: TableEntry,
+        *,
+        archivable_window: tuple[date, date] | None = None,
+    ) -> TableCounters:
+        """Per-table four-counter primitive for Cluster B (event + state)."""
+        async with self.session() as s:
+            archivable_predicate = _archivable_window_predicate(entry, archivable_window)
+            if entry.kind == "event":
+                total_stmt = select(func.count()).select_from(entry.model)
+                total = int((await s.execute(total_stmt)).scalar_one())
+                archivable: int | None = None
+                if archivable_predicate is not None:
+                    archivable_stmt = (
+                        select(func.count()).select_from(entry.model).where(archivable_predicate)
+                    )
+                    archivable = int((await s.execute(archivable_stmt)).scalar_one())
+                return TableCounters(total=total, current=None, closed=None, archivable=archivable)
+            current_stmt = (
+                select(func.count())
+                .select_from(entry.model)
+                .where(entry.model.known_to == KNOWN_TO_MAX)
+            )
+            closed_stmt = (
+                select(func.count())
+                .select_from(entry.model)
+                .where(entry.model.known_to != KNOWN_TO_MAX)
+            )
+            current = int((await s.execute(current_stmt)).scalar_one())
+            closed = int((await s.execute(closed_stmt)).scalar_one())
+            archivable = None
+            if archivable_predicate is not None:
+                archivable_stmt = (
+                    select(func.count())
+                    .select_from(entry.model)
+                    .where(entry.model.known_to != KNOWN_TO_MAX, archivable_predicate)
+                )
+                archivable = int((await s.execute(archivable_stmt)).scalar_one())
+            return TableCounters(
+                total=current + closed, current=current, closed=closed, archivable=archivable
+            )
+
+
+def _archivable_window_predicate(
+    entry: TableEntry,
+    archivable_window: tuple[date, date] | None,
+) -> Any | None:
+    """Build the half-open ``timestamp`` predicate for ``archivable_window``.
+
+    Cluster B/C alignment contract: rows AT
+    ``datetime(day_start, 0, 0, UTC)`` are INCLUDED; rows AT
+    ``datetime(day_end + 1d, 0, 0, UTC)`` are EXCLUDED. Mirrors the
+    archive-query bounds shape (``repository.py:get_event_rows_for_archive``
+    timestamp-range filter).
+    """
+    if archivable_window is None:
+        return None
+    day_start, day_end = archivable_window
+    window_start = datetime.combine(day_start, datetime.min.time(), tzinfo=UTC)
+    window_end = datetime.combine(day_end + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+    return and_(
+        entry.model.timestamp >= window_start,
+        entry.model.timestamp < window_end,
+    )
 
 
 _repository_cache: dict[str, Repository] = {}
