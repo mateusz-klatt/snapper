@@ -37,6 +37,9 @@ from fastapi import status
 
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.api.schemas.retention import RetentionPolicyResult
+from snapper.api.schemas.retention import RetentionRunData
+from snapper.api.schemas.retention import RetentionRunResponse
 from snapper.api.schemas.system_metrics import AsyncioMetrics
 from snapper.api.schemas.system_metrics import CpuMetrics
 from snapper.api.schemas.system_metrics import DbInternalMetrics
@@ -51,6 +54,9 @@ from snapper.api.schemas.system_metrics import SystemMetricsHistoryResponse
 from snapper.api.schemas.system_metrics import SystemMetricsResponse
 from snapper.api.schemas.system_metrics import TracemallocState
 from snapper.api.schemas.system_metrics import TracemallocStateResponse
+from snapper.application.retention.scheduler import RetentionScheduler
+from snapper.application.retention.service import RetentionPolicyRunResult
+from snapper.application.retention.service import RetentionRunSummary
 from snapper.application.system_metrics.snapshot_types import SystemMetricsSnapshot
 from snapper.application.system_metrics.snapshotter import SystemMetricsSnapshotter
 from snapper.application.system_metrics.tracemalloc_controller import DEFAULT_DURATION_SECONDS
@@ -68,6 +74,9 @@ router = APIRouter(prefix="/metrics", tags=["metrics"])
 _REST_STREAM = "rest.metrics"
 _DEFAULT_HISTORY_LIMIT = 720
 _SNAPSHOTTER_UNAVAILABLE_DETAIL = "system metrics snapshotter not available"
+_RETENTION_UNAVAILABLE_DETAIL = "retention scheduler not available"
+_RETENTION_DISABLED_DETAIL = "retention scheduler disabled"
+_RETENTION_NOT_YET_RUN_DETAIL = "retention scheduler not yet run"
 
 
 class NotificationMetricsData(StrictDataSchema[Literal["notification_metrics"]]):
@@ -478,4 +487,143 @@ async def post_system_metrics_tracemalloc_stop(
             active=snapshotter.tracemalloc.is_active(),
             requested_duration_seconds=None,
         ),
+    )
+
+
+@router.get("/retention")
+async def get_retention_metrics(
+    request: Request,
+    _principal: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.READ_SYSTEM_STATUS)),
+    ],
+) -> RetentionRunResponse:
+    """Return the most recent retention-scheduler run summary.
+
+    Args:
+        request: FastAPI request — provides app state + REST tracker.
+        _principal: Authenticated caller (permission gate enforced at
+            dependency resolution; the bound value is discarded because
+            the metrics are user-agnostic).
+
+    Returns:
+        :class:`RetentionRunResponse` envelope wrapping the latest
+        :class:`RetentionRunData` payload — per-policy outcomes for
+        the most recent scheduler tick.
+
+    Raises:
+        HTTPException: 503 when the scheduler is missing, disabled, or
+            has not yet run a tick (cold-start window).
+    """
+    scheduler = _resolve_retention_scheduler(request)
+    if scheduler.disabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_RETENTION_DISABLED_DETAIL,
+        )
+    summary = scheduler.last_run_summary
+    if summary is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_RETENTION_NOT_YET_RUN_DETAIL,
+        )
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    payload_sid, payload_seq, payload_ts, payload_pid = _next_provenance(tracker)
+    payload = _build_retention_run_data(
+        summary,
+        session_id=payload_sid,
+        sequence_id=payload_seq,
+        public_id=payload_pid,
+        timestamp=payload_ts,
+    )
+    envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(tracker)
+    return RetentionRunResponse(
+        session_id=envelope_sid,
+        sequence_id=envelope_seq,
+        public_id=envelope_pid,
+        timestamp=envelope_ts,
+        payload=payload,
+    )
+
+
+def _resolve_retention_scheduler(request: Request) -> RetentionScheduler:
+    """Pull the retention scheduler singleton or raise 503 if unavailable.
+
+    The lifespan startup hook in :mod:`snapper.server.app` assigns
+    ``app.state.retention_scheduler`` ONLY after a successful
+    :meth:`RetentionScheduler.start` call (B22 — no half-initialized
+    object can bypass the route layer's 503 fallback).
+
+    Args:
+        request: FastAPI request whose ``app.state`` holds the
+            singleton (or pre-set ``None`` on startup failure).
+
+    Returns:
+        The attached :class:`RetentionScheduler` instance.
+
+    Raises:
+        HTTPException: 503 when no scheduler is attached.
+    """
+    scheduler: RetentionScheduler | None = getattr(request.app.state, "retention_scheduler", None)
+    if scheduler is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_RETENTION_UNAVAILABLE_DETAIL,
+        )
+    return scheduler
+
+
+def _build_retention_run_data(
+    summary: RetentionRunSummary,
+    *,
+    session_id: str,
+    sequence_id: int,
+    public_id: str,
+    timestamp: datetime,
+) -> RetentionRunData:
+    """Map an in-memory :class:`RetentionRunSummary` to the wire schema.
+
+    Args:
+        summary: Source summary captured by the scheduler.
+        session_id: Envelope provenance — payload session.
+        sequence_id: Envelope provenance — payload sequence.
+        public_id: Envelope provenance — payload UUID7.
+        timestamp: Envelope provenance — payload timestamp.
+
+    Returns:
+        Wire-strict :class:`RetentionRunData` payload.
+    """
+    return RetentionRunData(
+        session_id=session_id,
+        sequence_id=sequence_id,
+        public_id=public_id,
+        timestamp=timestamp,
+        run_started_at=summary["run_started_at"],
+        run_completed_at=summary["run_completed_at"],
+        dry_run=summary["dry_run"],
+        results=[_build_retention_policy_result(r) for r in summary["results"]],
+    )
+
+
+def _build_retention_policy_result(
+    result: RetentionPolicyRunResult,
+) -> RetentionPolicyResult:
+    """Map an in-memory :class:`RetentionPolicyRunResult` to the wire schema.
+
+    Args:
+        result: Source per-policy result captured by the service.
+
+    Returns:
+        Wire-strict :class:`RetentionPolicyResult` body.
+    """
+    return RetentionPolicyResult(
+        table=result["table"],
+        retain_days=result["retain_days"],
+        backlog_lookback_days=result["backlog_lookback_days"],
+        day_start=result["day_start"],
+        day_end=result["day_end"],
+        archived_rows=result["archived_rows"],
+        purged_rows=result["purged_rows"],
+        files_written=result["files_written"],
+        error=result["error"],
     )

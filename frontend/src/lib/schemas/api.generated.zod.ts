@@ -672,6 +672,20 @@ export const RestRateExchangeStatsSchema = z
   })
   .strict()
 
+export const RetentionPolicyResultSchema = z
+  .object({
+    table: z.string(),
+    retain_days: z.number().int(),
+    backlog_lookback_days: z.number().int(),
+    day_start: z.string().nullable(),
+    day_end: z.string().nullable(),
+    archived_rows: z.number().int(),
+    purged_rows: z.number().int(),
+    files_written: z.number().int(),
+    error: z.string().nullable(),
+  })
+  .strict()
+
 export const RollPointDetailSchema = z
   .object({
     from_contract: z.string(),
@@ -1604,6 +1618,21 @@ export const RestRateDataSchema = z
   })
   .strict()
 
+export const RetentionRunDataSchema = z
+  .object({
+    type: z.literal('retention_run'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    topic: z.string().nullable().optional(),
+    run_started_at: z.iso.datetime(),
+    run_completed_at: z.iso.datetime(),
+    dry_run: z.boolean(),
+    results: z.array(RetentionPolicyResultSchema),
+  })
+  .strict()
+
 export const ContinuousSeriesPartialResponseSchema = z
   .object({
     type: z.literal('continuous_partial'),
@@ -2286,6 +2315,18 @@ export const RestRateResponseSchema = z
     session_id: z.string(),
     topic: z.string().nullable().optional(),
     payload: RestRateDataSchema,
+  })
+  .strict()
+
+export const RetentionRunResponseSchema = z
+  .object({
+    type: z.literal('retention_run_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    topic: z.string().nullable().optional(),
+    payload: RetentionRunDataSchema,
   })
   .strict()
 
@@ -3077,6 +3118,7 @@ export type PushBetaConfigRead = z.infer<typeof PushBetaConfigReadSchema>
 export type RegisterDeviceBody = z.infer<typeof RegisterDeviceBodySchema>
 export type RelationshipTypeEnum = z.infer<typeof RelationshipTypeEnumSchema>
 export type RestRateExchangeStats = z.infer<typeof RestRateExchangeStatsSchema>
+export type RetentionPolicyResult = z.infer<typeof RetentionPolicyResultSchema>
 export type RollPointDetail = z.infer<typeof RollPointDetailSchema>
 export type SaturationMetrics = z.infer<typeof SaturationMetricsSchema>
 export type ScopeGrantInfo = z.infer<typeof ScopeGrantInfoSchema>
@@ -3163,6 +3205,7 @@ export type ProcessStopResponse = z.infer<typeof ProcessStopResponseSchema>
 export type PushBetaConfigResponse = z.infer<typeof PushBetaConfigResponseSchema>
 export type RegisterDeviceCommand = z.infer<typeof RegisterDeviceCommandSchema>
 export type RestRateData = z.infer<typeof RestRateDataSchema>
+export type RetentionRunData = z.infer<typeof RetentionRunDataSchema>
 export type ContinuousSeriesPartialResponse = z.infer<typeof ContinuousSeriesPartialResponseSchema>
 export type SystemMetricsData = z.infer<typeof SystemMetricsDataSchema>
 export type SystemMetricsHistoryItem = z.infer<typeof SystemMetricsHistoryItemSchema>
@@ -3220,6 +3263,7 @@ export type JsonObject = z.infer<typeof JsonObjectSchema>
 export type ProcessSummaryResponse = z.infer<typeof ProcessSummaryResponseSchema>
 export type ProcessCreateResponse = z.infer<typeof ProcessCreateResponseSchema>
 export type RestRateResponse = z.infer<typeof RestRateResponseSchema>
+export type RetentionRunResponse = z.infer<typeof RetentionRunResponseSchema>
 export type SystemMetricsResponse = z.infer<typeof SystemMetricsResponseSchema>
 export type SystemMetricsHistoryResponse = z.infer<typeof SystemMetricsHistoryResponseSchema>
 export type HandoverScopeGrantResponse = z.infer<typeof HandoverScopeGrantResponseSchema>

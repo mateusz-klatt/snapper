@@ -3070,6 +3070,76 @@ struct RestRateResponse: Codable, Sendable {
     }
 }
 
+struct RetentionPolicyResult: Codable, Sendable {
+    let table: String
+    let retainDays: Int
+    let backlogLookbackDays: Int
+    let dayStart: String?
+    let dayEnd: String?
+    let archivedRows: Int
+    let purgedRows: Int
+    let filesWritten: Int
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case table
+        case retainDays = "retain_days"
+        case backlogLookbackDays = "backlog_lookback_days"
+        case dayStart = "day_start"
+        case dayEnd = "day_end"
+        case archivedRows = "archived_rows"
+        case purgedRows = "purged_rows"
+        case filesWritten = "files_written"
+        case error
+    }
+}
+
+struct RetentionRunData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let topic: String?
+    let runStartedAt: Date
+    let runCompletedAt: Date
+    let dryRun: Bool
+    let results: [RetentionPolicyResult]
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case topic
+        case runStartedAt = "run_started_at"
+        case runCompletedAt = "run_completed_at"
+        case dryRun = "dry_run"
+        case results
+    }
+}
+
+struct RetentionRunResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let topic: String?
+    let payload: RetentionRunData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case topic
+        case payload
+    }
+}
+
 struct RevokeScopeGrantResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int

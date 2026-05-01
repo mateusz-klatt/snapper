@@ -116,39 +116,69 @@ class TestSchedulerLoop:
 
     @pytest.mark.asyncio
     async def test_loop_continues_after_one_tick_raises(self) -> None:
-        """A bug in ``run_once`` itself is caught + the loop ticks again."""
-        scheduler, fake_service = _build_scheduler_with_fake_service(
-            run_once_side_effects=[
-                _build_fake_summary(),
-                RuntimeError("synthetic mid-loop boom"),
-                _build_fake_summary(),
-            ],
-            interval_seconds=0.01,
-        )
+        """A bug in ``run_once`` itself is caught + the loop ticks again.
+
+        Uses an :class:`asyncio.Event` to deterministically wait for
+        the third call without a wall-clock sleep — keeps the test
+        non-flaky under CI scheduling pressure.
+        """
+        third_call = asyncio.Event()
+        call_count = {"n": 0}
+        outcomes: list[Any] = [
+            _build_fake_summary(),
+            RuntimeError("synthetic mid-loop boom"),
+            _build_fake_summary(),
+        ]
+
+        async def _run_once_recording() -> Any:
+            call_count["n"] += 1
+            if call_count["n"] >= 3:
+                third_call.set()
+            outcome = outcomes[call_count["n"] - 1]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        scheduler, fake_service = _build_scheduler_with_fake_service(interval_seconds=0.005)
+        fake_service.run_once.side_effect = _run_once_recording
 
         await scheduler.start()
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(third_call.wait(), timeout=2.0)
         await scheduler.stop()
 
-        assert fake_service.run_once.await_count >= 3
+        assert call_count["n"] >= 3
 
     @pytest.mark.asyncio
     async def test_loop_continues_when_run_once_itself_raises(self) -> None:
-        """First post-eager tick raises; second tick still runs (defensive catch)."""
-        scheduler, fake_service = _build_scheduler_with_fake_service(
-            run_once_side_effects=[
-                _build_fake_summary(),
-                RuntimeError("post-eager bug"),
-                _build_fake_summary(),
-            ],
-            interval_seconds=0.01,
-        )
+        """First post-eager tick raises; second tick still runs (defensive catch).
+
+        Same deterministic-event pattern as the previous test.
+        """
+        third_call = asyncio.Event()
+        call_count = {"n": 0}
+        outcomes: list[Any] = [
+            _build_fake_summary(),
+            RuntimeError("post-eager bug"),
+            _build_fake_summary(),
+        ]
+
+        async def _run_once_recording() -> Any:
+            call_count["n"] += 1
+            if call_count["n"] >= 3:
+                third_call.set()
+            outcome = outcomes[call_count["n"] - 1]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        scheduler, fake_service = _build_scheduler_with_fake_service(interval_seconds=0.005)
+        fake_service.run_once.side_effect = _run_once_recording
 
         await scheduler.start()
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(third_call.wait(), timeout=2.0)
         await scheduler.stop()
 
-        assert fake_service.run_once.await_count >= 3
+        assert call_count["n"] >= 3
 
     @pytest.mark.asyncio
     async def test_stop_cancels_loop_cleanly(self) -> None:

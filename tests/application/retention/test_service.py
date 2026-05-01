@@ -446,6 +446,12 @@ async def test_to_thread_keeps_event_loop_responsive() -> None:
 
     Surfaces SC#13 — sampler tick offloads to thread (the loop ticks
     even while a synthetic 100ms ``export`` is running).
+
+    Given: a service whose archiver export sleeps 100ms in a thread,
+    When: a concurrent ticker awaits ``asyncio.sleep(0.02)`` five times
+        while ``evaluate_policy`` is running,
+    Then: the ticker completes all five iterations — proving the event
+        loop stays responsive while the sync export executes.
     """
     sleep_secs = 0.1
     progress: list[int] = []

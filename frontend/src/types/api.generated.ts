@@ -1140,6 +1140,22 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/metrics/retention": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: Operations["get_retention_metrics_api_metrics_retention_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/alerts/history": {
         parameters: {
             query?: never;
@@ -2786,6 +2802,38 @@ export type Components = {
             session_id: string;
             topic?: string | null;
             payload: Components["schemas"]["RestRateData"];
+        };
+        RetentionPolicyResult: {
+            table: string;
+            retain_days: number;
+            backlog_lookback_days: number;
+            day_start: string | null;
+            day_end: string | null;
+            archived_rows: number;
+            purged_rows: number;
+            files_written: number;
+            error: string | null;
+        };
+        RetentionRunData: {
+            type: "retention_run";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            topic?: string | null;
+            run_started_at: string;
+            run_completed_at: string;
+            dry_run: boolean;
+            results: Components["schemas"]["RetentionPolicyResult"][];
+        };
+        RetentionRunResponse: {
+            type: "retention_run_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            topic?: string | null;
+            payload: Components["schemas"]["RetentionRunData"];
         };
         RevokeScopeGrantResponse: {
             type: "revoke_scope_grant_response";
@@ -6392,6 +6440,25 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["TracemallocStateResponse"];
+                };
+            };
+        };
+    };
+    get_retention_metrics_api_metrics_retention_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["RetentionRunResponse"];
                 };
             };
         };
