@@ -1314,7 +1314,7 @@ struct DbStatsData: Codable, Sendable {
     let topic: String?
     let snapshotStartedAt: Date
     let snapshotCompletedAt: Date
-    let intervalSeconds: Double
+    let intervalSeconds: Int
     let tables: [TableStatsItem]
 
     enum CodingKeys: String, CodingKey {

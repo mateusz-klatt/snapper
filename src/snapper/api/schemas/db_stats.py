@@ -68,7 +68,7 @@ class DbStatsData(StrictDataSchema[Literal["db_stats"]]):
     type: Literal["db_stats"] = "db_stats"
     snapshot_started_at: datetime
     snapshot_completed_at: datetime
-    interval_seconds: float
+    interval_seconds: int
     tables: list[TableStatsItem]
 
 

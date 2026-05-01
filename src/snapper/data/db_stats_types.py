@@ -18,8 +18,9 @@ the sentinel).
 """
 
 from dataclasses import dataclass
-from typing import Any
 from typing import Literal
+
+from sqlalchemy.orm import DeclarativeBase
 
 TableKind = Literal["event", "state"]
 
@@ -31,14 +32,15 @@ class TableEntry:
     Attributes:
         name: Table name (key in ``EVENT_TABLES`` or ``STATE_TABLES``).
         kind: ``"event"`` (append-only) or ``"state"`` (SCD2-versioned).
-        model: SQLAlchemy ORM model class. ``type[Any]`` follows the
-            project boundary-exception rule for SQLAlchemy expression
-            internals.
+        model: SQLAlchemy ORM model class — must inherit
+            :class:`sqlalchemy.orm.DeclarativeBase` so the count
+            primitive can resolve ``model.known_to`` /
+            ``model.timestamp`` columns at runtime.
     """
 
     name: str
     kind: TableKind
-    model: type[Any]
+    model: type[DeclarativeBase]
 
 
 @dataclass(frozen=True, slots=True)

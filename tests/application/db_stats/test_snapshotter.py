@@ -58,29 +58,48 @@ def _stable_clock() -> Callable[[], datetime]:
 
 
 class TestResolveInterval:
-    """``DB_METRICS_INTERVAL_SECONDS`` parsing."""
+    """``DB_METRICS_INTERVAL_SECONDS`` parsing — int range [10, 3600]."""
 
     def test_unset_returns_default(self) -> None:
-        """``None`` env value falls back to 60.0."""
-        assert resolve_interval(None) == 60.0
+        """``None`` env value falls back to default 60."""
+        assert resolve_interval(None) == 60
 
     def test_blank_returns_default(self) -> None:
-        """Whitespace-only env value falls back to 60.0."""
-        assert resolve_interval("   ") == 60.0
+        """Whitespace-only env value falls back to default 60."""
+        assert resolve_interval("   ") == 60
 
-    def test_unparseable_returns_default(self) -> None:
-        """Non-numeric strings fall back to 60.0."""
-        assert resolve_interval("not-a-number") == 60.0
+    def test_unparseable_raises(self) -> None:
+        """Non-integer strings raise so a malformed env var fails loud."""
+        with pytest.raises(ValueError, match="not an integer"):
+            resolve_interval("not-a-number")
 
-    def test_non_positive_returns_default(self) -> None:
-        """Zero or negative values fall back to 60.0."""
-        assert resolve_interval("0") == 60.0
-        assert resolve_interval("-5") == 60.0
+    def test_below_min_raises(self) -> None:
+        """Values below ``INTERVAL_MIN_SECONDS`` raise out-of-range."""
+        with pytest.raises(ValueError, match="out of range"):
+            resolve_interval("5")
 
-    def test_positive_value_passes_through(self) -> None:
-        """Positive numerics survive parsing exactly."""
-        assert resolve_interval("120") == 120.0
-        assert resolve_interval("0.5") == 0.5
+    def test_above_max_raises(self) -> None:
+        """Values above ``INTERVAL_MAX_SECONDS`` raise out-of-range."""
+        with pytest.raises(ValueError, match="out of range"):
+            resolve_interval("3601")
+
+    def test_zero_or_negative_raises(self) -> None:
+        """Non-positive values are out-of-range and raise."""
+        with pytest.raises(ValueError, match="out of range"):
+            resolve_interval("0")
+        with pytest.raises(ValueError, match="out of range"):
+            resolve_interval("-5")
+
+    def test_in_range_passes_through_as_int(self) -> None:
+        """Values inside the supported range survive parsing exactly."""
+        assert resolve_interval("120") == 120
+        assert resolve_interval("10") == 10
+        assert resolve_interval("3600") == 3600
+
+    def test_float_string_raises(self) -> None:
+        """Fractional strings are not integers — raise instead of truncating."""
+        with pytest.raises(ValueError, match="not an integer"):
+            resolve_interval("0.5")
 
 
 class TestResolveDisabled:
@@ -128,23 +147,23 @@ class TestConstructorAndProperties:
         """Disabled mode discards the repo even when one was passed."""
         snapshotter = DbStatsSnapshotter(
             repo=_FakeRepo(),
-            interval_seconds=60.0,
+            interval_seconds=60,
             disabled=True,
         )
         assert snapshotter.disabled is True
         assert snapshotter.latest_snapshot is None
-        assert snapshotter.interval_seconds == 60.0
+        assert snapshotter.interval_seconds == 60
 
     def test_enabled_mode_keeps_repo(self) -> None:
         """Enabled mode preserves the repo and the configured interval."""
         repo = _FakeRepo()
         snapshotter = DbStatsSnapshotter(
             repo=repo,
-            interval_seconds=15.0,
+            interval_seconds=15,
             disabled=False,
         )
         assert snapshotter.disabled is False
-        assert snapshotter.interval_seconds == 15.0
+        assert snapshotter.interval_seconds == 15
 
     def test_constructor_reads_env_when_args_not_supplied(
         self, monkeypatch: pytest.MonkeyPatch
@@ -153,7 +172,7 @@ class TestConstructorAndProperties:
         monkeypatch.setenv("DB_METRICS_INTERVAL_SECONDS", "240")
         monkeypatch.setenv("DB_METRICS_DISABLED", "yes")
         snapshotter = DbStatsSnapshotter(repo=_FakeRepo())
-        assert snapshotter.interval_seconds == 240.0
+        assert snapshotter.interval_seconds == 240
         assert snapshotter.disabled is True
 
 
@@ -173,7 +192,7 @@ class TestSampleOnce:
         )
         snapshotter = DbStatsSnapshotter(
             repo=repo,
-            interval_seconds=60.0,
+            interval_seconds=60,
             disabled=False,
             clock=_stable_clock(),
         )
@@ -192,7 +211,7 @@ class TestSampleOnce:
             )
         )
         snapshotter = DbStatsSnapshotter(
-            repo=repo, interval_seconds=60.0, disabled=False, clock=_stable_clock()
+            repo=repo, interval_seconds=60, disabled=False, clock=_stable_clock()
         )
         snapshot = await snapshotter._sample_once()
         events = [t for t in snapshot.tables if t.table_kind == "event"]
@@ -221,7 +240,7 @@ class TestSampleOnce:
 
         snapshotter = DbStatsSnapshotter(
             repo=_CapturingRepo(),
-            interval_seconds=60.0,
+            interval_seconds=60,
             disabled=False,
             clock=_stable_clock(),
         )
@@ -240,7 +259,7 @@ class TestSampleOnce:
 
         repo = _FakeRepo(per_table_async=per_table)
         snapshotter = DbStatsSnapshotter(
-            repo=repo, interval_seconds=60.0, disabled=False, clock=_stable_clock()
+            repo=repo, interval_seconds=60, disabled=False, clock=_stable_clock()
         )
         snapshot = await snapshotter._sample_once()
         telemetry_row = snapshot.find("telemetry")
@@ -261,7 +280,7 @@ class TestSampleOnce:
 
         repo = _FakeRepo(per_table_async=per_table)
         snapshotter = DbStatsSnapshotter(
-            repo=repo, interval_seconds=60.0, disabled=False, clock=_stable_clock()
+            repo=repo, interval_seconds=60, disabled=False, clock=_stable_clock()
         )
         first = await snapshotter._sample_once()
         snapshotter._latest_snapshot = first
@@ -282,7 +301,7 @@ class TestSampleOnce:
 
         repo = _FakeRepo(per_table_async=hanging)
         snapshotter = DbStatsSnapshotter(
-            repo=repo, interval_seconds=60.0, disabled=False, clock=_stable_clock()
+            repo=repo, interval_seconds=60, disabled=False, clock=_stable_clock()
         )
         original_timeout = snapshotter_module.PER_TABLE_TIMEOUT_SECONDS
         try:
@@ -298,7 +317,7 @@ class TestSampleOnce:
     async def test_disabled_mode_sample_once_raises(self) -> None:
         """Calling ``_sample_once`` directly when disabled is a programmer error."""
         snapshotter = DbStatsSnapshotter(
-            repo=None, interval_seconds=60.0, disabled=True, clock=_stable_clock()
+            repo=None, interval_seconds=60, disabled=True, clock=_stable_clock()
         )
         with pytest.raises(RuntimeError, match="disabled mode"):
             await snapshotter._sample_once()
@@ -311,7 +330,7 @@ class TestStartStop:
     async def test_disabled_start_is_noop(self, caplog: pytest.LogCaptureFixture) -> None:
         """Disabled mode skips loop spawn and leaves ``latest_snapshot`` ``None``."""
         snapshotter = DbStatsSnapshotter(
-            repo=None, interval_seconds=60.0, disabled=True, clock=_stable_clock()
+            repo=None, interval_seconds=60, disabled=True, clock=_stable_clock()
         )
         with caplog.at_level("INFO", logger="snapper.application.db_stats.snapshotter"):
             await snapshotter.start()
@@ -328,13 +347,13 @@ class TestStartStop:
             )
         )
         snapshotter = DbStatsSnapshotter(
-            repo=repo, interval_seconds=0.05, disabled=False, clock=_stable_clock()
+            repo=repo, interval_seconds=1, disabled=False, clock=_stable_clock()
         )
         await snapshotter.start()
-        for _ in range(50):
+        for _ in range(200):
             if snapshotter.latest_snapshot is not None:
                 break
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.02)
         await snapshotter.stop()
         assert snapshotter.latest_snapshot is not None
         assert all(row.total == 3 for row in snapshotter.latest_snapshot.tables)
@@ -359,15 +378,15 @@ class TestStartStop:
         monkeypatch.setattr(DbStatsSnapshotter, "_sample_once", flaky)
         repo = _FakeRepo()
         snapshotter = DbStatsSnapshotter(
-            repo=repo, interval_seconds=0.05, disabled=False, clock=_stable_clock()
+            repo=repo, interval_seconds=1, disabled=False, clock=_stable_clock()
         )
         with caplog.at_level("ERROR", logger="snapper.application.db_stats.snapshotter"):
             try:
                 await snapshotter.start()
-                for _ in range(50):
+                for _ in range(200):
                     if len(events_seen) >= 2 and snapshotter.latest_snapshot is not None:
                         break
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0.02)
             finally:
                 await snapshotter.stop()
         assert len(events_seen) >= 2
@@ -384,7 +403,7 @@ class TestStartStop:
 
         repo = _FakeRepo(per_table_async=slow)
         snapshotter = DbStatsSnapshotter(
-            repo=repo, interval_seconds=0.05, disabled=False, clock=_stable_clock()
+            repo=repo, interval_seconds=1, disabled=False, clock=_stable_clock()
         )
         await snapshotter.start()
         await snapshotter.stop()
@@ -394,7 +413,7 @@ class TestStartStop:
     async def test_stop_is_idempotent_when_never_started(self) -> None:
         """``stop()`` on a never-started snapshotter is a clean no-op."""
         snapshotter = DbStatsSnapshotter(
-            repo=_FakeRepo(), interval_seconds=60.0, disabled=False, clock=_stable_clock()
+            repo=_FakeRepo(), interval_seconds=60, disabled=False, clock=_stable_clock()
         )
         await snapshotter.stop()
         assert snapshotter._loop_task is None
@@ -404,7 +423,7 @@ class TestStartStop:
         """Pre-set ``stopping`` exits at the ``while`` check without entering the body."""
         repo = _FakeRepo()
         snapshotter = DbStatsSnapshotter(
-            repo=repo, interval_seconds=10.0, disabled=False, clock=_stable_clock()
+            repo=repo, interval_seconds=10, disabled=False, clock=_stable_clock()
         )
         snapshotter._stopping.set()
         await snapshotter._loop()
@@ -416,7 +435,7 @@ class TestStartStop:
         """``stopping.set()`` mid-sleep returns from the loop via the wait_for branch."""
         repo = _FakeRepo()
         snapshotter = DbStatsSnapshotter(
-            repo=repo, interval_seconds=5.0, disabled=False, clock=_stable_clock()
+            repo=repo, interval_seconds=10, disabled=False, clock=_stable_clock()
         )
         await snapshotter.start()
         await asyncio.sleep(0)
@@ -435,7 +454,7 @@ class TestStartStop:
         """Stopping set after sleep timeout but before sample exits without sampling."""
         repo = _FakeRepo()
         snapshotter = DbStatsSnapshotter(
-            repo=repo, interval_seconds=0.005, disabled=False, clock=_stable_clock()
+            repo=repo, interval_seconds=1, disabled=False, clock=_stable_clock()
         )
         sleep_calls: list[int] = []
 
@@ -462,7 +481,7 @@ class TestStaleRowFor:
         prior = DbStatsSnapshot(
             snapshot_started_at=sampled_at,
             snapshot_completed_at=sampled_at,
-            interval_seconds=60.0,
+            interval_seconds=60,
             tables=(
                 TableStats(
                     table="telemetry",
@@ -512,7 +531,7 @@ class TestDbStatsSnapshotFind:
         snapshot = DbStatsSnapshot(
             snapshot_started_at=ts,
             snapshot_completed_at=ts,
-            interval_seconds=60.0,
+            interval_seconds=60,
             tables=(row,),
         )
         assert snapshot.find("orders") is row
@@ -523,7 +542,7 @@ class TestDbStatsSnapshotFind:
         snapshot = DbStatsSnapshot(
             snapshot_started_at=ts,
             snapshot_completed_at=ts,
-            interval_seconds=60.0,
+            interval_seconds=60,
             tables=(),
         )
         assert snapshot.find("nope") is None

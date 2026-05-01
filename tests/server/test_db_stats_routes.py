@@ -58,7 +58,7 @@ def _build_snapshot() -> DbStatsSnapshot:
     return DbStatsSnapshot(
         snapshot_started_at=started,
         snapshot_completed_at=completed,
-        interval_seconds=60.0,
+        interval_seconds=60,
         tables=(
             TableStats(
                 table="orders",
@@ -102,7 +102,7 @@ class TestGetDbStatsHandler:
         """Latest snapshot is mapped onto the wire envelope."""
         snapshotter = SimpleNamespace(
             disabled=False,
-            interval_seconds=60.0,
+            interval_seconds=60,
             latest_snapshot=_build_snapshot(),
         )
 
@@ -113,7 +113,7 @@ class TestGetDbStatsHandler:
 
         assert response.type == "db_stats_response"
         assert response.payload.type == "db_stats"
-        assert response.payload.interval_seconds == 60.0
+        assert response.payload.interval_seconds == 60
         assert response.payload.snapshot_started_at == datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
         assert len(response.payload.tables) == 2
         orders = response.payload.tables[0]
@@ -149,7 +149,7 @@ class TestGetDbStatsHandler:
         """Snapshotter in disabled state → 503 with the disabled detail (no Retry-After)."""
         snapshotter = SimpleNamespace(
             disabled=True,
-            interval_seconds=60.0,
+            interval_seconds=60,
             latest_snapshot=None,
         )
 
@@ -167,7 +167,7 @@ class TestGetDbStatsHandler:
         """Cold-start window → 503 distinct detail + ``Retry-After`` echoing interval."""
         snapshotter = SimpleNamespace(
             disabled=False,
-            interval_seconds=60.0,
+            interval_seconds=60,
             latest_snapshot=None,
         )
 
@@ -186,7 +186,7 @@ class TestGetDbStatsHandler:
         """``Retry-After`` derives from the interval, not a hardcoded constant."""
         snapshotter = SimpleNamespace(
             disabled=False,
-            interval_seconds=300.0,
+            interval_seconds=300,
             latest_snapshot=None,
         )
         with pytest.raises(HTTPException) as exc:
@@ -230,7 +230,7 @@ class TestGetDbStatsViaTestClient:
         """VIEWER role passes the permission gate."""
         snapshotter = SimpleNamespace(
             disabled=False,
-            interval_seconds=60.0,
+            interval_seconds=60,
             latest_snapshot=_build_snapshot(),
         )
         app = _build_app_with_snapshotter(snapshotter=snapshotter, auth_override=True)
@@ -250,7 +250,7 @@ class TestGetDbStatsViaTestClient:
         """No auth override → no Authorization header → 401."""
         snapshotter = SimpleNamespace(
             disabled=False,
-            interval_seconds=60.0,
+            interval_seconds=60,
             latest_snapshot=_build_snapshot(),
         )
         app = _build_app_with_snapshotter(snapshotter=snapshotter, auth_override=False)

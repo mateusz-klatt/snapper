@@ -1810,7 +1810,7 @@ export const DbStatsDataSchema = z
     topic: z.string().nullable().optional(),
     snapshot_started_at: z.iso.datetime(),
     snapshot_completed_at: z.iso.datetime(),
-    interval_seconds: z.number(),
+    interval_seconds: z.number().int(),
     tables: z.array(TableStatsItemSchema),
   })
   .strict()

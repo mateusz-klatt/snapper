@@ -10991,27 +10991,24 @@ class SQLAlchemyRepository(Repository):
         archivable_window: tuple[date, date] | None = None,
     ) -> TableCounters:
         """Per-table four-counter primitive for Cluster B (event + state)."""
+        model = cast(Any, entry.model)
         async with self.session() as s:
             archivable_predicate = _archivable_window_predicate(entry, archivable_window)
             if entry.kind == "event":
-                total_stmt = select(func.count()).select_from(entry.model)
+                total_stmt = select(func.count()).select_from(model)
                 total = int((await s.execute(total_stmt)).scalar_one())
                 archivable: int | None = None
                 if archivable_predicate is not None:
                     archivable_stmt = (
-                        select(func.count()).select_from(entry.model).where(archivable_predicate)
+                        select(func.count()).select_from(model).where(archivable_predicate)
                     )
                     archivable = int((await s.execute(archivable_stmt)).scalar_one())
                 return TableCounters(total=total, current=None, closed=None, archivable=archivable)
             current_stmt = (
-                select(func.count())
-                .select_from(entry.model)
-                .where(entry.model.known_to == KNOWN_TO_MAX)
+                select(func.count()).select_from(model).where(model.known_to == KNOWN_TO_MAX)
             )
             closed_stmt = (
-                select(func.count())
-                .select_from(entry.model)
-                .where(entry.model.known_to != KNOWN_TO_MAX)
+                select(func.count()).select_from(model).where(model.known_to != KNOWN_TO_MAX)
             )
             current = int((await s.execute(current_stmt)).scalar_one())
             closed = int((await s.execute(closed_stmt)).scalar_one())
@@ -11019,8 +11016,8 @@ class SQLAlchemyRepository(Repository):
             if archivable_predicate is not None:
                 archivable_stmt = (
                     select(func.count())
-                    .select_from(entry.model)
-                    .where(entry.model.known_to != KNOWN_TO_MAX, archivable_predicate)
+                    .select_from(model)
+                    .where(model.known_to != KNOWN_TO_MAX, archivable_predicate)
                 )
                 archivable = int((await s.execute(archivable_stmt)).scalar_one())
             return TableCounters(
@@ -11042,12 +11039,13 @@ def _archivable_window_predicate(
     """
     if archivable_window is None:
         return None
+    model = cast(Any, entry.model)
     day_start, day_end = archivable_window
     window_start = datetime.combine(day_start, datetime.min.time(), tzinfo=UTC)
     window_end = datetime.combine(day_end + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
     return and_(
-        entry.model.timestamp >= window_start,
-        entry.model.timestamp < window_end,
+        model.timestamp >= window_start,
+        model.timestamp < window_end,
     )
 
 

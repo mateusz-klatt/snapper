@@ -677,7 +677,7 @@ async def get_db_table_stats(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=_DB_STATS_NOT_YET_RUN_DETAIL,
-            headers={"Retry-After": str(int(snapshotter.interval_seconds))},
+            headers={"Retry-After": str(snapshotter.interval_seconds)},
         )
     tracker: SequenceTracker = request.app.state.rest_tracker
     payload_sid, payload_seq, payload_ts, payload_pid = _next_provenance(tracker)

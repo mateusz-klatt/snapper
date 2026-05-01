@@ -143,3 +143,88 @@ class TestClusterBCAlignment:
         assert result["error"] is None
         assert counters.archivable == result["archived_rows"] == in_window_count == 70
         assert counters.total == 100
+
+    @pytest.mark.asyncio
+    async def test_boundary_edges_agree_between_b_and_c(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Plan §7.6 boundary edge cases: both sides count the same edge rows.
+
+        Seed 3 telemetry rows at the exact half-open window edges:
+        ``day_start 00:00 UTC`` (INCLUDED), ``day_end 23:59:59 UTC``
+        (INCLUDED), ``day_end + 1d 00:00 UTC`` (EXCLUDED). Both
+        Cluster B's ``count_table_stats`` and Cluster C's
+        ``evaluate_policy(dry_run=True)`` MUST count exactly 2.
+        """
+        db_path = tmp_path / "boundary.db"
+        db_url = f"sqlite+aiosqlite:///{db_path}"
+        today = date(2026, 5, 1)
+        policy = RetentionPolicy(table="telemetry", retain_days=1, backlog_lookback_days=30)
+        day_start, day_end = compute_retention_window(today, policy)
+
+        seed_repo = service_module.DatabaseRepository(db_url)
+        seed_repo.create_all()
+        edge_rows = [
+            (
+                "at_start_midnight",
+                datetime(day_start.year, day_start.month, day_start.day, 0, 0, tzinfo=UTC),
+            ),
+            (
+                "at_end_last_second",
+                datetime(day_end.year, day_end.month, day_end.day, 23, 59, 59, tzinfo=UTC),
+            ),
+            (
+                "at_end_plus_one_midnight",
+                datetime(
+                    (day_end + timedelta(days=1)).year,
+                    (day_end + timedelta(days=1)).month,
+                    (day_end + timedelta(days=1)).day,
+                    0,
+                    0,
+                    tzinfo=UTC,
+                ),
+            ),
+        ]
+        with seed_repo.get_session() as session:
+            for i, (label, ts) in enumerate(edge_rows):
+                session.add(
+                    Telemetry(
+                        public_id=f"00000000-0000-7000-8000-{i:012d}",
+                        session_id=label,
+                        sequence_id=i,
+                        timestamp=ts,
+                        known_to=KNOWN_TO_MAX,
+                        transport="ws",
+                        direction="in",
+                        message_type="ping",
+                        payload=None,
+                    )
+                )
+            session.commit()
+        seed_repo.dispose()
+
+        async_repo = SQLAlchemyRepository(db_url)
+        try:
+            counters = await async_repo.count_table_stats(
+                _telemetry_entry(),
+                archivable_window=(day_start, day_end),
+            )
+        finally:
+            await async_repo.engine.dispose()
+
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> _FrozenDatetime:
+                return cls(today.year, today.month, today.day, 12, 0, tzinfo=tz or UTC)
+
+        monkeypatch.setattr(service_module, "datetime", _FrozenDatetime)
+        monkeypatch.delenv("RETENTION_DRY_RUN", raising=False)
+        service = RetentionService(db_url=db_url, base_dir=tmp_path)
+        try:
+            result = await service.evaluate_policy(policy, dry_run=True)
+        finally:
+            await service.close()
+
+        assert result["error"] is None
+        assert counters.archivable == result["archived_rows"] == 2
+        assert counters.total == 3

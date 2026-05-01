@@ -53,33 +53,46 @@ from snapper.data.repository import Repository
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_INTERVAL_SECONDS: Final[float] = 60.0
+DEFAULT_INTERVAL_SECONDS: Final[int] = 60
+INTERVAL_MIN_SECONDS: Final[int] = 10
+INTERVAL_MAX_SECONDS: Final[int] = 3600
 PER_TABLE_TIMEOUT_SECONDS: Final[float] = 30.0
 _INTERVAL_ENV_VAR: Final[str] = "DB_METRICS_INTERVAL_SECONDS"
 _DISABLED_ENV_VAR: Final[str] = "DB_METRICS_DISABLED"
 _TRUTHY_ENV_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes"})
 
 
-def resolve_interval(env_value: str | None) -> float:
-    """Coerce ``DB_METRICS_INTERVAL_SECONDS`` to a positive float in seconds.
+def resolve_interval(env_value: str | None) -> int:
+    """Coerce ``DB_METRICS_INTERVAL_SECONDS`` to an int in [10, 3600] seconds.
 
-    Empty / unset / unparseable / non-positive values fall back to the
-    default :data:`DEFAULT_INTERVAL_SECONDS` (60.0).
+    Empty / unset values fall back to :data:`DEFAULT_INTERVAL_SECONDS`
+    (60). Anything else that parses as an integer outside the
+    [``INTERVAL_MIN_SECONDS``, ``INTERVAL_MAX_SECONDS``] range raises
+    :class:`ValueError` so a malformed env var fails loud at lifespan
+    startup (the helper catches the exception and the route falls
+    through to 503 ``not initialized``).
 
     Args:
         env_value: Raw env-var value, or ``None`` when unset.
 
     Returns:
         Loop interval in seconds.
+
+    Raises:
+        ValueError: When the raw value is not parseable as an integer
+            or parses outside the supported range.
     """
     if env_value is None or env_value.strip() == "":
         return DEFAULT_INTERVAL_SECONDS
     try:
-        value = float(env_value)
-    except ValueError:
-        return DEFAULT_INTERVAL_SECONDS
-    if value <= 0:
-        return DEFAULT_INTERVAL_SECONDS
+        value = int(env_value.strip())
+    except ValueError as exc:
+        raise ValueError(f"DB_METRICS_INTERVAL_SECONDS={env_value!r} is not an integer") from exc
+    if value < INTERVAL_MIN_SECONDS or value > INTERVAL_MAX_SECONDS:
+        raise ValueError(
+            "DB_METRICS_INTERVAL_SECONDS="
+            f"{value} out of range [{INTERVAL_MIN_SECONDS}, {INTERVAL_MAX_SECONDS}]"
+        )
     return value
 
 
@@ -133,7 +146,7 @@ class DbStatsSnapshot:
 
     snapshot_started_at: datetime
     snapshot_completed_at: datetime
-    interval_seconds: float
+    interval_seconds: int
     tables: tuple[TableStats, ...]
 
     def find(self, name: str) -> TableStats | None:
@@ -159,7 +172,7 @@ class DbStatsSnapshotter:
         self,
         *,
         repo: Repository | None,
-        interval_seconds: float | None = None,
+        interval_seconds: int | None = None,
         disabled: bool | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -199,7 +212,7 @@ class DbStatsSnapshotter:
         return self._disabled
 
     @property
-    def interval_seconds(self) -> float:
+    def interval_seconds(self) -> int:
         """Return the configured loop period in seconds.
 
         Returns:
