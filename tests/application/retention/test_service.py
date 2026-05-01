@@ -48,7 +48,6 @@ from snapper.application.retention.policies import resolve_dry_run
 from snapper.application.retention.policies import resolve_interval
 from snapper.application.retention.policies import resolve_output_dir
 from snapper.application.retention.service import RetentionService
-from snapper.application.retention.service import _compute_window
 from snapper.application.retention.service import _failure_result
 from snapper.data.archiver import ExportResult
 from snapper.data.models import KNOWN_TO_MAX
@@ -232,30 +231,6 @@ class TestEnvVarParsers:
     def test_resolve_output_dir(self, env_value: str | None, expected: str) -> None:
         """Empty / unset falls back to the CLI default ``data``."""
         assert resolve_output_dir(env_value) == expected
-
-
-class TestComputeWindow:
-    """Per-tick boundary formula (Cluster C plan §3.6)."""
-
-    def test_telemetry_policy_today_2026_05_01(self) -> None:
-        """SC#4 fixture — `retain_days=1, backlog_lookback_days=30`."""
-        policy = RetentionPolicy(table="telemetry", retain_days=1, backlog_lookback_days=30)
-        day_start, day_end = _compute_window(date(2026, 5, 1), policy)
-        assert day_start == date(2026, 3, 30)
-        assert day_end == date(2026, 4, 29)
-
-    def test_zero_lookback_yields_one_day_window(self) -> None:
-        """``backlog_lookback_days=0`` → window covers exactly one day."""
-        policy = RetentionPolicy(table="telemetry", retain_days=2, backlog_lookback_days=0)
-        day_start, day_end = _compute_window(date(2026, 5, 1), policy)
-        assert day_start == day_end == date(2026, 4, 28)
-
-    def test_large_retain_pushes_window_into_past(self) -> None:
-        """Large ``retain_days`` shifts both bounds proportionally."""
-        policy = RetentionPolicy(table="telemetry", retain_days=365, backlog_lookback_days=30)
-        day_start, day_end = _compute_window(date(2026, 5, 1), policy)
-        assert day_end == date(2025, 4, 30)
-        assert day_start == date(2025, 3, 31)
 
 
 class TestFailureResult:

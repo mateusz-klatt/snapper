@@ -896,6 +896,7 @@ class Telemetry(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
+        Index("ix_telemetry_timestamp", "timestamp"),
     )
     transport: Mapped[str] = mapped_column(String(10))
     direction: Mapped[str] = mapped_column(String(10))

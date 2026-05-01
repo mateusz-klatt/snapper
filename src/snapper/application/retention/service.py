@@ -26,15 +26,14 @@ import asyncio
 import logging
 import os
 from datetime import UTC
-from datetime import date
 from datetime import datetime
-from datetime import timedelta
 from pathlib import Path
 from typing import TypedDict
 
 from snapper.application.retention.policies import RETENTION_POLICIES
 from snapper.application.retention.policies import RetentionPolicy
 from snapper.application.retention.policies import resolve_dry_run
+from snapper.application.retention.window import compute_retention_window
 from snapper.data.archiver import EventArchiver
 from snapper.data.repository import DatabaseRepository
 
@@ -137,7 +136,7 @@ class RetentionService:
         """
         today_utc = datetime.now(UTC).date()
         try:
-            day_start, day_end = _compute_window(today_utc, policy)
+            day_start, day_end = compute_retention_window(today_utc, policy)
         except (ValueError, OverflowError) as exc:
             logger.exception(
                 "RetentionService: window computation failed for table=%s", policy.table
@@ -223,35 +222,6 @@ class RetentionService:
         ``await service.close()``.
         """
         await asyncio.to_thread(self._repo.dispose)
-
-
-def _compute_window(today_utc: date, policy: RetentionPolicy) -> tuple[date, date]:
-    """Map ``policy`` to a per-tick ``(day_start, day_end)`` window.
-
-    Per the formula in
-    ``proprietary/plans/plan_observability_cluster_c.md`` §3.6:
-
-    .. code-block:: python
-
-        oldest_kept_day      = today_utc - timedelta(days=policy.retain_days)
-        last_eligible_day    = oldest_kept_day - timedelta(days=1)
-        earliest_scanned_day = last_eligible_day - timedelta(days=policy.backlog_lookback_days)
-
-    Args:
-        today_utc: UTC date to anchor the window against (typically
-            ``datetime.now(UTC).date()``).
-        policy: Retention rule with ``retain_days`` +
-            ``backlog_lookback_days``.
-
-    Returns:
-        ``(earliest_scanned_day, last_eligible_day)`` — the
-        ``(day_start, day_end)`` pair to pass to
-        :meth:`EventArchiver.export` (whole-day inclusive).
-    """
-    oldest_kept_day = today_utc - timedelta(days=policy.retain_days)
-    last_eligible_day = oldest_kept_day - timedelta(days=1)
-    earliest_scanned_day = last_eligible_day - timedelta(days=policy.backlog_lookback_days)
-    return earliest_scanned_day, last_eligible_day
 
 
 def _failure_result(
