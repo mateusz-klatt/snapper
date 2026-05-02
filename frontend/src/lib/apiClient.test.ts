@@ -651,6 +651,47 @@ describe('domain API methods', () => {
     expect(result.payload.delivery_success_total).toBe(100)
     expect(result.payload.outbox_queued_depth).toBe(5)
   })
+  it('getRetentionRun returns the latest scheduler tick', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        type: 'retention_run_response',
+        sequence_id: 0,
+        public_id: 'env-r',
+        timestamp: '2026-05-02T17:00:00Z',
+        session_id: 'sid',
+        payload: {
+          type: 'retention_run',
+          sequence_id: 1,
+          public_id: 'p-r',
+          timestamp: '2026-05-02T17:00:00Z',
+          session_id: 'sid',
+          run_started_at: '2026-05-02T17:00:00Z',
+          run_completed_at: '2026-05-02T17:00:01Z',
+          dry_run: true,
+          results: [
+            {
+              table: 'orders',
+              retain_days: 30,
+              backlog_lookback_days: 7,
+              day_start: '2026-04-01',
+              day_end: '2026-04-02',
+              archived_rows: 100,
+              purged_rows: 0,
+              files_written: 1,
+              error: null,
+            },
+          ],
+        },
+      }),
+    })
+    const result = await apiClient.getRetentionRun()
+
+    expect(result.payload.dry_run).toBe(true)
+    expect(result.payload.results).toHaveLength(1)
+    expect(result.payload.results[0]?.archived_rows).toBe(100)
+  })
   it('getCandles returns candle data', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,

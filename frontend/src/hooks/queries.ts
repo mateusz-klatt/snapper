@@ -161,6 +161,19 @@ export const useNotificationMetrics = () => {
   })
 }
 
+export const useRetentionRun = () => {
+  const { isAuthenticated } = useAuth()
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+
+  return useQuery({
+    queryKey: ['system', 'retention'] as const,
+    queryFn: () => apiClient.getRetentionRun(),
+    refetchInterval: isAuthenticated && !isTimeTraveling ? 60000 : false,
+    enabled: isAuthenticated,
+    throwOnError: false,
+  })
+}
+
 export const useCandles = (
   instrument: string,
   exchange: string,

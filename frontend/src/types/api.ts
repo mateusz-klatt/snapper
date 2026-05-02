@@ -130,3 +130,7 @@ export type TableStatsItem = Components['schemas']['TableStatsItem']
 
 export type NotificationMetricsResponse = Components['schemas']['NotificationMetricsResponse']
 export type NotificationMetricsData = Components['schemas']['NotificationMetricsData']
+
+export type RetentionRunResponse = Components['schemas']['RetentionRunResponse']
+export type RetentionRunData = Components['schemas']['RetentionRunData']
+export type RetentionPolicyResult = Components['schemas']['RetentionPolicyResult']

@@ -25,6 +25,11 @@ vi.mock('../../hooks/queries', () => ({
     isLoading: false,
     error: null,
   })),
+  useRetentionRun: vi.fn(() => ({
+    data: null,
+    isLoading: false,
+    error: null,
+  })),
 }))
 const createQueryClient = () =>
   new QueryClient({

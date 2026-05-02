@@ -7,6 +7,7 @@ import {
   useSystemMetrics,
   useDbStats,
   useNotificationMetrics,
+  useRetentionRun,
   useCandles,
   useExchanges,
   useExchangeInstruments,
@@ -173,6 +174,18 @@ vi.mock('../lib/apiClient', () => ({
             delivery_410_unregistered_total: 0,
             delivery_cancelled_scope_total: 0,
             outbox_queued_depth: 0,
+          }),
+        })
+      )
+    ),
+    getRetentionRun: vi.fn(() =>
+      Promise.resolve(
+        envelope('retention_run_response', {
+          payload: envelope('retention_run', {
+            run_started_at: '2026-05-02T17:00:00Z',
+            run_completed_at: '2026-05-02T17:00:01Z',
+            dry_run: false,
+            results: [],
           }),
         })
       )
@@ -569,6 +582,16 @@ describe('queries', () => {
   describe('useNotificationMetrics', () => {
     it('returns data when authenticated', async () => {
       const { result } = renderHook(() => useNotificationMetrics(), { wrapper: createWrapper() })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data).toBeDefined()
+    })
+  })
+  describe('useRetentionRun', () => {
+    it('returns data when authenticated', async () => {
+      const { result } = renderHook(() => useRetentionRun(), { wrapper: createWrapper() })
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false)
@@ -1426,6 +1449,12 @@ describe('queries', () => {
     it('useNotificationMetrics disables refetchInterval when time-traveling', async () => {
       appStoreModule.useAppStore.setState({ asOf: '2026-01-01T00:00:00Z', isTimeTraveling: true })
       const { result } = renderHook(() => useNotificationMetrics(), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
+    })
+    it('useRetentionRun disables refetchInterval when time-traveling', async () => {
+      appStoreModule.useAppStore.setState({ asOf: '2026-01-01T00:00:00Z', isTimeTraveling: true })
+      const { result } = renderHook(() => useRetentionRun(), { wrapper: createWrapper() })
 
       await waitFor(() => expect(result.current.isLoading).toBe(false))
     })

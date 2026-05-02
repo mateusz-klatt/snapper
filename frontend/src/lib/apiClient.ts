@@ -17,6 +17,7 @@ import {
   SystemMetricsResponseSchema,
   DbStatsResponseSchema,
   NotificationMetricsResponseSchema,
+  RetentionRunResponseSchema,
   SystemStatusResponseSchema,
   ConfiguredProcessesResponseSchema,
   ProcessSummaryResponseSchema,
@@ -62,6 +63,7 @@ import type {
   SystemMetricsResponse,
   DbStatsResponse,
   NotificationMetricsResponse,
+  RetentionRunResponse,
   SystemStatusResponse,
   SettingListResponse,
   SettingResponse,
@@ -528,6 +530,11 @@ class APIClient {
     const data = await this.getJSON('/api/metrics/notifications')
 
     return validateResponse(data, NotificationMetricsResponseSchema, '/metrics/notifications')
+  }
+  async getRetentionRun(): Promise<RetentionRunResponse> {
+    const data = await this.getJSON('/api/metrics/retention')
+
+    return validateResponse(data, RetentionRunResponseSchema, '/metrics/retention')
   }
   async getCandles(
     instrument: string,
