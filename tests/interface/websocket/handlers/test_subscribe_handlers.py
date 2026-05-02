@@ -354,8 +354,8 @@ class TestHandleUnsubscribeEdgeCases:
     ) -> None:
         """Unsubscribe handles topics not currently subscribed.
 
-        Given: Client subscribed to BTC-USD but not ETH-PLN,
-        When: Unsubscribing from ETH-PLN,
+        Given: Client subscribed to BTC-USD but not ETH-USD,
+        When: Unsubscribing from ETH-USD,
         Then: Returns success with no_topics status and denied topic.
         """
         message = WSUnsubscribeRequest(
@@ -363,14 +363,14 @@ class TestHandleUnsubscribeEdgeCases:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             session_id="",
             sequence_id=0,
-            topics=["market.zonda.ETH-PLN.candles.1m"],
+            topics=["market.kraken.ETH-USD.candles.1m"],
         )
         await handle_unsubscribe(mock_websocket, message, mock_manager)
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
         assert response["type"] == "subscription_success"
         assert response["status"] == "no_topics"
-        assert "market.zonda.ETH-PLN.candles.1m" in response["denied_topics"]
+        assert "market.kraken.ETH-USD.candles.1m" in response["denied_topics"]
 
     @pytest.mark.asyncio
     async def test_unsubscribe_when_zmq_bridge_unavailable(
@@ -414,7 +414,7 @@ class TestHandleUnsubscribeEdgeCases:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             session_id="",
             sequence_id=0,
-            topics=["market.kraken.BTC-USD.candles.1m", "market.zonda.ETH-PLN.candles.1m"],
+            topics=["market.kraken.BTC-USD.candles.1m", "market.kraken.ETH-USD.candles.1m"],
         )
         await handle_unsubscribe(mock_websocket, message, mock_manager)
         mock_websocket.send_text.assert_called_once()
@@ -422,7 +422,7 @@ class TestHandleUnsubscribeEdgeCases:
         assert response["type"] == "subscription_success"
         assert response["status"] == "partial"
         assert "market.kraken.BTC-USD.candles.1m" in response["topics"]
-        assert "market.zonda.ETH-PLN.candles.1m" in response["denied_topics"]
+        assert "market.kraken.ETH-USD.candles.1m" in response["denied_topics"]
 
     @pytest.mark.asyncio
     async def test_unsubscribe_with_whitespace_only_topics(

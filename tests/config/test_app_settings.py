@@ -195,7 +195,7 @@ class TestAppSettingsTradingProperties:
         Then configured dict is returned.
         """
         bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        custom_instruments = {"kraken": ["BTC-USD"], "zonda": ["BTC-PLN"]}
+        custom_instruments = {"kraken": ["BTC-USD"], "walutomat": ["EUR-PLN"]}
         service = MockSettingsService({"instruments": custom_instruments})
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.instruments == custom_instruments

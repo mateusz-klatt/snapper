@@ -585,9 +585,9 @@ class TestMessages:
             "sequence_id": 0,
             "public_id": "test-pid",
             "timestamp": "2024-01-01T00:00:00Z",
-            "exchange": "zonda",
-            "instrument": "BTC-PLN",
-            "exchange_order_id": "ZONDA-111",
+            "exchange": "walutomat",
+            "instrument": "EUR-PLN",
+            "exchange_order_id": "WALUTOMAT-111",
             "client_order_id": "client_111",
             "new_price": 200000.0,
         }

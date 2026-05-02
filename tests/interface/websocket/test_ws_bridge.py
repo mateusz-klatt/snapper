@@ -3099,7 +3099,7 @@ class TestPatternMatching:
         When: Finding matching pattern for submit command topic,
         Then: Returns config with orders.commands pattern.
         """
-        config = bridge._find_matching_pattern("orders.commands.zonda.ETH-PLN.submit")
+        config = bridge._find_matching_pattern("orders.commands.kraken.ETH-USD.submit")
         assert config is not None
         assert config.pattern == "orders.commands."
 

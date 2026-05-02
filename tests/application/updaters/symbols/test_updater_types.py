@@ -7,7 +7,6 @@ optional keys are truly optional, and key access patterns work correctly.
 from snapper.application.updaters.symbols.types import KrakenSymbolRecord
 from snapper.application.updaters.symbols.types import PolygonSymbolRecord
 from snapper.application.updaters.symbols.types import WalutomatSymbolRecord
-from snapper.application.updaters.symbols.types import ZondaSymbolRecord
 
 
 class TestWalutomatSymbolRecord:
@@ -27,32 +26,6 @@ class TestWalutomatSymbolRecord:
         assert record["quote"] == "PLN"
         assert record["symbol"] == "EUR_PLN"
         assert record["walutomat_rest_symbol"] == "EURPLN"
-
-
-class TestZondaSymbolRecord:
-    """ZondaSymbolRecord has optional ccxt_symbol."""
-
-    def test_required_keys_only(self) -> None:
-        """Construct without optional ccxt_symbol."""
-        record: ZondaSymbolRecord = {
-            "native_symbol": "BTC-PLN",
-            "base": "BTC",
-            "quote": "PLN",
-            "zonda_symbol": "BTC-PLN",
-        }
-        assert record["native_symbol"] == "BTC-PLN"
-        assert record["zonda_symbol"] == "BTC-PLN"
-
-    def test_with_optional_ccxt_symbol(self) -> None:
-        """Construct with optional ccxt_symbol included."""
-        record: ZondaSymbolRecord = {
-            "native_symbol": "BTC-PLN",
-            "base": "BTC",
-            "quote": "PLN",
-            "zonda_symbol": "BTC-PLN",
-            "ccxt_symbol": "BTC/PLN",
-        }
-        assert record["ccxt_symbol"] == "BTC/PLN"
 
 
 class TestPolygonSymbolRecord:

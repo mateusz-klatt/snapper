@@ -539,30 +539,6 @@ def test_trade_zmq_exits_when_validation_fails(
     assert "Error validating configuration" in result.stdout
 
 
-def test_update_zonda_symbols_reports_error(
-    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
-) -> None:
-    """Test update-zonda-symbols handles updater errors gracefully.
-
-    Given a ZondaSymbolUpdaterService that raises an error,
-    When the update-zonda-symbols command is invoked,
-    Then it returns exit code 1 with an error message.
-    """
-
-    class DummyUpdater:
-        def __init__(self, update_threshold_hours: int, force: bool) -> None:
-            self.update_threshold_hours = update_threshold_hours
-            self.force = force
-
-        async def start(self) -> None:
-            raise RuntimeError("boom")
-
-    monkeypatch.setattr(app_module, "ZondaSymbolUpdaterService", DummyUpdater)
-    result = cli_runner.invoke(app, ["update-zonda-symbols", "--force"])
-    assert result.exit_code == 1
-    assert "Error updating Zonda symbol mappings" in result.stdout
-
-
 def test_polygon_backfill_aggregates_reports_error(
     monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
 ) -> None:
@@ -837,25 +813,6 @@ def test_update_kraken_equities_market_snapshot_error(
     assert "Error updating Kraken Equities market snapshots" in result.stdout
 
 
-def test_update_zonda_market_snapshot_error(
-    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
-) -> None:
-    """Test update-zonda-market-snapshot handles errors.
-
-    Given: A function that raises RuntimeError,
-    When: update-zonda-market-snapshot is invoked,
-    Then: Command exits with code 1 and error message.
-    """
-
-    def _raise_zsnap() -> None:
-        raise RuntimeError("zsnap")
-
-    monkeypatch.setattr(app_module, "run_zonda_snapshot_update", _raise_zsnap)
-    result = cli_runner.invoke(app, ["update-zonda-market-snapshot"])
-    assert result.exit_code == 1
-    assert "Error updating Zonda market snapshots" in result.stdout
-
-
 def test_update_walutomat_market_snapshot_error(
     monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
 ) -> None:
@@ -886,15 +843,12 @@ def test_update_market_snapshot_successes(
     """
     flags: list[str] = []
     monkeypatch.setattr(app_module, "run_snapshot_update", lambda: flags.append("kraken"))
-    monkeypatch.setattr(app_module, "run_zonda_snapshot_update", lambda: flags.append("zonda"))
     monkeypatch.setattr(app_module, "run_walutomat_snapshot_update", lambda: flags.append("wal"))
     result_kraken = cli_runner.invoke(app, ["update-kraken-market-snapshot"])
-    result_zonda = cli_runner.invoke(app, ["update-zonda-market-snapshot"])
     result_wal = cli_runner.invoke(app, ["update-walutomat-market-snapshot"])
     assert result_kraken.exit_code == 0
-    assert result_zonda.exit_code == 0
     assert result_wal.exit_code == 0
-    assert flags == ["kraken", "zonda", "wal"]
+    assert flags == ["kraken", "wal"]
 
 
 def test_executor_unknown_exchange(monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
@@ -934,7 +888,6 @@ def test_executor_runs_and_stops(monkeypatch: pytest.MonkeyPatch, cli_runner: Cl
             calls.append("stop")
 
     monkeypatch.setattr(app_module, "KrakenOrderExecutor", DummyExecutor)
-    monkeypatch.setattr(app_module, "ZondaOrderExecutor", DummyExecutor)
     monkeypatch.setattr(app_module, "WalutomatOrderExecutor", DummyExecutor)
     original_run = asyncio.run
 
@@ -1301,7 +1254,7 @@ def create_mock_settings(**overrides: Any) -> type:
     """Create a mock settings class with optional attribute overrides."""
     default_attrs: dict[str, Any] = {
         "db_url": SYNC_MEMORY_DB_URL,
-        "instruments": {"kraken": ["BTC-USD"], "zonda": [], "walutomat": [], "polygon": []},
+        "instruments": {"kraken": ["BTC-USD"], "walutomat": [], "polygon": []},
         "timeframes": ["1m"],
         "backfill_days": 30,
         "risk_max_leverage": 1.0,
@@ -2909,56 +2862,6 @@ def test_update_kraken_equities_symbols_handles_exception(
     monkeypatch.setattr(app_module, "KrakenEquitiesSymbolUpdaterService", DummyUpdater)
     result = cli_runner.invoke(app, ["update-kraken-equities-symbols"])
     assert result.exit_code == 1
-
-
-def test_update_zonda_symbols_runs_updater(
-    cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Test update-zonda-symbols runs symbol updater.
-
-    Given: Mocked ZondaSymbolUpdaterService,
-    When: update-zonda-symbols is invoked,
-    Then: Service starts with default threshold.
-    """
-    captured: dict[str, bool | int] = {}
-
-    class MockUpdater:
-        def __init__(self, update_threshold_hours: int = 24, force: bool = False):
-            captured["threshold"] = update_threshold_hours
-            captured["force"] = force
-
-        async def start(self) -> None:
-            captured["started"] = True
-
-    monkeypatch.setattr(app_module, "ZondaSymbolUpdaterService", MockUpdater)
-    result = cli_runner.invoke(app, ["update-zonda-symbols"])
-    assert result.exit_code == 0
-    assert "Starting Zonda symbol mapping update" in result.stdout
-    assert "Zonda symbol mappings updated successfully" in result.stdout
-    assert captured["threshold"] == 24
-    assert captured["force"] is False
-
-
-def test_update_zonda_market_snapshot_runs_service(
-    cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Test update-zonda-market-snapshot runs service.
-
-    Given: Mocked run_zonda_snapshot_update function,
-    When: update-zonda-market-snapshot is invoked,
-    Then: Service runs and completes.
-    """
-    captured: dict[str, bool] = {}
-
-    def mock_run_zonda_snapshot_update() -> None:
-        captured["run"] = True
-
-    monkeypatch.setattr(app_module, "run_zonda_snapshot_update", mock_run_zonda_snapshot_update)
-    result = cli_runner.invoke(app, ["update-zonda-market-snapshot"])
-    assert result.exit_code == 0
-    assert "Updating Zonda market snapshots" in result.stdout
-    assert "Zonda market snapshot update complete" in result.stdout
-    assert captured["run"] is True
 
 
 def test_update_kraken_futures_market_snapshot_runs_service(

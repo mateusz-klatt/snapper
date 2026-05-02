@@ -357,12 +357,12 @@ class TestWsAiDelegateWalletScopeContract:
             ``(kraken, BTC-USD)`` only,
         When: the client subscribes to the four-topic mix
             ``[signals.kraken.BTC-USD.live,
-              signals.zonda.BTC-USD.live,
+              signals.kraken.ETH-USD.live,
               market.kraken.BTC-USD.ticks,
               signals.paper.BTC-USD.my_strategy]``,
         Then: the single response frame is a ``subscription_success``
             envelope with ``status in {"denied", "partial"}``,
-            ``denied_topics`` includes ``signals.zonda.BTC-USD.live``,
+            ``denied_topics`` includes ``signals.kraken.ETH-USD.live``,
             and ``topics`` (accepted) includes the market +
             paper-signals pass-throughs. MCP / CLI clients rely on
             this being a plain-JSON frame on the standard WS endpoint
@@ -392,7 +392,7 @@ class TestWsAiDelegateWalletScopeContract:
             sequence_id=0,
             topics=[
                 "signals.kraken.BTC-USD.live",
-                "signals.zonda.BTC-USD.live",
+                "signals.kraken.ETH-USD.live",
                 "market.kraken.BTC-USD.ticks",
                 "signals.paper.BTC-USD.my_strategy",
             ],
@@ -408,9 +408,9 @@ class TestWsAiDelegateWalletScopeContract:
             SubscriptionStatusEnum.DENIED.value,
             SubscriptionStatusEnum.PARTIAL.value,
         }
-        assert "signals.zonda.BTC-USD.live" in response["denied_topics"]
+        assert "signals.kraken.ETH-USD.live" in response["denied_topics"]
         accepted = set(response.get("topics") or [])
-        assert "signals.zonda.BTC-USD.live" not in accepted
+        assert "signals.kraken.ETH-USD.live" not in accepted
         assert "market.kraken.BTC-USD.ticks" in accepted
         assert "signals.kraken.BTC-USD.live" in accepted, (
             "AI_DELEGATE holds READ_SIGNALS and the (kraken, BTC-USD) pair is in "

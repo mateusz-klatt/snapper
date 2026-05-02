@@ -97,13 +97,13 @@ describe('useHeartbeats', () => {
 
     act(() => {
       heartbeatCallback?.({
-        component: 'feed.zonda',
+        component: 'feed.walutomat',
         status: 'warning',
         lag_ms: 500,
       })
     })
 
-    expect(result.current['feed.zonda'].healthy).toBe(false)
+    expect(result.current['feed.walutomat'].healthy).toBe(false)
   })
 
   it('defaults lag_ms to 0 when missing', () => {
@@ -156,7 +156,7 @@ describe('useHeartbeats', () => {
 
     act(() => {
       heartbeatCallback?.({
-        component: 'feed.zonda',
+        component: 'feed.walutomat',
         status: 'healthy',
         lag_ms: 5,
       })
@@ -166,7 +166,7 @@ describe('useHeartbeats', () => {
       vi.advanceTimersByTime(10_000)
     })
 
-    expect(result.current['feed.zonda']).toBeDefined()
+    expect(result.current['feed.walutomat']).toBeDefined()
     expect(result.current['feed.kraken']).toBeUndefined()
   })
 

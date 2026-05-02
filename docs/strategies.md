@@ -139,7 +139,7 @@ class RSIReversion(BaseStrategy):
 | `strategy_class` | string | Strategy class name |
 | `inputs` | list[str] | List of ZMQ topics to subscribe |
 | `outputs` | list[str] | List of instruments for signals |
-| `exchange` | string | Target exchange (`paper`, `kraken`, `zonda`, `walutomat`) |
+| `exchange` | string | Target exchange (`paper`, `kraken`, `walutomat`) |
 | `params` | dict | Strategy-specific parameters |
 | `wallet_public_id` | string | Wallet that will execute orders for this strategy. Empty default for backwards compatibility; **REQUIRED (non-empty) for any strategy that uses `create_ai_review_and_await()`** — see "AI delegate consultation" below. |
 | `operator_public_id` | string | Trading-identity operator that owns this strategy instance. Empty default; validated against the launching principal's `operator_public_ids` when populated. |
@@ -338,7 +338,7 @@ Framework automatically validates:
 1.  **Strategy name** — cannot be empty
 2.  **Inputs** — at least one required
 3.  **Outputs** — at least one instrument must be defined
-4.  **Exchange** — must be one of: `paper`, `kraken`, `zonda`, `walutomat`
+4.  **Exchange** — must be one of: `paper`, `kraken`, `walutomat`
 5.  **Instruments** — must be available on selected exchange
 6.  **Paper/live mixing** — mixing paper inputs with live exchange not allowed
 

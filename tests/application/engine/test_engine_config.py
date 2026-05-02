@@ -694,7 +694,6 @@ class TestTraderSignalHandling:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -762,7 +761,6 @@ class TestTraderSignalHandling:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -823,7 +821,6 @@ class TestTraderSignalHandling:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -884,7 +881,6 @@ class TestTraderSignalHandling:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -955,7 +951,6 @@ class TestTraderSignalHandling:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }

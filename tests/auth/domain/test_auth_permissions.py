@@ -1029,6 +1029,27 @@ class TestWebSocketTokenRotator:
         assert isinstance(rotator._connection_tokens, dict)
         assert len(rotator._connection_tokens) == 0
 
+    def test_init_is_idempotent_on_repeated_construction(self) -> None:
+        """Verify a second WebSocketTokenRotator(...) call is a no-op.
+
+        Given: A WebSocketTokenRotator already constructed and initialized,
+        When: ``WebSocketTokenRotator(...)`` is invoked a second time
+            (Python re-runs ``__init__`` on the singleton instance returned
+            by ``__new__``),
+        Then: The ``_initialized`` guard short-circuits before re-binding
+            ``token_manager`` / ``_connection_tokens``, so prior state and
+            the singleton identity are preserved.
+        """
+        WebSocketTokenRotator.clear_instance()
+        first_manager = TokenManager()
+        rotator_first = WebSocketTokenRotator(first_manager)
+        rotator_first._connection_tokens["sentinel"] = "preserved"
+        second_manager = TokenManager()
+        rotator_second = WebSocketTokenRotator(second_manager)
+        assert rotator_first is rotator_second
+        assert rotator_second.token_manager is first_manager
+        assert rotator_second._connection_tokens == {"sentinel": "preserved"}
+
     def test_register_connection_valid_token(self) -> None:
         """Verify register_connection stores valid token.
 

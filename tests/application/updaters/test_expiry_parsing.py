@@ -135,8 +135,8 @@ class TestInstrumentKindClassification:
         assert kind == expected_kind
 
     def test_spot_exchanges_always_spot(self) -> None:
-        """Given spot exchanges (kraken, zonda, walutomat), When classifying, Then spot."""
-        for exchange in ("kraken", "zonda", "walutomat"):
+        """Given spot exchanges (kraken, walutomat), When classifying, Then spot."""
+        for exchange in ("kraken", "walutomat"):
             assert "spot" == "spot", f"Expected spot for {exchange}"
 
     def test_polygon_crypto_is_spot(self) -> None:

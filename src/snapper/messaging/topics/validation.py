@@ -502,8 +502,8 @@ def _validate_feed_heartbeat(segments: list[str]) -> tuple[bool, str]:
         system.heartbeats.feed.{exchange} — live feed (4 segments)
         system.heartbeats.feed.paper.{source} — paper replay (5 segments)
 
-    Live feed exchange must be in MarketSubscribeExchange (kraken/zonda/walutomat).
-    Paper source must be in MarketDataExchange (kraken/zonda/walutomat/polygon).
+    Live feed exchange must be in MarketSubscribeExchange (kraken/walutomat).
+    Paper source must be in MarketDataExchange (kraken/walutomat/polygon).
 
     Args:
         segments: Split topic segments starting with system.heartbeats.feed.
@@ -1037,7 +1037,7 @@ def _validate_exchange(exchange: str) -> tuple[bool, str]:
 
 
 def _validate_market_source(exchange: str) -> tuple[bool, str]:
-    """Validate exchange for live market data topics (kraken/zonda/walutomat).
+    """Validate exchange for live market data topics (kraken/walutomat).
 
     Args:
         exchange: Exchange name from market topic segment.
@@ -1060,7 +1060,7 @@ def _validate_market_source(exchange: str) -> tuple[bool, str]:
 def _validate_replay_source(exchange: str) -> tuple[bool, str]:
     """Validate source exchange for paper replay topics.
 
-    Valid sources: kraken, zonda, walutomat, polygon.
+    Valid sources: kraken, walutomat, polygon.
     Paper is excluded — it is the consumer, not a data source.
 
     Args:

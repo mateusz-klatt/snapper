@@ -203,7 +203,6 @@ _EXCHANGE_MAP_ATTRS: tuple[tuple[str, str, str, str], ...] = (
     ("native_to_kraken_ws", "kraken_ws_to_native", "kraken", "ws"),
     ("native_to_kraken_rest", "kraken_rest_to_native", "kraken", "rest"),
     ("native_to_ccxt", "ccxt_to_native", "kraken", "ccxt"),
-    ("native_to_zonda_ws", "zonda_ws_to_native", "zonda", "ws"),
     ("native_to_walutomat_ws", "walutomat_ws_to_native", "walutomat", "ws"),
     ("native_to_walutomat_rest", "walutomat_rest_to_native", "walutomat", "rest"),
     ("native_to_polygon_rest", "polygon_rest_to_native", "polygon", "rest"),
@@ -211,20 +210,18 @@ _EXCHANGE_MAP_ATTRS: tuple[tuple[str, str, str, str], ...] = (
 
 _TEST_EXCHANGE_CAPABILITIES: dict[str, tuple[bool, bool]] = {
     "kraken": (True, True),
-    "zonda": (True, True),
     "walutomat": (True, True),
     "polygon": (True, False),
 }
 
 _TEST_SYMBOL_MAPPINGS: dict[str, tuple[str | None, ...]] = {
-    "BTC-USD": ("BTC/USD", "XXBTZUSD", "BTC/USD", "BTC-USD", None, None, "X:BTCUSD"),
-    "ETH-USD": ("ETH/USD", "XETHZUSD", "ETH/USD", "ETH-USD", None, None, "X:ETHUSD"),
-    "BTC-EUR": ("BTC/EUR", "XXBTZEUR", "BTC/EUR", "BTC-EUR", None, None, "X:BTCEUR"),
-    "EUR-USD": ("EUR/USD", "ZEURZUSD", "EUR/USD", None, "EUR_USD", "EURUSD", "C:EURUSD"),
-    "EUR-PLN": (None, None, None, None, "EUR_PLN", "EURPLN", "C:EURPLN"),
-    "BTC-PLN": (None, None, "BTC/PLN", "BTC-PLN", None, None, None),
-    "USD-PLN": (None, None, None, None, "USD_PLN", "USDPLN", "C:USDPLN"),
-    "AAPL": ("AAPLx/USD", "AAPLxUSD", None, None, None, None, "AAPL"),
+    "BTC-USD": ("BTC/USD", "XXBTZUSD", "BTC/USD", None, None, "X:BTCUSD"),
+    "ETH-USD": ("ETH/USD", "XETHZUSD", "ETH/USD", None, None, "X:ETHUSD"),
+    "BTC-EUR": ("BTC/EUR", "XXBTZEUR", "BTC/EUR", None, None, "X:BTCEUR"),
+    "EUR-USD": ("EUR/USD", "ZEURZUSD", "EUR/USD", "EUR_USD", "EURUSD", "C:EURUSD"),
+    "EUR-PLN": (None, None, None, "EUR_PLN", "EURPLN", "C:EURPLN"),
+    "USD-PLN": (None, None, None, "USD_PLN", "USDPLN", "C:USDPLN"),
+    "AAPL": ("AAPLx/USD", "AAPLxUSD", None, None, None, "AAPL"),
 }
 
 _SETTINGS_WITH_SERVICE_PATHS: tuple[str, ...] = (
@@ -270,7 +267,6 @@ def _build_mock_settings() -> Mock:
     mock_settings.csrf_token_expire_minutes = 60
     mock_settings.instruments = {
         "kraken": ["BTC-USD", "EUR-USD", "BTC-EUR"],
-        "zonda": [],
         "walutomat": [],
         "polygon": [],
     }

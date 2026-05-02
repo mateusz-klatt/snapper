@@ -6,7 +6,6 @@ to the SymbolMapperService singleton for actual lookups.
 Functions are organized by exchange
     Kraken: WebSocket and REST symbol conversions
     CCXT: CCXT library symbol format
-    Zonda: Zonda exchange symbol format
     Walutomat: Walutomat WebSocket and REST formats
     Polygon: Polygon.io ticker format
 Each conversion direction has a corresponding function pair
@@ -46,8 +45,6 @@ __all__ = [
     "kraken_websocket_to_native",
     "native_to_kraken_rest",
     "kraken_rest_to_native",
-    "native_to_zonda_ws",
-    "zonda_ws_to_native",
     "native_to_walutomat_ws",
     "walutomat_ws_to_native",
     "native_to_walutomat_rest",
@@ -57,7 +54,6 @@ __all__ = [
     "native_to_kraken_futures_ws",
     "kraken_futures_ws_to_native",
     "get_available_kraken_futures_symbols",
-    "get_available_zonda_symbols",
     "get_available_walutomat_symbols",
     "get_available_polygon_symbols",
     "get_available_symbols",
@@ -260,46 +256,6 @@ def ccxt_to_native(symbol: str) -> str:
         return mapper.ccxt_to_native[symbol]
     except KeyError as exc:
         raise ValueError(f"Unknown CCXT symbol: {symbol}") from exc
-
-
-def native_to_zonda_ws(native_symbol: str) -> str:
-    """Convert native symbol to Zonda WebSocket format.
-
-    Args:
-        native_symbol: Native symbol (e.g., ``BTC-PLN``).
-
-    Returns:
-        Zonda WebSocket symbol (e.g., ``BTC-PLN``).
-
-    Raises:
-        ValueError: If native symbol is not available on Zonda.
-    """
-    mapper = _get_db_mapper()
-    try:
-        return mapper.native_to_zonda_ws[native_symbol]
-    except KeyError as exc:
-        raise ValueError(
-            f"Unknown native symbol (not available on Zonda): {native_symbol}"
-        ) from exc
-
-
-def zonda_ws_to_native(symbol: str) -> str:
-    """Convert Zonda WebSocket symbol to native format.
-
-    Args:
-        symbol: Zonda WebSocket symbol (e.g., ``BTC-PLN``).
-
-    Returns:
-        Native symbol (e.g., ``BTC-PLN``).
-
-    Raises:
-        ValueError: If Zonda symbol is not recognized.
-    """
-    mapper = _get_db_mapper()
-    try:
-        return mapper.zonda_ws_to_native[symbol]
-    except KeyError as exc:
-        raise ValueError(f"Unknown Zonda WebSocket symbol: {symbol}") from exc
 
 
 def native_to_walutomat_ws(native_symbol: str) -> str:
@@ -577,16 +533,6 @@ def get_available_kraken_symbols() -> list[str]:
     return sorted(mapper.native_to_kraken_ws.keys())
 
 
-def get_available_zonda_symbols() -> list[str]:
-    """Get all available Zonda exchange symbols.
-
-    Returns:
-        Sorted list of Zonda symbols (e.g., ``["BTC-PLN", ...]``).
-    """
-    mapper = _get_db_mapper()
-    return sorted(mapper.zonda_ws_to_native.keys())
-
-
 def get_available_walutomat_rest_symbols() -> list[str]:
     """Get all available Walutomat REST API symbols.
 
@@ -620,7 +566,7 @@ def get_available_polygon_symbols() -> list[str]:
 def get_available_symbols() -> list[str]:
     """Get all available native symbols across all exchanges.
 
-    Combines symbols from Kraken, Kraken Futures, Kraken Equities, Zonda, Walutomat, and Polygon.
+    Combines symbols from Kraken, Kraken Futures, Kraken Equities, Walutomat, and Polygon.
 
     Returns:
         Sorted list of unique native symbols from all exchanges.
@@ -629,7 +575,6 @@ def get_available_symbols() -> list[str]:
     all_symbols.update(get_available_kraken_symbols())
     all_symbols.update(get_available_kraken_futures_symbols())
     all_symbols.update(get_available_kraken_equities_symbols())
-    all_symbols.update(get_available_zonda_symbols())
     all_symbols.update(get_available_walutomat_symbols())
     all_symbols.update(get_available_polygon_symbols())
     return sorted(all_symbols)

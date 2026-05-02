@@ -70,7 +70,7 @@ Each step has an existing reference implementation to copy from.
 - `src/snapper/infrastructure/market_data/{exchange}.py`
 - Extend `MarketSnapshotUpdaterService`
 - `run_{exchange}_snapshot_update()` entry point for CLI
-- Reference: `market_data/zonda.py` (WS-based), `market_data/walutomat.py` (polling-based)
+- Reference: `market_data/kraken.py` (WS-based), `market_data/walutomat.py` (polling-based)
 
 ## 9. CLI commands
 

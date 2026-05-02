@@ -66,7 +66,7 @@ def test_build_topic_format_live() -> None:
     Then: Fourth segment is 'live'.
     """
     assert build_topic("kraken", "BTC-USD") == "signals.kraken.BTC-USD.live"
-    assert build_topic("zonda", "ETH-USD") == "signals.zonda.ETH-USD.live"
+    assert build_topic("walutomat", "ETH-USD") == "signals.walutomat.ETH-USD.live"
 
 
 def test_build_topic_format_paper() -> None:

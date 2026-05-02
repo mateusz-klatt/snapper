@@ -80,7 +80,7 @@ class TestKrakenMarketDataPublisher:
         Then returns dict with those symbols.
         """
         mock_settings = MagicMock(spec=AppSettings)
-        mock_settings.instruments = {"kraken": ["BTC-USD", "ETH-USD"], "zonda": ["BTC-PLN"]}
+        mock_settings.instruments = {"kraken": ["BTC-USD", "ETH-USD"], "walutomat": ["EUR-PLN"]}
         kwargs = KrakenMarketDataPublisher.get_default_parameters(mock_settings)
         assert kwargs == {"symbols": ["BTC-USD", "ETH-USD"]}
 
@@ -92,7 +92,7 @@ class TestKrakenMarketDataPublisher:
         Then returns dict with empty symbols list.
         """
         mock_settings = MagicMock(spec=AppSettings)
-        mock_settings.instruments = {"kraken": [], "zonda": ["BTC-PLN"]}
+        mock_settings.instruments = {"kraken": [], "walutomat": ["EUR-PLN"]}
         kwargs = KrakenMarketDataPublisher.get_default_parameters(mock_settings)
         assert kwargs == {"symbols": []}
 
@@ -104,6 +104,6 @@ class TestKrakenMarketDataPublisher:
         Then returns dict with empty symbols list.
         """
         mock_settings = MagicMock(spec=AppSettings)
-        mock_settings.instruments = {"zonda": ["BTC-PLN"]}
+        mock_settings.instruments = {"walutomat": ["EUR-PLN"]}
         kwargs = KrakenMarketDataPublisher.get_default_parameters(mock_settings)
         assert kwargs == {"symbols": []}

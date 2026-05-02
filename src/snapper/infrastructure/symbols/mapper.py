@@ -9,7 +9,6 @@ exchange-specific formats vary:
     - Kraken WebSocket: ``XBT/USD``
     - Kraken REST: ``XBTUSD``
     - CCXT: ``BTC/USD``
-    - Zonda: ``BTC-USD``
     - Walutomat: ``BTCUSD``
     - Polygon: ``C:BTCUSD`` (crypto) or ``X:EURUSD`` (forex)
 
@@ -99,7 +98,6 @@ _SHORTCUT_FORWARD: tuple[tuple[str, str, str], ...] = (
     (ExchangeEnum.KRAKEN, AliasChannelEnum.REST, "native_to_kraken_rest"),
     (ExchangeEnum.KRAKEN_FUTURES, AliasChannelEnum.WS, "native_to_kraken_futures_ws"),
     (ExchangeEnum.KRAKEN_EQUITIES, AliasChannelEnum.WS, "native_to_kraken_equities_ws"),
-    (ExchangeEnum.ZONDA, AliasChannelEnum.WS, "native_to_zonda_ws"),
     (ExchangeEnum.WALUTOMAT, AliasChannelEnum.WS, "native_to_walutomat_ws"),
     (ExchangeEnum.WALUTOMAT, AliasChannelEnum.REST, "native_to_walutomat_rest"),
     (ExchangeEnum.POLYGON, AliasChannelEnum.REST, "native_to_polygon_rest"),
@@ -110,7 +108,6 @@ _SHORTCUT_REVERSE: tuple[tuple[str, str, str], ...] = (
     (ExchangeEnum.KRAKEN, AliasChannelEnum.REST, "kraken_rest_to_native"),
     (ExchangeEnum.KRAKEN_FUTURES, AliasChannelEnum.WS, "kraken_futures_ws_to_native"),
     (ExchangeEnum.KRAKEN_EQUITIES, AliasChannelEnum.WS, "kraken_equities_ws_to_native"),
-    (ExchangeEnum.ZONDA, AliasChannelEnum.WS, "zonda_ws_to_native"),
     (ExchangeEnum.WALUTOMAT, AliasChannelEnum.WS, "walutomat_ws_to_native"),
     (ExchangeEnum.WALUTOMAT, AliasChannelEnum.REST, "walutomat_rest_to_native"),
     (ExchangeEnum.POLYGON, AliasChannelEnum.REST, "polygon_rest_to_native"),
@@ -142,7 +139,6 @@ class SymbolMapperService:
         native_to_kraken_futures_ws: Alias for ``forward[("kraken_futures", "ws")]``.
         native_to_kraken_equities_ws: Alias for ``forward[("kraken_equities", "ws")]``.
         native_to_ccxt: Union of all ``forward[(*, "ccxt")]`` across exchanges.
-        native_to_zonda_ws: Alias for ``forward[("zonda", "ws")]``.
         native_to_walutomat_ws: Alias for ``forward[("walutomat", "ws")]``.
         native_to_walutomat_rest: Alias for ``forward[("walutomat", "rest")]``.
         native_to_polygon_rest: Alias for ``forward[("polygon", "rest")]``.
@@ -151,7 +147,6 @@ class SymbolMapperService:
         kraken_futures_ws_to_native: Alias for ``reverse[("kraken_futures", "ws")]``.
         kraken_equities_ws_to_native: Alias for ``reverse[("kraken_equities", "ws")]``.
         ccxt_to_native: Union of all ``reverse[(*, "ccxt")]`` across exchanges.
-        zonda_ws_to_native: Alias for ``reverse[("zonda", "ws")]``.
         walutomat_ws_to_native: Alias for ``reverse[("walutomat", "ws")]``.
         walutomat_rest_to_native: Alias for ``reverse[("walutomat", "rest")]``.
         polygon_rest_to_native: Alias for ``reverse[("polygon", "rest")]``.
@@ -204,8 +199,6 @@ class SymbolMapperService:
         self.kraken_futures_ws_to_native: dict[str, str] = {}
         self.kraken_equities_ws_to_native: dict[str, str] = {}
         self.ccxt_to_native: dict[str, str] = {}
-        self.native_to_zonda_ws: dict[str, str] = {}
-        self.zonda_ws_to_native: dict[str, str] = {}
         self.native_to_walutomat_ws: dict[str, str] = {}
         self.walutomat_ws_to_native: dict[str, str] = {}
         self.native_to_walutomat_rest: dict[str, str] = {}

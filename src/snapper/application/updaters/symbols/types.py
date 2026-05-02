@@ -20,19 +20,6 @@ class WalutomatSymbolRecord(_WalutomatSymbolRequired, total=False):
     """Walutomat symbol record with all-required fields."""
 
 
-class _ZondaSymbolRequired(TypedDict):
-    native_symbol: str
-    base: str
-    quote: str
-    zonda_symbol: str
-
-
-class ZondaSymbolRecord(_ZondaSymbolRequired, total=False):
-    """Zonda symbol record with optional ccxt_symbol."""
-
-    ccxt_symbol: str
-
-
 class _PolygonSymbolRequired(TypedDict):
     ticker: str
 

@@ -46,7 +46,6 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
-from snapper.infrastructure.exchanges.implementations.zonda import ZondaExchangeClient
 from snapper.infrastructure.security.encryption import get_encryption_service
 from snapper.infrastructure.symbols.functions import native_to_ccxt
 
@@ -142,8 +141,6 @@ async def get_settings() -> Any:
         "kraken_api_secret": "",
         "kraken_futures_api_key": "",
         "kraken_futures_api_secret": "",
-        "zonda_api_key": "",
-        "zonda_api_secret": "",
     }
     for row in rows:
         if row["credential_type"] == "paper":
@@ -159,9 +156,6 @@ async def get_settings() -> Any:
         elif exchange == "walutomat":
             attrs["walutomat_api_key"] = envelope.get("api_key", "")
             attrs["walutomat_private_key"] = envelope.get("private_key_pem", "")
-        elif exchange == "zonda":
-            attrs["zonda_api_key"] = envelope.get("api_key", "")
-            attrs["zonda_api_secret"] = envelope.get("api_secret", "")
     return SimpleNamespace(**attrs)
 
 
@@ -575,123 +569,10 @@ async def run_kraken_futures(settings: Any, scenarios: list[str] | None = None) 
             emit("kraken_futures", "cancel_inflight", "cancel", snapshot_to_dict(canceled))
 
 
-async def run_zonda(settings: Any, scenarios: list[str] | None = None) -> None:
-    """Test order lifecycle on Zonda BTC-PLN via CCXT.
-
-    Zonda specifics:
-    - CCXT create_order may return filled=None, remaining=None
-    - cancel_order requires fetch_open_orders first (to get side+price)
-    - No fetchOrder support → uses fetch_open_orders or findOrders
-    - client_order_id always null in responses
-    - Minimum: 0.00001 BTC (5e-05)
-
-    Args:
-        settings: AppSettings with exchange credentials.
-        scenarios: Optional list of scenarios to run.
-    """
-    if not settings.zonda_api_key or not settings.zonda_api_secret:
-        logger.warning("Zonda: no API keys, skipping")
-        return
-    all_scenarios = [
-        "passive_buy",
-        "passive_sell",
-        "aggressive_buy",
-        "aggressive_sell",
-        "cancel_inflight",
-    ]
-    run = scenarios or all_scenarios
-    client = ZondaExchangeClient(
-        api_key=settings.zonda_api_key,
-        api_secret=settings.zonda_api_secret,
-    )
-    async with client:
-        ticker = await client.get_ticker("BTC-PLN")
-        mid = (ticker.bid + ticker.ask) / 2
-        logger.info(f"Zonda BTC-PLN: bid={ticker.bid}, ask={ticker.ask}, mid={mid:.2f}")
-
-        if "passive_buy" in run:
-            logger.info("Zonda: passive_buy — deep bid")
-            passive_price = round(ticker.bid * 0.90, 2)
-            request = ExchangeOrderRequest(
-                symbol="BTC-PLN",
-                side=OrderSideEnum.BUY,
-                type=ExchangeOrderTypeEnum.LIMIT,
-                amount=5e-05,
-                price=passive_price,
-            )
-            snap = await client.create_order(request)
-            emit("zonda", "passive_buy", "create", snapshot_to_dict(snap))
-            await asyncio.sleep(DELAY_AFTER_CREATE)
-
-            canceled = await client.cancel_order(snap.id, "BTC-PLN")
-            emit("zonda", "passive_buy", "cancel", snapshot_to_dict(canceled))
-            await asyncio.sleep(DELAY_BETWEEN_SCENARIOS)
-
-        if "passive_sell" in run:
-            logger.info("Zonda: passive_sell — deep ask")
-            passive_price = round(ticker.ask * 1.10, 2)
-            request = ExchangeOrderRequest(
-                symbol="BTC-PLN",
-                side=OrderSideEnum.SELL,
-                type=ExchangeOrderTypeEnum.LIMIT,
-                amount=5e-05,
-                price=passive_price,
-            )
-            snap = await client.create_order(request)
-            emit("zonda", "passive_sell", "create", snapshot_to_dict(snap))
-            await asyncio.sleep(DELAY_AFTER_CREATE)
-
-            canceled = await client.cancel_order(snap.id, "BTC-PLN")
-            emit("zonda", "passive_sell", "cancel", snapshot_to_dict(canceled))
-            await asyncio.sleep(DELAY_BETWEEN_SCENARIOS)
-
-        if "aggressive_buy" in run:
-            logger.info("Zonda: aggressive_buy — at ask")
-            request = ExchangeOrderRequest(
-                symbol="BTC-PLN",
-                side=OrderSideEnum.BUY,
-                type=ExchangeOrderTypeEnum.LIMIT,
-                amount=5e-05,
-                price=round(ticker.ask * 1.01, 2),
-            )
-            snap = await client.create_order(request)
-            emit("zonda", "aggressive_buy", "create", snapshot_to_dict(snap))
-            await asyncio.sleep(DELAY_BETWEEN_SCENARIOS)
-
-        if "aggressive_sell" in run:
-            logger.info("Zonda: aggressive_sell — at bid")
-            request = ExchangeOrderRequest(
-                symbol="BTC-PLN",
-                side=OrderSideEnum.SELL,
-                type=ExchangeOrderTypeEnum.LIMIT,
-                amount=5e-05,
-                price=round(ticker.bid * 0.99, 2),
-            )
-            snap = await client.create_order(request)
-            emit("zonda", "aggressive_sell", "create", snapshot_to_dict(snap))
-            await asyncio.sleep(DELAY_BETWEEN_SCENARIOS)
-
-        if "cancel_inflight" in run:
-            logger.info("Zonda: cancel_inflight — create+cancel immediately")
-            request = ExchangeOrderRequest(
-                symbol="BTC-PLN",
-                side=OrderSideEnum.BUY,
-                type=ExchangeOrderTypeEnum.LIMIT,
-                amount=5e-05,
-                price=round(ticker.bid * 0.90, 2),
-            )
-            snap = await client.create_order(request)
-            emit("zonda", "cancel_inflight", "create", snapshot_to_dict(snap))
-
-            canceled = await client.cancel_order(snap.id, "BTC-PLN")
-            emit("zonda", "cancel_inflight", "cancel", snapshot_to_dict(canceled))
-
-
 EXCHANGE_RUNNERS = {
     "walutomat": run_walutomat,
     "kraken": run_kraken_spot,
     "kraken_futures": run_kraken_futures,
-    "zonda": run_zonda,
 }
 
 

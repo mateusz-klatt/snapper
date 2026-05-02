@@ -33,7 +33,6 @@ from snapper.infrastructure.symbols.functions import get_available_symbols
 from snapper.infrastructure.symbols.functions import get_available_walutomat_rest_symbols
 from snapper.infrastructure.symbols.functions import get_available_walutomat_symbols
 from snapper.infrastructure.symbols.functions import get_available_ws_symbols
-from snapper.infrastructure.symbols.functions import get_available_zonda_symbols
 from snapper.infrastructure.symbols.functions import get_market_data_exchanges
 from snapper.infrastructure.symbols.functions import get_market_data_symbols
 from snapper.infrastructure.symbols.functions import get_market_subscribe_exchanges
@@ -53,12 +52,10 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 from snapper.infrastructure.symbols.functions import native_to_polygon_rest
 from snapper.infrastructure.symbols.functions import native_to_walutomat_rest
 from snapper.infrastructure.symbols.functions import native_to_walutomat_ws
-from snapper.infrastructure.symbols.functions import native_to_zonda_ws
 from snapper.infrastructure.symbols.functions import polygon_rest_to_native
 from snapper.infrastructure.symbols.functions import validate_symbol
 from snapper.infrastructure.symbols.functions import walutomat_rest_to_native
 from snapper.infrastructure.symbols.functions import walutomat_ws_to_native
-from snapper.infrastructure.symbols.functions import zonda_ws_to_native
 from snapper.infrastructure.symbols.mapper import CapabilityInfo
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.infrastructure.symbols.mapper import make_native_symbol
@@ -577,8 +574,6 @@ def _make_mapper_with_empty_cache() -> SymbolMapperService:
     mapper.kraken_ws_to_native = {}
     mapper.kraken_rest_to_native = {}
     mapper.ccxt_to_native = {}
-    mapper.native_to_zonda_ws = {}
-    mapper.zonda_ws_to_native = {}
     mapper.native_to_walutomat_ws = {}
     mapper.walutomat_ws_to_native = {}
     mapper.native_to_walutomat_rest = {}
@@ -798,7 +793,6 @@ class TestDatabaseSymbolMapperCore:
             ("ETH-USD", "kraken", "ws", "ETH/USD"),
             ("ETH-USD", "kraken", "rest", "XETHZUSD"),
             ("ETH-USD", "kraken", "ccxt", "ETH/USD"),
-            ("ETH-USD", "zonda", "ws", "ETH-USD"),
             ("ETH-USD", "walutomat", "ws", "ETH_USD"),
             ("ETH-USD", "walutomat", "rest", "ETHUSD"),
             ("ETH-USD", "polygon", "rest", "X:ETHUSD"),
@@ -1310,10 +1304,6 @@ class TestDatabaseSymbolMapperFunctions:
                 return_value=["BTC-USD", "ETH-USD"],
             ),
             patch(
-                "snapper.infrastructure.symbols.functions.get_available_zonda_symbols",
-                return_value=["BTC-PLN", "ETH-PLN"],
-            ),
-            patch(
                 "snapper.infrastructure.symbols.functions.get_available_walutomat_symbols",
                 return_value=["EUR-PLN", "USD-PLN"],
             ),
@@ -1328,10 +1318,8 @@ class TestDatabaseSymbolMapperFunctions:
         ):
             result = get_available_symbols()
             expected = [
-                "BTC-PLN",
                 "BTC-USD",
                 "CLM6-NYMEX",
-                "ETH-PLN",
                 "ETH-USD",
                 "EUR-PLN",
                 "EUR-USD",
@@ -1437,8 +1425,6 @@ class TestSymbolMapperEdgeCases:
 def mock_mapper() -> MagicMock:
     """Provide mock SymbolMapperService with preconfigured mappings."""
     mapper = MagicMock(spec=SymbolMapperService)
-    mapper.native_to_zonda_ws = {"BTC-PLN": "BTC-PLN", "ETH-PLN": "ETH-PLN"}
-    mapper.zonda_ws_to_native = {"BTC-PLN": "BTC-PLN", "ETH-PLN": "ETH-PLN"}
     mapper.native_to_walutomat_ws = {"EUR-PLN": "EUR_PLN", "USD-PLN": "USD_PLN"}
     mapper.walutomat_ws_to_native = {"EUR_PLN": "EUR-PLN", "USD_PLN": "USD-PLN"}
     mapper.native_to_walutomat_rest = {"EUR-PLN": "EURPLN", "USD-PLN": "USDPLN"}
@@ -1452,85 +1438,6 @@ def mock_mapper() -> MagicMock:
     mapper.native_to_ccxt = {"BTC-USD": "BTC/USD", "ETH-USD": "ETH/USD"}
     mapper.ccxt_to_native = {"BTC/USD": "BTC-USD", "ETH/USD": "ETH-USD"}
     return mapper
-
-
-class TestZondaHelpers:
-    """Tests for Zonda symbol conversion helpers."""
-
-    def test_native_to_zonda_ws_success(self, mock_mapper: MagicMock) -> None:
-        """Convert native symbol to Zonda format.
-
-        Given: Native symbol in Zonda mapping cache,
-        When: native_to_zonda_ws is called,
-        Then: Returns Zonda format symbol.
-        """
-        with patch(
-            "snapper.infrastructure.symbols.functions._get_db_mapper",
-            return_value=mock_mapper,
-        ):
-            result = native_to_zonda_ws("BTC-PLN")
-            assert result == "BTC-PLN"
-
-    def test_native_to_zonda_ws_unknown_symbol_raises_value_error(
-        self, mock_mapper: MagicMock
-    ) -> None:
-        """Reject unknown native symbol for Zonda.
-
-        Given: Native symbol not in Zonda mapping,
-        When: native_to_zonda_ws is called,
-        Then: Raises ValueError.
-        """
-        with patch(
-            "snapper.infrastructure.symbols.functions._get_db_mapper",
-            return_value=mock_mapper,
-        ), pytest.raises(
-            ValueError,
-            match=r"Unknown native symbol \(not available on Zonda\): INVALID-SYMBOL",
-        ):
-            native_to_zonda_ws("INVALID-SYMBOL")
-
-    def test_zonda_ws_to_native_success(self, mock_mapper: MagicMock) -> None:
-        """Convert Zonda symbol to native format.
-
-        Given: Zonda symbol in mapping cache,
-        When: zonda_ws_to_native is called,
-        Then: Returns native format symbol.
-        """
-        with patch(
-            "snapper.infrastructure.symbols.functions._get_db_mapper",
-            return_value=mock_mapper,
-        ):
-            result = zonda_ws_to_native("BTC-PLN")
-            assert result == "BTC-PLN"
-
-    def test_zonda_ws_to_native_unknown_symbol_raises_value_error(
-        self, mock_mapper: MagicMock
-    ) -> None:
-        """Reject unknown Zonda symbol.
-
-        Given: Zonda symbol not in mapping cache,
-        When: zonda_ws_to_native is called,
-        Then: Raises ValueError.
-        """
-        with patch(
-            "snapper.infrastructure.symbols.functions._get_db_mapper",
-            return_value=mock_mapper,
-        ), pytest.raises(ValueError, match=r"Unknown Zonda WebSocket symbol: INVALID-SYMBOL"):
-            zonda_ws_to_native("INVALID-SYMBOL")
-
-    def test_get_available_zonda_symbols_returns_sorted_list(self, mock_mapper: MagicMock) -> None:
-        """Get sorted list of Zonda native symbols.
-
-        Given: Mapper with Zonda symbol mappings,
-        When: get_available_zonda_symbols is called,
-        Then: Returns sorted list of native symbols.
-        """
-        with patch(
-            "snapper.infrastructure.symbols.functions._get_db_mapper",
-            return_value=mock_mapper,
-        ):
-            result = get_available_zonda_symbols()
-            assert result == ["BTC-PLN", "ETH-PLN"]
 
 
 class TestWalutomatHelpers:
@@ -1887,7 +1794,7 @@ class TestGetAvailableExchanges:
         Then: Returns sorted list excluding data-only exchanges.
         """
         result = get_available_exchanges()
-        assert sorted(result) == ["kraken", "kraken_futures", "paper", "walutomat", "zonda"]
+        assert sorted(result) == ["kraken", "kraken_futures", "paper", "walutomat"]
         assert "polygon" not in result
 
     def test_get_market_subscribe_exchanges_returns_live_feeds(self) -> None:
@@ -1903,7 +1810,6 @@ class TestGetAvailableExchanges:
             "kraken_equities",
             "kraken_futures",
             "walutomat",
-            "zonda",
         ]
         assert "paper" not in result
         assert "polygon" not in result
@@ -1922,7 +1828,6 @@ class TestGetAvailableExchanges:
             "kraken_futures",
             "polygon",
             "walutomat",
-            "zonda",
         ]
         assert "paper" not in result
 
@@ -2218,16 +2123,16 @@ class TestCapabilityQueryFunctions:
     def test_is_market_data_available_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Return False when capability row has can_market_data=False.
 
-        Given: Mapper with (BTC-USD, zonda) can_market_data=False,
+        Given: Mapper with (BTC-USD, walutomat) can_market_data=False,
         When: is_market_data_available is called,
         Then: Returns False.
         """
         mock_mapper = MagicMock()
         mock_mapper.capabilities = {
-            ("BTC-USD", "zonda"): CapabilityInfo(False, True, "zonda_updater", None),
+            ("BTC-USD", "walutomat"): CapabilityInfo(False, True, "walutomat_updater", None),
         }
         monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
-        assert is_market_data_available("BTC-USD", "zonda") is False
+        assert is_market_data_available("BTC-USD", "walutomat") is False
 
     def test_get_tradeable_symbols_kraken(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Return sorted tradeable symbols for a live exchange.
@@ -2257,7 +2162,7 @@ class TestCapabilityQueryFunctions:
         mock_mapper = MagicMock()
         mock_mapper.forward = {
             ("kraken", "ws"): {"BTC-USD": "BTC/USD", "ETH-USD": "ETH/USD"},
-            ("zonda", "ws"): {"BTC-USD": "BTC-USD"},
+            ("walutomat", "ws"): {"BTC-USD": "BTC-USD"},
         }
         monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
         result = get_tradeable_symbols("paper")

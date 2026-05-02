@@ -978,7 +978,7 @@ class VenueEvent(TemporalMixin, Base):
     """Append-only log of raw venue observations.
 
     Created by ExchangeExecutorService when venue state changes are
-    detected (WS stream for Kraken/Zonda, HTTP polling for Walutomat,
+    detected (WS stream for Kraken, HTTP polling for Walutomat,
     in-process for Paper). All exchanges produce the same schema.
 
     The TemporalMixin id (auto-increment PK) serves as the monotonic
@@ -1965,7 +1965,7 @@ class BacktestRun(TemporalMixin, Base):
         ),
         CheckConstraint(
             "target_execution_exchange IS NULL OR target_execution_exchange IN "
-            "('paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat')",
+            "('paper', 'kraken', 'kraken_futures', 'walutomat')",
             name="ck_br_target_execution_exchange",
         ),
     )

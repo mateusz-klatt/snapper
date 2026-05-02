@@ -502,7 +502,7 @@ class InstrumentSpecInput:
     ``rollover_rate_long``, ``rollover_rate_short``, ``max_funding_rate``)
     are populated by the per-exchange symbol updaters and consumed by
     the funding accrual coroutine. Spot exchanges without margin
-    (Zonda, Walutomat) leave them ``None``.
+    (Walutomat) leave them ``None``.
     """
 
     tick_size: float | None = None
@@ -2162,7 +2162,7 @@ class Repository(ABC):
 
         Used by the cancel pipeline to hydrate ``OrderCancelData`` with
         the venue-assigned order id so that venue adapters that cancel
-        by exchange id (Kraken, Zonda, Walutomat) can actually cancel.
+        by exchange id (Kraken, Walutomat) can actually cancel.
         Returns ``None`` if no active order row exists yet (e.g., the
         venue has not ACKed the submit), or if it exists but has not
         been assigned an ``exchange_order_id`` yet.

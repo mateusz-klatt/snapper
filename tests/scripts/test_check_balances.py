@@ -66,25 +66,22 @@ def test_build_factories_walutomat_without_private_key() -> None:
 
 
 def test_build_factories_all_exchanges() -> None:
-    """Verify all four factories when all envelopes provided.
+    """Verify all factories when all envelopes provided.
 
-    Given: Credentials for Kraken, Kraken Futures, Zonda, and
-        Walutomat,
+    Given: Credentials for Kraken, Kraken Futures, and Walutomat,
     When: build_exchange_factories is called,
-    Then: Four factories returned in deterministic order.
+    Then: Three factories returned in deterministic order.
     """
     credentials = _make_credentials(
         kraken={"api_key": "k", "api_secret": "s"},
         kraken_futures={"api_key": "kf", "api_secret": "kfs"},
-        zonda={"api_key": "z", "api_secret": "zs"},
         walutomat={"api_key": "w", "private_key_pem": "-----BEGIN PEM-----"},
     )
     factories = build_exchange_factories(credentials)
-    assert len(factories) == 4
+    assert len(factories) == 3
     names = [f[0] for f in factories]
     assert "Kraken" in names
     assert "Kraken Futures" in names
-    assert "Zonda" in names
     assert "Walutomat" in names
 
 

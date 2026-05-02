@@ -25,7 +25,7 @@ class ExchangeOrderTypeEnum(StrEnum):
     """Exchange-wire-format order type.
 
     Covers SDK-reported order types across all supported exchanges
-    (Kraken, Kraken Futures, Zonda, Walutomat, Polygon). Distinct
+    (Kraken, Kraken Futures, Walutomat, Polygon). Distinct
     from ``snapper.core.types.OrderTypeEnum`` (domain trading-core
     type) by design — exchange values include ICEBERG, STOP_LOSS_LIMIT,
     TAKE_PROFIT_LIMIT, TRAILING_STOP_LIMIT, SETTLE_POSITION that the

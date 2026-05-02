@@ -45,7 +45,6 @@ class ExchangeEnum(StrEnum):
     KRAKEN = "kraken"
     KRAKEN_FUTURES = "kraken_futures"
     KRAKEN_EQUITIES = "kraken_equities"
-    ZONDA = "zonda"
     WALUTOMAT = "walutomat"
     POLYGON = "polygon"
 
@@ -489,7 +488,6 @@ OrderExchange = Literal[
     ExchangeEnum.PAPER,
     ExchangeEnum.KRAKEN,
     ExchangeEnum.KRAKEN_FUTURES,
-    ExchangeEnum.ZONDA,
     ExchangeEnum.WALUTOMAT,
 ]
 """Exchanges capable of order execution (paper simulator + live venues)."""
@@ -498,7 +496,6 @@ MarketSubscribeExchange = Literal[
     ExchangeEnum.KRAKEN,
     ExchangeEnum.KRAKEN_FUTURES,
     ExchangeEnum.KRAKEN_EQUITIES,
-    ExchangeEnum.ZONDA,
     ExchangeEnum.WALUTOMAT,
 ]
 """Live market feed exchanges (no paper — paper replays from these)."""
@@ -507,7 +504,6 @@ MarketDataExchange = Literal[
     ExchangeEnum.KRAKEN,
     ExchangeEnum.KRAKEN_FUTURES,
     ExchangeEnum.KRAKEN_EQUITIES,
-    ExchangeEnum.ZONDA,
     ExchangeEnum.WALUTOMAT,
     ExchangeEnum.POLYGON,
 ]
@@ -518,7 +514,6 @@ AllExchange = Literal[
     ExchangeEnum.KRAKEN,
     ExchangeEnum.KRAKEN_FUTURES,
     ExchangeEnum.KRAKEN_EQUITIES,
-    ExchangeEnum.ZONDA,
     ExchangeEnum.WALUTOMAT,
     ExchangeEnum.POLYGON,
 ]

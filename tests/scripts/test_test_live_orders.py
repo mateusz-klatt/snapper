@@ -14,7 +14,6 @@ from scripts.test_live_orders import main
 from scripts.test_live_orders import run_kraken_futures
 from scripts.test_live_orders import run_kraken_spot
 from scripts.test_live_orders import run_walutomat
-from scripts.test_live_orders import run_zonda
 from scripts.test_live_orders import safe_get_ticker
 from scripts.test_live_orders import snapshot_to_dict
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
@@ -38,8 +37,6 @@ def _make_settings(**overrides: str) -> SimpleNamespace:
         "kraken_api_secret": "",
         "kraken_futures_api_key": "",
         "kraken_futures_api_secret": "",
-        "zonda_api_key": "",
-        "zonda_api_secret": "",
         "walutomat_api_key": "",
         "walutomat_private_key": "",
     }
@@ -92,13 +89,13 @@ def test_emit_outputs_json(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_exchange_runners_has_all_exchanges() -> None:
-    """Verify EXCHANGE_RUNNERS maps all 4 exchanges.
+    """Verify EXCHANGE_RUNNERS maps all live exchanges.
 
     Given: The EXCHANGE_RUNNERS constant.
     When: Keys are examined.
-    Then: walutomat, kraken, kraken_futures, zonda all present.
+    Then: walutomat, kraken, kraken_futures all present.
     """
-    assert set(EXCHANGE_RUNNERS.keys()) == {"walutomat", "kraken", "kraken_futures", "zonda"}
+    assert set(EXCHANGE_RUNNERS.keys()) == {"walutomat", "kraken", "kraken_futures"}
 
 
 @pytest.mark.asyncio
@@ -177,18 +174,6 @@ async def test_run_kraken_futures_skips_without_api_key() -> None:
     """
     settings = _make_settings()
     await run_kraken_futures(settings)
-
-
-@pytest.mark.asyncio
-async def test_run_zonda_skips_without_api_key() -> None:
-    """Verify run_zonda does nothing when no API keys configured.
-
-    Given: Settings with empty zonda_api_key.
-    When: run_zonda is called.
-    Then: Returns without error.
-    """
-    settings = _make_settings()
-    await run_zonda(settings)
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ the contract for all exchange client implementations. It provides:
 - Abstract methods for real-time data subscriptions via WebSocket
 - Internal methods for logging orders and executions to database
 
-All exchange implementations (Kraken, Zonda, Walutomat, Paper, Polygon)
+All exchange implementations (Kraken, Walutomat, Paper, Polygon)
 must inherit from this base class and implement its abstract methods.
 """
 
@@ -69,7 +69,7 @@ class ExchangeClientBase(ABC):
         Args:
             repository: Optional database repository for persisting orders
                 and executions. If None, database logging is disabled.
-            exchange_name: Identifier for the exchange (e.g., "kraken", "zonda").
+            exchange_name: Identifier for the exchange (e.g., "kraken", "walutomat").
         """
         self.repository = repository
         self.exchange_name = exchange_name

@@ -20,8 +20,6 @@ MarketDataPublisherService
     Abstract base class for all feed publishers.
 KrakenMarketDataPublisher
     Kraken exchange feed publisher.
-ZondaMarketDataPublisher
-    Zonda exchange feed publisher.
 
 Message Flow
 ------------

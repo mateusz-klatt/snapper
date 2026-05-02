@@ -139,7 +139,6 @@ def test_client(mock_settings_for_tests: Any) -> Generator[Any]:
             session_same_site="lax",
             instruments={
                 "kraken": ["BTC-USD", "ETH-USD", "EUR-USD"],
-                "zonda": ["BTC-PLN"],
                 "walutomat": [],
                 "polygon": [],
             },

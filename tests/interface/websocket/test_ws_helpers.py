@@ -306,10 +306,8 @@ class TestParseWalletScopedTopic:
         ("topic", "expected"),
         [
             ("signals.kraken.BTC-USD.live", ("kraken", "BTC-USD")),
-            ("signals.zonda.ETH-PLN.live", ("zonda", "ETH-PLN")),
             ("orders.commands.kraken.BTC-USD.submit", ("kraken", "BTC-USD")),
             ("orders.commands.kraken.BTC-USD.cancel", ("kraken", "BTC-USD")),
-            ("orders.commands.zonda.ETH-PLN.replace", ("zonda", "ETH-PLN")),
             ("orders.events.kraken.BTC-USD.executed", ("kraken", "BTC-USD")),
             ("orders.events.kraken.BTC-USD.submitted", ("kraken", "BTC-USD")),
             ("orders.events.kraken.BTC-USD.accepted", ("kraken", "BTC-USD")),

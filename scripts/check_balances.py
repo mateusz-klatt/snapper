@@ -27,7 +27,6 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
-from snapper.infrastructure.exchanges.implementations.zonda import ZondaExchangeClient
 from snapper.infrastructure.security.encryption import get_encryption_service
 
 logger.remove()
@@ -44,7 +43,7 @@ def build_exchange_factories(
 
     Only includes exchanges whose credential envelope carries the
     fields needed to construct a client — e.g. ``api_key`` +
-    ``api_secret`` for Kraken / Zonda / Kraken Futures, and
+    ``api_secret`` for Kraken / Kraken Futures, and
     ``api_key`` + ``private_key_pem`` for Walutomat.
 
     Args:
@@ -75,17 +74,6 @@ def build_exchange_factories(
                 lambda: KrakenFuturesExchangeClient(
                     api_key=kraken_futures["api_key"],
                     api_secret=kraken_futures["api_secret"],
-                ),
-            )
-        )
-    zonda = credentials_by_exchange.get("zonda", {})
-    if zonda.get("api_key") and zonda.get("api_secret"):
-        factories.append(
-            (
-                "Zonda",
-                lambda: ZondaExchangeClient(
-                    api_key=zonda["api_key"],
-                    api_secret=zonda["api_secret"],
                 ),
             )
         )

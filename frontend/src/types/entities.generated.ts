@@ -14,8 +14,8 @@ export type {
   Status2 as HeartbeatStatus,
 } from './ws.generated'
 
-type Exchange = 'kraken' | 'kraken_futures' | 'kraken_equities' | 'zonda' | 'walutomat' | 'polygon'
-type Exchange2 = 'paper' | 'kraken' | 'kraken_futures' | 'zonda' | 'walutomat'
+type Exchange = 'kraken' | 'kraken_futures' | 'kraken_equities' | 'walutomat' | 'polygon'
+type Exchange2 = 'paper' | 'kraken' | 'kraken_futures' | 'walutomat'
 type TradeSide = 'buy' | 'sell'
 type Mode = 'live' | 'paper'
 

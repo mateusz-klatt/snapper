@@ -63,7 +63,6 @@ enum ExecutionDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case krakenFutures = "kraken_futures"
-    case zonda
     case walutomat
 }
 
@@ -87,7 +86,6 @@ enum OrderDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case krakenFutures = "kraken_futures"
-    case zonda
     case walutomat
 }
 
@@ -112,7 +110,6 @@ enum PositionDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case krakenFutures = "kraken_futures"
-    case zonda
     case walutomat
 }
 
@@ -184,7 +181,6 @@ enum SignalDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case krakenFutures = "kraken_futures"
-    case zonda
     case walutomat
 }
 

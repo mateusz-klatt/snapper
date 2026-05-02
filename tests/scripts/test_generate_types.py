@@ -2328,21 +2328,21 @@ class TestExtractRepeatedUnions:
         lines = [
             "export interface A {",
             "  side: 'buy' | 'sell'",
-            "  exchange: 'paper' | 'kraken' | 'zonda'",
+            "  exchange: 'paper' | 'kraken' | 'walutomat'",
             "}",
             "export interface B {",
             "  side: 'buy' | 'sell'",
-            "  exchange: 'paper' | 'kraken' | 'zonda'",
+            "  exchange: 'paper' | 'kraken' | 'walutomat'",
             "}",
             "export interface C {",
             "  side: 'buy' | 'sell'",
-            "  exchange: 'paper' | 'kraken' | 'zonda'",
+            "  exchange: 'paper' | 'kraken' | 'walutomat'",
             "}",
         ]
         result = extract_repeated_unions(lines)
         joined = "\n".join(result)
         assert "type TradeSide = 'buy' | 'sell'" in joined
-        assert "type Exchange = 'paper' | 'kraken' | 'zonda'" in joined
+        assert "type OrderExchange = 'paper' | 'kraken' | 'walutomat'" in joined
 
     def test_does_not_extract_below_threshold(self) -> None:
         """Unions appearing < 3 times are not extracted."""
@@ -2415,13 +2415,13 @@ class TestExtractRepeatedUnions:
         lines = [
             "",
             "interface A {",
-            "  exchange: 'kraken' | 'zonda'",
+            "  exchange: 'kraken' | 'walutomat'",
             "}",
             "interface B {",
-            "  exchange: 'kraken' | 'zonda'",
+            "  exchange: 'kraken' | 'walutomat'",
             "}",
             "interface C {",
-            "  exchange: 'kraken' | 'zonda'",
+            "  exchange: 'kraken' | 'walutomat'",
             "}",
             "interface D {",
             "  exchange: 'paper' | 'kraken'",

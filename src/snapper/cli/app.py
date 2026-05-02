@@ -23,7 +23,6 @@ User Management:
 
 Data Updates:
     - ``update-kraken-symbols``: Sync Kraken symbol mappings
-    - ``update-zonda-symbols``: Sync Zonda symbol mappings
     - ``update-polygon-symbols``: Sync Polygon symbol mappings
     - ``polygon-backfill-aggregates``: Backfill historical data
     - ``kraken-futures-backfill-candles``: Backfill Kraken Futures OHLCV
@@ -96,7 +95,6 @@ from snapper.application.updaters.symbols.kraken_equities import KrakenEquitiesS
 from snapper.application.updaters.symbols.kraken_futures import KrakenFuturesSymbolUpdaterService
 from snapper.application.updaters.symbols.polygon import PolygonSymbolUpdaterService
 from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdaterService
-from snapper.application.updaters.symbols.zonda import ZondaSymbolUpdaterService
 from snapper.application.updaters.underlying_updater import UnderlyingUpdater
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
@@ -127,12 +125,10 @@ from snapper.infrastructure.market_data.kraken import run_snapshot_update
 from snapper.infrastructure.market_data.kraken_equities import run_kraken_equities_snapshot_update
 from snapper.infrastructure.market_data.kraken_futures import run_kraken_futures_snapshot_update
 from snapper.infrastructure.market_data.walutomat import run_walutomat_snapshot_update
-from snapper.infrastructure.market_data.zonda import run_zonda_snapshot_update
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 from snapper.infrastructure.security.encryption import get_encryption_service
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.executors.walutomat import WalutomatOrderExecutor
-from snapper.messaging.executors.zonda import ZondaOrderExecutor
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
 from snapper.messaging.infrastructure.logger import ZmqMessageLogger
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -564,31 +560,28 @@ def executor(
         typer.Option(
             "--exchange",
             "-e",
-            help="Exchange to run executor for (kraken, zonda, walutomat)",
+            help="Exchange to run executor for (kraken, walutomat)",
         ),
     ] = ExchangeEnum.KRAKEN,
 ) -> None:
     """Run the exchange order executor service.
 
     Args:
-        exchange: Exchange name (kraken, zonda, walutomat).
+        exchange: Exchange name (kraken, walutomat).
     """
 
     async def run_executor() -> None:
         service_map: dict[
             str,
-            type[KrakenOrderExecutor] | type[ZondaOrderExecutor] | type[WalutomatOrderExecutor],
+            type[KrakenOrderExecutor] | type[WalutomatOrderExecutor],
         ] = {
             ExchangeEnum.KRAKEN: KrakenOrderExecutor,
-            ExchangeEnum.ZONDA: ZondaOrderExecutor,
             ExchangeEnum.WALUTOMAT: WalutomatOrderExecutor,
         }
         if exchange.lower() not in service_map:
-            typer.echo(f"Error: Unknown exchange '{exchange}'. Choose: kraken, zonda, walutomat")
+            typer.echo(f"Error: Unknown exchange '{exchange}'. Choose: kraken, walutomat")
             raise typer.Exit(1)
-        service: KrakenOrderExecutor | ZondaOrderExecutor | WalutomatOrderExecutor = service_map[
-            exchange.lower()
-        ]()
+        service: KrakenOrderExecutor | WalutomatOrderExecutor = service_map[exchange.lower()]()
         try:
             typer.echo(f"Starting {exchange} execution service")
             status = service.get_status()
@@ -787,41 +780,6 @@ def update_kraken_equities_symbols(
             raise typer.Exit(code=1) from e
 
     asyncio.run(run_equities_update())
-
-
-@app.command(name="update-zonda-symbols")
-def update_zonda_symbols(
-    force: bool = typer.Option(False, "--force", "-f", help=_FORCE_UPDATE_HELP),
-) -> None:
-    """Sync Zonda symbol mappings from exchange API.
-
-    Args:
-        force: Force update even if recently updated.
-    """
-
-    async def run_zonda_update() -> None:
-        updater = ZondaSymbolUpdaterService(update_threshold_hours=24, force=force)
-        try:
-            typer.echo("Starting Zonda symbol mapping update...")
-            await updater.start()
-            typer.echo("Zonda symbol mappings updated successfully")
-        except Exception as e:
-            typer.echo(f"Error updating Zonda symbol mappings: {e}")
-            raise typer.Exit(code=1) from e
-
-    asyncio.run(run_zonda_update())
-
-
-@app.command(name="update-zonda-market-snapshot")
-def update_zonda_market_snapshot() -> None:
-    """Update Zonda market snapshots with current prices."""
-    typer.echo("Updating Zonda market snapshots...")
-    try:
-        run_zonda_snapshot_update()
-        typer.echo("Zonda market snapshot update complete!")
-    except Exception as e:
-        typer.echo(f"Error updating Zonda market snapshots: {e}")
-        raise typer.Exit(code=1) from e
 
 
 @app.command(name="update-walutomat-symbols")

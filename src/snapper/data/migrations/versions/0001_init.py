@@ -66,26 +66,21 @@ SYMBOL_ALIASES = [
     ("BTC-USD", "kraken", "ws", "BTC/USD"),
     ("BTC-USD", "kraken", "rest", "XXBTZUSD"),
     ("BTC-USD", "kraken", "ccxt", "BTC/USD"),
-    ("BTC-USD", "zonda", "ws", "BTC-USD"),
     ("BTC-USD", "polygon", "rest", "X:BTCUSD"),
     ("BTC-EUR", "kraken", "ws", "BTC/EUR"),
     ("BTC-EUR", "kraken", "rest", "XXBTZEUR"),
     ("BTC-EUR", "kraken", "ccxt", "BTC/EUR"),
-    ("BTC-EUR", "zonda", "ws", "BTC-EUR"),
     ("BTC-EUR", "polygon", "rest", "X:BTCEUR"),
     ("ETH-USD", "kraken", "ws", "ETH/USD"),
     ("ETH-USD", "kraken", "rest", "XETHZUSD"),
     ("ETH-USD", "kraken", "ccxt", "ETH/USD"),
-    ("ETH-USD", "zonda", "ws", "ETH-USD"),
     ("ETH-USD", "polygon", "rest", "X:ETHUSD"),
     ("ETH-EUR", "kraken", "ws", "ETH/EUR"),
     ("ETH-EUR", "kraken", "rest", "XETHZEUR"),
     ("ETH-EUR", "kraken", "ccxt", "ETH/EUR"),
-    ("ETH-EUR", "zonda", "ws", "ETH-EUR"),
     ("ETH-BTC", "kraken", "ws", "ETH/BTC"),
     ("ETH-BTC", "kraken", "rest", "XETHXXBT"),
     ("ETH-BTC", "kraken", "ccxt", "ETH/BTC"),
-    ("ETH-BTC", "zonda", "ws", "ETH-BTC"),
     ("ETH-BTC", "polygon", "rest", "X:ETHBTC"),
     ("EUR-USD", "kraken", "ws", "EUR/USD"),
     ("EUR-USD", "kraken", "rest", "ZEURZUSD"),
@@ -108,7 +103,6 @@ SYMBOL_ALIASES = [
 _EXCHANGE_CAPABILITIES: dict[str, tuple[bool, bool]] = {
     "kraken": (True, True),
     "polygon": (True, False),
-    "zonda": (True, True),
     "walutomat": (True, True),
 }
 SYMBOL_CAPABILITIES: list[tuple[str, str, bool, bool]] = []
@@ -865,7 +859,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "target_execution_exchange IS NULL OR target_execution_exchange IN "
-            "('paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat')",
+            "('paper', 'kraken', 'kraken_futures', 'walutomat')",
             name="ck_br_target_execution_exchange",
         ),
     )

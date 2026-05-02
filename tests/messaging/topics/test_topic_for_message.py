@@ -76,19 +76,19 @@ class TestTopicForMessage:
 
         Given: A TradeData instance,
         When: Deriving topic,
-        Then: Returns market.zonda.BTC-PLN.trades.
+        Then: Returns market.walutomat.EUR-PLN.trades.
         """
         data = TradeData(
             session_id="",
             sequence_id=0,
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-            exchange="zonda",
-            instrument="BTC-PLN",
+            exchange="walutomat",
+            instrument="EUR-PLN",
             price=200000.0,
             volume=0.5,
         )
-        assert topic_for_message(data) == "market.zonda.BTC-PLN.trades"
+        assert topic_for_message(data) == "market.walutomat.EUR-PLN.trades"
 
     def test_order_request_data(self) -> None:
         """OrderRequestData maps to orders.commands.{exchange}.{instrument}.submit.

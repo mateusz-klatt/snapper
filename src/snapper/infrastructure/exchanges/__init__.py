@@ -4,7 +4,7 @@ This package provides abstractions and implementations for connecting to
 cryptocurrency and FX exchanges. It includes:
 
 - Abstract base class defining the exchange client interface
-- Concrete implementations for supported exchanges (Kraken, Zonda, Walutomat, Polygon)
+- Concrete implementations for supported exchanges (Kraken, Walutomat, Polygon)
 - Paper trading simulation client for testing
 - Pydantic schemas for exchange-specific data validation
 - Adapter functions for data format conversions

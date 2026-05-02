@@ -2135,7 +2135,7 @@ export type Components = {
             exchange_order_id?: string | null;
             client_order_id: string;
             instrument: string;
-            exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
+            exchange: "paper" | "kraken" | "kraken_futures" | "walutomat";
             side: "buy" | "sell";
             size: number;
             price: number;
@@ -2477,7 +2477,7 @@ export type Components = {
             exchange_order_id?: string | null;
             client_order_id: string;
             instrument: string;
-            exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
+            exchange: "paper" | "kraken" | "kraken_futures" | "walutomat";
             mode: "live" | "paper";
             side: "buy" | "sell";
             status: string;
@@ -2578,7 +2578,7 @@ export type Components = {
             topic?: string | null;
             instrument: string;
             instrument_public_id: string;
-            exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
+            exchange: "paper" | "kraken" | "kraken_futures" | "walutomat";
             mode: "live" | "paper";
             quantity: number;
             average_price: number;
@@ -2978,7 +2978,7 @@ export type Components = {
             session_id: string;
             topic?: string | null;
             instrument: string;
-            exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
+            exchange: "paper" | "kraken" | "kraken_futures" | "walutomat";
             side: "buy" | "sell";
             strength: number;
             reason: string;
@@ -3664,7 +3664,7 @@ export type Components = {
             fill_model?: string;
             slippage_bps?: number;
             commission_bps?: number;
-            target_execution_exchange?: ("paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat") | null;
+            target_execution_exchange?: ("paper" | "kraken" | "kraken_futures" | "walutomat") | null;
         };
         BacktestCompareRequest: {
             type?: "backtest_compare_request";
@@ -5171,7 +5171,7 @@ export interface Operations {
         parameters: {
             query?: {
                 symbol?: string | null;
-                exchange?: ("paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat") | null;
+                exchange?: ("paper" | "kraken" | "kraken_futures" | "walutomat") | null;
                 limit?: number;
                 offset?: number;
                 as_of?: string | null;
@@ -6597,7 +6597,7 @@ export interface Operations {
         parameters: {
             query: {
                 instrument: string;
-                exchange: "kraken" | "kraken_futures" | "kraken_equities" | "zonda" | "walutomat" | "polygon";
+                exchange: "kraken" | "kraken_futures" | "kraken_equities" | "walutomat" | "polygon";
                 timeframe: string;
                 limit?: number;
                 as_of?: string | null;
@@ -6637,7 +6637,7 @@ export interface Operations {
             query?: {
                 instrument?: string | null;
                 strategy?: string | null;
-                exchange?: ("paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat") | null;
+                exchange?: ("paper" | "kraken" | "kraken_futures" | "walutomat") | null;
                 hours?: number;
                 limit?: number;
                 as_of?: string | null;

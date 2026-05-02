@@ -30,7 +30,6 @@ enum CandleDataExchange: String, Codable, Sendable {
     case kraken
     case krakenFutures = "kraken_futures"
     case krakenEquities = "kraken_equities"
-    case zonda
     case walutomat
     case polygon
 }
@@ -39,7 +38,6 @@ enum FundingAccrualDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case krakenFutures = "kraken_futures"
-    case zonda
     case walutomat
 }
 
@@ -64,7 +62,6 @@ enum OrderCancelDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case krakenFutures = "kraken_futures"
-    case zonda
     case walutomat
 }
 
@@ -72,7 +69,6 @@ enum OrderEventDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case krakenFutures = "kraken_futures"
-    case zonda
     case walutomat
 }
 
@@ -89,7 +85,6 @@ enum OrderReplaceDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case krakenFutures = "kraken_futures"
-    case zonda
     case walutomat
 }
 
@@ -97,7 +92,6 @@ enum OrderRequestDataExchange: String, Codable, Sendable {
     case paper
     case kraken
     case krakenFutures = "kraken_futures"
-    case zonda
     case walutomat
 }
 
@@ -127,7 +121,6 @@ enum TickDataExchange: String, Codable, Sendable {
     case kraken
     case krakenFutures = "kraken_futures"
     case krakenEquities = "kraken_equities"
-    case zonda
     case walutomat
     case polygon
 }
@@ -136,7 +129,6 @@ enum TradeDataExchange: String, Codable, Sendable {
     case kraken
     case krakenFutures = "kraken_futures"
     case krakenEquities = "kraken_equities"
-    case zonda
     case walutomat
     case polygon
 }

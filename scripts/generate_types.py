@@ -1375,8 +1375,8 @@ _ENTITY_UNION_THRESHOLD = 3
 _UNION_LINE_RE = re.compile(r"^(\s+\w+\??:\s+)((?:'[\w]+' \| )*'[\w]+')\s*$")
 
 _KNOWN_UNION_ALIASES: dict[str, str] = {
-    "'kraken' | 'zonda' | 'walutomat' | 'polygon'": "MarketDataExchange",
-    "'paper' | 'kraken' | 'zonda' | 'walutomat'": "OrderExchange",
+    "'kraken' | 'walutomat' | 'polygon'": "MarketDataExchange",
+    "'paper' | 'kraken' | 'walutomat'": "OrderExchange",
     "'buy' | 'sell'": "TradeSide",
     "'market' | 'limit' | 'stop' | 'stop_limit'": "OrderType",
     "'filled' | 'partial'": "FillStatus",

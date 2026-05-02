@@ -10,12 +10,6 @@ underlyings:
       - exchange: kraken
         match_type: exact
         pattern: "BTC-EUR"
-      - exchange: zonda
-        match_type: exact
-        pattern: "BTC-USD"
-      - exchange: zonda
-        match_type: exact
-        pattern: "BTC-EUR"
       - exchange: polygon
         match_type: exact
         pattern: "BTC-USD"
@@ -53,12 +47,6 @@ underlyings:
       - exchange: kraken
         match_type: exact
         pattern: "ETH-BTC"
-      - exchange: zonda
-        match_type: exact
-        pattern: "ETH-USD"
-      - exchange: zonda
-        match_type: exact
-        pattern: "ETH-EUR"
       - exchange: kraken_futures
         match_type: exact
         pattern: "ETH-USD-PERP"

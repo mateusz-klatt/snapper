@@ -221,7 +221,7 @@ class TestTargetExecutionExchange:
         When: BacktestConfig is built,
         Then: Pydantic raises ValidationError because 'not_a_real_exchange'
             is not a member of the OrderExchange Literal (paper/kraken/
-            kraken_futures/zonda/walutomat).
+            kraken_futures/walutomat).
         """
         with pytest.raises(ValidationError):
             BacktestConfig(**_valid_config(target_execution_exchange="not_a_real_exchange"))

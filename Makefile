@@ -321,14 +321,12 @@ run-static:
 	$(PYRUN) snapper update-kraken-symbols --force
 	$(PYRUN) snapper update-kraken-futures-symbols --force
 	$(PYRUN) snapper update-kraken-equities-symbols --force
-	$(PYRUN) snapper update-zonda-symbols --force
 	$(PYRUN) snapper update-walutomat-symbols --force
 	$(PYRUN) snapper update-polygon-symbols --force || true
 	$(PYRUN) snapper update-underlyings
 	$(PYRUN) snapper update-kraken-market-snapshot
 	$(PYRUN) snapper update-kraken-futures-market-snapshot
 	$(PYRUN) snapper update-kraken-equities-market-snapshot
-	$(PYRUN) snapper update-zonda-market-snapshot
 	$(PYRUN) snapper update-walutomat-market-snapshot
 
 run-polygon-aggregates:
@@ -560,11 +558,9 @@ docker-run:
 
 docker-run-static:
 	$(DOCKER_RUN) update-kraken-symbols --force
-	$(DOCKER_RUN) update-zonda-symbols --force
 	$(DOCKER_RUN) update-walutomat-symbols --force
 	$(DOCKER_RUN) update-polygon-symbols --force || true
 	$(DOCKER_RUN) update-kraken-market-snapshot
-	$(DOCKER_RUN) update-zonda-market-snapshot
 	$(DOCKER_RUN) update-walutomat-market-snapshot
 
 docker-polygon-aggregates:

@@ -9,7 +9,7 @@ Known upstream limits (public API docs)
 Walutomat: 20 req/s per account.
 Kraken Spot (REST): 15 req/s per nonce window.
 Polygon.io: 5 req/min on the free tier.
-Kraken Futures / Kraken Equities / Zonda: not publicly documented
+Kraken Futures / Kraken Equities: not publicly documented
   as a flat req/s; left as `None` and the tracker reports only raw
   rates (no utilization).
 Design

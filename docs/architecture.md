@@ -42,7 +42,7 @@ Fundamental types and aliases used throughout the application:
 - `OrderType` — Order type (`market`, `limit`, `stop`, `stop_limit`)
 - `OrderStatus` — Order status in lifecycle
 - `ExecutionMode` — Execution mode (`live`, `paper`)
-- `OrderExchange` — Order-capable exchanges (`paper`, `kraken`, `zonda`, `walutomat`)
+- `OrderExchange` — Order-capable exchanges (`paper`, `kraken`, `walutomat`)
 
 ### Config (`src/snapper/config/`)
 
@@ -248,7 +248,7 @@ Business logic:
 
 External integrations:
 
-- **Exchanges** (`exchanges/`) — Exchange clients (Kraken, Zonda, Walutomat)
+- **Exchanges** (`exchanges/`) — Exchange clients (Kraken, Walutomat)
 - **Market Data** (`market_data/`) — WebSocket feeds
 - **Symbols** (`symbols/`) — Symbol mapping
 - **Security** (`security/`) — Settings encryption

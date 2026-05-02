@@ -57,7 +57,7 @@ class TraderParameters(StrictBody):
 
 
 class PublisherSymbolsParameters(StrictBody):
-    """Parameters for exchange market data publishers (Kraken, Zonda, Walutomat).
+    """Parameters for exchange market data publishers (Kraken, Walutomat).
 
     Attributes:
         symbols: List of native symbols to subscribe and publish.
@@ -161,7 +161,7 @@ class GroupedDailyBackfillParameters(StrictBody):
 
 
 class SymbolUpdaterParameters(StrictBody):
-    """Parameters for symbol updater services (Kraken, Zonda, Walutomat).
+    """Parameters for symbol updater services (Kraken, Walutomat).
 
     Attributes:
         update_threshold_hours: Minimum hours between automatic updates.

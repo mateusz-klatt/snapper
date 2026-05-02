@@ -42,7 +42,7 @@ const mockHookState: {
   instruments: { payload: MockInstrumentRow[] } | undefined
   wallets: { public_id: string; label: string; is_paper: boolean }[] | undefined
 } = {
-  exchanges: { payload: ['kraken', 'zonda'] },
+  exchanges: { payload: ['kraken', 'walutomat'] },
   instruments: {
     payload: [
       { symbol: 'BTC-USD', can_trade: true },

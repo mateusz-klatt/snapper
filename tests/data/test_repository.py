@@ -2560,7 +2560,7 @@ async def test_get_signals_filters_by_exchange(tmp_path: Path) -> None:
     """Verify get_signals filters by exchange.
 
     Given: Repository with signal on kraken,
-    When: get_signals is called with exchange='zonda',
+    When: get_signals is called with exchange='walutomat',
     Then: Returns empty list.
     """
     r, _, inst_pid = await _seed_full_repo(tmp_path)
@@ -2583,7 +2583,7 @@ async def test_get_signals_filters_by_exchange(tmp_path: Path) -> None:
         )
         await s.commit()
     result = await r.get_signals(
-        since=now - timedelta(hours=1), limit=10, as_of=now, exchange="zonda"
+        since=now - timedelta(hours=1), limit=10, as_of=now, exchange="walutomat"
     )
     assert len(result) == 0
 
@@ -2625,7 +2625,7 @@ async def test_get_orders_filters_by_exchange(tmp_path: Path) -> None:
     """Verify get_orders filters by exchange.
 
     Given: Repository with order on kraken,
-    When: get_orders is called with exchange='zonda',
+    When: get_orders is called with exchange='walutomat',
     Then: Returns empty list.
     """
     r, _, inst_pid = await _seed_full_repo(tmp_path)
@@ -2645,7 +2645,7 @@ async def test_get_orders_filters_by_exchange(tmp_path: Path) -> None:
         sequence_id=20,
         timestamp=now,
     )
-    result = await r.get_orders(limit=10, offset=0, as_of=now, exchange="zonda")
+    result = await r.get_orders(limit=10, offset=0, as_of=now, exchange="walutomat")
     assert len(result) == 0
 
 
@@ -5745,7 +5745,7 @@ async def test_get_instrument_capabilities_returns_active_rows(tmp_path: Path) -
         s.add(
             InstrumentOrderCapability(
                 instrument_public_id="inst-2",
-                exchange="zonda",
+                exchange="walutomat",
                 supported_order_types=["limit"],
                 supports_post_only=False,
                 supports_reduce_only=False,
@@ -5773,7 +5773,7 @@ async def test_get_instrument_capabilities_returns_active_rows(tmp_path: Path) -
     assert rows[0]["supported_order_types"] == ["market", "limit"]
     assert rows[0]["supports_post_only"] is True
     assert rows[0]["max_leverage_long"] == 5.0
-    assert rows[1]["exchange"] == "zonda"
+    assert rows[1]["exchange"] == "walutomat"
 
 
 @pytest.mark.asyncio
@@ -5784,7 +5784,7 @@ async def test_get_instrument_capabilities_exchange_filter(tmp_path: Path) -> No
     await r.create_all()
     now = datetime.now(UTC)
     async with r.session() as s:
-        for ex in ("kraken", "zonda"):
+        for ex in ("kraken", "walutomat"):
             s.add(
                 InstrumentOrderCapability(
                     instrument_public_id=f"inst-{ex}",
@@ -5890,7 +5890,7 @@ async def test_get_venue_fee_schedules_exchange_filter(tmp_path: Path) -> None:
     await r.create_all()
     now = datetime.now(UTC)
     async with r.session() as s:
-        for ex in ("kraken", "zonda"):
+        for ex in ("kraken", "walutomat"):
             s.add(
                 VenueFeeSchedule(
                     exchange=ex,
@@ -5906,9 +5906,9 @@ async def test_get_venue_fee_schedules_exchange_filter(tmp_path: Path) -> None:
                 )
             )
         await s.commit()
-    rows = await r.get_venue_fee_schedules(as_of=now, exchange="zonda")
+    rows = await r.get_venue_fee_schedules(as_of=now, exchange="walutomat")
     assert len(rows) == 1
-    assert rows[0]["exchange"] == "zonda"
+    assert rows[0]["exchange"] == "walutomat"
 
 
 @pytest.mark.asyncio
@@ -6524,7 +6524,7 @@ async def test_get_execution_plans_exchange_mode_wallet_filters(tmp_path: Path) 
     )
     rows = await r.get_execution_plans(as_of=now, exchange="kraken")
     assert len(rows) == 1
-    rows = await r.get_execution_plans(as_of=now, exchange="zonda")
+    rows = await r.get_execution_plans(as_of=now, exchange="walutomat")
     assert len(rows) == 0
     rows = await r.get_execution_plans(as_of=now, mode="live")
     assert len(rows) == 1
@@ -7532,7 +7532,7 @@ async def test_get_orders_total_count_filters_by_symbol_and_exchange(tmp_path: P
     await _insert_order_with_status(r, inst_pid=inst_pid, status="open", seq=50, now=inserted_at)
     total_match = await r.get_orders_total_count(as_of=as_of, symbol="BTC-USD", exchange="kraken")
     assert total_match == 1
-    total_miss = await r.get_orders_total_count(as_of=as_of, exchange="zonda")
+    total_miss = await r.get_orders_total_count(as_of=as_of, exchange="walutomat")
     assert total_miss == 0
 
 

@@ -63,7 +63,6 @@ class TestTraderCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD", "ETH-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -94,7 +93,6 @@ class TestTraderCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD", "ETH-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -117,7 +115,6 @@ class TestTraderCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -149,7 +146,6 @@ class TestTraderCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -189,7 +185,6 @@ class TestTraderCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -217,7 +212,6 @@ class TestTraderCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -256,7 +250,6 @@ class TestTraderCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -293,7 +286,6 @@ class TestTraderCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -349,7 +341,6 @@ class TestTraderCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -397,7 +388,6 @@ class TestTraderCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -442,7 +432,6 @@ class TestTraderCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -483,7 +472,6 @@ class TestTraderCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -531,7 +519,6 @@ class TestTraderCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }
@@ -612,7 +599,6 @@ class TestTraderCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }

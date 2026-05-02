@@ -320,7 +320,7 @@ X-CSRF-Token: <csrf_token>
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
 | `instrument` | string | yes | Instrument symbol (e.g., `BTC-USD`) |
-| `exchange` | string | yes | Exchange name (`kraken`, `zonda`, `walutomat`, `polygon`) |
+| `exchange` | string | yes | Exchange name (`kraken`, `walutomat`, `polygon`) |
 | `timeframe` | string | yes | Candle timeframe (e.g., `1m`, `5m`, `15m`, `1h`, `4h`, `1d`) |
 | `limit` | int | no | Number of candles, max 1000 (default 100) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
@@ -366,7 +366,7 @@ X-CSRF-Token: <csrf_token>
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
 | `symbol` | string | no | Filter by instrument symbol |
-| `exchange` | string | no | Filter by exchange (`paper`, `kraken`, `zonda`, `walutomat`) |
+| `exchange` | string | no | Filter by exchange (`paper`, `kraken`, `walutomat`) |
 | `limit` | int | no | Number of orders, 1-1000 (default 100) |
 | `offset` | int | no | Number of orders to skip (default 0) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
@@ -574,7 +574,7 @@ X-CSRF-Token: <csrf_token>
 | --------- | ---- | -------- | ----------- |
 | `instrument` | string | no | Filter by instrument symbol |
 | `strategy` | string | no | Filter by strategy name |
-| `exchange` | string | no | Filter by exchange (`paper`, `kraken`, `zonda`, `walutomat`) |
+| `exchange` | string | no | Filter by exchange (`paper`, `kraken`, `walutomat`) |
 | `hours` | int | no | Hours of history, max 168 (default 24) |
 | `limit` | int | no | Number of signals, max 1000 (default 100) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
@@ -862,7 +862,7 @@ X-CSRF-Token: <csrf_token>
 **Response (200):**
 
 ```json
-["kraken", "polygon", "walutomat", "zonda"]
+["kraken", "polygon", "walutomat"]
 ```
 
 ### GET /api/exchanges/{exchange}/instruments
@@ -1297,7 +1297,7 @@ List all settings, optionally filtered by category.
 ]
 ```
 
-Note: per-wallet trading credentials (kraken, walutomat, zonda,
+Note: per-wallet trading credentials (kraken, walutomat,
 kraken_futures) are NOT exposed through the settings endpoints.
 They live in the `wallet_credentials` table and are currently
 managed via seed files (`proprietary/data/seed/dev.toml` /

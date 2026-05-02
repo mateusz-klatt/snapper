@@ -4083,11 +4083,11 @@ class TestBaseStrategyValidation:
             config = object.__new__(StrategyConfig)
             config.name = "test"
             config.strategy_class = "Test"
-            config.inputs = ["market.zonda.BTC-PLN.candles.1h"]
-            config.outputs = ["BTC-PLN"]
-            config.exchange = "zonda"
+            config.inputs = ["market.kraken.UNKNOWN-PAIR.candles.1h"]
+            config.outputs = ["UNKNOWN-PAIR"]
+            config.exchange = "kraken"
             config.params = {}
-            with pytest.raises(ValueError, match="not tradeable on zonda"):
+            with pytest.raises(ValueError, match="not tradeable on kraken"):
                 config._validate_output_instruments()
 
     def test_validate_outputs_paper_accepts_known_symbols(self) -> None:
@@ -5343,40 +5343,6 @@ def test_walutomat_accepts_fx_pairs() -> None:
         exchange="walutomat",
     )
     assert config.outputs == ["EUR-PLN"]
-
-
-def test_zonda_rejects_invalid_symbols() -> None:
-    """Verify Zonda rejects invalid symbols.
-
-    Given: Zonda exchange,
-    When: Invalid pair,
-    Then: ValueError raised.
-    """
-    with pytest.raises(ValueError, match="not tradeable on zonda"):
-        StrategyConfig(
-            name="test_zonda_invalid",
-            strategy_class="TestStrategy",
-            inputs=["market.zonda.INVALID-PAIR.ticks"],
-            outputs=["INVALID-PAIR"],
-            exchange="zonda",
-        )
-
-
-def test_zonda_accepts_valid_symbols() -> None:
-    """Verify Zonda accepts valid symbols.
-
-    Given: Zonda exchange,
-    When: Valid BTC-PLN,
-    Then: Config accepted.
-    """
-    config = StrategyConfig(
-        name="test_zonda_valid",
-        strategy_class="TestStrategy",
-        inputs=["market.zonda.BTC-PLN.ticks"],
-        outputs=["BTC-PLN"],
-        exchange="zonda",
-    )
-    assert config.outputs == ["BTC-PLN"]
 
 
 def test_kraken_rejects_invalid_symbols() -> None:

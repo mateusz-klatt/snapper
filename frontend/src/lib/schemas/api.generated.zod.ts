@@ -249,7 +249,7 @@ export const ExecutionDataSchema = z
     exchange_order_id: z.string().nullable().optional(),
     client_order_id: z.string(),
     instrument: z.string(),
-    exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
+    exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'walutomat']),
     side: z.enum(['buy', 'sell']),
     size: z.number(),
     price: z.number(),
@@ -481,7 +481,7 @@ export const OrderDataSchema = z
     exchange_order_id: z.string().nullable().optional(),
     client_order_id: z.string(),
     instrument: z.string(),
-    exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
+    exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'walutomat']),
     mode: z.enum(['live', 'paper']),
     side: z.enum(['buy', 'sell']),
     status: z.string(),
@@ -561,7 +561,7 @@ export const PositionDataSchema = z
     topic: z.string().nullable().optional(),
     instrument: z.string(),
     instrument_public_id: z.string(),
-    exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
+    exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'walutomat']),
     mode: z.enum(['live', 'paper']),
     quantity: z.number(),
     average_price: z.number(),
@@ -759,7 +759,7 @@ export const SignalDataSchema = z
     session_id: z.string(),
     topic: z.string().nullable().optional(),
     instrument: z.string(),
-    exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
+    exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'walutomat']),
     side: z.enum(['buy', 'sell']),
     strength: z.number(),
     reason: z.string(),
@@ -2737,7 +2737,7 @@ export const BacktestCreateBodySchema = z
     slippage_bps: z.number().optional(),
     commission_bps: z.number().optional(),
     target_execution_exchange: z
-      .enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat'])
+      .enum(['paper', 'kraken', 'kraken_futures', 'walutomat'])
       .nullable()
       .optional(),
   })

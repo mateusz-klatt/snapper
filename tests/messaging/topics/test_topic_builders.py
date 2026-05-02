@@ -48,7 +48,7 @@ class TestMarketTopic:
             market_topic("paper", "BTC-USD", "ticks", source_exchange="kraken")
             == "market.paper.kraken.BTC-USD.ticks"
         )
-        assert market_topic("zonda", "BTC-PLN", "ticks") == "market.zonda.BTC-PLN.ticks"
+        assert market_topic("walutomat", "EUR-PLN", "ticks") == "market.walutomat.EUR-PLN.ticks"
 
     def test_trades_topic(self) -> None:
         """Verify trades topic builds correctly.
@@ -57,8 +57,8 @@ class TestMarketTopic:
         When: Building trades topic,
         Then: Returns correctly formatted topic.
         """
-        result = market_topic("zonda", "BTC-PLN", "trades")
-        assert result == "market.zonda.BTC-PLN.trades"
+        result = market_topic("walutomat", "EUR-PLN", "trades")
+        assert result == "market.walutomat.EUR-PLN.trades"
 
     def test_candles_topic_with_timeframe(self) -> None:
         """Verify candles topic includes timeframe.
@@ -246,16 +246,6 @@ class TestOrderEventTopic:
         result = order_event_topic("kraken", "BTC-USD", "replaced")
         assert result == "orders.events.kraken.BTC-USD.replaced"
 
-    def test_event_with_zonda_exchange(self) -> None:
-        """Verify event topic with zonda exchange.
-
-        Given: Zonda exchange name,
-        When: Building event topic,
-        Then: Returns correctly formatted topic.
-        """
-        result = order_event_topic("zonda", "BTC-PLN", "executed")
-        assert result == "orders.events.zonda.BTC-PLN.executed"
-
 
 class TestSignalTopic:
     """Tests for signal_topic builder function."""
@@ -438,16 +428,6 @@ class TestOrderPrefixes:
         result = order_events_prefix("kraken")
         assert result == "orders.events.kraken."
 
-    def test_events_prefix_with_zonda_exchange(self) -> None:
-        """Verify events prefix with zonda exchange.
-
-        Given: Zonda exchange name,
-        When: Building events prefix,
-        Then: Returns correctly formatted prefix.
-        """
-        result = order_events_prefix("zonda")
-        assert result == "orders.events.zonda."
-
 
 class TestParseOrderCommandTopic:
     """Tests for parse_order_command_topic parser function."""
@@ -485,10 +465,10 @@ class TestParseOrderCommandTopic:
         When: Parsing the topic,
         Then: Returns ParsedOrderTopic with correct components.
         """
-        result = parse_order_command_topic("orders.commands.zonda.BTC-PLN.replace")
+        result = parse_order_command_topic("orders.commands.walutomat.EUR-PLN.replace")
         assert result is not None
-        assert result.exchange == "zonda"
-        assert result.instrument == "BTC-PLN"
+        assert result.exchange == "walutomat"
+        assert result.instrument == "EUR-PLN"
         assert result.suffix == "replace"
 
     def test_parse_malformed_short_topic(self) -> None:
@@ -606,10 +586,10 @@ class TestParseOrderEventTopic:
         When: Parsing the topic,
         Then: Returns ParsedOrderTopic with correct components.
         """
-        result = parse_order_event_topic("orders.events.zonda.BTC-PLN.rejected")
+        result = parse_order_event_topic("orders.events.walutomat.EUR-PLN.rejected")
         assert result is not None
-        assert result.exchange == "zonda"
-        assert result.instrument == "BTC-PLN"
+        assert result.exchange == "walutomat"
+        assert result.instrument == "EUR-PLN"
         assert result.suffix == "rejected"
 
     def test_parse_malformed_short_topic(self) -> None:
@@ -654,7 +634,7 @@ class TestIsOrderTopic:
         Then: Returns True.
         """
         assert is_order_topic("orders.commands.kraken.BTC-USD.submit") is True
-        assert is_order_topic("orders.commands.zonda.BTC-PLN.cancel") is True
+        assert is_order_topic("orders.commands.walutomat.EUR-PLN.cancel") is True
 
     def test_market_topic_returns_false(self) -> None:
         """Verify market topic is not identified as order topic.

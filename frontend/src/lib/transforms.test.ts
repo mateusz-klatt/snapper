@@ -267,8 +267,8 @@ describe('Execution Transformers', () => {
       timestamp: '2026-01-15T10:30:00Z',
       session_id: 'test-sid',
       client_order_id: 'client-11',
-      exchange: 'zonda',
-      instrument: 'ETH/PLN',
+      exchange: 'walutomat',
+      instrument: 'EUR/PLN',
       side: 'sell',
       size: 2,
       price: 15000,
@@ -284,8 +284,8 @@ describe('Execution Transformers', () => {
     expect(result.publicId).toBe('ws-exec-uuid')
     expect(result.timestamp).toEqual(new Date('2026-01-15T10:30:00Z'))
     expect(result.clientOrderId).toBe('client-11')
-    expect(result.exchange).toBe('zonda')
-    expect(result.instrument).toBe('ETH/PLN')
+    expect(result.exchange).toBe('walutomat')
+    expect(result.instrument).toBe('EUR/PLN')
     expect(result.feeAsset).toBe('PLN')
     expect(result.status).toBe('filled')
     expect(result.executedAt).toEqual(new Date('2026-01-15T10:30:00Z'))
@@ -314,8 +314,8 @@ describe('Execution Transformers', () => {
       type: 'execution',
       timestamp: '2026-01-15T10:30:00Z',
       client_order_id: 'client-11',
-      exchange: 'zonda',
-      instrument: 'ETH/PLN',
+      exchange: 'walutomat',
+      instrument: 'EUR/PLN',
       side: 'sell',
       size: 2,
       price: 15000,
@@ -859,7 +859,7 @@ describe('Batch Transformers', () => {
         timestamp: '2026-01-15T10:31:00Z',
         session_id: 'test-sid',
         instrument: 'ETH/USD',
-        exchange: 'zonda',
+        exchange: 'kraken',
         client_order_id: 'client-2',
         exchange_order_id: null,
         created_at: '2026-01-15T10:31:00Z',

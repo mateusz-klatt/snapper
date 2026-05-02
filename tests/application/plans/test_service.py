@@ -1456,13 +1456,13 @@ class TestPlanExecutorService:
             session_id="s1",
             sequence_id=1,
             instrument="BTC-USD",
-            exchange="zonda",
+            exchange="walutomat",
             volume=0.0,
             bid=50000.0,
             ask=50001.0,
             last=50000.5,
         )
-        await service._handle_tick("market.zonda.BTC-USD.ticks", tick)
+        await service._handle_tick("market.walutomat.BTC-USD.ticks", tick)
         assert service._last_tick_timestamps.get("plan-1") is None
 
     @pytest.mark.asyncio

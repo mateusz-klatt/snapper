@@ -153,7 +153,6 @@ class TestTopicContractValidation:
         """
         valid_topics = [
             "orders.events.kraken.BTC-USD.executed",
-            "orders.events.zonda.BTC-PLN.executed",
             "orders.events.walutomat.EUR-PLN.executed",
         ]
         for topic in valid_topics:
@@ -169,7 +168,6 @@ class TestTopicContractValidation:
         """
         valid_topics = [
             "orders.commands.kraken.BTC-USD.submit",
-            "orders.commands.zonda.BTC-PLN.submit",
             "orders.commands.walutomat.EUR-PLN.submit",
             "orders.commands.kraken.BTC-USD.cancel",
         ]
@@ -187,7 +185,6 @@ class TestTopicContractValidation:
         invalid_topics = [
             ("trade.kraken.executions", "Unknown topic category: trade"),
             ("trade.kraken.orders", "Unknown topic category: trade"),
-            ("trade.zonda.executions", "Unknown topic category: trade"),
         ]
         for topic, expected_error in invalid_topics:
             is_valid, error_msg = validate_topic(topic)
@@ -208,8 +205,8 @@ class TestValidatedPublisherContract:
         valid_executor_topics = [
             "orders.events.kraken.BTC-USD.executed",
             "orders.events.kraken.BTC-USD.accepted",
-            "orders.events.zonda.BTC-PLN.executed",
-            "orders.events.zonda.BTC-PLN.accepted",
+            "orders.events.walutomat.EUR-PLN.executed",
+            "orders.events.walutomat.EUR-PLN.accepted",
         ]
         for topic in valid_executor_topics:
             is_valid, error_msg = validate_topic(topic)
@@ -448,15 +445,15 @@ def patch_symbol_data(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     attribute replacement.
     """
     monkeypatch.setattr(
-        validation, "get_available_exchanges", lambda: ["kraken", "paper", "zonda", "walutomat"]
+        validation, "get_available_exchanges", lambda: ["kraken", "paper", "walutomat"]
     )
     monkeypatch.setattr(
-        validation, "get_market_subscribe_exchanges", lambda: ["kraken", "zonda", "walutomat"]
+        validation, "get_market_subscribe_exchanges", lambda: ["kraken", "walutomat"]
     )
     monkeypatch.setattr(
         validation,
         "get_market_data_exchanges",
-        lambda: ["kraken", "polygon", "zonda", "walutomat"],
+        lambda: ["kraken", "polygon", "walutomat"],
     )
     monkeypatch.setattr(
         validation,
@@ -1572,7 +1569,7 @@ class TestFieldValidatorEdgeCases:
         When: Each is validated,
         Then: All are accepted.
         """
-        valid_exchanges = ["kraken", "paper", "walutomat", "zonda"]
+        valid_exchanges = ["kraken", "paper", "walutomat"]
         for exchange in valid_exchanges:
             valid, _err = _validate_exchange(exchange)
             assert valid, f"Exchange {exchange} should be valid"

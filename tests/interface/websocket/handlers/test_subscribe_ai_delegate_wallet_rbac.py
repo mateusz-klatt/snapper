@@ -7,10 +7,8 @@ Topic                                                                    Verdict
 =======================================================================  ========
 signals.kraken.BTC-USD.live  (pair in allowed)                           accepted
 signals.kraken.ETH-USD.live  (pair NOT in allowed)                       denied
-signals.zonda.BTC-USD.live   (wrong exchange)                            denied
 orders.commands.kraken.BTC-USD.submit  (pair in allowed)                 accepted
 orders.events.kraken.BTC-USD.executed  (pair in allowed)                 accepted
-orders.events.zonda.BTC-USD.executed   (wrong exchange)                  denied
 signals.paper.BTC-USD.my_strategy      (paper prefix pass-through)       accepted
 market.kraken.BTC-USD.ticks            (non-wallet-scoped prefix)        accepted
 =======================================================================  ========
@@ -84,10 +82,8 @@ class TestAIDelegateWalletScopeFilter:
         [
             ("signals.kraken.BTC-USD.live", {("kraken", "BTC-USD")}, True),
             ("signals.kraken.ETH-USD.live", {("kraken", "BTC-USD")}, False),
-            ("signals.zonda.BTC-USD.live", {("kraken", "BTC-USD")}, False),
             ("orders.commands.kraken.BTC-USD.submit", {("kraken", "BTC-USD")}, True),
             ("orders.events.kraken.BTC-USD.executed", {("kraken", "BTC-USD")}, True),
-            ("orders.events.zonda.BTC-USD.executed", {("kraken", "BTC-USD")}, False),
             ("signals.paper.BTC-USD.my_strategy", set(), True),
             ("market.kraken.BTC-USD.ticks", set(), True),
         ],
@@ -124,7 +120,7 @@ class TestAIDelegateWalletScopeFilter:
         """
         topics = [
             "signals.kraken.BTC-USD.live",
-            "signals.zonda.ETH-USD.live",
+            "signals.kraken.ETH-USD.live",
             "orders.events.kraken.BTC-USD.executed",
             "market.kraken.BTC-USD.ticks",
         ]
@@ -159,7 +155,7 @@ class TestAIDelegateWalletScopeFilter:
         repo = _repo_with_pairs(set())
         topics = [
             "signals.kraken.BTC-USD.live",
-            "orders.commands.zonda.ETH-PLN.submit",
+            "orders.commands.kraken.ETH-USD.submit",
             "market.kraken.BTC-USD.ticks",
             "signals.paper.MNQU6-CME.my_strategy",
         ]
@@ -175,7 +171,7 @@ class TestAIDelegateWalletScopeFilter:
         ]
         assert denied == [
             "signals.kraken.BTC-USD.live",
-            "orders.commands.zonda.ETH-PLN.submit",
+            "orders.commands.kraken.ETH-USD.submit",
         ]
 
 
@@ -199,7 +195,7 @@ class TestAIDelegateHandleSubscribeIntegration:
             _msg(
                 [
                     "signals.kraken.BTC-USD.live",
-                    "signals.zonda.BTC-USD.live",
+                    "signals.kraken.ETH-USD.live",
                 ]
             ),
             manager,
@@ -208,7 +204,7 @@ class TestAIDelegateHandleSubscribeIntegration:
         )
 
         response = json.loads(ws.send_text.call_args[0][0])
-        assert "signals.zonda.BTC-USD.live" in response["denied_topics"]
+        assert "signals.kraken.ETH-USD.live" in response["denied_topics"]
 
     @pytest.mark.asyncio
     async def test_filter_runs_once_per_subscribe_call(self) -> None:

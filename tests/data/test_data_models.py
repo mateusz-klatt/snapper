@@ -572,7 +572,7 @@ class TestSymbolExchangeCapabilityModel:
         now = datetime.now(UTC)
         cap = SymbolExchangeCapability(
             symbol_public_id="test-uuid-cap-2",
-            exchange="zonda",
+            exchange="walutomat",
             can_market_data=False,
             can_trade=False,
             source="seed",

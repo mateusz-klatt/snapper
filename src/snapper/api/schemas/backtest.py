@@ -41,7 +41,7 @@ class BacktestCreateBody(StrictBody):
             enables observe-on-feed-A / trade-on-venue-B (cross-asset)
             runs from the public REST surface. Must be one of the
             order-capable values: ``paper`` / ``kraken`` /
-            ``kraken_futures`` / ``zonda`` / ``walutomat``.
+            ``kraken_futures`` / ``walutomat``.
     """
 
     strategy_class: str

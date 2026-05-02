@@ -68,7 +68,7 @@ class TestRestCallTrackerRateAndUtilization:
         tracker = RestCallTracker()
         assert tracker.get_rate(ExchangeEnum.KRAKEN, 1.0) == pytest.approx(0.0)
         assert tracker.get_utilization(ExchangeEnum.KRAKEN) == pytest.approx(0.0)
-        assert tracker.get_utilization(ExchangeEnum.ZONDA) is None
+        assert tracker.get_utilization(ExchangeEnum.KRAKEN_FUTURES) is None
 
     def test_record_call_increments_rate_for_exchange(self) -> None:
         """Given 5 recorded calls, the 1 s rate reports 5 req/s.
@@ -129,7 +129,7 @@ class TestRestCallTrackerRateAndUtilization:
         """Exchanges without a published limit never report utilization.
 
         Given:
-            A tracker with no ``zonda`` entry in ``_limits``,
+            A tracker with no ``kraken_futures`` entry in ``_limits``,
 
         When:
             Calls are recorded and utilization queried,
@@ -139,8 +139,8 @@ class TestRestCallTrackerRateAndUtilization:
             as "no limit known", not "zero utilization".
         """
         tracker = RestCallTracker(limits={})
-        tracker.record_call(ExchangeEnum.ZONDA)
-        assert tracker.get_utilization(ExchangeEnum.ZONDA) is None
+        tracker.record_call(ExchangeEnum.KRAKEN_FUTURES)
+        assert tracker.get_utilization(ExchangeEnum.KRAKEN_FUTURES) is None
 
     def test_window_trims_old_events(self) -> None:
         """Events older than 60 s are trimmed on the next record_call.
@@ -442,13 +442,12 @@ class TestSingletonAccess:
             Walutomat = 20 req/s, Kraken = 15 req/s, Polygon is
             configured based on the 5 req/min free tier
             (approximately 0.083 req/s). Undocumented exchanges
-            (Zonda, Kraken Futures, Kraken Equities) are absent.
+            (Kraken Futures, Kraken Equities) are absent.
         """
         limits: dict[str, Any] = dict(REST_RATE_LIMITS_PER_SECOND)
         assert limits[ExchangeEnum.WALUTOMAT] == pytest.approx(20.0)
         assert limits[ExchangeEnum.KRAKEN] == pytest.approx(15.0)
         assert limits[ExchangeEnum.POLYGON] == pytest.approx(5.0 / 60.0)
-        assert ExchangeEnum.ZONDA not in limits
         assert ExchangeEnum.KRAKEN_FUTURES not in limits
         assert ExchangeEnum.KRAKEN_EQUITIES not in limits
 
@@ -461,10 +460,10 @@ class TestRestCallTrackerAcquire:
         """Exchanges without a published limit record immediately with no sleep.
 
         Given:
-            Tracker has no entry for Zonda,
+            Tracker has no entry for Kraken Futures,
 
         When:
-            ``acquire(ZONDA)`` is awaited,
+            ``acquire(KRAKEN_FUTURES)`` is awaited,
 
         Then:
             The call is recorded and the coroutine returns quickly
@@ -477,9 +476,9 @@ class TestRestCallTrackerAcquire:
             "snapper.infrastructure.rest.tracker.asyncio.sleep",
             new_callable=AsyncMock,
         ) as sleep_mock:
-            await tracker.acquire(ExchangeEnum.ZONDA)
+            await tracker.acquire(ExchangeEnum.KRAKEN_FUTURES)
         elapsed = time.monotonic() - start
-        assert tracker.get_rate(ExchangeEnum.ZONDA, 1.0) == pytest.approx(1.0)
+        assert tracker.get_rate(ExchangeEnum.KRAKEN_FUTURES, 1.0) == pytest.approx(1.0)
         sleep_mock.assert_not_awaited()
         assert elapsed < 0.1
 

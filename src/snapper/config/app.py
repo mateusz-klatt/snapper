@@ -11,7 +11,7 @@ two sources:
    - ZMQ broker endpoints
 
 2. **Database settings** - Runtime configuration stored in DB (via SettingsService)
-   - API keys for exchanges (Kraken, Polygon, Walutomat, Zonda)
+   - API keys for exchanges (Kraken, Polygon, Walutomat)
    - Trading parameters (instruments, timeframes, risk limits)
    - Authentication settings (token expiry, CSRF configuration)
 
@@ -30,7 +30,7 @@ Example:
         settings = get_settings_with_service(settings_service)
         polygon_key = settings.polygon_api_key  # From encrypted DB
 
-    Wallet-scoped exchange credentials (kraken, walutomat, zonda,
+    Wallet-scoped exchange credentials (kraken, walutomat,
     kraken_futures) do NOT live on AppSettings. They are loaded from
     the ``wallet_credentials`` table by ``CredentialResolver`` during
     per-wallet executor startup.
@@ -269,7 +269,7 @@ class AppSettings:
 
         Polygon is a shared market-data provider, not a wallet-scoped
         exchange, so the key stays in the ``settings`` table. Per-wallet
-        trading credentials (kraken, walutomat, zonda, kraken_futures)
+        trading credentials (kraken, walutomat, kraken_futures)
         live in ``wallet_credentials``.
 
         Returns:
@@ -345,7 +345,6 @@ class AppSettings:
                     "MYMM6-CBOT",
                     "M2KM6-CME",
                 ],
-                ExchangeEnum.ZONDA: ["BTC-PLN", "USDC-PLN", "ETH-PLN", "SOL-USDC", "BTC-EUR"],
                 ExchangeEnum.WALUTOMAT: ["EUR-PLN", "USD-PLN", "EUR-USD"],
                 ExchangeEnum.POLYGON: ["BTC-USD", "BTC-EUR", "EUR-USD", "EUR-PLN", "USD-PLN"],
             },
@@ -363,7 +362,6 @@ class AppSettings:
             {
                 ExchangeEnum.KRAKEN: ["BTC-USD", "EUR-USD"],
                 ExchangeEnum.KRAKEN_FUTURES: [],
-                ExchangeEnum.ZONDA: ["BTC-PLN"],
                 ExchangeEnum.WALUTOMAT: ["EUR-PLN", "USD-PLN"],
             },
         )

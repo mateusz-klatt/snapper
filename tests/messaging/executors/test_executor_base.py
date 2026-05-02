@@ -235,16 +235,6 @@ class MergedDummyExecutor(ExchangeExecutorService[Any]):
         return "kraken"
 
 
-class ZondaDummyExecutor(ExchangeExecutorService[Any]):
-    """Test stub for Zonda-specific execution handling."""
-
-    def _create_exchange_client(self) -> MergedDummyClient:
-        return MergedDummyClient()
-
-    def _get_exchange_name(self) -> str:
-        return "zonda"
-
-
 def make_order(**overrides: Any) -> OrderRequestData:
     """Create an OrderRequestData with optional overrides."""
     return OrderRequestData(
@@ -2051,7 +2041,7 @@ class ConcreteTestExecutor(ExchangeExecutorService[ExchangeClientBase]):
         """
         return cast(ExchangeClientBase, self._mock_client)
 
-    def _get_exchange_name(self) -> Literal["kraken", "zonda", "walutomat", "paper"]:
+    def _get_exchange_name(self) -> Literal["kraken", "walutomat", "paper"]:
         """Get exchange name.
 
         Returns:
@@ -3195,7 +3185,7 @@ class TestExecutorCoverage:
     ) -> None:
         """Verify order handler skips orders for other exchanges.
 
-        Given: Order for different exchange (zonda vs kraken),
+        Given: Order for different exchange (walutomat vs kraken),
         When: Order handler processes message,
         Then: Order is not processed.
         """
@@ -3211,7 +3201,7 @@ class TestExecutorCoverage:
             return ("orders.commands.kraken.BTC-USD.submit", b"{}")
 
         service_any.subscriber.recv_multipart = AsyncMock(side_effect=fake_recv)
-        wrong_order = self._create_order(exchange="zonda")
+        wrong_order = self._create_order(exchange="walutomat")
         process_mock: AsyncMock = AsyncMock()
         service_any._process_order = process_mock
         with patch(
@@ -4278,10 +4268,10 @@ class TestCancelReplaceHandlers:
         payload = (
             '{"type":"order_replace","session_id":"","sequence_id":0,'
             '"public_id":"test-pid","timestamp":"2024-01-01T00:00:00Z",'
-            '"exchange":"zonda","instrument":"BTC-PLN",'
-            '"exchange_order_id":"ZONDA-123","client_order_id":"client_456","new_price":200000.0}'
+            '"exchange":"walutomat","instrument":"EUR-PLN",'
+            '"exchange_order_id":"WALUTOMAT-123","client_order_id":"client_456","new_price":200000.0}'
         )
-        await service_any._handle_replace_command(payload, "kraken", "BTC-PLN")
+        await service_any._handle_replace_command(payload, "kraken", "EUR-PLN")
         service_any._process_replace.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -5091,54 +5081,6 @@ class TestDeltaFillSemantics:
         assert fill_3.last_size == pytest.approx(0.3)
         assert fill_3.last_price == pytest.approx(50150.0)
         assert fill_3.status == "filled"
-
-    @pytest.mark.asyncio
-    async def test_build_execution_data_zonda_delta_partials_accumulate(self) -> None:
-        """Verify Zonda trade events are accumulated until requested size is reached.
-
-        Given: Two Zonda trade executions where each payload reports only delta quantity,
-        When: _build_execution_data is called for both events,
-        Then: The first fill stays partial and the second closes the order.
-        """
-        ex: Any = ZondaDummyExecutor()
-        ex.running = True
-        order = make_order(client_order_id="zonda-delta", quantity=0.0001, exchange="zonda")
-        ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
-
-        first = ExecutionUpdate(
-            order_id="zonda-ex-1",
-            exec_type="trade",
-            symbol="BTC-PLN",
-            side=OrderSideEnum.SELL,
-            order_type=ExchangeOrderTypeEnum.LIMIT,
-            order_status=ExchangeOrderStatusEnum.FILLED,
-            timestamp=datetime.now(UTC),
-            last_qty=0.00002073,
-            last_price=248468.97,
-        )
-        _topic, fill_1 = ex._build_execution_data(first, "zonda-ex-1", order, "zonda")
-        assert fill_1.size == pytest.approx(0.00002073)
-        assert fill_1.last_size == pytest.approx(0.00002073)
-        assert fill_1.status == "partial"
-        assert ex.pending_orders[order.client_order_id].last_seen_cum_qty == pytest.approx(
-            0.00002073
-        )
-
-        second = ExecutionUpdate(
-            order_id="zonda-ex-1",
-            exec_type="trade",
-            symbol="BTC-PLN",
-            side=OrderSideEnum.SELL,
-            order_type=ExchangeOrderTypeEnum.LIMIT,
-            order_status=ExchangeOrderStatusEnum.FILLED,
-            timestamp=datetime.now(UTC),
-            last_qty=0.00007927,
-            last_price=248468.97,
-        )
-        _topic, fill_2 = ex._build_execution_data(second, "zonda-ex-1", order, "zonda")
-        assert fill_2.size == pytest.approx(0.0001)
-        assert fill_2.last_size == pytest.approx(0.00007927)
-        assert fill_2.status == "filled"
 
     @pytest.mark.asyncio
     async def test_last_seen_cum_qty_cleaned_on_filled(self) -> None:
@@ -5968,6 +5910,39 @@ def test_resolve_fee_zero_usd_equiv_falls_through() -> None:
         fees=[ExecutionFeeBreakdown(asset="PLN", quantity=1.5)],
     )
     assert base_module.ExchangeExecutorService._resolve_fee(execution) == (1.5, "PLN")
+
+
+def test_resolve_fill_quantities_accumulates_when_only_last_qty_present() -> None:
+    """Verify cum_qty falls back to ``prev_cum + last_qty`` when SDK omits cum_qty.
+
+    Given: An ExecutionUpdate with ``cum_qty=None`` and ``last_qty != None``
+        (the partial-fill shape some venues produce — only the per-event
+        delta is reported, the running cumulative must be reconstructed),
+    When: ``_resolve_fill_quantities`` is called with a non-zero
+        ``prev_cum``,
+    Then: Returns the additive cumulative ``prev_cum + last_qty`` and
+        forwards ``last_qty/last_price`` as the per-event delta.
+    """
+    execution = ExecutionUpdate(
+        order_id="ex-1",
+        exec_type="trade",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        order_status=ExchangeOrderStatusEnum.FILLED,
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        cum_qty=None,
+        last_qty=0.4,
+        last_price=100.0,
+        average_price=100.0,
+    )
+    cum_qty, delta_size, delta_price, avg_price = (
+        base_module.ExchangeExecutorService._resolve_fill_quantities(execution, prev_cum=0.6)
+    )
+    assert cum_qty == pytest.approx(1.0)
+    assert delta_size == pytest.approx(0.4)
+    assert delta_price == pytest.approx(100.0)
+    assert avg_price == pytest.approx(100.0)
 
 
 class TestWalletScopedExecutor:

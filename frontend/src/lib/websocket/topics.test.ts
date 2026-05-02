@@ -91,10 +91,10 @@ describe('topics', () => {
     it('builds topic from tick message data', () => {
       const message = createTick({
         instrument: 'ETH-EUR',
-        exchange: 'ZONDA',
+        exchange: 'KRAKEN',
       })
 
-      expect(getMessageTopic(message as never)).toBe('market.zonda.ETH-EUR.ticks')
+      expect(getMessageTopic(message as never)).toBe('market.kraken.ETH-EUR.ticks')
     })
     it('returns fallback for tick with missing data', () => {
       const message = createTick({

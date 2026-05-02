@@ -141,7 +141,7 @@ snapper executor [OPTIONS]
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
-| `-e, --exchange` | string | `kraken` | Exchange (`kraken`, `zonda`, `walutomat`) |
+| `-e, --exchange` | string | `kraken` | Exchange (`kraken`, `walutomat`) |
 
 **Examples:**
 
@@ -149,8 +149,8 @@ snapper executor [OPTIONS]
 # Kraken executor
 snapper executor -e kraken
 
-# Zonda executor
-snapper executor --exchange zonda
+# Walutomat executor
+snapper executor --exchange walutomat
 ```
 
 ### `feed`
@@ -340,20 +340,6 @@ snapper update-kraken-symbols [OPTIONS]
 | ------ | ---- | ------- | ----------- |
 | `-f, --force` | bool | `false` | Force update |
 
-### `update-zonda-symbols`
-
-Synchronizes symbol mappings from the Zonda API.
-
-```bash
-snapper update-zonda-symbols [OPTIONS]
-```
-
-**Options:**
-
-| Option | Type | Default | Description |
-| ------ | ---- | ------- | ----------- |
-| `-f, --force` | bool | `false` | Force update |
-
 ### `update-walutomat-symbols`
 
 Synchronizes symbol mappings from the Walutomat API.
@@ -408,14 +394,6 @@ Updates Kraken market snapshots with current prices.
 
 ```bash
 snapper update-kraken-market-snapshot
-```
-
-### `update-zonda-market-snapshot`
-
-Updates Zonda market snapshots with current prices.
-
-```bash
-snapper update-zonda-market-snapshot
 ```
 
 ### `update-walutomat-market-snapshot`

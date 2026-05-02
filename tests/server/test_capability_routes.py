@@ -237,9 +237,9 @@ class TestGetVenueFeeSchedules:
         repo = AsyncMock()
         repo.get_venue_fee_schedules = AsyncMock(return_value=[])
         client = _create_client(repo)
-        client.get("/api/venue-fee-schedules?exchange=zonda")
+        client.get("/api/venue-fee-schedules?exchange=walutomat")
         call_kwargs = repo.get_venue_fee_schedules.call_args[1]
-        assert call_kwargs["exchange"] == "zonda"
+        assert call_kwargs["exchange"] == "walutomat"
         client.close()
 
     def test_database_error(self) -> None:

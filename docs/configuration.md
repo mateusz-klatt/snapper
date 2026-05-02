@@ -72,14 +72,14 @@ startup. Each row carries:
 | Column | Description |
 | --- | ----------- |
 | `wallet_public_id` | UUID of the owning wallet (`(label, is_paper)` unique in `wallets` table) |
-| `exchange` | Exchange identifier (`kraken`, `kraken_futures`, `walutomat`, `zonda`, `paper`) |
+| `exchange` | Exchange identifier (`kraken`, `kraken_futures`, `walutomat`, `paper`) |
 | `credential_type` | Envelope shape: `api_key_secret`, `rsa_pem`, `oauth`, or `paper` |
 | `encrypted_payload` | Fernet-encrypted JSON envelope (shape depends on `credential_type`) |
 | `label` | Human-readable description of the credential row |
 
 Envelope shapes by `credential_type`:
 
-- `api_key_secret` — `{"api_key": "...", "api_secret": "..."}` (Kraken, Zonda, Kraken Futures)
+- `api_key_secret` — `{"api_key": "...", "api_secret": "..."}` (Kraken, Kraken Futures)
 - `rsa_pem` — `{"api_key": "...", "private_key_pem": "..."}` (Walutomat)
 - `paper` — `{"initial_balance": "10000.0"}` (paper wallets)
 

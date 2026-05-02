@@ -293,8 +293,7 @@ Three explicit non-goals in the current implementation:
   single-exchange and byte-identical to legacy behaviour. The same
   field round-trips through DB persistence + the rerun endpoint, and
   surfaces on `BacktestRunData` for frontend display. Allowed target
-  values: `paper` / `kraken` / `kraken_futures` / `zonda` /
-  `walutomat`.
+  values: `paper` / `kraken` / `kraken_futures` / `walutomat`.
 
 ### Fingerprint + pairing
 

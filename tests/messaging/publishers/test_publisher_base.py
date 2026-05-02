@@ -1636,7 +1636,6 @@ class TestFeedPublisherCoverage:
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD", "EUR-USD"],
-            "zonda": [],
             "walutomat": [],
             "polygon": [],
         }

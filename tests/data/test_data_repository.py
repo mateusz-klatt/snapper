@@ -506,7 +506,7 @@ async def _make_repo_with_two_instruments(
     )
     _, inst_b = await repo.ensure_instrument(
         symbol_public_id=spid,
-        exchange="zonda",
+        exchange="walutomat",
         session_id="test-session",
         sequence_id=2,
         timestamp=datetime.now(UTC),

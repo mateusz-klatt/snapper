@@ -1650,7 +1650,7 @@ describe('Processes', () => {
         is_one_shot: false,
       }),
       makeConfiguredProcess({
-        name: 'executor_zonda',
+        name: 'executor_walutomat',
         enabled: true,
         running: true,
         class_path: 'snapper.executor',

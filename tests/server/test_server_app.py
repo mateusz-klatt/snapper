@@ -1834,30 +1834,6 @@ class TestWebSocketEndpoints:
         assert wlm["limit_rps"] == 20.0
         assert wlm["utilization"] == wlm["rps_1s"] / 20.0
 
-    def test_rest_rate_metrics_undocumented_exchange_reports_none_util(self) -> None:
-        """Exchange without a published limit reports limit_rps/utilization as null.
-
-        Given:
-            Tracker has calls recorded for Zonda (no published
-            limit),
-
-        When:
-            GET /api/metrics/rest-rate is called,
-
-        Then:
-            The zonda entry has ``limit_rps == None`` and
-            ``utilization == None`` — the caller must interpret
-            that as "no documented upstream limit", not "zero".
-        """
-        reset_rest_call_tracker_for_tests()
-        tracker = get_rest_call_tracker()
-        tracker.record_call(ExchangeEnum.ZONDA)
-        response = self.client.get("/api/metrics/rest-rate")
-        payload = response.json()["payload"]
-        zonda = payload["exchanges"][ExchangeEnum.ZONDA]
-        assert zonda["limit_rps"] is None
-        assert zonda["utilization"] is None
-
 
 class TestStaticFileServing:
     """Tests for static file serving behavior."""
@@ -3360,14 +3336,14 @@ class TestExchangesEndpoint:
         When: GET /exchanges is called,
         Then: Response contains distinct exchange names as strings.
         """
-        repo = MockRepository(session_result=["kraken", "zonda"])
+        repo = MockRepository(session_result=["kraken", "walutomat"])
         client = create_app_with_overrides(repo)
         response = client.get("/api/exchanges")
         assert response.status_code == 200
         data = response.json()
         assert data["type"] == "exchange_list"
         assert "kraken" in data["payload"]
-        assert "zonda" in data["payload"]
+        assert "walutomat" in data["payload"]
 
     def test_get_exchanges_empty(self) -> None:
         """Verify exchanges endpoint returns empty list when no data.

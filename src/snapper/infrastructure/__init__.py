@@ -6,7 +6,7 @@ integrations, data persistence, and system-level utilities.
 
 Subpackages:
     exchanges: Exchange client implementations and adapters for trading
-        operations across multiple exchanges (Kraken, Zonda, Walutomat,
+        operations across multiple exchanges (Kraken, Walutomat,
         Paper, Polygon).
     symbols: Symbol mapping services for converting between native and
         exchange-specific symbol formats.
