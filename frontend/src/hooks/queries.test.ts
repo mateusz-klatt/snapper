@@ -6,6 +6,7 @@ import {
   useSystemStatus,
   useSystemMetrics,
   useDbStats,
+  useNotificationMetrics,
   useCandles,
   useExchanges,
   useExchangeInstruments,
@@ -159,6 +160,19 @@ vi.mock('../lib/apiClient', () => ({
                 last_sampled_at: '2026-05-02T17:00:01Z',
               },
             ],
+          }),
+        })
+      )
+    ),
+    getNotificationMetrics: vi.fn(() =>
+      Promise.resolve(
+        envelope('notification_metrics_response', {
+          payload: envelope('notification_metrics', {
+            delivery_success_total: 0,
+            delivery_failed_total: 0,
+            delivery_410_unregistered_total: 0,
+            delivery_cancelled_scope_total: 0,
+            outbox_queued_depth: 0,
           }),
         })
       )
@@ -545,6 +559,16 @@ describe('queries', () => {
   describe('useDbStats', () => {
     it('returns data when authenticated', async () => {
       const { result } = renderHook(() => useDbStats(), { wrapper: createWrapper() })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data).toBeDefined()
+    })
+  })
+  describe('useNotificationMetrics', () => {
+    it('returns data when authenticated', async () => {
+      const { result } = renderHook(() => useNotificationMetrics(), { wrapper: createWrapper() })
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false)
@@ -1396,6 +1420,12 @@ describe('queries', () => {
     it('useDbStats disables refetchInterval when time-traveling', async () => {
       appStoreModule.useAppStore.setState({ asOf: '2026-01-01T00:00:00Z', isTimeTraveling: true })
       const { result } = renderHook(() => useDbStats(), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
+    })
+    it('useNotificationMetrics disables refetchInterval when time-traveling', async () => {
+      appStoreModule.useAppStore.setState({ asOf: '2026-01-01T00:00:00Z', isTimeTraveling: true })
+      const { result } = renderHook(() => useNotificationMetrics(), { wrapper: createWrapper() })
 
       await waitFor(() => expect(result.current.isLoading).toBe(false))
     })

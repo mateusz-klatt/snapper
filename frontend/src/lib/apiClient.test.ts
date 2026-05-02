@@ -622,6 +622,35 @@ describe('domain API methods', () => {
     expect(result.payload.tables[0]?.table).toBe('orders')
     expect(result.payload.interval_seconds).toBe(60)
   })
+  it('getNotificationMetrics returns outbox counters', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        type: 'notification_metrics_response',
+        sequence_id: 0,
+        public_id: 'env-n',
+        timestamp: '2026-05-02T17:00:00Z',
+        session_id: 'sid',
+        payload: {
+          type: 'notification_metrics',
+          sequence_id: 1,
+          public_id: 'p-n',
+          timestamp: '2026-05-02T17:00:00Z',
+          session_id: 'sid',
+          delivery_success_total: 100,
+          delivery_failed_total: 3,
+          delivery_410_unregistered_total: 1,
+          delivery_cancelled_scope_total: 2,
+          outbox_queued_depth: 5,
+        },
+      }),
+    })
+    const result = await apiClient.getNotificationMetrics()
+
+    expect(result.payload.delivery_success_total).toBe(100)
+    expect(result.payload.outbox_queued_depth).toBe(5)
+  })
   it('getCandles returns candle data', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,

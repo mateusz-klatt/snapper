@@ -148,6 +148,19 @@ export const useDbStats = () => {
   })
 }
 
+export const useNotificationMetrics = () => {
+  const { isAuthenticated } = useAuth()
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+
+  return useQuery({
+    queryKey: ['system', 'notification-metrics'] as const,
+    queryFn: () => apiClient.getNotificationMetrics(),
+    refetchInterval: isAuthenticated && !isTimeTraveling ? 30000 : false,
+    enabled: isAuthenticated,
+    throwOnError: false,
+  })
+}
+
 export const useCandles = (
   instrument: string,
   exchange: string,

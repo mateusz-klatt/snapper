@@ -16,6 +16,7 @@ import {
   SettingResponseSchema,
   SystemMetricsResponseSchema,
   DbStatsResponseSchema,
+  NotificationMetricsResponseSchema,
   SystemStatusResponseSchema,
   ConfiguredProcessesResponseSchema,
   ProcessSummaryResponseSchema,
@@ -60,6 +61,7 @@ import type {
   CandleData,
   SystemMetricsResponse,
   DbStatsResponse,
+  NotificationMetricsResponse,
   SystemStatusResponse,
   SettingListResponse,
   SettingResponse,
@@ -521,6 +523,11 @@ class APIClient {
     const data = await this.getJSON('/api/metrics/db/tables')
 
     return validateResponse(data, DbStatsResponseSchema, '/metrics/db/tables')
+  }
+  async getNotificationMetrics(): Promise<NotificationMetricsResponse> {
+    const data = await this.getJSON('/api/metrics/notifications')
+
+    return validateResponse(data, NotificationMetricsResponseSchema, '/metrics/notifications')
   }
   async getCandles(
     instrument: string,

@@ -127,3 +127,6 @@ export type SystemMetricsData = Components['schemas']['SystemMetricsData']
 export type DbStatsResponse = Components['schemas']['DbStatsResponse']
 export type DbStatsData = Components['schemas']['DbStatsData']
 export type TableStatsItem = Components['schemas']['TableStatsItem']
+
+export type NotificationMetricsResponse = Components['schemas']['NotificationMetricsResponse']
+export type NotificationMetricsData = Components['schemas']['NotificationMetricsData']

@@ -4,6 +4,7 @@ import { HealthSkeleton } from '../../components/Skeleton'
 import { LiveOnlyNotice } from '../../components/LiveOnlyNotice'
 import { SystemMetricsCard } from './SystemMetricsCard'
 import { DbStatsCard } from './DbStatsCard'
+import { NotificationMetricsCard } from './NotificationMetricsCard'
 import clsx from 'clsx'
 import type { ProcessStatus } from '../../types/api'
 
@@ -258,6 +259,7 @@ export const Health: React.FC = () => {
       </div>
       <SystemMetricsCard />
       <DbStatsCard />
+      <NotificationMetricsCard />
       <div className='rounded-2xl border border-dark-600 bg-alpine-50 p-5'>
         <h3 className='mb-3 text-lg font-medium text-alpine-900'>Quick Actions</h3>
         <div className='flex flex-wrap gap-3'>
