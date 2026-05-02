@@ -514,16 +514,17 @@ class TradingEngineService:
         session_id = self.execution_socket.tracker.session_id
         sequence_id = self.execution_socket.tracker.next_sequence(topic)
 
+        spec = self.instrument_specs.get(self.instrument, InstrumentSpec())
+        instrument_public_id = spec.get("public_id")
+        if ai_review_public_id is not None and instrument_public_id is None:
+            raise InstrumentSpecMissingError(
+                f"AI-attributed strategy emit for {self.instrument!r} "
+                "requires instrument_specs[...]['public_id'] to be "
+                "populated by the spec loader; aborting before caps "
+                "guard so the failure is loud + operator-actionable."
+            )
+
         if self._repository is not None:
-            spec = self.instrument_specs.get(self.instrument, InstrumentSpec())
-            instrument_public_id = spec.get("public_id")
-            if ai_review_public_id is not None and instrument_public_id is None:
-                raise InstrumentSpecMissingError(
-                    f"AI-attributed strategy emit for {self.instrument!r} "
-                    "requires instrument_specs[...]['public_id'] to be "
-                    "populated by the spec loader; aborting before caps "
-                    "guard so the failure is loud + operator-actionable."
-                )
             strategy_submission = TradeCommandSubmission(
                 user_public_id=None,
                 operator_public_id=self.operator_public_id or None,

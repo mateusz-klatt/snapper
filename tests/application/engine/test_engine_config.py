@@ -1497,6 +1497,38 @@ async def test_send_order_ai_attributed_fail_closed_on_missing_public_id() -> No
 
 
 @pytest.mark.asyncio
+async def test_send_order_ai_attributed_fail_closed_without_repository() -> None:
+    """Plan D Phase 3 §2.5 — AI fail-closed applies on the no-repo path too.
+
+    Given: a TradingEngine with NO repository wired (test/CLI fallback
+        path that publishes without writing a TradeCommand row),
+    When: ``_send_order`` is called WITH ``ai_review_public_id``,
+    Then: ``InstrumentSpecMissingError`` is raised regardless of the
+        repository-or-not branch. Closes Codex per-chunk-review
+        finding that the §2.5 contract was only enforced inside the
+        ``if self._repository is not None`` block in v1 of Chunk 2.
+    """
+    socket = _SocketStub()
+    engine = TradingEngineService(
+        instrument="BTC-USD",
+        execution_socket=cast(Any, socket),
+        cfg=EngineConfigModel(initial_cash=1_000.0, fee_bps=10.0),
+        exchange="paper",
+    )
+    engine.instrument_specs = {"BTC-USD": InstrumentSpec(tick_size=0.01, lot_size=0.0001)}
+    with pytest.raises(InstrumentSpecMissingError):
+        await engine._send_order(
+            side="buy",
+            size=1.0,
+            price=10.0,
+            reason="test",
+            ai_review_public_id="rev-uuid-no-repo",
+            ai_review_dispatch_version=1,
+        )
+    assert socket.sent == []
+
+
+@pytest.mark.asyncio
 async def test_send_order_ai_attributed_routes_through_attribution_guard() -> None:
     """Plan D Phase 3 §6 — AI emit threads attribution onto the submission.
 
