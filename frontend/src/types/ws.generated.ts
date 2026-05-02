@@ -229,6 +229,8 @@ export type Price2 = number | null;
 export type StrategyName = string | null;
 export type OperatorPublicId8 = string | null;
 export type UserPublicId6 = string | null;
+export type AiReviewPublicId = string | null;
+export type AiReviewDispatchVersion = number | null;
 export type Type30 = "symbol_alias_update";
 export type Topic31 = string | null;
 export type Event2 = "symbol_aliases_updated";
@@ -851,6 +853,8 @@ export interface SignalData {
   wallet_public_id?: string;
   operator_public_id?: OperatorPublicId8;
   user_public_id?: UserPublicId6;
+  ai_review_public_id?: AiReviewPublicId;
+  ai_review_dispatch_version?: AiReviewDispatchVersion;
 }
 export interface SymbolAliasUpdateData {
   type: Type30;

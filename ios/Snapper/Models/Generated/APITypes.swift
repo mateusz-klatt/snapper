@@ -3421,6 +3421,8 @@ struct SignalData: Codable, Sendable {
     let walletPublicId: String?
     let operatorPublicId: String?
     let userPublicId: String?
+    let aiReviewPublicId: String?
+    let aiReviewDispatchVersion: Int?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -3440,6 +3442,8 @@ struct SignalData: Codable, Sendable {
         case walletPublicId = "wallet_public_id"
         case operatorPublicId = "operator_public_id"
         case userPublicId = "user_public_id"
+        case aiReviewPublicId = "ai_review_public_id"
+        case aiReviewDispatchVersion = "ai_review_dispatch_version"
     }
 }
 

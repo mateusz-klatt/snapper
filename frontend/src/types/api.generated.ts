@@ -2986,6 +2986,8 @@ export type Components = {
             wallet_public_id: string;
             operator_public_id?: string | null;
             user_public_id?: string | null;
+            ai_review_public_id?: string | null;
+            ai_review_dispatch_version?: number | null;
         };
         SignalDiffEntry: {
             instrument: string;

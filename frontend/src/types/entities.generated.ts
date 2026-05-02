@@ -664,6 +664,8 @@ export interface Signal {
   walletPublicId?: string
   operatorPublicId?: string | null
   userPublicId?: string | null
+  aiReviewPublicId?: string | null
+  aiReviewDispatchVersion?: number | null
 }
 
 /**

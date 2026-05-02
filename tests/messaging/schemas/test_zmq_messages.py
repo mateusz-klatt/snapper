@@ -154,6 +154,89 @@ class TestMessages:
         assert parsed.side == "buy"
         assert parsed.strength == pytest.approx(0.85)
 
+    def test_signal_ai_review_attribution_defaults_to_none(self) -> None:
+        """Test SignalData AI-review attribution defaults.
+
+        Given: A SignalData without AI-review attribution kwargs,
+        When: Constructed with only required + standard fields,
+        Then: Both ``ai_review_public_id`` and
+            ``ai_review_dispatch_version`` default to ``None`` so
+            non-AI strategy emits remain backward-compatible at
+            the schema level.
+        """
+        msg = SignalData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-default-attr",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
+            strategy_name="rsi_reversion#1",
+            instrument="BTCUSD",
+            exchange="kraken",
+            side="buy",
+            strength=0.5,
+            reason="defaults",
+        )
+        assert msg.ai_review_public_id is None
+        assert msg.ai_review_dispatch_version is None
+
+    def test_signal_ai_review_attribution_round_trip(self) -> None:
+        """Test SignalData AI-review attribution survives round-trip.
+
+        Given: A SignalData with both AI-review attribution fields set,
+        When: Serialized to JSON and parsed back,
+        Then: Both ``ai_review_public_id`` (str) and
+            ``ai_review_dispatch_version`` (int) are preserved
+            byte-equal across the wire boundary so the trader
+            coordinator can read them on the receiving side.
+        """
+        msg = SignalData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-attr-rt",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
+            strategy_name="rsi_reversion#1",
+            instrument="BTCUSD",
+            exchange="kraken",
+            side="buy",
+            strength=0.5,
+            reason="ai-attributed",
+            ai_review_public_id="01890000-7000-7000-8000-000000000000",
+            ai_review_dispatch_version=2,
+        )
+        json_str = msg.to_json()
+        parsed = SignalData.from_json(json_str)
+        assert isinstance(parsed, SignalData)
+        assert parsed.ai_review_public_id == "01890000-7000-7000-8000-000000000000"
+        assert parsed.ai_review_dispatch_version == 2
+
+    def test_signal_ai_review_attribution_unset_round_trip(self) -> None:
+        """Test SignalData round-trip preserves None AI-review attribution.
+
+        Given: A SignalData without AI-review attribution kwargs,
+        When: Serialized and parsed,
+        Then: Both attribution fields remain ``None`` post round-trip
+            so the receiver cannot misinterpret a non-AI signal as
+            an AI-attributed one due to schema serialization.
+        """
+        msg = SignalData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-attr-unset-rt",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
+            strategy_name="rsi_reversion#1",
+            instrument="BTCUSD",
+            exchange="kraken",
+            side="buy",
+            strength=0.5,
+            reason="non-ai",
+        )
+        parsed = SignalData.from_json(msg.to_json())
+        assert parsed.ai_review_public_id is None
+        assert parsed.ai_review_dispatch_version is None
+
     def test_order_request_message(self) -> None:
         """Test OrderRequestData serialization.
 

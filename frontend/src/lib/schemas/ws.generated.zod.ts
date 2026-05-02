@@ -579,6 +579,8 @@ export const SignalDataSchema = z
     wallet_public_id: z.string(),
     operator_public_id: z.string().nullable().optional(),
     user_public_id: z.string().nullable().optional(),
+    ai_review_public_id: z.string().nullable().optional(),
+    ai_review_dispatch_version: z.number().int().nullable().optional(),
   })
   .strict()
 

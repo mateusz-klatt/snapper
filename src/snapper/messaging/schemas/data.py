@@ -162,6 +162,18 @@ class SignalData(StrictDataSchema[Literal["signal"]]):
         price: Suggested entry/exit price (optional).
         strategy_name: Name of the generating strategy (optional).
         fired_at: Domain timestamp when the signal was generated.
+        ai_review_public_id: Optional citation for an AI delegate
+            CONSULT outcome. Populated by the strategy primitive
+            after a successful ``create_ai_review_and_await``;
+            threaded end-to-end into the trader-coordinator's
+            attribution-aware caps gate so caps violations on the
+            approved trade fan out under the AI delegate's identity.
+        ai_review_dispatch_version: Companion to ``ai_review_public_id``
+            per Plan A Q18 dedup contract. Carried end-to-end as
+            transport-only — the strategy citation validator does
+            not compare it; the bus publisher reads dispatch_version
+            from the cited row at publish time. The carried value
+            exists so a future enhancement can enable comparison.
     """
 
     type: Literal["signal"] = "signal"
@@ -176,6 +188,8 @@ class SignalData(StrictDataSchema[Literal["signal"]]):
     wallet_public_id: str = ""
     operator_public_id: str | None = None
     user_public_id: str | None = None
+    ai_review_public_id: str | None = None
+    ai_review_dispatch_version: int | None = None
 
     @model_validator(mode="after")
     def _paper_requires_strategy_name(self) -> Self:
