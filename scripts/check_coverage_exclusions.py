@@ -135,7 +135,7 @@ def print_results(
         return 0
     total = 0
     for filepath, findings in sorted(results.items()):
-        rel_path = filepath.relative_to(root)
+        rel_path = filepath.relative_to(root).as_posix()
         print(f"\n  {rel_path}")
         for line_num, pattern_name, line_content in findings:
             print(f"     L{line_num}: [{pattern_name}]")
