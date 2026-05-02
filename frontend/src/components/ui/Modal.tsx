@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useId, useRef } from 'react'
+import React, { useEffect, useId, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 
@@ -64,41 +64,44 @@ export const Modal: React.FC<Readonly<ModalProps>> = ({
       return
     }
 
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
         onClose()
+
+        return
+      }
+
+      if (event.key !== 'Tab') {
+        return
+      }
+
+      const focusable = getFocusableElements(contentRef.current as HTMLElement)
+
+      if (focusable.length === 0) {
+        event.preventDefault()
+
+        return
+      }
+
+      const first = focusable[0]
+      const last = focusable.at(-1) as HTMLElement
+      const active = document.activeElement
+
+      if (event.shiftKey && active === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault()
+        first.focus()
       }
     }
 
-    document.addEventListener('keydown', handleEsc)
+    document.addEventListener('keydown', handleKeyDown)
 
     return () => {
-      document.removeEventListener('keydown', handleEsc)
+      document.removeEventListener('keydown', handleKeyDown)
     }
   }, [open, onClose])
-
-  const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDialogElement>) => {
-    if (event.key !== 'Tab') return
-    const focusable = getFocusableElements(contentRef.current as HTMLElement)
-
-    if (focusable.length === 0) {
-      event.preventDefault()
-
-      return
-    }
-
-    const first = focusable[0]
-    const last = focusable.at(-1) as HTMLElement
-    const active = document.activeElement
-
-    if (event.shiftKey && active === first) {
-      event.preventDefault()
-      last.focus()
-    } else if (!event.shiftKey && active === last) {
-      event.preventDefault()
-      first.focus()
-    }
-  }, [])
 
   if (!open) return null
   const sizeClasses = {
@@ -112,7 +115,6 @@ export const Modal: React.FC<Readonly<ModalProps>> = ({
       ref={dialogRef}
       className='fixed inset-0 z-50 m-0 h-full max-h-none w-full max-w-none overflow-y-auto bg-transparent p-0 backdrop:bg-muted-900/40'
       aria-labelledby={title ? titleId : undefined}
-      onKeyDown={handleKeyDown}
     >
       <button
         type='button'

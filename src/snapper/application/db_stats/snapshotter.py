@@ -29,7 +29,6 @@ Configuration: ``DB_METRICS_INTERVAL_SECONDS`` (default 60),
 
 import asyncio
 import contextlib
-import dataclasses
 import logging
 import os
 from collections.abc import Callable
@@ -243,9 +242,11 @@ class DbStatsSnapshotter:
         """
         if self._disabled or self._repo is None:
             logger.info("DbStatsSnapshotter: disabled (DB_METRICS_DISABLED=true); skipping start")
+            await asyncio.sleep(0)
             return
         self._stopping.clear()
         self._loop_task = asyncio.create_task(self._loop())
+        await asyncio.sleep(0)
 
     async def stop(self) -> None:
         """Signal the loop to exit, cancel + await its task."""
@@ -283,10 +284,9 @@ class DbStatsSnapshotter:
         """Build ONE :class:`DbStatsSnapshot` covering every registered table.
 
         Per-table failures (timeout / exception) clone the prior
-        :class:`TableStats` with ``is_stale=True`` via
-        :func:`dataclasses.replace`; if no prior snapshot exists the
-        failed-table row carries all-null counters with the loop's
-        ``last_sampled_at`` timestamp.
+        :class:`TableStats` with ``is_stale=True``; if no prior snapshot
+        exists the failed-table row carries all-null counters with the
+        loop's ``last_sampled_at`` timestamp.
         """
         repo = self._repo
         if repo is None:
@@ -344,7 +344,16 @@ class DbStatsSnapshotter:
         """Build the stale-row clone or all-null fallback for ``entry``."""
         prior_row = prior.find(entry.name) if prior is not None else None
         if prior_row is not None:
-            return dataclasses.replace(prior_row, is_stale=True)
+            return TableStats(
+                table=prior_row.table,
+                table_kind=prior_row.table_kind,
+                total=prior_row.total,
+                current=prior_row.current,
+                closed=prior_row.closed,
+                archivable=prior_row.archivable,
+                is_stale=True,
+                last_sampled_at=prior_row.last_sampled_at,
+            )
         return TableStats(
             table=entry.name,
             table_kind=entry.kind,
