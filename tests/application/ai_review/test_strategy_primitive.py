@@ -222,16 +222,7 @@ async def _resolve_review_after_delay(
 ) -> str:
     """Background task helper: wait, then approve/reject the latest pending review."""
     await asyncio.sleep(delay_seconds)
-    async with repo.session() as s:
-        row = (
-            await s.execute(
-                sqlalchemy.text(
-                    "SELECT public_id FROM ai_reviews WHERE status='pending' "
-                    "ORDER BY created_at DESC LIMIT 1"
-                )
-            )
-        ).first()
-    review_id: str = row[0] if row else ""
+    review_id = await _wait_for_latest_pending_review_id(repo)
     new_status = (
         "resolved_approved" if decision is AiReviewDecisionEnum.APPROVE else "resolved_rejected"
     )
@@ -251,6 +242,37 @@ async def _resolve_review_after_delay(
         now=datetime.now(UTC),
     )
     return review_id
+
+
+async def _wait_for_latest_pending_review_id(
+    repo: SQLAlchemyRepository,
+    *,
+    timeout_seconds: float = 5.0,
+    poll_seconds: float = 0.01,
+) -> str:
+    """Wait until the primitive has inserted a pending review row."""
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        review_id = await _latest_pending_review_id(repo)
+        if review_id is not None:
+            return review_id
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("pending ai_review row was not inserted before helper timeout")
+        await asyncio.sleep(poll_seconds)
+
+
+async def _latest_pending_review_id(repo: SQLAlchemyRepository) -> str | None:
+    """Return the newest pending review id, if the primitive has inserted one."""
+    async with repo.session() as s:
+        row = (
+            await s.execute(
+                sqlalchemy.text(
+                    "SELECT public_id FROM ai_reviews WHERE status='pending' "
+                    "ORDER BY created_at DESC LIMIT 1"
+                )
+            )
+        ).first()
+    return row[0] if row else None
 
 
 @pytest.mark.asyncio
@@ -384,17 +406,9 @@ async def test_supersede_terminal_state_observed_via_poll(
 
     async def _supersede_after() -> None:
         await asyncio.sleep(0.2)
-        async with repo.session() as s:
-            row = (
-                await s.execute(
-                    sqlalchemy.text(
-                        "SELECT public_id FROM ai_reviews WHERE status='pending' "
-                        "ORDER BY created_at DESC LIMIT 1"
-                    )
-                )
-            ).first()
+        review_id = await _wait_for_latest_pending_review_id(repo)
         await svc.supersede_review(
-            review_public_id=row[0] if row else "",
+            review_public_id=review_id,
             reason="signal expired",
             repo=repo,
             now=datetime.now(UTC),
@@ -498,23 +512,15 @@ async def test_future_resolved_externally_skips_remaining_poll(
 
     async def _resolve_fast() -> None:
         await asyncio.sleep(0.05)
-        async with repo.session() as s:
-            row = (
-                await s.execute(
-                    sqlalchemy.text(
-                        "SELECT public_id FROM ai_reviews WHERE status='pending' "
-                        "ORDER BY created_at DESC LIMIT 1"
-                    )
-                )
-            ).first()
+        review_id = await _wait_for_latest_pending_review_id(repo)
         await repo.atomic_resolve_review_with_audit_and_counter(
-            review_public_id=row[0] if row else "",
+            review_public_id=review_id,
             decision="approve",
             responding_delegate_public_id=ids["delegate_public_id"],
             rationale="fast",
             new_status="resolved_approved",
             audit_event=_decision_audit_event(
-                review_id=row[0] if row else "",
+                review_id=review_id,
                 delegate_pid=ids["delegate_public_id"],
                 decision=AiReviewDecisionEnum.APPROVE,
                 occurred_at=datetime.now(UTC),
@@ -523,10 +529,9 @@ async def test_future_resolved_externally_skips_remaining_poll(
             now=datetime.now(UTC),
         )
         svc = AiReviewService.get_instance()
-        if row is not None:
-            fut = svc.get_future(row[0])
-            if fut is not None and not fut.done():
-                fut.set_result(None)
+        fut = svc.get_future(review_id)
+        if fut is not None and not fut.done():
+            fut.set_result(None)
 
     background = asyncio.create_task(_resolve_fast())
     request = _make_request(ids, deadline_seconds=5)
