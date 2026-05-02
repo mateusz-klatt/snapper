@@ -9,12 +9,14 @@ append-only for immutable data (events, signals, trades, equity).
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
+from typing import cast
 
 from sqlalchemy import select
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from snapper.core.types import OrderExchange
 from snapper.data.models import BacktestComparison
 from snapper.data.models import BacktestEquityPoint
 from snapper.data.models import BacktestEvent
@@ -63,6 +65,7 @@ def _run_to_dict(row: BacktestRun) -> BacktestRunRow:
         slippage_bps=row.slippage_bps,
         commission_bps=row.commission_bps,
         config_hash=row.config_hash,
+        target_execution_exchange=cast("OrderExchange | None", row.target_execution_exchange),
         created_by_user_id=row.created_by_user_id,
         started_at=row.started_at,
         completed_at=row.completed_at,
@@ -232,6 +235,7 @@ class BacktestRepository:
                 slippage_bps=row.get("slippage_bps", 0.0),
                 commission_bps=row.get("commission_bps", 0.0),
                 config_hash=row.get("config_hash"),
+                target_execution_exchange=row.get("target_execution_exchange"),
                 created_by_user_id=row.get("created_by_user_id"),
                 process_name=row.get("process_name"),
                 session_id=session_id,

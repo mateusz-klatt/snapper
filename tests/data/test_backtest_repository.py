@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import snapper.data.repository as repo_module
+from snapper.core.types import ExchangeEnum
 from snapper.data.backtest_repository import BacktestRepository
 
 NOW = datetime(2026, 4, 13, 12, 0, 0, tzinfo=UTC)
@@ -49,6 +50,36 @@ async def test_create_and_get_run(tmp_path: Path) -> None:
     assert run["strategy_name"] == "sma_cross"
     assert run["status"] == "pending"
     assert run["wallet_public_id"] == "w-1"
+    assert run["target_execution_exchange"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_and_get_run_cross_asset(tmp_path: Path) -> None:
+    """Given: cross-asset insert payload, When: round-trip, Then: target venue persisted."""
+    repo = await _make_repo(tmp_path)
+    _, pid = await repo.create_run(
+        {
+            "wallet_public_id": "w-1",
+            "strategy_name": "sma_cross",
+            "strategy_params": {"fast": 10},
+            "instrument_public_id": "inst-1",
+            "exchange": "kraken_futures",
+            "timeframe": "1h",
+            "start_date": NOW,
+            "end_date": NOW + timedelta(days=30),
+            "target_execution_exchange": ExchangeEnum.KRAKEN,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": NOW,
+        },
+        bus_time=NOW,
+        session_id="s1",
+        sequence_id=1,
+    )
+    run = await repo.get_run(pid, as_of=NOW + timedelta(seconds=1))
+    assert run is not None
+    assert run["exchange"] == "kraken_futures"
+    assert run["target_execution_exchange"] == "kraken"
 
 
 @pytest.mark.asyncio

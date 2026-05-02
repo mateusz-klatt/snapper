@@ -124,6 +124,7 @@ def _run_to_data(
         slippage_bps=run["slippage_bps"],
         commission_bps=run["commission_bps"],
         config_hash=run.get("config_hash"),
+        target_execution_exchange=run.get("target_execution_exchange"),
         started_at=run.get("started_at"),
         completed_at=run.get("completed_at"),
         error=run.get("error"),
@@ -158,6 +159,7 @@ def _run_to_detail_data(
         slippage_bps=run["slippage_bps"],
         commission_bps=run["commission_bps"],
         config_hash=run.get("config_hash"),
+        target_execution_exchange=run.get("target_execution_exchange"),
         started_at=run.get("started_at"),
         completed_at=run.get("completed_at"),
         error=run.get("error"),
@@ -344,6 +346,7 @@ async def create_backtest(
             fill_model=BacktestFillModel(body.fill_model),
             slippage_bps=body.slippage_bps,
             commission_bps=body.commission_bps,
+            target_execution_exchange=body.target_execution_exchange,
         )
         config_hash = compute_fingerprint(pairing_config, for_pairing=True)
     except Exception as exc:
@@ -367,6 +370,7 @@ async def create_backtest(
             "slippage_bps": body.slippage_bps,
             "commission_bps": body.commission_bps,
             "config_hash": config_hash,
+            "target_execution_exchange": body.target_execution_exchange,
             "created_by_user_id": principal.username,
             "process_name": process_name,
             "session_id": sid,
@@ -996,6 +1000,7 @@ async def rerun_backtest(
         fill_model=original["fill_model"],
         slippage_bps=original["slippage_bps"],
         commission_bps=original["commission_bps"],
+        target_execution_exchange=original.get("target_execution_exchange"),
     )
     rerun_command = BacktestCreateCommand(
         type="backtest_create_command",

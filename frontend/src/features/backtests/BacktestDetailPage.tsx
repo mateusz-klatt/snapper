@@ -95,6 +95,14 @@ export const BacktestDetailPage: React.FC<Props> = ({ runPublicId }) => {
             {formatDate(run.start_date)} — {formatDate(run.end_date)}
           </div>
         </div>
+        {run.target_execution_exchange && (
+          <div className='col-span-2 md:col-span-4'>
+            <div className='text-muted-500'>Cross-asset attribution</div>
+            <div className='font-mono text-alpine-900'>
+              {run.exchange} feed → {run.target_execution_exchange} fills
+            </div>
+          </div>
+        )}
         {run.config_hash && (
           <div className='col-span-2 md:col-span-4'>
             <div className='text-muted-500'>Config hash</div>

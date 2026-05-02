@@ -141,4 +141,26 @@ describe('BacktestDetailPage', () => {
 
     expect(statusEl.className).toContain('text-muted-400')
   })
+  it('renders cross-asset attribution row when target_execution_exchange is set', async () => {
+    ;(apiClient.getBacktest as ReturnType<typeof vi.fn>).mockResolvedValue({
+      type: 'backtest_run_response',
+      payload: makeRunPayload({
+        exchange: 'kraken_futures',
+        target_execution_exchange: 'kraken',
+      }),
+    })
+    renderWithQuery(<BacktestDetailPage runPublicId={VALID_RUN} />)
+
+    expect(await screen.findByText('Cross-asset attribution')).toBeDefined()
+    expect(screen.getByText(/kraken_futures feed → kraken fills/)).toBeDefined()
+  })
+  it('omits the cross-asset row when target_execution_exchange is null', async () => {
+    ;(apiClient.getBacktest as ReturnType<typeof vi.fn>).mockResolvedValue({
+      type: 'backtest_run_response',
+      payload: makeRunPayload({ target_execution_exchange: null }),
+    })
+    renderWithQuery(<BacktestDetailPage runPublicId={VALID_RUN} />)
+    await waitFor(() => expect(screen.getByTestId('compare-launcher-mount')).toBeTruthy())
+    expect(screen.queryByText('Cross-asset attribution')).toBeNull()
+  })
 })

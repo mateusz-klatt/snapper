@@ -286,12 +286,15 @@ Three explicit non-goals in the current implementation:
 - **Multi-target cross-asset** — a single
   `target_execution_exchange` per run means one strategy cannot emit
   signals for different target venues inside the same backtest.
-- **Public REST create path** — `POST /api/backtests` + the
-  `BacktestCreateBody` schema persist a single
-  `instrument_public_id` / `exchange` pair. Cross-asset backtests
-  are invoked directly through `DirectDbEngine.run(...)` from Python
-  tests / scripts. Widening the REST surface is tracked as a
-  follow-up plan.
+- **Public REST create path** — `POST /api/backtests` accepts an
+  optional `target_execution_exchange` field on `BacktestCreateBody`.
+  When set, simulated fills are attributed to that order-capable venue
+  while candles still feed from `exchange`. When unset, the run stays
+  single-exchange and byte-identical to legacy behaviour. The same
+  field round-trips through DB persistence + the rerun endpoint, and
+  surfaces on `BacktestRunData` for frontend display. Allowed target
+  values: `paper` / `kraken` / `kraken_futures` / `zonda` /
+  `walutomat`.
 
 ### Fingerprint + pairing
 

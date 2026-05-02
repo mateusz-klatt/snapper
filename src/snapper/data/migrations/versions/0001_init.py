@@ -838,6 +838,7 @@ def upgrade() -> None:
             server_default="0",
         ),
         sa.Column("config_hash", sa.String(64), nullable=True),
+        sa.Column("target_execution_exchange", sa.String(32), nullable=True),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(
             "status IN ('pending', 'running', 'completed', 'failed', "
@@ -861,6 +862,11 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "commission_bps >= 0 AND commission_bps <= 500",
             name="ck_br_commission_bounds",
+        ),
+        sa.CheckConstraint(
+            "target_execution_exchange IS NULL OR target_execution_exchange IN "
+            "('paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat')",
+            name="ck_br_target_execution_exchange",
         ),
     )
     op.create_index(

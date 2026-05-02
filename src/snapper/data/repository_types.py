@@ -12,6 +12,7 @@ from typing import NotRequired
 from typing import TypedDict
 
 from snapper.core.json_types import JsonObject
+from snapper.core.types import OrderExchange
 
 
 class CandleUpsertRow(TypedDict, total=False):
@@ -1181,6 +1182,7 @@ class BacktestRunInsertRow(TypedDict, total=False):
     slippage_bps: float
     commission_bps: float
     config_hash: str | None
+    target_execution_exchange: OrderExchange | None
     created_by_user_id: str | None
     process_name: str | None
     session_id: str
@@ -1212,6 +1214,7 @@ class BacktestRunRow(TypedDict):
     slippage_bps: float
     commission_bps: float
     config_hash: str | None
+    target_execution_exchange: OrderExchange | None
     created_by_user_id: str | None
     started_at: datetime | None
     completed_at: datetime | None

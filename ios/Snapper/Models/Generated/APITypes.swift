@@ -719,6 +719,7 @@ struct BacktestRunData: Codable, Sendable {
     let slippageBps: Double?
     let commissionBps: Double?
     let configHash: String?
+    let targetExecutionExchange: String?
     let startedAt: Date?
     let completedAt: Date?
     let error: String?
@@ -745,6 +746,7 @@ struct BacktestRunData: Codable, Sendable {
         case slippageBps = "slippage_bps"
         case commissionBps = "commission_bps"
         case configHash = "config_hash"
+        case targetExecutionExchange = "target_execution_exchange"
         case startedAt = "started_at"
         case completedAt = "completed_at"
         case error
@@ -773,6 +775,7 @@ struct BacktestRunDetailData: Codable, Sendable {
     let slippageBps: Double?
     let commissionBps: Double?
     let configHash: String?
+    let targetExecutionExchange: String?
     let startedAt: Date?
     let completedAt: Date?
     let error: String?
@@ -800,6 +803,7 @@ struct BacktestRunDetailData: Codable, Sendable {
         case slippageBps = "slippage_bps"
         case commissionBps = "commission_bps"
         case configHash = "config_hash"
+        case targetExecutionExchange = "target_execution_exchange"
         case startedAt = "started_at"
         case completedAt = "completed_at"
         case error
@@ -4872,6 +4876,7 @@ struct BacktestCreateBody: Codable, Sendable {
     let fillModel: String?
     let slippageBps: Double?
     let commissionBps: Double?
+    let targetExecutionExchange: String?
 
     enum CodingKeys: String, CodingKey {
         case strategyClass = "strategy_class"
@@ -4886,6 +4891,7 @@ struct BacktestCreateBody: Codable, Sendable {
         case fillModel = "fill_model"
         case slippageBps = "slippage_bps"
         case commissionBps = "commission_bps"
+        case targetExecutionExchange = "target_execution_exchange"
     }
 }
 

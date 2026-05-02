@@ -38,6 +38,7 @@ def _make_run_row(
     public_id: str = "run-1",
     status: str = "pending",
     wallet: str = "wallet-1",
+    target_execution_exchange: str | None = None,
 ) -> dict[str, Any]:
     """Build a minimal BacktestRunRow dict."""
     return {
@@ -61,6 +62,7 @@ def _make_run_row(
         "fill_model": "market",
         "slippage_bps": 0.0,
         "commission_bps": 0.0,
+        "target_execution_exchange": target_execution_exchange,
         "created_by_user_id": "test",
         "started_at": None,
         "completed_at": None,
@@ -738,6 +740,57 @@ class TestCreateBacktest:
             assert bt.update_run_status.call_args.kwargs["new_status"] == "failed"
             client.close()
 
+    def test_create_with_cross_asset_target_exchange(self) -> None:
+        """Cross-asset run sets target_execution_exchange on the persisted row."""
+        bt = AsyncMock()
+        bt.create_run = AsyncMock(return_value=(1, "run-cross"))
+        bt.get_run = AsyncMock(
+            return_value=_make_run_row(public_id="run-cross", target_execution_exchange="kraken")
+        )
+        body = _create_body()
+        body["payload"]["target_execution_exchange"] = "kraken"
+        body["payload"]["exchange"] = "kraken_futures"
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt, wallet="wallet-1")
+            response = client.post("/api/backtests", json=body)
+
+            assert response.status_code == 200
+            assert response.json()["payload"]["target_execution_exchange"] == "kraken"
+            inserted = bt.create_run.call_args.kwargs["row"]
+
+            assert inserted["target_execution_exchange"] == "kraken"
+            assert inserted["exchange"] == "kraken_futures"
+            client.close()
+
+    def test_create_rejects_invalid_target_exchange(self) -> None:
+        """Non order-capable target exchange rejected by request schema validator."""
+        bt = AsyncMock()
+        body = _create_body()
+        body["payload"]["target_execution_exchange"] = "kraken_equities"
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt, wallet="wallet-1")
+            response = client.post("/api/backtests", json=body)
+
+            assert response.status_code == 422
+            bt.create_run.assert_not_called()
+            client.close()
+
+    def test_create_omits_target_exchange_persists_null(self) -> None:
+        """Single-exchange create body persists target_execution_exchange as None."""
+        bt = AsyncMock()
+        bt.create_run = AsyncMock(return_value=(1, "run-single"))
+        bt.get_run = AsyncMock(return_value=_make_run_row(public_id="run-single"))
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt, wallet="wallet-1")
+            response = client.post("/api/backtests", json=_create_body())
+
+            assert response.status_code == 200
+            assert response.json()["payload"]["target_execution_exchange"] is None
+            inserted = bt.create_run.call_args.kwargs["row"]
+
+            assert inserted["target_execution_exchange"] is None
+            client.close()
+
 
 class TestWalletScopingOnSubResources:
     """Tests for wallet scoping on trades/signals/events endpoints."""
@@ -907,6 +960,26 @@ class TestRerunBacktest:
             response = client.post("/api/backtests/run-1/rerun")
             assert response.status_code == 200
             assert response.json()["payload"]["public_id"] == "run-rerun"
+            client.close()
+
+    def test_rerun_preserves_cross_asset_target_exchange(self) -> None:
+        """Rerun of a cross-asset run carries target_execution_exchange forward."""
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(
+            side_effect=[
+                _make_run_row(status="completed", target_execution_exchange="kraken"),
+                _make_run_row(public_id="run-rerun", target_execution_exchange="kraken"),
+            ]
+        )
+        bt.create_run = AsyncMock(return_value=(2, "run-rerun"))
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt, wallet="wallet-1")
+            response = client.post("/api/backtests/run-1/rerun")
+
+            assert response.status_code == 200
+            inserted = bt.create_run.call_args.kwargs["row"]
+
+            assert inserted["target_execution_exchange"] == "kraken"
             client.close()
 
 

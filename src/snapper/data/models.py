@@ -1963,6 +1963,11 @@ class BacktestRun(TemporalMixin, Base):
             "commission_bps >= 0 AND commission_bps <= 500",
             name="ck_br_commission_bounds",
         ),
+        CheckConstraint(
+            "target_execution_exchange IS NULL OR target_execution_exchange IN "
+            "('paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat')",
+            name="ck_br_target_execution_exchange",
+        ),
     )
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
@@ -1981,6 +1986,7 @@ class BacktestRun(TemporalMixin, Base):
     slippage_bps: Mapped[float] = mapped_column(Float, default=0.0)
     commission_bps: Mapped[float] = mapped_column(Float, default=0.0)
     config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    target_execution_exchange: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_by_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)

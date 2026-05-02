@@ -97,6 +97,37 @@ describe('Backtests', () => {
     expect(screen.getByText('completed')).toBeInTheDocument()
   })
 
+  it('renders cross-asset attribution arrow when target_execution_exchange is set', async () => {
+    mockGetBacktests.mockResolvedValue({
+      type: 'backtest_run_list',
+      session_id: 's1',
+      sequence_id: 1,
+      public_id: 'resp-1',
+      timestamp: NOW,
+      payload: [makeRun({ exchange: 'kraken_futures', target_execution_exchange: 'kraken' })],
+      count: 1,
+    })
+
+    renderWithQuery(<Backtests />)
+    expect(await screen.findByText(/→ kraken/)).toBeInTheDocument()
+  })
+
+  it('omits the cross-asset arrow when target_execution_exchange is null', async () => {
+    mockGetBacktests.mockResolvedValue({
+      type: 'backtest_run_list',
+      session_id: 's1',
+      sequence_id: 1,
+      public_id: 'resp-1',
+      timestamp: NOW,
+      payload: [makeRun()],
+      count: 1,
+    })
+
+    renderWithQuery(<Backtests />)
+    await screen.findByText('sma_cross')
+    expect(screen.queryByText(/→/)).not.toBeInTheDocument()
+  })
+
   it('renders loading skeletons', () => {
     mockGetBacktests.mockReturnValue(new Promise(() => {}))
 

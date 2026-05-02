@@ -2626,6 +2626,7 @@ export const BacktestRunDataSchema = z
     slippage_bps: z.number(),
     commission_bps: z.number(),
     config_hash: z.string().nullable().optional(),
+    target_execution_exchange: z.string().nullable().optional(),
     started_at: z.iso.datetime().nullable().optional(),
     completed_at: z.iso.datetime().nullable().optional(),
     error: z.string().nullable().optional(),
@@ -2735,6 +2736,10 @@ export const BacktestCreateBodySchema = z
     fill_model: z.string().optional(),
     slippage_bps: z.number().optional(),
     commission_bps: z.number().optional(),
+    target_execution_exchange: z
+      .enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat'])
+      .nullable()
+      .optional(),
   })
   .strict()
 
@@ -2842,6 +2847,7 @@ export const BacktestRunDetailDataSchema = z
     slippage_bps: z.number(),
     commission_bps: z.number(),
     config_hash: z.string().nullable().optional(),
+    target_execution_exchange: z.string().nullable().optional(),
     started_at: z.iso.datetime().nullable().optional(),
     completed_at: z.iso.datetime().nullable().optional(),
     error: z.string().nullable().optional(),

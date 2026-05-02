@@ -18,6 +18,7 @@ from snapper.application.backtest.config import BacktestExecutionMode
 from snapper.application.backtest.runner import BacktestRunnerProcess
 from snapper.application.backtest.runner import noop_publish
 from snapper.application.backtest.runner import run_to_config_dict
+from snapper.core.types import ExchangeEnum
 from snapper.data.backtest_conflict import SINGLE_RUNNING_INDEX
 from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.repository_types import BacktestRunRow
@@ -53,6 +54,7 @@ def _make_run_row(
         slippage_bps=0.0,
         commission_bps=0.0,
         config_hash=None,
+        target_execution_exchange=None,
         created_by_user_id=None,
         started_at=None,
         completed_at=None,
@@ -85,6 +87,19 @@ class TestRunToConfigDict:
         row = _make_run_row()
         result = run_to_config_dict(row)
         assert result["operator_public_id"] is None
+
+    def test_target_execution_exchange_none_passes_through(self) -> None:
+        """Default-None target_execution_exchange round-trips."""
+        row = _make_run_row()
+        result = run_to_config_dict(row)
+        assert result["target_execution_exchange"] is None
+
+    def test_target_execution_exchange_persisted_round_trip(self) -> None:
+        """Cross-asset target venue round-trips from DB row to config dict."""
+        row = _make_run_row()
+        row["target_execution_exchange"] = ExchangeEnum.KRAKEN
+        result = run_to_config_dict(row)
+        assert result["target_execution_exchange"] == ExchangeEnum.KRAKEN
 
 
 class TestBacktestRunnerProcess:

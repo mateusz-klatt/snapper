@@ -17,6 +17,7 @@ from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.json_types import JsonObject
+from snapper.core.types import OrderExchange
 from snapper.strategies.factory import StrategyFactory
 
 
@@ -25,13 +26,22 @@ class BacktestCreateBody(StrictBody):
 
     Attributes:
         strategy_class: Registered strategy name.
-        instrument_public_id: Instrument to backtest.
-        exchange: Exchange name.
+        instrument_public_id: Source-feed instrument to backtest.
+        exchange: Source-feed exchange name (where candles are read from).
         timeframe: Candle timeframe (e.g., "1h").
         start_date: Backtest period start.
         end_date: Backtest period end.
         initial_cash: Starting cash balance.
         strategy_params: Strategy-specific parameters.
+        target_execution_exchange: Optional order-capable venue that
+            simulated fills are attributed to. ``None`` (default) keeps
+            fills on the source feed (single-exchange backtest, byte-
+            identical to legacy behaviour). When set, the engine
+            attributes simulated trades to this venue at fill time —
+            enables observe-on-feed-A / trade-on-venue-B (cross-asset)
+            runs from the public REST surface. Must be one of the
+            order-capable values: ``paper`` / ``kraken`` /
+            ``kraken_futures`` / ``zonda`` / ``walutomat``.
     """
 
     strategy_class: str
@@ -46,6 +56,7 @@ class BacktestCreateBody(StrictBody):
     fill_model: str = "market"
     slippage_bps: float = 0.0
     commission_bps: float = 0.0
+    target_execution_exchange: OrderExchange | None = None
 
     @field_validator("strategy_class")
     @classmethod
@@ -179,8 +190,10 @@ class BacktestRunData(StrictDataSchema[Literal["backtest_run"]]):
         wallet_public_id: Owning wallet.
         strategy_name: Strategy class name.
         strategy_params: Strategy parameters.
-        instrument_public_id: Target instrument.
-        exchange: Exchange name.
+        instrument_public_id: Source-feed instrument.
+        exchange: Source-feed exchange name.
+        target_execution_exchange: Target order venue when set; ``None``
+            attributes fills to ``exchange`` (single-exchange run).
         timeframe: Candle timeframe.
         start_date: Period start.
         end_date: Period end.
@@ -207,6 +220,7 @@ class BacktestRunData(StrictDataSchema[Literal["backtest_run"]]):
     slippage_bps: float = 0.0
     commission_bps: float = 0.0
     config_hash: str | None = None
+    target_execution_exchange: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error: str | None = None

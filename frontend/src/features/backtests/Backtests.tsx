@@ -49,7 +49,12 @@ const BacktestRow: React.FC<BacktestRowProps> = ({ run, onCancel, onRerun }) => 
         >
           <span className='font-semibold text-alpine-900'>{run.strategy_name}</span>
           <span className='text-sm text-muted-500'>{run.instrument_public_id}</span>
-          <span className='text-sm text-muted-500'>{run.exchange}</span>
+          <span className='text-sm text-muted-500'>
+            {run.exchange}
+            {run.target_execution_exchange && (
+              <span className='ml-1 text-brand-500'>→ {run.target_execution_exchange}</span>
+            )}
+          </span>
           <span className={clsx('text-sm font-medium', getStatusColor(run.status))}>
             {run.status}
           </span>

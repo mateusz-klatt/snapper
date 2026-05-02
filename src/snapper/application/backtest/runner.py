@@ -124,6 +124,7 @@ def run_to_config_dict(run: BacktestRunRow) -> dict[str, Any]:
         "fill_model": BacktestFillModel(run["fill_model"]),
         "slippage_bps": run["slippage_bps"],
         "commission_bps": run["commission_bps"],
+        "target_execution_exchange": run.get("target_execution_exchange"),
     }
 
 

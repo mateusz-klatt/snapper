@@ -1728,6 +1728,7 @@ export type Components = {
             slippage_bps: number;
             commission_bps: number;
             config_hash?: string | null;
+            target_execution_exchange?: string | null;
             started_at?: string | null;
             completed_at?: string | null;
             error?: string | null;
@@ -1754,6 +1755,7 @@ export type Components = {
             slippage_bps: number;
             commission_bps: number;
             config_hash?: string | null;
+            target_execution_exchange?: string | null;
             started_at?: string | null;
             completed_at?: string | null;
             error?: string | null;
@@ -3662,6 +3664,7 @@ export type Components = {
             fill_model?: string;
             slippage_bps?: number;
             commission_bps?: number;
+            target_execution_exchange?: ("paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat") | null;
         };
         BacktestCompareRequest: {
             type?: "backtest_compare_request";
