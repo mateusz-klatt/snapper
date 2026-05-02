@@ -454,8 +454,6 @@ sub-request inside the same bearer-authenticated HTTP connection.
 
 ## Related reading
 
-- `plan_ai_integration_phase_a.md` — the shipping plan (multi-model
-    APPROVED at R6).
 - `docs/architecture.md` — repository + SCD2 + bus layering.
 - `docs/operations.md` — lifespan order, token cleanup loop, shard
     partitioning.
