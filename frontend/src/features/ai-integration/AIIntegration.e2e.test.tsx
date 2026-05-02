@@ -212,6 +212,238 @@ describe('AIIntegration — end-to-end create flow', () => {
     })
   })
 
+  it('admin flow: open detail → revoke → confirm → list refetched without delegate', async () => {
+    const user = userEvent.setup()
+    const activeList: DelegateListResponse = {
+      ...emptyList,
+      payload: [createdDelegate],
+      count: 1,
+    }
+
+    mockApiClient.listAiDelegates.mockResolvedValueOnce(activeList)
+    mockApiClient.getAiDelegate.mockResolvedValueOnce({
+      type: 'delegate_response',
+      sequence_id: 3,
+      public_id: 'env-3',
+      timestamp: '2026-04-21T12:00:00Z',
+      session_id: 's',
+      payload: createdDelegate,
+    })
+    mockApiClient.deactivateAiDelegate.mockResolvedValueOnce({
+      type: 'delegate_response',
+      sequence_id: 4,
+      public_id: 'env-4',
+      timestamp: '2026-04-21T12:00:00Z',
+      session_id: 's',
+      payload: { ...createdDelegate, is_active: false },
+    })
+    mockApiClient.listAiDelegates.mockResolvedValueOnce({
+      ...emptyList,
+      payload: [{ ...createdDelegate, is_active: false }],
+      count: 1,
+    })
+
+    renderApp()
+
+    await waitFor(() => {
+      expect(screen.getByText('alpha-prop')).toBeInTheDocument()
+    })
+
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: /View delegate alpha-prop/ }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'alpha-prop' })).toBeInTheDocument()
+    })
+    expect(mockApiClient.getAiDelegate).toHaveBeenCalledWith(createdDelegate.public_id)
+
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: 'Revoke' }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /Revoke delegate/ })).toBeInTheDocument()
+    })
+
+    const confirmButtons = screen.getAllByRole('button', { name: 'Revoke' })
+    const dialogConfirm = confirmButtons[confirmButtons.length - 1]
+
+    await act(async () => {
+      await user.click(dialogConfirm)
+    })
+
+    await waitFor(() => {
+      expect(mockApiClient.deactivateAiDelegate).toHaveBeenCalledWith(createdDelegate.public_id)
+    })
+  })
+
+  it('admin flow: open detail → update caps → save → success toast', async () => {
+    const user = userEvent.setup()
+    const activeList: DelegateListResponse = {
+      ...emptyList,
+      payload: [createdDelegate],
+      count: 1,
+    }
+
+    mockApiClient.listAiDelegates.mockResolvedValue(activeList)
+    mockApiClient.getAiDelegate.mockResolvedValue({
+      type: 'delegate_response',
+      sequence_id: 3,
+      public_id: 'env-3',
+      timestamp: '2026-04-21T12:00:00Z',
+      session_id: 's',
+      payload: createdDelegate,
+    })
+    mockApiClient.updateAiDelegateCaps.mockResolvedValueOnce({
+      type: 'delegate_response',
+      sequence_id: 5,
+      public_id: 'env-5',
+      timestamp: '2026-04-21T12:00:00Z',
+      session_id: 's',
+      payload: {
+        ...createdDelegate,
+        caps: { ...createdDelegate.caps, max_open_orders: 25 },
+      },
+    })
+
+    renderApp()
+
+    await waitFor(() => {
+      expect(screen.getByText('alpha-prop')).toBeInTheDocument()
+    })
+
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: /View delegate alpha-prop/ }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'alpha-prop' })).toBeInTheDocument()
+    })
+
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: 'Update caps' }))
+    })
+
+    const maxOpenOrdersInput = screen.getByLabelText(/max open orders/i) as HTMLInputElement
+
+    await act(async () => {
+      await user.clear(maxOpenOrdersInput)
+      await user.type(maxOpenOrdersInput, '25')
+    })
+
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: /^Save$/ }))
+    })
+
+    await waitFor(() => {
+      expect(mockApiClient.updateAiDelegateCaps).toHaveBeenCalledWith(
+        createdDelegate.public_id,
+        expect.objectContaining({
+          caps: expect.objectContaining({ max_open_orders: 25 }),
+        })
+      )
+    })
+  })
+
+  it('error path: createAiDelegate failure surfaces in the wizard, list stays empty', async () => {
+    const user = userEvent.setup()
+
+    mockApiClient.createAiDelegate.mockRejectedValueOnce(
+      new Error('backend rejected: scope_invalid')
+    )
+
+    renderApp()
+
+    await waitFor(() => {
+      expect(screen.getByText('No AI delegates yet')).toBeInTheDocument()
+    })
+
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: /Create delegate/ }))
+    })
+
+    await act(async () => {
+      await user.type(screen.getByLabelText('Label'), 'alpha-prop')
+    })
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: 'Next' }))
+    })
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: 'Next' }))
+    })
+
+    const submitButtons = screen.getAllByRole('button', { name: /Create delegate/ })
+    const wizardSubmit = submitButtons[submitButtons.length - 1]
+
+    await act(async () => {
+      await user.click(wizardSubmit)
+    })
+
+    await waitFor(() => {
+      expect(mockApiClient.createAiDelegate).toHaveBeenCalled()
+    })
+
+    expect(screen.queryByLabelText(/\.mcp\.json/)).not.toBeInTheDocument()
+    expect(mockApiClient.listAiDelegates).toHaveBeenCalled()
+  })
+
+  it('error path: caps PATCH failure keeps the editor open with the new value', async () => {
+    const user = userEvent.setup()
+    const activeList: DelegateListResponse = {
+      ...emptyList,
+      payload: [createdDelegate],
+      count: 1,
+    }
+
+    mockApiClient.listAiDelegates.mockResolvedValue(activeList)
+    mockApiClient.getAiDelegate.mockResolvedValue({
+      type: 'delegate_response',
+      sequence_id: 3,
+      public_id: 'env-3',
+      timestamp: '2026-04-21T12:00:00Z',
+      session_id: 's',
+      payload: createdDelegate,
+    })
+    mockApiClient.updateAiDelegateCaps.mockRejectedValueOnce(new Error('caps_validation_error'))
+
+    renderApp()
+
+    await waitFor(() => {
+      expect(screen.getByText('alpha-prop')).toBeInTheDocument()
+    })
+
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: /View delegate alpha-prop/ }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'alpha-prop' })).toBeInTheDocument()
+    })
+
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: 'Update caps' }))
+    })
+
+    const maxOpenOrdersInput = screen.getByLabelText(/max open orders/i) as HTMLInputElement
+
+    await act(async () => {
+      await user.clear(maxOpenOrdersInput)
+      await user.type(maxOpenOrdersInput, '999999')
+    })
+
+    await act(async () => {
+      await user.click(screen.getByRole('button', { name: /^Save$/ }))
+    })
+
+    await waitFor(() => {
+      expect(mockApiClient.updateAiDelegateCaps).toHaveBeenCalled()
+    })
+
+    expect(screen.getByRole('button', { name: /^Save$/ })).toBeInTheDocument()
+    expect((maxOpenOrdersInput as HTMLInputElement).value).toBe('999999')
+  })
+
   it('disabled feature flag prevents delegate fetch', async () => {
     mockApiClient.getFeatureFlags.mockResolvedValueOnce({
       type: 'feature_flags_response',
