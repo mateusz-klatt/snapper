@@ -172,4 +172,112 @@ describe('Modal', () => {
     )
     expect(document.body.style.overflow).toBe('unset')
   })
+  it('moves focus to first focusable child on open', () => {
+    render(
+      <Modal open={true} onClose={vi.fn()}>
+        <button type='button'>First</button>
+        <button type='button'>Second</button>
+      </Modal>
+    )
+    const first = screen.getByRole('button', { name: 'First' })
+
+    expect(document.activeElement).toBe(first)
+  })
+  it('restores focus to the trigger element when modal closes', () => {
+    const trigger = document.createElement('button')
+
+    trigger.textContent = 'Trigger'
+    document.body.appendChild(trigger)
+    trigger.focus()
+    expect(document.activeElement).toBe(trigger)
+    const { rerender } = render(
+      <Modal open={true} onClose={vi.fn()}>
+        <button type='button'>Inside</button>
+      </Modal>
+    )
+
+    expect(document.activeElement).not.toBe(trigger)
+    rerender(
+      <Modal open={false} onClose={vi.fn()}>
+        <button type='button'>Inside</button>
+      </Modal>
+    )
+    expect(document.activeElement).toBe(trigger)
+    trigger.remove()
+  })
+  it('wraps focus from last focusable to first on Tab', () => {
+    render(
+      <Modal open={true} onClose={vi.fn()}>
+        <button type='button'>First</button>
+        <button type='button'>Last</button>
+      </Modal>
+    )
+    const first = screen.getByRole('button', { name: 'First' })
+    const last = screen.getByRole('button', { name: 'Last' })
+
+    last.focus()
+    expect(document.activeElement).toBe(last)
+    fireEvent.keyDown(last, { key: 'Tab' })
+    expect(document.activeElement).toBe(first)
+  })
+  it('wraps focus from first focusable to last on Shift+Tab', () => {
+    render(
+      <Modal open={true} onClose={vi.fn()}>
+        <button type='button'>First</button>
+        <button type='button'>Last</button>
+      </Modal>
+    )
+    const first = screen.getByRole('button', { name: 'First' })
+    const last = screen.getByRole('button', { name: 'Last' })
+
+    first.focus()
+    expect(document.activeElement).toBe(first)
+    fireEvent.keyDown(first, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(last)
+  })
+  it('lets Tab pass through when active element is in the middle of focusable set', () => {
+    render(
+      <Modal open={true} onClose={vi.fn()}>
+        <button type='button'>First</button>
+        <button type='button'>Middle</button>
+        <button type='button'>Last</button>
+      </Modal>
+    )
+    const middle = screen.getByRole('button', { name: 'Middle' })
+
+    middle.focus()
+    expect(document.activeElement).toBe(middle)
+    const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+
+    fireEvent(middle, event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(document.activeElement).toBe(middle)
+  })
+  it('blocks Tab when modal has no focusable content', () => {
+    render(
+      <Modal open={true} onClose={vi.fn()}>
+        <div>No interactive content</div>
+      </Modal>
+    )
+    const dialog = document.querySelector('dialog')
+
+    expect(dialog).toBeInTheDocument()
+    if (dialog === null) return
+    const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+
+    fireEvent(dialog, event)
+    expect(event.defaultPrevented).toBe(true)
+  })
+  it('does not interfere with non-Tab keys', () => {
+    render(
+      <Modal open={true} onClose={vi.fn()}>
+        <button type='button'>Inside</button>
+      </Modal>
+    )
+    const inside = screen.getByRole('button', { name: 'Inside' })
+
+    inside.focus()
+    fireEvent.keyDown(inside, { key: 'Enter' })
+    expect(document.activeElement).toBe(inside)
+  })
 })
