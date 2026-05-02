@@ -74,3 +74,12 @@ class TradeCommandSubmission:
     re-fanout the rejection to the delegate's UI. Default ``None`` keeps
     every existing call site (REST manual submit, MCP submit_manual_order,
     plan executor, strategy hot-path) untouched."""
+    ai_review_dispatch_version: int | None = None
+    """Plan A Q18 — companion dedup version for ``ai_review_public_id``.
+    Carried end-to-end as transport-only on the strategy hot-path: the
+    strategy citation validator does NOT compare it, and
+    :meth:`TradingCapsEnforcer._publish_caps_violation_after_ai_approve`
+    reads ``dispatch_version`` from the cited ``ai_reviews`` row at
+    publish time so the bus event always uses the row-of-record value.
+    Default ``None`` preserves byte-identical behaviour for every
+    submission that does not threadattribution."""

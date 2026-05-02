@@ -190,8 +190,14 @@ class TestCoordinatorSharding:
         engine = coord.engines["BTC-USD@paper-scalp"]
 
         def _mock_execute(
-            desired_units: float, price: float, signaled_at: float | None = None
+            desired_units: float,
+            price: float,
+            signaled_at: float | None = None,
+            *,
+            ai_review_public_id: str | None = None,
+            ai_review_dispatch_version: int | None = None,
         ) -> None:
+            del ai_review_public_id, ai_review_dispatch_version
             engine.pending_client_order_id = "order-456"
 
         engine.execute_desired_units = AsyncMock(side_effect=_mock_execute)

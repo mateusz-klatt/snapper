@@ -778,12 +778,16 @@ class _EngineStub:
         price: float,
         *,
         signaled_at: Any,
+        ai_review_public_id: str | None = None,
+        ai_review_dispatch_version: int | None = None,
     ) -> None:
         self.execute_calls.append(
             {
                 "desired_units": desired_units,
                 "price": price,
                 "signaled_at": signaled_at,
+                "ai_review_public_id": ai_review_public_id,
+                "ai_review_dispatch_version": ai_review_dispatch_version,
             }
         )
 
@@ -1138,6 +1142,77 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     await coord_any._on_signal(signal_sell)
     assert engine.execute_calls[1]["desired_units"] == pytest.approx(-1.0)
     assert coord.last_signal_time[engine_key] <= time.time()
+
+
+@pytest.mark.asyncio
+async def test_on_signal_threads_ai_review_attribution_to_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan D Phase 3 §6.3 — _on_signal forwards SignalData attribution.
+
+    Given: a TraderCoordinator + ``_EngineStub`` that records
+        ``execute_desired_units`` kwargs,
+    When: ``_on_signal`` receives a SignalData with both
+        ``ai_review_public_id`` and ``ai_review_dispatch_version`` set,
+    Then: the engine's ``execute_desired_units`` is invoked with
+        the same tuple — pinning the ZMQ wire → in-process call
+        threading without re-testing the engine internals.
+
+    Also pins the regression: a signal WITHOUT attribution forwards
+    ``None`` for both kwargs so non-AI emits stay byte-identical.
+    """
+    _configure_settings(monkeypatch)
+    monkeypatch.setattr(
+        trader_module,
+        "_bootstrap_settings",
+        SimpleNamespace(zmq_broker_xpub="tcp://broker.xpub"),
+    )
+    publisher = _PublisherStub(_SocketStub())
+    coord = TraderCoordinator()
+    coord.execution_publisher = cast(Any, publisher)
+    coord.msg_publisher = cast(Any, SimpleNamespace(publish=AsyncMock()))
+    monkeypatch.setattr(trader_module, "TradingEngineService", _EngineStub, raising=True)
+    coord_any = cast(Any, coord)
+    coord_any._current_topic = "signals.kraken.BTC-USD.live"
+    signal_attributed = SignalData(
+        session_id="",
+        sequence_id=0,
+        public_id="test-public-id-attr",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        fired_at=datetime.now(UTC),
+        instrument="BTC-USD",
+        side="buy",
+        price=10.0,
+        strength=0.5,
+        strategy_name="momentum",
+        exchange="kraken",
+        reason="test-attr",
+        ai_review_public_id="rev-uuid-trader",
+        ai_review_dispatch_version=7,
+    )
+    await coord_any._on_signal(signal_attributed)
+    engine = cast(_EngineStub, coord.engines["BTC-USD@kraken-live"])
+    call_kwargs = engine.execute_calls[0]
+    assert call_kwargs["ai_review_public_id"] == "rev-uuid-trader"
+    assert call_kwargs["ai_review_dispatch_version"] == 7
+    signal_unattributed = SignalData(
+        session_id="",
+        sequence_id=0,
+        public_id="test-public-id-unattr",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        fired_at=datetime.now(UTC),
+        instrument="BTC-USD",
+        side="sell",
+        price=10.0,
+        strength=1.0,
+        strategy_name="momentum",
+        exchange="kraken",
+        reason="test-unattr",
+    )
+    await coord_any._on_signal(signal_unattributed)
+    second_call = engine.execute_calls[1]
+    assert second_call["ai_review_public_id"] is None
+    assert second_call["ai_review_dispatch_version"] is None
 
 
 @pytest.mark.asyncio
@@ -2214,9 +2289,16 @@ class StubEngine:
         self.calls: list[tuple[float, float | None]] = []
 
     async def execute_desired_units(
-        self, desired_units: float, price: float, signaled_at: float | None = None
+        self,
+        desired_units: float,
+        price: float,
+        signaled_at: float | None = None,
+        *,
+        ai_review_public_id: str | None = None,
+        ai_review_dispatch_version: int | None = None,
     ) -> None:
         """Record desired units and timestamp for verification."""
+        del ai_review_public_id, ai_review_dispatch_version
         self.calls.append((desired_units, signaled_at))
 
 
@@ -4783,7 +4865,13 @@ class TestResolveInstrumentSpecs:
 
     @pytest.mark.asyncio
     async def test_returns_real_values_from_spec(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Verify real tick_size and lot_size from InstrumentSpec."""
+        """Verify real tick_size, lot_size, and public_id from InstrumentSpec.
+
+        Plan D Phase 3 §6.2 — successful spec lookup populates ``public_id``
+        on the returned :class:`InstrumentSpec` so the engine's
+        AI-attribution path can fail-closed when caps need to evaluate
+        notional / per-instrument quantity limits.
+        """
         _configure_settings(monkeypatch)
         coord = TraderCoordinator()
         coord.repository = AsyncMock()
@@ -4794,6 +4882,27 @@ class TestResolveInstrumentSpecs:
         result = await cast(Any, coord)._resolve_instrument_specs("BTC-USD", "kraken")
         assert result["BTC-USD"]["tick_size"] == 0.5
         assert result["BTC-USD"]["lot_size"] == 1.0
+        assert result["BTC-USD"]["public_id"] == "inst-1"
+
+    @pytest.mark.asyncio
+    async def test_fallback_omits_public_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Plan D Phase 3 §2.5 — fallback path omits ``public_id`` deliberately.
+
+        Given: instrument lookup fails (returns None),
+        When: ``_resolve_instrument_specs`` returns the fallback,
+        Then: the fallback's :class:`InstrumentSpec` has ``tick_size``
+            and ``lot_size`` keys populated but does NOT have a
+            ``public_id`` key. The strategy hot-path's tolerant lookup
+            sees this absence and downgrades to ``instrument_public_id=None``
+            on the submission for non-AI emits, while AI-attributed
+            emits fail closed with :class:`InstrumentSpecMissingError`.
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.repository = AsyncMock()
+        coord.repository.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        result = await cast(Any, coord)._resolve_instrument_specs("UNKNOWN", "kraken")
+        assert "public_id" not in result["UNKNOWN"]
 
     @pytest.mark.asyncio
     async def test_returns_fallback_on_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:

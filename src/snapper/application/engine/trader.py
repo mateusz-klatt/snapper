@@ -31,6 +31,7 @@ from loguru import logger
 from sqlalchemy.exc import IntegrityError
 
 from snapper.application.engine.config import EngineConfigModel
+from snapper.application.engine.service import InstrumentSpec
 from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.service import _compute_shard_key
 from snapper.application.portfolio.models import PositionStateModel
@@ -1473,14 +1474,19 @@ class TraderCoordinator(RegisterableProcess):
 
     async def _resolve_instrument_specs(
         self, instrument: str, exchange: str
-    ) -> dict[str, dict[str, float]]:
-        """Resolve tick_size and lot_size from InstrumentSpec repository.
+    ) -> dict[str, InstrumentSpec]:
+        """Resolve tick_size, lot_size, and public_id from InstrumentSpec repository.
 
-        Falls back to conservative defaults if the lookup fails or the
-        instrument has no spec row yet.
+        Falls back to conservative defaults (without ``public_id``) when the
+        lookup fails or the instrument has no spec row yet. The
+        ``public_id`` key is populated only when the upstream lookup
+        succeeds — the strategy hot-path's AI-attribution gate
+        (Plan D Phase 3 §2.5) reads it for fail-closed cap evaluation
+        on AI-attributed emits, while non-AI emits remain tolerant of
+        an absent ``public_id``.
         """
-        fallback: dict[str, dict[str, float]] = {
-            instrument: {"tick_size": 0.01, "lot_size": 0.0001}
+        fallback: dict[str, InstrumentSpec] = {
+            instrument: InstrumentSpec(tick_size=0.01, lot_size=0.0001)
         }
         try:
             now = datetime.now(UTC)
@@ -1494,7 +1500,7 @@ class TraderCoordinator(RegisterableProcess):
                 return fallback
             tick = spec["tick_size"] if spec["tick_size"] is not None else 0.01
             lot = spec["lot_size"] if spec["lot_size"] is not None else 0.0001
-            return {instrument: {"tick_size": tick, "lot_size": lot}}
+            return {instrument: InstrumentSpec(public_id=inst_pid, tick_size=tick, lot_size=lot)}
         except Exception:
             logger.opt(exception=True).debug(
                 "InstrumentSpec lookup failed for {}/{}, using defaults", instrument, exchange
@@ -2837,7 +2843,13 @@ class TraderCoordinator(RegisterableProcess):
         )
         signaled_at = signal.fired_at.timestamp()
         prev_oid = engine.pending_client_order_id
-        await engine.execute_desired_units(desired_units, price, signaled_at=signaled_at)
+        await engine.execute_desired_units(
+            desired_units,
+            price,
+            signaled_at=signaled_at,
+            ai_review_public_id=signal.ai_review_public_id,
+            ai_review_dispatch_version=signal.ai_review_dispatch_version,
+        )
         new_oid = engine.pending_client_order_id
         if new_oid and new_oid != prev_oid:
             self._order_shard_keys[new_oid] = engine._shard_key

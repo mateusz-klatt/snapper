@@ -8,6 +8,8 @@ stop-loss logic, fee calculation, and order publication to ZMQ.
 import datetime as dt
 import time
 from collections import OrderedDict
+from decimal import Decimal
+from typing import TypedDict
 from uuid import uuid7
 
 import zmq
@@ -37,6 +39,38 @@ from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderRequestData
 from snapper.messaging.topics.builders import order_command_topic
+
+
+class InstrumentSpec(TypedDict, total=False):
+    """Per-instrument lookup row carrying lot/tick sizing plus identity.
+
+    All fields optional via ``total=False`` so existing
+    ``instrument_specs`` constructions that only stamp
+    ``tick_size`` and ``lot_size`` keep typechecking. The
+    ``public_id`` key is populated by
+    :meth:`TraderCoordinator._resolve_instrument_specs` whenever
+    the upstream lookup succeeds; it is the UUID7 identity used
+    by the AI-attribution gate to evaluate per-instrument quantity
+    and notional caps.
+    """
+
+    public_id: str
+    tick_size: float
+    lot_size: float
+
+
+class InstrumentSpecMissingError(RuntimeError):
+    """Raised when an AI-attributed strategy emit lacks a resolved ``public_id``.
+
+    The strategy hot-path's AI gate
+    (:meth:`TradingCapsEnforcer.guard_with_ai_review_attribution`)
+    requires a real ``instrument_public_id`` on the submission so the
+    notional and per-instrument quantity caps can evaluate. When the
+    spec lookup returns no ``public_id`` for an AI-attributed emit the
+    engine raises this loud, operator-actionable error before invoking
+    the guard. Non-AI strategy emits remain tolerant of a missing
+    ``public_id`` per Plan D Phase 3 §2.5.
+    """
 
 
 def _compute_shard_key(
@@ -122,7 +156,7 @@ class TradingEngineService:
     position_qty: float
     peak_equity: float
     entry_price: float | None
-    instrument_specs: dict[str, dict[str, float]]
+    instrument_specs: dict[str, InstrumentSpec]
     order_in_flight: bool
     pending_client_order_id: str | None
     seen_exec_ids: OrderedDict[str, None]
@@ -134,7 +168,7 @@ class TradingEngineService:
         risk: RiskEvaluator | None = None,
         cfg: EngineConfigModel | None = None,
         *,
-        instrument_specs: dict[str, dict[str, float]] | None = None,
+        instrument_specs: dict[str, InstrumentSpec] | None = None,
         exchange: OrderExchange = ExchangeEnum.PAPER,
         repository: SQLAlchemyRepository | None = None,
         outbox: OutboxDispatcher | None = None,
@@ -431,6 +465,9 @@ class TradingEngineService:
         signaled_at: float | None = None,
         leverage: int | None = None,
         reduce_only: bool = False,
+        *,
+        ai_review_public_id: str | None = None,
+        ai_review_dispatch_version: int | None = None,
     ) -> str:
         """Publish order request via the durable-outbox path.
 
@@ -449,9 +486,24 @@ class TradingEngineService:
             signaled_at: Unix timestamp when signal was generated.
             leverage: Margin leverage (None for spot).
             reduce_only: True when closing a position.
+            ai_review_public_id: Optional citation forwarded from
+                :class:`SignalData` so the strategy hot-path can route
+                through the attribution-aware caps gate. ``None`` keeps
+                the existing service-principal bypass.
+            ai_review_dispatch_version: Companion to
+                ``ai_review_public_id`` per Plan A Q18 — transport-only;
+                the strategy citation validator does not compare it.
 
         Returns:
             Client order ID assigned to the published order.
+
+        Raises:
+            InstrumentSpecMissingError: When ``ai_review_public_id`` is
+                set but ``instrument_specs[self.instrument]`` lacks the
+                ``public_id`` key. AI-attributed emits require a
+                resolved ``instrument_public_id`` so the caps evaluator
+                can run quantity / notional checks; failing closed
+                makes the spec-loader gap loud and operator-actionable.
         """
         signaled_at_dt = None
         if signaled_at is not None:
@@ -463,18 +515,29 @@ class TradingEngineService:
         sequence_id = self.execution_socket.tracker.next_sequence(topic)
 
         if self._repository is not None:
+            spec = self.instrument_specs.get(self.instrument, InstrumentSpec())
+            instrument_public_id = spec.get("public_id")
+            if ai_review_public_id is not None and instrument_public_id is None:
+                raise InstrumentSpecMissingError(
+                    f"AI-attributed strategy emit for {self.instrument!r} "
+                    "requires instrument_specs[...]['public_id'] to be "
+                    "populated by the spec loader; aborting before caps "
+                    "guard so the failure is loud + operator-actionable."
+                )
             strategy_submission = TradeCommandSubmission(
                 user_public_id=None,
                 operator_public_id=self.operator_public_id or None,
                 wallet_public_id=self.wallet_public_id or None,
-                instrument_public_id=None,
+                instrument_public_id=instrument_public_id,
                 command_type=OrderCommandEnum.SUBMIT,
                 side=side,
                 order_type="market",
-                quantity=None,
+                quantity=Decimal(str(size)),
                 price=None,
                 source_surface="strategy",
                 idempotency_key=None,
+                ai_review_public_id=ai_review_public_id,
+                ai_review_dispatch_version=ai_review_dispatch_version,
             )
             if self._caps_enforcer is not None:
                 async with self._caps_enforcer.guard_service_principal(strategy_submission):
@@ -609,7 +672,13 @@ class TradingEngineService:
         return 0.0, abs_delta
 
     async def execute_desired_units(
-        self, desired_units: float, current_price: float, signaled_at: float | None = None
+        self,
+        desired_units: float,
+        current_price: float,
+        signaled_at: float | None = None,
+        *,
+        ai_review_public_id: str | None = None,
+        ai_review_dispatch_version: int | None = None,
     ) -> None:
         """Execute position change based on desired position size.
 
@@ -627,6 +696,14 @@ class TradingEngineService:
             desired_units: Target position size (positive=long, negative=short, 0=flat).
             current_price: Current market price for sizing calculations.
             signaled_at: Unix timestamp when signal was generated.
+            ai_review_public_id: Optional citation forwarded from
+                :class:`SignalData` so the strategy hot-path can route through
+                :meth:`TradingCapsEnforcer.guard_with_ai_review_attribution`
+                in a future chunk. ``None`` preserves the existing
+                ``guard_service_principal()`` audit-bypass behavior.
+            ai_review_dispatch_version: Companion to
+                ``ai_review_public_id`` per Plan A Q18; transport-only — the
+                strategy citation validator does not compare it.
         """
         if self.read_only:
             logger.warning(f"Engine {self.instrument} in degraded read-only mode, dropping signal")
@@ -666,6 +743,8 @@ class TradingEngineService:
             signaled_at=signaled_at,
             leverage=self.cfg.leverage,
             reduce_only=is_pure_close,
+            ai_review_public_id=ai_review_public_id,
+            ai_review_dispatch_version=ai_review_dispatch_version,
         )
         self.order_in_flight = True
         self.pending_client_order_id = client_order_id

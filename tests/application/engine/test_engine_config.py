@@ -5,6 +5,7 @@ import contextlib
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
@@ -15,6 +16,8 @@ from unittest.mock import patch
 import pytest
 
 from snapper.application.engine.config import EngineConfigModel
+from snapper.application.engine.service import InstrumentSpec
+from snapper.application.engine.service import InstrumentSpecMissingError
 from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.portfolio.models import PositionStateModel
@@ -1377,6 +1380,154 @@ async def test_send_order_writes_trade_command_without_outbox() -> None:
     await engine._send_order(side="sell", size=0.5, price=20.0, reason="test")
     repo_mock.insert_trade_command.assert_called_once()
     assert socket.sent
+
+
+def _engine_with_caps_capture() -> tuple[TradingEngineService, list[Any]]:
+    """Build a TradingEngineService that captures the submission passed to caps.
+
+    Returns:
+        Tuple of (engine, captured_submissions). Each ``_send_order``
+        invocation appends the ``TradeCommandSubmission`` it built to
+        the list so tests can assert on the submission's fields without
+        relying on the row-builder side effect.
+    """
+    socket = _SocketStub()
+    repo_mock = AsyncMock()
+    repo_mock.insert_trade_command = AsyncMock(return_value=(1, "cmd-cap"))
+    captured: list[Any] = []
+
+    class _CapsCapture:
+        def guard_service_principal(self, submission: Any) -> Any:
+            captured.append(submission)
+            return _NullCM()
+
+        def guard_with_ai_review_attribution(
+            self,
+            submission: Any,
+            *,
+            ai_review_public_id: str,
+            ai_review_dispatch_version: int | None,
+        ) -> Any:
+            del ai_review_public_id, ai_review_dispatch_version
+            captured.append(submission)
+            return _NullCM()
+
+    class _NullCM:
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_a: Any) -> None:
+            return None
+
+    engine = TradingEngineService(
+        instrument="BTC-USD",
+        execution_socket=cast(Any, socket),
+        cfg=EngineConfigModel(initial_cash=1_000.0, fee_bps=10.0),
+        exchange="paper",
+        repository=repo_mock,
+        caps_enforcer=cast(Any, _CapsCapture()),
+    )
+    return engine, captured
+
+
+@pytest.mark.asyncio
+async def test_send_order_non_ai_tolerates_missing_public_id() -> None:
+    """Plan D Phase 3 §2.5 — non-AI strategy emits tolerate absent public_id.
+
+    Given: a TradingEngine whose ``instrument_specs`` lacks ``public_id``,
+    When: ``_send_order`` is called WITHOUT ``ai_review_public_id``,
+    Then: no error raised and the submission carries
+        ``instrument_public_id=None`` plus ``quantity=Decimal(str(size))``.
+        Behavior byte-identical for non-AI consumers.
+    """
+    engine, captured = _engine_with_caps_capture()
+    engine.instrument_specs = {"BTC-USD": InstrumentSpec(tick_size=0.01, lot_size=0.0001)}
+    await engine._send_order(side="sell", size=0.75, price=20.0, reason="test")
+    assert len(captured) == 1
+    submission = captured[0]
+    assert submission.instrument_public_id is None
+    assert submission.quantity == Decimal("0.75")
+    assert submission.ai_review_public_id is None
+    assert submission.ai_review_dispatch_version is None
+
+
+@pytest.mark.asyncio
+async def test_send_order_non_ai_populates_resolved_public_id() -> None:
+    """Plan D Phase 3 §6 — non-AI submission still benefits from spec lookup.
+
+    Given: ``instrument_specs[symbol]['public_id']`` populated,
+    When: ``_send_order`` is called WITHOUT AI attribution,
+    Then: submission carries the resolved ``instrument_public_id`` so the
+        AI-attribution path can later evaluate quantity / notional caps,
+        even though the gate selection still routes through
+        ``guard_service_principal``.
+    """
+    engine, captured = _engine_with_caps_capture()
+    engine.instrument_specs = {
+        "BTC-USD": InstrumentSpec(public_id="inst-uuid-1", tick_size=0.01, lot_size=0.0001),
+    }
+    await engine._send_order(side="buy", size=2.0, price=10.0, reason="test")
+    submission = captured[0]
+    assert submission.instrument_public_id == "inst-uuid-1"
+    assert submission.quantity == Decimal("2.0")
+
+
+@pytest.mark.asyncio
+async def test_send_order_ai_attributed_fail_closed_on_missing_public_id() -> None:
+    """Plan D Phase 3 §2.5 — AI emits FAIL-CLOSED when public_id absent.
+
+    Given: ``instrument_specs`` lacks ``public_id``,
+    When: ``_send_order`` is called WITH ``ai_review_public_id``,
+    Then: ``InstrumentSpecMissingError`` is raised BEFORE the caps guard
+        invocation so the failure is loud + operator-actionable. The
+        captured submissions list stays empty.
+    """
+    engine, captured = _engine_with_caps_capture()
+    engine.instrument_specs = {"BTC-USD": InstrumentSpec(tick_size=0.01, lot_size=0.0001)}
+    with pytest.raises(InstrumentSpecMissingError):
+        await engine._send_order(
+            side="buy",
+            size=1.0,
+            price=10.0,
+            reason="test",
+            ai_review_public_id="rev-uuid",
+            ai_review_dispatch_version=1,
+        )
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_send_order_ai_attributed_routes_through_attribution_guard() -> None:
+    """Plan D Phase 3 §6 — AI emit threads attribution onto the submission.
+
+    Given: ``instrument_specs`` carries ``public_id`` and the engine has a
+        caps enforcer that records the guard method invoked,
+    When: ``_send_order`` is called WITH AI attribution,
+    Then: the submission carries the resolved ``instrument_public_id``,
+        the AI tuple ``(ai_review_public_id, ai_review_dispatch_version)``,
+        and ``quantity == Decimal(str(size))``. (Chunk 3 wires the
+        actual ``guard_with_ai_review_attribution`` selection into
+        ``_send_order``; this chunk only proves the submission is
+        constructed correctly so the next chunk's guard swap is
+        mechanical.)
+    """
+    engine, captured = _engine_with_caps_capture()
+    engine.instrument_specs = {
+        "BTC-USD": InstrumentSpec(public_id="inst-uuid-2", tick_size=0.01, lot_size=0.0001),
+    }
+    await engine._send_order(
+        side="buy",
+        size=1.5,
+        price=10.0,
+        reason="test",
+        ai_review_public_id="rev-uuid-2",
+        ai_review_dispatch_version=3,
+    )
+    submission = captured[0]
+    assert submission.instrument_public_id == "inst-uuid-2"
+    assert submission.quantity == Decimal("1.5")
+    assert submission.ai_review_public_id == "rev-uuid-2"
+    assert submission.ai_review_dispatch_version == 3
 
 
 @pytest.mark.asyncio
