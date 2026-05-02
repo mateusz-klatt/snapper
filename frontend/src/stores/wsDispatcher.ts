@@ -41,13 +41,19 @@ export const AI_REVIEW_ACTIVITY_RING_CAP = 1024
 /**
  * Compose the per-user cache key for the AI review activity ring buffer.
  *
- * The user public_id is folded into the key so that a logout/login
- * cycle in the same browser tab cannot leak delegate A's frames into
- * delegate B's view: the QueryClient is a process-singleton that is
- * NOT cleared on logout (orders / signals / etc share this trade-off,
- * but those caches are overwritten by the next REST refetch; the
- * activity ring is WS-driven and would otherwise stay populated
- * indefinitely after a logout).
+ * Defense-in-depth atop B#3 (`feddb225` 2026-05-01) — the QueryClient
+ * is wiped via `queryClient.clear()` in both logout paths
+ * (`logout` + `silentLogout`), so the primary cross-user leak vector
+ * is closed there. The user public_id is folded into the activity key
+ * as a belt-and-suspenders guard: even a hypothetical bug in the
+ * logout teardown order could not leak delegate A's frames into
+ * delegate B's view.
+ *
+ * Per-key user scoping is intentionally NOT applied to
+ * orders/signals/executions/positions (per B#3 decision) — those
+ * caches are owned by the QueryClient.clear() teardown plus REST
+ * refetch on every mount; adding per-key scoping there would be a
+ * risky defensive overlap with no marginal safety gain.
  *
  * ``null`` is the "unauthenticated" sentinel; frames written under
  * this key are intentionally orphaned because no logged-in delegate
