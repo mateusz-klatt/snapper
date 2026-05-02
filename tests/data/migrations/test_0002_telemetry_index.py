@@ -8,11 +8,18 @@ timestamp window query Cluster B/C run on ``telemetry``.
 PostgreSQL planner verification is out of scope for the in-tree test
 suite (no PG fixture); this test pins the SQLite path so dev/test
 deployments fail loud on any future regression.
+
+Tests use ``sqlite:///:memory:`` rather than a tmp_path file so the
+schema-creation cost stays in-process. Under xdist contention (~8
+workers each creating + dropping ``Base.metadata`` on real disk),
+the file-backed variant occasionally crashed the xdist worker on
+WSL2; the in-memory engine gives identical SQL semantics for the
+``CREATE INDEX`` and ``EXPLAIN QUERY PLAN`` predicates checked here
+without any disk-write contention.
 """
 
 from datetime import UTC
 from datetime import datetime
-from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy import text
@@ -23,10 +30,9 @@ from snapper.data.models import Base
 class TestTelemetryTimestampIndex:
     """Plan §7.8 — SQLite planner uses ``ix_telemetry_timestamp``."""
 
-    def test_metadata_creates_ix_telemetry_timestamp(self, tmp_path: Path) -> None:
+    def test_metadata_creates_ix_telemetry_timestamp(self) -> None:
         """``metadata.create_all()`` registers the new index alongside legacy ones."""
-        db_path = tmp_path / "schema.db"
-        engine = create_engine(f"sqlite:///{db_path}")
+        engine = create_engine("sqlite:///:memory:")
         try:
             Base.metadata.create_all(engine)
             with engine.connect() as conn:
@@ -42,10 +48,9 @@ class TestTelemetryTimestampIndex:
         assert "ix_telemetry_timestamp" in index_names
         assert "ix_telemetry_public_id" in index_names
 
-    def test_window_query_plan_uses_ix_telemetry_timestamp(self, tmp_path: Path) -> None:
+    def test_window_query_plan_uses_ix_telemetry_timestamp(self) -> None:
         """SQLite ``EXPLAIN QUERY PLAN`` mentions the new index for the window predicate."""
-        db_path = tmp_path / "explain.db"
-        engine = create_engine(f"sqlite:///{db_path}")
+        engine = create_engine("sqlite:///:memory:")
         try:
             Base.metadata.create_all(engine)
             window_start = datetime(2026, 4, 15, 0, 0, tzinfo=UTC).isoformat()
