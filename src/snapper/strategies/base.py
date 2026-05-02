@@ -22,6 +22,7 @@ from uuid import uuid7
 import zmq
 import zmq.asyncio
 
+from snapper.application.ai_review.service import AiReviewDecisionOutcome
 from snapper.application.services.signals.service import signal_service
 from snapper.config.settings import get_bootstrap_settings
 from snapper.core.types import ExchangeEnum
@@ -498,11 +499,26 @@ class BaseStrategy(ABC):
         logger.warning(f"Strategy {self.name}: Unknown market data topic type: {topic}")
         return None
 
-    async def emit_signal(self, signal: StrategySignal) -> None:
+    async def emit_signal(
+        self,
+        signal: StrategySignal,
+        *,
+        outcome: AiReviewDecisionOutcome | None = None,
+    ) -> None:
         """Emit a trading signal to the output topic.
 
         Args:
             signal: The signal to emit.
+            outcome: Optional :class:`AiReviewDecisionOutcome` from a
+                successful ``create_ai_review_and_await`` call. When
+                set, the AI review attribution
+                (``review_public_id`` + ``dispatch_version``) is
+                stamped onto the published :class:`SignalData` so the
+                trader-coordinator's attribution-aware caps gate can
+                run for the strategy emit. Plan A Q18 dispatch_version
+                is transport-only end-to-end. Default ``None`` keeps
+                non-AI strategy emits byte-identical for downstream
+                consumers.
 
         Raises:
             ValueError: If signal instrument is not in configured outputs.
@@ -539,6 +555,8 @@ class BaseStrategy(ABC):
             fired_at=now,
             wallet_public_id=self.config.wallet_public_id,
             operator_public_id=self.config.operator_public_id or None,
+            ai_review_public_id=outcome.review_public_id if outcome is not None else None,
+            ai_review_dispatch_version=(outcome.dispatch_version if outcome is not None else None),
         )
 
         if self.msg_publisher is not None:

@@ -7,6 +7,7 @@ from collections.abc import Callable
 from collections.abc import Coroutine
 from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
@@ -21,6 +22,7 @@ from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
 import snapper.application.engine.trader as trader_module
 from snapper.application.engine.config import EngineConfigModel
+from snapper.application.engine.service import InstrumentSpec
 from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.engine.trader import _compute_pending_boundaries
@@ -29,6 +31,8 @@ from snapper.application.portfolio.models import PortfolioTracker
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
+from snapper.application.trade.caps_enforcer import CapsViolationError
+from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.trade_service import PositionProjection
 from snapper.config.app import AppSettings
 from snapper.data.repository import SQLAlchemyRepository
@@ -1213,6 +1217,68 @@ async def test_on_signal_threads_ai_review_attribution_to_engine(
     second_call = engine.execute_calls[1]
     assert second_call["ai_review_public_id"] is None
     assert second_call["ai_review_dispatch_version"] is None
+
+
+@pytest.mark.asyncio
+async def test_engine_ai_attribution_fails_loudly_when_wallet_unset() -> None:
+    """Plan D Phase 3 §8.3 — wallet preflight integration smoke.
+
+    Given: an :class:`TradingEngineService` constructed without a
+        ``wallet_public_id`` (default ``""``), wired with a real
+        :class:`TradingCapsEnforcer` whose underlying repository
+        returns a resolved_approved AI review row,
+    When: the strategy hot-path emits an AI-attributed trade through
+        ``engine._send_order(..., ai_review_public_id="X", ...)``,
+    Then: ``CapsViolationError("missing_wallet_for_ai_review_attribution")``
+        propagates to the caller BEFORE the citation row fetch. Pins
+        the operator-actionable failure mode that surfaces when a
+        strategy author left :class:`StrategyConfig.wallet_public_id`
+        at the default empty string while wiring AI CONSULT — the
+        fail-closed message tells the operator exactly what to fix
+        instead of failing silently or with a misleading wallet
+        mismatch deeper in the validator stack.
+
+    This is the integration analogue of the unit tests in
+    ``tests/application/trade/test_caps_enforcer.py``
+    ``TestGuardWithAiReviewAttribution`` — drives the assertion
+    through the engine call site so the wiring contract end-to-end
+    cannot regress without surfacing here.
+    """
+    repo = MagicMock()
+    repo.get_ai_review = AsyncMock()
+    repo.get_user_trading_caps = AsyncMock(return_value=None)
+    repo.count_user_open_commands = AsyncMock(return_value=0)
+    repo.get_user_recent_submits = AsyncMock(return_value=[])
+    repo.count_user_rolling_cancels = AsyncMock(return_value=0)
+    repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-pid"))
+    pricing = MagicMock()
+    pricing.to_usd = AsyncMock(return_value=Decimal("0"))
+    enforcer = TradingCapsEnforcer(cast(Any, repo), cast(Any, pricing))
+
+    msg_publisher = SimpleNamespace(tracker=SequenceTracker())
+    engine = TradingEngineService(
+        instrument="BTC-USD",
+        execution_socket=cast(Any, msg_publisher),
+        cfg=EngineConfigModel(initial_cash=1_000.0, fee_bps=10.0),
+        exchange="paper",
+        repository=cast(Any, repo),
+        caps_enforcer=enforcer,
+        wallet_public_id="",
+    )
+    engine.instrument_specs = {
+        "BTC-USD": InstrumentSpec(public_id="inst-pid", tick_size=0.01, lot_size=0.0001),
+    }
+    with pytest.raises(CapsViolationError, match="missing_wallet_for_ai_review_attribution"):
+        await engine._send_order(
+            side="buy",
+            size=1.0,
+            price=10.0,
+            reason="ai-emit",
+            ai_review_public_id="rev-attr",
+            ai_review_dispatch_version=1,
+        )
+    repo.get_ai_review.assert_not_awaited()
+    repo.insert_trade_command.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -141,6 +141,43 @@ class RSIReversion(BaseStrategy):
 | `outputs` | list[str] | List of instruments for signals |
 | `exchange` | string | Target exchange (`paper`, `kraken`, `zonda`, `walutomat`) |
 | `params` | dict | Strategy-specific parameters |
+| `wallet_public_id` | string | Wallet that will execute orders for this strategy. Empty default for backwards compatibility; **REQUIRED (non-empty) for any strategy that uses `create_ai_review_and_await()`** — see "AI delegate consultation" below. |
+| `operator_public_id` | string | Trading-identity operator that owns this strategy instance. Empty default; validated against the launching principal's `operator_public_ids` when populated. |
+
+### AI delegate consultation
+
+Strategies that consult an AI delegate via
+`create_ai_review_and_await()` and then forward the approved
+outcome to `emit_signal(outcome=...)` MUST set
+`StrategyConfig.wallet_public_id` to a non-empty value. The
+trader-coordinator's caps gate
+(`TradingCapsEnforcer.guard_with_ai_review_attribution`)
+fail-closes early when the engine submission's
+`wallet_public_id` is empty:
+
+```text
+CapsViolationError: missing_wallet_for_ai_review_attribution
+    submission.wallet_public_id required for the strategy AI gate;
+    engine state must populate wallet on the submission before
+    invoking this guard
+```
+
+The error is loud and operator-actionable: it identifies the
+exact missing config field. Without `wallet_public_id`, the
+engine cannot map the AI delegate's approved trade to a wallet
+for cap evaluation (per-user notional / open-orders / quantity
+caps key on wallet+user). Pure non-AI strategies that never
+invoke `create_ai_review_and_await()` continue to run without a
+wallet; they bypass caps via `guard_service_principal()` per the
+existing audit-bypass contract.
+
+The `ai_review_public_id` carried on the published `SignalData`
+is transport-only end-to-end through the ZMQ wire. The
+companion `ai_review_dispatch_version` (Plan A Q18 dedup key) is
+also transport-only — the strategy citation validator does not
+compare it; the bus publisher reads `dispatch_version` from the
+cited row at publish time so downstream caps-violation fanout
+events are always tagged with the row-of-record version.
 
 ### Input Topics
 

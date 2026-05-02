@@ -22,8 +22,10 @@ import pandas as pd
 import pytest
 import zmq
 
+from snapper.application.ai_review.service import AiReviewDecisionOutcome
 from snapper.application.services.signals.service import signal_service
 from snapper.cli.app import _alembic_cfg
+from snapper.core.types import AiReviewStatusEnum
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
@@ -754,6 +756,85 @@ async def test_emit_signal_validates_outputs(monkeypatch: pytest.MonkeyPatch) ->
         )
     )
     mock_msg_publisher.send.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_emit_signal_no_outcome_keeps_attribution_fields_none() -> None:
+    """Plan D Phase 3 §8.1 — emit_signal without outcome keeps attribution None.
+
+    Given: a strategy emitting a non-AI signal (no ``outcome`` kwarg),
+    When: emit_signal publishes the SignalData envelope,
+    Then: both ``ai_review_public_id`` and
+        ``ai_review_dispatch_version`` on the published envelope are
+        ``None``. Pins the regression: non-AI strategy emits stay
+        byte-identical for downstream consumers (the new optional
+        kwarg has no effect when omitted).
+    """
+    strategy = FakeStrategy(_strategy_config(exchange="paper"))
+    mock_msg_publisher = MagicMock()
+    mock_msg_publisher.send = AsyncMock()
+    mock_msg_publisher.tracker = SequenceTracker()
+    mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
+    strategy.msg_publisher = mock_msg_publisher
+    strategy._last_data_ts = 200.0
+    await strategy.emit_signal(
+        StrategySignal(
+            instrument="BTC-USD",
+            side="buy",
+            strength=0.5,
+            reason="non-ai",
+            price=10.0,
+        )
+    )
+    mock_msg_publisher.send.assert_called_once()
+    sent_envelope = mock_msg_publisher.send.call_args.args[1]
+    assert sent_envelope.ai_review_public_id is None
+    assert sent_envelope.ai_review_dispatch_version is None
+
+
+@pytest.mark.asyncio
+async def test_emit_signal_outcome_stamps_attribution_on_envelope() -> None:
+    """Plan D Phase 3 §8.1 — emit_signal(outcome=) stamps both attribution fields.
+
+    Given: a strategy that just received an
+        :class:`AiReviewDecisionOutcome` from a successful CONSULT
+        round,
+    When: emit_signal is called with ``outcome=decision``,
+    Then: the published SignalData envelope carries both
+        ``ai_review_public_id == decision.review_public_id`` and
+        ``ai_review_dispatch_version == decision.dispatch_version``,
+        threading the AI attribution end-to-end through the ZMQ wire
+        per Plan A Q18 transport contract.
+    """
+    strategy = FakeStrategy(_strategy_config(exchange="paper"))
+    mock_msg_publisher = MagicMock()
+    mock_msg_publisher.send = AsyncMock()
+    mock_msg_publisher.tracker = SequenceTracker()
+    mock_msg_publisher.session_id = mock_msg_publisher.tracker.session_id
+    strategy.msg_publisher = mock_msg_publisher
+    strategy._last_data_ts = 200.0
+    decision = AiReviewDecisionOutcome(
+        review_public_id="rev-emit-attr",
+        status=AiReviewStatusEnum.RESOLVED_APPROVED,
+        resolution_mode=None,
+        decision=None,
+        rationale=None,
+        dispatch_version=11,
+        responding_delegate_public_id=None,
+    )
+    await strategy.emit_signal(
+        StrategySignal(
+            instrument="BTC-USD",
+            side="buy",
+            strength=0.5,
+            reason="ai-attributed",
+            price=10.0,
+        ),
+        outcome=decision,
+    )
+    sent_envelope = mock_msg_publisher.send.call_args.args[1]
+    assert sent_envelope.ai_review_public_id == "rev-emit-attr"
+    assert sent_envelope.ai_review_dispatch_version == 11
 
 
 @pytest.mark.asyncio
