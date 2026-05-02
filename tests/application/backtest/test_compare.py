@@ -1,4 +1,4 @@
-"""Tests for Phase 2c backtest comparison diff computation."""
+"""Tests for backtest comparison diff computation."""
 
 from datetime import UTC
 from datetime import datetime

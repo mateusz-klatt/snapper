@@ -317,7 +317,7 @@ class TestInvalidateUserCache:
 
 
 class TestVerifyCachePrune:
-    """Opportunistic pruning keeps the cache bounded (§3.6.3)."""
+    """Opportunistic pruning keeps the cache bounded."""
 
     @pytest.mark.asyncio
     async def test_hard_cap_applies_when_all_entries_fresh(self) -> None:

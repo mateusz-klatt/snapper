@@ -563,7 +563,7 @@ class TestCancelBracket:
             stubbed enforcer whose ``guard()`` raises
             ``CapsViolationError('max_cancels_per_minute')``,
         When: the client POSTs to the cancel endpoint,
-        Then: response is HTTP 422 carrying the §9.2 caps_violation
+        Then: response is HTTP 422 carrying the caps_violation
             body — verifies the cap-violation branch in
             ``cancel_bracket``.
         """

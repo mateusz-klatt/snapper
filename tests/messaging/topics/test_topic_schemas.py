@@ -145,7 +145,7 @@ class TestTopicUtilities:
         assert results[0].pattern == "accruals."
 
     def test_alerts_registry_entry_exists(self) -> None:
-        """Verify alerts entry exists in TOPIC_REGISTRY (BE-2 iOS Push Plan §D4).
+        """Verify alerts entry exists in TOPIC_REGISTRY.
 
         Given: TOPIC_REGISTRY,
         When: Filtering for alerts pattern,

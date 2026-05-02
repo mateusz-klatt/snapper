@@ -12,7 +12,7 @@ type User = Components['schemas']['UserProfile']
 type UserRole = Components['schemas']['UserRole']
 
 /**
- * Tagged-union arg for ``refreshToken`` (Phase 2c).
+ * Tagged-union arg for ``refreshToken``.
  *
  * - ``undefined`` — the three historical zero-body callers
  *   (``apiClient.refreshAndRetry``, WS ticket refresh, the original

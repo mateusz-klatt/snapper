@@ -4,7 +4,7 @@ Locks the BE-1 contract: ``signal.instrument`` drives the recorded
 target instrument and ``config.target_execution_exchange`` (when set)
 drives the recorded target venue, with byte-identical fallback to
 ``event.exchange`` / ``event.instrument`` when the carrier is None or
-``signal.instrument == event.instrument`` (single-feed Phase 2c).
+``signal.instrument == event.instrument`` (single-feed legacy path).
 """
 
 from datetime import UTC
@@ -283,8 +283,8 @@ class TestTargetAttribution:
         When: process_time_batch runs,
         Then: the recorded signal + trade rows match the pre-v1.2
             behaviour — price equals event.row['close'] (populated into
-            latest_closes by the pre-batch scan at §1.4 line 117), and
-            the counter stays at 0 (no block).
+            latest_closes by the pre-batch scan), and the counter stays
+            at 0 (no block).
         """
         signal = StrategySignal(
             instrument="BTC-USD",

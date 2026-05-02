@@ -1,25 +1,26 @@
-"""Phase 4 meta-audit — ``insert_trade_command`` call-site ownership contract.
+"""Meta-audit — ``insert_trade_command`` call-site ownership contract.
 
 Every ``insert_trade_command`` call in ``src/snapper/**`` must pass
-an explicit ``ownership=`` kwarg matching.8. This test is
-repo-wide + forward-compatible: a future PR that adds a new call
-site without updating §1.8 fails CI; a refactor that moves an
+an explicit ``ownership=`` kwarg. This test is repo-wide +
+forward-compatible: a future PR that adds a new call site without
+updating the canonical matrix fails CI; a refactor that moves an
 existing call to a different file line does NOT fail (the matrix
 keys on ``(file, enclosing_function_name)``, not line numbers).
 
-Note: the 7  sites collapsed
-to 6 canonical entries when the two plan-service sites
-(``_reemit_single_stranded_cancel`` + ``_dispatch_commands``) were
-refactored onto a single shared ``_emit_trade_command`` helper so
-the :class:`TradingCapsEnforcer` wrap lives in one place instead
-of two. Both original callers still carry the same ``ownership=None``
+Note: the prior set of sites collapsed to fewer canonical entries
+when the two plan-service sites (``_reemit_single_stranded_cancel``
++ ``_dispatch_commands``) were refactored onto a single shared
+``_emit_trade_command`` helper so the
+:class:`TradingCapsEnforcer` wrap lives in one place instead of
+two. Both original callers still carry the same ``ownership=None``
 semantics — just through the helper.
 
-Value-shape policy (§1.8):
+Value-shape policy:
     - ``self._ownership`` (attribute access chain ending in
       ``_ownership``) — coordinator-bound site.
     - ``None`` literal — HTTP handler / plan service site (row
-      propagates to the owning coordinator's outbox via §3.3 filter).
+      propagates to the owning coordinator's outbox via the
+      shard-key filter).
 
 Positional ``ownership`` argument is rejected; the kwarg must be
 visible at the call site so policy is auditable.
@@ -39,14 +40,13 @@ CANONICAL_SITES: set[tuple[str, str]] = {
     ("src/snapper/server/execution_plan_routes.py", "cancel_bracket"),
     ("src/snapper/mcp/tools.py", "submit_manual_order"),
 }
-"""§1.8 canonical insert-site matrix.
+"""Canonical insert-site matrix.
 
-Plan D Phase 3 §7 extracted the strategy emit's three-way gate
-selection from ``_send_order`` into the dedicated
-``_insert_strategy_trade_command`` helper so the
-``guard_with_ai_review_attribution`` branch could land without
-inflating ``_send_order``'s cognitive complexity past the linter
-ceiling. The helper is the new ownership-policy site for the
+The strategy emit's three-way gate selection was extracted from
+``_send_order`` into the dedicated ``_insert_strategy_trade_command``
+helper so the ``guard_with_ai_review_attribution`` branch could land
+without inflating ``_send_order``'s cognitive complexity past the
+linter ceiling. The helper is the ownership-policy site for the
 strategy hot path.
 """
 
@@ -75,7 +75,7 @@ def _is_ownership_value_policy(value: ast.expr) -> bool:
 def _classify_ownership_value(value: ast.expr) -> str | None:
     """Return ``"ownership"``, ``"none"``, or ``None`` for the given AST value.
 
-    Used by :func:`test_insert_site_policy_matches_plan_section_1_8` to
+    Used by :func:`test_insert_site_policy_matches_canonical_matrix` to
     pin each canonical site to its expected policy value. Prevents a
     future accidental swap (e.g., ``_send_order`` changing to
     ``ownership=None``) from passing the weaker
@@ -157,15 +157,15 @@ def test_every_insert_trade_command_call_has_explicit_ownership_kwarg() -> None:
         if not _is_ownership_value_policy(value):
             violations.append(
                 f"{rel}:{lineno} in {fn_name}(): ownership= value does not match "
-                f"§1.8 policy (must be self._ownership OR None literal)"
+                f"policy (must be self._ownership OR None literal)"
             )
     assert not violations, "insert_trade_command call-site violations:\n" + "\n".join(violations)
 
 
-def test_insert_site_policy_matches_plan_section_1_8() -> None:
+def test_insert_site_policy_matches_canonical_matrix() -> None:
     """Each canonical site uses its specific policy value.
 
-    Given: the §1.8 ``SITE_POLICY`` dict pinning each
+    Given: the ``SITE_POLICY`` dict pinning each
         ``(file, function)`` tuple to ``"ownership"`` or ``"none"``,
     When: every insert site collected via AST walk is classified,
     Then: the actual policy value matches the expected one — a
@@ -189,23 +189,23 @@ def test_insert_site_policy_matches_plan_section_1_8() -> None:
             if actual_policy != expected_policy:
                 violations.append(
                     f"{rel}:{lineno} in {fn_name}(): expected "
-                    f"ownership={expected_policy!r} per §1.8, got "
+                    f"ownership={expected_policy!r}, got "
                     f"{actual_policy!r}"
                 )
     assert not violations, "per-site policy violations:\n" + "\n".join(violations)
 
 
-def test_insert_site_matrix_matches_plan_section_1_8() -> None:
-    """Collected ``(file, function)`` set matches §1.8 canonical matrix.
+def test_insert_site_matrix_matches_canonical_set() -> None:
+    """Collected ``(file, function)`` set matches the canonical matrix.
 
-    Given: the :data:`CANONICAL_SITES` set enumerating the 7
-        known insert sites.8,
+    Given: the :data:`CANONICAL_SITES` set enumerating the
+        known insert sites,
     When: every ``insert_trade_command`` call in
         ``src/snapper/**`` is collected via AST walk,
     Then: the collected set equals the canonical set — adding a
-        new site without updating §1.8 fails CI, and removing a
-        listed site without cleaning the canonical matrix also
-        fails CI.
+        new site without updating the canonical matrix fails CI, and
+        removing a listed site without cleaning the canonical matrix
+        also fails CI.
     """
     collected: set[tuple[str, str]] = set()
     for py_file in SRC_ROOT.rglob("*.py"):
@@ -213,11 +213,11 @@ def test_insert_site_matrix_matches_plan_section_1_8() -> None:
             collected.add((rel, fn_name))
     missing = CANONICAL_SITES - collected
     unexpected = collected - CANONICAL_SITES
-    assert not missing, "expected §1.8 sites missing from src/:\n" + "\n".join(
+    assert not missing, "canonical insert sites missing from src/:\n" + "\n".join(
         f"  {f}::{fn}" for f, fn in sorted(missing)
     )
     assert not unexpected, (
-        "new insert_trade_command sites not listed in §1.8 — update "
-        "plan_trade_runtime_phase4.md §1.8 AND CANONICAL_SITES:\n"
+        "new insert_trade_command sites not listed in canonical matrix — "
+        "update CANONICAL_SITES + SITE_POLICY:\n"
         + "\n".join(f"  {f}::{fn}" for f, fn in sorted(unexpected))
     )

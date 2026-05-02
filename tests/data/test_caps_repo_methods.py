@@ -154,7 +154,7 @@ async def test_count_user_open_commands_counts_non_terminal_submits(
         one dispatched ``cancel``,
     When: ``count_user_open_commands`` runs,
     Then: the count is 3 (the three non-terminal submit-type rows).
-        The filled row and the cancel row are excluded per §3.5.3
+        The filled row and the cancel row are excluded
         (in-flight exposure basis). The ``create`` row is counted —
         REST/plan inserts persist this vocabulary and the cap must
         see them to enforce ``max_open_orders``.

@@ -1,4 +1,4 @@
-"""Tests for the Phase 0d operator catalogue read route.
+"""Tests for the operator catalogue read route.
 
 Verifies the ADMIN-wide vs. membership-bound visibility branches of
 ``list_operators``. ADMIN returns every active operator; VIEWER and

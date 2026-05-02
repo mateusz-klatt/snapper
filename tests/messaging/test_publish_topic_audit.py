@@ -1,7 +1,7 @@
 """Audit test: forbid future ZMQ-publish bypass paths in production backend.
 
-The chokepoint contract introduced in Phase 2 is that every
-production publish call site emitting a ``StrictDataSchema``-derived
+The chokepoint contract is that every production publish call
+site emitting a ``StrictDataSchema``-derived
 payload routes serialization through ``StrictDataSchema.publish_to``
 so the payload's ``topic`` field is always populated on the wire.
 

@@ -1,4 +1,4 @@
-"""Tests for Phase 3c: venue reconciliation in executor."""
+"""Tests for venue reconciliation in executor."""
 
 from datetime import UTC
 from datetime import datetime

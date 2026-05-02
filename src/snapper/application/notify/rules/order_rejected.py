@@ -1,4 +1,4 @@
-"""``order_rejected`` rule — fires on every ``orders.events.*.rejected`` event (§D6.1 Rule 2)."""
+"""``order_rejected`` rule — fires on every ``orders.events.*.rejected`` event."""
 
 from datetime import datetime
 

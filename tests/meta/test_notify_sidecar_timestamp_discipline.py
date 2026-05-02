@@ -1,9 +1,8 @@
 """Meta-audit — ``datetime.now(UTC)`` confined to entry boundaries in sidecar.
 
-Closes BE-3a R1 blocker B-7 (INV-5 per
-``feedback_timestamp_discipline.md``): one ``now`` per logical
-operation, minted at the entry boundary and threaded through every
-helper / repository call. The sidecar's three entry boundaries are:
+Invariant: one ``now`` per logical operation, minted at the entry
+boundary and threaded through every helper / repository call. The
+sidecar's three entry boundaries are:
 
 - ``NotifySidecar.start`` -> pre-drain + per-received-message now.
 - ``NotifySidecar._process_retry_queue_loop`` -> per-tick now.

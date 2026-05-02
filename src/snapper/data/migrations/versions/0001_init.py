@@ -1266,6 +1266,7 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
         postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
+    op.create_index("ix_telemetry_timestamp", "telemetry", ["timestamp"])
     op.create_table(
         "trade_commands",
         sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
@@ -2612,13 +2613,6 @@ def upgrade() -> None:
         postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
 
-    # ---------------------------------------------------------------------
-    # AI Integration Phase B+C+D — Plan A v1.4 architecture seed tables
-    # ---------------------------------------------------------------------
-    # ai_delegates: operational side-table for AI delegate runtime state
-    # (Plan A §3.4). Logical 1-to-1 with users.role=AI_DELEGATE; FK via
-    # user_public_id. Stores last_seen_at + active_reviews_count for Q10
-    # admission control + Q17 reconnect hysteresis.
     op.create_table(
         "ai_delegates",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -2643,11 +2637,6 @@ def upgrade() -> None:
     )
     op.create_index("ix_ai_delegates_last_seen_at", "ai_delegates", ["last_seen_at"])
 
-    # ai_reviews: mutable status row for CONSULT pattern state machine
-    # (Plan A §3.1, Q9 + Q13). NOT TemporalMixin — Q13 drops SCD2 for
-    # operational queue; audit trail via append-only ai_review_events.
-    # Q18 dispatch_version + Q10 counter_decremented_at for protocol-level
-    # dedup + idempotent counter primitive.
     op.create_table(
         "ai_reviews",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -2731,7 +2720,6 @@ def upgrade() -> None:
     op.create_index("ix_ai_reviews_wallet_public_id", "ai_reviews", ["wallet_public_id"])
     op.create_index("ix_ai_reviews_instrument_public_id", "ai_reviews", ["instrument_public_id"])
 
-    # ai_review_events: append-only audit log per Plan A §3.2 + Q13
     op.create_table(
         "ai_review_events",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -2762,8 +2750,6 @@ def upgrade() -> None:
         ["event_type", "occurred_at"],
     )
 
-    # Plan B v1.2 cancel idempotency partial unique index on execution_plans
-    # (uses cancel_idempotency_key column added earlier in this migration).
     with op.get_context().autocommit_block():
         op.execute(
             text(
@@ -2793,6 +2779,7 @@ def downgrade() -> None:
         op.execute(text("DROP INDEX IF EXISTS uq_device_alert_wallet_scope"))
         op.execute(text("DROP INDEX IF EXISTS uq_device_alert_operator_scope"))
         op.execute(text("DROP INDEX IF EXISTS uq_device_alert_device_scope"))
+        op.execute(text("DROP INDEX IF EXISTS ix_telemetry_timestamp"))
     op.drop_table("ai_review_events")
     op.drop_table("ai_reviews")
     op.drop_table("ai_delegates")

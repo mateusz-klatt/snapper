@@ -1,4 +1,4 @@
-"""Plan A Q14 / Plan D D3 — canonical envelope shape for MCP tool results.
+"""Canonical envelope shape for MCP tool results.
 
 This module owns :func:`to_call_tool_result`, the single helper that
 wraps any structured tool envelope (success boolean, optional
@@ -7,17 +7,15 @@ error_code, human-readable message, opaque details) into the
 
 Why a dedicated helper:
 
-- Plan A Q14 v1.2 lock — idempotent retries (e.g.
-  ``decision_already_recorded``) MUST surface as
-  ``success=True, error_code='decision_already_recorded'`` so the
+- Idempotent retries (e.g. ``decision_already_recorded``) MUST surface
+  as ``success=True, error_code='decision_already_recorded'`` so the
   bridge logs the no-op for audit while the strategy treats it as a
   success. The naive shape ``success = error_code is None`` would
   collapse the two cases into ``isError=True`` and break the
   contract.
-- Plan D cross-plan decision D3 — locked the explicit ``success``
-  parameter from day one so the helper signature does not need to be
-  retroactively widened when Plan B's read-mode tools (also Q14
-  envelopes) start consuming it.
+- The explicit ``success`` parameter is locked from day one so the
+  helper signature does not need to be retroactively widened when
+  read-mode tools (also envelope-based) start consuming it.
 
 Server-side return shape:
 
@@ -65,7 +63,7 @@ def to_call_tool_result(
 ) -> CallToolResult:
     """Wrap a structured tool envelope as a FastMCP :class:`CallToolResult`.
 
-    The four fields map 1:1 to Plan A Q14 v1.2 envelope semantics —
+    The four fields map 1:1 to the canonical envelope semantics —
     ``error_code`` is the load-bearing discriminator that the bridge
     forwards to delegate clients, ``message`` is the human-readable
     summary FastMCP exposes verbatim, and ``details`` is the opaque
@@ -73,14 +71,14 @@ def to_call_tool_result(
     consumers parse for follow-up logic.
 
     Args:
-        success: Plan A Q14 explicit-success flag. ``True`` for first
+        success: Explicit-success flag. ``True`` for first
             valid decision AND idempotent retry; ``False`` for hard
             errors (review_not_found, not_authorized, peer_resolved,
             review_id_expired). The MCP layer flips
             :attr:`CallToolResult.isError` to ``not success`` so
             MCP-aware clients without a JSON-envelope parser still
             observe the correct top-level error flag.
-        error_code: Optional Plan A Q14 stable-classifier string. May
+        error_code: Optional stable-classifier string. May
             be set even when ``success=True`` (idempotent retry
             ``decision_already_recorded``); ``None`` only on the
             first-valid-decision happy path.

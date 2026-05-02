@@ -398,7 +398,7 @@ async def test_price_unavailable_error_carries_context(
     Given: an EUR-quoted instrument,
     When: ``to_usd`` raises,
     Then: the exception carries a meaningful ``str()`` plus the
-        structured fields the HTTP layer uses to build the §9.2
+        structured fields the HTTP layer uses to build the
         ``caps_price_unavailable`` response.
     """
     inst_id = "inst-error-context"

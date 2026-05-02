@@ -1,7 +1,6 @@
 """Tests for :meth:`SQLAlchemyRepository.count_table_stats`.
 
-Pins the per-kind contract from
-``proprietary/plans/plan_observability_cluster_b.md`` §7.2 + §3.3:
+Pins the per-kind contract:
 
 * EVENT tables: ``total = COUNT(*)``; ``current`` / ``closed`` = ``None``;
   ``archivable`` = half-open window count (or ``None`` when no window).
@@ -123,7 +122,7 @@ async def _close_order_version(
 
 
 class TestEventTableSemantics:
-    """Per-plan §3.1 — append-only event tables."""
+    """Append-only event tables."""
 
     @pytest.mark.asyncio
     async def test_empty_db_returns_zero_total_and_null_axes(
@@ -214,7 +213,7 @@ class TestEventTableSemantics:
 
 
 class TestStateTableSemantics:
-    """Per-plan §3.2 — SCD2-versioned state tables."""
+    """SCD2-versioned state tables."""
 
     @pytest.mark.asyncio
     async def test_empty_db_returns_zero_axes(self, _repo: SQLAlchemyRepository) -> None:

@@ -1,4 +1,4 @@
-"""Tests for Phase 3b: checkpoint recovery in TraderCoordinator."""
+"""Tests for checkpoint recovery in TraderCoordinator."""
 
 from collections import OrderedDict
 from datetime import UTC
@@ -121,7 +121,7 @@ def _set_sqlalchemy_repo(coord: TraderCoordinator, mock_repo: AsyncMock) -> None
 
 
 class TestCheckpointRecovery:
-    """Phase 3b: checkpoint recovery restores TradeService, engine, and portfolio."""
+    """Checkpoint recovery restores TradeService, engine, and portfolio."""
 
     @pytest.mark.asyncio
     async def test_checkpoint_recovery_restores_position(

@@ -1,6 +1,6 @@
 """AI_DELEGATE role hierarchy + permission binding tests.
 
-Covers the canonical §3.4 guarantees:
+Covers the canonical guarantees:
 
     - ``UserRole.AI_DELEGATE`` is ordinally **below** VIEWER in BOTH
       ``role_hierarchy`` dicts (``auth/dependencies.py`` and
@@ -120,11 +120,11 @@ def test_admin_still_passes_require_role_admin() -> None:
 
 
 def test_ai_delegate_has_canonical_permission_set() -> None:
-    """``ROLE_PERMISSIONS[AI_DELEGATE]`` matches §3.4 inclusion list.
+    """``ROLE_PERMISSIONS[AI_DELEGATE]`` matches the canonical inclusion list.
 
     Given: the ROLE_PERMISSIONS mapping,
     When: the AI_DELEGATE entry is inspected,
-    Then: it contains exactly the canonical §3.4 permissions —
+    Then: it contains exactly the canonical permissions —
         read-only observability plus create/cancel-orders plus
         READ_SIGNALS — and excludes strategy lifecycle + admin.
     """
@@ -189,7 +189,7 @@ def test_ai_delegate_passes_require_permission_for_create_orders() -> None:
     When: ``require_permission(CREATE_ORDERS)`` runs,
     Then: the principal is returned — the hierarchy gate cannot grant
         access but the permission gate can (and does for the
-        narrow set §3.4 whitelisted).
+        narrow whitelisted set).
     """
     checker = require_permission(Permission.CREATE_ORDERS)
     result = checker(current_user=_principal(UserRole.AI_DELEGATE))

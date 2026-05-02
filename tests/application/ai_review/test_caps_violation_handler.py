@@ -1,8 +1,8 @@
-"""Tests for Plan D §3.6 caps_violation_after_ai_approve handler.
+"""Tests for caps_violation_after_ai_approve handler.
 
 Covers :meth:`AiReviewService.handle_caps_violation_bus_message` —
 translates the internal ``caps_violation_after_ai_approve`` bus payload
-to the external ``ai_review.caps_violation`` Q16 WS frame and re-fanouts
+to the external ``ai_review.caps_violation`` WS frame and re-fanouts
 to the ``ai_reviews.{user}.{strategy}.caps_violation`` topic so the
 bridge can surface the rejection on the delegate's UI.
 """
@@ -29,7 +29,7 @@ def _make_publisher() -> MagicMock:
     """Build a MagicMock publisher with a real :class:`SequenceTracker`.
 
     The handler stamps fresh ``sequence_id`` + ``session_id`` from the
-    publisher's tracker (Plan D §3.6 fix-up) so the gap detector keys
+    publisher's tracker so the gap detector keys
     the external stream by the external topic, not by the internal
     bus topic. Tests need a real tracker so ``next_sequence`` actually
     increments + so ``session_id`` returns a deterministic UUID7.
@@ -78,14 +78,13 @@ def _make_event(
 async def test_publishes_caps_violation_to_external_ws_topic() -> None:
     """Happy path — handler builds the WS topic + forwards via publisher.
 
-    Plan D §3.6 + Plan A Q7 — the external topic suffix is
+    The external topic suffix is
     ``ai_reviews.{user}.{strategy}.caps_violation`` so the bridge per-frame
-    scope filter routes the frame to the right delegate. Plan A §4.2
-    line 467 fixes the OUTBOUND frame discriminator at
-    ``ai_review.caps_violation`` (a different value from the internal
-    ``caps_violation_after_ai_approve`` bus type), so the handler must
-    translate to :class:`AiReviewCapsViolationFrameData` before
-    publishing.
+    scope filter routes the frame to the right delegate. The OUTBOUND
+    frame discriminator is fixed at ``ai_review.caps_violation`` (a
+    different value from the internal ``caps_violation_after_ai_approve``
+    bus type), so the handler must translate to
+    :class:`AiReviewCapsViolationFrameData` before publishing.
 
     Given an AiReviewService with a wired publisher,
     When handle_caps_violation_bus_message receives a caps event,
@@ -151,10 +150,10 @@ async def test_swallows_publisher_failure_and_returns_false() -> None:
 async def test_topic_includes_user_and_strategy_ids_verbatim() -> None:
     """Topic suffix uses user_public_id + strategy_public_id verbatim.
 
-    Per Plan D §4.3 the WS topic family is
+    The WS topic family is
     ``ai_reviews.{user_public_id}.{strategy_public_id}.{request|decision_ack|caps_violation}``;
-    the per-frame scope filter (Plan D §9) parses the JSON envelope
-    for wallet/instrument so the topic suffix only needs the user +
+    the per-frame scope filter parses the JSON envelope for
+    wallet/instrument so the topic suffix only needs the user +
     strategy ids that drive routing.
 
     Given a UUID-shaped user_public_id + strategy_public_id,
@@ -214,7 +213,7 @@ async def test_payload_carries_cap_type_attempted_and_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_external_frame_carries_dispatch_version_for_q18_dedup() -> None:
-    """Plan A §4.2 line 481 / Q18 — dispatch_version forwarded to external frame.
+    """dispatch_version forwarded to external frame.
 
     The bridge dedupes external frames by ``(public_id, dispatch_version)``
     so a re-fanout of the same event after the original review row's
@@ -237,15 +236,15 @@ async def test_external_frame_carries_dispatch_version_for_q18_dedup() -> None:
 
 @pytest.mark.asyncio
 async def test_external_frame_type_matches_q16_contract() -> None:
-    """Plan A §4.2 line 467 / Q16 — external frame ``type`` is fixed.
+    """External frame ``type`` is fixed.
 
     The internal bus payload carries
     ``type="caps_violation_after_ai_approve"`` (snake-case bus name),
     but the OUTBOUND WS frame the JS bridge dispatcher reads MUST be
-    ``"ai_review.caps_violation"`` (Plan A §4.2 line 467; bridge
-    dispatcher ``switch (frame.type)`` at line 503). Pin the
-    discriminator translation here so a future renaming of the
-    internal schema cannot silently break the JS dispatcher contract.
+    ``"ai_review.caps_violation"``. The bridge dispatcher uses
+    ``switch (frame.type)``. Pin the discriminator translation here
+    so a future renaming of the internal schema cannot silently break
+    the JS dispatcher contract.
 
     Given a bus message with the internal type literal,
     When handle_caps_violation_bus_message routes,
@@ -263,7 +262,7 @@ async def test_external_frame_type_matches_q16_contract() -> None:
 
 @pytest.mark.asyncio
 async def test_external_frame_preserves_routing_fields() -> None:
-    """Plan A Q15 — routing fields stay at envelope top level.
+    """Routing fields stay at envelope top level.
 
     The bridge per-frame scope filter (``_enforce_ai_review_scope``)
     reads ``wallet_public_id`` + ``instrument_public_id`` directly off
@@ -296,8 +295,8 @@ def _find_owner_and_non_owner_instances(
 ) -> tuple[ShardOwnership, ShardOwnership]:
     """Return (owner, non-owner) :class:`ShardOwnership` for a review id.
 
-    Plan D Phase 2 #8 ownership tests need both sides of the partition for
-    one specific review id so the gating gate can be exercised symmetrically
+    Ownership tests need both sides of the partition for one specific
+    review id so the gating gate can be exercised symmetrically
     without relying on hash-luck. Walks every instance id in
     ``[0, instance_count)`` and picks one matching pair.
     """
@@ -320,7 +319,7 @@ def _find_owner_and_non_owner_instances(
 
 @pytest.mark.asyncio
 async def test_publishes_when_no_shard_ownership_injected_legacy_compat() -> None:
-    """Plan D Phase 2 #8 — pre-lifespan / pre-P2-8 single-instance behaviour.
+    """Pre-lifespan / pre-P2-8 single-instance behaviour.
 
     The lifespan injects :class:`ShardOwnership` AFTER the publisher seam
     but BEFORE the bus listener subscribes. Under partial-startup races,
@@ -388,7 +387,7 @@ async def test_publishes_when_owner_under_multi_instance() -> None:
 async def test_skips_when_non_owner_under_multi_instance() -> None:
     """Multi-instance deployment — the non-owning worker short-circuits.
 
-    Plan D Phase 2 #8 — the dedup invariant: exactly one worker per review
+    Dedup invariant: exactly one worker per review
     row publishes the external frame. Non-owners MUST return False without
     invoking the publisher, otherwise N workers would N-duplicate the WS
     frame to every connected subscriber.

@@ -207,8 +207,7 @@ class TestRateLimitMiddleware:
         When: the fourth total request — which would exhaust a
             shared pool — arrives from the second principal,
         Then: it is admitted because the limiter key includes the
-            principal id. Pins the per-principal contract plan
-            §3.10 requires.
+            principal id. Pins the per-principal contract.
         """
         _ = enabled_limiter
         app_a = _build_harness(_claims(user_public_id="rl-alpha"))

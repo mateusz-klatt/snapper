@@ -1,4 +1,4 @@
-"""Tests for ``snapper.application.notify.routing`` (§D7 precedence cascade)."""
+"""Tests for ``snapper.application.notify.routing`` precedence cascade."""
 
 from datetime import UTC
 from datetime import datetime

@@ -248,7 +248,7 @@ async def _seed_queued_delivery(
 
 
 class TestBackoff:
-    """``_backoff_seconds`` implements the §D5.5 exponential schedule."""
+    """``_backoff_seconds`` implements the exponential schedule."""
 
     def test_first_attempt_30s(self) -> None:
         """Covered by test body."""

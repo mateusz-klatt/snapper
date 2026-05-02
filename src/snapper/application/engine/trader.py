@@ -1481,7 +1481,7 @@ class TraderCoordinator(RegisterableProcess):
         lookup fails or the instrument has no spec row yet. The
         ``public_id`` key is populated only when the upstream lookup
         succeeds — the strategy hot-path's AI-attribution gate
-        (Plan D Phase 3 §2.5) reads it for fail-closed cap evaluation
+        reads it for fail-closed cap evaluation
         on AI-attributed emits, while non-AI emits remain tolerant of
         an absent ``public_id``.
         """

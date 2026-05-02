@@ -390,7 +390,7 @@ async def test_insert_and_get_result(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_insert_and_get_result_advanced_metrics_round_trip(tmp_path: Path) -> None:
-    """Given: all 8 Phase 2c typed metrics, When: insert + get, Then: non-null round-trip."""
+    """Given: all 8 advanced typed metrics, When: insert + get, Then: non-null round-trip."""
     repo = await _make_repo(tmp_path)
     await repo.insert_result(
         {
@@ -435,7 +435,7 @@ async def test_insert_and_get_result_advanced_metrics_round_trip(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_insert_result_advanced_metrics_default_none(tmp_path: Path) -> None:
-    """Given: omitted Phase 2c fields, When: insert + get, Then: all 8 read back as None."""
+    """Given: omitted advanced fields, When: insert + get, Then: all 8 read back as None."""
     repo = await _make_repo(tmp_path)
     await repo.insert_result(
         {

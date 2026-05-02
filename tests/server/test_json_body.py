@@ -96,7 +96,7 @@ class TestJsonBody:
 
 
 class TestOptionalJsonBody:
-    """Cover optional_json_body sentinel + validation paths (Phase 2c)."""
+    """Cover optional_json_body sentinel + validation paths."""
 
     @pytest.mark.asyncio()
     async def test_empty_body_returns_none(self) -> None:

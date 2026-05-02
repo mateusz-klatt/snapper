@@ -332,7 +332,7 @@ async def revoke_scope_grant(
         grant_public_id: Public ID of the active grant to revoke.
         _principal: Authenticated caller holding MANAGE_SCOPE_GRANTS.
         command: Revoke command envelope.
-        scope_grant_service: Service singleton (single-publisher per §D7).
+        scope_grant_service: Service singleton (single-publisher).
 
     Returns:
         ``RevokeScopeGrantResponse`` wrapping the closed grant.

@@ -1,4 +1,4 @@
-r"""Phase 4 meta-audit — ``docs/operations.md`` runbook structure.
+r"""Meta-audit — ``docs/operations.md`` runbook structure.
 
 Per acceptance #17, the operations runbook must carry:
 
@@ -108,7 +108,7 @@ def test_runbook_mentions_full_cutover_invariant() -> None:
     Then: at least one phrase (``full cutover`` / ``full-cutover``
         / ``improper restart with overlap``) must appear — the
         full-cutover invariant IS the operational discipline that
-        compensates for the absence of HA in Phase 4 scope.
+        compensates for the absence of HA.
     """
     body = _read_runbook().lower()
     matched = [phrase for phrase in CUTOVER_PHRASES if phrase in body]
@@ -122,8 +122,8 @@ def test_runbook_has_scale_up_scale_down_crash_recovery_sections() -> None:
     When: the meta-test greps for scale-up / scale-down /
         crash-recovery markers,
     Then: all three markers must appear so operators can
-        navigate directly to each Phase 4 failure-mode recipe
-        without reading the full document.
+        navigate directly to each failure-mode recipe without
+        reading the full document.
     """
     body = _read_runbook().lower()
     assert "scale up" in body or "scale-up" in body, "runbook missing scale-up section"

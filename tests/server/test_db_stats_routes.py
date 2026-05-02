@@ -1,4 +1,4 @@
-"""Tests for ``GET /api/metrics/db/tables`` (Cluster B).
+"""Tests for ``GET /api/metrics/db/tables``.
 
 Covers:
 

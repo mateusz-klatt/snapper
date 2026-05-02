@@ -340,7 +340,7 @@ def build_mcp_app(
             to REST-initiated writes.
         tracker_getter: Zero-arg callable returning the shared
             :class:`SequenceTracker` (typically the FastAPI app's
-            ``app.state.rest_tracker``). Plan B v1.2 §1.4
+            ``app.state.rest_tracker``). The
             ``cancel_order`` write tool emits a sequenced cancel
             ``TradeCommand`` through this tracker so MCP-initiated
             cancels share session_id / sequence_id parity with

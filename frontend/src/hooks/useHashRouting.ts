@@ -36,7 +36,7 @@ function useHashRouting<T extends string>(
 ): [T, (route: T) => void] {
   const getRouteFromHash = useCallback((): T => {
     const hash = globalThis.location.hash.slice(1)
-    // Phase 2c: match first segment before "/" so `#backtests/{uuid7}`
+    // Match first segment before "/" so `#backtests/{uuid7}`
     // resolves to the "backtests" tab. Backwards-compatible because no
     // existing VALID_TABS identifier contains a slash.
     const firstSegment = hash.split('/')[0]

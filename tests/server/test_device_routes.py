@@ -1,4 +1,4 @@
-"""Tests for the iOS Push Foundation device-management routes (BE-1c).
+"""Tests for the iOS Push Foundation device-management routes.
 
 Covers the four endpoints in ``src/snapper/server/device_routes.py``.
 Each test AAA-structured, AsyncMock-backed Repository, real
@@ -140,12 +140,12 @@ class TestRegisterDevice:
     ) -> None:
         """Response is synthesized from body + returned public_id — no post-upsert re-read.
 
-        Closes Copilot BE-1c recommendation: the previous
-        ``list_active_*`` re-read after the upsert could race against
-        a concurrent DELETE and 500 on a legitimately-successful
-        write. Synthesizing the response from what we just wrote
-        eliminates the race — the caller gets exactly the values they
-        sent, plus the stable ``public_id`` the upsert returned.
+        The previous ``list_active_*`` re-read after the upsert could
+        race against a concurrent DELETE and 500 on a
+        legitimately-successful write. Synthesizing the response from
+        what we just wrote eliminates the race — the caller gets
+        exactly the values they sent, plus the stable ``public_id``
+        the upsert returned.
         """
         repo = AsyncMock()
         repo.upsert_notification_device = AsyncMock(return_value="dev-pub-1")
@@ -282,7 +282,7 @@ class TestUpdateDevicePref:
         repo-returned ``public_id`` and reconstructs the response
         from the validated body (which Pydantic has already populated
         with defaults). Eliminates the post-upsert race that could
-        surface as a 500 (closes Copilot BE-1c recommendation).
+        surface as a 500.
         """
         repo = AsyncMock()
         repo.list_active_notification_devices_for_user = AsyncMock(

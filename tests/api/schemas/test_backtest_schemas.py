@@ -81,7 +81,7 @@ class TestBacktestCreateBody:
             )
 
     def test_invalid_fill_model_rejected(self) -> None:
-        """fill_model only accepts 'market' in Phase 2a."""
+        """fill_model only accepts 'market'."""
         with pytest.raises(ValueError, match="fill_model must be 'market'"):
             BacktestCreateBody(
                 strategy_class="sma_cross",

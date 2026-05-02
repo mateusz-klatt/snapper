@@ -1,18 +1,18 @@
-"""Phase 4  tests — :class:`TraderCoordinator` shard-ownership wiring.
+"""Tests for :class:`TraderCoordinator` shard-ownership wiring.
 
 Covers:
     - :meth:`TraderCoordinator._build_ownership` validation contract.
-    - :meth:`TraderCoordinator._on_signal` drops foreign shards (§3.1).
+    - :meth:`TraderCoordinator._on_signal` drops foreign shards.
     - BOTH engine construction paths populate ``engine._ownership``
-      (signal at :2243 + recovery at :1055) —.6 v1.2 R2 fix.
+      (signal at :2243 + recovery at :1055).
     - :meth:`TraderCoordinator._dispatch_order_event` CID guard
-      matrix (§3.2 v1.2): empty CID under N>1 → drop, unknown CID
-      under N>1 → drop, unknown CID under N=1 → fallthrough, foreign
-      shard under any N → drop.
+      matrix: empty CID under N>1 → drop, unknown CID under N>1 →
+      drop, unknown CID under N=1 → fallthrough, foreign shard under
+      any N → drop.
 
 Uses the ``settings=`` kwarg on
 :class:`TraderCoordinator.__init__` to inject per-coordinator
-ownership (matches the integration-fixture pattern from ).
+ownership.
 """
 
 from datetime import UTC
@@ -160,7 +160,7 @@ class TestBuildOwnership:
 
 
 class TestOnSignalOwnershipFilter:
-    """``_on_signal`` (§3.1) drops signals for foreign shards at N>1."""
+    """``_on_signal`` drops signals for foreign shards at N>1."""
 
     def _signal(self, instrument: str = "BTC-USD") -> SignalData:
         """Build a valid signal for the test matrix."""
@@ -273,7 +273,7 @@ class TestOnSignalOwnershipFilter:
 
 
 class TestDispatchOrderEventCIDGuard:
-    """``_dispatch_order_event`` §3.2 v1.2 — CID edge-case matrix."""
+    """``_dispatch_order_event`` — CID edge-case matrix."""
 
     def _order_event(self, cid: str) -> OrderEventData:
         """Build a minimal :class:`OrderEventData` carrying ``cid``."""
@@ -457,7 +457,7 @@ def _make_order_row(
 
 
 class TestRecoveryOwnershipFilters:
-    """``_recover_engine_state`` §3.5 — per-sub-method filters."""
+    """``_recover_engine_state`` — per-sub-method filters."""
 
     @pytest.mark.asyncio
     async def test_checkpoint_foreign_shard_skipped_under_n2(
@@ -486,9 +486,9 @@ class TestRecoveryOwnershipFilters:
     async def test_execution_paper_skipped_under_n2(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Under N>1, paper executions are skipped (strategy_tag unavailable).
 
-        §1.5 / §3.5 v1.3 — ExecutionRow has no ``strategy_tag`` so the
-        runtime-correct paper shard_key is unrecoverable. Paper under
-        N>1 relies on checkpoints (sub-method 1).
+        ExecutionRow has no ``strategy_tag`` so the runtime-correct
+        paper shard_key is unrecoverable. Paper under N>1 relies on
+        checkpoints (sub-method 1).
         """
         coord = _make_coordinator_with_ownership(monkeypatch, instance_id=0, instance_count=2)
         mock_repo = AsyncMock(spec=SQLAlchemyRepository)

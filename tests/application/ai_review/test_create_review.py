@@ -1,4 +1,4 @@
-"""Tests for :meth:`AiReviewService.create_review` (Plan A v1.4 Q10 + Plan D §3.1).
+"""Tests for :meth:`AiReviewService.create_review`.
 
 Covers admission control end-to-end:
 - Candidate listing through the repository's eligibility query.
@@ -492,7 +492,7 @@ async def test_custom_policy_extends_heartbeat_window_admits_stale_delegate(
     When create_review runs with the default 15s heartbeat window,
     Then the call raises NoLiveDelegateError;
     And when the same call uses a policy with ``heartbeat_window_seconds=60``
-    (with a strictly-greater fanout to satisfy the Q17 invariant),
+    (with a strictly-greater fanout to satisfy the invariant),
     Then admission succeeds and the delegate is claimed.
     """
     svc = AiReviewService.get_instance()
@@ -525,8 +525,8 @@ async def test_custom_policy_overrides_fanout_after_seconds(
     """Custom ``fanout_after_seconds`` lands on the persisted row.
 
     Given a configured AiReviewService and a custom policy with
-    ``heartbeat_window_seconds=5`` + ``fanout_after_seconds=10`` (Q17
-    invariant satisfied),
+    ``heartbeat_window_seconds=5`` + ``fanout_after_seconds=10``
+    (invariant satisfied),
     When create_review runs,
     Then the persisted row's fanout_after equals ``now + 10s``.
     """
@@ -550,7 +550,7 @@ async def test_custom_policy_overrides_fanout_after_seconds(
 async def test_admission_policy_rejects_invalid_fanout_window() -> None:
     """``fanout_after_seconds <= heartbeat_window_seconds`` raises ValueError.
 
-    Given the Q17 cross-plan invariant requires
+    Given the cross-plan invariant requires
     ``fanout_after > heartbeat_window``,
     When AiReviewAdmissionPolicy is constructed with the relation flipped
     (less-than) or equal,
@@ -646,7 +646,7 @@ async def test_signal_envelope_over_16kb_raises_too_large(
 ) -> None:
     """Canonical-JSON > 16KB -> :class:`SignalEnvelopeTooLargeError`.
 
-    Given an envelope whose canonical form exceeds the Plan A v1.4
+    Given an envelope whose canonical form exceeds the
     risk-register cap,
     When create_review runs,
     Then it raises SignalEnvelopeTooLargeError BEFORE the eligibility query
@@ -715,12 +715,12 @@ async def test_envelope_at_16kb_boundary_succeeds(
 async def test_create_review_publishes_external_request_frame_post_commit(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """Plan A §4.2 / Q16 + Phase 2 #6 — post-commit external WS fanout.
+    """Post-commit external WS fanout.
 
     Given a configured AiReviewService with a wired publisher,
     When create_review claims+inserts a review,
     Then publisher.send is awaited once with topic
-        ``ai_reviews.{user}.{strategy}.request`` carrying the Q16
+        ``ai_reviews.{user}.{strategy}.request`` carrying the
         envelope: routing fields at top-level, signal_envelope +
         instrument_metadata + deadline + selected_delegate_public_id
         all forwarded; dispatch_version is 0 on the just-inserted row;
@@ -786,9 +786,8 @@ async def test_create_review_returns_envelope_when_publish_fails(
 ) -> None:
     """Publisher.send raising -> log + still return AiReviewCreated.
 
-    Closes the same exception-masking guarantee as Phase 2 #2 +
-    Phase 2 #3: a broker hiccup must NOT replace the post-commit
-    AiReviewCreated envelope.
+    Closes the same exception-masking guarantee: a broker hiccup
+    must NOT replace the post-commit AiReviewCreated envelope.
 
     Given a publisher whose send() raises RuntimeError,
     When create_review claims+inserts a review,

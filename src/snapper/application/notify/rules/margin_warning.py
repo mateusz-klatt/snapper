@@ -1,4 +1,4 @@
-"""``margin_warning`` rule — fires on margin-related order rejections (§D6.1 Rule 5)."""
+"""``margin_warning`` rule — fires on margin-related order rejections."""
 
 from datetime import datetime
 
@@ -73,10 +73,8 @@ def is_margin_related_rejection(reason: str | None, error: str | None) -> bool:
 class MarginWarningRule(AlertRule):
     """Safety-critical margin alert — venue rejected for margin reasons.
 
-    No upstream balance / margin-level topic exists on the bus today
-    (Plan 2 v1.11 §Future Work tracks the polling infrastructure that
-    would let an "approaching-margin" pre-warning fire). The next
-    best signal we can deliver is the venue's own
+    No upstream balance / margin-level topic exists on the bus today.
+    The next best signal we can deliver is the venue's own
     ``insufficient margin`` rejection: the moment the exchange tells
     Snapper "your account does not have enough margin to size this
     order", that is a *de facto* margin event the user should know

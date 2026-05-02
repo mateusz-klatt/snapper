@@ -65,7 +65,7 @@ const Column: React.FC<ColumnProps> = ({ title, entries, testId }) => (
 )
 
 /**
- * Phase 2c trades diff list — three columns split by `entry.leg`
+ * Trades diff list — three columns split by `entry.leg`
  * (`common`, `a` ↔ only_in_a, `b` ↔ only_in_b). Counts in headers.
  */
 export const TradesDiffList: React.FC<Props> = ({ entries }) => {

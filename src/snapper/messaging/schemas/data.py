@@ -169,7 +169,7 @@ class SignalData(StrictDataSchema[Literal["signal"]]):
             attribution-aware caps gate so caps violations on the
             approved trade fan out under the AI delegate's identity.
         ai_review_dispatch_version: Companion to ``ai_review_public_id``
-            per Plan A Q18 dedup contract. Carried end-to-end as
+            for the bridge dedup contract. Carried end-to-end as
             transport-only — the strategy citation validator does
             not compare it; the bus publisher reads dispatch_version
             from the cited row at publish time. The carried value
@@ -542,7 +542,7 @@ class UserDeactivatedData(StrictDataSchema[Literal["user_deactivated"]]):
 
 
 class CapsViolationAfterAiApproveData(StrictDataSchema[Literal["caps_violation_after_ai_approve"]]):
-    """Plan D §3.6 — caps-violation event for an already-AI-approved CONSULT.
+    """Caps-violation event for an already-AI-approved CONSULT.
 
     Published by ``TradingCapsEnforcer`` (deferred wiring chunk —
     publisher side ships when the enforcer learns to thread the
@@ -552,8 +552,7 @@ class CapsViolationAfterAiApproveData(StrictDataSchema[Literal["caps_violation_a
     fails the caps gate. ``AiReviewService.handle_caps_violation_bus_message``
     subscribes and re-publishes the event onto the external WS
     topic ``ai_reviews.{user_public_id}.{strategy_public_id}.caps_violation``
-    so the bridge (Plan C) can surface the rejection back to the
-    delegate's UI.
+    so the bridge can surface the rejection back to the delegate's UI.
 
     Attributes:
         review_public_id: UUID7 of the ``ai_reviews`` row whose
@@ -565,7 +564,7 @@ class CapsViolationAfterAiApproveData(StrictDataSchema[Literal["caps_violation_a
             the strategy that made the call.
         wallet_public_id: Wallet the trade would have settled on.
         instrument_public_id: Instrument the trade was on.
-        cap_type: Plan A / Plan D cap classifier (e.g.
+        cap_type: Cap classifier (e.g.
             ``"max_open_orders"``, ``"max_daily_notional_usd"``,
             ``"max_position_quantity"``).
         attempted: Numeric value the trade tried to push the cap to.
@@ -583,7 +582,7 @@ class CapsViolationAfterAiApproveData(StrictDataSchema[Literal["caps_violation_a
     attempted: float
     limit: float
     dispatch_version: int
-    """Plan A Q18 — bridge dedup key. Mirrors the ``ai_reviews``
+    """Bridge dedup key. Mirrors the ``ai_reviews``
     row's ``dispatch_version`` at publish time so the JS bridge
     dispatcher can dedupe replays of the same caps violation
     against the same review row (e.g. if the listener re-dispatches
@@ -591,19 +590,19 @@ class CapsViolationAfterAiApproveData(StrictDataSchema[Literal["caps_violation_a
 
 
 class AiReviewRequestFrameData(StrictDataSchema[Literal["ai_review.request"]]):
-    """Plan A §4.2 / Q16 — external WS frame for new AI review consults.
+    """External WS frame for new AI review consults.
 
     Published by :meth:`AiReviewService.create_review` (sole publisher)
     AFTER the atomic claim+insert commits. Targets the
     ``ai_reviews.{user_public_id}.{strategy_public_id}.request`` topic
-    so the bridge per-frame scope filter (Plan A Q15) routes it to
+    so the bridge per-frame scope filter routes it to
     AI delegates that have a scope grant on the wallet+instrument.
     Routing fields stay at envelope level (top-level
     ``wallet_public_id`` + ``instrument_public_id``) so the bridge
     scope filter reads them directly off the parsed JSON without
     descending into the nested payload.
 
-    Q18 dedup: ``dispatch_version`` is the original review row's
+    Bridge dedup: ``dispatch_version`` is the original review row's
     counter (always 0 on the request frame since the row was just
     inserted; supersede / fanout retries that increment the counter
     are surfaced as separate frames). The JS bridge dispatcher
@@ -617,7 +616,7 @@ class AiReviewRequestFrameData(StrictDataSchema[Literal["ai_review.request"]]):
         strategy_public_id: Origin strategy.
         wallet_public_id: Wallet the strategy would trade on.
         instrument_public_id: Instrument the strategy is consulting on.
-        selected_delegate_public_id: AI delegate selected by Q10
+        selected_delegate_public_id: AI delegate selected by
             admission control. Threaded onto the frame so the
             delegate UI can show a "this is for you" affordance vs a
             broadcast frame received via fanout.
@@ -625,12 +624,12 @@ class AiReviewRequestFrameData(StrictDataSchema[Literal["ai_review.request"]]):
             must submit a decision before the strategy primitive
             transitions the row to ``timeout``. The delegate UI
             renders this as a countdown.
-        signal_envelope: Plan A §3 strategy signal payload.
-            Bounded by 16KB at the create_review enforcement layer.
+        signal_envelope: Strategy signal payload. Bounded by 16KB at
+            the create_review enforcement layer.
         instrument_metadata: Strategy-supplied instrument context
             (e.g. order book snapshot, recent volatility metrics)
             used by the delegate to inform their decision.
-        dispatch_version: Plan A Q18 — bridge dedup key.
+        dispatch_version: Bridge dedup key.
     """
 
     type: Literal["ai_review.request"] = "ai_review.request"
@@ -647,7 +646,7 @@ class AiReviewRequestFrameData(StrictDataSchema[Literal["ai_review.request"]]):
 
 
 class AiReviewDecisionAckFrameData(StrictDataSchema[Literal["ai_review.decision_ack"]]):
-    """Plan A §4.2 / Q16 — external WS frame acknowledging a decision.
+    """External WS frame acknowledging a decision.
 
     Published by :meth:`AiReviewService.submit_decision` (sole
     publisher) AFTER the atomic resolve commits + the audit event +
@@ -657,19 +656,19 @@ class AiReviewDecisionAckFrameData(StrictDataSchema[Literal["ai_review.decision_
     topic so the operator dashboard + the originating delegate can
     surface the decision in real-time without polling REST.
 
-    Distinct from the internal ``bus.ai_review_decision`` event
-    (Phase 2 #3): that event drives the strategy primitive's
-    in-process Future fast-path; this frame drives the bridge fanout
-    to WS subscribers (delegate UIs + operator dashboards). Both
-    fire from the same submit_decision post-commit chain but go to
-    different subscribers via different topic families.
+    Distinct from the internal ``bus.ai_review_decision`` event:
+    that event drives the strategy primitive's in-process Future
+    fast-path; this frame drives the bridge fanout to WS subscribers
+    (delegate UIs + operator dashboards). Both fire from the same
+    submit_decision post-commit chain but go to different subscribers
+    via different topic families.
 
     Routing fields stay at envelope top-level so the bridge
-    per-frame scope filter (Plan A Q15) reads
+    per-frame scope filter reads
     ``wallet_public_id`` + ``instrument_public_id`` directly without
     descending into the nested payload.
 
-    Q18 dedup: ``dispatch_version`` is the resolved review row's
+    Bridge dedup: ``dispatch_version`` is the resolved review row's
     current counter (atomic_resolve preserves it; supersede / fanout
     flows are the operations that bump it). A re-fanout of the same
     decision after the row's version bumps surfaces as a fresh frame
@@ -683,16 +682,16 @@ class AiReviewDecisionAckFrameData(StrictDataSchema[Literal["ai_review.decision_
         instrument_public_id: Instrument the strategy consulted on.
         responding_delegate_public_id: ``ai_delegates.public_id`` of
             the delegate whose decision resolved the row.
-        decision: Plan A Q9 enum value — ``"approve"`` or ``"reject"``.
+        decision: ``"approve"`` or ``"reject"``.
         new_status: Resolved row's terminal status
             (``resolved_approved`` or ``resolved_rejected``).
-        resolution_mode: Plan A Q4 enum — ``pick_one_primary`` /
+        resolution_mode: ``pick_one_primary`` /
             ``secondary_after_fanout`` / ``fanout_first_responder``.
         rationale: Optional free-form rationale supplied by the
             delegate, threaded onto the audit event payload + this
             frame so the operator dashboard can show it next to the
             decision.
-        dispatch_version: Plan A Q18 — bridge dedup key.
+        dispatch_version: Bridge dedup key.
     """
 
     type: Literal["ai_review.decision_ack"] = "ai_review.decision_ack"
@@ -710,20 +709,20 @@ class AiReviewDecisionAckFrameData(StrictDataSchema[Literal["ai_review.decision_
 
 
 class AiReviewCapsViolationFrameData(StrictDataSchema[Literal["ai_review.caps_violation"]]):
-    """Plan A §4.2 / Q16 — external WS frame for caps violations.
+    """External WS frame for caps violations.
 
     Public-facing counterpart to :class:`CapsViolationAfterAiApproveData`.
     The internal bus topic ``bus.caps_violation_after_ai_approve`` carries
     the snake-case ``caps_violation_after_ai_approve`` discriminator;
-    Plan A §4.2 line 467 fixes the OUTBOUND WS frame discriminator at
+    the OUTBOUND WS frame discriminator is fixed at
     ``ai_review.caps_violation`` so the JS bridge dispatcher's
-    ``switch (frame.type)`` (Plan A §4.2 line 503) routes the frame to
+    ``switch (frame.type)`` routes the frame to
     the delegate's ``handleCapsViolation`` handler.
     :meth:`AiReviewService.handle_caps_violation_bus_message` translates
     from the internal schema to this external schema before publishing
     to the ``ai_reviews.{user}.{strategy}.caps_violation`` topic.
     Routing fields stay at envelope level so the bridge per-frame scope
-    filter (Plan A Q15) reads ``wallet_public_id`` +
+    filter reads ``wallet_public_id`` +
     ``instrument_public_id`` directly off the parsed envelope without
     descending into a nested payload.
 
@@ -737,7 +736,7 @@ class AiReviewCapsViolationFrameData(StrictDataSchema[Literal["ai_review.caps_vi
             back to the strategy that made the call.
         wallet_public_id: Wallet the trade would have settled on.
         instrument_public_id: Instrument the trade was on.
-        cap_type: Plan A / Plan D cap classifier (e.g.
+        cap_type: Cap classifier (e.g.
             ``"max_open_orders"``, ``"max_daily_notional_usd"``,
             ``"max_position_quantity"``).
         attempted: Numeric value the trade tried to push the cap to.
@@ -755,24 +754,24 @@ class AiReviewCapsViolationFrameData(StrictDataSchema[Literal["ai_review.caps_vi
     attempted: float
     limit: float
     dispatch_version: int
-    """Plan A Q18 — bridge dedup key forwarded verbatim from the
-    internal :class:`CapsViolationAfterAiApproveData` (which the
-    publisher populates from the ``ai_reviews`` row). Listed here so
-    the external WS frame matches the Plan A §4.2 line 481 envelope
-    contract that fixes ``dispatch_version`` as a required field on
-    every ``ai_review.*`` frame type."""
+    """Bridge dedup key forwarded verbatim from the internal
+    :class:`CapsViolationAfterAiApproveData` (which the publisher
+    populates from the ``ai_reviews`` row). Listed here so the
+    external WS frame matches the envelope contract that fixes
+    ``dispatch_version`` as a required field on every ``ai_review.*``
+    frame type."""
 
 
 class AiReviewDecisionData(StrictDataSchema[Literal["ai_review_decision"]]):
-    """Plan A §7.1 — internal bus event published when an AI review row resolves.
+    """Internal bus event published when an AI review row resolves.
 
     Published by :meth:`AiReviewService.submit_decision` (sole publisher)
     on the internal ``bus.ai_review_decision`` topic AFTER the atomic
     state-machine transition + audit event + counter decrement have
     committed. Sole subscriber is the same :class:`AiReviewService`
-    bus listener (Phase 2 #1) which resolves the registered
+    bus listener which resolves the registered
     :class:`asyncio.Future` so the strategy primitive's await loop
-    (Plan A §7.1) wakes up immediately instead of spinning the DB-poll
+    wakes up immediately instead of spinning the DB-poll
     loop until the next jitter interval. Cross-instance: a remote
     instance's listener that finds no matching future in its registry
     treats the event as a no-op (the strategy's future was registered
@@ -785,15 +784,15 @@ class AiReviewDecisionData(StrictDataSchema[Literal["ai_review_decision"]]):
         responding_delegate_public_id: ``ai_delegates.public_id`` of
             the delegate whose decision resolved the row. Threaded onto
             the outcome surfaced to the strategy.
-        decision: Plan A Q9 enum value — ``"approve"`` or ``"reject"``.
+        decision: ``"approve"`` or ``"reject"``.
         new_status: Resolved row's terminal status (``resolved_approved``
             or ``resolved_rejected``).
-        resolution_mode: Plan A Q4 enum — ``pick_one_primary`` /
+        resolution_mode: ``pick_one_primary`` /
             ``secondary_after_fanout`` / ``fanout_first_responder``.
-        dispatch_version: Plan A Q18 — bridge dedup key forwarded onto
-            the optional external WS frame so a re-fanout of the same
-            decision after a row's version bumped surfaces as a fresh
-            frame to the delegate UI.
+        dispatch_version: Bridge dedup key forwarded onto the optional
+            external WS frame so a re-fanout of the same decision after
+            a row's version bumped surfaces as a fresh frame to the
+            delegate UI.
     """
 
     type: Literal["ai_review_decision"] = "ai_review_decision"
@@ -806,15 +805,15 @@ class AiReviewDecisionData(StrictDataSchema[Literal["ai_review_decision"]]):
 
 
 class DelegateOfflineData(StrictDataSchema[Literal["delegate_offline"]]):
-    """Q17 Layer 1 fast-path event for an AI delegate that dropped its WS.
+    """Layer 1 fast-path event for an AI delegate that dropped its WS.
 
     Published by :class:`WebSocketAuthManager` on the
     ``bus.delegate_offline`` topic ONLY after a delay equal to
     ``_delegate_offline_grace_seconds`` so a flapping reconnect within
     the grace window cancels the publish before any subscriber observes
-    a phantom-offline transition. Sole subscriber per Plan D §3.5 is
+    a phantom-offline transition. Sole subscriber is
     ``AiReviewService``, which atomically CAS-fans-out matching pending
-    reviews (same UPDATE shape as the §3.4 Layer 2 scanner).
+    reviews (same UPDATE shape as the Layer 2 scanner).
 
     Attributes:
         user_public_id: Owner of the AI_DELEGATE user row.
@@ -1349,7 +1348,7 @@ AlertType = Literal[
     "margin_warning",
     "critical_system_error",
 ]
-"""Canonical alert type enumeration for iOS Push Foundation Plan 2 §D4.
+"""Canonical alert type enumeration for iOS Push Foundation.
 
 Mirrored by:
 - ``DeviceAlertPrefBody.alert_type`` (wire schema Literal)
@@ -1370,7 +1369,7 @@ AlertPriority = Literal["low", "medium", "high"]
 - ``high`` -> 10 (immediate)
 
 ``is_safety_critical=True`` alerts bypass user-pref gating regardless
-of priority (§D4).
+of priority.
 """
 
 
@@ -1379,7 +1378,7 @@ class AlertEventData(StrictDataSchema[Literal["alert_event"]]):
 
     The sidecar (``snapper notify``, BE-3a) subscribes to the
     ``alerts.`` prefix via ``ValidatedSubscriber.subscribe("alerts.")``
-    and dispatches into the APNs outbox per Plan 2 §D5. Producers are
+    and dispatches into the APNs outbox. Producers are
     domain services (trader / portfolio / system health) that call
     ``build_alert_event()`` to mint a valid payload with topic string
     + provenance stamped from a ``SequenceTracker``.
@@ -1428,7 +1427,7 @@ class AlertEventData(StrictDataSchema[Literal["alert_event"]]):
 
 
 class ExecutionPlanDecisionEventData(StrictDataSchema[Literal["execution_plan_decision_event"]]):
-    """Published on ``plans.decisions.{plan_public_id}`` right after insert (§D6.2).
+    """Published on ``plans.decisions.{plan_public_id}`` right after insert.
 
     Emitted by ``PlanExecutorService`` immediately after every
     ``ExecutionPlanDecision`` row commits. Minimal shape — carries

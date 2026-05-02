@@ -145,7 +145,7 @@ class TestDeactivateUserOrchestration:
         When: deactivate_user runs with a reason,
         Then: (a) returns True; (b) publisher.send called once on
             topic `admin.user_deactivated`; (c) payload carries
-            `user_public_id`, `deactivated_at`, `reason` per §3.6.5;
+            `user_public_id`, `deactivated_at`, `reason`;
             (d) `payload.deactivated_at == payload.timestamp`.
         """
         existing = _make_db_user("user-1")
@@ -199,9 +199,9 @@ class TestDeactivateUserOrchestration:
             session.commit has already fired,
         When: deactivate_user runs,
         Then: the recorded value is True at publish time — proving
-            the bus event lands strictly after the commit. This is
-            the §3.6.1 invariant that prevents subscribers from
-            seeing a stale `is_active=True` snapshot.
+            the bus event lands strictly after the commit. This
+            invariant prevents subscribers from seeing a stale
+            `is_active=True` snapshot.
         """
         existing = _make_db_user("user-2")
         service, _session, commit, _revoke, tm = _build_service(existing_db_user=existing)
@@ -283,9 +283,9 @@ class TestDeactivateUserOrchestration:
     async def test_revoke_called_before_session_commit(
         self, _patch_token_manager_lookup: MagicMock
     ) -> None:
-        """Token revocation runs BEFORE the user-row commit (§3.6.1 step 2).
+        """Token revocation runs BEFORE the user-row commit.
 
-        The plan ordering is: SCD2 close+insert (uncommitted) →
+        The ordering is: SCD2 close+insert (uncommitted) →
         revoke_user_sessions (its own committed sub-tx) → user commit
         → bus publish. If the user commit fails, tokens stay revoked
         — the safer failure mode (kill switch wins).
@@ -317,11 +317,10 @@ class TestDeactivateUserOrchestration:
     ) -> None:
         """Token revocation failure rolls back uncommitted user mutation + skips publish.
 
-        Codex+Copilot : this is a load-bearing failure
-        contract from §3.6.1 step 2 — if revoke raises, the SCD2
-        close+insert (still uncommitted) MUST be discarded by the
-        session's `__aexit__` rollback, the bus event MUST NOT fire
-        (the deactivation never landed), and the exception MUST
+        This is a load-bearing failure contract — if revoke raises,
+        the SCD2 close+insert (still uncommitted) MUST be discarded by
+        the session's `__aexit__` rollback, the bus event MUST NOT
+        fire (the deactivation never landed), and the exception MUST
         propagate so the route returns 5xx instead of a fake 200.
         """
         existing = _make_db_user("user-revoke-fail")
@@ -344,13 +343,12 @@ class TestDeactivateUserOrchestration:
     ) -> None:
         """Commit failure leaves tokens revoked + skips publish + propagates.
 
-        Codex+Copilot : §3.6.1 step 3 says if the user
-        commit fails AFTER token revocation already committed in its
-        own subtransaction, the kill switch wins (tokens stay
-        revoked, user row stays active) — the safer failure mode.
-        The bus event MUST NOT fire because no `admin.user_deactivated`
-        actually happened from a subscriber's POV. The exception MUST
-        propagate so the route returns 5xx.
+        If the user commit fails AFTER token revocation already
+        committed in its own subtransaction, the kill switch wins
+        (tokens stay revoked, user row stays active) — the safer
+        failure mode. The bus event MUST NOT fire because no
+        `admin.user_deactivated` actually happened from a subscriber's
+        POV. The exception MUST propagate so the route returns 5xx.
         """
         existing = _make_db_user("user-commit-fail")
         service, _session, commit, revoke, tm = _build_service(existing_db_user=existing)

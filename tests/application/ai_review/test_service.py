@@ -1,4 +1,4 @@
-"""Unit tests for the AiReviewService skeleton (Plan A v1.4 + Plan D v1.1).
+"""Unit tests for the AiReviewService skeleton.
 
 Covers the singleton lifecycle, the in-memory ``asyncio.Future`` registry that
 backs the strategy-side await primitive, and the bus-publisher injection seam.
@@ -154,7 +154,7 @@ class TestFutureRegistry:
     async def test_register_replaces_prior(self) -> None:
         """Re-registering the same id replaces the previous future.
 
-        Plan D §8 — only a reconnecting strategy legitimately re-registers,
+        Only a reconnecting strategy legitimately re-registers,
         and the most-recent waiter wins.
         """
         instance = AiReviewService.get_instance()
@@ -190,7 +190,7 @@ class TestFutureRegistry:
 
 
 class TestExceptionTypes:
-    """Plan A Q11 admission-control exception types.
+    """Admission-control exception types.
 
     The two outcomes ``NoLiveDelegateError`` and ``DelegateBusyError`` let
     strategy code branch deterministically on retry policy.

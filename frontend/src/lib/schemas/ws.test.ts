@@ -38,7 +38,7 @@ describe('parseWsMessage', () => {
     )
   })
 
-  it('parses ai_review.request frames published by Phase 2 #6', () => {
+  it('parses ai_review.request frames', () => {
     const message = {
       type: 'ai_review.request',
       sequence_id: 1,
@@ -63,7 +63,7 @@ describe('parseWsMessage', () => {
     expect(result).toMatchObject(message)
   })
 
-  it('parses ai_review.decision_ack frames published by Phase 2 #7', () => {
+  it('parses ai_review.decision_ack frames', () => {
     const message = {
       type: 'ai_review.decision_ack',
       sequence_id: 1,
@@ -89,7 +89,7 @@ describe('parseWsMessage', () => {
     expect(result).toMatchObject(message)
   })
 
-  it('parses ai_review.caps_violation frames published by Phase 2 #2', () => {
+  it('parses ai_review.caps_violation frames', () => {
     const message = {
       type: 'ai_review.caps_violation',
       sequence_id: 1,

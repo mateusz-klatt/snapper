@@ -1,4 +1,4 @@
-"""Tests for ``CriticalSystemErrorRule`` (§D6.1 Rule 4)."""
+"""Tests for ``CriticalSystemErrorRule``."""
 
 from datetime import UTC
 from datetime import datetime

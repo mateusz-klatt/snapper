@@ -35,8 +35,8 @@ class CreateOrderBody(StrictBody):
             :meth:`TradingCapsEnforcer.guard` triggers a
             ``bus.caps_violation_after_ai_approve`` publish so
             :class:`AiReviewService` can re-fanout the rejection to the
-            delegate's UI (Plan D §3.6 / Plan D Phase 2 #10). Default
-            ``None`` keeps every existing manual-order caller untouched.
+            delegate's UI. Default ``None`` keeps every existing
+            manual-order caller untouched.
     """
 
     instrument: str

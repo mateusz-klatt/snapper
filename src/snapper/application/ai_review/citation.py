@@ -1,8 +1,7 @@
 """Validation for caller-supplied ``ai_review_public_id`` citations on manual orders.
 
-Plan D Phase 2 #10 R1 — closes the unauthorized citation gap on the
-manual-order entry points (MCP ``submit_manual_order`` + REST
-``POST /api/orders``). Both endpoints accept an optional
+Closes the unauthorized citation gap on the manual-order entry points
+(MCP ``submit_manual_order`` + REST ``POST /api/orders``). Both endpoints accept an optional
 ``ai_review_public_id`` body field that, when set, threads onto the
 :class:`TradeCommandSubmission` so a caps rejection inside
 :meth:`TradingCapsEnforcer.guard` can re-fanout the rejection to the
@@ -88,7 +87,7 @@ async def validate_ai_review_citation_for_strategy(
     ai_review_public_id: str,
     expected_wallet_public_id: str,
 ) -> AiReviewRow:
-    """Plan D Phase 3 §2.1 — strategy-path citation validator.
+    """Strategy-path citation validator.
 
     Returns the validated ``ai_reviews`` row so the caller (the
     strategy attribution guard) can read ``user_public_id`` without
@@ -104,15 +103,15 @@ async def validate_ai_review_citation_for_strategy(
     2. ``row.status == "resolved_approved"`` — catches a
        supersede-after-await race where the row has been reaped or
        otherwise transitioned away from the APPROVED state by the
-       Phase 1 #3 reaper / scanner between the strategy's
+       reaper / scanner between the strategy's
        ``await create_ai_review_and_await`` and its emit call.
     3. ``row.wallet_public_id == expected_wallet_public_id`` —
        defends against engine misrouting (the engine instance
        carries a wallet on init; the cited row must agree).
 
     The companion ``ai_review_dispatch_version`` carried on the
-    submission is **transport-only** per Plan A Q18: the validator
-    deliberately does NOT compare it. Q18 dedup happens at the bus
+    submission is **transport-only**: the validator deliberately does
+    NOT compare it. Dispatch-version dedup happens at the bus
     publisher (`_publish_caps_violation_after_ai_approve` reads
     ``dispatch_version`` from the cited row at publish time so the
     fanout always uses the row-of-record version).

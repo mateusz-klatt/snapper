@@ -1,4 +1,4 @@
-"""Tests for the Phase 4 ``--instance-id`` / ``--instance-count`` CLI flags.
+"""Tests for the ``--instance-id`` / ``--instance-count`` CLI flags.
 
 These tests use :mark:`real_settings` to opt out of the autouse
 ``mock_settings_for_tests`` fixture (defined at
@@ -8,7 +8,7 @@ These tests use :mark:`real_settings` to opt out of the autouse
 ``get_settings`` at the module-level, defeating cache-clear spies.
 
 A function-scope autouse ``_reset_cli_environment`` fixture resets
-the three Phase 4 env vars AND clears both factory caches before and
+the partitioning env vars AND clears both factory caches before and
 after every test, making the suite deterministic under any xdist
 worker ordering.
 """
@@ -37,7 +37,7 @@ def _reset_cli_environment(
 ) -> Generator[None]:
     """Reset env + caches before and after each test.
 
-    Pre-test: delete the three Phase 4 env vars, then clear both
+    Pre-test: delete the three partitioning env vars, then clear both
     factory caches so the next ``get_settings()`` call sees a clean
     baseline.
 

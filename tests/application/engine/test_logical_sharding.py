@@ -1,4 +1,4 @@
-"""Tests for Phase 3a: logical sharding — paper mode strategy isolation."""
+"""Tests for logical sharding — paper mode strategy isolation."""
 
 from datetime import UTC
 from datetime import datetime

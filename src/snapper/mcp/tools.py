@@ -88,10 +88,10 @@ _ORDER_STATUS_VALUES: frozenset[str] = frozenset(member.value for member in Orde
 class _ManualOrderInput:
     """Input bundle for :func:`_prepare_manual_order`.
 
-    Plan D Phase 2 #10 — extracted to keep the helper signature under
-    the project's 13-parameter cap after adding ``ai_review_public_id``
-    for the AI-mediated manual-order flow. All fields mirror the
-    matching MCP ``submit_manual_order`` tool parameters one-to-one.
+    Extracted to keep the helper signature under the project's
+    13-parameter cap after adding ``ai_review_public_id`` for the
+    AI-mediated manual-order flow. All fields mirror the matching
+    MCP ``submit_manual_order`` tool parameters one-to-one.
     """
 
     exchange: str
@@ -224,7 +224,7 @@ def _parse_iso8601_utc(value: str) -> datetime:
     Args:
         value: Caller-supplied timestamp string. The empty string is
             rejected to keep the malformed-input branch consistent
-            with the broader Plan A Q14 envelope semantics.
+            with the broader envelope semantics.
 
     Returns:
         Timezone-aware :class:`datetime` parsed from ``value``.
@@ -240,13 +240,13 @@ def _parse_iso8601_utc(value: str) -> datetime:
 def _envelope_for_permission_check(
     claims: TokenClaims, permission: Permission
 ) -> CallToolResult | None:
-    """Plan A Q14 envelope wrapper for the permission check.
+    """Envelope wrapper for the permission check.
 
     Returns the structured ``permission_denied`` envelope when the
     caller's role does not include ``permission``; ``None`` when the
     check passes (caller proceeds with the tool body). The legacy
     :func:`_require_permission` raises a :class:`PermissionError` —
-    Plan B §5 requires Plan A Q14 envelopes from every tool, so the
+    every MCP tool returns the canonical envelope, so the
     new tools wrap the check at their entry point.
     """
     role_permissions = ROLE_PERMISSIONS.get(claims.role, set())
@@ -266,13 +266,12 @@ def _envelope_for_permission_check(
 def _envelope_for_repository(
     repository_getter: Callable[[], Repository | None],
 ) -> Repository | CallToolResult:
-    """Plan A Q14 envelope wrapper for the repository getter.
+    """Envelope wrapper for the repository getter.
 
     Returns the :class:`Repository` singleton on success, or a
     structured ``service_unavailable`` envelope when the lifespan has
     not yet initialised the repository — clients receive a
-    well-formed Plan A Q14 envelope instead of a raw FastMCP tool
-    error.
+    well-formed envelope instead of a raw FastMCP tool error.
     """
     repo = repository_getter()
     if repo is None:
@@ -372,7 +371,7 @@ def _serialize_position_row(row: PositionRow) -> dict[str, Any]:
 def _serialize_execution_plan_row(row: dict[str, Any]) -> dict[str, Any]:
     """JSON-serialise an :class:`ExecutionPlanRow` for MCP envelope details.
 
-    Plan B v1.2 §2.3 ``cancel_order`` returns the updated plan after
+    The ``cancel_order`` tool returns the updated plan after
     the SCD2 transition. ``timestamp``, ``created_at``,
     ``cancel_requested_at`` and friends are :class:`datetime` natively;
     JSON encoding requires ISO-8601 strings.
@@ -1403,7 +1402,7 @@ def register_mcp_tools(
             back to a per-call :class:`SequenceTracker` instance — fine
             for MCP write paths because each call has its own envelope
             scope and the existing partial-unique idempotency indices
-            (Plan B v1.2 §1.4) prevent cross-call collisions.
+            prevent cross-call collisions.
     """
     _tracker_getter: Callable[[], SequenceTracker | None] = tracker_getter or (lambda: None)
 
@@ -1472,8 +1471,8 @@ def register_mcp_tools(
                 types.
             operator_public_id: Optional operator scope. Omit to
                 inherit the caller's primary operator.
-            ai_review_public_id: Plan D §3.6 / Plan D Phase 2 #10 —
-                Optional UUID7 of the ``ai_reviews`` row that
+            ai_review_public_id: Optional UUID7 of the
+                ``ai_reviews`` row that
                 AI-approved this trade. When set, a
                 :class:`CapsViolationError` raised inside
                 :meth:`TradingCapsEnforcer.guard` triggers a
@@ -1547,13 +1546,13 @@ def register_mcp_tools(
         decision: str,
         rationale: str | None = None,
     ) -> CallToolResult:
-        """AI delegate decision endpoint for a CONSULT request (Plan D §6).
+        """AI delegate decision endpoint for a CONSULT request.
 
         Wraps :meth:`AiReviewService.submit_decision` for the MCP
-        transport. Expects an AI_DELEGATE caller (Plan A Q14 narrows
+        transport. Expects an AI_DELEGATE caller (the role narrows
         the permission set; ``CREATE_ORDERS`` is the explicit gate
-        per Plan A v1.4 §6.3 since the decision affects the trade
-        path the strategy is awaiting).
+        since the decision affects the trade path the strategy is
+        awaiting).
 
         Args:
             review_id: UUID7 of the ``ai_reviews`` row the delegate is
@@ -1567,12 +1566,11 @@ def register_mcp_tools(
                 ``decision_recorded`` payload.
 
         Returns:
-            :class:`mcp.types.CallToolResult` carrying the Plan A Q14
+            :class:`mcp.types.CallToolResult` carrying the canonical
             envelope (``success``, ``error_code``, ``message``,
             ``details``). Idempotent retries (same delegate + same
             decision after a successful resolve) surface as
-            ``success=True, error_code="decision_already_recorded"``
-            per cross-plan decision D3.
+            ``success=True, error_code="decision_already_recorded"``.
 
         Raises:
             PermissionError: if the caller lacks
@@ -1599,7 +1597,7 @@ def register_mcp_tools(
         limit: int = 50,
         offset: int = 0,
     ) -> CallToolResult:
-        """List orders with optional filters and pagination (Plan B §2.1).
+        """List orders with optional filters and pagination.
 
         Args:
             wallet_public_id: Filter to one wallet. Caller must have
@@ -1622,7 +1620,7 @@ def register_mcp_tools(
                 surface as ``invalid_argument``.
 
         Returns:
-            Plan A Q14 envelope. ``details`` carries ``orders``
+            Canonical envelope. ``details`` carries ``orders``
             (list of ``OrderRow`` dicts) and ``total_count`` (int —
             cardinality of matching rows BEFORE limit/offset).
         """
@@ -1639,7 +1637,7 @@ def register_mcp_tools(
 
     @mcp_server.tool()
     async def get_order_status(command_public_id: str) -> CallToolResult:
-        """Fetch full state of a single order by command_public_id (Plan B §2.2).
+        """Fetch full state of a single order by command_public_id.
 
         Args:
             command_public_id: UUID7 returned by ``submit_manual_order``
@@ -1648,7 +1646,7 @@ def register_mcp_tools(
                 via ``trade_commands.plan_public_id == orders.plan_public_id``.
 
         Returns:
-            Plan A Q14 envelope. On success ``details`` carries the
+            Canonical envelope. On success ``details`` carries the
             full ``OrderRow`` plus ``execution_history`` (list of
             ``ExecutionRow`` dicts ordered oldest-first). When the
             command exists but the exchange has not ACK'd a row yet,
@@ -1670,7 +1668,7 @@ def register_mcp_tools(
         exchange: str | None = None,
         instrument: str | None = None,
     ) -> CallToolResult:
-        """List active positions with optional filters (Plan B §2.4).
+        """List active positions with optional filters.
 
         Args:
             wallet_public_id: Filter to one wallet. Caller must have
@@ -1688,7 +1686,7 @@ def register_mcp_tools(
                 post-fetch.
 
         Returns:
-            Plan A Q14 envelope. ``details`` carries ``positions``
+            Canonical envelope. ``details`` carries ``positions``
             (list of ``PositionRow`` dicts with ISO-8601 ``timestamp``)
             and ``count`` (length of the filtered list).
         """
@@ -1702,7 +1700,7 @@ def register_mcp_tools(
 
     @mcp_server.tool()
     async def get_position_cycle(cycle_public_id: str) -> CallToolResult:
-        """Fetch a position cycle by its public_id (Plan B §2.5).
+        """Fetch a position cycle by its public_id.
 
         Position cycles are Snapper's canonical "open→close lifetime"
         record for a position on a given (instrument, exchange, mode,
@@ -1714,7 +1712,7 @@ def register_mcp_tools(
             cycle_public_id: UUID7 of the position cycle.
 
         Returns:
-            Plan A Q14 envelope. On success ``details`` carries the
+            Canonical envelope. On success ``details`` carries the
             full ``PositionCycleRow`` (datetime fields ISO-8601
             stringified). When the cycle is unknown OR not in the
             caller's wallet scope, returns
@@ -1731,7 +1729,7 @@ def register_mcp_tools(
         plan_public_id: str,
         idempotency_key: str,
     ) -> CallToolResult:
-        """Cancel an active execution plan (Plan B §2.3).
+        """Cancel an active execution plan.
 
         WRITE operation. Wraps :class:`PlansCancelService` for the MCP
         transport so callers reuse the same cancel-by-plan-public-id
@@ -1752,7 +1750,7 @@ def register_mcp_tools(
                 convention). Must be non-empty.
 
         Returns:
-            Plan A Q14 envelope. On success ``details`` carries the
+            Canonical envelope. On success ``details`` carries the
             updated ``ExecutionPlanRow`` (datetime fields ISO-8601
             stringified). Failure paths surface as one of:
             ``order_not_found`` (plan missing OR caller out of scope —
@@ -1811,7 +1809,7 @@ def register_mcp_tools(
                 as ``invalid_argument``.
 
         Returns:
-            Plan A Q14 envelope. ``details`` carries ``candles``
+            Canonical envelope. ``details`` carries ``candles``
             (list of ``[open_at_iso, open, high, low, close, volume]``
             tuples) and ``mode`` (``"range"`` / ``"latest_as_of"``).
             Market-data is public — ``READ_MARKET_DATA`` is the only
@@ -1858,7 +1856,7 @@ def register_mcp_tools(
                 surface as ``invalid_argument``.
 
         Returns:
-            Plan A Q14 envelope. ``details`` carries ``signals``
+            Canonical envelope. ``details`` carries ``signals``
             (list of ``SignalRow`` dicts ordered by ``fired_at``
             descending) and ``count`` (length of the returned list).
         """

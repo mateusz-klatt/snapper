@@ -40,8 +40,6 @@ SKIP_DIRS = {
     "build",
     "coverage",
     ".pytest_cache",
-    "data",
-    "ios",
 }
 SKIP_FILES = {
     "test_check_coverage_exclusions.py",
@@ -171,6 +169,10 @@ def run_scan(
     py_results = scan_python_files(root / "src")
     py_results.update(scan_python_files(root / "tests"))
     py_results.update(scan_python_files(root / "scripts"))
+    if (root / "proprietary" / "src").exists():
+        py_results.update(scan_python_files(root / "proprietary" / "src"))
+    if (root / "proprietary" / "tests").exists():
+        py_results.update(scan_python_files(root / "proprietary" / "tests"))
     py_count = print_results(py_results, root, "Python")
     print("\n" + "-" * 70)
     print("TYPESCRIPT FILES (.ts/.tsx)")

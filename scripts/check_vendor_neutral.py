@@ -1,9 +1,9 @@
 """Scan Python source files for vendor-specific names that leak into core.
 
-Phase A §3.11 mandates that `src/snapper/` stays vendor-neutral so the MCP
-surface cannot assume any single AI client (Claude Desktop, Cursor, Windsurf,
-ChatGPT, Gemini, Copilot, ...).  Vendor-specific wrappers belong in adjacent
-public repos (e.g. `integrations/snapper-mcp/`), not the core engine.
+`src/snapper/` must stay vendor-neutral so the MCP surface cannot assume any
+single AI client (Claude Desktop, Cursor, Windsurf, ChatGPT, Gemini, Copilot,
+...). Vendor-specific wrappers belong in adjacent public repos (e.g.
+`integrations/snapper-mcp/`), not the core engine.
 
 The check regex-scans every `*.py` file under `src/snapper/` for the terms
 listed in `VENDOR_PATTERN`.  A line with a trailing `# vendor-neutral-ok`

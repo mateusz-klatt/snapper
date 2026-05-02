@@ -1,6 +1,6 @@
 """End-to-end paper-mode integration tests for the Manual Orders flow.
 
-These tests exercise the Phase 1.5 happy path of the Execution Plans
+These tests exercise the happy path of the Execution Plans
 framework end-to-end without mocking ZMQ transports:
 
 1. Insert a ``manual_once`` ``ExecutionPlan`` directly in the DB.

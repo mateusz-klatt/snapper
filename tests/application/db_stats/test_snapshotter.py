@@ -1,9 +1,4 @@
-"""Unit tests for :class:`DbStatsSnapshotter`.
-
-Pins behavioural contract from
-``proprietary/plans/plan_observability_cluster_b.md`` §2.1 + §2.2 +
-§2.7 + §2.9 + §3.4 + §7.1.
-"""
+"""Unit tests for :class:`DbStatsSnapshotter`."""
 
 import asyncio
 from collections.abc import Awaitable

@@ -12,8 +12,8 @@ server-side to the caller's ``user_public_id``:
   owns the SCD2 close+insert + IntegrityError-retry pattern.
 
 User-level fallbacks are consulted by the routing layer when no
-device-scoped override matches the inbound alert (§D7 step 4) — they
-are the second-narrowest tier above the in-code built-in defaults.
+device-scoped override matches the inbound alert — they are the
+second-narrowest tier above the in-code built-in defaults.
 
 Ownership scoping mirrors ``device_routes``: every read + write is
 joined to ``principal.user_public_id`` so callers cannot manipulate

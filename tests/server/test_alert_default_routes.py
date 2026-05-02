@@ -1,4 +1,4 @@
-"""Tests for the user-level alert default routes (BE-NP-1).
+"""Tests for the user-level alert default routes.
 
 Covers ``GET /api/alert_defaults`` + ``PATCH /api/alert_defaults``
 in ``src/snapper/server/alert_default_routes.py``. Provenance-stamping
@@ -134,7 +134,7 @@ class TestUpdateAlertDefault:
     async def test_synthesizes_response_from_body_and_returned_public_id(self) -> None:
         """Response is synthesized from body + repo-returned public_id.
 
-        Mirrors the post-upsert race fix Copilot BE-1c locked in for
+        Mirrors the post-upsert race fix locked in for
         ``upsert_device_alert_pref``: the route trusts the
         repo-returned ``public_id`` and reconstructs the response
         from the validated body, avoiding a re-read that could race

@@ -6263,9 +6263,9 @@ async def test_claim_execution_plan_cancel_key_mismatch_precedence_over_terminal
 
     Given: a plan that ran to terminal under key-A,
     When: caller B claims with key-B,
-    Then: outcome=``key_mismatch`` (not ``terminal``). The Plan B v1.2
-        §2.3 idempotency contract: a different cancel key targeting a
-        plan that already claimed one MUST surface as
+    Then: outcome=``key_mismatch`` (not ``terminal``). Idempotency
+        contract: a different cancel key targeting a plan that
+        already claimed one MUST surface as
         ``idempotency_key_conflict``, even if the plan has since
         moved to a terminal status.
     """
@@ -7233,8 +7233,8 @@ async def test_get_all_open_position_cycles_empty(tmp_path: Path) -> None:
 async def test_insert_trade_command_raises_on_foreign_shard(tmp_path: Path) -> None:
     """Insert raises :class:`ShardOwnershipError` for a foreign-shard row.
 
-    Phase 4 defense-in-depth guard: when ``ownership`` is provided and
-    the row's ``shard_key`` is not owned by it, the repository raises
+    Defense-in-depth guard: when ``ownership`` is provided and the
+    row's ``shard_key`` is not owned by it, the repository raises
     BEFORE any DB write happens.
     """
     db_path = tmp_path / "guard_foreign.db"
@@ -7350,11 +7350,11 @@ async def test_get_undispatched_commands_stable_across_same_created_at(
 ) -> None:
     """OFFSET pagination is stable when multiple rows share ``created_at``.
 
-    Regression guard for the R1 review finding on Phase 4 plan-service dispatch inserts multiple commands under a single
-    ``now`` tick, so ties on ``created_at`` are realistic. Without
-    the ``id`` tie-breaker in ``ORDER BY``, paginating with OFFSET
-    could skip or duplicate rows → double-dispatch. The fix adds
-    ``TradeCommand.id`` as a deterministic secondary key.
+    The plan-service dispatch inserts multiple commands under a
+    single ``now`` tick, so ties on ``created_at`` are realistic.
+    Without the ``id`` tie-breaker in ``ORDER BY``, paginating with
+    OFFSET could skip or duplicate rows → double-dispatch. The fix
+    adds ``TradeCommand.id`` as a deterministic secondary key.
     """
     db_path = tmp_path / "stable_offset.db"
     r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
@@ -7465,7 +7465,7 @@ async def _insert_order_with_status(
 
 @pytest.mark.asyncio
 async def test_get_orders_filters_by_status_via_sql(tmp_path: Path) -> None:
-    """Plan B Phase 1 — ``get_orders(status=...)`` pushes the filter into SQL.
+    """``get_orders(status=...)`` pushes the filter into SQL.
 
     Given: 3 orders inserted with statuses ['open', 'open', 'filled'],
     When: ``get_orders(limit=10, status='filled', ...)`` is called,
@@ -7538,7 +7538,7 @@ async def test_get_orders_total_count_filters_by_symbol_and_exchange(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_get_orders_returns_plan_public_id(tmp_path: Path) -> None:
-    """Plan B Phase 1 — ``OrderRow`` carries ``plan_public_id``.
+    """``OrderRow`` carries ``plan_public_id``.
 
     Used by MCP ``get_order_status`` to resolve the parent execution
     plan without a second round-trip.

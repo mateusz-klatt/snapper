@@ -1,4 +1,4 @@
-"""REST endpoints for the AI-review state machine (Plan D §7).
+"""REST endpoints for the AI-review state machine.
 
 Mirrors the MCP tool surface in :mod:`snapper.mcp.tools` so the bridge
 can fall back to plain HTTP when the MCP transport is unavailable AND
@@ -7,9 +7,9 @@ endpoint that does not require an MCP-aware client.
 
 Routes
     ``POST /api/ai-reviews/{review_public_id}/decision`` — submit an
-      AI delegate's decision. Same Plan A Q14 envelope shape as the
-      MCP tool wrapped in HTTP statuses per the Plan A risk-register
-      mapping (200 / 404 / 409 / 410 / 422 / 503).
+      AI delegate's decision. Same canonical envelope shape as the
+      MCP tool wrapped in HTTP statuses
+      (200 / 404 / 409 / 410 / 422 / 503).
     ``GET /api/ai-reviews/pending`` — list pending reviews for the
       calling delegate (where the delegate is the
       ``selected_delegate_public_id`` and ``fanout_after`` has
@@ -17,11 +17,9 @@ Routes
 
 Permission gates
     ``POST .../decision`` requires :data:`Permission.CREATE_ORDERS` —
-      matches the MCP tool (Plan D §6 spec). The plan's §7 line 412
-      mentions ``CANCEL_ORDERS`` but the MCP tool uses ``CREATE_ORDERS``;
-      this REST surface deliberately follows the MCP precedent so a
-      single delegate JWT works both transports without per-request
-      role gymnastics.
+      matches the MCP tool. This REST surface deliberately follows
+      the MCP precedent so a single delegate JWT works both transports
+      without per-request role gymnastics.
     ``GET .../pending`` requires :data:`Permission.READ_SIGNALS` —
       AI_DELEGATE inherits this; non-delegate principals are admitted
       by the role check but get a 422 because the endpoint is keyed
@@ -72,17 +70,17 @@ _HTTP_STATUS_BY_ERROR_CODE: dict[str, int] = {
     ERROR_PEER_RESOLVED: status.HTTP_409_CONFLICT,
     ERROR_REVIEW_EXPIRED: status.HTTP_410_GONE,
 }
-"""Plan A Q14 + §5.2 — HTTP status mapping for known submit_decision outcomes.
+"""HTTP status mapping for known submit_decision outcomes.
 
 Successful outcomes (``error_code is None`` AND idempotent retries via
 :data:`ERROR_DECISION_ALREADY_RECORDED`) map to 200 outside this dict;
-unknown error codes fall through to 503 (Plan A §5.2 line 409
-"review_state_race" + defensive default).
+unknown error codes fall through to 503 ("review_state_race" +
+defensive default).
 """
 
 
 class AiReviewDecisionRequest(StrictBody):
-    """Body schema for ``POST /api/ai-reviews/{id}/decision`` (Plan D §7).
+    """Body schema for ``POST /api/ai-reviews/{id}/decision``.
 
     Attributes:
         decision: ``"approve"`` or ``"reject"``. Validated against
@@ -99,7 +97,7 @@ class AiReviewDecisionRequest(StrictBody):
 
 
 class AiReviewDecisionResponse(StrictBody):
-    """Plan A Q14 envelope wrapped in a JSON body for the REST surface.
+    """Canonical envelope wrapped in a JSON body for the REST surface.
 
     Mirrors the MCP tool's :class:`mcp.types.CallToolResult` JSON
     payload one-to-one so consumers can switch transports without
@@ -138,7 +136,7 @@ def _build_envelope(
     message: str,
     details: JsonObject,
 ) -> AiReviewDecisionResponse:
-    """Construct the Plan A Q14 envelope shared with the MCP surface."""
+    """Construct the canonical envelope shared with the MCP surface."""
     return AiReviewDecisionResponse(
         success=success, error_code=error_code, message=message, details=details
     )
@@ -166,8 +164,7 @@ async def submit_ai_review_decision_route(
 
     Validates the decision string, forwards to
     :meth:`AiReviewService.submit_decision`, and translates the
-    Plan A Q14 result envelope into HTTP status + JSON body per
-    the Plan A §5.2 mapping.
+    canonical result envelope into HTTP status + JSON body.
 
     Args:
         review_public_id: UUID7 of the ``ai_reviews`` row.
@@ -180,8 +177,7 @@ async def submit_ai_review_decision_route(
     Returns:
         :class:`AiReviewDecisionResponse` envelope. Idempotent retries
         return 200 with ``success=True`` AND
-        ``error_code='decision_already_recorded'`` per the Plan A Q14
-        v1.2 lock + cross-plan decision D3.
+        ``error_code='decision_already_recorded'``.
 
     Raises:
         HTTPException: 404 / 403 / 409 / 410 / 422 / 503 mapped from
@@ -256,14 +252,14 @@ async def list_pending_ai_reviews(
 ) -> PendingReviewListResponse:
     """List pending CONSULT reviews where the caller is the selected delegate.
 
-    Used by the bridge (Plan C v1.1 catch-up after WS reconnect) and
+    Used by the bridge (catch-up after WS reconnect) and
     by operator dashboards. Snapshot is bounded by ``limit`` and
     ordered by ``fanout_after ASC`` (oldest first).
 
     The ``fanout_after < now`` gate uses ``datetime.now(UTC)`` because
     this REST poll is the catch-up surface — the live wall-clock is
     the right reference for "what should the bridge re-acknowledge
-    right now". The §3.5 fast-path bus subscriber uses
+    right now". The fast-path bus subscriber uses
     ``msg.last_seen_at`` for a different reason: it dispatches
     fanout, while THIS endpoint only lists what is currently fan-
     eligible.
@@ -275,8 +271,8 @@ async def list_pending_ai_reviews(
             endpoint is keyed by the delegate identity.
         repo: Repository handle.
         limit: Max rows returned (clamped to ``[1, 500]``).
-        wallet_public_id: Optional Plan D §7 filter — narrows the
-            snapshot to one wallet. Bridge passes this when it wants
+        wallet_public_id: Optional filter — narrows the snapshot to
+            one wallet. Bridge passes this when it wants
             catch-up scoped to the wallet currently surfaced in the
             UI; ``None`` returns every wallet the delegate is
             assigned to.

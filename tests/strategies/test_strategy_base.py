@@ -760,7 +760,7 @@ async def test_emit_signal_validates_outputs(monkeypatch: pytest.MonkeyPatch) ->
 
 @pytest.mark.asyncio
 async def test_emit_signal_no_outcome_keeps_attribution_fields_none() -> None:
-    """Plan D Phase 3 §8.1 — emit_signal without outcome keeps attribution None.
+    """emit_signal without outcome keeps attribution None.
 
     Given: a strategy emitting a non-AI signal (no ``outcome`` kwarg),
     When: emit_signal publishes the SignalData envelope,
@@ -794,7 +794,7 @@ async def test_emit_signal_no_outcome_keeps_attribution_fields_none() -> None:
 
 @pytest.mark.asyncio
 async def test_emit_signal_outcome_stamps_attribution_on_envelope() -> None:
-    """Plan D Phase 3 §8.1 — emit_signal(outcome=) stamps both attribution fields.
+    """emit_signal(outcome=) stamps both attribution fields.
 
     Given: a strategy that just received an
         :class:`AiReviewDecisionOutcome` from a successful CONSULT
@@ -803,8 +803,7 @@ async def test_emit_signal_outcome_stamps_attribution_on_envelope() -> None:
     Then: the published SignalData envelope carries both
         ``ai_review_public_id == decision.review_public_id`` and
         ``ai_review_dispatch_version == decision.dispatch_version``,
-        threading the AI attribution end-to-end through the ZMQ wire
-        per Plan A Q18 transport contract.
+        threading the AI attribution end-to-end through the ZMQ wire.
     """
     strategy = FakeStrategy(_strategy_config(exchange="paper"))
     mock_msg_publisher = MagicMock()

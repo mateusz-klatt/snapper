@@ -1,13 +1,13 @@
-"""Tests for :meth:`AiReviewService.submit_decision` (Plan D §3.2).
+"""Tests for :meth:`AiReviewService.submit_decision`.
 
 Covers the full state machine:
-- Caller delegate resolve (Q9 step 1).
+- Caller delegate resolve.
 - Review existence + scope check.
 - Terminal-state shortcuts (idempotent retry vs peer-resolved).
-- Q9 step 3.5 inline late-decision timeout.
-- Atomic CAS resolve + audit-event append + Q10 counter decrement.
+- Inline late-decision timeout.
+- Atomic CAS resolve + audit-event append + counter decrement.
 - Resolution-mode classification across pending vs fanout_dispatched.
-- Phase 2 #3: post-commit ``bus.ai_review_decision`` fast-path emission.
+- Post-commit ``bus.ai_review_decision`` fast-path emission.
 """
 
 from collections.abc import AsyncIterator
@@ -44,8 +44,8 @@ TEST_TIMEOUT = 15
 class _FakeScopeGrantService:
     """Stub that returns a pre-configured allow/deny verdict.
 
-    Plan D §10 has the real :class:`ScopeGrantService.has_grant_for_delegate`
-    forward to the repository. The submit_decision path consults the service,
+    The real :class:`ScopeGrantService.has_grant_for_delegate` forwards
+    to the repository. The submit_decision path consults the service,
     so mocking just the verdict (rather than the full repo wiring) keeps the
     unit tests focused on the state machine behaviour.
     """
@@ -434,7 +434,7 @@ async def test_different_delegate_after_resolve_returns_peer_resolved(
 async def test_late_decision_pending_marks_timeout_returns_review_id_expired(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """Q9 step 3.5 — deadline elapsed and row still pending.
+    """Deadline elapsed and row still pending.
 
     Given a configured AiReviewService and seeded repository,
     When submit_decision is invoked with the test parameters,
@@ -757,8 +757,8 @@ async def test_late_decision_atomic_timeout_returns_none_still_returns_expired(
 
     Covers the branch where the snapshot showed non-terminal but a peer
     flipped the row terminal between read and the atomic timeout call.
-    Per Plan D §3.2 step 3.5 the response is still ``review_id_expired``;
-    the audit-event + counter-decrement are skipped because there's no
+    The response is still ``review_id_expired``; the audit-event +
+    counter-decrement are skipped because there's no
     transition to record.
 
     Given a configured AiReviewService and seeded repository,
@@ -851,7 +851,7 @@ async def test_atomic_resolve_returns_none_then_row_disappeared(
 async def test_submit_decision_publishes_bus_event_after_commit(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """Plan A §7.1 / Phase 2 #3 — post-commit bus.ai_review_decision fanout.
+    """Post-commit bus.ai_review_decision fanout.
 
     The publisher MUST fire AFTER the atomic resolve commits + the
     audit event lands + the counter decrements. The bus event drives
@@ -969,18 +969,17 @@ async def test_submit_decision_does_not_publish_on_terminal_shortcut(
 async def test_submit_decision_publishes_external_decision_ack_frame_post_commit(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """Plan A §4.2 / Q16 + Phase 2 #7 — post-commit external WS fanout.
+    """Post-commit external WS fanout.
 
     Given a configured AiReviewService with a wired publisher + a
         pending review,
     When submit_decision approves the review with a rationale,
     Then publisher.send is awaited TWICE: once for
-        ``bus.ai_review_decision`` (Phase 2 #3 fast-path) AND once
-        for ``ai_reviews.{user}.{strategy}.decision_ack`` (this
-        chunk's external WS fanout). The decision_ack payload carries
-        every routing field at top-level, the responding delegate +
-        decision + new_status + rationale, and the dispatch_version
-        from the atomic resolve.
+        ``bus.ai_review_decision`` (fast-path) AND once for
+        ``ai_reviews.{user}.{strategy}.decision_ack`` (external WS
+        fanout). The decision_ack payload carries every routing field
+        at top-level, the responding delegate + decision + new_status
+        + rationale, and the dispatch_version from the atomic resolve.
     """
     svc = AiReviewService.get_instance()
     publisher = MagicMock()
@@ -1041,8 +1040,8 @@ async def test_submit_decision_ack_publish_failure_does_not_mask_result(
 ) -> None:
     """Decision_ack send failure -> log + still return AiReviewDecisionResult.
 
-    Mirrors the Phase 2 #2/#3/#6 best-effort guarantee: the post-commit
-    decision result is the primary contract; the WS fanout is
+    Best-effort guarantee: the post-commit decision result is the
+    primary contract; the WS fanout is
     auxiliary. A broker hiccup must NOT replace the success envelope
     the AI delegate's MCP tool call sees.
 

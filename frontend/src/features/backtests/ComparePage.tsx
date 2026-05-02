@@ -23,7 +23,7 @@ const labelRun = (label: 'A' | 'B', publicId: string, status: string): string =>
   `Run ${label} · ${publicId.slice(0, 8)} · ${status}`
 
 /**
- * Phase 2c Compare page — full implementation. Branches:
+ * Compare page — full implementation. Branches:
  * - loading: spinner-like message.
  * - 404 APIError: "comparison not found in current wallet" + back link.
  *   Triggered when the user switches wallet picker after navigation.

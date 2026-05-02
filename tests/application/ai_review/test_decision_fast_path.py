@@ -1,4 +1,4 @@
-"""Tests for Plan A §7.1 bus.ai_review_decision fast-path (Phase 2 #3).
+"""Tests for the bus.ai_review_decision fast-path.
 
 Covers two sides of the strategy-await fast-path:
 
@@ -158,7 +158,7 @@ class TestPublishDecisionBusEvent:
     async def test_publisher_captured_into_local_avoids_shutdown_race(self) -> None:
         """Publisher reference captured BEFORE await — concurrent shutdown safe.
 
-        Mirrors the TradingCapsEnforcer fix-up shape from Phase 2 #2:
+        Mirrors the TradingCapsEnforcer fix-up shape:
         if a concurrent ``set_msg_publisher(None)`` from the lifespan
         teardown path runs between the None-check + the actual await,
         the captured local must still be the original publisher so
@@ -207,7 +207,7 @@ class TestHandleAiReviewDecisionBusMessage:
     def test_resolves_matching_registered_future(self) -> None:
         """A future registered by the strategy primitive is resolved by the bus event.
 
-        Plan A §7.1: the strategy await loop blocks on
+        The strategy await loop blocks on
         ``asyncio.wait_for(fut, ...)`` mixed with a jittered DB poll.
         When the bus event fires, ``set_result`` wakes the future and
         the strategy bypasses the remaining poll interval.
@@ -228,7 +228,7 @@ class TestHandleAiReviewDecisionBusMessage:
     def test_returns_false_when_no_future_registered(self) -> None:
         """Cross-instance frame: this process has no future to resolve.
 
-        Plan D §3 single-publisher / multi-subscriber correctness:
+        Single-publisher / multi-subscriber correctness:
         every instance subscribes to bus.ai_review_decision; only the
         instance that initiated the CONSULT has the future in its
         registry. Remote instances treat the event as a no-op.
@@ -378,13 +378,12 @@ class TestRegisterAfterCreateRace:
 
 
 class TestPendingResolutionsSizeCap:
-    """Hard-size cap on _pending_resolutions cache (Phase 2 #5).
+    """Hard-size cap on _pending_resolutions cache.
 
-    Closes Codex non-blocking note from Phase 2 #3: TTL eviction is
-    opportunistic, so a runaway publisher emitting events for review
-    ids no strategy ever registers a future for could in principle
-    grow the dict without bound between TTL sweeps. The hard cap
-    bounds memory regardless of TTL pressure.
+    TTL eviction is opportunistic, so a runaway publisher emitting
+    events for review ids no strategy ever registers a future for
+    could in principle grow the dict without bound between TTL
+    sweeps. The hard cap bounds memory regardless of TTL pressure.
     """
 
     def test_overflow_evicts_oldest_entries_first(self) -> None:

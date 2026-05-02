@@ -1,4 +1,4 @@
-"""Plan D §9 + Plan A Q15 per-frame scope filter for ``ai_reviews.*`` topics.
+"""Per-frame scope filter for ``ai_reviews.*`` topics.
 
 Lives in its own module (rather than alongside the subscribe-time
 RBAC handlers) so the bridge can import it WITHOUT pulling in the
@@ -23,7 +23,7 @@ __all__ = ["AI_REVIEWS_TOPIC_PREFIX", "enforce_ai_review_scope"]
 
 
 AI_REVIEWS_TOPIC_PREFIX = "ai_reviews."
-"""Plan D §9 + Plan A Q15 — topic-family prefix the per-frame filter gates.
+"""Topic-family prefix the per-frame filter gates.
 
 Frames whose topic does NOT start with this prefix bypass the filter
 entirely (registry-root subscribed roles already passed the
@@ -42,7 +42,7 @@ async def enforce_ai_review_scope(
     scope_grant_service: ScopeGrantService,
     as_of: datetime | None = None,
 ) -> bool:
-    """Plan D §9 + Q15 — return True iff the principal may receive the frame.
+    """Return True iff the principal may receive the frame.
 
     Bridge calls this per-subscription before sending an
     ``ai_reviews.*`` frame so a delegate can subscribe to the

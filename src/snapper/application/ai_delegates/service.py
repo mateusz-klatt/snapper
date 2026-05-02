@@ -54,7 +54,7 @@ def _now_for_join() -> datetime:
 _DELEGATES_TOPIC = "ai_delegates"
 
 MAX_AI_DELEGATES_PER_OWNER: int = 5
-"""Plan §5 item 5 — cap on live delegates per operator.
+"""Cap on live delegates per operator.
 
 Bounds delegate proliferation so an operator can't spray
 credentials that later need individual revocation on compromise.

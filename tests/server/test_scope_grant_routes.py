@@ -1,4 +1,4 @@
-"""Tests for the Phase 0d scope grant read + write routes.
+"""Tests for the scope grant read + write routes.
 
 Exercises:
 

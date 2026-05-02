@@ -1,14 +1,14 @@
-"""Tests for Plan D Phase 1 #3 — supersede + reaper + offline scanner.
+"""Tests for supersede + reaper + offline scanner.
 
 Covers:
 
 - :meth:`AiReviewService.supersede_review` — strategy-abandon CAS to
   ``superseded`` / ``superseded_by_strategy``.
-- :meth:`AiReviewService._reaper_tick` — Plan D §3.3 atomic reaper.
-- :meth:`AiReviewService._offline_scanner_tick` — Plan D §3.4 Layer 2.
+- :meth:`AiReviewService._reaper_tick` — atomic reaper.
+- :meth:`AiReviewService._offline_scanner_tick` — Layer 2.
 - :meth:`AiReviewService._delegate_offline_tick` +
-  :meth:`AiReviewService.handle_delegate_offline_bus_message` — Plan D
-  §3.5 fast-path subscriber.
+  :meth:`AiReviewService.handle_delegate_offline_bus_message` —
+  fast-path subscriber.
 """
 
 import asyncio
@@ -540,7 +540,7 @@ async def test_offline_scanner_tick_skips_pre_fanout_after(
 async def test_handle_delegate_offline_bus_message_dispatches_fanout(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """Bus message subscriber drives the §3.5 fast path equivalent.
+    """Bus message subscriber drives the fast-path equivalent.
 
     Given a pending review whose selected delegate matches the bus
     message's delegate_public_id,
@@ -608,7 +608,7 @@ async def test_reaper_tick_skips_row_lost_to_peer_decision(
 ) -> None:
     """If the combined timeout primitive returns None, the reaper logs the loss + continues.
 
-    Plan D §3.3 "drop-the-lease" guarantee: a row observed in the
+    "Drop-the-lease" guarantee: a row observed in the
     expired snapshot may already have raced against a peer decision
     by the time the per-row CAS fires. The reaper must not crash —
     it should simply skip the row and report 0 transitions.
@@ -655,8 +655,9 @@ async def test_offline_scanner_skips_row_lost_to_peer_dispatch(
 ) -> None:
     """If the combined dispatch primitive returns None, the scanner skips the row.
 
-    The §3.4 / §3.5 paths share the same per-row dispatch helper, so
-    a stubbed ``atomic_dispatch_fanout_with_audit`` exercises the
+    The Layer 2 scanner and fast-path subscriber share the same per-row
+    dispatch helper, so a stubbed ``atomic_dispatch_fanout_with_audit``
+    exercises the
     loss-to-peer branch for both code paths.
 
     Given a pending review past fanout_after with an offline delegate
@@ -706,8 +707,8 @@ async def test_list_pending_for_delegate_wallet_filter(
 ) -> None:
     """``wallet_public_id`` predicate narrows the snapshot to one wallet.
 
-    Plan D §7 REST-surface filter — bridge passes the wallet it is
-    rendering so the catch-up snapshot stays scoped.
+    REST-surface filter — bridge passes the wallet it is rendering
+    so the catch-up snapshot stays scoped.
 
     Given two pending reviews for the same delegate on different wallets,
     When list_pending_reviews_for_delegate is called with wallet_public_id,
@@ -762,19 +763,19 @@ async def test_list_pending_for_delegate_wallet_filter(
 async def test_handle_delegate_offline_skips_review_before_fanout_after(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """§3.5 fast-path defers reviews whose fanout_after is still in the future.
+    """Fast-path defers reviews whose fanout_after is still in the future.
 
-    Plan D §3.5 + DelegateOfflineData docstring lock: subscribers
-    compare ``last_seen_at`` to ``ai_reviews.fanout_after`` and either
+    DelegateOfflineData docstring lock: subscribers compare
+    ``last_seen_at`` to ``ai_reviews.fanout_after`` and either
     dispatch immediately OR wait for the natural fanout timer (the
-    §3.4 Layer 2 scanner). The fast-path MUST NOT re-fan reviews
-    whose grace window has not elapsed.
+    Layer 2 scanner). The fast-path MUST NOT re-fan reviews whose
+    grace window has not elapsed.
 
     Given a pending review whose fanout_after is still in the future
     AND a bus.delegate_offline message timestamped at ``now``,
     When handle_delegate_offline_bus_message runs,
-    Then it returns 0 dispatches and the row stays pending; the §3.4
-    scanner picks it up after ``fanout_after`` elapses.
+    Then it returns 0 dispatches and the row stays pending; the
+    Layer 2 scanner picks it up after ``fanout_after`` elapses.
     """
     svc = AiReviewService.get_instance()
     now = _now()
@@ -810,11 +811,11 @@ async def test_handle_delegate_offline_skips_review_before_fanout_after(
 async def test_delegate_offline_idempotent_with_layer_2_scanner(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """§3.5 fast path is a no-op when §3.4 scanner already fired.
+    """Fast path is a no-op when the Layer 2 scanner already fired.
 
     Given the Layer 2 scanner has already transitioned a pending row to
     fanout_dispatched,
-    When the §3.5 bus subscriber later runs for the same delegate,
+    When the bus subscriber later runs for the same delegate,
     Then it observes status='fanout_dispatched' (excluded by the
     pending-only snapshot) and reports 0 dispatches.
     """

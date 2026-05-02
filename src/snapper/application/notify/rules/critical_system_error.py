@@ -1,4 +1,4 @@
-"""``critical_system_error`` rule — 3-consecutive WARNING heartbeat (§D6.1 Rule 4)."""
+"""``critical_system_error`` rule — 3-consecutive WARNING heartbeat."""
 
 from datetime import datetime
 from datetime import timedelta

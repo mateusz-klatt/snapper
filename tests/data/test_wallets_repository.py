@@ -1,4 +1,4 @@
-"""Repository-level tests for the Phase 0d wallet catalogue helpers.
+"""Repository-level tests for the wallet catalogue helpers.
 
 Covers ``SQLAlchemyRepository.list_active_wallets`` and
 ``list_accessible_wallets_for_operators``. These back the frontend

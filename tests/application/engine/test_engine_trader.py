@@ -1152,7 +1152,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
 async def test_on_signal_threads_ai_review_attribution_to_engine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Plan D Phase 3 §6.3 — _on_signal forwards SignalData attribution.
+    """_on_signal forwards SignalData attribution.
 
     Given: a TraderCoordinator + ``_EngineStub`` that records
         ``execute_desired_units`` kwargs,
@@ -1221,7 +1221,7 @@ async def test_on_signal_threads_ai_review_attribution_to_engine(
 
 @pytest.mark.asyncio
 async def test_engine_ai_attribution_fails_loudly_when_wallet_unset() -> None:
-    """Plan D Phase 3 §8.3 — wallet preflight integration smoke.
+    """Wallet preflight integration smoke.
 
     Given: an :class:`TradingEngineService` constructed without a
         ``wallet_public_id`` (default ``""``), wired with a real
@@ -4933,8 +4933,8 @@ class TestResolveInstrumentSpecs:
     async def test_returns_real_values_from_spec(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify real tick_size, lot_size, and public_id from InstrumentSpec.
 
-        Plan D Phase 3 §6.2 — successful spec lookup populates ``public_id``
-        on the returned :class:`InstrumentSpec` so the engine's
+        Successful spec lookup populates ``public_id`` on the returned
+        :class:`InstrumentSpec` so the engine's
         AI-attribution path can fail-closed when caps need to evaluate
         notional / per-instrument quantity limits.
         """
@@ -4952,7 +4952,7 @@ class TestResolveInstrumentSpecs:
 
     @pytest.mark.asyncio
     async def test_fallback_omits_public_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Plan D Phase 3 §2.5 — fallback path omits ``public_id`` deliberately.
+        """Fallback path omits ``public_id`` deliberately.
 
         Given: instrument lookup fails (returns None),
         When: ``_resolve_instrument_specs`` returns the fallback,

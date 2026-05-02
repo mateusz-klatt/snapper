@@ -450,6 +450,38 @@ class TestRunScan:
 
         assert result == 0
 
+    def test_scans_proprietary_subtrees_when_present(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Verify run_scan picks up findings under ``proprietary/src`` and ``proprietary/tests``.
+
+        Given: A project layout that includes both ``proprietary/src`` and
+            ``proprietary/tests`` subtrees, each with a file carrying a
+            ``noqa`` exclusion,
+        When: Running scan in strict mode,
+        Then: Returns 1 (failure) AND surfaces both proprietary findings
+            in the captured output, exercising the ``proprietary/*``
+            optional-scan branches added so the scanner has parity with
+            ``check_no_comments``.
+        """
+        (tmp_path / "src").mkdir()
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "scripts").mkdir()
+        (tmp_path / "frontend").mkdir()
+        prop_src = tmp_path / "proprietary" / "src"
+        prop_src.mkdir(parents=True)
+        prop_tests = tmp_path / "proprietary" / "tests"
+        prop_tests.mkdir(parents=True)
+        (prop_src / "bad.py").write_text("x = 1  # noqa\n")
+        (prop_tests / "bad.py").write_text("y = 2  # noqa\n")
+
+        result = run_scan(tmp_path, strict_mode=True)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "proprietary/src/bad.py" in captured.out
+        assert "proprietary/tests/bad.py" in captured.out
+
 
 class TestMain:
     """Test suite for Main functionality."""

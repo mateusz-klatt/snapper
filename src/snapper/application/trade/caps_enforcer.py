@@ -58,7 +58,7 @@ ROLLING_NOTIONAL_WINDOW = timedelta(hours=24)
 ROLLING_CANCELS_WINDOW = timedelta(seconds=60)
 
 _BUS_CAPS_VIOLATION_TOPIC = "bus.caps_violation_after_ai_approve"
-"""Plan D §3.6 — internal bus topic that
+"""Internal bus topic that
 :class:`~snapper.application.ai_review.service.AiReviewService` subscribes
 to. Sole publisher is this enforcer, fired exclusively when a
 :class:`CapsViolationError` is raised against a submission whose
@@ -281,14 +281,14 @@ class TradingCapsEnforcer:
         ai_review_public_id: str,
         ai_review_dispatch_version: int | None,
     ) -> AsyncIterator[Guard]:
-        """Plan D Phase 3 — strategy hot-path AI-attribution gate.
+        """Strategy hot-path AI-attribution gate.
 
         Validates the citation, resolves ``user_public_id`` from the
         cited ``ai_reviews`` row, rebuilds the submission with the
         attribution + resolved user identity, and delegates to
         :meth:`guard` so caps actually evaluate and
         ``bus.caps_violation_after_ai_approve`` fires on rejection.
-        Mirrors the REST/MCP attribution pattern from Phase 2 #10.
+        Mirrors the REST/MCP attribution pattern.
 
         Citation validation invariants (per
         :func:`validate_ai_review_citation_for_strategy`):
@@ -299,11 +299,11 @@ class TradingCapsEnforcer:
         - ``row.wallet_public_id == submission.wallet_public_id``
           (defends against engine misrouting).
 
-        ``ai_review_dispatch_version`` is transport-only per Plan A
-        Q18: this method receives the value, threads it onto the
+        ``ai_review_dispatch_version`` is transport-only:
+        this method receives the value, threads it onto the
         rebuilt submission, but the validator deliberately does NOT
         compare it against the row's current ``dispatch_version``.
-        Q18 dedup is enforced at the bus publisher.
+        Dispatch-version dedup is enforced at the bus publisher.
 
         Args:
             submission: Pre-insert DTO from the engine's strategy
@@ -314,7 +314,7 @@ class TradingCapsEnforcer:
                 :class:`SignalData` after the strategy primitive
                 returned a successful CONSULT outcome.
             ai_review_dispatch_version: Companion to
-                ``ai_review_public_id`` per Q18 (transport-only).
+                ``ai_review_public_id`` (transport-only).
 
         Yields:
             A :class:`Guard` from the underlying :meth:`guard`
@@ -498,14 +498,14 @@ class TradingCapsEnforcer:
     async def _publish_caps_violation_after_ai_approve(
         self, submission: TradeCommandSubmission, exc: CapsViolationError
     ) -> None:
-        """Plan D §3.6 — emit a bus event for an AI-approved trade rejected by caps.
+        """Emit a bus event for an AI-approved trade rejected by caps.
 
         Fires only when the submission carries an
         ``ai_review_public_id`` (i.e. the trade was previously
         AI-approved via the CONSULT pattern) AND a
         :class:`CapsViolationError` is being raised. Loads the
         ``ai_reviews`` row to populate ``strategy_public_id`` and
-        ``dispatch_version`` (Plan A Q18 dedup key) which the
+        ``dispatch_version`` (dedup key) which the
         :class:`TradeCommandSubmission` does not carry. Pricing-oracle
         violations (``cap_type == "price_unavailable"``) and missing-user
         violations (``cap_type == "missing_user_public_id"``) are

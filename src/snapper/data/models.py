@@ -198,7 +198,7 @@ class Instrument(TemporalMixin, Base):
     requires_ai_review: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
-    """Plan A v1.4 Q6 — instrument-level default for AI review opt-in.
+    """Instrument-level default for AI review opt-in.
 
     Strategies with ``ai_review_policy="instrument_default"`` consult
     AI delegate before submitting trades on instruments where this
@@ -1772,7 +1772,7 @@ class ExecutionPlan(TemporalMixin, Base):
     last_error: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     cancel_idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    """Plan B v1.2 §1.4 + Plan A v1.4 cancel idempotency.
+    """Cancel idempotency.
 
     Caller-supplied dedup key for ``PlansCancelService.cancel_by_plan_public_id``
     (extracts existing ``_cancel_plan`` helper from
@@ -2283,9 +2283,8 @@ class NotificationDevice(TemporalMixin, Base):
     ``token_status = 'unregistered'``), and explicit user unregister
     from the app (successor with ``token_status = 'user_unregistered'``).
     The tombstone successor keeps ``known_to = KNOWN_TO_MAX`` so an
-    ``as_of`` query returns a visible inactive row instead of a gap
-    (see plan 2 §D3 + BE-3a R1 invariant INV-9 closure). Partial
-    indexes add ``token_status = 'active'`` so multiple historical
+    ``as_of`` query returns a visible inactive row instead of a gap.
+    Partial indexes add ``token_status = 'active'`` so multiple historical
     tombstones per token do not collide with the active-row uniqueness
     constraint, and re-registration of the same token after an
     unregister is permitted.
@@ -2338,7 +2337,7 @@ class NotificationDevice(TemporalMixin, Base):
 class DeviceAlertPref(TemporalMixin, Base):
     """Temporal (SCD2) per-(device, alert_type, scope) preferences.
 
-    Scope layers (narrowest first, §D7 routing precedence):
+    Scope layers (narrowest first, routing precedence):
     wallet (operator NOT NULL + wallet NOT NULL) →
     operator (operator NOT NULL + wallet NULL) →
     device-global (operator NULL + wallet NULL). Three partial unique
@@ -2432,7 +2431,7 @@ class DeviceAlertPref(TemporalMixin, Base):
 class UserAlertDefault(TemporalMixin, Base):
     """Temporal (SCD2) user-level fallback preference per alert type.
 
-    Last step in the §D7 routing precedence chain: when no
+    Last step in the routing precedence chain: when no
     device-scoped (wallet / operator / device-global) row matches
     for a given (device, alert_type) combo, routing falls back to
     the per-user default. Unique among ACTIVE rows per
@@ -2531,8 +2530,8 @@ class AlertDelivery(TemporalMixin, Base):
     ``attempt_count`` / ``apns_id`` / etc.) so the full lifecycle
     of every delivery is queryable with ``as_of``. Active-row lookups
     (queue drain, retry) use ``known_to == KNOWN_TO_MAX`` via the
-    partial active indexes below. Crash-safety invariant per plan
-    §D5.5: ``attempt_count`` increments BEFORE the APNs HTTP call,
+    partial active indexes below. Crash-safety invariant:
+    ``attempt_count`` increments BEFORE the APNs HTTP call,
     so on sidecar restart mid-flight a row with ``attempt_count=N``
     and ``status='queued'`` is retriable at most once redundantly
     (bounded ≤1 duplicate send per crash). Scope columns
@@ -2604,7 +2603,7 @@ class AlertDelivery(TemporalMixin, Base):
 
 
 class AiDelegate(Base):
-    """Runtime state for AI delegates (Plan A v1.4 §3.4 + Plan D §2.3).
+    """Runtime state for AI delegates.
 
     Logical 1-to-1 with ``users`` rows where ``role=AI_DELEGATE``.
     Created by ``UserService.create_ai_delegate`` AFTER the user
@@ -2625,11 +2624,11 @@ class AiDelegate(Base):
             row with ``role=AI_DELEGATE``).
         last_seen_at: Most recent WS connection / heartbeat /
             authenticate frame. Updated by
-            ``WebSocketAuthManager``. Used by Q17 Layer 2 scanner +
-            Q10 admission control.
-        active_reviews_count: In-flight review counter. Q10 v1.2
-            lock — incremented exactly once per review at creation,
-            decremented exactly once at terminal transition via
+            ``WebSocketAuthManager``. Used by the Layer 2 scanner +
+            admission control.
+        active_reviews_count: In-flight review counter — incremented
+            exactly once per review at creation, decremented exactly
+            once at terminal transition via
             ``ai_reviews.counter_decremented_at`` writable-CTE
             primitive.
         created_at: Row creation timestamp.
@@ -2659,10 +2658,9 @@ class AiDelegate(Base):
 class AiReview(Base):
     """A CONSULT review request issued by a strategy to an AI delegate.
 
-    Plan A v1.4 §3.1 + Plan D v1.1 §2.1. Mutable status row (Q13
-    drops SCD2 for ``ai_reviews``); audit trail via append-only
-    :class:`AiReviewEvent` rows. Status transitions via atomic
-    UPDATE per Q9 step 4 (writable-CTE counter primitive).
+    Mutable status row (no SCD2 for ``ai_reviews``); audit trail
+    via append-only :class:`AiReviewEvent` rows. Status transitions
+    via atomic UPDATE (writable-CTE counter primitive).
 
     Lifecycle: created with ``status=pending`` -> optional
     ``fanout_dispatched`` -> terminal ``resolved_approved`` /
@@ -2670,18 +2668,17 @@ class AiReview(Base):
     terminal states are FINAL.
 
     The state machine + bus pub/sub + WS fanout + reaper + offline
-    scanner + admission control are owned by ``AiReviewService``
-    (Plan D §3, separate commit).
+    scanner + admission control are owned by ``AiReviewService``.
 
-    Attributes (full Plan A v1.4 spec):
+    Attributes:
         public_id: UUID7 review correlation ID — used as
             ``review_id`` in MCP ``submit_ai_review_decision``.
         user_public_id: Owner of the strategy. DISTINCT from
-            delegate users (Q9 step 1 v1.4 fix).
+            delegate users.
         operator_public_id: Operator scope.
         wallet_public_id: Wallet for caps + scope grants.
         instrument_public_id: Instrument for scope grants
-            (BLOCKER fix v1.3: grants are wallet+instrument).
+            (grants are wallet+instrument).
         strategy_public_id: Origin strategy.
         selected_delegate_public_id: AI delegate originally chosen
             at creation. IMMUTABLE.
@@ -2692,8 +2689,7 @@ class AiReview(Base):
         status: Current state (see
             :class:`AiReviewStatusEnum`).
         signal_envelope: Full signal payload (JSON). Persisted for
-            restart-time reconstruction of pending review lists
-            (Plan A §7.2 startup_recovery).
+            restart-time reconstruction of pending review lists.
         signal_snapshot_hash: SHA-256 hex of canonical-encoded
             signal_envelope. Audit/forensics — NOT used for replay
             protection.
@@ -2706,10 +2702,10 @@ class AiReview(Base):
             offline. Default = ``created_at + 30s``.
         decision: ``approve`` / ``reject`` / NULL. Set at terminal.
         rationale: Free text. Bounded 4096 chars at insert.
-        dispatch_version: Q18 v1.2 lock — monotonically incremented
-            on every fanout-related UPDATE. Bridge dedupes by
+        dispatch_version: Monotonically incremented on every
+            fanout-related UPDATE. Bridge dedupes by
             ``(public_id, dispatch_version)``. Initial value 0.
-        counter_decremented_at: Q10 v1.2 lock — set NON-NULL when
+        counter_decremented_at: Set NON-NULL when
             ``ai_delegates.active_reviews_count`` has been
             decremented for this review. Idempotency primitive:
             writable-CTE `WHERE counter_decremented_at IS NULL`
@@ -2719,9 +2715,8 @@ class AiReview(Base):
         updated_at: Last status mutation timestamp.
         resolved_at: Wall-clock when review reached terminal
             state. NULL while ``pending``/``fanout_dispatched``.
-        session_id: Strategy's bus session UUID at creation (Sonnet
-            N4 v1.3 fix — strategy passes via
-            ``StrategyContext.create_ai_review``).
+        session_id: Strategy's bus session UUID at creation —
+            strategy passes via ``StrategyContext.create_ai_review``.
         sequence_id: Strategy's monotonic sequence at creation.
     """
 
@@ -2744,8 +2739,6 @@ class AiReview(Base):
         Index("ix_ai_reviews_operator_public_id", "operator_public_id"),
         Index("ix_ai_reviews_wallet_public_id", "wallet_public_id"),
         Index("ix_ai_reviews_instrument_public_id", "instrument_public_id"),
-        # Sonnet N6 v1.3 fix: status consistency CHECK enforces resolution_mode
-        # IS NULL for non-terminal AND IS NOT NULL for resolved_*/timeout/superseded.
         CheckConstraint(
             "(status IN ('pending', 'fanout_dispatched') AND decision IS NULL "
             " AND responding_delegate_public_id IS NULL AND resolution_mode IS NULL "
@@ -2811,8 +2804,8 @@ class AiReview(Base):
 class AiReviewEvent(Base):
     """Append-only audit log for every :class:`AiReview` transition.
 
-    Per Plan A v1.4 Q13: replaces SCD2 history that
-    ``TemporalMixin`` would have provided. Each transition (created,
+    Replaces SCD2 history that ``TemporalMixin`` would have
+    provided. Each transition (created,
     fanout_dispatched, decision_recorded, timeout_marked,
     superseded, counter_decremented, counter_adjusted) appends ONE
     row. Rows are immutable — no UPDATE allowed.

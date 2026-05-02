@@ -1,16 +1,15 @@
-"""Deterministic Phase 2c baseline capture for cross-asset backtest refactor parity.
+"""Deterministic baseline capture for cross-asset backtest refactor parity.
 
 Runs a fixed set of ``batch_processor.process_time_batch`` scenarios with
 deterministic inputs (fake strategy, fake candles, pinned snapshot time)
 and serialises the resulting collector artifacts + portfolio state to
 JSON. Used twice:
 
-1. Commit 1 step 0 (one-shot): capture golden snapshot against master
-   HEAD pre-refactor, written to
+1. One-shot baseline capture: writes the golden snapshot to
    ``tests/application/backtest/fixtures/phase2c_baseline_snapshot.json``.
-2. Commit 3 (regression): ``TestPhase2cBaselineParity`` imports
-   ``SCENARIOS`` + ``serialise_run`` and re-runs each scenario
-   post-refactor against the same snapshot — any drift fails the gate.
+2. Regression check: ``TestPhase2cBaselineParity`` imports ``SCENARIOS``
+   + ``serialise_run`` and re-runs each scenario against the same
+   snapshot — any drift fails the gate.
 
 The serialiser strips nondeterministic identifiers (uuid7 ``public_id``,
 ``signal_public_id``, SequenceTracker ``session_id``, ``sequence_id``)
@@ -93,10 +92,8 @@ def _make_config(
     """Build a MagicMock BacktestConfig with explicit attribute set.
 
     ``target_execution_exchange`` is set explicitly (None by default) so the
-    cross-asset-backtest attribution ternary introduced in Commit 1 takes
-    the ``event.exchange`` fallback branch when running this script against
-    the post-BE-1 codebase. Pre-BE-1 the engine does not read the attribute
-    so the assignment is harmless.
+    cross-asset-backtest attribution ternary takes the ``event.exchange``
+    fallback branch.
     """
     config = MagicMock(spec=BacktestConfig)
     config.timeframe = "1h"
@@ -273,7 +270,7 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(name="warmup_gated_signal_dropped", run=_scenario_warmup_gated_signal_dropped),
     Scenario(name="signal_emitted_fill_skipped", run=_scenario_signal_emitted_fill_skipped),
 )
-"""Public scenario registry. Imported by Commit 3 TestPhase2cBaselineParity."""
+"""Public scenario registry. Imported by ``TestPhase2cBaselineParity``."""
 
 
 def _serialise_signal(row: dict[str, Any]) -> dict[str, Any]:

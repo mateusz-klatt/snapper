@@ -1,11 +1,10 @@
 """Tests for the manual-order ``ai_review_public_id`` citation validator.
 
-Plan D Phase 2 #10 R1 — closes the unauthorized citation gap on the
-manual-order entry points (MCP ``submit_manual_order`` + REST
-``POST /api/orders``). Without this validator, any authenticated
-caller could supply an arbitrary ``ai_review_public_id`` to trigger
-``bus.caps_violation_after_ai_approve`` fanout to other delegates'
-UIs (info leak + fanout spam).
+Closes the unauthorized citation gap on the manual-order entry points
+(MCP ``submit_manual_order`` + REST ``POST /api/orders``). Without
+this validator, any authenticated caller could supply an arbitrary
+``ai_review_public_id`` to trigger ``bus.caps_violation_after_ai_approve``
+fanout to other delegates' UIs (info leak + fanout spam).
 """
 
 from datetime import UTC
@@ -211,7 +210,7 @@ async def test_non_approved_status_raises_citation_error(
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
 async def test_strategy_validator_happy_path_returns_row(tmp_path: Path) -> None:
-    """Plan D Phase 3 §2.1 — strategy validator returns the cited row.
+    """Strategy validator returns the cited row.
 
     Given a resolved_approved ai_review whose wallet matches the
     submission's,
@@ -236,7 +235,7 @@ async def test_strategy_validator_happy_path_returns_row(tmp_path: Path) -> None
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
 async def test_strategy_validator_unknown_review_raises(tmp_path: Path) -> None:
-    """Plan D Phase 3 §2.1 — missing row raises AiReviewCitationError.
+    """Missing row raises AiReviewCitationError.
 
     Given: a fresh repo with no ai_reviews rows,
     When: the strategy validator is called with a fabricated UUID7,
@@ -258,7 +257,7 @@ async def test_strategy_validator_unknown_review_raises(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
 async def test_strategy_validator_wallet_mismatch_raises(tmp_path: Path) -> None:
-    """Plan D Phase 3 §2.1 — wallet mismatch raises citation error.
+    """Wallet mismatch raises citation error.
 
     Given: a resolved_approved ai_review for wallet A,
     When: the strategy validator is called with expected wallet B,
@@ -290,14 +289,14 @@ async def test_strategy_validator_wallet_mismatch_raises(tmp_path: Path) -> None
 async def test_strategy_validator_non_approved_status_raises(
     tmp_path: Path, non_approved_status: str
 ) -> None:
-    """Plan D Phase 3 §2.1 — non-approved status raises citation error.
+    """Non-approved status raises citation error.
 
     Given: an ai_review row in any non-approved status (pending,
         fanout_dispatched, resolved_rejected, timeout, superseded),
     When: the strategy validator runs against the row,
     Then: AiReviewCitationError fires with a "cannot authorize a
         strategy emit" message. Closes the supersede-after-await
-        race where the Phase 1 #3 reaper / scanner transitioned the
+        race where the reaper / scanner transitioned the
         row away from resolved_approved between the strategy's
         ``await create_ai_review_and_await`` and its emit — without
         this status check the AI gate would happily accept a
@@ -323,7 +322,7 @@ async def test_strategy_validator_non_approved_status_raises(
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
 async def test_strategy_validator_ignores_dispatch_version_mismatch(tmp_path: Path) -> None:
-    """Plan D Phase 3 §2.6 — dispatch_version is TRANSPORT-ONLY.
+    """dispatch_version is TRANSPORT-ONLY.
 
     Given a resolved_approved ai_review with dispatch_version=0 (the
     seed default),
@@ -331,7 +330,7 @@ async def test_strategy_validator_ignores_dispatch_version_mismatch(tmp_path: Pa
     ai_review_dispatch_version=99 on the submission and the validator
     runs,
     Then the validator does NOT compare versions; it returns the row
-    silently. Q18 dedup is enforced at the bus publisher
+    silently. Dedup is enforced at the bus publisher
     (_publish_caps_violation_after_ai_approve reads the row's
     dispatch_version at publish time), not in this validator.
 

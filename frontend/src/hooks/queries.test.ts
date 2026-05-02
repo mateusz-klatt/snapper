@@ -2013,7 +2013,7 @@ describe('queries', () => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['ai-delegates', 'd-1'] })
     })
   })
-  describe('AI Reviews hooks (Plan D Phase 2 #11)', () => {
+  describe('AI Reviews hooks', () => {
     it('usePendingAiReviews stays disabled when caller is not an AI delegate', async () => {
       vi.mocked(useAuth).mockReturnValueOnce({
         isAuthenticated: true,

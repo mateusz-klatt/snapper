@@ -439,7 +439,7 @@ async def list_backtests(
     config_hash: Annotated[
         str | None,
         Query(
-            description="Phase 2c pairing-stable hash filter (64-hex SHA-256)",
+            description="Pairing-stable config-hash filter (64-hex SHA-256)",
             pattern=r"^[0-9a-f]{64}$",
         ),
     ] = None,

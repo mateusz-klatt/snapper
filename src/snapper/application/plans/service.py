@@ -197,7 +197,7 @@ class PlanExecutorService(RegisterableProcess):
         logger.info("PlanExecutorService: subscribed to orders.events. and market.")
 
     def _setup_publisher(self) -> None:
-        """Create ZMQ publisher for the ``plans.decisions.*`` topic family (§D6.2).
+        """Create ZMQ publisher for the ``plans.decisions.*`` topic family.
 
         Self-bootstrapped from ``settings.zmq_broker_xsub`` following
         the ``TraderCoordinator`` / ``BalanceService`` / ``SettingsService``
@@ -205,14 +205,13 @@ class PlanExecutorService(RegisterableProcess):
         ``application/services/settings.py:232-236``). ``PlanExecutorService``
         does not receive a DI-injected publisher because
         ``process_manager/launcher.py:291`` instantiates processes via
-        ``process_class(**validated_params)`` without a DI container
-        (Plan 2 v1.12 R10.B-4 closure).
+        ``process_class(**validated_params)`` without a DI container.
 
         Short-circuits when ``zmq_broker_xsub`` is not a real string
         (MagicMock in unit tests), leaving ``self._publisher = None``.
         ``_log_decision`` tolerates this by skipping the publish step —
         the DB insert remains the source of truth (best-effort emit
-        per §D6.2 fail-closed semantics).
+        with fail-closed semantics).
         """
         broker_addr = getattr(self.settings, "zmq_broker_xsub", None)
         if not isinstance(broker_addr, str) or not broker_addr:
@@ -794,7 +793,7 @@ class PlanExecutorService(RegisterableProcess):
         reason: str,
         triggered_at: datetime,
     ) -> None:
-        """Best-effort publish of the ``plans.decisions.{plan_public_id}`` event (§D6.2).
+        """Best-effort publish of the ``plans.decisions.{plan_public_id}`` event.
 
         DB insert is the source of truth — publish failure logs
         ``logger.warning`` and returns without raising so the caller

@@ -345,7 +345,7 @@ class TestReplayPublisher:
     async def test_published_candle_carries_topic_field(self) -> None:
         """Real (non-warmup) candle payloads carry ``topic`` matching the wire topic.
 
-        Phase 2 chokepoint contract: the replay publisher routes every
+        Chokepoint contract: the replay publisher routes every
         ``StrictDataSchema``-derived send through ``publish_to(topic)``,
         so consumers see the routing key on the payload itself instead
         of having to read the ZMQ frame header.

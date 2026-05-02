@@ -5,17 +5,17 @@ BTC-USD) actually trades BTC-USD on the configured target venue
 (``kraken``) when backtested under the new
 ``BacktestConfig.target_execution_exchange`` contract — not on the source
 TradFi feed (``kraken_equities``). This is the objective acceptance
-criterion for BE-2 per plan Commit 2.
+criterion for BE-2.
 
 ``snapper.strategies.models.is_tradeable`` is patched to True because
 ``DirectDbEngine.run`` currently hardcodes ``StrategyConfig.outputs`` to
 every instrument from ``BacktestConfig.instruments`` (source feed +
 target feed combined) and then ``_validate_output_instruments`` rejects
 MNQU6-CME as non-tradeable on paper. Widening the output derivation to
-only the target instrument is pre-existing drift tracked under plan
-§D10 (non-goal v1 — REST API + engine output construction stay
-single-feed; cross-asset runs targeted via direct BacktestConfig use);
-this test focuses strictly on the BE-1 attribution invariants.
+only the target instrument is pre-existing drift (non-goal v1 — REST
+API + engine output construction stay single-feed; cross-asset runs
+targeted via direct BacktestConfig use); this test focuses strictly on
+the BE-1 attribution invariants.
 """
 
 from datetime import UTC

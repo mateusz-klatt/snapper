@@ -1,13 +1,13 @@
-"""Tests for the Plan D §8 strategy-side await primitive.
+"""Tests for the strategy-side await primitive.
 
 Covers :func:`create_ai_review_and_await` end-to-end against a real
-SQLite repository so the full Plan A §7.1 await loop (DB poll + Future
-fast path + inline timeout) is exercised.
+SQLite repository so the full await loop (DB poll + Future fast path
++ inline timeout) is exercised.
 
 The primitive itself is a thin compose over already-shipped service
-methods (Phase 1 #1 ``create_review`` + Phase 1 #6 ``timeout_review``)
-plus the existing futures registry on the singleton — these tests
-focus on the await-loop semantics, not the underlying state machine.
+methods (``create_review`` + ``timeout_review``) plus the existing
+futures registry on the singleton — these tests focus on the
+await-loop semantics, not the underlying state machine.
 """
 
 import asyncio
@@ -321,7 +321,7 @@ async def test_reject_path_returns_resolved_rejected(
 ) -> None:
     """Reject landed via concurrent task -> outcome carries RESOLVED_REJECTED.
 
-    Plan A Q12 — strategy MUST treat reject as a VETO (no fall-through).
+    Strategy MUST treat reject as a VETO (no fall-through).
 
     Given a background task that rejects after 0.2s,
     When the strategy primitive runs,
@@ -438,7 +438,7 @@ async def test_no_live_delegate_propagates_from_create_review(
     Given a seeded scope graph WITHOUT any live delegate,
     When the primitive invokes create_review,
     Then the error propagates BEFORE the await loop runs (so the
-    strategy can fall through per Plan A Q3).
+    strategy can fall through).
     """
     now = _now()
     user_public_id = str(uuid7())
@@ -495,8 +495,8 @@ async def test_future_resolved_externally_skips_remaining_poll(
 ) -> None:
     """Pre-resolved future short-circuits the await loop.
 
-    Plan A §7.1 fast path — when the (future-deferred) bus listener
-    fires bus.ai_review_decision and resolves the registered Future,
+    Fast path — when the (future-deferred) bus listener fires
+    bus.ai_review_decision and resolves the registered Future,
     the primitive exits the wait_for early. Because the bus listener
     isn't wired yet, we simulate the path by resolving the future
     directly.

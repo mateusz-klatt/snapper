@@ -1,10 +1,11 @@
-"""Cluster B/C alignment integration test (plan §7.6).
+"""DB-stats / retention alignment integration test.
 
-Pins the exact-equality contract between Cluster B's per-table
-``archivable`` counter and Cluster C's dry-run ``archived_rows``: for
-the same policy + same ``today_utc`` they MUST count the same rows.
-Drift here would mean operators see one number on the dashboard and a
-different number in the next retention cycle's summary.
+Pins the exact-equality contract between the per-table
+``archivable`` counter and the retention dry-run ``archived_rows``:
+for the same policy + same ``today_utc`` they MUST count the same
+rows. Drift here would mean operators see one number on the
+dashboard and a different number in the next retention cycle's
+summary.
 
 Strategy: seed an isolated SQLite DB with telemetry rows split between
 in-window (policy retention range) and out-of-window (today /
@@ -46,7 +47,7 @@ def _telemetry_entry() -> TableEntry:
 
 
 class TestClusterBCAlignment:
-    """Plan §7.6 — same window, same archivable count between B and C."""
+    """Same window, same archivable count between sampler and retention."""
 
     @pytest.mark.asyncio
     async def test_archivable_count_equals_archived_rows_for_telemetry_policy(
@@ -148,12 +149,12 @@ class TestClusterBCAlignment:
     async def test_boundary_edges_agree_between_b_and_c(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Plan §7.6 boundary edge cases: both sides count the same edge rows.
+        """Boundary edge cases: both sides count the same edge rows.
 
         Seed 3 telemetry rows at the exact half-open window edges:
         ``day_start 00:00 UTC`` (INCLUDED), ``day_end 23:59:59 UTC``
         (INCLUDED), ``day_end + 1d 00:00 UTC`` (EXCLUDED). Both
-        Cluster B's ``count_table_stats`` and Cluster C's
+        the per-table ``count_table_stats`` and the retention
         ``evaluate_policy(dry_run=True)`` MUST count exactly 2.
         """
         db_path = tmp_path / "boundary.db"

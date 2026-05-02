@@ -37,10 +37,10 @@ const Column: React.FC<ColumnProps> = ({ title, entries, testId }) => (
 )
 
 /**
- * Phase 2c signals diff list — three columns split by `entry.leg`
+ * Signals diff list — three columns split by `entry.leg`
  * (`common`, `a` ↔ only_in_a, `b` ↔ only_in_b). Counts in headers.
  * Schema has only instrument / signal_time / signal_type / leg —
- * NO confidence field (R1 C fix).
+ * NO confidence field.
  */
 export const SignalsDiffList: React.FC<Props> = ({ entries }) => {
   const { common, onlyA, onlyB } = useMemo(() => {

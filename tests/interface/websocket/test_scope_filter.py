@@ -1,4 +1,4 @@
-"""Tests for the Plan D §9 + Q15 per-frame ``ai_reviews.*`` scope filter.
+"""Tests for the per-frame ``ai_reviews.*`` scope filter.
 
 Covers :func:`snapper.interface.websocket.handlers.subscribe.enforce_ai_review_scope`
 end-to-end: pass-through for unrelated topics, drop on missing /
@@ -64,9 +64,9 @@ def _clear_scope_singleton() -> Any:
 async def test_passes_through_non_ai_review_topic() -> None:
     """Non-``ai_reviews.*`` topics short-circuit to True.
 
-    Plan D §9 + Q15 — the filter only owns the AI-review family.
-    Other categories (market, signals, orders, etc.) have their own
-    subscribe-time RBAC + wallet narrowing.
+    The filter only owns the AI-review family. Other categories
+    (market, signals, orders, etc.) have their own subscribe-time
+    RBAC + wallet narrowing.
 
     Given any frame whose topic does not start with ``ai_reviews.``,
     When enforce_ai_review_scope evaluates,
@@ -108,9 +108,9 @@ async def test_drops_when_principal_missing() -> None:
 async def test_drops_when_principal_lacks_delegate_id() -> None:
     """OPERATOR / VIEWER (no delegate row) -> drop the frame.
 
-    Plan A Q19 + Plan D §9 — the scope-grant check is delegate-keyed;
-    a non-delegate principal that somehow subscribed cannot evaluate
-    so we play it safe and drop.
+    The scope-grant check is delegate-keyed; a non-delegate principal
+    that somehow subscribed cannot evaluate so we play it safe and
+    drop.
 
     Given an OPERATOR principal with no ``delegate_public_id``,
     When the filter evaluates,

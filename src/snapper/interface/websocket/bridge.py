@@ -751,7 +751,7 @@ class ZmqWebSocketBridgeService:
         topic: str,
         payload: Mapping[str, Any],
     ) -> bool:
-        """Plan D §9 + Q15 per-frame scope filter for the ``ai_reviews.*`` family.
+        """Per-frame scope filter for the ``ai_reviews.*`` family.
 
         Resolves the destination socket's principal via the
         :class:`WebSocketAuthManager` singleton + delegates to

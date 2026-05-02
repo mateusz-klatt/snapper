@@ -1,4 +1,4 @@
-"""Tests for ``snapper.application.notify.scope_revalidation.ScopeRevalidator`` (§D8)."""
+"""Tests for ``snapper.application.notify.scope_revalidation.ScopeRevalidator``."""
 
 from datetime import UTC
 from datetime import datetime

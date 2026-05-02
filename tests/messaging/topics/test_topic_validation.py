@@ -3716,7 +3716,7 @@ class TestAccrualsTopicValidation:
 
 
 class TestBacktestTopicFamily:
-    """Phase 2c backtest topic validator coverage."""
+    """Backtest topic validator coverage."""
 
     _WALLET = "01948f94-0001-7a00-8000-000000000001"
     _RUN = "01948f94-0001-7a00-8000-000000000002"
@@ -3794,7 +3794,7 @@ class TestBacktestTopicFamily:
 
 
 class TestAlertsTopicValidation:
-    """Tests for ``_validate_alerts_topic`` (iOS Push Foundation §D4)."""
+    """Tests for ``_validate_alerts_topic`` (iOS Push Foundation)."""
 
     _USER = "019dbb34-f439-77bd-afa8-ee5321d60307"
 
@@ -3881,7 +3881,7 @@ class TestAlertsTopicValidation:
 
 
 class TestPlansDecisionsTopicValidation:
-    """Tests for ``_validate_plans_decisions_topic`` (§D6.2 — BE-3b)."""
+    """Tests for ``_validate_plans_decisions_topic``."""
 
     _PLAN = "019dbb34-f439-77bd-afa8-ee5321d60307"
 
@@ -3939,14 +3939,12 @@ class TestPlansDecisionsTopicValidation:
 
 
 class TestAiReviewsTopicValidation:
-    """Tests for ``_validate_ai_reviews_topic`` (Plan A §4.3 / Plan D §4.3).
+    """Tests for ``_validate_ai_reviews_topic``.
 
     The ``ai_reviews.`` prefix is in :data:`TOPIC_REGISTRY` (subscriber
-    side), but until Phase 1 #8 fix-up the dispatcher had no matching
-    publish-side validator — so ``MessagePublisher.send`` raised
-    :class:`TopicValidationError` for every legitimate
-    ``ai_reviews.{user}.{strategy}.caps_violation`` fanout. These cases
-    pin the validator's contract.
+    side); the dispatcher's matching publish-side validator pins the
+    legitimate ``ai_reviews.{user}.{strategy}.caps_violation`` fanout.
+    These cases pin the validator's contract.
     """
 
     _USER = "019dbb34-f439-77bd-afa8-ee5321d60307"
@@ -3961,7 +3959,7 @@ class TestAiReviewsTopicValidation:
         assert err == ""
 
     def test_valid_request_and_decision_ack_suffixes(self) -> None:
-        """All three Q16 frame suffixes accepted (request / decision_ack / caps_violation)."""
+        """All three frame suffixes accepted (request / decision_ack / caps_violation)."""
         for suffix in ("request", "decision_ack", "caps_violation"):
             topic = f"ai_reviews.{self._USER}.{self._STRATEGY}.{suffix}"
             valid, err = _validate_ai_reviews_topic(topic)
@@ -4006,7 +4004,7 @@ class TestAiReviewsTopicValidation:
         assert "segment 3" in err
 
     def test_unknown_suffix_rejected(self) -> None:
-        """Suffix must be one of the three Q16 frame discriminators."""
+        """Suffix must be one of the three frame discriminators."""
         valid, err = _validate_ai_reviews_topic(f"ai_reviews.{self._USER}.{self._STRATEGY}.bogus")
         assert not valid
         assert "segment 4" in err
@@ -4021,19 +4019,19 @@ class TestAiReviewsTopicValidation:
         """Bridge / handler subscriber side accepts the registry prefix.
 
         The bridge subscribes to the registry root via
-        ``validate_subscription_pattern("ai_reviews.")`` per Plan D §9
-        + Phase 1 #7 wiring; the validator-side allowlist must still
-        accept this prefix for the subscribe path even though the
-        publish path goes through the stricter 4-segment check above.
+        ``validate_subscription_pattern("ai_reviews.")``; the
+        validator-side allowlist must still accept this prefix for
+        the subscribe path even though the publish path goes through
+        the stricter 4-segment check above.
         """
         valid, err = validate_subscription_pattern("ai_reviews.")
         assert valid, err
 
     def test_frame_suffix_set_matches_q16_contract(self) -> None:
-        """The validator's suffix set matches the Plan A §4.2 / Q16 contract.
+        """The validator's suffix set matches the WS frame contract.
 
-        Plan A §4.2 line 472-473 fixes the three external WS frame
-        types at ``ai_review.request`` / ``ai_review.decision_ack`` /
+        The three external WS frame types are
+        ``ai_review.request`` / ``ai_review.decision_ack`` /
         ``ai_review.caps_violation``. The topic-suffix set drops the
         ``ai_review.`` prefix on the wire (the topic family is already
         ``ai_reviews.`` plural) but otherwise stays in lockstep.
@@ -4044,11 +4042,10 @@ class TestAiReviewsTopicValidation:
 class TestBusTopicValidation:
     """Tests for ``_validate_bus_topic`` (internal cross-service event bus).
 
-    Closes the parallel topic-validation gap that left
-    ``bus.delegate_offline`` unable to publish through the real
-    :class:`MessagePublisher` — without this validator, every Phase 1 #2
-    layer-1 fast-path publish would have raised
-    :class:`TopicValidationError`.
+    Closes the topic-validation gap that left ``bus.delegate_offline``
+    unable to publish through the real :class:`MessagePublisher` —
+    without this validator, every layer-1 fast-path publish would
+    have raised :class:`TopicValidationError`.
     """
 
     def test_valid_bus_topic(self) -> None:
@@ -4100,8 +4097,8 @@ class TestBusTopicValidation:
 class TestAlertTypeParity:
     """Parity between the three ``alert_type`` definition sites.
 
-    Closes Copilot BE-2 recommendation: the five alert_type strings
-    live in three places (``AlertType`` Literal, ``_ALERT_TYPES``
+    The five alert_type strings live in three places
+    (``AlertType`` Literal, ``_ALERT_TYPES``
     frozenset, ``DeviceAlertPrefBody.alert_type`` wire Literal). The
     validator's frozenset is now *derived* from ``AlertType`` via
     ``typing.get_args`` so those two are automatically in sync; the

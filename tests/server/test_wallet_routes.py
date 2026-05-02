@@ -1,4 +1,4 @@
-"""Tests for the Phase 0d wallet catalogue read + create routes.
+"""Tests for the wallet catalogue read + create routes.
 
 Exercises:
 

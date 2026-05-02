@@ -1438,7 +1438,7 @@ class TestGetCurrentUser:
     ) -> None:
         """AI_DELEGATE role -> ``AuthPrincipal.delegate_public_id`` populated.
 
-        Plan D Q19 contract: the AI_DELEGATE auth chain MUST forward
+        The AI_DELEGATE auth chain MUST forward
         ``ai_delegates.public_id`` onto the principal so downstream
         routes (``GET /api/ai-reviews/pending``, the WS hysteresis
         hooks) can key on the delegate identity without re-querying.
@@ -1724,7 +1724,7 @@ class TestResourcePermissions:
 
 
 class TestMultiTenantPermissions:
-    """Tests for the Phase 0d multi-tenant permission additions.
+    """Tests for the multi-tenant permission additions.
 
     These four permissions guard frontend admin tabs and impersonation
     flows. They are ADMIN-only (VIEWER + OPERATOR must NOT receive
@@ -1739,7 +1739,7 @@ class TestMultiTenantPermissions:
         """ADMIN receives every new multi-tenant permission.
 
         Given: ``ROLE_PERMISSIONS[ADMIN]``,
-        When: Checking for the four Phase 0d permissions,
+        When: Checking for the four multi-tenant permissions,
         Then: All four are present in the ADMIN set.
         """
         admin_perms = ROLE_PERMISSIONS[UserRole.ADMIN]
@@ -1752,7 +1752,7 @@ class TestMultiTenantPermissions:
         """VIEWER must never hold any multi-tenant permission.
 
         Given: ``ROLE_PERMISSIONS[VIEWER]``,
-        When: Checking for the four Phase 0d permissions,
+        When: Checking for the four multi-tenant permissions,
         Then: None of them are present.
         """
         viewer_perms = ROLE_PERMISSIONS[UserRole.VIEWER]
@@ -1765,7 +1765,7 @@ class TestMultiTenantPermissions:
         """OPERATOR must never hold any multi-tenant permission.
 
         Given: ``ROLE_PERMISSIONS[OPERATOR]``,
-        When: Checking for the four Phase 0d permissions,
+        When: Checking for the four multi-tenant permissions,
         Then: None of them are present (multi-tenant administration
             is reserved for ADMIN).
         """
@@ -1778,7 +1778,7 @@ class TestMultiTenantPermissions:
     def test_permission_values_follow_resource_action_pattern(self) -> None:
         """New permission values follow the ``resource:action`` convention.
 
-        Given: The four Phase 0d permission enum values,
+        Given: The four multi-tenant permission enum values,
         When: Comparing them to the established naming,
         Then: Each is a colon-separated ``resource:action`` string.
         """

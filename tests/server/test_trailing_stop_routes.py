@@ -622,7 +622,7 @@ class TestCancelTrailingStop:
         When: the client POSTs to the cancel endpoint,
         Then: the response is HTTP 422 with a JSON detail carrying
             ``error_code='caps_violation'`` + the enforcer's
-            ``cap_type``/``attempted``/``limit`` — proves the §9.2
+            ``cap_type``/``attempted``/``limit`` — proves the
             error mapping in the cancel path is wired end-to-end.
         """
         repo = AsyncMock()

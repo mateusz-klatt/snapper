@@ -136,7 +136,7 @@ async def _enforce_ai_delegate_wallet_scope(
        :func:`parse_wallet_scoped_topic`.
     3. Passes non-wallet-scoped topics through unchanged (market,
        system, backtest, accruals, admin, and the ``signals.paper.*``
-       sandbox per §D2).
+       sandbox).
     4. Allows wallet-scoped topics whose pair is in the delegate's
        set; denies everything else so they surface as
        ``topic_outside_scope`` in the response envelope.

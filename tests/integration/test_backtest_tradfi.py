@@ -1,7 +1,7 @@
 """Observation-only backtest integration — TradFi (kraken_equities) symbols.
 
-Per plan_tradfi_market_data_p3.md v1.5 §2  + §5 item 18: backtest
-engines in this repo do NOT write to ``trade_commands`` / ``orders``
+Backtest engines in this repo do NOT write to
+``trade_commands`` / ``orders``
 — those are live-runtime surfaces. Backtest artifacts live on the
 in-memory ``ResultCollector`` (and, after the runner persists, on
 ``backtest_signals`` / ``backtest_trades`` / ``backtest_equity_points``).

@@ -1,4 +1,4 @@
-"""Tests for ``OrderFillFullRule`` (§D6.1 Rule 1)."""
+"""Tests for ``OrderFillFullRule``."""
 
 from datetime import UTC
 from datetime import datetime

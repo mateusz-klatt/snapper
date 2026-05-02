@@ -589,7 +589,7 @@ class TestServerProxyProperties:
 
 
 class TestCoordinatorPartitioningProperties:
-    """Phase 4 ``coordinator_*`` delegate properties on :class:`AppSettings`.
+    """``coordinator_*`` delegate properties on :class:`AppSettings`.
 
     The bootstrap field types differ from the :class:`AppSettings`
     return types for ``coordinator_outbox_max_scan_rows`` (bootstrap

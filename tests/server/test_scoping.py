@@ -1,4 +1,4 @@
-"""Tests for the Phase 0d multi-tenant wallet scoping helper.
+"""Tests for the multi-tenant wallet scoping helper.
 
 ``resolve_target_wallets`` is the single function that every scoped
 list endpoint calls to derive the ``wallet_public_ids`` filter from

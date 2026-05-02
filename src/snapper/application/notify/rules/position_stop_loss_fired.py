@@ -1,4 +1,4 @@
-"""``position_stop_loss_fired`` rule — fires on bracket/trailing stop loss (§D6.1 Rule 3)."""
+"""``position_stop_loss_fired`` rule — fires on bracket/trailing stop loss."""
 
 from datetime import datetime
 
@@ -18,8 +18,8 @@ _KNOWN_LOSS_REASONS: frozenset[str] = frozenset({"sl_hit", "trailing_stop_hit"})
 class PositionStopLossFiredRule(AlertRule):
     """High-priority alert on bracket or trailing-stop loss firings.
 
-    Subscribes on the ``plans.decisions.*`` topic family (new in
-    BE-3b §D6.2) and filters the free-form ``reason`` field to the
+    Subscribes on the ``plans.decisions.*`` topic family
+    and filters the free-form ``reason`` field to the
     two known-loss values — ``"sl_hit"`` from
     ``src/snapper/application/plans/bracket.py`` + ``"trailing_stop_hit"``
     from ``src/snapper/application/plans/trailing_stop.py``. ``"tp_hit"``

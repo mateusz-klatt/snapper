@@ -21,7 +21,7 @@ const STATUS_COLOR: Record<string, string> = {
 const formatDate = (iso: string): string => new Date(iso).toLocaleDateString()
 
 /**
- * Phase 2c backtest detail page.
+ * Backtest detail page.
  *
  * Fetches the full run row so CompareLauncher can read currentRun.status
  * + currentRun.config_hash for terminal-status gating + auto-pair gating

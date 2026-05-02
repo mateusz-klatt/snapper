@@ -1,4 +1,4 @@
-"""Plan D §8 strategy-side await primitive for CONSULT reviews.
+"""Strategy-side await primitive for CONSULT reviews.
 
 This module owns the single async entry point strategies invoke to
 issue + await an AI-delegate CONSULT round:
@@ -13,12 +13,12 @@ issue + await an AI-delegate CONSULT round:
     if decision.status is AiReviewStatusEnum.RESOLVED_APPROVED:
         ...  # proceed with trade
     elif decision.status is AiReviewStatusEnum.RESOLVED_REJECTED:
-        ...  # VETO per Plan A Q12 — abort, no trade
+        ...  # VETO — abort, no trade
     else:
         ...  # timeout / superseded -> fall through to non-AI decision
 
 The primitive composes :meth:`AiReviewService.create_review` with the
-Plan A §7.1 await loop:
+await loop:
 
 - **Fast path (deferred wiring)** — :meth:`AiReviewService.register_future`
   registers an :class:`asyncio.Future` keyed on ``review_public_id``.
@@ -28,7 +28,7 @@ Plan A §7.1 await loop:
   this is a separate chunk; until it lands the future stays unset
   and the slow path is the primary completion signal.
 - **Slow path** — DB poll every ``poll_min_seconds`` to
-  ``poll_max_seconds`` (jittered 3-7s default per Plan A §7.1).
+  ``poll_max_seconds`` (jittered 3-7s default).
   ``Repository.get_ai_review`` returns the row; once status reaches
   one of the terminal sentinels the loop exits with
   :class:`AiReviewDecisionOutcome`.
@@ -65,7 +65,7 @@ from snapper.data.repository_types import AiReviewRow
 
 DEFAULT_POLL_MIN_SECONDS = 3.0
 DEFAULT_POLL_MAX_SECONDS = 7.0
-"""Plan A §7.1 jittered DB poll window for the slow path.
+"""Jittered DB poll window for the slow path.
 
 3-7s keeps DB load bounded under fleet-wide CONSULT bursts while
 still bounding the worst-case strategy wake latency to one window
@@ -101,10 +101,10 @@ async def create_ai_review_and_await(
     poll_min_seconds: float = DEFAULT_POLL_MIN_SECONDS,
     poll_max_seconds: float = DEFAULT_POLL_MAX_SECONDS,
 ) -> AiReviewDecisionOutcome:
-    """Plan D §8 — create + await a CONSULT review end-to-end.
+    """Create + await a CONSULT review end-to-end.
 
-    Composes :meth:`AiReviewService.create_review` with the Plan A
-    §7.1 await loop (DB poll + Future registration + inline timeout).
+    Composes :meth:`AiReviewService.create_review` with the
+    await loop (DB poll + Future registration + inline timeout).
     On a deadline crossing with the row still non-terminal the
     primitive transitions the row to ``timeout`` itself so the
     strategy never sees a hung await.
@@ -116,17 +116,16 @@ async def create_ai_review_and_await(
             their context already holds — the primitive lives outside
             :class:`BaseStrategy` because the strategy class has no
             DB handle in its inheritance chain.
-        deadline_seconds: Override for ``request.deadline_seconds`` —
-            kept here for symmetry with the Plan D §8 spec signature
+        deadline_seconds: Override for ``request.deadline_seconds``
             (the request also carries deadline_seconds). The primitive
             uses this value for both the row's deadline AND the
             local await loop's wall-clock cutoff.
         ai_service: Optional :class:`AiReviewService` injection point;
             defaults to the process-wide singleton.
         poll_min_seconds: Lower bound of the jittered DB-poll
-            interval. Plan A §7.1 default 3s.
+            interval. Default 3s.
         poll_max_seconds: Upper bound of the jittered DB-poll
-            interval. Plan A §7.1 default 7s.
+            interval. Default 7s.
 
     Returns:
         :class:`AiReviewDecisionOutcome` with the terminal row state.
@@ -137,8 +136,8 @@ async def create_ai_review_and_await(
         DelegateBusyError: All eligible delegates have an in-flight
             review. Strategy falls through.
         SignalEnvelopeTooLargeError: Canonical-JSON > 16KB cap.
-        ValueError: Non-finite floats in the envelope (Plan A §3
-            risk-register guard).
+        ValueError: Non-finite floats in the envelope
+            (risk-register guard).
     """
     service = ai_service if ai_service is not None else get_ai_review_service()
     request_for_creation = (
@@ -193,7 +192,7 @@ async def _await_terminal_state(
     poll_min_seconds: float,
     poll_max_seconds: float,
 ) -> AiReviewDecisionOutcome:
-    """Drive the Plan A §7.1 await loop to a terminal outcome.
+    """Drive the await loop to a terminal outcome.
 
     Each iteration: read the row, return immediately if terminal;
     else if the deadline has crossed, transition the row to timeout

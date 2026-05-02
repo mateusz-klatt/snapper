@@ -279,7 +279,7 @@ async def two_coordinator_stack(
 
     Both coordinators share the same ZMQ broker + SQLite DB. Each is
     constructed with its own ``coordinator_instance_id`` (0, 1) via
-    the Phase 4 ``settings=`` kwarg on ``TraderCoordinator.__init__``.
+    the ``settings=`` kwarg on ``TraderCoordinator.__init__``.
     The fixture reuses :func:`_patch_settings_for_e2e` for broker +
     executor + module-level ``_bootstrap_settings`` patching
     (essential — ``_setup_signal_subscriber`` reads the module-level
@@ -288,9 +288,8 @@ async def two_coordinator_stack(
 
     Readiness: gives the broker proxy thread + both coordinator
     subscribers time to establish subscriptions before yielding.
-    Simpler than the plan's canary-driven barrier; the same
-    ``_wait_for_executor_subscription`` sleep-based approach works
-    for the Phase 4 integration tests because they publish after the
+    The ``_wait_for_executor_subscription`` sleep-based approach works
+    for these integration tests because they publish after the
     yield (giving the subscribers extra time beyond the initial
     sleep).
     """

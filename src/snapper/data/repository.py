@@ -900,9 +900,9 @@ class Repository(ABC):
             symbol: Optional native symbol filter.
             exchange: Optional exchange filter.
             status: Optional ``OrderStatusEnum`` filter pushed INTO SQL
-                (Plan B v1.2 §1.4 — was post-fetch in v1.0 which broke
-                pagination because limit/offset clipped before the
-                filter could discard non-matching rows).
+                (must run pre-pagination — post-fetch filtering breaks
+                pagination because limit/offset clip before the filter
+                can discard non-matching rows).
             wallet_public_ids: Optional wallet scope filter for
                 multi-tenant scoping. When ``None``, no wallet filter is
                 applied (ADMIN sees all). When a non-empty list, only
@@ -910,9 +910,9 @@ class Repository(ABC):
 
         Returns:
             Order dicts ordered by created_at DESC, denormalized with
-            instrument and symbol info plus ``plan_public_id`` (Plan B
-            v1.2 §1.4 — needed by MCP ``get_order_status`` to resolve
-            the parent execution plan without a second round-trip).
+            instrument and symbol info plus ``plan_public_id`` (needed
+            by MCP ``get_order_status`` to resolve the parent execution
+            plan without a second round-trip).
         """
         ...
 
@@ -953,8 +953,8 @@ class Repository(ABC):
     ) -> OrderRow | None:
         """Resolve an order from its triggering trade-command public_id.
 
-        ``Order`` rows do NOT carry ``command_public_id`` directly
-        (Plan B v1.2 §1.4 / Sonnet N3); the link is via the parent
+        ``Order`` rows do NOT carry ``command_public_id`` directly;
+        the link is via the parent
         ``execution_plan``: ``trade_commands.public_id == :command``
         AND ``trade_commands.plan_public_id == orders.plan_public_id``.
         Implementation issues an internal JOIN on those columns.
@@ -1003,10 +1003,10 @@ class Repository(ABC):
     ) -> list[ExecutionRow]:
         """Return every execution row belonging to a single order.
 
-        Plan B v1.2 §1.4 fix per Codex MAJOR: filtering the generic
-        :meth:`get_executions` result by ``order_public_id`` would
-        silently omit fills if the wallet had ``limit`` newer fills on
-        unrelated orders. SQL-side filter is the only correct shape.
+        Filtering the generic :meth:`get_executions` result by
+        ``order_public_id`` would silently omit fills if the wallet had
+        ``limit`` newer fills on unrelated orders. SQL-side filter is
+        the only correct shape.
 
         Args:
             order_public_id: UUID7 of the parent ``orders`` row.
@@ -1644,8 +1644,8 @@ class Repository(ABC):
             completed_at: When plan completed.
             cancel_requested_at: When cancel was requested.
             last_evaluated_at: Last evaluation timestamp.
-            cancel_idempotency_key: Plan B v1.2 §1.4 — caller-supplied
-                dedup key for the cancel transition. ``None`` preserves
+            cancel_idempotency_key: Caller-supplied dedup key for the
+                cancel transition. ``None`` preserves
                 the existing column value on the new SCD2 row;
                 non-``None`` writes the supplied key (used by
                 :class:`PlansCancelService` to claim cancel idempotency).
@@ -1667,7 +1667,7 @@ class Repository(ABC):
     ) -> CancelClaimResult:
         """Atomically claim the cancel transition with CAS-style preconditions.
 
-        Plan B v1.2 §1.4 — locks the active execution-plan row, verifies
+        Locks the active execution-plan row, verifies
         the precondition (no key claimed yet, or matching caller key),
         and only then performs the SCD2 close-and-insert with the
         caller's ``idempotency_key`` written on the new row. Avoids the
@@ -2536,12 +2536,12 @@ class Repository(ABC):
         change between calls, so callers get an authoritative read.
 
         Implementation issues up to three sequential queries (grants,
-        optional mapping expansion, instrument+symbol JOIN). An earlier
-        draft of §D4 promised a single round-trip; the multi-query shape
-        was retained after Commit 2 review because the per-step JOIN is
-        cheaper than a CTE/UNION over four SCD2 tables when the first
-        query returns zero grants (the common case for operators that
-        hold no active grants at ``as_of``).
+        optional mapping expansion, instrument+symbol JOIN). The
+        multi-query shape is preferred over a single round-trip
+        because the per-step JOIN is cheaper than a CTE/UNION over
+        four SCD2 tables when the first query returns zero grants
+        (the common case for operators that hold no active grants at
+        ``as_of``).
 
         Args:
             operator_public_ids: Operator identity set (typically the
@@ -3004,7 +3004,7 @@ class Repository(ABC):
     ) -> list[AlertEventRow]:
         """Active ``alert_events`` matching user+dedup_key emitted at/after ``since``.
 
-        Used by the notify sidecar's rule-side dedup helper (§D6.1) to
+        Used by the notify sidecar's rule-side dedup helper to
         suppress duplicate alerts within a per-rule
         ``suppression_window_seconds`` — the table's
         ``ix_alert_events_dedup`` composite index
@@ -3031,7 +3031,7 @@ class Repository(ABC):
         """Active user ``public_id``s whose role grants ``permission``.
 
         Used by the notify sidecar's ``critical_system_error`` rule
-        (§D6.1 Rule 4) to fan the alert out to every admin — the
+        to fan the alert out to every admin — the
         rule emits one ``AlertEventInsertRow`` per returned user_id.
         Membership is derived from ``auth.domain.permissions.ROLE_PERMISSIONS``
         so the calling rule doesn't hard-code which roles count as
@@ -3055,7 +3055,7 @@ class Repository(ABC):
 
         Scope columns (user/operator/wallet) MUST be denormalised from
         the source alert_event at queue time and provided in the row —
-        they are what the scope-cancel path filters on (§D8).
+        they are what the scope-cancel path filters on.
         """
         ...
 
@@ -3139,7 +3139,7 @@ class Repository(ABC):
     ) -> bool:
         """SCD2 close + insert, status remains queued, bumps attempt_count.
 
-        Called BEFORE the APNs HTTP call (crash-safety §D5.5) so a
+        Called BEFORE the APNs HTTP call (crash-safety) so a
         mid-flight sidecar restart leaves a row with incremented
         attempt_count that is still retriable — bounded ≤1 duplicate
         send per crash.
@@ -3178,7 +3178,7 @@ class Repository(ABC):
         instrument_public_id: str,
         as_of: datetime,
     ) -> bool:
-        """Plan A v1.4 §1.1 + Plan D §10 — AI delegate scope check with underlying expansion.
+        """AI delegate scope check with underlying expansion.
 
         Resolves ``ai_delegates.public_id -> user_public_id``, then
         looks up the delegate's operator memberships
@@ -3190,17 +3190,17 @@ class Repository(ABC):
         instrument's underlying.
 
         Used by:
-        - Plan D §6 ``submit_ai_review_decision`` MCP tool (Q9 step
-          2 auth load + scope check).
-        - Plan D §9 per-frame ``enforce_ai_review_scope`` filter for
-          ``ai_reviews.*`` WS topic family (Q15).
-        - Plan D §3 ``AiReviewService.create_review`` for delegate
-          eligibility query (Q10 admission control candidate list).
+        - ``submit_ai_review_decision`` MCP tool (auth load + scope
+          check).
+        - Per-frame ``enforce_ai_review_scope`` filter for
+          ``ai_reviews.*`` WS topic family.
+        - ``AiReviewService.create_review`` for delegate eligibility
+          query (admission control candidate list).
 
         Args:
             delegate_public_id: ``ai_delegates.public_id`` (NOT the
                 delegate's ``users.public_id``; the operational table
-                holds its own UUID7 per Plan A §3.4 v1.3 lock).
+                holds its own UUID7).
             wallet_public_id: Wallet to check.
             instrument_public_id: Instrument to check (matched
                 directly for ``scope_kind='instrument'`` grants OR
@@ -3270,23 +3270,15 @@ class Repository(ABC):
         """
         ...
 
-    # ------------------------------------------------------------------
-    # AI Integration Phase B+C+D (Plan A v1.4 + Plan D v1.1) — CRUD primitives
-    # ------------------------------------------------------------------
-    # These are the foundational reads + inserts needed by AiReviewService
-    # (Plan D §3). Atomic state transitions (Q9 step 4 writable-CTE counter)
-    # + reaper UPDATE + offline scanner CAS live as service-layer methods
-    # that compose these primitives plus raw SQL via session().
-
     @abstractmethod
     async def get_ai_review(self, review_public_id: str) -> AiReviewRow | None:
         """Fetch a single :class:`AiReview` row by public_id.
 
         Returns ``None`` if no row exists. Used by:
-        - Plan D §3.2 ``submit_decision`` step 2 (load + scope check).
-        - Plan D §7.1 ``await_ai_review`` poll fallback (DB-backed
-          terminal status check on bus-loss / restart).
-        - Plan D §7 ``GET /api/ai-reviews/pending`` REST endpoint.
+        - ``submit_decision`` step 2 (load + scope check).
+        - ``await_ai_review`` poll fallback (DB-backed terminal
+          status check on bus-loss / restart).
+        - ``GET /api/ai-reviews/pending`` REST endpoint.
         """
         ...
 
@@ -3294,8 +3286,8 @@ class Repository(ABC):
     async def insert_ai_review(self, row: AiReviewInsertRow) -> str:
         """INSERT new :class:`AiReview` row; returns ``public_id``.
 
-        Used by Plan D §3.1 ``AiReviewService.create_review`` step
-        2e (ATOMIC transaction with Q10 counter increment +
+        Used by ``AiReviewService.create_review`` step 2e (ATOMIC
+        transaction with admission counter increment +
         ``ai_review_events`` append).
         """
         ...
@@ -3305,15 +3297,13 @@ class Repository(ABC):
         """Lookup operational :class:`AiDelegate` row by FK to users.
 
         Used by:
-        - Plan D §5 WS authenticate handler (populate
-          ``AuthPrincipal.delegate_public_id`` for AI_DELEGATE
-          users; Q19 lock).
-        - Plan D §3.2 Q9 step 1 caller delegate resolution.
+        - WS authenticate handler (populate
+          ``AuthPrincipal.delegate_public_id`` for AI_DELEGATE users).
+        - ``submit_decision`` caller delegate resolution.
 
         Returns ``None`` if no operational row exists. Strategy
         layer creates the row when the AI_DELEGATE user is minted
-        (per :class:`UserService.create_ai_delegate` extension in
-        Plan D §14 risk register migration).
+        (per :class:`UserService.create_ai_delegate`).
         """
         ...
 
@@ -3328,10 +3318,9 @@ class Repository(ABC):
         """INSERT new :class:`AiDelegate` operational row; returns ``public_id``.
 
         Called by ``UserService.create_ai_delegate`` in same DB
-        transaction as the new ``users`` row insert. Existing
-        AI_DELEGATE users (pre-Plan-D) get backfilled by data
-        migration step in 0001_init.py at next prod cutover (Plan D
-        §12 file matrix Sonnet M4 fix).
+        transaction as the new ``users`` row insert. Pre-existing
+        AI_DELEGATE users get backfilled by data migration step in
+        0001_init.py at next prod cutover.
         """
         ...
 
@@ -3339,13 +3328,13 @@ class Repository(ABC):
     async def update_delegate_last_seen(
         self, delegate_public_id: str, last_seen_at: datetime
     ) -> None:
-        """Update ``ai_delegates.last_seen_at`` for Q17 hysteresis.
+        """Update ``ai_delegates.last_seen_at`` for reconnect hysteresis.
 
         Called by :class:`WebSocketAuthManager` on:
         - WS connection upgrade (initial).
         - ``authenticate`` frame (post-reauth).
-        - ``system.heartbeat.client`` frame (cross-plan lock per
-          Q17 v1.4: ``heartbeat_interval ≤ window/2``, default 7s).
+        - ``system.heartbeat.client`` frame
+          (``heartbeat_interval ≤ window/2``, default 7s).
         """
         ...
 
@@ -3359,7 +3348,7 @@ class Repository(ABC):
         heartbeat_window_seconds: int,
         as_of: datetime,
     ) -> list[AiDelegateRow]:
-        """Plan A v1.4 Q10 + Plan D §3.1.a — eligible AI-delegate candidates.
+        """Eligible AI-delegate candidates for admission control.
 
         Returns the ``ai_delegates`` rows whose users are active members of
         ``operator_public_id`` (``users.is_active = TRUE``,
@@ -3376,7 +3365,7 @@ class Repository(ABC):
         compose the candidate list passed to
         :meth:`claim_and_insert_ai_review`. The order returned is the order
         the service tries to claim — most-recently-seen first, matching the
-        Plan A v1.4 §3.4 freshness preference.
+        freshness preference.
 
         Args:
             operator_public_id: Operator the strategy is consulting under.
@@ -3384,9 +3373,8 @@ class Repository(ABC):
                 this operator AND that operator must hold the scope grant.
             wallet_public_id: Wallet the eventual trade would settle on.
             instrument_public_id: Instrument the strategy is signalling on.
-            heartbeat_window_seconds: Liveness threshold (Plan A Q10 v1.3
-                lock — default 15s; the service passes the configured
-                value through).
+            heartbeat_window_seconds: Liveness threshold (default 15s;
+                the service passes the configured value through).
             as_of: Wall-clock used for SCD2-active filtering on users,
                 memberships, grants, and underlying mappings.
 
@@ -3406,7 +3394,7 @@ class Repository(ABC):
         event_data: AiReviewEventInsertRow,
         now: datetime,
     ) -> str | None:
-        """Plan A v1.4 Q10 + Plan D §3.1.d-e — atomic claim + INSERT.
+        """Atomic claim + INSERT for AI-review admission control.
 
         Iterates ``candidate_delegate_public_ids`` in order. For each, runs
         a CAS UPDATE on ``ai_delegates`` setting
@@ -3451,7 +3439,7 @@ class Repository(ABC):
         now: datetime,
         limit: int = 100,
     ) -> list[PendingReviewSummary]:
-        """Plan D §3.3 reaper input: pending/fanout_dispatched rows past deadline.
+        """Reaper input: pending/fanout_dispatched rows past deadline.
 
         Snapshot read used by :meth:`AiReviewService._reaper_tick` to
         drive per-row atomic timeouts. The reaper trusts that any row
@@ -3480,7 +3468,7 @@ class Repository(ABC):
         heartbeat_window_seconds: int,
         limit: int = 100,
     ) -> list[PendingReviewSummary]:
-        """Plan D §3.4 offline scanner input: pending past fanout_after with stale delegate.
+        """Offline scanner input: pending past fanout_after with stale delegate.
 
         Returns ``ai_reviews`` rows that are still ``status='pending'``
         AND whose ``fanout_after`` has elapsed AND whose
@@ -3494,9 +3482,8 @@ class Repository(ABC):
             now: Wall-clock used for ``fanout_after`` / heartbeat window
                 comparisons.
             heartbeat_window_seconds: Seconds of silence after which
-                the delegate is considered offline (Plan A Q10 v1.3
-                lock — default 15s; the service passes the configured
-                value through).
+                the delegate is considered offline (default 15s; the
+                service passes the configured value through).
             limit: Cap on the number of rows returned per tick.
 
         Returns:
@@ -3513,11 +3500,11 @@ class Repository(ABC):
         wallet_public_id: str | None = None,
         limit: int = 100,
     ) -> list[PendingReviewSummary]:
-        """Plan D §3.5 fast-path input: pending rows for one delegate past fanout.
+        """Fast-path input: pending rows for one delegate past fanout.
 
         Used by :meth:`AiReviewService.handle_delegate_offline_bus_message`
         to snapshot the affected reviews when a ``bus.delegate_offline``
-        event lands AND by the Plan D §7
+        event lands AND by the
         ``GET /api/ai-reviews/pending`` REST endpoint for bridge
         catch-up after WS reconnect. Mirrors
         :meth:`list_offline_pending_reviews` shape: the
@@ -3526,10 +3513,10 @@ class Repository(ABC):
         elapses (the :class:`DelegateOfflineData` schema docstring
         explicitly says subscribers compare ``last_seen_at`` to
         ``ai_reviews.fanout_after`` and either dispatch immediately
-        OR wait for the natural fanout timer — which the §3.4
+        OR wait for the natural fanout timer — which the offline
         scanner provides). Status filter excludes ``fanout_dispatched``
         and terminal states so the same row never gets re-fanned twice
-        (idempotent if §3.4 Layer 2 scanner already fired).
+        (idempotent if the Layer 2 scanner already fired).
 
         Args:
             selected_delegate_public_id: ``ai_delegates.public_id`` to
@@ -3541,9 +3528,9 @@ class Repository(ABC):
                 REST surface passes ``datetime.now(UTC)`` since the
                 live wall-clock is the right reference for
                 catch-up polls.
-            wallet_public_id: Optional Plan D §7 filter — when
-                provided, narrows the snapshot to one wallet (the
-                bridge passes this for wallet-scoped catch-up). When
+            wallet_public_id: Optional filter — when provided,
+                narrows the snapshot to one wallet (the bridge
+                passes this for wallet-scoped catch-up). When
                 ``None``, returns every wallet the delegate is
                 assigned to.
             limit: Cap on returned rows per call.
@@ -3565,22 +3552,23 @@ class Repository(ABC):
         audit_event: AiReviewEventInsertRow,
         now: datetime,
     ) -> AtomicResolveResult | None:
-        """Plan D Phase 2 #8 — single-transaction resolve + audit + counter decrement.
+        """Single-transaction resolve + audit + counter decrement.
 
-        Closes the Phase 1 #3 deferred Finding A: the legacy 3-call sequence
-        ``atomic_resolve_ai_review`` -> ``insert_ai_review_event`` ->
-        ``decrement_delegate_active_count_for_review`` ran across THREE
-        separate DB transactions, so a process crash between any two left
-        the row in an inconsistent state (terminal status without audit row
-        OR terminal status + audit but counter still elevated, blocking
-        future admission control for the responding delegate).
+        A 3-call sequence ``atomic_resolve_ai_review`` ->
+        ``insert_ai_review_event`` ->
+        ``decrement_delegate_active_count_for_review`` would run across
+        THREE separate DB transactions, so a process crash between any
+        two would leave the row in an inconsistent state (terminal
+        status without audit row OR terminal status + audit but counter
+        still elevated, blocking future admission control for the
+        responding delegate).
 
         Folds every step into ONE transaction:
 
         1. ``SELECT ... FOR UPDATE`` on the ``ai_reviews`` row to capture
            ``previous_status`` + ``deadline`` + ``dispatch_version`` AND
-           hold the row lock against concurrent peers. Closes Finding B
-           (the previous_status SELECT-then-CAS race) on engines that
+           hold the row lock against concurrent peers. Avoids the
+           previous_status SELECT-then-CAS race on engines that
            support row locking; SQLite serialises the entire transaction
            via the connection-level write lock so the same invariant
            holds.
@@ -3606,7 +3594,7 @@ class Repository(ABC):
 
         Args:
             review_public_id: UUID7 of the ``ai_reviews`` row.
-            decision: ``"approve"`` or ``"reject"`` per Plan A Q9.
+            decision: ``"approve"`` or ``"reject"``.
             responding_delegate_public_id: ``ai_delegates.public_id`` of
                 the responding delegate (also wins the audit event's
                 actor field if the caller threads it onto
@@ -3640,13 +3628,12 @@ class Repository(ABC):
         audit_event: AiReviewEventInsertRow,
         now: datetime,
     ) -> AtomicResolveResult | None:
-        """Plan D Phase 2 #8 — single-transaction timeout + audit + counter decrement.
+        """Single-transaction timeout + audit + counter decrement.
 
         Mirrors :meth:`atomic_resolve_review_with_audit_and_counter` minus
         the deadline gate and the decision/responding_delegate fields:
-        used by the strategy await-loop's late-decision shortcut (Plan A
-        Q9 step 3.5), the reaper tick (Plan D §3.3), and the offline
-        scanner's terminal-state branches.
+        used by the strategy await-loop's late-decision shortcut, the
+        reaper tick, and the offline scanner's terminal-state branches.
 
         Args:
             review_public_id: UUID7 of the ``ai_reviews`` row.
@@ -3670,11 +3657,11 @@ class Repository(ABC):
         audit_event: AiReviewEventInsertRow,
         now: datetime,
     ) -> AtomicResolveResult | None:
-        """Plan D Phase 2 #8 — single-transaction supersede + audit + counter decrement.
+        """Single-transaction supersede + audit + counter decrement.
 
         Mirrors :meth:`atomic_timeout_review_with_audit_and_counter`
         with ``new_status='superseded'`` + ``resolution_mode='superseded_by_strategy'``.
-        Used by the strategy-abandon path (Plan D §3 supersede).
+        Used by the strategy-abandon supersede path.
 
         Args:
             review_public_id: UUID7 of the ``ai_reviews`` row.
@@ -3698,20 +3685,19 @@ class Repository(ABC):
         audit_event: AiReviewEventInsertRow,
         now: datetime,
     ) -> int | None:
-        """Plan D Phase 2 #8 — single-transaction fanout dispatch + audit.
+        """Single-transaction fanout dispatch + audit.
 
-        Closes the Phase 1 #3 deferred Finding A on the §3.4 / §3.5
-        fanout dispatch path: the legacy 2-call sequence
-        ``atomic_dispatch_fanout`` -> ``insert_ai_review_event`` ran
-        across TWO separate transactions, so a crash between them left
-        the row in ``fanout_dispatched`` without the matching
-        ``fanout_dispatched`` audit-event row.
+        On the fanout dispatch path: a 2-call sequence
+        ``atomic_dispatch_fanout`` -> ``insert_ai_review_event`` would
+        run across TWO separate transactions, so a crash between them
+        would leave the row in ``fanout_dispatched`` without the
+        matching ``fanout_dispatched`` audit-event row.
 
         Folds both steps into ONE transaction. The ``audit_event``'s
         ``payload`` field has its ``dispatch_version`` slot OVERWRITTEN
         by the actual incremented version returned from the UPDATE so
         callers cannot record a stale version on the audit row even if
-        the row gets re-fanned out concurrently from §3.4 racing §3.5.
+        the row gets re-fanned out concurrently between scanners.
 
         Args:
             review_public_id: UUID7 of the ``ai_reviews`` row.
@@ -3736,7 +3722,7 @@ class Repository(ABC):
         *,
         archivable_window: tuple[date, date] | None = None,
     ) -> TableCounters:
-        """Cluster B per-table four-counter primitive.
+        """Per-table four-counter primitive for the DB-stats counter.
 
         Returns ``TableCounters(total, current, closed, archivable)`` for
         a single table. Per-kind semantics:
@@ -3776,9 +3762,9 @@ def _derive_resolve_resolution_mode(
     selected_delegate_public_id: str,
     responding_delegate_public_id: str,
 ) -> str:
-    """Plan A Q4 — derive ``resolution_mode`` for the resolve transition.
+    """Derive ``resolution_mode`` for the resolve transition.
 
-    Mirrors the Plan A Q4 + Plan D §3.2 v1.4 enum resolution rules:
+    Enum resolution rules:
 
     - ``pending`` + selected==responding -> ``pick_one_primary`` (most
       common path: the originally-selected delegate responds within
@@ -3792,10 +3778,10 @@ def _derive_resolve_resolution_mode(
     Lives at the repository module level (not on a service or enum
     class) so the resolve primitive can derive it INSIDE its own
     SELECT-FOR-UPDATE transaction without crossing a layer boundary
-    or duplicating the Plan A Q4 rules. Closes the Phase 2 #8 R3
-    MAJOR where the service computed ``resolution_mode`` from a
-    pre-snapshot ``status`` that could disagree with the actually-locked
-    predecessor under concurrent fanout.
+    or duplicating the rules. The service must not compute
+    ``resolution_mode`` from a pre-snapshot ``status`` that could
+    disagree with the actually-locked predecessor under concurrent
+    fanout.
     """
     if previous_status == "pending":
         return "pick_one_primary"
@@ -4886,10 +4872,11 @@ class SQLAlchemyRepository(Repository):
     ) -> list[OrderRow]:
         """Retrieve orders with optional filters and pagination.
 
-        Plan B Phase 1: ``status`` is pushed INTO SQL (was post-fetch in
-        v1.0; broke pagination per Codex BLOCKER + Sonnet N5). ``OrderRow``
-        now carries ``plan_public_id`` so the MCP ``get_order_status`` tool
-        can resolve the parent execution plan without a second round-trip.
+        ``status`` is pushed INTO SQL — post-fetch filtering broke
+        pagination because limit/offset clipped before the filter could
+        discard non-matching rows. ``OrderRow`` carries ``plan_public_id``
+        so the MCP ``get_order_status`` tool can resolve the parent
+        execution plan without a second round-trip.
         """
         async with self.session() as s:
             query = (
@@ -9931,7 +9918,7 @@ class SQLAlchemyRepository(Repository):
     ) -> bool:
         """Bump attempt_count + reschedule next retry via SCD2 close+insert.
 
-        Called BEFORE the APNs HTTP call (crash-safety §D5.5). Status
+        Called BEFORE the APNs HTTP call (crash-safety). Status
         stays ``queued`` across versions.
 
         Returns:
@@ -10010,7 +9997,7 @@ class SQLAlchemyRepository(Repository):
         instrument_public_id: str,
         as_of: datetime,
     ) -> bool:
-        """Plan A v1.4 §1.1 + Plan D §10 — AI delegate scope check with underlying expansion.
+        """AI delegate scope check with underlying expansion.
 
         Resolves ``ai_delegates.public_id -> users.public_id``,
         joins on ``UserOperatorMembership`` for operator memberships,
@@ -10020,8 +10007,6 @@ class SQLAlchemyRepository(Repository):
         ``InstrumentUnderlyingMapping``.
         """
         async with self.session() as s:
-            # Step 1: resolve delegate -> user_public_id (operational
-            # side-table; not SCD2, simple PK lookup).
             delegate_user_id = (
                 await s.execute(
                     select(AiDelegate.user_public_id).where(
@@ -10032,7 +10017,6 @@ class SQLAlchemyRepository(Repository):
             if delegate_user_id is None:
                 return False
 
-            # Step 2: candidate operator_public_ids via active memberships.
             operator_ids = (
                 (
                     await s.execute(
@@ -10048,7 +10032,6 @@ class SQLAlchemyRepository(Repository):
             if not operator_ids:
                 return False
 
-            # Step 3: instrument-direct grant?
             direct_grant = (
                 await s.execute(
                     select(WalletOperatorScopeGrant.id)
@@ -10065,9 +10048,6 @@ class SQLAlchemyRepository(Repository):
             if direct_grant is not None:
                 return True
 
-            # Step 4: underlying-kind grant + instrument_underlying_mappings JOIN.
-            # Match active grants where scope_kind='underlying' AND the requested
-            # instrument's underlying maps to the granted underlying_public_id.
             underlying_grant = (
                 await s.execute(
                     select(WalletOperatorScopeGrant.id)
@@ -10270,10 +10250,6 @@ class SQLAlchemyRepository(Repository):
             )
             return {status: int(count) for status, count in result.all()}
 
-    # ------------------------------------------------------------------
-    # AI Integration Phase B+C+D — Plan A v1.4 + Plan D v1.1 CRUD impls
-    # ------------------------------------------------------------------
-
     async def get_ai_review(self, review_public_id: str) -> AiReviewRow | None:
         """Fetch :class:`AiReview` row by public_id."""
         async with self.session() as s:
@@ -10366,7 +10342,7 @@ class SQLAlchemyRepository(Repository):
     async def update_delegate_last_seen(
         self, delegate_public_id: str, last_seen_at: datetime
     ) -> None:
-        """Update ``ai_delegates.last_seen_at`` for Q17 hysteresis."""
+        """Update ``ai_delegates.last_seen_at`` for reconnect hysteresis."""
         async with self.session() as s:
             await s.execute(
                 update(AiDelegate)
@@ -10384,7 +10360,7 @@ class SQLAlchemyRepository(Repository):
         heartbeat_window_seconds: int,
         as_of: datetime,
     ) -> list[AiDelegateRow]:
-        """Plan A v1.4 Q10 + Plan D §3.1.a admission-control candidate list.
+        """Admission-control candidate list.
 
         Two-step query: first confirm the operator holds a matching
         scope grant (cheap LIMIT 1 lookup over instrument-direct then
@@ -10479,7 +10455,7 @@ class SQLAlchemyRepository(Repository):
         event_data: AiReviewEventInsertRow,
         now: datetime,
     ) -> str | None:
-        """Plan A v1.4 Q10 + Plan D §3.1.d-e atomic claim + INSERT.
+        """Atomic claim + INSERT for AI-review admission control.
 
         Iterates candidates in order; first one whose CAS UPDATE wins
         also gets INSERTed against. INSERT failure rolls the whole
@@ -10516,7 +10492,7 @@ class SQLAlchemyRepository(Repository):
         now: datetime,
         limit: int = 100,
     ) -> list[PendingReviewSummary]:
-        """Plan D §3.3 reaper input: pending/fanout_dispatched past deadline."""
+        """Reaper input: pending/fanout_dispatched past deadline."""
         async with self.session() as s:
             rows = (
                 await s.execute(
@@ -10560,7 +10536,7 @@ class SQLAlchemyRepository(Repository):
         heartbeat_window_seconds: int,
         limit: int = 100,
     ) -> list[PendingReviewSummary]:
-        """Plan D §3.4 offline scanner input: pending past fanout_after with stale delegate."""
+        """Offline scanner input: pending past fanout_after with stale delegate."""
         threshold = now - timedelta(seconds=heartbeat_window_seconds)
         async with self.session() as s:
             rows = (
@@ -10614,7 +10590,7 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str | None = None,
         limit: int = 100,
     ) -> list[PendingReviewSummary]:
-        """Plan D §3.5 fast-path input: pending rows for one delegate past fanout."""
+        """Fast-path input: pending rows for one delegate past fanout."""
         predicates = [
             AiReview.selected_delegate_public_id == selected_delegate_public_id,
             AiReview.status == "pending",
@@ -10673,16 +10649,13 @@ class SQLAlchemyRepository(Repository):
         ``status == previous_status`` so a peer that flips the row in
         the read-then-CAS gap on engines without row locking simply
         loses the rowcount=0 race + the primitive rolls back rather
-        than recording a stale predecessor (closes the Phase 2 #8 R3
-        MAJOR on the SQLite predecessor race). Returns ``None`` when
+        than recording a stale predecessor. Returns ``None`` when
         the row does not exist OR is already terminal so callers can
         short-circuit without the UPDATE.
 
         ``selected_delegate_public_id`` is captured here so the resolve
         primitive can derive ``resolution_mode`` inside the locked
-        transaction (closes the Phase 2 #8 R3 MAJOR on the
-        ``resolution_mode`` SELECT-then-CAS race) without a second
-        SELECT after the UPDATE.
+        transaction (no second SELECT after the UPDATE is needed).
         """
         cols = (
             (
@@ -10724,7 +10697,7 @@ class SQLAlchemyRepository(Repository):
     ) -> bool:
         """Helper for the combined terminal-transition primitives.
 
-        Reuses the Q10 v1.2 ``counter_decremented_at`` CAS pattern from
+        Reuses the ``counter_decremented_at`` CAS pattern from
         :meth:`decrement_delegate_active_count_for_review` but operates
         on the open session instead of opening its own transaction so
         the entire terminal-transition + audit-event + counter chain
@@ -10769,16 +10742,16 @@ class SQLAlchemyRepository(Repository):
         audit_event: AiReviewEventInsertRow,
         now: datetime,
     ) -> AtomicResolveResult | None:
-        """Single-transaction resolve + audit + counter decrement (Plan D Phase 2 #8).
+        """Single-transaction resolve + audit + counter decrement.
 
         ``resolution_mode`` is derived INSIDE the primitive from the
         SELECT-FOR-UPDATE-captured ``previous_status`` +
         ``selected_delegate_public_id`` so the row UPDATE, audit-event
         row, and the value returned to the service all match the
-        actually-locked transition (closes the R3 MAJOR where the
-        service computed ``resolution_mode`` from a pre-snapshot
-        ``status`` that could disagree with the lock-time predecessor
-        if a peer flipped pending -> fanout_dispatched in the gap).
+        actually-locked transition (the service must not compute
+        ``resolution_mode`` from a pre-snapshot ``status`` that could
+        disagree with the lock-time predecessor if a peer flipped
+        pending -> fanout_dispatched in the gap).
         The UPDATE is bound to ``status == previous_status`` (the
         captured value) so even on engines without row locking
         (SQLite plain-SELECT fallback), a peer transition between the
@@ -10842,7 +10815,7 @@ class SQLAlchemyRepository(Repository):
         audit_event: AiReviewEventInsertRow,
         now: datetime,
     ) -> AtomicResolveResult | None:
-        """Single-transaction timeout + audit + counter decrement (Plan D Phase 2 #8).
+        """Single-transaction timeout + audit + counter decrement.
 
         UPDATE is bound to ``status == previous_status`` (the captured
         value) so a peer transition in the SELECT-then-CAS gap on
@@ -10896,7 +10869,7 @@ class SQLAlchemyRepository(Repository):
         audit_event: AiReviewEventInsertRow,
         now: datetime,
     ) -> AtomicResolveResult | None:
-        """Single-transaction supersede + audit + counter decrement (Plan D Phase 2 #8).
+        """Single-transaction supersede + audit + counter decrement.
 
         UPDATE is bound to ``status == previous_status`` (the captured
         value) for the same predecessor-race reason as
@@ -10947,7 +10920,7 @@ class SQLAlchemyRepository(Repository):
         audit_event: AiReviewEventInsertRow,
         now: datetime,
     ) -> int | None:
-        """Single-transaction fanout dispatch + audit insert (Plan D Phase 2 #8)."""
+        """Single-transaction fanout dispatch + audit insert."""
         async with self.session() as s:
             update_stmt = (
                 update(AiReview)
@@ -10990,7 +10963,7 @@ class SQLAlchemyRepository(Repository):
         *,
         archivable_window: tuple[date, date] | None = None,
     ) -> TableCounters:
-        """Per-table four-counter primitive for Cluster B (event + state)."""
+        """Per-table four-counter primitive (event + state)."""
         model = cast(Any, entry.model)
         async with self.session() as s:
             archivable_predicate = _archivable_window_predicate(entry, archivable_window)
@@ -11031,7 +11004,7 @@ def _archivable_window_predicate(
 ) -> Any | None:
     """Build the half-open ``timestamp`` predicate for ``archivable_window``.
 
-    Cluster B/C alignment contract: rows AT
+    Alignment contract: rows AT
     ``datetime(day_start, 0, 0, UTC)`` are INCLUDED; rows AT
     ``datetime(day_end + 1d, 0, 0, UTC)`` are EXCLUDED. Mirrors the
     archive-query bounds shape (``repository.py:get_event_rows_for_archive``

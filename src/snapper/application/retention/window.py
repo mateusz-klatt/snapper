@@ -1,8 +1,7 @@
 """Shared retention-window helper.
 
 Computes the per-tick ``(day_start, day_end)`` window from a
-:class:`RetentionPolicy` using the formula pinned in
-``proprietary/plans/plan_observability_cluster_c.md`` §3.6:
+:class:`RetentionPolicy` using the formula:
 
 .. code-block:: python
 
@@ -10,10 +9,10 @@ Computes the per-tick ``(day_start, day_end)`` window from a
     last_eligible_day    = oldest_kept_day - timedelta(days=1)
     earliest_scanned_day = last_eligible_day - timedelta(days=policy.backlog_lookback_days)
 
-Single source of truth for both Cluster C's :class:`RetentionService`
+Single source of truth for both :class:`RetentionService`
 (which calls :meth:`EventArchiver.export(day_start, day_end, ...)`) and
-Cluster B's per-table ``archivable`` counter (which counts rows in the
-same window). Drift here would mean Cluster B reports a different
+the per-table ``archivable`` counter (which counts rows in the
+same window). Drift here would mean the counter reports a different
 number than the next retention cycle actually purges.
 """
 

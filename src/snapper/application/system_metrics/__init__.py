@@ -1,1 +1,1 @@
-"""System metrics snapshotter + ring-buffer history (Observability Cluster A)."""
+"""System metrics snapshotter + ring-buffer history."""

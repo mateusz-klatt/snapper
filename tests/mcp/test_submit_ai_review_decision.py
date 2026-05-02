@@ -1,9 +1,9 @@
-"""Tests for the ``submit_ai_review_decision`` MCP tool (Plan D Phase 1 #4).
+"""Tests for the ``submit_ai_review_decision`` MCP tool.
 
-Covers the full Plan A Q14 envelope contract:
+Covers the full envelope contract:
 
 - Happy path approve / reject -> ``success=True, error_code=None``.
-- Idempotent retry (Plan A Q14 v1.2 + Plan D D3 cross-plan lock) ->
+- Idempotent retry ->
   ``success=True, error_code='decision_already_recorded'``,
   ``isError=False`` so MCP-aware bridges don't surface it as an error.
 - All hard errors (review_not_found / not_authorized / peer_resolved /
@@ -122,7 +122,7 @@ def _decode_call_tool_result(result: Any) -> dict[str, Any]:
 
 
 class TestToCallToolResult:
-    """Plan A Q14 + Plan D D3 envelope helper contract."""
+    """Envelope helper contract."""
 
     def test_success_true_no_error_code_yields_iserror_false(self) -> None:
         """Happy path envelope.
@@ -143,13 +143,13 @@ class TestToCallToolResult:
         }
 
     def test_idempotent_retry_carries_error_code_with_iserror_false(self) -> None:
-        """D3 lock: success=True + non-null error_code -> isError=False.
+        """success=True + non-null error_code -> isError=False.
 
         Given success=True + error_code='decision_already_recorded',
         When to_call_tool_result wraps it,
-        Then isError is False (per Plan A Q14 v1.2 / D3) so MCP-aware
-        bridges do NOT surface idempotent retries as tool errors,
-        while the audit-trail discriminator stays in the JSON envelope.
+        Then isError is False so MCP-aware bridges do NOT surface
+        idempotent retries as tool errors, while the audit-trail
+        discriminator stays in the JSON envelope.
         """
         result = to_call_tool_result(
             success=True,
@@ -243,7 +243,7 @@ class TestSubmitAiReviewDecisionTool:
     async def test_idempotent_retry_keeps_iserror_false(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Plan A Q14 + D3: idempotent retry surfaces success=True with error_code.
+        """Idempotent retry surfaces success=True with error_code.
 
         Given submit_decision returns ``decision_already_recorded``,
         When the MCP tool wraps the envelope,
@@ -283,7 +283,7 @@ class TestSubmitAiReviewDecisionTool:
     async def test_hard_errors_yield_failure_envelope(
         self, monkeypatch: pytest.MonkeyPatch, error_code: str, message: str
     ) -> None:
-        """All Plan A Q14 hard-error codes -> success=False + isError=True.
+        """All hard-error codes -> success=False + isError=True.
 
         Given submit_decision returns a hard-error envelope,
         When the MCP tool wraps it,

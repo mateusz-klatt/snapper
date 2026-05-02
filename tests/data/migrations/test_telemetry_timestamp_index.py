@@ -1,21 +1,17 @@
-"""Migration 0002 acceptance: ``ix_telemetry_timestamp`` planner usage (plan §7.8).
+"""Acceptance test for ``ix_telemetry_timestamp``.
 
 Verifies that after ``metadata.create_all()`` (which mirrors the
-0002 migration via ``Telemetry.__table_args__``), SQLite's
-``EXPLAIN QUERY PLAN`` references the new index for the half-open
-timestamp window query Cluster B/C run on ``telemetry``.
+0001 migration via ``Telemetry.__table_args__``), SQLite's
+``EXPLAIN QUERY PLAN`` references the index for the half-open
+timestamp window query the retention/archival paths run on
+``telemetry``.
 
-PostgreSQL planner verification is out of scope for the in-tree test
-suite (no PG fixture); this test pins the SQLite path so dev/test
-deployments fail loud on any future regression.
+PostgreSQL planner verification is out of scope for the in-tree
+test suite (no PG fixture); this test pins the SQLite path so
+dev/test deployments fail loud on any future regression.
 
-Tests use ``sqlite:///:memory:`` rather than a tmp_path file so the
-schema-creation cost stays in-process. Under xdist contention (~8
-workers each creating + dropping ``Base.metadata`` on real disk),
-the file-backed variant occasionally crashed the xdist worker on
-WSL2; the in-memory engine gives identical SQL semantics for the
-``CREATE INDEX`` and ``EXPLAIN QUERY PLAN`` predicates checked here
-without any disk-write contention.
+Tests use ``sqlite:///:memory:`` so the schema-creation cost stays
+in-process and avoids xdist disk-write contention on WSL2.
 """
 
 from datetime import UTC
@@ -28,10 +24,10 @@ from snapper.data.models import Base
 
 
 class TestTelemetryTimestampIndex:
-    """Plan §7.8 — SQLite planner uses ``ix_telemetry_timestamp``."""
+    """SQLite planner uses ``ix_telemetry_timestamp`` for window queries."""
 
     def test_metadata_creates_ix_telemetry_timestamp(self) -> None:
-        """``metadata.create_all()`` registers the new index alongside legacy ones."""
+        """``metadata.create_all()`` registers the index alongside legacy ones."""
         engine = create_engine("sqlite:///:memory:")
         try:
             Base.metadata.create_all(engine)
@@ -49,7 +45,7 @@ class TestTelemetryTimestampIndex:
         assert "ix_telemetry_public_id" in index_names
 
     def test_window_query_plan_uses_ix_telemetry_timestamp(self) -> None:
-        """SQLite ``EXPLAIN QUERY PLAN`` mentions the new index for the window predicate."""
+        """SQLite ``EXPLAIN QUERY PLAN`` mentions the index for the window predicate."""
         engine = create_engine("sqlite:///:memory:")
         try:
             Base.metadata.create_all(engine)

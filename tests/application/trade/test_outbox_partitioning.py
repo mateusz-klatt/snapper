@@ -1,13 +1,13 @@
-"""Phase 4  tests — :class:`OutboxDispatcher` shard-ownership wiring.
+"""Tests for :class:`OutboxDispatcher` shard-ownership wiring.
 
-Covers.3 v1.2 — `_fetch_owned_batch` pagination contract:
-    - ownership=None → straight pass-through (pre-Phase-4 behavior).
+Covers `_fetch_owned_batch` pagination contract:
+    - ownership=None → straight pass-through (legacy behavior).
     - ownership=N>1 → page through the backlog, filter in Python,
       stop at batch_size owned rows OR DB exhaustion OR max_scan_rows.
     - Starvation-bound: 150 foreign + 10 owned → owned rows still
       dispatched at default max_scan_rows=1000.
     - max_scan_rows cap → WARN log + partial batch when hit.
-    - Regression guard against the former v1.1 ``10 × batch_size`` cap.
+    - Regression guard against the former ``10 × batch_size`` cap.
 """
 
 from datetime import UTC

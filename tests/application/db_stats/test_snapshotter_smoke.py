@@ -1,4 +1,4 @@
-"""Performance smoke test for the per-table sampler (plan §7.7).
+"""Performance smoke test for the per-table sampler.
 
 Pins a wall-clock budget so future regressions in the COUNT path get
 caught early. Seeds 100k telemetry rows + ``ix_telemetry_timestamp``
@@ -51,7 +51,7 @@ def _bulk_insert_telemetry(
 
 
 class TestSnapshotterPerformance:
-    """Plan §7.7 — wall-clock budget for one full sampler tick."""
+    """Wall-clock budget for one full sampler tick."""
 
     @pytest.mark.timeout(60)
     @pytest.mark.asyncio

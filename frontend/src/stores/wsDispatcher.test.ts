@@ -1817,7 +1817,7 @@ describe('WSDispatcher', () => {
       expect(histCached).toHaveLength(0)
     })
   })
-  describe('ai_review.* activity stream (Plan D Phase 2 #11)', () => {
+  describe('ai_review.* activity stream', () => {
     function makeRequest(
       reviewPublicId: string,
       dispatchVersion = 0,
@@ -1948,7 +1948,7 @@ describe('WSDispatcher', () => {
       expect(cached).toHaveLength(1)
     })
 
-    it('does NOT dedupe across different dispatch_version (Plan A Q18 re-fanout)', () => {
+    it('does NOT dedupe across different dispatch_version (re-fanout)', () => {
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)

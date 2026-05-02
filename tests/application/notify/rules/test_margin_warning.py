@@ -1,4 +1,4 @@
-"""Tests for ``MarginWarningRule`` (§D6.1 Rule 5).
+"""Tests for ``MarginWarningRule``.
 
 Covers the substring-match predicate, the fire path on margin-keyword
 rejections, the skip path on non-margin rejections, dedup, and the

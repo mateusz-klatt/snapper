@@ -1,4 +1,4 @@
-"""Shared types for the per-table DB-stats counter (Cluster B).
+"""Shared types for the per-table DB-stats counter.
 
 ``TableEntry`` describes ONE table the snapshotter samples (name, kind,
 ORM model). ``TableCounters`` is the four-counter result returned by
@@ -6,7 +6,7 @@ ORM model). ``TableCounters`` is the four-counter result returned by
 
 The dataclasses live in the ``data`` layer (alongside SQLAlchemy ORM
 models) so :class:`Repository` can declare the abstract primitive
-without importing from ``application``. Cluster B's
+without importing from ``application``. The
 :class:`DbStatsSnapshotter` imports from here too — single source of
 truth, no circular dependency.
 

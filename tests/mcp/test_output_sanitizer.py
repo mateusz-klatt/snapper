@@ -1,7 +1,6 @@
 r"""Coverage for :func:`snapper.mcp.output_sanitizer.sanitize_output`.
 
-Exercises the three normalizations the sanitizer applies per plan
-§3.2 item 8 + §7 item 12:
+Exercises the three normalizations the sanitizer applies:
 
     - HTML-escape of string leaves (prompt-injection hardening).
     - Control-character stripping (keeps ``\t``, ``\n``, ``\r``;

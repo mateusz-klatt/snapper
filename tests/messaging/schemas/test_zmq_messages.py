@@ -819,7 +819,7 @@ class TestFundingAccrualData:
 
 
 class TestAlertEventDataSchema:
-    """BE-2 iOS Push Foundation: ``AlertEventData`` dataclass + parse dispatch."""
+    """iOS Push Foundation: ``AlertEventData`` dataclass + parse dispatch."""
 
     def _minimal(self) -> AlertEventData:
         """Return a fully-valid minimal ``AlertEventData`` fixture."""
@@ -899,7 +899,7 @@ class TestAlertEventDataSchema:
 
 
 class TestExecutionPlanDecisionEventDataSchema:
-    """BE-3b §D6.2 — ``ExecutionPlanDecisionEventData`` schema + dispatch."""
+    """``ExecutionPlanDecisionEventData`` schema + dispatch."""
 
     def _minimal(self) -> ExecutionPlanDecisionEventData:
         """Return a fully-valid minimal decision event fixture."""

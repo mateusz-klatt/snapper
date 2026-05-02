@@ -1,10 +1,9 @@
-"""Repository-level tests for the iOS Push Foundation BE-1 surface.
+"""Repository-level tests for the iOS Push Foundation surface.
 
 Covers the 21 SCD2 methods introduced for the five new
 bitemporal tables ``notification_devices``, ``device_alert_prefs``,
-``user_alert_defaults``, ``alert_events``, ``alert_deliveries``
-(see ``proprietary/plans/plan_ios_push_foundation_weeks1_4.md`` v1.9
-§D1 + §BE-1). Per project invariant (``feedback_bitemporal_all_tables``)
+``user_alert_defaults``, ``alert_events``, ``alert_deliveries``.
+Per project invariant (``feedback_bitemporal_all_tables``)
 every row lifecycle is SCD2 close-and-insert; reads gate on
 ``known_to == KNOWN_TO_MAX`` via partial active indexes.
 
@@ -18,6 +17,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import select as _select
@@ -221,10 +221,10 @@ class TestNotificationDeviceRepo:
     async def test_list_device_alert_prefs_excludes_tombstoned_device(
         self, repo: SQLAlchemyRepository
     ) -> None:
-        """Prefs attached to a 410'd device must not leak back (BE-3a R1.1).
+        """Prefs attached to a 410'd device must not leak back.
 
         Tombstone successor rows remain at ``known_to = KNOWN_TO_MAX``,
-        so a pre-R1.1 join filtering only on ``known_to`` would return
+        so a join filtering only on ``known_to`` would return
         prefs owned by an unregistered device. The join must also
         require ``token_status = 'active'``.
         """
@@ -481,7 +481,7 @@ class TestAlertEventRepo:
     ) -> None:
         """Only events matching (user, dedup_key, timestamp >= since) return.
 
-        Drives the BE-3b rule-side suppression helper: a 2-event
+        Drives the rule-side suppression helper: a 2-event
         fixture — one inside the window, one outside — verifies the
         since-bound is inclusive on the lower edge + exact key match
         on dedup_key.
@@ -658,7 +658,7 @@ class TestAlertDeliveryRepo:
 
 
 class TestListUsersWithPermission:
-    """BE-3b §D6.1 Rule 4 fan-out helper."""
+    """Rule 4 fan-out helper."""
 
     @pytest.mark.asyncio
     async def test_returns_users_with_matching_role(self, repo: SQLAlchemyRepository) -> None:
@@ -706,7 +706,7 @@ class TestListUsersWithPermission:
 
 
 class TestCancelDeliveriesForUser:
-    """BE-3c: ``cancel_pending_deliveries_for_user`` admin kill-switch helper."""
+    """``cancel_pending_deliveries_for_user`` admin kill-switch helper."""
 
     @pytest.mark.asyncio
     async def test_cancels_every_queued_delivery_for_user(self, repo: SQLAlchemyRepository) -> None:
@@ -772,7 +772,7 @@ class TestCancelDeliveriesForUser:
 
 
 class TestBulkCancelRaceSafety:
-    """BE-3c R1: bulk cancel helpers are race-safe against concurrent transitions."""
+    """Bulk cancel helpers are race-safe against concurrent transitions."""
 
     @pytest.mark.asyncio
     async def test_scope_cancel_skips_row_already_transitioned(
@@ -1018,7 +1018,7 @@ class TestBulkCancelRaceSafety:
 
 
 class TestCountDeliveriesByStatus:
-    """BE-3c: status aggregation for ``GET /api/metrics/notifications``."""
+    """Status aggregation for ``GET /api/metrics/notifications``."""
 
     @pytest.mark.asyncio
     async def test_counts_only_active_scd2_rows_per_status(
@@ -1756,9 +1756,12 @@ class TestConcurrencyInvariants:
         original_execute = AsyncSession.execute
         sabotaged = {"count": 0}
 
-        async def patched_execute(  # type: ignore[no-untyped-def]
-            self_session, statement, *args, **kwargs
-        ):
+        async def patched_execute(
+            self_session: AsyncSession,
+            statement: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
             stmt_text = str(statement)
             if (
                 sabotaged["count"] == 0
@@ -1835,9 +1838,12 @@ class TestConcurrencyInvariants:
         class _ZeroRowcountResult:
             rowcount = 0
 
-        async def patched_execute(  # type: ignore[no-untyped-def]
-            self_session, statement, *args, **kwargs
-        ):
+        async def patched_execute(
+            self_session: AsyncSession,
+            statement: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
             stmt_text = str(statement)
             if "UPDATE notification_devices" in stmt_text and "SET known_to" in stmt_text:
                 return _ZeroRowcountResult()
@@ -1884,7 +1890,7 @@ class TestConcurrencyInvariants:
         original_commit = AsyncSession.commit
         tripped = {"n": 0}
 
-        async def patched_commit(self_session):  # type: ignore[no-untyped-def]
+        async def patched_commit(self_session: AsyncSession) -> None:
             if tripped["n"] == 0:
                 tripped["n"] += 1
                 await self_session.rollback()
@@ -1932,9 +1938,12 @@ class TestConcurrencyInvariants:
         original_execute = AsyncSession.execute
         sabotaged = {"count": 0}
 
-        async def patched_execute(  # type: ignore[no-untyped-def]
-            self_session, statement, *args, **kwargs
-        ):
+        async def patched_execute(
+            self_session: AsyncSession,
+            statement: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
             stmt_text = str(statement)
             if (
                 sabotaged["count"] == 0
@@ -2002,9 +2011,12 @@ class TestConcurrencyInvariants:
         class _ZeroRowcountResult:
             rowcount = 0
 
-        async def patched_execute(  # type: ignore[no-untyped-def]
-            self_session, statement, *args, **kwargs
-        ):
+        async def patched_execute(
+            self_session: AsyncSession,
+            statement: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
             stmt_text = str(statement)
             if "UPDATE device_alert_prefs" in stmt_text and "SET known_to" in stmt_text:
                 return _ZeroRowcountResult()
@@ -2036,7 +2048,7 @@ class TestConcurrencyInvariants:
         original_commit = AsyncSession.commit
         tripped = {"n": 0}
 
-        async def patched_commit(self_session):  # type: ignore[no-untyped-def]
+        async def patched_commit(self_session: AsyncSession) -> None:
             if tripped["n"] == 0:
                 tripped["n"] += 1
                 await self_session.rollback()
@@ -2099,9 +2111,12 @@ class TestConcurrencyInvariants:
         class _ZeroRowcountResult:
             rowcount = 0
 
-        async def patched_execute(  # type: ignore[no-untyped-def]
-            self_session, statement, *args, **kwargs
-        ):
+        async def patched_execute(
+            self_session: AsyncSession,
+            statement: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
             stmt_text = str(statement)
             if "UPDATE user_alert_defaults" in stmt_text and "SET known_to" in stmt_text:
                 return _ZeroRowcountResult()
@@ -2146,7 +2161,7 @@ class TestConcurrencyInvariants:
         original_commit = AsyncSession.commit
         tripped = {"n": 0}
 
-        async def patched_commit(self_session):  # type: ignore[no-untyped-def]
+        async def patched_commit(self_session: AsyncSession) -> None:
             if tripped["n"] == 0:
                 tripped["n"] += 1
                 await self_session.rollback()

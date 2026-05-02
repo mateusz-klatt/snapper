@@ -681,7 +681,7 @@ class TestSubmitManualOrderTool:
 
     @pytest.mark.asyncio
     async def test_ai_review_citation_threads_through_to_caps_enforcer_guard(self) -> None:
-        """Plan D Phase 2 #10 — valid ai_review_public_id citation lands on the caps-guard submission.
+        """Valid ai_review_public_id citation lands on the caps-guard submission.
 
         ``ai_review_public_id`` is a runtime-only signal on
         :class:`TradeCommandSubmission` consumed by
@@ -748,7 +748,7 @@ class TestSubmitManualOrderTool:
 
     @pytest.mark.asyncio
     async def test_ai_review_citation_owner_mismatch_rejects_before_any_write(self) -> None:
-        """Plan D Phase 2 #10 R1 — citing another user's review is rejected before any write.
+        """Citing another user's review is rejected before any write.
 
         Given: the caller cites an ``ai_review_public_id`` whose owner
             is a different user (the row's ``user_public_id`` does
@@ -796,7 +796,7 @@ class TestSubmitManualOrderTool:
 
 
 class TestListOrdersTool:
-    """Plan B Phase 1 — coverage for the ``list_orders`` MCP tool."""
+    """Coverage for the ``list_orders`` MCP tool."""
 
     @staticmethod
     def _build_repo_with_orders(
@@ -860,7 +860,7 @@ class TestListOrdersTool:
 
     @pytest.mark.asyncio
     async def test_role_without_read_orders_returns_permission_denied_envelope(self) -> None:
-        """Plan B §5 — permission failure surfaces as Plan A Q14 envelope.
+        """Permission failure surfaces as structured envelope.
 
         Given: a viewer-shaped role with READ_ORDERS removed from its
             permission set,
@@ -889,7 +889,7 @@ class TestListOrdersTool:
 
     @pytest.mark.asyncio
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
-        """Plan B §5 — pre-lifespan repository surfaces structured envelope."""
+        """Pre-lifespan repository surfaces structured envelope."""
         server = _build_server(repository=None)
         result = await server._tool_manager.call_tool("list_orders", {})
         envelope = _decode_envelope(result)
@@ -943,7 +943,7 @@ class TestListOrdersTool:
 
 
 class TestGetOrderStatusTool:
-    """Plan B Phase 1 — coverage for the ``get_order_status`` MCP tool."""
+    """Coverage for the ``get_order_status`` MCP tool."""
 
     @pytest.mark.asyncio
     async def test_returns_full_envelope_with_executions(self) -> None:
@@ -1011,7 +1011,7 @@ class TestGetOrderStatusTool:
 
     @pytest.mark.asyncio
     async def test_role_without_read_orders_returns_permission_denied_envelope(self) -> None:
-        """Plan B §5 — get_order_status permission failure also envelope-wrapped."""
+        """get_order_status permission failure also envelope-wrapped."""
         repo = AsyncMock()
         saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
         ROLE_PERMISSIONS[UserRole.VIEWER] = set()
@@ -1034,7 +1034,7 @@ class TestGetOrderStatusTool:
 
     @pytest.mark.asyncio
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
-        """Plan B §5 — get_order_status pre-lifespan also envelope-wrapped."""
+        """get_order_status pre-lifespan also envelope-wrapped."""
         server = _build_server(repository=None)
         result = await server._tool_manager.call_tool(
             "get_order_status", {"command_public_id": "cmd-x"}
@@ -1171,7 +1171,7 @@ _POSITION_CYCLE_ROW_FIXTURE: dict[str, Any] = {
 
 
 class TestListPositionsTool:
-    """Plan B Phase 2 — coverage for the ``list_positions`` MCP tool."""
+    """Coverage for the ``list_positions`` MCP tool."""
 
     @staticmethod
     def _build_repo_with_positions(
@@ -1201,7 +1201,7 @@ class TestListPositionsTool:
 
     @pytest.mark.asyncio
     async def test_serialised_timestamp_is_iso_string(self) -> None:
-        """Plan B §5 — JSON envelope cannot carry raw datetimes; ISO string."""
+        """JSON envelope cannot carry raw datetimes; ISO string."""
         position_row = _POSITION_ROW_FIXTURE.copy()
         repo = self._build_repo_with_positions([position_row])
         server = _build_server(repository=repo)
@@ -1256,7 +1256,7 @@ class TestListPositionsTool:
 
     @pytest.mark.asyncio
     async def test_role_without_read_positions_returns_permission_denied_envelope(self) -> None:
-        """Plan B §5 — permission failure surfaces as Plan A Q14 envelope."""
+        """Permission failure surfaces as structured envelope."""
         repo = self._build_repo_with_positions([])
         saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
         ROLE_PERMISSIONS[UserRole.VIEWER] = set()
@@ -1278,7 +1278,7 @@ class TestListPositionsTool:
 
     @pytest.mark.asyncio
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
-        """Plan B §5 — pre-lifespan repository surfaces structured envelope."""
+        """Pre-lifespan repository surfaces structured envelope."""
         server = _build_server(repository=None)
         result = await server._tool_manager.call_tool("list_positions", {})
         envelope = _decode_envelope(result)
@@ -1307,7 +1307,7 @@ class TestListPositionsTool:
 
 
 class TestGetPositionCycleTool:
-    """Plan B Phase 2 — coverage for the ``get_position_cycle`` MCP tool."""
+    """Coverage for the ``get_position_cycle`` MCP tool."""
 
     @pytest.mark.asyncio
     async def test_happy_path_returns_full_cycle(self) -> None:
@@ -1417,7 +1417,7 @@ class TestGetPositionCycleTool:
 
     @pytest.mark.asyncio
     async def test_role_without_read_positions_returns_permission_denied_envelope(self) -> None:
-        """Plan B §5 — permission failure surfaces as Plan A Q14 envelope."""
+        """Permission failure surfaces as structured envelope."""
         repo = AsyncMock()
         saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
         ROLE_PERMISSIONS[UserRole.VIEWER] = set()
@@ -1440,7 +1440,7 @@ class TestGetPositionCycleTool:
 
     @pytest.mark.asyncio
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
-        """Plan B §5 — pre-lifespan repository surfaces structured envelope."""
+        """Pre-lifespan repository surfaces structured envelope."""
         server = _build_server(repository=None)
         result = await server._tool_manager.call_tool(
             "get_position_cycle", {"cycle_public_id": "cycle-1"}
@@ -1484,7 +1484,7 @@ _PLAN_ROW_FIXTURE: dict[str, Any] = {
 
 
 class TestCancelOrderTool:
-    """Plan B Phase 3 — coverage for the ``cancel_order`` MCP write tool."""
+    """Coverage for the ``cancel_order`` MCP write tool."""
 
     @staticmethod
     def _enforcer_admit() -> Any:
@@ -1533,7 +1533,7 @@ class TestCancelOrderTool:
 
     @pytest.mark.asyncio
     async def test_role_without_cancel_orders_returns_permission_denied(self) -> None:
-        """Plan B §5 — permission failure surfaces as Plan A Q14 envelope."""
+        """Permission failure surfaces as structured envelope."""
         repo = AsyncMock()
         saved = ROLE_PERMISSIONS.get(UserRole.VIEWER)
         ROLE_PERMISSIONS[UserRole.VIEWER] = set()
@@ -1556,7 +1556,7 @@ class TestCancelOrderTool:
 
     @pytest.mark.asyncio
     async def test_pre_lifespan_repository_returns_service_unavailable(self) -> None:
-        """Plan B §5 — pre-lifespan repository surfaces structured envelope."""
+        """Pre-lifespan repository surfaces structured envelope."""
         server = _build_server(repository=None, caps_enforcer=self._enforcer_admit())
         result = await server._tool_manager.call_tool(
             "cancel_order", {"plan_public_id": "plan-1", "idempotency_key": "k"}
@@ -1694,11 +1694,11 @@ class TestCancelOrderTool:
 
     @pytest.mark.asyncio
     async def test_oversize_idempotency_key_returns_invalid_argument(self) -> None:
-        """R1: idempotency_key > 64 chars rejected at MCP boundary as invalid_argument.
+        """idempotency_key > 64 chars rejected at MCP boundary as invalid_argument.
 
-        Plan B v1.2 §1.4: ``execution_plans.cancel_idempotency_key`` is
-        ``String(64)``. Without this guard PostgreSQL surfaces a raw
-        DataError that escapes the Plan A Q14 envelope.
+        ``execution_plans.cancel_idempotency_key`` is ``String(64)``.
+        Without this guard PostgreSQL surfaces a raw DataError that
+        escapes the structured envelope.
         """
         repo = AsyncMock()
         server = _build_server(repository=repo, caps_enforcer=self._enforcer_admit())
@@ -1759,7 +1759,7 @@ class TestCancelOrderTool:
     async def test_serialised_plan_datetime_fields_are_iso_strings(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Plan B §5 — JSON envelope cannot carry raw datetimes; ISO strings."""
+        """JSON envelope cannot carry raw datetimes; ISO strings."""
         plan = _PLAN_ROW_FIXTURE.copy()
 
         async def _ok(**kwargs: Any) -> dict[str, Any]:
@@ -1815,7 +1815,7 @@ _CANDLE_ROW_FIXTURE: dict[str, Any] = {
 
 
 class TestGetOhlcvTool:
-    """Plan B Phase 4 — coverage for the ``get_ohlcv`` MCP tool."""
+    """Coverage for the ``get_ohlcv`` MCP tool."""
 
     @staticmethod
     def _build_repo_with_candles(rows: list[dict[str, Any]]) -> Any:
@@ -2001,7 +2001,7 @@ class TestGetOhlcvTool:
 
 
 class TestListRecentSignalsTool:
-    """Plan B Phase 4 — coverage for the ``list_recent_signals`` MCP tool."""
+    """Coverage for the ``list_recent_signals`` MCP tool."""
 
     @staticmethod
     def _build_repo_with_signals(
@@ -2033,7 +2033,7 @@ class TestListRecentSignalsTool:
 
     @pytest.mark.asyncio
     async def test_serialised_datetime_fields_are_iso_strings(self) -> None:
-        """Plan B §5 — datetimes surface as ISO-8601 strings."""
+        """Datetimes surface as ISO-8601 strings."""
         signal = _SIGNAL_ROW_FIXTURE.copy()
         repo = self._build_repo_with_signals([signal])
         server = _build_server(repository=repo)

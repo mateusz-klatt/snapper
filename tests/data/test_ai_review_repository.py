@@ -1,9 +1,9 @@
 """Tests for the AI-review repository CRUD primitives + delegate scope check.
 
-Plan A v1.4 + Plan D v1.1 — covers ``has_grant_for_delegate``
-(four-step resolve: delegate -> user -> operator memberships ->
-instrument-direct or underlying-kind grant) plus the six AiReview /
-AiDelegate CRUD methods that back the AiReviewService.
+Covers ``has_grant_for_delegate`` (four-step resolve: delegate -> user
+-> operator memberships -> instrument-direct or underlying-kind grant)
+plus the six AiReview / AiDelegate CRUD methods that back the
+AiReviewService.
 """
 
 from datetime import UTC
@@ -423,7 +423,7 @@ async def test_get_ai_delegate_by_user_public_id_returns_none_when_unknown(
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
 async def test_insert_ai_delegate_then_get_round_trip(tmp_path: Path) -> None:
-    """Insert + read-back covers all stored fields including the Q10 counter."""
+    """Insert + read-back covers all stored fields including the active-reviews counter."""
     repo = await _build_repo(tmp_path)
     now = _now()
     user_public_id = str(uuid7())
@@ -523,7 +523,7 @@ async def _seed_user_row(
 ) -> None:
     """Insert an active ``users`` row with the requested role + public_id.
 
-    Plan A v1.4 Q10 admission control filters delegates by
+    Admission control filters delegates by
     ``users.role = 'ai_delegate'``; tests for
     ``list_eligible_delegates_for_ai_review`` need real User rows so the
     JOIN can resolve. The default username is derived from the public_id
@@ -577,7 +577,7 @@ async def _seed_busy_delegate(
 ) -> str:
     """Insert a live AiDelegate and bump ``active_reviews_count`` to 1.
 
-    Forces the Q10 admission CAS UPDATE to miss so claim attempts fail
+    Forces the admission CAS UPDATE to miss so claim attempts fail
     deterministically. Using a raw UPDATE rather than a real review row
     keeps the helper independent of the AiReview INSERT contract.
     """
@@ -696,7 +696,7 @@ async def test_list_eligible_returns_empty_when_operator_has_no_grant(
 ) -> None:
     """Operator without a matching scope grant -> empty list.
 
-    Plan A Q10 admission control short-circuits before considering any
+    Admission control short-circuits before considering any
     delegate liveness, since the operator has no authority to act on the
     requested ``(wallet, instrument)`` tuple.
     """
@@ -867,11 +867,11 @@ async def test_list_eligible_returns_delegate_with_instrument_grant(
 async def test_list_eligible_excludes_deactivated_user(tmp_path: Path) -> None:
     """``users.is_active=False`` -> delegate filtered out even when fully scoped + live.
 
-    Plan A v1.4 risk register: user deactivation is implemented as a
-    ``users.is_active=False`` flip on the active SCD2 row (see
-    ``UserService.deactivate_user``); the eligibility query MUST honour
-    that flag so a recently-seen deactivated delegate cannot still be
-    claimed during the heartbeat window.
+    User deactivation is implemented as a ``users.is_active=False``
+    flip on the active SCD2 row (see ``UserService.deactivate_user``);
+    the eligibility query MUST honour that flag so a recently-seen
+    deactivated delegate cannot still be claimed during the heartbeat
+    window.
     """
     repo = await _build_repo(tmp_path, "eligible_deactivated.db")
     as_of = _now()
@@ -944,7 +944,7 @@ async def test_list_eligible_orders_candidates_by_last_seen_desc(
 ) -> None:
     """Multiple eligible delegates returned most-recently-seen first.
 
-    Plan A v1.4 Q10 specifies ``ORDER BY last_seen_at DESC`` so admission
+    The query specifies ``ORDER BY last_seen_at DESC`` so admission
     control prefers the freshest live connection. The test seeds two
     delegates 3 seconds apart and asserts the newer one comes first.
     """
@@ -1114,9 +1114,9 @@ async def test_claim_and_insert_skips_busy_candidate_picks_next(
 async def test_claim_and_insert_returns_none_when_all_busy(tmp_path: Path) -> None:
     """Every candidate busy -> None, no review row, no counter change.
 
-    Plan A v1.4 §3.1.d ``DelegateBusyError`` precondition: when the CAS
-    misses on every candidate the iteration finishes without committing,
-    so neither the review row nor any audit event is persisted.
+    ``DelegateBusyError`` precondition: when the CAS misses on every
+    candidate the iteration finishes without committing, so neither
+    the review row nor any audit event is persisted.
     """
     repo = await _build_repo(tmp_path, "claim_all_busy.db")
     as_of = _now()
@@ -1309,7 +1309,7 @@ async def _seed_pending_with_active_counter(
 async def test_combined_resolve_with_audit_and_counter_atomic_happy_path(
     tmp_path: Path,
 ) -> None:
-    """Plan D Phase 2 #8 — combined resolve + audit + counter happens in ONE transaction.
+    """Combined resolve + audit + counter happens in ONE transaction.
 
     Given a pending review with the delegate's counter elevated to 1,
     When :meth:`atomic_resolve_review_with_audit_and_counter` wins the CAS,
@@ -1447,7 +1447,7 @@ async def test_combined_resolve_returns_none_when_deadline_elapsed(tmp_path: Pat
 async def test_combined_timeout_with_audit_and_counter_atomic_happy_path(
     tmp_path: Path,
 ) -> None:
-    """Plan D Phase 2 #8 — combined timeout + audit + counter atomically transitions."""
+    """Combined timeout + audit + counter atomically transitions."""
     repo = await _build_repo(tmp_path, "combined_timeout.db")
     now = datetime.now(UTC)
     review_pid, delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
@@ -1521,7 +1521,7 @@ async def test_combined_timeout_returns_none_when_already_terminal(tmp_path: Pat
 async def test_combined_supersede_with_audit_and_counter_atomic_happy_path(
     tmp_path: Path,
 ) -> None:
-    """Plan D Phase 2 #8 — combined supersede + audit + counter atomically transitions."""
+    """Combined supersede + audit + counter atomically transitions."""
     repo = await _build_repo(tmp_path, "combined_supersede.db")
     now = datetime.now(UTC)
     review_pid, delegate_pid = await _seed_pending_with_active_counter(repo, as_of=now)
@@ -1592,7 +1592,7 @@ async def test_combined_supersede_returns_none_when_already_terminal(tmp_path: P
 async def test_combined_resolve_audit_uses_actual_previous_status_not_caller_sentinel(
     tmp_path: Path,
 ) -> None:
-    """Plan D Phase 2 #8 / Finding B — primitive overrides caller-supplied previous_status.
+    """Primitive overrides caller-supplied previous_status.
 
     The audit-event row's ``previous_status`` field MUST come from the
     SELECT-FOR-UPDATE inside the primitive's transaction, not from the
@@ -1624,7 +1624,7 @@ async def test_combined_resolve_audit_uses_actual_previous_status_not_caller_sen
     audit_rows = await _fetch_audit_event_payloads(repo, review_pid=review_pid)
     assert len(audit_rows) == 1
     assert audit_rows[0]["previous_status"] == "pending", (
-        "Phase 2 #8 Finding B: primitive must capture previous_status from SELECT-FOR-UPDATE "
+        "primitive must capture previous_status from SELECT-FOR-UPDATE "
         "rather than trust the caller-supplied audit_event['previous_status'] sentinel"
     )
 
@@ -1632,7 +1632,7 @@ async def test_combined_resolve_audit_uses_actual_previous_status_not_caller_sen
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
 async def test_combined_dispatch_fanout_with_audit_atomic_happy_path(tmp_path: Path) -> None:
-    """Plan D Phase 2 #8 — combined dispatch fanout + audit happens in ONE transaction.
+    """Combined dispatch fanout + audit happens in ONE transaction.
 
     Given a pending review past fanout_after,
     When :meth:`atomic_dispatch_fanout_with_audit` wins the CAS,
@@ -1664,7 +1664,7 @@ async def test_combined_dispatch_fanout_with_audit_atomic_happy_path(tmp_path: P
     audit_rows = await _fetch_audit_event_payloads(repo, review_pid=review_pid)
     assert len(audit_rows) == 1
     assert audit_rows[0]["payload"]["dispatch_version"] == 1, (
-        "Phase 2 #8: primitive must overwrite caller's payload.dispatch_version with "
+        "primitive must overwrite caller's payload.dispatch_version with "
         "the actual post-UPDATE incremented version"
     )
     assert audit_rows[0]["payload"]["trigger"] == "test"
@@ -1722,11 +1722,10 @@ async def test_combined_resolve_with_for_update_falls_back_on_not_implemented(
 ) -> None:
     """SQLite without ``SELECT FOR UPDATE`` falls back to plain SELECT.
 
-    Plan D Phase 2 #8 — the new combined primitives share
-    ``_select_for_update_pre_state`` which catches NotImplementedError on
-    engines without row-level locking and falls back to a plain SELECT
-    (the connection-level write lock provides equivalent serialisation
-    on SQLite).
+    The combined primitives share ``_select_for_update_pre_state``
+    which catches NotImplementedError on engines without row-level
+    locking and falls back to a plain SELECT (the connection-level
+    write lock provides equivalent serialisation on SQLite).
 
     Given a session executor that raises NotImplementedError on the
     with_for_update path,
@@ -1772,8 +1771,8 @@ async def test_combined_decrement_in_session_no_op_when_counter_already_claimed(
 ) -> None:
     """Counter-claim CAS short-circuits when ``counter_decremented_at`` is already set.
 
-    Plan D Phase 2 #8 — the helper :meth:`_decrement_delegate_counter_in_session`
-    uses a CAS UPDATE with predicate ``counter_decremented_at IS NULL``.
+    The helper :meth:`_decrement_delegate_counter_in_session` uses a
+    CAS UPDATE with predicate ``counter_decremented_at IS NULL``.
     A peer that already claimed the slot leaves the predicate False, so
     the second caller's UPDATE rowcount is 0 and the helper returns
     False without touching the delegate counter (preventing a
@@ -1824,10 +1823,10 @@ async def test_combined_resolve_rowcount_zero_rolls_back_and_returns_none(
 ) -> None:
     """Combined resolve rolls back + returns None when UPDATE rowcount is 0.
 
-    Plan D Phase 2 #8 — covers the rollback branch where the SELECT
-    pre-state passed all gates (status pending, deadline > now) but the
-    subsequent UPDATE found zero matching rows (peer transitioned the
-    row in the SELECT-then-UPDATE gap on engines without row locks).
+    Covers the rollback branch where the SELECT pre-state passed all
+    gates (status pending, deadline > now) but the subsequent UPDATE
+    found zero matching rows (peer transitioned the row in the
+    SELECT-then-UPDATE gap on engines without row locks).
 
     Given a stub that forces every UPDATE to report rowcount=0,
     When the combined resolve primitive runs,

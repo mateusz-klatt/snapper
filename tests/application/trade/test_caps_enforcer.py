@@ -119,8 +119,7 @@ async def test_guard_rejects_none_user_public_id() -> None:
     When: the caller enters ``async with enforcer.guard(s):``,
     Then: :class:`CapsViolationError` with
         ``cap_type='missing_user_public_id'`` is raised BEFORE any
-        DB access — prevents silent cap bypass (§3.4 canonical
-        rule + 4-model consultation Q4 resolution).
+        DB access — prevents silent cap bypass.
     """
     enforcer = TradingCapsEnforcer(_stub_repo(), _stub_pricing(), now=lambda: _NOW)
     with pytest.raises(CapsViolationError) as exc:
@@ -393,7 +392,7 @@ async def test_notional_cap_maps_price_unavailable_to_caps_violation() -> None:
     When: ``guard()`` runs,
     Then: :class:`CapsViolationError` with
         ``cap_type='price_unavailable'`` is raised — HTTP layer
-        surfaces the §9.2 ``caps_price_unavailable`` code.
+        surfaces the ``caps_price_unavailable`` code.
     """
     caps = _caps(max_daily_notional_usd=10_000.0)
     pricing = MagicMock(spec=USDConverter)
@@ -514,7 +513,7 @@ async def test_per_user_lock_serializes_concurrent_submissions_for_same_user() -
     Then: the second acquires the lock only after the first
         releases; the second sees the incremented count and
         rejects. This proves the lock spans check+yield, closing
-        the TOCTOU window (§3.5.2 R2-B2 resolution).
+        the TOCTOU window.
     """
     counter = {"n": 0}
 
@@ -559,8 +558,8 @@ def _ai_review_row(
     The publisher branch reads ``user_public_id`` / ``strategy_public_id``
     / ``wallet_public_id`` / ``instrument_public_id`` /
     ``dispatch_version`` off the row before publishing the bus event;
-    Plan D Phase 3 §7's strategy gate also reads ``status`` to enforce
-    the supersede-after-await invariant. Other columns are irrelevant
+    The strategy gate also reads ``status`` to enforce the
+    supersede-after-await invariant. Other columns are irrelevant
     for those paths so we cast a partial dict through the Repository
     mock's ``get_ai_review`` AsyncMock return.
     """
@@ -606,7 +605,7 @@ def _publisher_with_tracker() -> MagicMock:
 
 
 class TestCapsViolationAfterAiApprovePublish:
-    """Phase 2 #2 — bus.caps_violation_after_ai_approve publisher branch.
+    """bus.caps_violation_after_ai_approve publisher branch.
 
     Verifies the four-way decision tree on the
     :meth:`TradingCapsEnforcer.guard` exception path:
@@ -860,10 +859,10 @@ class TestCapsViolationAfterAiApprovePublish:
 
 
 class TestGuardWithAiReviewAttribution:
-    """Plan D Phase 3 §7 — strategy hot-path AI-attribution gate.
+    """Strategy hot-path AI-attribution gate.
 
     Verifies the new ``guard_with_ai_review_attribution`` context
-    manager closes the loop on Phase 3:
+    manager closes the loop:
 
     1. Resolves user_public_id from the cited row + delegates to
        ``guard()`` so caps actually evaluate.
@@ -910,8 +909,8 @@ class TestGuardWithAiReviewAttribution:
     async def test_empty_wallet_fails_closed_before_row_fetch(self) -> None:
         """Submission with empty wallet raises BEFORE repo.get_ai_review.
 
-        Plan D Phase 3 §8.3 wallet-preflight rationale: a strategy
-        operator who left ``StrategyConfig.wallet_public_id`` at the
+        Wallet-preflight rationale: a strategy operator who left
+        ``StrategyConfig.wallet_public_id`` at the
         default ``""`` sees a loud, operator-actionable failure on
         first AI-attributed emit, NOT a confusing wallet-mismatch
         deeper in the validator.
@@ -945,7 +944,7 @@ class TestGuardWithAiReviewAttribution:
     async def test_cap_rejection_publishes_with_row_dispatch_version(self) -> None:
         """Cap rejection on AI-attributed strategy emit publishes bus event.
 
-        Plan A Q18 transport-only contract: even if the carried
+        Transport-only contract: even if the carried
         ``ai_review_dispatch_version`` differs from the row's, the
         published event uses the row-of-record value.
         """
@@ -976,7 +975,7 @@ class TestGuardWithAiReviewAttribution:
 
     @pytest.mark.asyncio
     async def test_ignores_dispatch_version_mismatch_on_happy_path(self) -> None:
-        """Plan D Phase 3 §2.6 — strategy validator does NOT compare versions.
+        """Strategy validator does NOT compare versions.
 
         The carried ``ai_review_dispatch_version`` differs from the
         cited row's; the gate yields successfully (no

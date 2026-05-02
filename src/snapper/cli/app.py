@@ -1966,10 +1966,10 @@ def backtest_rerun(
 def notify() -> None:
     """Run the iOS Push Foundation sidecar (ZMQ alerts -> APNs HTTP/2).
 
-    Long-running process per Plan 2 §D5. Subscribes to the
+    Long-running process. Subscribes to the
     ``alerts.`` ZMQ prefix, fans out each received ``AlertEventData``
     to the target user's active devices via the outbox-backed
-    ``NotifySidecar`` (§D5.5), and retries server/throttled failures
+    ``NotifySidecar``, and retries server/throttled failures
     on its own 30-second scheduler. Configuration is read from the
     ``apns_*`` settings seeded via ``proprietary/data/seed/{dev,prod}.toml``.
 

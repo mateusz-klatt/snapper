@@ -226,20 +226,19 @@ class ExecutionPlanStatusEnum(StrEnum):
 
 
 class AiReviewStatusEnum(StrEnum):
-    """Lifecycle state of an AI delegate review (CONSULT pattern, Plan A v1.4 Q9).
+    """Lifecycle state of an AI delegate review (CONSULT pattern).
 
     Covers the full state machine for an :class:`AiReview` row: created
     with ``PENDING``; transitions to ``FANOUT_DISPATCHED`` when the
-    selected delegate goes offline (Q17 hysteresis) and the review is
-    broadcast to fanout-eligible delegates; terminal at
+    selected delegate goes offline (reconnect hysteresis) and the
+    review is broadcast to fanout-eligible delegates; terminal at
     ``RESOLVED_APPROVED``/``RESOLVED_REJECTED`` on first decision,
     ``TIMEOUT`` if deadline passes, or ``SUPERSEDED`` if the strategy
     abandons (e.g. signal expired before deadline).
 
     All terminal states are FINAL — no further transitions. Audit row
     persists indefinitely in :class:`AiReview`; transition events
-    captured in append-only :class:`AiReviewEvent` table per Plan A
-    Q13.
+    captured in append-only :class:`AiReviewEvent` table.
     """
 
     PENDING = "pending"
@@ -251,11 +250,11 @@ class AiReviewStatusEnum(StrEnum):
 
 
 class AiReviewDecisionEnum(StrEnum):
-    """AI delegate decision outcome (Plan A Q9).
+    """AI delegate decision outcome.
 
     APPROVE: agent approved the trade; strategy proceeds.
-    REJECT: agent vetoed the trade per Plan A Q12 lock — strategy
-    ABORTS, no fall-through to baseline.
+    REJECT: agent vetoed the trade — strategy ABORTS, no fall-through
+    to baseline.
     """
 
     APPROVE = "approve"
@@ -263,7 +262,7 @@ class AiReviewDecisionEnum(StrEnum):
 
 
 class AiReviewResolutionModeEnum(StrEnum):
-    """How an :class:`AiReview` reached its terminal state (Plan A Q4).
+    """How an :class:`AiReview` reached its terminal state.
 
     PICK_ONE_PRIMARY: selected delegate (immutable from review
     creation) responded directly. Most common case.
@@ -286,12 +285,12 @@ class AiReviewResolutionModeEnum(StrEnum):
 
 
 class AiReviewEventTypeEnum(StrEnum):
-    """Event type for append-only :class:`AiReviewEvent` audit log (Plan A Q13).
+    """Event type for append-only :class:`AiReviewEvent` audit log.
 
     Each transition of an :class:`AiReview` row appends ONE event
     row. Event types fully discriminate the audit trail without
-    needing previous_status (Sonnet m1 fix v1.3 / v1.4): rows are
-    immutable; queries filter by event_type.
+    needing previous_status: rows are immutable; queries filter by
+    event_type.
     """
 
     CREATED = "created"

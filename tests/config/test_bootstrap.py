@@ -1,4 +1,4 @@
-"""Tests for Phase 4 partitioning fields on :class:`BootstrapSettingsLoader`.
+"""Tests for partitioning fields on :class:`BootstrapSettingsLoader`.
 
 Bootstrap fields verify env-var round-trip only. The parsing contract
 for ``coordinator_outbox_max_scan_rows`` (``str | None`` on bootstrap →

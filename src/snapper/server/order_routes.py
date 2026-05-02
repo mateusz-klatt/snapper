@@ -129,7 +129,7 @@ async def _validate_create_order_ai_review_citation(
     principal: AuthPrincipal,
     body: CreateOrderBody,
 ) -> None:
-    """Plan D Phase 2 #10 R1 — gate ``ai_review_public_id`` citations.
+    """Gate ``ai_review_public_id`` citations.
 
     No-op when ``body.ai_review_public_id`` is None (the default for
     every non-AI-mediated manual order). When set, delegates to
@@ -434,9 +434,8 @@ async def _cancel_plan(
     """Shared cancel-plan logic used by the by-id and by-client-order-id routes.
 
     Delegates to :meth:`PlansCancelService.cancel_by_plan_public_id`
-    (Plan B Phase 3.5 unification — REST + MCP share one cancel-plan
-    code path) and maps the service's domain exceptions onto the REST
-    HTTP contract:
+    (REST + MCP share one cancel-plan code path) and maps the
+    service's domain exceptions onto the REST HTTP contract:
 
     * :class:`PlanNotFoundError` → 404
     * :class:`PlanScopeError` → 403 (REST does NOT collapse to 404 like

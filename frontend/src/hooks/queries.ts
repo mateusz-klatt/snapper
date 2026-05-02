@@ -803,13 +803,13 @@ export const useBacktests = (strategy?: string, status?: string) => {
 }
 
 /**
- * Phase 2c auto-pair candidate lookup — returns recent terminal
- * runs sharing the same pairing-stable `config_hash` as the current
- * run. Used by CompareLauncher (Step 4) to seed the manual-pair
- * combobox and gate the "compare with most recent" button.
+ * Auto-pair candidate lookup — returns recent terminal runs sharing
+ * the same pairing-stable `config_hash` as the current run. Used by
+ * CompareLauncher to seed the manual-pair combobox and gate the
+ * "compare with most recent" button.
  *
- * Disabled (enabled: false) when `configHash` is `null` — pre-0006
- * runs have no hash and auto-pair is not applicable.
+ * Disabled (enabled: false) when `configHash` is `null` — older runs
+ * have no hash and auto-pair is not applicable.
  */
 export const useBacktestRunsByConfigHash = (configHash: string | null, limit: number = 20) => {
   return useQuery({
@@ -990,8 +990,7 @@ export const useDeactivateAiDelegate = () => {
 const PENDING_AI_REVIEWS_REFETCH_MS = 5_000
 
 /**
- * Plan D §7 / Plan A §5.2 — list pending CONSULT reviews for the
- * authenticated AI delegate.
+ * List pending CONSULT reviews for the authenticated AI delegate.
  *
  * Gated by ``role === 'ai_delegate'`` because the REST endpoint
  * (`GET /api/ai-reviews/pending`) returns 422 for any other role:

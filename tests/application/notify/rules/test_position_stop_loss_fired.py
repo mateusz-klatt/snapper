@@ -1,4 +1,4 @@
-"""Tests for ``PositionStopLossFiredRule`` (§D6.1 Rule 3)."""
+"""Tests for ``PositionStopLossFiredRule``."""
 
 from datetime import UTC
 from datetime import datetime

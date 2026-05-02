@@ -65,7 +65,7 @@ class TradeCommandSubmission:
     source_surface: str
     idempotency_key: str | None
     ai_review_public_id: str | None = None
-    """Plan D §3.6 — UUID7 of the ``ai_reviews`` row that AI-approved
+    """UUID7 of the ``ai_reviews`` row that AI-approved
     this trade, or ``None`` for non-AI-mediated submissions. When set,
     a :class:`CapsViolationError` raised inside
     :meth:`TradingCapsEnforcer.guard` triggers an additional
@@ -75,7 +75,7 @@ class TradeCommandSubmission:
     every existing call site (REST manual submit, MCP submit_manual_order,
     plan executor, strategy hot-path) untouched."""
     ai_review_dispatch_version: int | None = None
-    """Plan A Q18 — companion dedup version for ``ai_review_public_id``.
+    """Companion dedup version for ``ai_review_public_id``.
     Carried end-to-end as transport-only on the strategy hot-path: the
     strategy citation validator does NOT compare it, and
     :meth:`TradingCapsEnforcer._publish_caps_violation_after_ai_approve`

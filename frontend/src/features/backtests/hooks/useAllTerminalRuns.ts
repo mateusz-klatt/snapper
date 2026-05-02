@@ -10,7 +10,7 @@ interface Options {
 const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'] as const
 
 /**
- * Phase 2c "Show all runs" toggle data source for CompareLauncher.
+ * "Show all runs" toggle data source for CompareLauncher.
  *
  * The list endpoint accepts only a single `status` value, so the
  * three terminal slices are fetched in parallel via Promise.all

@@ -6,7 +6,7 @@ import type { BacktestProgressData } from '../../../types/ws'
 export type BacktestProgressSnapshot = BacktestProgressData
 
 /**
- * Phase 2c live backtest progress subscription.
+ * Live backtest progress subscription.
  *
  * Owns the WS subscription lifecycle scoped to a single
  * (wallet, run) pair. Subscribes to the 4-segment topic prefix

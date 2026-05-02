@@ -1,6 +1,6 @@
 """Tests for MessagePublisher.send stamping the topic field on every payload.
 
-Phase 2 promotes ``StrictDataSchema.publish_to(topic) -> bytes`` as
+``StrictDataSchema.publish_to(topic) -> bytes`` is promoted as
 the chokepoint that stamps the routing key on every production
 payload before it crosses the wire. ``MessagePublisher.send`` is one
 of three production publish call sites that route through it; these

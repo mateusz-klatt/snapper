@@ -1,9 +1,9 @@
-"""Tests for the ``ai-reviews`` REST endpoints (Plan D Phase 1 #5).
+"""Tests for the ``ai-reviews`` REST endpoints.
 
 Covers the HTTP-status surface of the two routes added by
 :mod:`snapper.server.ai_review_routes`:
 
-- ``POST /api/ai-reviews/{review_public_id}/decision`` — Plan A Q14
+- ``POST /api/ai-reviews/{review_public_id}/decision`` — structured
   envelope wrapped in HTTP statuses (200 / 404 / 403 / 409 / 410 /
   422 / 503).
 - ``GET /api/ai-reviews/pending`` — list pending reviews keyed by the
@@ -166,8 +166,7 @@ class TestSubmitDecisionRoute:
         Given the service returns the idempotent-retry envelope,
         When the route wraps it,
         Then HTTP 200 (not 409) and success=True so bridges treat the
-        retry as a no-op rather than a hard error (Plan A Q14 v1.2 +
-        cross-plan decision D3 lock).
+        retry as a no-op rather than a hard error.
         """
         _stub_submit_decision(
             monkeypatch,
@@ -206,9 +205,9 @@ class TestSubmitDecisionRoute:
         error_code: str,
         expected_status: int,
     ) -> None:
-        """Plan A §5.2 mapping — each hard-error classifier yields its HTTP code.
+        """Each hard-error classifier yields its HTTP code.
 
-        Given the service returns one of the Plan A Q14 hard-error codes,
+        Given the service returns one of the hard-error codes,
         When the route translates the envelope,
         Then the matching HTTP status is raised and the body's
         ``detail`` carries the same envelope shape MCP clients see.
@@ -375,9 +374,9 @@ class TestListPendingRoute:
     def test_wallet_public_id_filter_threaded_through_to_repo(self) -> None:
         """``?wallet_public_id=`` query param reaches the repo predicate.
 
-        Plan D §7 spec — bridge passes wallet_public_id to scope the
-        catch-up snapshot. The route MUST forward the filter so the
-        repo's WHERE clause adds ``ai_reviews.wallet_public_id ==
+        The bridge passes wallet_public_id to scope the catch-up
+        snapshot. The route MUST forward the filter so the repo's
+        WHERE clause adds ``ai_reviews.wallet_public_id ==
         wallet_public_id``.
 
         Given a repo whose mock records the kwargs it received,

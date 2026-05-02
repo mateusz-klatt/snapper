@@ -204,8 +204,8 @@ class TestPlanExecutorService:
     ) -> None:
         """A cancel_requested plan with no cancel TradeCommand is re-emitted.
 
-        Phase 1.5 review round 2 fix: if the REST cancel route crashed
-        after flipping the plan to cancel_requested but before inserting
+        If the REST cancel route crashed after flipping the plan to
+        cancel_requested but before inserting
         the cancel command, the plan would be stranded forever. On
         startup recovery the service now re-emits the cancel.
         """
@@ -1159,7 +1159,7 @@ class TestPlanExecutorService:
         ``_running`` stayed ``True`` — making the service look healthy
         while silently stopping to consume events. The loop now wraps
         each message in a try/except so a single bad frame cannot take
-        the service down (Phase 1.5 review fix).
+        the service down.
         """
         mock_repo_fn.return_value = AsyncMock()
         service = PlanExecutorService()
@@ -1221,8 +1221,8 @@ class TestPlanExecutorService:
     ) -> None:
         """A transient socket recv failure is logged and the loop retries.
 
-        Phase 1.5 review fix: previously an exception from ``recv_multipart``
-        fell out of the outer handler and silently exited the loop.
+        Previously an exception from ``recv_multipart`` fell out of
+        the outer handler and silently exited the loop.
         """
         mock_repo_fn.return_value = AsyncMock()
         service = PlanExecutorService()
@@ -2190,7 +2190,7 @@ class TestLogDecisionError:
 
 
 class TestSetupPublisher:
-    """BE-3b §D6.2 self-bootstrap publisher covers both no-broker + reuse-context paths."""
+    """BE-3b self-bootstrap publisher covers both no-broker + reuse-context paths."""
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
@@ -2269,7 +2269,7 @@ class TestSetupPublisher:
 
 
 class TestLogDecisionPublishesEvent:
-    """BE-3b §D6.2: ``_log_decision`` publishes ``plans.decisions.*`` after insert."""
+    """``_log_decision`` publishes ``plans.decisions.*`` after insert."""
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
@@ -2356,7 +2356,7 @@ class TestLogDecisionPublishesEvent:
     ) -> None:
         """The published payload carries ``topic`` matching the decision topic.
 
-        Phase 2 chokepoint contract: every production publish call site
+        Chokepoint contract: every production publish call site
         routes serialization through ``StrictDataSchema.publish_to`` so
         downstream consumers see the routing key on the payload itself.
         """

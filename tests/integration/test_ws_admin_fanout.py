@@ -17,12 +17,12 @@ and non-wallet-scoped subscriptions, then feeds a serialised
 ``ScopeRevokedData`` payload into ``_admin_dispatch_frame`` to
 reproduce what a real publisher → subscriber hand-off does at runtime.
 
-Plan §7 DoD item 3: "REST → publisher → bus → subscriber → fanout →
+Pinned DoD: "REST → publisher → bus → subscriber → fanout →
 WSErrorResponse frame with message.startswith('topic_outside_scope:')
 + unsubscribe_client + bridge.remove_subscription." This test omits
 the REST + bus halves (they are exercised at the service-level +
 contract-test level respectively) and focuses on the subscriber +
-fanout half that only Commit 3 can exercise end-to-end.
+fanout half end-to-end.
 """
 
 import json
@@ -157,7 +157,7 @@ class TestWsAdminFanoutEndToEnd:
     async def test_dispatch_frame_is_idempotent_per_event(self) -> None:
         """The subscriber contract: one event → one fanout pass.
 
-        Plan §D7 single-publisher invariant's corollary on the
+        The single-publisher invariant's corollary on the
         subscriber side — a single publisher frame must not fan out
         twice on the same subscriber. We call ``_admin_dispatch_frame``
         twice with the same event payload (simulating a duplicate

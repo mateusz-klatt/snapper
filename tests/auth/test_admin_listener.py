@@ -1,14 +1,10 @@
 """Tests for the admin-bus listener on `WebSocketAuthManager`.
 
-Covers the kill-switch fanout half of.6.1: every authenticated
-WebSocket whose principal matches the deactivated user is closed with
-code 4003 on receipt of `admin.user_deactivated`.  planted the
-publisher's local-blacklist + DB inventory;  made
-`UserService.deactivate_user` the SOLE publisher;  connects the
-WebSocket layer to that publisher.
-
-Subscription wiring for `admin.scope_revoked` is deferred to
-(re-validation needs the §3.8 wallet-scope algorithm).
+Covers the kill-switch fanout: every authenticated WebSocket whose
+principal matches the deactivated user is closed with code 4003 on
+receipt of `admin.user_deactivated`. The publisher's local-blacklist
++ DB inventory is planted; `UserService.deactivate_user` is the SOLE
+publisher; the WebSocket layer is connected to that publisher.
 
 The ZMQ socket layer is mocked because (a) starting a real broker
 in unit tests would dwarf the test's value and (b) the recv +

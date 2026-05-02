@@ -28,9 +28,6 @@ SKIP_DIRS: Final[set[str]] = {
     "build",
     "coverage",
     ".pytest_cache",
-    "data",
-    "ios",
-    "notebooks",
 }
 
 

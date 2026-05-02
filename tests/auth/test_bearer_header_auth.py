@@ -263,10 +263,9 @@ class TestWebSocketBearerAuth:
     async def test_ai_delegate_principal_carries_delegate_public_id(self) -> None:
         """AI_DELEGATE WS upgrade -> ``AuthPrincipal.delegate_public_id`` populated.
 
-        Plan D Q19 + Phase 1 #7 fix-up — the WS auth chain MUST
-        mirror the REST chain's ``ai_delegates`` lookup so the
-        per-frame scope filter (``enforce_ai_review_scope``) finds
-        a non-None delegate id. Without this, every legitimate
+        The WS auth chain MUST mirror the REST chain's ``ai_delegates``
+        lookup so the per-frame scope filter (``enforce_ai_review_scope``)
+        finds a non-None delegate id. Without this, every legitimate
         AI_DELEGATE WS subscriber gets dropped by the filter and
         silently receives no ``ai_reviews.*`` events.
 

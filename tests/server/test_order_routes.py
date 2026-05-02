@@ -177,7 +177,7 @@ class TestCreateOrder:
             ``CapsViolationError('max_open_orders')``,
         When: the client POSTs a valid order,
         Then: response is HTTP 422 carrying the structured error
-            body per §9.2 — verifies the cap-violation branch in
+            body — verifies the cap-violation branch in
             ``create_order``.
         """
         repo = AsyncMock()
@@ -614,8 +614,8 @@ class TestCancelOrder:
     def test_cancel_with_child_order_insert_failure_marks_plan_failed(self) -> None:
         """When the cancel TradeCommand insert fails, plan transitions to failed.
 
-        After the Phase 3.5 unification the SCD2 ``cancel_requested``
-        transition lives inside :meth:`Repository.claim_execution_plan_cancel`
+        The SCD2 ``cancel_requested`` transition lives inside
+        :meth:`Repository.claim_execution_plan_cancel`
         (the FOR UPDATE-locked CAS); the compensate-to-failed step still
         uses the legacy :meth:`Repository.update_execution_plan_status`
         because compensation does not need the cancel-key claim. We
@@ -646,11 +646,10 @@ class TestCancelOrder:
     def test_cancel_compensation_failure_still_raises_500(self) -> None:
         """If both insert and compensation update fail, route still returns 500.
 
-        After Phase 3.5: a second failure in the compensating ``failed``
-        transition must not mask the original cancel-insert failure.
-        The plan is stranded in ``cancel_requested`` and the
-        PlanExecutorService recovery loop re-emits the cancel on next
-        startup.
+        A second failure in the compensating ``failed`` transition
+        must not mask the original cancel-insert failure. The plan is
+        stranded in ``cancel_requested`` and the PlanExecutorService
+        recovery loop re-emits the cancel on next startup.
         """
         active_row = _make_plan_row(status="active", with_child_order=True)
         cancel_requested_row = _make_plan_row(status="cancel_requested", with_child_order=True)
@@ -676,10 +675,10 @@ class TestCancelOrder:
 
 
 class TestCreateOrderAiReviewCitation:
-    """Plan D Phase 2 #10 ``ai_review_public_id`` body field on POST /api/orders."""
+    """``ai_review_public_id`` body field on POST /api/orders."""
 
     def test_valid_citation_threads_through_to_caps_enforcer_guard(self) -> None:
-        """Plan D Phase 2 #10 — valid citation lands on the caps-guard submission.
+        """Valid citation lands on the caps-guard submission.
 
         ``ai_review_public_id`` is a runtime-only signal on
         :class:`TradeCommandSubmission` consumed by
@@ -737,7 +736,7 @@ class TestCreateOrderAiReviewCitation:
         client.close()
 
     def test_unknown_citation_returns_403(self) -> None:
-        """Plan D Phase 2 #10 R1 — citing an unknown ai_review_public_id returns 403.
+        """Citing an unknown ai_review_public_id returns 403.
 
         Given: a body whose ``ai_review_public_id`` does not exist
             (caller fabricated the value to attempt a fanout-spam
@@ -761,7 +760,7 @@ class TestCreateOrderAiReviewCitation:
         client.close()
 
     def test_citation_owned_by_other_user_returns_403(self) -> None:
-        """Plan D Phase 2 #10 R1 — citing another user's review returns 403.
+        """Citing another user's review returns 403.
 
         Given: a body whose ``ai_review_public_id`` row exists but is
             owned by a different user (the cross-user fanout-spam

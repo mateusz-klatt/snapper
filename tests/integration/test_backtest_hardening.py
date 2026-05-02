@@ -1,4 +1,4 @@
-"""Phase 2b-hardening integration acceptance tests.
+"""Backtest hardening integration acceptance tests.
 
 Covers:
 - Concurrent backtest runs rejected at the DB layer (uq_bt_single_running).
@@ -132,7 +132,7 @@ def _candle_row(open_at: datetime, close: float) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 class TestHardeningIntegration:
-    """Phase 2b-hardening acceptance suite."""
+    """Hardening acceptance suite."""
 
     @pytest.mark.timeout(15)
     async def test_concurrent_second_run_rejected_at_db_layer(self, tmp_path: Path) -> None:

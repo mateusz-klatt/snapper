@@ -6,15 +6,15 @@ import type { AiReviewActivityFrame } from '../../stores/wsDispatcher'
  * Single-row renderer for the WS-driven AI review activity stream.
  *
  * The frame's discriminator (`type`) drives the visual variant; the
- * three external WS frame types (Plan A §4.2 / Q16) are
- * ``ai_review.request`` (a CONSULT was dispatched to the delegate),
- * ``ai_review.decision_ack`` (the delegate's decision was committed
- * and broadcast), and ``ai_review.caps_violation`` (an
- * AI-approved trade tripped a TradingCaps gate).
+ * three external WS frame types are ``ai_review.request`` (a CONSULT
+ * was dispatched to the delegate), ``ai_review.decision_ack`` (the
+ * delegate's decision was committed and broadcast), and
+ * ``ai_review.caps_violation`` (an AI-approved trade tripped a
+ * TradingCaps gate).
  *
  * The component is intentionally exhaustive on the discriminator so
- * adding a fourth frame type in a later phase becomes a TS compile
- * error rather than a silent no-op.
+ * adding a fourth frame type later becomes a TS compile error rather
+ * than a silent no-op.
  */
 export function AiReviewActivityRow({
   frame,

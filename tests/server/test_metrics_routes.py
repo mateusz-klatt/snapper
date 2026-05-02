@@ -1,4 +1,4 @@
-"""Tests for ``GET /api/metrics/notifications`` (BE-3c §D11)."""
+"""Tests for ``GET /api/metrics/notifications``."""
 
 import inspect
 from unittest.mock import AsyncMock

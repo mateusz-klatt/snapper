@@ -449,9 +449,8 @@ class TestLifespan:
     ) -> None:
         """ScopeGrantService shares the UserService publisher socket.
 
-        Plan §3 Commit 1 `app.py` lifespan wiring: after
-        ``UserService.set_msg_publisher(user_publisher)`` the lifespan
-        MUST call ``ScopeGrantService.set_msg_publisher(user_publisher)``
+        After ``UserService.set_msg_publisher(user_publisher)`` the
+        lifespan MUST call ``ScopeGrantService.set_msg_publisher(user_publisher)``
         with the SAME publisher instance — single ZMQ PUB socket serves
         both ``admin.user_deactivated`` and ``admin.scope_revoked``
         (vs. opening a second socket and doubling broker connection
@@ -526,8 +525,8 @@ class TestLifespan:
     ) -> None:
         """AiReviewService shares the same publisher socket as UserService.
 
-        Plan D §3.6 ``handle_caps_violation_bus_message`` re-fanouts
-        internal caps-violation events onto the external
+        ``handle_caps_violation_bus_message`` re-fanouts internal
+        caps-violation events onto the external
         ``ai_reviews.{user}.{strategy}.caps_violation`` WS topic. The
         FastAPI lifespan MUST inject the publisher singleton so the
         handler is non-degraded by the time the bus subscriber loop
@@ -617,13 +616,12 @@ class TestLifespan:
     async def test_lifespan_injects_ws_auth_manager_publisher(self) -> None:
         """WebSocketAuthManager shares the UserService publisher socket.
 
-        Phase 1 #2 added :meth:`WebSocketAuthManager.set_msg_publisher`
-        for the layer-1 ``bus.delegate_offline`` fast-path emit, but
-        the FastAPI lifespan never wired it. Without this injection
-        :meth:`_publish_delegate_offline` observes ``None`` + logs a
-        warning, so AI delegates that drop their WS would never trigger
-        the AI Review fanout fast-path until the natural fanout timer
-        (Plan D §3.4) eventually fired. Mirrors the AiReviewService
+        :meth:`WebSocketAuthManager.set_msg_publisher` exists for the
+        layer-1 ``bus.delegate_offline`` fast-path emit. Without this
+        injection :meth:`_publish_delegate_offline` observes ``None``
+        + logs a warning, so AI delegates that drop their WS would
+        never trigger the AI Review fanout fast-path until the natural
+        fanout timer eventually fired. Mirrors the AiReviewService
         wiring assertion above.
         """
         mock_app = MagicMock()
@@ -761,15 +759,15 @@ class TestLifespan:
     async def test_lifespan_injects_caps_enforcer_publisher(self) -> None:
         """TradingCapsEnforcer shares the UserService publisher socket.
 
-        Phase 2 #2 wiring: lifespan must inject the ZMQ publisher onto
-        the caps enforcer at startup (so CapsViolationError raised
-        against AI-approved submissions can fan out
-        bus.caps_violation_after_ai_approve to AiReviewService) AND
-        clear the slot at shutdown (so an in-flight cap evaluation
-        observes ``None`` and degrades gracefully). Mirrors the
-        AiReviewService / WebSocketAuthManager wiring assertions above.
-        Uses a recorder side-effect on ``set_msg_publisher`` so both
-        startup + shutdown calls are pinned in a single sequence.
+        Lifespan must inject the ZMQ publisher onto the caps enforcer
+        at startup (so CapsViolationError raised against AI-approved
+        submissions can fan out bus.caps_violation_after_ai_approve to
+        AiReviewService) AND clear the slot at shutdown (so an
+        in-flight cap evaluation observes ``None`` and degrades
+        gracefully). Mirrors the AiReviewService / WebSocketAuthManager
+        wiring assertions above. Uses a recorder side-effect on
+        ``set_msg_publisher`` so both startup + shutdown calls are
+        pinned in a single sequence.
         """
         mock_app = MagicMock()
         mock_manager = MagicMock()
@@ -906,17 +904,16 @@ class TestLifespan:
     async def test_lifespan_starts_and_stops_ai_review_bus_listener(self) -> None:
         """AiReviewService bus listener is started + stopped by lifespan.
 
-        Phase 2 #1 wiring: lifespan must spin up the
+        Lifespan must spin up the
         ``bus.delegate_offline`` + ``bus.caps_violation_after_ai_approve``
-        subscriber so the Phase 1 #2 + #8 handlers actually drain
-        events in production. Pins the load-bearing relative ordering
-        recorded into a single sequence so a regression that moves
-        any of the four hooks fails this test:
+        subscriber so the handlers actually drain events in production.
+        Pins the load-bearing relative ordering recorded into a single
+        sequence so a regression that moves any of the four hooks
+        fails this test:
 
-        - ``set_msg_publisher`` (Phase 1 #8 — caps_violation handler
-          publish path) MUST run BEFORE ``start_bus_listener`` so the
-          first event the listener dispatches finds a non-None
-          publisher slot.
+        - ``set_msg_publisher`` (caps_violation handler publish path)
+          MUST run BEFORE ``start_bus_listener`` so the first event
+          the listener dispatches finds a non-None publisher slot.
         - ``set_repository_factory`` MUST run BEFORE
           ``start_bus_listener`` so the first ``bus.delegate_offline``
           frame finds a non-None factory.

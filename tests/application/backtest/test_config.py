@@ -124,7 +124,7 @@ class TestBacktestConfigValidation:
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_zmq_replay_now_accepted(self) -> None:
-        """ZMQ_REPLAY mode is accepted at schema level (Phase 2a)."""
+        """ZMQ_REPLAY mode is accepted at schema level."""
         config = BacktestConfig(**_valid_config(execution_mode=BacktestExecutionMode.ZMQ_REPLAY))
         assert config.execution_mode == BacktestExecutionMode.ZMQ_REPLAY
 
@@ -196,7 +196,7 @@ class TestTargetExecutionExchange:
         Given: a config constructed without the field,
         When: BacktestConfig is built,
         Then: target_execution_exchange is None so fills attribute to the
-            source candle's exchange (Phase 2c byte-identical path).
+            source candle's exchange (byte-identical legacy path).
         """
         config = BacktestConfig(**_valid_config())
         assert config.target_execution_exchange is None
@@ -234,7 +234,6 @@ class TestTargetExecutionExchange:
         When: BacktestConfig is built,
         Then: Pydantic raises ValidationError — OrderExchange excludes
             kraken_equities (which is feed-only, not order-capable).
-            Closes R3-Q1 design decision.
         """
         with pytest.raises(ValidationError):
             BacktestConfig(**_valid_config(target_execution_exchange="kraken_equities"))
@@ -251,7 +250,7 @@ class TestTargetExecutionExchangeFingerprint:
             target_execution_exchange=None explicitly,
         When: fingerprints are computed,
         Then: both produce the byte-identical hash, matching pre-v1.2
-            legacy runs (Phase 2c dedup cache remains valid).
+            legacy runs (dedup cache remains valid).
         """
         c1 = BacktestConfig(**_valid_config())
         c2 = BacktestConfig(**_valid_config(target_execution_exchange=None))

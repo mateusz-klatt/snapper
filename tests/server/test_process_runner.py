@@ -1,11 +1,11 @@
 """Tests for the subprocess process-runner entry point.
 
-Plan D Phase 2 #9 — verifies the decision-only AiReviewService bus
-listener wiring around the subprocess target invocation. The listener
-is wired in :func:`snapper.server.process_runner._ai_review_decision_listener`
+Verifies the decision-only AiReviewService bus listener wiring around
+the subprocess target invocation. The listener is wired in
+:func:`snapper.server.process_runner._ai_review_decision_listener`
 and consumed by both the async-method and awaitable code paths so any
 strategy that subscribes to the strategy primitive's await loop gets
-the Plan A §7.1 fast-path even when launched via
+the fast-path even when launched via
 :class:`ProcessLauncherService` in ``ProcessModeEnum.PROCESS``.
 """
 
@@ -36,7 +36,7 @@ def _clear_singleton() -> Iterator[None]:
 
 @pytest.mark.asyncio
 async def test_decision_listener_starts_with_decision_topic_only() -> None:
-    """Plan D Phase 2 #9 — listener subscribes to ``bus.ai_review_decision`` only.
+    """Listener subscribes to ``bus.ai_review_decision`` only.
 
     Subprocess strategies must NOT subscribe to ``bus.delegate_offline``
     (handler needs a repository factory the subprocess lacks) or

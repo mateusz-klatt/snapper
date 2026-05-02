@@ -22,9 +22,9 @@ export const WalletPicker: React.FC = () => {
       id='wallet-picker'
       value={currentId ?? '__all__'}
       onChange={v => {
-        // Phase 2c: picker change now mints a new JWT with the
-        // selected wallet claim before swapping client scope, so
-        // REST + WS both authorise against the same wallet.
+        // Picker change mints a new JWT with the selected wallet
+        // claim before swapping client scope, so REST + WS both
+        // authorise against the same wallet.
         void selectWalletAndRefresh(v === '__all__' ? null : v)
       }}
       options={options}

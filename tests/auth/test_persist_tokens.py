@@ -519,8 +519,8 @@ class TestPersistTokens:
         Then: :meth:`Repository.get_active_token_by_hash` resolves
             BOTH the access and refresh tokens back to their DB rows
             via ``hash_token``. This proves the hash shape matches
-            across write and read paths (the §3.6.3 invariant that
-            lets ``verify_token`` hit the inventory).
+            across write and read paths (the invariant that lets
+            ``verify_token`` hit the inventory).
         """
         await _seed_user(repo, public_id="user-persist", username="persist-user")
         manager = self._fresh_manager()

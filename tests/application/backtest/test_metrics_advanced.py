@@ -1,4 +1,4 @@
-"""Tests for Phase 2c advanced metrics (3 new + warnings side-channel).
+"""Tests for advanced backtest metrics (3 new + warnings side-channel).
 
 Covers ``max_drawdown_duration_seconds``, ``exposure_ratio``, and
 ``turnover_ratio`` — including edge-case policy (``None`` + warning
@@ -58,7 +58,7 @@ def _trade(quantity: float, price: float, pnl: float | None = None) -> BacktestT
 
 
 class TestPromotedMetricNames:
-    """PROMOTED_METRIC_NAMES is the single source of truth for §4.3."""
+    """PROMOTED_METRIC_NAMES is the single source of truth."""
 
     def test_contains_all_five_promoted(self) -> None:
         """Set matches the migration 0005 promoted-column list."""

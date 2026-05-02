@@ -999,7 +999,7 @@ class CancelClaimResult(TypedDict):
 
     The CAS-style cancel claim returns this structured shape so the
     service layer can dispatch on ``outcome`` without re-reading the
-    plan or interpreting raw exceptions. Plan B v1.2 §1.4.
+    plan or interpreting raw exceptions.
 
     ``outcome`` values:
 
@@ -1548,9 +1548,9 @@ class DeviceAlertPrefUpsertRow(TypedDict, total=False):
     timestamp. Optional keys default per ORM column defaults
     (enabled True, min_priority "medium", timezone "UTC"); scope
     columns are NULL for the device-global scope, operator_public_id
-    set with wallet NULL for operator scope, both set for wallet scope
-    (§D7 routing precedence). On an update the existing active row is
-    closed (known_to := now) and a new version is inserted.
+    set with wallet NULL for operator scope, both set for wallet scope.
+    On an update the existing active row is closed (known_to := now)
+    and a new version is inserted.
     """
 
     public_id: str
@@ -1616,8 +1616,7 @@ class UserAlertDefaultRow(TypedDict):
     """Row dict returned by Repository.list_user_alert_defaults.
 
     Always an active SCD2 row. Fallback per-(user, alert_type)
-    preference consulted when no device-scoped override matches
-    (§D7 step 4).
+    preference consulted when no device-scoped override matches.
     """
 
     public_id: str
@@ -1764,9 +1763,8 @@ class AlertDeliveryRow(TypedDict):
 class AiDelegateRow(TypedDict):
     """Row dict for :class:`snapper.data.models.AiDelegate`.
 
-    Plan A v1.4 §3.4 + Plan D §2.3 — operational side-table FK to
-    AI_DELEGATE-role users; holds Q10 admission counter +
-    Q17 ``last_seen_at`` for reconnect hysteresis.
+    Operational side-table FK to AI_DELEGATE-role users; holds the
+    admission counter + ``last_seen_at`` for reconnect hysteresis.
     """
 
     public_id: str
@@ -1780,9 +1778,8 @@ class AiDelegateRow(TypedDict):
 class AiReviewRow(TypedDict):
     """Row dict for :class:`snapper.data.models.AiReview`.
 
-    Plan A v1.4 §3.1 + Plan D §2.1 — full state machine fields.
-    Mutable status row (Q13 lock); audit trail in append-only
-    ``ai_review_events``.
+    Full state machine fields. Mutable status row; audit trail in
+    append-only ``ai_review_events``.
     """
 
     public_id: str
@@ -1814,7 +1811,7 @@ class AiReviewRow(TypedDict):
 class AiReviewEventRow(TypedDict):
     """Row dict for :class:`snapper.data.models.AiReviewEvent`.
 
-    Plan A v1.4 §3.2 + Plan D §2.2 — append-only audit log.
+    Append-only audit log.
     """
 
     public_id: str
@@ -1830,10 +1827,10 @@ class AiReviewEventRow(TypedDict):
 class AiReviewInsertRow(TypedDict, total=False):
     """Insert payload for :class:`snapper.data.models.AiReview` create.
 
-    Plan D §3.1 — used by ``AiReviewService.create_review``. All
-    non-NULL fields required; nullable terminal fields (decision,
-    rationale, responding_delegate_public_id, resolution_mode,
-    resolved_at, counter_decremented_at) defaulted by service layer.
+    Used by ``AiReviewService.create_review``. All non-NULL fields
+    required; nullable terminal fields (decision, rationale,
+    responding_delegate_public_id, resolution_mode, resolved_at,
+    counter_decremented_at) defaulted by service layer.
     """
 
     public_id: str
@@ -1872,9 +1869,9 @@ class AiReviewEventInsertRow(TypedDict, total=False):
 class AtomicResolveResult(TypedDict, total=False):
     """Return shape for the AI-review terminal-transition primitives.
 
-    Plan D §3.2 step 5 / Phase 2 #8 — atomic single-transaction UPDATE of
-    ``ai_reviews`` from non-terminal to a resolved / timeout / superseded
-    state via :meth:`Repository.atomic_resolve_review_with_audit_and_counter`,
+    Atomic single-transaction UPDATE of ``ai_reviews`` from non-terminal
+    to a resolved / timeout / superseded state via
+    :meth:`Repository.atomic_resolve_review_with_audit_and_counter`,
     :meth:`Repository.atomic_timeout_review_with_audit_and_counter`, or
     :meth:`Repository.atomic_supersede_review_with_audit_and_counter`. The
     ``previous_status`` is captured BY the primitive's SELECT-FOR-UPDATE
@@ -1888,15 +1885,15 @@ class AtomicResolveResult(TypedDict, total=False):
     derived inside the primitive from the locked ``previous_status`` +
     ``selected_delegate_public_id`` so the value the service publishes
     on the post-commit bus event + WS frame matches what the row +
-    audit row hold (closes the Phase 2 #8 R3 MAJOR where the service
-    computed ``resolution_mode`` from a pre-transaction snapshot of
-    ``status``; if a peer flipped the row from ``pending`` to
-    ``fanout_dispatched`` between the read and the lock, the published
-    ``resolution_mode`` could disagree with the actual transition). The
-    timeout + supersede primitives leave it absent because their
-    ``resolution_mode`` is fixed by the transition target
-    (``timeout_no_response`` / ``superseded_by_strategy``) and the
-    service does not depend on the primitive returning it.
+    audit row hold (the service must not compute ``resolution_mode``
+    from a pre-transaction snapshot of ``status``; if a peer flipped
+    the row from ``pending`` to ``fanout_dispatched`` between the read
+    and the lock, the published ``resolution_mode`` could disagree
+    with the actual transition). The timeout + supersede primitives
+    leave it absent because their ``resolution_mode`` is fixed by the
+    transition target (``timeout_no_response`` /
+    ``superseded_by_strategy``) and the service does not depend on the
+    primitive returning it.
     """
 
     selected_delegate_public_id: str
@@ -1908,11 +1905,11 @@ class AtomicResolveResult(TypedDict, total=False):
 class PendingReviewSummary(TypedDict):
     """Read-only projection of ``ai_reviews`` rows for reaper / scanner ticks.
 
-    Plan D §3.3 reaper iterates `(public_id, selected_delegate_public_id,
+    The reaper iterates `(public_id, selected_delegate_public_id,
     dispatch_version, deadline, status)` to drive per-row atomic
-    timeouts. Plan D §3.4 / §3.5 scanners use the same shape minus the
-    deadline (offline dispatch is gated by ``fanout_after`` instead).
-    The Plan D §7 ``GET /api/ai-reviews/pending`` REST surface adds
+    timeouts. The offline / fast-path scanners use the same shape minus
+    the deadline (offline dispatch is gated by ``fanout_after`` instead).
+    The ``GET /api/ai-reviews/pending`` REST surface adds
     ``wallet_public_id`` so dashboards / the bridge can render the
     review without a follow-up read. Keeping a single shared TypedDict
     avoids drift between the four callers.

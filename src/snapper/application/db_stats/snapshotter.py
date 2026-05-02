@@ -1,4 +1,4 @@
-"""DbStatsSnapshotter — async per-table row-count sampler (Cluster B).
+"""DbStatsSnapshotter — async per-table row-count sampler.
 
 Owns ONE :class:`Repository` (async) for the lifetime of the
 snapshotter. Per tick:
@@ -23,12 +23,8 @@ deps therefore boot cleanly when ``DB_METRICS_DISABLED=true``.
 
 Configuration: ``DB_METRICS_INTERVAL_SECONDS`` (default 60),
 ``DB_METRICS_DISABLED`` (default false). Read directly from
-``os.environ.get(...)`` per the A1/Cluster A pattern. Per-table
-timeout is a module constant (not env-configurable for v1).
-
-Plan reference:
-``proprietary/plans/plan_observability_cluster_b.md`` §2.1 + §2.2 +
-§2.7 + §2.8 + §2.9 + §3.1 + §3.2 + §3.3 + §3.4 + §6.
+``os.environ.get(...)``. Per-table timeout is a module constant
+(not env-configurable for v1).
 """
 
 import asyncio
@@ -243,7 +239,7 @@ class DbStatsSnapshotter:
         shorter than ``interval_seconds`` never pays for a DB sample
         run. Operators pay an up-to-``interval_seconds`` cold-start
         503 window before the first ``GET /api/metrics/db/tables``
-        returns 200 — documented in plan §11.2.
+        returns 200.
         """
         if self._disabled or self._repo is None:
             logger.info("DbStatsSnapshotter: disabled (DB_METRICS_DISABLED=true); skipping start")
@@ -264,8 +260,8 @@ class DbStatsSnapshotter:
     async def _loop(self) -> None:
         """Sleep then sample; repeat until cancelled.
 
-        Pre-sleep on every iteration (mirrors the Cluster A sampler
-        pattern) so an ephemeral test app that lives shorter than
+        Pre-sleep on every iteration (mirrors the system-metrics
+        sampler pattern) so an ephemeral test app that lives shorter than
         ``interval_seconds`` never pays for a DB sample. Defensive
         ``try/except`` keeps the loop alive across unexpected
         exceptions from the sampler path.

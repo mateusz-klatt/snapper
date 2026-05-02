@@ -69,7 +69,7 @@ class InstrumentSpecMissingError(RuntimeError):
     spec lookup returns no ``public_id`` for an AI-attributed emit the
     engine raises this loud, operator-actionable error before invoking
     the guard. Non-AI strategy emits remain tolerant of a missing
-    ``public_id`` per Plan D Phase 3 §2.5.
+    ``public_id``.
     """
 
 
@@ -466,7 +466,7 @@ class TradingEngineService:
     ) -> None:
         """Route the strategy emit through the appropriate caps gate.
 
-        Three-way selection per Plan D Phase 3 §3.1:
+        Three-way selection:
             1. ``ai_review_public_id`` set → AI-attribution guard
                (resolves user from cited row, runs caps).
             2. caps_enforcer wired but no AI attribution →
@@ -484,7 +484,7 @@ class TradingEngineService:
                 ``SignalData`` envelope, threaded down through
                 :meth:`execute_desired_units` → :meth:`_send_order`.
             ai_review_dispatch_version: Companion to the citation
-                per Plan A Q18 (transport-only).
+                (transport-only).
         """
         assert self._repository is not None
         if self._caps_enforcer is not None and ai_review_public_id is not None:
@@ -536,7 +536,7 @@ class TradingEngineService:
                 through the attribution-aware caps gate. ``None`` keeps
                 the existing service-principal bypass.
             ai_review_dispatch_version: Companion to
-                ``ai_review_public_id`` per Plan A Q18 — transport-only;
+                ``ai_review_public_id`` — transport-only;
                 the strategy citation validator does not compare it.
 
         Returns:
@@ -734,7 +734,7 @@ class TradingEngineService:
                 in a future chunk. ``None`` preserves the existing
                 ``guard_service_principal()`` audit-bypass behavior.
             ai_review_dispatch_version: Companion to
-                ``ai_review_public_id`` per Plan A Q18; transport-only — the
+                ``ai_review_public_id``; transport-only — the
                 strategy citation validator does not compare it.
         """
         if self.read_only:

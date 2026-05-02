@@ -1,4 +1,4 @@
-"""``AlertRule`` ABC + ``RuleRegistry`` for the notify sidecar (BE-3b §D6).
+"""``AlertRule`` ABC + ``RuleRegistry`` for the notify sidecar.
 
 Each rule owns a fire condition on one or more ZMQ topic prefixes
 plus an evaluator that turns a received event into zero or more

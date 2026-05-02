@@ -1669,7 +1669,7 @@ class TestBridgeIntermediatePrefixDefense:
 
 
 class TestAiReviewScopeFilterWiring:
-    """Plan D §9 + Q15 — bridge calls enforce_ai_review_scope per-subscription."""
+    """Bridge calls enforce_ai_review_scope per-subscription."""
 
     def _make_bridge_with_subscription(self) -> tuple[Any, Any]:
         """Build a bridge with one subscription on the ai_reviews family."""

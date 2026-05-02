@@ -12,9 +12,9 @@ const MILESTONE_LABELS: Record<string, string> = {
 }
 
 /**
- * Phase 2c progress bar — renders a 0..100 % bar plus milestone
- * chips and current candle / equity counts. Falls back to "no
- * progress yet" when no event has arrived.
+ * Progress bar — renders a 0..100 % bar plus milestone chips and
+ * current candle / equity counts. Falls back to "no progress yet"
+ * when no event has arrived.
  */
 export const BacktestProgressBar: React.FC<Props> = ({ snapshot }) => {
   if (!snapshot) {

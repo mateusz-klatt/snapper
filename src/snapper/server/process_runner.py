@@ -6,8 +6,8 @@ by the ProcessLauncherService. It handles
 2. Dynamic class loading and instantiation
 3. Async/sync method invocation
 4. Logging setup with process-specific context
-5. AiReviewService decision-only bus listener wiring (Plan D Phase 2 #9 —
-   process-mode strategy fast-path closure)
+5. AiReviewService decision-only bus listener wiring (process-mode
+   strategy fast-path closure)
 Usage
     Called by ProcessLauncherService when mode='subprocess'
         python -m snapper.server.process_runner --config '{...}'
@@ -19,7 +19,7 @@ Configuration JSON
 The subprocess runs independently with its own Python interpreter
 allowing true parallelism and isolation from the main server process.
 
-AI Review fast-path (Plan A §7.1 / Plan D Phase 2 #9): subprocess
+AI Review fast-path: subprocess
 strategies that invoke ``create_ai_review_and_await`` register an
 ``asyncio.Future`` on the subprocess's :class:`AiReviewService`
 singleton. Without a bus listener that future would never fire (the
@@ -84,12 +84,12 @@ async def _run_async_method(method: Callable[[], Awaitable[Any]]) -> Any:
 
 @contextlib.asynccontextmanager
 async def _ai_review_decision_listener() -> AsyncIterator[None]:
-    """Plan D Phase 2 #9 — wire the subprocess decision-only bus listener.
+    """Wire the subprocess decision-only bus listener.
 
     Subscribes the subprocess's :class:`AiReviewService` singleton to
     ``bus.ai_review_decision`` ONLY so the strategy primitive's Future
-    fast-path (Plan A §7.1) wakes immediately when an AI delegate
-    submits a decision. Restricted to that single topic on purpose:
+    fast-path wakes immediately when an AI delegate submits a
+    decision. Restricted to that single topic on purpose:
 
     - ``bus.delegate_offline``: handler needs a repository factory the
       subprocess lacks; would log warning + skip on every event.

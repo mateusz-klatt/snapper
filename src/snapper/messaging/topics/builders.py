@@ -291,7 +291,7 @@ def alerts_topic(user_public_id: str, alert_type: str) -> str:
 
 
 def plans_decisions_topic(plan_public_id: str) -> str:
-    """Build a ``plans.decisions.{plan_public_id}`` topic string (§D6.2).
+    """Build a ``plans.decisions.{plan_public_id}`` topic string.
 
     Published by ``PlanExecutorService`` immediately after each
     ``ExecutionPlanDecision`` row commits. Subscribed by the notify

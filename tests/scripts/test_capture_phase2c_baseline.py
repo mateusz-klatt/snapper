@@ -1,4 +1,4 @@
-"""Tests for Phase 2c baseline capture script."""
+"""Tests for the ``capture_phase2c_baseline`` script."""
 
 import asyncio
 import json

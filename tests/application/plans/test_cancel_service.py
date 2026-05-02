@@ -2,9 +2,9 @@
 
 The service is the domain-level cancel-by-plan-public-id facade that
 the MCP ``cancel_order`` tool calls. REST keeps the legacy helper
-in :mod:`snapper.server.order_routes` untouched (Plan B v1.2 §1.4
-deferred REST refactor); these tests exercise the service in
-isolation against an in-memory mock repository.
+in :mod:`snapper.server.order_routes` untouched (deferred REST
+refactor); these tests exercise the service in isolation against an
+in-memory mock repository.
 """
 
 import asyncio
@@ -639,8 +639,8 @@ class TestPlansCancelServiceR1:
             reclassifier returns it as a replay-success row,
             ``_claim_cancel_transition`` short-circuits the caller's
             ``insert_trade_command`` step, and the service returns the
-            current row WITHOUT raising. This honours the Plan B v1.2
-            §2.3 idempotent-replay contract.
+            current row WITHOUT raising. This honours the
+            idempotent-replay contract.
         """
         plan_pre = _make_plan(status="active")
         plan_post = _make_plan(status="cancel_requested", cancel_idempotency_key="loser-key")
@@ -741,8 +741,8 @@ class TestPlansCancelServiceR1:
             normally surface :class:`CapsViolationError`,
         When: the post-race plan carries the caller's key,
         Then: the service short-circuits to a replay-success row
-            instead of bubbling the caps error. Plan B v1.2 §2.3
-            idempotent-replay contract.
+            instead of bubbling the caps error. Idempotent-replay
+            contract.
         """
         plan_pre = _make_plan(status="active")
         plan_post = _make_plan(status="cancel_requested", cancel_idempotency_key="loser-key")

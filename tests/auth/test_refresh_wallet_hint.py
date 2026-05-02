@@ -1,4 +1,4 @@
-"""Tests for refresh-token wallet-hint validation (Phase 2c §2.5).
+"""Tests for refresh-token wallet-hint validation.
 
 Covers ``_apply_wallet_hint`` (role-branched membership validation,
 404 on foreign wallet, model_copy projection) and the

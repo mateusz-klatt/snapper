@@ -99,7 +99,7 @@ class TestAIDelegateWalletScopeFilter:
         allowed_pairs: set[tuple[str, str]],
         expected_allowed: bool,
     ) -> None:
-        """Plan §D2 v1.1 truth table — 8 rows exercised here."""
+        """Truth table — 8 rows exercised here."""
         repo = _repo_with_pairs(allowed_pairs)
         allowed, denied = await _enforce_ai_delegate_wallet_scope(
             [topic],

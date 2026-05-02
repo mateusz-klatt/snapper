@@ -1,9 +1,9 @@
 """Lifespan helper tests for ``_start_db_stats_snapshotter`` / ``_stop_db_stats_snapshotter``.
 
-Mirrors the test pattern used by Cluster C
+Mirrors the test pattern used by retention
 (``tests/application/retention/test_scheduler.py::TestStartHelper`` /
 ``TestStopHelper``) so the B22 attribute-absent contract is exercised
-across all three clusters in the same shape.
+across all snapshotter helpers in the same shape.
 """
 
 from types import SimpleNamespace

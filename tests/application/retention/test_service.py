@@ -5,7 +5,7 @@ Covers:
 * Module-level validation rejects a policy whose ``table`` is not a
   key in ``EVENT_TABLES``.
 * `_compute_window` arithmetic — frozen ``today_utc`` produces the
-  exact ``(day_start, day_end)`` per §3.6 of the Cluster C plan.
+  exact ``(day_start, day_end)`` boundary mapping.
 * `evaluate_policy` happy path + dry-run propagation + archiver
   exception capture + window-failure capture.
 * `run_once` collects per-policy results and never re-raises.

@@ -1,4 +1,4 @@
-"""Per-(device, alert) routing with the 4-level precedence cascade (§D7).
+"""Per-(device, alert) routing with the 4-level precedence cascade.
 
 Given an ``AlertEventRow`` (already persisted) and the caller's user +
 device prefs + user-level defaults, decide which active devices

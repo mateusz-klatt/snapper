@@ -1432,7 +1432,7 @@ def _engine_with_caps_capture() -> tuple[TradingEngineService, list[Any]]:
 
 @pytest.mark.asyncio
 async def test_send_order_non_ai_tolerates_missing_public_id() -> None:
-    """Plan D Phase 3 §2.5 — non-AI strategy emits tolerate absent public_id.
+    """Non-AI strategy emits tolerate absent public_id.
 
     Given: a TradingEngine whose ``instrument_specs`` lacks ``public_id``,
     When: ``_send_order`` is called WITHOUT ``ai_review_public_id``,
@@ -1453,7 +1453,7 @@ async def test_send_order_non_ai_tolerates_missing_public_id() -> None:
 
 @pytest.mark.asyncio
 async def test_send_order_non_ai_populates_resolved_public_id() -> None:
-    """Plan D Phase 3 §6 — non-AI submission still benefits from spec lookup.
+    """Non-AI submission still benefits from spec lookup.
 
     Given: ``instrument_specs[symbol]['public_id']`` populated,
     When: ``_send_order`` is called WITHOUT AI attribution,
@@ -1474,7 +1474,7 @@ async def test_send_order_non_ai_populates_resolved_public_id() -> None:
 
 @pytest.mark.asyncio
 async def test_send_order_ai_attributed_fail_closed_on_missing_public_id() -> None:
-    """Plan D Phase 3 §2.5 — AI emits FAIL-CLOSED when public_id absent.
+    """AI emits FAIL-CLOSED when public_id absent.
 
     Given: ``instrument_specs`` lacks ``public_id``,
     When: ``_send_order`` is called WITH ``ai_review_public_id``,
@@ -1498,15 +1498,13 @@ async def test_send_order_ai_attributed_fail_closed_on_missing_public_id() -> No
 
 @pytest.mark.asyncio
 async def test_send_order_ai_attributed_fail_closed_without_repository() -> None:
-    """Plan D Phase 3 §2.5 — AI fail-closed applies on the no-repo path too.
+    """AI fail-closed applies on the no-repo path too.
 
     Given: a TradingEngine with NO repository wired (test/CLI fallback
         path that publishes without writing a TradeCommand row),
     When: ``_send_order`` is called WITH ``ai_review_public_id``,
     Then: ``InstrumentSpecMissingError`` is raised regardless of the
-        repository-or-not branch. Closes Codex per-chunk-review
-        finding that the §2.5 contract was only enforced inside the
-        ``if self._repository is not None`` block in v1 of Chunk 2.
+        repository-or-not branch.
     """
     socket = _SocketStub()
     engine = TradingEngineService(
@@ -1530,7 +1528,7 @@ async def test_send_order_ai_attributed_fail_closed_without_repository() -> None
 
 @pytest.mark.asyncio
 async def test_send_order_ai_attributed_routes_through_attribution_guard() -> None:
-    """Plan D Phase 3 §6 — AI emit threads attribution onto the submission.
+    """AI emit threads attribution onto the submission.
 
     Given: ``instrument_specs`` carries ``public_id`` and the engine has a
         caps enforcer that records the guard method invoked,

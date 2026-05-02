@@ -1,6 +1,6 @@
-"""Phase 4  integration tests — N=2 partitioning end-to-end.
+"""Integration tests — N=2 partitioning end-to-end.
 
-Covers success criteria #5 + §8 acceptance #3, #4, #16:
+Covers:
     1. ``test_two_coordinators_split_signals``: two coordinators,
        10 signals precomputed to split ~50/50 across instance_id 0/1,
        assert each instance's engines set is disjoint + the union
@@ -273,11 +273,9 @@ class TestCoordinatorRestartOnlyRecoversOwned:
         coordinator HAS that shard's engine in memory after the
         recovery cycle completes.
 
-        This exercises the §3.5 sub-method 1 (checkpoint) path
+        This exercises the checkpoint sub-method recovery path
         end-to-end under N>1 — the contract that paper-N>1 recovery
-        RELIES on because sub-methods 2+3 are disabled for paper.
-        Recommended by the 3-model final review for converting the
-        disjoint-only assertion into a positive recovery guarantee.
+        relies on because the other sub-methods are disabled for paper.
         """
         trader_0, trader_1 = two_coordinator_stack.traders
         _, instruments_1 = _pick_instruments_per_instance()
@@ -328,23 +326,23 @@ class TestCoordinatorRestartOnlyRecoversOwned:
         Step 2: stop trader_1 and start a fresh trader_1_new with
         the same settings (instance_id=1, instance_count=2).
 
-        Assertions ( #4 + §3.5 partitioned-recovery contract):
+        Assertions (partitioned-recovery contract):
 
             - trader_1_new MUST NOT recover any of trader_0's shards.
-              This is the ownership-split invariant the §3.5 paper
-              N>1 exclusion exists to protect.
+              This is the ownership-split invariant the paper N>1
+              exclusion exists to protect.
             - Whatever engines trader_1_new does recover MUST carry
               ``_ownership`` with instance_id=1, instance_count=2 —
-              proves the recovery-path engine wiring ( §3.6
-              v1.2).
+              proves the recovery-path engine wiring.
             - trader_0 is untouched by the restart.
 
         The test does NOT require trader_1_new to re-recover
-        trader_1's original engines: under N>1 paper mode, §3.5 v1.3
-        excludes paper ExecutionRow/OrderRow rows (strategy_tag
-        unavailable on those tables) and recovery is checkpoint-only.
-        Checkpoints take time to emit and this test does not force a
-        checkpoint tick, so the recovered set is allowed to be empty.
+        trader_1's original engines: under N>1 paper mode the
+        recovery path excludes paper ExecutionRow/OrderRow rows
+        (strategy_tag unavailable on those tables) and recovery is
+        checkpoint-only. Checkpoints take time to emit and this test
+        does not force a checkpoint tick, so the recovered set is
+        allowed to be empty.
         """
         trader_0, trader_1 = two_coordinator_stack.traders
         instruments_0, instruments_1 = _pick_instruments_per_instance()

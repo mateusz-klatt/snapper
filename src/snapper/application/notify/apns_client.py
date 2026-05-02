@@ -4,8 +4,8 @@ Wraps ``aioapns.APNs`` with a small, opinionated surface: one
 ``ApnsClientPool`` instance owns one sandbox client + one production
 client (sharing the same PEM private key, only the ``use_sandbox``
 flag differs) and routes sends by the target device's recorded
-``env`` column. Constructed inside an async context (per Plan 2 §D3
-— the ``aioapns.APNs`` constructor calls ``asyncio.get_event_loop()``
+``env`` column. Constructed inside an async context (the
+``aioapns.APNs`` constructor calls ``asyncio.get_event_loop()``
 internally and raises on Py 3.12+ if invoked outside a running loop).
 Returned by ``build_apns_client_pool`` rather than a classmethod so
 tests can fake out both ends without needing an event loop.
@@ -27,7 +27,7 @@ class ApnsSendResult:
     """Small, stable result envelope the sidecar logs and persists.
 
     The sidecar maps a subset of ``NotificationResult`` into this
-    shape so the retry policy in §D5.5 doesn't leak the
+    shape so the retry policy doesn't leak the
     ``aioapns``-specific response class into the outbox code path.
 
     Attributes:
@@ -44,7 +44,7 @@ class ApnsSendResult:
     Note:
         aioapns 4.0 does not expose the ``Retry-After`` header on
         429 responses; the sidecar applies its own backoff schedule
-        (§D5.5) for all throttled / server-error cases rather than
+        for all throttled / server-error cases rather than
         reading Apple's hint. This is an acceptable trade-off because
         Apple's hint is advisory and the schedule is already
         exponential with a 5-minute cap.
@@ -61,7 +61,7 @@ class ApnsClientPool:
 
     Constructed inside an async context so ``aioapns``' internal
     ``asyncio.get_event_loop()`` call resolves to the running loop
-    (§D3 compatibility note for Py 3.12+).
+    (compatibility note for Py 3.12+).
 
     Args:
         sandbox_client: Optional sandbox-bound ``aioapns.APNs``.
@@ -137,12 +137,12 @@ class ApnsClientPool:
             device_token: 64-hex APNs device token.
             payload: Full APNs ``aps``-dict payload (includes
                 ``{"aps": {...}, ...custom}``). Caller is
-                responsible for sizing — see §D3 4KB limit.
+                responsible for sizing — see APNs 4KB limit.
             apns_topic: Usually identical to the app bundle id
                 (``ApnsConfig.topic``). Forwarded as the
                 ``apns-topic`` HTTP/2 header.
             priority: APNs priority (5 = throttleable, 10 =
-                immediate). Defaults to 10 per §D4 safety-critical
+                immediate). Defaults to 10 per safety-critical
                 delivery contract; non-critical senders may lower.
             push_type: APNs push type (``alert`` | ``background`` |
                 ``voip`` | ...). Defaults to ``alert``.
@@ -197,7 +197,7 @@ def _status_code_from(status: str) -> int:
 
     ``aioapns`` exposes the status as the numeric HTTP code rendered
     as a string (e.g. ``'200'``, ``'410'``, ``'429'``) — we cast it
-    back to int so the retry policy in §D5.5 can switch on the same
+    back to int so the retry policy can switch on the same
     integer buckets regardless of the underlying library. Unknown /
     empty strings collapse to 0 (handled as ``other`` coarse status).
     """
@@ -231,7 +231,7 @@ def build_apns_client_pool(config: ApnsConfig) -> ApnsClientPool:
     """Build an ``ApnsClientPool`` from a hydrated ``ApnsConfig``.
 
     Must be called from within a running asyncio event loop — see the
-    §D3 note on ``aioapns.APNs`` constructor behavior under Py 3.12+.
+    note on ``aioapns.APNs`` constructor behavior under Py 3.12+.
 
     Args:
         config: Hydrated config (PEM string already decoded from

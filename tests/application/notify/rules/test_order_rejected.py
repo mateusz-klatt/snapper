@@ -1,4 +1,4 @@
-"""Tests for ``OrderRejectedRule`` (§D6.1 Rule 2)."""
+"""Tests for ``OrderRejectedRule``."""
 
 from datetime import UTC
 from datetime import datetime

@@ -5,7 +5,7 @@ profile (``proprietary/data/seed/{dev,prod}.toml``, category
 ``apns``) and hydrates them into an ``ApnsConfig`` dataclass the
 ``ApnsClientPool`` can consume.
 
-Per Plan 2 §D3: the private key is stored as a base64-encoded PEM
+The private key is stored as a base64-encoded PEM
 string in ``apns_private_key_p8_base64`` so it round-trips cleanly
 through the TOML seed. Decoding yields a PEM string that aioapns /
 PyJWT accepts verbatim — no filesystem tempfile is required despite

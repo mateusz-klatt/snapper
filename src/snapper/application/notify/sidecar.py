@@ -1,9 +1,8 @@
 """``NotifySidecar`` — ZMQ ``alerts.`` consumer with APNs fanout and outbox retry.
 
-Plan 2 §D5 / §D5.5 (iOS Push Foundation). The sidecar owns three
-co-routines: the ZMQ receive loop, the startup outbox drain, and a
-background retry loop that wakes every 30s and picks up queued
-deliveries whose ``next_attempt_at`` has arrived.
+The sidecar owns three co-routines: the ZMQ receive loop, the startup
+outbox drain, and a background retry loop that wakes every 30s and
+picks up queued deliveries whose ``next_attempt_at`` has arrived.
 
 Flow per received ``alerts.`` message:
 
@@ -22,7 +21,7 @@ Flow per received ``alerts.`` message:
    non-terminal response (``throttled`` / ``server_error``) leaves
    the row ``queued`` and schedules a retry via ``next_attempt_at``.
 
-Retry semantics (§D5.5 attempt-number-before-attempt rule): every
+Retry semantics (attempt-number-before-attempt rule): every
 attempt bumps ``attempt_count`` *before* the APNs call via
 ``update_delivery_retry_schedule`` — so a crash between the DB write
 and the APNs call leaves ``attempt_count=N`` and the retry loop will
@@ -70,7 +69,7 @@ _ZMQ_STREAM = "sidecar.notify"
 def _backoff_seconds(attempt_number: int) -> float:
     """Compute the exponential backoff for the N-th attempt.
 
-    Schedule: ``min(30s * 2^(N-1), 5min)`` per Plan 2 §D5.5.
+    Schedule: ``min(30s * 2^(N-1), 5min)``.
     N=1 -> 30s, N=2 -> 60s, N=3 -> 120s; capped at 300s.
 
     Args:
@@ -131,7 +130,7 @@ class NotifySidecar(RegisterableProcess):
                 every ``alert_events`` / ``alert_deliveries`` row
                 the sidecar writes.
             registry: Alert rule registry — defaults to
-                ``load_default_registry()`` (the 5 P0 rules per §D6
+                ``load_default_registry()`` (the 5 P0 rules
                 + ``margin_warning``). Injected for tests that want a
                 narrower rule set.
             scope_revalidator: Scope-revocation helper — defaults to
@@ -161,9 +160,9 @@ class NotifySidecar(RegisterableProcess):
     async def start(self) -> None:
         """Run the sidecar main loop until ``stop()`` is signalled.
 
-        Subscribes to every prefix the rule registry aggregates (§D6 —
-        ``orders.events.`` + ``plans.decisions.`` + ``system.heartbeats.``
-        for the v1.11 default set), drains the outbox (crash recovery),
+        Subscribes to every prefix the rule registry aggregates
+        (``orders.events.`` + ``plans.decisions.`` + ``system.heartbeats.``
+        for the default set), drains the outbox (crash recovery),
         spawns the background retry loop, and consumes the receive loop
         until ``_stop_event`` is set. Each entry boundary mints one
         ``now`` timestamp (per ``feedback_timestamp_discipline.md``)
@@ -197,7 +196,7 @@ class NotifySidecar(RegisterableProcess):
         self._stop_event.set()
 
     async def _dispatch(self, topic: str, payload: bytes, now: datetime) -> None:
-        """Route one received bus frame through the rule registry (§D6).
+        """Route one received bus frame through the rule registry.
 
         Matches ``topic`` against the registry's longest-prefix
         dispatch, runs every matching rule's ``evaluate``, and persists
@@ -362,7 +361,7 @@ class NotifySidecar(RegisterableProcess):
         without an APNs round-trip.
 
         Otherwise, bumps ``attempt_count`` first (attempt-number-before-
-        attempt per §D5.5), builds the APNs payload, calls through the
+        attempt rule), builds the APNs payload, calls through the
         pool, and maps the result to the SCD2 terminal / retry schedule.
         """
         if await self._scope_revalidator.should_skip_send(event, self._repo, now):
@@ -422,7 +421,7 @@ class NotifySidecar(RegisterableProcess):
 
         Reads the active row to learn the current attempt_count, then
         delegates to ``update_delivery_retry_schedule`` which emits a
-        successor SCD2 row with the incremented counter (§D5.5). The
+        successor SCD2 row with the incremented counter. The
         new attempt number is returned when the transition succeeded;
         ``None`` when the row is no longer queued (a concurrent admin
         handler cancelled it between our ``should_skip_send`` check
@@ -503,7 +502,7 @@ class NotifySidecar(RegisterableProcess):
 
         Throttled responses use a conservative 60s delay (aioapns 4.0
         does not expose Retry-After); all other server/network errors
-        use the exponential backoff from §D5.5. Retry exhaustion
+        use the exponential backoff. Retry exhaustion
         emits a ``logger.warning`` before the terminal ``failed``
         transition so ops alerting has a single log record to pivot
         on (BE-3a R1 invariant INV-10).
@@ -553,7 +552,7 @@ class NotifySidecar(RegisterableProcess):
     async def _drain_outbox(self, now: datetime) -> None:
         """Process every ``status='queued'`` row on startup (crash recovery).
 
-        Ordered ``last_attempt_at ASC NULLS FIRST`` (per §D5.5 — never-
+        Ordered ``last_attempt_at ASC NULLS FIRST`` (never-
         attempted rows first, then longest-waiting retries). Each
         row gets one fresh attempt; a second-or-later failure stays
         inside the retry loop's normal scheduling.

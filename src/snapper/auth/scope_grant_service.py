@@ -76,7 +76,7 @@ class ScopeGrantService:
     ) -> ScopeGrantRow:
         """Revoke an active scope grant and publish the revocation event.
 
-        Orchestration (single publisher invariant, §D7):
+        Orchestration (single publisher invariant):
 
         1. ``repository.revoke_scope_grant`` SCD2-closes the grant
            (atomic, under per-wallet advisory lock on PostgreSQL).
@@ -189,7 +189,7 @@ class ScopeGrantService:
         instrument_public_id: str,
         as_of: datetime,
     ) -> bool:
-        """Plan A v1.4 + Plan D §10 — AI delegate scope check forwarder.
+        """AI delegate scope check forwarder.
 
         Wraps :meth:`Repository.has_grant_for_delegate` so the service stays
         the single SOLE owner of the delegate-scope contract. The repo

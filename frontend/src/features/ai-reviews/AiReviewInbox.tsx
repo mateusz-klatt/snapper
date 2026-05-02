@@ -8,7 +8,7 @@ import { AiReviewActivityRow } from './AiReviewActivityRow'
 const ACTIVITY_DISPLAY_LIMIT = 50
 
 /**
- * Plan D Phase 2 #11 — delegate-facing AI Review inbox.
+ * Delegate-facing AI Review inbox.
  *
  * Two surfaces stitched together:
  *

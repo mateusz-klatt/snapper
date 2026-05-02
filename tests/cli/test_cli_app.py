@@ -4029,7 +4029,7 @@ class TestBacktestRerun:
 
 
 class TestBacktestRerunPreservesPhase2Fields:
-    """backtest-rerun must propagate non-default Phase 2 fields."""
+    """backtest-rerun must propagate non-default execution-config fields."""
 
     @patch.dict(
         "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES",
@@ -4196,7 +4196,7 @@ class TestBacktestRun:
 
 
 class TestNotifyCommand:
-    """``snapper notify`` — iOS Push Foundation sidecar CLI (BE-3a).
+    """``snapper notify`` — iOS Push Foundation sidecar CLI.
 
     The command wires four external collaborators (bootstrap
     settings, repository, SettingsService, ApnsClientPool) and

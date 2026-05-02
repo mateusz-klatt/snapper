@@ -2,7 +2,7 @@
 
 Two route families, both gated by ``Permission.READ_SYSTEM_STATUS``:
 
-* ``/notifications`` — iOS Push Foundation ops metrics (BE-3c §D11).
+* ``/notifications`` — iOS Push Foundation ops metrics.
   DB-derived outbox counters + per-status totals so an oncall
   dashboard can tell at a glance whether the sidecar is keeping up
   or whether deliveries are piling up in the retry queue.
@@ -89,7 +89,7 @@ _DB_STATS_NOT_YET_RUN_DETAIL = "DB metrics snapshotter has not completed a sampl
 
 
 class NotificationMetricsData(StrictDataSchema[Literal["notification_metrics"]]):
-    """DB-derived counters for the notify sidecar's outbox (§D11).
+    """DB-derived counters for the notify sidecar's outbox.
 
     All counts aggregate over active ``alert_deliveries`` rows
     (``known_to = KNOWN_TO_MAX``) — the SCD2 predecessor versions are
@@ -134,7 +134,7 @@ async def get_notification_metrics(
     ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> NotificationMetricsResponse:
-    """Return current notify-sidecar outbox counters (§D11).
+    """Return current notify-sidecar outbox counters.
 
     Args:
         request: FastAPI request — provides REST tracker.
@@ -646,7 +646,7 @@ async def get_db_table_stats(
         Depends(require_permission(Permission.READ_SYSTEM_STATUS)),
     ],
 ) -> DbStatsResponse:
-    """Return the most recent per-table row-count snapshot (Cluster B).
+    """Return the most recent per-table row-count snapshot.
 
     Args:
         request: FastAPI request — provides app state + REST tracker.

@@ -1,4 +1,4 @@
-"""Repository-level tests for the Phase 0d wallet credential helpers.
+"""Repository-level tests for the wallet credential helpers.
 
 Covers ``create_wallet_credential``, ``rotate_wallet_credential``,
 and ``list_wallet_credentials_for_wallet``. Runs against an on-disk

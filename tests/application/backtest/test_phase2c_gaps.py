@@ -1,4 +1,4 @@
-"""Targeted Phase 2c coverage for the small leftover branches.
+"""Targeted backtest coverage for small leftover branches.
 
 Covers:
 
@@ -616,7 +616,7 @@ class TestCreateBacktestConfigHashFallback:
 
 
 class TestPhase2cBaselineParity:
-    """BE-3: cross-asset refactor must not drift any Phase 2c baseline scenario.
+    """BE-3: cross-asset refactor must not drift any baseline scenario.
 
     Re-runs the 4 deterministic batch_processor scenarios captured by
     ``scripts.capture_phase2c_baseline.SCENARIOS`` and deep-dict-equal
@@ -638,7 +638,7 @@ class TestPhase2cBaselineParity:
             and the result is serialised via the same serialise_run
             helper used to produce the snapshot,
         Then: every serialised scenario matches the snapshot deep-dict
-            equally — byte-identical for single-feed Phase 2c runs.
+            equally — byte-identical for single-feed runs.
         """
         fixture_path = (
             Path(__file__).resolve().parent / "fixtures" / "phase2c_baseline_snapshot.json"
@@ -652,4 +652,4 @@ class TestPhase2cBaselineParity:
             actual = serialise_run(collector, portfolio)
             assert (
                 actual == golden[scenario.name]
-            ), f"Phase 2c parity drift in scenario '{scenario.name}'"
+            ), f"baseline parity drift in scenario '{scenario.name}'"

@@ -1,10 +1,10 @@
-"""Tests for Phase 2 #1 AiReviewService bus listener.
+"""Tests for the AiReviewService bus listener.
 
 Covers :meth:`AiReviewService.start_bus_listener` /
 :meth:`AiReviewService.stop_bus_listener` + the recv / dispatch
-helpers that drain ``bus.delegate_offline`` (Q17 layer-1 fast-path)
-and ``bus.caps_violation_after_ai_approve`` (Plan D §3.6 fanout)
-into the per-message handlers shipped in Phase 1 #2 + #8.
+helpers that drain ``bus.delegate_offline`` (layer-1 fast-path)
+and ``bus.caps_violation_after_ai_approve`` (fanout)
+into the per-message handlers.
 
 Mirrors the admin-listener test pattern used by ``WebSocketAuthManager``
 + ``TokenManager`` (`tests/auth/test_token_admin_listener.py`): the
@@ -136,7 +136,7 @@ class TestBusDispatchFrame:
     async def test_ai_review_decision_topic_dispatches_to_handler(self) -> None:
         """``bus.ai_review_decision`` → ``handle_ai_review_decision_bus_message``.
 
-        Phase 2 #3 fast-path: the listener wakes registered Futures so
+        Fast-path: the listener wakes registered Futures so
         the strategy primitive's await loop bypasses the DB-poll
         interval. The dispatch must route to the synchronous handler
         without requiring repository_factory wiring (the handler is
@@ -153,8 +153,8 @@ class TestBusDispatchFrame:
     async def test_delegate_offline_dispatches_with_repo_from_factory(self) -> None:
         """``bus.delegate_offline`` → handler invoked with a fresh repo from the factory.
 
-        The handler accepts a ``repo: Repository`` keyword (per Phase 1
-        #2's Plan D §3.5 contract); the listener-level dispatch must
+        The handler accepts a ``repo: Repository`` keyword; the
+        listener-level dispatch must
         thread a fresh repo per dispatch so the per-tick UnitOfWork is
         bounded + does not bleed connections across handler calls.
         """
@@ -384,7 +384,7 @@ class TestStartStopBusListener:
 
     @pytest.mark.asyncio
     async def test_topics_param_restricts_subscription_to_decision_only(self) -> None:
-        """Plan D Phase 2 #9 — subprocess strategies pass topics=(decision,) only.
+        """Subprocess strategies pass topics=(decision,) only.
 
         The subprocess listener wired by ``snapper.server.process_runner`` must
         subscribe ONLY to ``bus.ai_review_decision`` so the strategy primitive's

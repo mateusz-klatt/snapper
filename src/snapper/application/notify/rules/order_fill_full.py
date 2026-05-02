@@ -1,4 +1,4 @@
-"""``order_fill_full`` rule — fires when an execution completes in full (§D6.1 Rule 1)."""
+"""``order_fill_full`` rule — fires when an execution completes in full."""
 
 from datetime import datetime
 

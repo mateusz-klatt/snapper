@@ -1,4 +1,4 @@
-"""Scope revocation + user-deactivation handlers for the notify sidecar (§D8).
+"""Scope revocation + user-deactivation handlers for the notify sidecar.
 
 The sidecar subscribes to ``admin.scope_revoked`` + ``admin.user_deactivated``
 on startup. When either fires, ``ScopeRevalidator`` cancels the pending

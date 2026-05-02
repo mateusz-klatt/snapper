@@ -103,9 +103,8 @@ class DbInternalMetrics(TypedDict):
     ``aiosqlite_live_connections`` is the value of
     ``len(_live_aiosqlite_connections)`` at sample time — atomic read,
     no iteration. Each live aiosqlite Connection corresponds to one OS
-    thread under NullPool semantics; this metric was the missing
-    diagnostic for the 8h thread-leak crash documented in
-    ``proprietary/memory/project_monitoring_observability_plan_in_progress.md``.
+    thread under NullPool semantics; this metric is the diagnostic for
+    aiosqlite thread leaks.
     ``pool_size`` and ``pool_checked_out`` are populated when the engine
     uses a queue pool (PG / DB_POOL_MODE=queue); ``None`` under NullPool.
     """

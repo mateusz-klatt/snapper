@@ -1,7 +1,7 @@
 """Tests for the shared ``server.dependencies`` helpers.
 
 The shared module deduplicates the ``get_repository_dependency``
-callable that every new Phase 0d route file uses. These tests pin
+callable that every multi-tenant route file uses. These tests pin
 its contract so a future refactor of the caching shape is caught
 immediately.
 """

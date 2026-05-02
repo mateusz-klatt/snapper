@@ -1,4 +1,4 @@
-"""Pydantic schemas for the ``GET /api/metrics/db/tables`` route (Cluster B).
+"""Pydantic schemas for the ``GET /api/metrics/db/tables`` route.
 
 Mirrors the in-memory :class:`TableStats` + :class:`DbStatsSnapshot`
 dataclasses as wire-strict Pydantic bodies, wrapped in the standard

@@ -515,8 +515,8 @@ class BaseStrategy(ABC):
                 (``review_public_id`` + ``dispatch_version``) is
                 stamped onto the published :class:`SignalData` so the
                 trader-coordinator's attribution-aware caps gate can
-                run for the strategy emit. Plan A Q18 dispatch_version
-                is transport-only end-to-end. Default ``None`` keeps
+                run for the strategy emit. The ``dispatch_version`` is
+                transport-only end-to-end. Default ``None`` keeps
                 non-AI strategy emits byte-identical for downstream
                 consumers.
 

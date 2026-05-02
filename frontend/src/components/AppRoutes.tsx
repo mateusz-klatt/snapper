@@ -23,8 +23,8 @@ interface AppRoutesProps {
 }
 
 /**
- * Phase 2c: switches between the list view and the detail view
- * based on the hash sub-path (`#backtests/{run_public_id}`).
+ * Switches between the list view and the detail view based on
+ * the hash sub-path (`#backtests/{run_public_id}`).
  */
 function BacktestsRouter(): React.ReactElement {
   const subpath = useHashSubpath('backtests')

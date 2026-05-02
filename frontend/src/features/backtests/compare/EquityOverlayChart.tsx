@@ -44,11 +44,11 @@ const buildSeriesData = (
     .map(p => ({ time: toUtc(p.point_time), value: pick(p) as number }))
 
 /**
- * Phase 2c equity overlay chart — two independent line series (Run A
- * blue, Run B orange) on a shared X axis. One-sided gaps are
- * preserved: a point with `equity_a=null` produces zero entries on
- * series A at that timestamp (no `?? 0` backfill, no cross-leg
- * substitution). Theme-aware via useAppStore.
+ * Equity overlay chart — two independent line series (Run A blue,
+ * Run B orange) on a shared X axis. One-sided gaps are preserved:
+ * a point with `equity_a=null` produces zero entries on series A
+ * at that timestamp (no `?? 0` backfill, no cross-leg substitution).
+ * Theme-aware via useAppStore.
  */
 export const EquityOverlayChart: React.FC<Props> = ({ points, height = 300, className = '' }) => {
   const containerRef = useRef<HTMLDivElement>(null)

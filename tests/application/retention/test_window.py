@@ -1,9 +1,9 @@
 """Boundary-formula tests for :func:`compute_retention_window`.
 
-Pins the per-tick ``(day_start, day_end)`` mapping shared by Cluster C
-:class:`RetentionService` and Cluster B's per-table ``archivable``
-counter. Drift here is a Cluster B/C contract break — see
-``proprietary/plans/plan_observability_cluster_b.md`` §7.3.
+Pins the per-tick ``(day_start, day_end)`` mapping shared by
+:class:`RetentionService` and the per-table ``archivable`` counter.
+Drift here is a contract break between the retention service and the
+DB-stats sampler.
 """
 
 from datetime import date
@@ -13,7 +13,7 @@ from snapper.application.retention.window import compute_retention_window
 
 
 class TestComputeRetentionWindow:
-    """Per-tick boundary formula (Cluster C plan §3.6)."""
+    """Per-tick boundary formula."""
 
     def test_telemetry_policy_today_2026_05_01(self) -> None:
         """SC#4 fixture — ``retain_days=1, backlog_lookback_days=30``."""

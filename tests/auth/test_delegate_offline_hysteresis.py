@@ -1,4 +1,4 @@
-"""Tests for ``WebSocketAuthManager`` Q17 Layer 1 hysteresis (Plan D §4).
+"""Tests for ``WebSocketAuthManager`` Layer 1 delegate-offline hysteresis.
 
 Covers the three new hooks the WS dispatcher calls around the
 delegate-connection lifecycle:
@@ -183,9 +183,9 @@ async def test_on_disconnect_schedules_pending_task_for_delegate() -> None:
 async def test_on_disconnect_cancels_prior_pending_then_schedules_new() -> None:
     """A second disconnect for the same delegate cancels the prior pending task.
 
-    Plan D §4 hysteresis: only the LATEST disconnect timestamp must
-    fire, so a stale task from a previous flap is cancelled before the
-    new one is scheduled.
+    Hysteresis: only the LATEST disconnect timestamp must fire, so a
+    stale task from a previous flap is cancelled before the new one
+    is scheduled.
 
     Given a manager with one pending offline task already scheduled,
     When on_disconnect is invoked again for the same delegate,
@@ -245,8 +245,8 @@ async def test_delayed_offline_publish_fires_after_grace(
 async def test_delayed_offline_publish_cancellation_skips_publish() -> None:
     """Cancelling the task before grace elapses skips the publish call.
 
-    Plan D §4: a flapping reconnect within the grace window cancels
-    the pending task so subscribers never see a phantom-offline event.
+    A flapping reconnect within the grace window cancels the pending
+    task so subscribers never see a phantom-offline event.
 
     Given a manager with a long grace window and a scheduled task,
     When the test cancels the task before the sleep finishes,
@@ -297,7 +297,7 @@ async def test_delayed_offline_publish_swallows_publisher_failure(
 
     A broken broker connection must not leak into the asyncio task
     graph as an unhandled exception; the column-level last_seen_at is
-    the source of truth so the §3.4 Layer 2 scanner remains the
+    the source of truth so the Layer 2 scanner remains the
     correctness backstop.
 
     Given a publisher whose send() raises RuntimeError,
@@ -337,8 +337,8 @@ async def test_on_authenticate_no_op_for_non_delegate_principal() -> None:
 async def test_on_authenticate_cancels_pending_offline_task() -> None:
     """A delegate reconnect cancels the prior on_disconnect task.
 
-    Plan D §4 fast-path: a flapping reconnect within the grace window
-    cancels the pending publish so subscribers never observe the
+    Fast-path: a flapping reconnect within the grace window cancels
+    the pending publish so subscribers never observe the
     phantom-offline transition. The task slot is also cleared from
     ``_pending_offline_tasks`` so a follow-up disconnect schedules
     cleanly.
@@ -368,7 +368,7 @@ async def test_on_authenticate_updates_delegate_last_seen() -> None:
     """Successful authenticate path bumps ``ai_delegates.last_seen_at``.
 
     The wall-clock passed to the repository is the live ``datetime.now(UTC)``
-    so cross-instance Q17 Layer 2 scanners observe the freshness in their
+    so cross-instance Layer 2 scanners observe the freshness in their
     next tick.
 
     Given a manager wired with a repository and a delegate principal,
@@ -449,12 +449,12 @@ async def test_publish_payload_carries_session_and_sequence() -> None:
 async def test_concurrent_on_disconnect_does_not_orphan_pending_task() -> None:
     """Same-delegate concurrent disconnects never orphan a pending publish task.
 
-    Plan D §4 hysteresis: if call A and call B both run on_disconnect
-    for the same delegate, both must serialise so only the latest
-    scheduled task lives in the registry and any earlier task is
-    cancelled. Without the per-delegate lock, A's `await existing`
-    yields and B can install a new task that A then overwrites,
-    leaving an orphan that wakes up and publishes anyway.
+    Hysteresis: if call A and call B both run on_disconnect for the
+    same delegate, both must serialise so only the latest scheduled
+    task lives in the registry and any earlier task is cancelled.
+    Without the per-delegate lock, A's `await existing` yields and B
+    can install a new task that A then overwrites, leaving an orphan
+    that wakes up and publishes anyway.
 
     Given a manager with one already-pending offline task,
     When two on_disconnect coroutines race for the same delegate via
@@ -514,8 +514,7 @@ async def test_cancel_pending_offline_tasks_drains_registry() -> None:
     """Shutdown helper cancels every in-flight delayed task and clears the dict.
 
     FastAPI lifespan calls this on shutdown so a closing process does
-    not leave Plan D §4 deferred-publish tasks sleeping against
-    torn-down wiring.
+    not leave deferred-publish tasks sleeping against torn-down wiring.
 
     Given a manager with multiple pending tasks for distinct delegates,
     When cancel_pending_offline_tasks runs,

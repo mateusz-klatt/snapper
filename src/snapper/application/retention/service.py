@@ -4,8 +4,7 @@ Owns ONE :class:`DatabaseRepository` + ONE :class:`EventArchiver` for
 the lifetime of the scheduler. Per-tick:
 
   1. Compute the per-policy ``[earliest_scanned_day, last_eligible_day]``
-     window using the formula in
-     ``proprietary/plans/plan_observability_cluster_c.md`` §3.6.
+     window.
   2. Wrap the sync ``EventArchiver.export(...)`` in
      ``asyncio.to_thread`` so the event loop stays responsive.
   3. Capture per-policy results (``files_written``, ``rows_exported``,
@@ -113,8 +112,7 @@ class RetentionService:
     ) -> RetentionPolicyRunResult:
         """Archive + (optionally) purge eligible rows for one policy.
 
-        Computes the per-tick window per the formula in
-        ``proprietary/plans/plan_observability_cluster_c.md`` §3.6 and
+        Computes the per-tick window and
         delegates to :meth:`EventArchiver.export` via
         ``asyncio.to_thread``. Any exception is captured into the
         returned :class:`RetentionPolicyRunResult` ``error`` field; it

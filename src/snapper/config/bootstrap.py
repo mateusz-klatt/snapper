@@ -55,8 +55,8 @@ class BootstrapSettingsLoader(BaseSettings):
             The ZMQ-WebSocket bridge still starts so the frontend receives
             live data from a separately-running engine.  Useful for
             production deployments where the engine runs on a different
-            host. Multi-uvicorn-worker deployments are supported (Plan D
-            Phase 2 #8) — set ``SNAPPER_COORDINATOR_INSTANCE_ID`` and
+            host. Multi-uvicorn-worker deployments are supported —
+            set ``SNAPPER_COORDINATOR_INSTANCE_ID`` and
             ``SNAPPER_COORDINATOR_INSTANCE_COUNT`` per worker so the
             ``ShardOwnership`` partitioning gates the AI-review
             caps_violation external WS fanout to exactly one worker per

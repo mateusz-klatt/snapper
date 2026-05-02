@@ -760,7 +760,7 @@ class TestAccrualTopicBuilder:
 
 
 class TestAlertsTopicBuilder:
-    """Tests for ``alerts_topic`` builder (iOS Push Foundation §D4)."""
+    """Tests for ``alerts_topic`` builder."""
 
     _USER = "019dbb34-f439-77bd-afa8-ee5321d60307"
 
@@ -778,7 +778,7 @@ class TestAlertsTopicBuilder:
 
 
 class TestPlansDecisionsTopicBuilder:
-    """Tests for ``plans_decisions_topic`` builder (Plan 2 §D6.2)."""
+    """Tests for ``plans_decisions_topic`` builder."""
 
     _PLAN = "019dbb34-f439-77bd-afa8-ee5321d60307"
 

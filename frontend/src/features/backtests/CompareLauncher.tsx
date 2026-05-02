@@ -14,7 +14,7 @@ const formatLabel = (run: BacktestRunData): string =>
   `${run.public_id.slice(0, 8)} · ${run.strategy_name} · ${run.status}`
 
 /**
- * Phase 2c CompareLauncher.
+ * CompareLauncher.
  *
  * Two source modes for the manual combobox: same-config (default) and
  * "all runs" (toggle). Auto-pair fires when at least one same-config

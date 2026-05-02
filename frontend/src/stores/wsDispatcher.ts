@@ -64,7 +64,7 @@ export function aiReviewActivityQueryKey(userPublicId: string | null): readonly 
 }
 
 /**
- * Dedup key per Plan A Q18 — `(type, review_public_id, dispatch_version)`.
+ * Dedup key — `(type, review_public_id, dispatch_version)`.
  *
  * The triple is the protocol-level uniqueness contract: two frames with
  * the same triple are by-construction the same logical event (e.g. a

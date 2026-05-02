@@ -51,7 +51,7 @@ class BacktestConfig(StrictBody):
         target_execution_exchange: Optional order-capable venue that
             simulated fills are attributed to in cross-asset runs. When
             ``None`` (default) fills are attributed to the source
-            candle's exchange, preserving Phase 2c byte-identicality.
+            candle's exchange, preserving byte-identicality.
             When set, the batch_processor substitutes this venue +
             ``signal.instrument`` at fill time so observe-one /
             trade-another strategies (e.g. MNQU6-CME observation →

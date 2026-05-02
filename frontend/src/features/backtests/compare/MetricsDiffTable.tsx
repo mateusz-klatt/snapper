@@ -25,10 +25,10 @@ const deltaColor = (v: number | null | undefined): string => {
 }
 
 /**
- * Phase 2c metrics diff table — one row per metric name, columns
- * for run A value, run B value, absolute delta, percent delta.
- * Renders an empty state when the diff is empty (e.g. both runs
- * had no equity points).
+ * Metrics diff table — one row per metric name, columns for run A
+ * value, run B value, absolute delta, percent delta. Renders an
+ * empty state when the diff is empty (e.g. both runs had no equity
+ * points).
  */
 export const MetricsDiffTable: React.FC<Props> = ({ rows }) => {
   if (rows.length === 0) {

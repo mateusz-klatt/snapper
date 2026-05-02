@@ -714,8 +714,8 @@ def _validate_alerts_topic(topic: str) -> tuple[bool, str]:
 
     Expected shape: ``alerts.{user_public_id}.{alert_type}`` where
     ``user_public_id`` is a UUID7 string and ``alert_type`` is one of
-    the enumerated Plan 2 §D4 alert types (mirrored in
-    ``DeviceAlertPrefBody`` and the ``AlertEventData`` dataclass).
+    the enumerated alert types (mirrored in ``DeviceAlertPrefBody``
+    and the ``AlertEventData`` dataclass).
 
     Args:
         topic: Topic string starting with ``alerts.``.
@@ -742,12 +742,12 @@ def _validate_alerts_topic(topic: str) -> tuple[bool, str]:
 
 
 _AI_REVIEW_FRAME_SUFFIXES: frozenset[str] = frozenset({"request", "decision_ack", "caps_violation"})
-"""Plan A §4.2 / Q16 — fixed external WS frame suffixes for the
+"""Fixed external WS frame suffixes for the
 ``ai_reviews.{user}.{strategy}.*`` topic family. The bridge per-frame
 scope filter routes by user/strategy + the JS dispatcher's
-``switch (frame.type)`` (Plan A §4.2 line 503) covers exactly these
-three branches; any new suffix would need a paired JS handler so we
-fail closed on unknown ones."""
+``switch (frame.type)`` covers exactly these three branches; any new
+suffix would need a paired JS handler so we fail closed on unknown
+ones."""
 
 
 _AI_REVIEW_TOPIC_FORMAT_MSG = (
@@ -759,15 +759,14 @@ _AI_REVIEW_TOPIC_FORMAT_MSG = (
 def _validate_ai_reviews_topic(topic: str) -> tuple[bool, str]:
     """Validate an external WS ``ai_reviews.*`` fanout topic.
 
-    Plan A §4.3 / Plan D §4.3 — outbound topic family for delegate
-    consultations. Shape is
+    Outbound topic family for delegate consultations. Shape is
     ``ai_reviews.{user_public_id}.{strategy_public_id}.{suffix}`` where
     user / strategy ids are UUID7 and the suffix is one of the three
-    Q16 frame discriminators (``request`` / ``decision_ack`` /
+    frame discriminators (``request`` / ``decision_ack`` /
     ``caps_violation``). The matching ``ai_reviews.`` entry already
     exists in :data:`TOPIC_REGISTRY`; this validator is the publish-side
     counterpart so the shared ZMQ PUB socket accepts the topic before
-    handing it to the bridge per-frame scope filter (Q15).
+    handing it to the bridge per-frame scope filter.
 
     Args:
         topic: Topic string starting with ``ai_reviews.``.
@@ -798,16 +797,16 @@ def _validate_ai_reviews_topic(topic: str) -> tuple[bool, str]:
 
 _BUS_TOPIC_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 """Snake-case bus topic name shape — lowercase, digits and underscores
-allowed after the leading letter. Mirrors the Plan D §3 bus topic
-naming convention so a typo (``bus.Delegate-Offline``) fails fast at
-the publisher boundary."""
+allowed after the leading letter. Mirrors the bus topic naming
+convention so a typo (``bus.Delegate-Offline``) fails fast at the
+publisher boundary."""
 
 
 def _validate_bus_topic(topic: str) -> tuple[bool, str]:
     """Validate an internal ``bus.*`` cross-service event topic.
 
-    Plan A §3 / Plan D §3 — internal-only event bus used by services
-    that fan out across the same ZMQ broker (e.g.
+    Internal-only event bus used by services that fan out across
+    the same ZMQ broker (e.g.
     ``bus.delegate_offline``, ``bus.ai_review_request``,
     ``bus.caps_violation_after_ai_approve``). Shape is ``bus.{name}``
     with a snake-case suffix; the discriminator on the wire payload
@@ -837,13 +836,13 @@ def _validate_bus_topic(topic: str) -> tuple[bool, str]:
 
 
 def _validate_plans_decisions_topic(topic: str) -> tuple[bool, str]:
-    """Validate a ``plans.decisions.{plan_public_id}`` topic (§D6.2).
+    """Validate a ``plans.decisions.{plan_public_id}`` topic.
 
     Published by ``PlanExecutorService`` immediately after every
     ``ExecutionPlanDecision`` row insert. Subscribed by the notify
     sidecar's stop-loss rule to turn bracket / trailing-stop fires
-    into iOS push notifications. Best-effort delivery — see Plan 2
-    §D6.2 for fail-closed semantics.
+    into iOS push notifications. Best-effort delivery with
+    fail-closed semantics.
 
     Args:
         topic: Topic string starting with ``plans.decisions.``.

@@ -139,7 +139,7 @@ class TestWebSocketHelpersRuntimeError:
         assert determine_topic_category("market.kraken.") == "market"
 
     def test_determine_topic_category_backtest(self) -> None:
-        """Phase 2c backtest topics resolve to ``backtest`` at every depth."""
+        """Backtest topics resolve to ``backtest`` at every depth."""
         assert determine_topic_category("backtest") == "backtest"
         assert determine_topic_category("backtest.") == "backtest"
         assert determine_topic_category("backtest.wallet-uuid.") == "backtest"
@@ -174,7 +174,7 @@ class TestRoleCategorySecurityMatrix:
             ``strategy`` so AI_DELEGATE (READ_SIGNALS only, no
             START_STRATEGIES) can subscribe to ``signals.*`` without the
             operator-level strategy-management surface. ``ai_reviews`` is
-            the Plan A v1.4 CONSULT-pattern category — AI_DELEGATE delivers
+            the CONSULT-pattern category — AI_DELEGATE delivers
             review requests + receives decisions over it.
         """
         categories = role_allowed_categories(UserRole.OPERATOR)
@@ -196,7 +196,7 @@ class TestRoleCategorySecurityMatrix:
         When: Getting allowed categories,
         Then: All eight categories are allowed
             (market, trade, signals, strategy, system, admin, backtest,
-            ai_reviews — Plan A v1.4 CONSULT-pattern surface).
+            ai_reviews — CONSULT-pattern surface).
         """
         categories = role_allowed_categories(UserRole.ADMIN)
         assert categories == {

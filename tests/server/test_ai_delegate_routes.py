@@ -704,7 +704,7 @@ class TestBlankOwnerGuard:
 
 
 class TestDelegateProliferationCap:
-    """Plan §5 item 5 — bound delegates per operator."""
+    """Bound delegates per operator."""
 
     @pytest.mark.asyncio
     async def test_sixth_create_raises_proliferation_error(
@@ -1020,14 +1020,13 @@ class TestServiceEdgeCases:
 
 
 class TestAiDelegatesFeatureFlagGate:
-    """closure — `/api/ai-delegates/*` shares the MCP feature flag.
+    """`/api/ai-delegates/*` shares the MCP feature flag.
 
-    The  3-model review flagged a MAJOR (2/2 consensus): plan
-    §3.12 requires the delegate management surface to refuse every
-    request when ``ai_integration_enabled`` is off, parity with the
-    ``/api/mcp`` sub-app's :class:`FeatureFlagMiddleware`. Without
-    the gate, operators could mint delegates + tokens on an instance
-    where the rest of the AI surface is disabled.
+    The delegate management surface must refuse every request when
+    ``ai_integration_enabled`` is off, parity with the ``/api/mcp``
+    sub-app's :class:`FeatureFlagMiddleware`. Without the gate,
+    operators could mint delegates + tokens on an instance where the
+    rest of the AI surface is disabled.
     """
 
     def test_flag_off_raises_custom_error(self) -> None:

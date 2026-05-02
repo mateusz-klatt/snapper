@@ -245,7 +245,7 @@ class TestGetBacktest:
             client.close()
 
     def test_get_returns_phase2_fields_non_default(self) -> None:
-        """Non-default Phase 2 fields round-trip through the response projection."""
+        """Non-default execution-config fields round-trip through the response projection."""
         row = _make_run_row()
         row["execution_mode"] = "zmq_replay"
         row["fill_model"] = "market"
@@ -335,7 +335,7 @@ class TestGetBacktest:
             client.close()
 
     def test_get_run_detail_exposes_all_advanced_metrics(self) -> None:
-        """Phase 2c Step 1 DoD — 8 typed metrics surface on the detail response.
+        """All 8 typed metrics surface on the detail response.
 
         Fails hard if any future metric addition forgets to extend the
         ``_project_inline_result`` helper.
@@ -1284,7 +1284,7 @@ class TestCompareCreate:
             client.close()
 
     def test_auto_no_anchor_prefers_cross_execution_mode(self) -> None:
-        """Plan §3.2 line 763 — no-anchor auto-pair picks cross-mode partner.
+        """No-anchor auto-pair picks cross-mode partner.
 
         Given:
             Three recent terminal runs for the same config_hash —
@@ -1298,8 +1298,8 @@ class TestCompareCreate:
             The pair resolves to (direct_db_most_recent,
             zmq_replay) rather than the two same-mode direct_db runs
             — Direct-DB and ZMQ-replay are comparable on the same
-            config by design and the plan mandates preferring the
-            cross-mode partner when available.
+            config by design and we prefer the cross-mode partner
+            when available.
         """
         direct_new = _make_run_row(public_id="direct-new", status="completed")
         direct_new["config_hash"] = "a" * 64
@@ -1333,7 +1333,7 @@ class TestCompareCreate:
             client.close()
 
     def test_auto_no_anchor_falls_back_to_same_mode_when_no_cross(self) -> None:
-        """Plan §3.2 line 763 — no-anchor auto-pair falls back when no cross-mode.
+        """No-anchor auto-pair falls back when no cross-mode.
 
         Given:
             Two recent terminal runs, both direct_db.
@@ -1373,7 +1373,7 @@ class TestCompareCreate:
             client.close()
 
     def test_auto_anchor_prefers_opposite_execution_mode(self) -> None:
-        """Plan §3.2 line 769 — anchored auto-pair picks opposite-mode counterpart.
+        """Anchored auto-pair picks opposite-mode counterpart.
 
         Given:
             Direct-DB anchor plus two candidates — a more-recent
@@ -1386,8 +1386,8 @@ class TestCompareCreate:
         Then:
             Counterpart resolves to the zmq_replay run, not the
             direct_db run, even though the direct_db candidate is
-            more recent in list order. Plan line 769: anchored pair
-            prefers the **opposite** execution_mode when available.
+            more recent in list order. Anchored pair prefers the
+            **opposite** execution_mode when available.
         """
         anchor = _make_run_row(public_id="anchor-direct", status="completed")
         anchor["config_hash"] = "a" * 64
@@ -1424,7 +1424,7 @@ class TestCompareCreate:
             client.close()
 
     def test_auto_anchor_falls_back_to_same_mode_when_no_opposite(self) -> None:
-        """Plan §3.2 line 769 — anchored auto-pair falls back when no opposite-mode.
+        """Anchored auto-pair falls back when no opposite-mode.
 
         Given:
             Direct-DB anchor plus a single direct_db counterpart
@@ -1771,7 +1771,7 @@ _NO_WALLET_DETAIL = "no active wallet selected"
     ],
 )
 def test_detail_routes_fail_closed_without_active_wallet(method: str, path: str) -> None:
-    """Phase 2c Step 2c regression — detail routes reject caller with no active wallet.
+    """Detail routes reject caller with no active wallet.
 
     Given:
         The principal has ``active_wallet_public_id=None`` (selected
@@ -1786,9 +1786,9 @@ def test_detail_routes_fail_closed_without_active_wallet(method: str, path: str)
     Then:
         The ``_enforce_wallet_scope`` guard fires 400 with the
         ``no active wallet selected`` detail before any repo mutation
-        happens. This pins Phase 2c v1.18 §2.5 fail-closed contract —
-        the pre-2c truthy guard (``if principal.active_wallet_public_id
-        and ...``) was a no-op under a cleared wallet claim and leaked
+        happens. This pins the fail-closed contract — the previous
+        truthy guard (``if principal.active_wallet_public_id and ...``)
+        was a no-op under a cleared wallet claim and leaked
         cross-tenant reads; the new guard must raise 400 on every
         detail surface.
     """

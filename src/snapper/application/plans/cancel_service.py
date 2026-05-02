@@ -1,9 +1,8 @@
-"""Plan B v1.2 §1.4 cancel service for plan-based cancellation.
+"""Cancel service for plan-based cancellation.
 
-Domain-level cancel facade used by both REST (post-Phase-3.5
-delegation) and MCP transports. Raises specific domain exceptions
-instead of :class:`HTTPException`; each caller maps those to its
-surface contract (REST 4xx, MCP Plan A Q14 envelope).
+Domain-level cancel facade used by both REST and MCP transports.
+Raises specific domain exceptions instead of :class:`HTTPException`;
+each caller maps those to its surface contract (REST 4xx, MCP envelope).
 
 Idempotency: :meth:`PlansCancelService.cancel_by_plan_public_id` accepts
 an optional caller-supplied ``idempotency_key`` that is persisted on the
@@ -31,8 +30,8 @@ Sequence-stream choice: the cancel SCD2 transition + the cancel
 (``_CANCEL_STREAM``) regardless of caller — REST callers' response
 envelopes still use their REST stream via the route's response
 builder, but the venue-side audit trail is uniform across transports
-because cancels are a distinct stream class (Phase 3.5 deliberate
-unification — was per-transport in the legacy REST code).
+because cancels are a distinct stream class (deliberate unification —
+was per-transport in the legacy REST code).
 """
 
 import datetime as dt

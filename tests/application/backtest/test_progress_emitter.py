@@ -1,4 +1,4 @@
-"""Tests for the Phase 2c ``BacktestProgressEmitter`` (.3 + §2.6).
+"""Tests for the ``BacktestProgressEmitter``.
 
 Covers:
 
@@ -54,7 +54,7 @@ def _make_emitter(
 
 
 class TestBacktestProgressDataMilestoneInvariant:
-    """Cross-field validator on ``BacktestProgressData`` (R18 sonnet F3)."""
+    """Cross-field validator on ``BacktestProgressData``."""
 
     _COMMON = dict(
         type="backtest_progress",
@@ -105,7 +105,7 @@ class TestBacktestProgressDataMilestoneInvariant:
 
 
 class TestEmitterLifecycle:
-    """Emit-order invariants from.3."""
+    """Emit-order invariants."""
 
     @pytest.mark.asyncio
     async def test_on_started_fires_once(self) -> None:
@@ -138,7 +138,7 @@ class TestEmitterLifecycle:
 
 
 class TestThrottle:
-    """Progress throttle semantics (R18 §2.3)."""
+    """Progress throttle semantics."""
 
     @pytest.mark.asyncio
     async def test_progress_throttle_dedupes_within_window(self) -> None:
@@ -151,7 +151,7 @@ class TestThrottle:
 
 
 class TestMilestones:
-    """Milestone dedup + throttle-orthogonality (R18 §2.3)."""
+    """Milestone dedup + throttle-orthogonality."""
 
     @pytest.mark.asyncio
     async def test_milestone_fires_once_per_bucket(self) -> None:

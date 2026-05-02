@@ -3,12 +3,12 @@
 Locks BE-1 D9 contract at two layers:
 
 1. Runner side — the extra_metrics dict is ``{}`` when the collector's
-   ``cross_asset_blocked_fills`` counter is zero (single-feed byte-identical
-   Phase 2c path) and carries the key+value when positive (cross-asset
-   runs that blocked on missing target closes).
+   ``cross_asset_blocked_fills`` counter is zero (single-feed
+   byte-identical legacy path) and carries the key+value when positive
+   (cross-asset runs that blocked on missing target closes).
 2. Persistence side — the dict roundtrips intact through
    ``BacktestRepository.insert_result`` → ``get_result`` so downstream
-   callers observe the stored value exactly. Closes R3.8 MAJOR.
+   callers observe the stored value exactly.
 """
 
 from datetime import UTC
@@ -38,13 +38,13 @@ class TestExtraMetricsShape:
     """Runner-layer conditional dict (no DB, pure in-memory)."""
 
     def test_empty_when_no_blocked_fills(self) -> None:
-        """Zero counter → empty dict (byte-identical Phase 2c legacy).
+        """Zero counter → empty dict (byte-identical legacy).
 
         Given: a ResultCollector with cross_asset_blocked_fills=0
             (default after __init__),
         When: the runner builds extra_metrics via its conditional
             insert,
-        Then: the dict is ``{}`` exactly — no key written. Phase 2c
+        Then: the dict is ``{}`` exactly — no key written. Legacy
             dedup + response-schema fixtures unchanged.
         """
         collector = ResultCollector()
@@ -108,7 +108,7 @@ class TestExtraMetricsRoundtrip:
 
     @pytest.mark.asyncio
     async def test_empty_extra_metrics_roundtrips_as_empty_dict(self, tmp_path: Path) -> None:
-        """Empty extra_metrics roundtrips as {} (legacy Phase 2c parity).
+        """Empty extra_metrics roundtrips as {} (legacy parity).
 
         Given: insert_result with extra_metrics={},
         When: get_result fetches the row,

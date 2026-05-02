@@ -326,7 +326,7 @@ class TestHasGrantForDelegate:
 
 
 class TestStatelessness:
-    """Pins the §D10 "no coordinator-owned mutable state" invariant."""
+    """Pins the "no coordinator-owned mutable state" invariant."""
 
     @pytest.mark.asyncio
     async def test_two_successive_revokes_do_not_leak_state(self) -> None:

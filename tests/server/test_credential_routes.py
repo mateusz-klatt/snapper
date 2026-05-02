@@ -1,4 +1,4 @@
-"""Tests for the Phase 0d wallet credential management routes.
+"""Tests for the wallet credential management routes.
 
 Covers:
 

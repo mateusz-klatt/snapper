@@ -46,7 +46,7 @@ _KILL_SWITCH_REASON_MAX_BYTES = 123
 _SCOPE_REVOKED_ERROR_PREFIX = "topic_outside_scope"
 
 _BUS_DELEGATE_OFFLINE_TOPIC = "bus.delegate_offline"
-"""Plan D §3.5 internal-bus topic for delegate-offline fast-path notifications.
+"""Internal-bus topic for delegate-offline fast-path notifications.
 
 Published by :class:`WebSocketAuthManager` after the configured grace
 window elapses without a reconnect; subscribed by ``AiReviewService``
@@ -55,7 +55,7 @@ in :data:`TOPIC_REGISTRY` because no WS client subscribes to it.
 """
 
 DEFAULT_DELEGATE_OFFLINE_GRACE_SECONDS = 5
-"""Plan D §4 default grace window before a delegate disconnect publishes offline.
+"""Default grace window before a delegate disconnect publishes offline.
 
 A reconnect within this window cancels the pending publish so flapping
 WS connections never trigger a phantom-offline event for downstream
@@ -391,7 +391,7 @@ class WebSocketAuthManager:
         """Disconnect and cleanup WebSocket connection.
 
         Removes connection from tracking and cancels expiration tasks.
-        AI-delegate hysteresis (Plan D §4 Q17 Layer 1) lives in the
+        AI-delegate hysteresis (Layer 1) lives in the
         async :meth:`on_disconnect` hook the WS dispatcher calls
         alongside this synchronous cleanup so the offline publish can
         run after the grace window without blocking close-path latency.
@@ -421,7 +421,7 @@ class WebSocketAuthManager:
     def set_delegate_offline_grace_seconds(self, grace_seconds: int) -> None:
         """Override the delayed-publish grace window (testing seam).
 
-        Plan D §4 default is 5s; tests override to a sub-second value so
+        Default is 5s; tests override to a sub-second value so
         the deferred-publish path can be exercised deterministically.
 
         Args:
@@ -439,14 +439,14 @@ class WebSocketAuthManager:
     def _delegate_lock(self, delegate_id: str) -> asyncio.Lock:
         """Return the per-delegate :class:`asyncio.Lock` (lazily created).
 
-        Plan D §4 hysteresis correctness depends on serialising the
+        Hysteresis correctness depends on serialising the
         ``pop -> cancel -> await -> reassign`` critical section in
         :meth:`on_disconnect` AND :meth:`on_authenticate` for the same
         ``delegate_public_id``. Without serialisation, two concurrent
         same-delegate hooks can interleave at the ``await existing``
         yield and orphan the intermediate task — the orphan still
         wakes up and publishes ``bus.delegate_offline`` even though a
-        reconnect already happened, breaking Plan D's
+        reconnect already happened, breaking the
         phantom-offline-suppression contract.
 
         ``dict.setdefault`` is atomic under the GIL (no ``await``
@@ -463,15 +463,15 @@ class WebSocketAuthManager:
 
         Called from the WS dispatcher's authenticate path AFTER the
         principal has been minted (via :meth:`verify_session_cookie` and
-        :meth:`register_connection`). Plan D §4 Q17 Layer 1 hysteresis:
+        :meth:`register_connection`). Layer 1 hysteresis:
         a reconnect within :data:`DEFAULT_DELEGATE_OFFLINE_GRACE_SECONDS`
         cancels the pending ``bus.delegate_offline`` task scheduled by
         the prior :meth:`on_disconnect` so subscribers never observe a
         phantom-offline transition for a flapping delegate.
 
         Non-delegate principals short-circuit; only AI_DELEGATE
-        principals carry a populated ``delegate_public_id`` (Plan D Q19
-        ``AuthPrincipal`` extension). Same-delegate transitions are
+        principals carry a populated ``delegate_public_id``.
+        Same-delegate transitions are
         serialised through :meth:`_delegate_lock` so concurrent hooks
         cannot orphan a pending offline task.
 
@@ -506,8 +506,8 @@ class WebSocketAuthManager:
         """Schedule a delayed ``bus.delegate_offline`` publish for an AI delegate.
 
         Called from the WS dispatcher's disconnect path BEFORE (or
-        alongside) the synchronous :meth:`disconnect` cleanup. Plan D §4
-        hysteresis: the publish is deferred by
+        alongside) the synchronous :meth:`disconnect` cleanup. The
+        hysteresis publish is deferred by
         :data:`DEFAULT_DELEGATE_OFFLINE_GRACE_SECONDS` so a flapping
         reconnect cancels it before any subscriber observes the
         phantom-offline transition. If a prior pending task already
@@ -522,7 +522,7 @@ class WebSocketAuthManager:
         Multi-WS-per-delegate note: the registry is delegate-keyed,
         not WS-keyed, so disconnecting one of N concurrent sessions for
         the same delegate does schedule an offline publish even when
-        other sessions remain authenticated. The §3.4 Layer 2 DB
+        other sessions remain authenticated. The Layer 2 DB
         scanner is the correctness backstop — it consults
         ``ai_delegates.last_seen_at``, which the surviving session(s)
         keep refreshing via :meth:`on_authenticate`, so the
@@ -557,7 +557,7 @@ class WebSocketAuthManager:
         """Cancel + drain every in-flight delayed-offline task.
 
         Called from the FastAPI lifespan shutdown path so a closing
-        process does not leave Plan D §4 deferred-publish tasks
+        process does not leave deferred-publish tasks
         sleeping against a torn-down ZMQ publisher / repository
         connection. Idempotent: clears the registry after draining so
         a second call is a no-op.
@@ -614,7 +614,7 @@ class WebSocketAuthManager:
         lifespan attached one still tolerates the call (the local
         in-process subscriber, if any, would only matter for
         cross-instance fanout, and the ``ai_delegates.last_seen_at``
-        column is the source of truth anyway via the §3.4 Layer 2
+        column is the source of truth anyway via the Layer 2
         scanner).
         """
         if self._msg_publisher is None:
