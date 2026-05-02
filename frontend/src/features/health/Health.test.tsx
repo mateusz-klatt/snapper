@@ -15,6 +15,11 @@ vi.mock('../../hooks/queries', () => ({
     isLoading: false,
     error: null,
   })),
+  useDbStats: vi.fn(() => ({
+    data: null,
+    isLoading: false,
+    error: null,
+  })),
 }))
 const createQueryClient = () =>
   new QueryClient({

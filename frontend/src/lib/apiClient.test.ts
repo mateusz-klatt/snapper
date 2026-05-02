@@ -582,6 +582,46 @@ describe('domain API methods', () => {
     expect(result.payload.process.pid).toBe(100)
     expect(result.payload.cpu.process_percent).toBeCloseTo(1.5)
   })
+  it('getDbStats returns table statistics snapshot', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        type: 'db_stats_response',
+        sequence_id: 0,
+        public_id: 'env-db',
+        timestamp: '2026-05-02T17:00:00Z',
+        session_id: 'sid',
+        payload: {
+          type: 'db_stats',
+          sequence_id: 1,
+          public_id: 'p-db',
+          timestamp: '2026-05-02T17:00:00Z',
+          session_id: 'sid',
+          snapshot_started_at: '2026-05-02T17:00:00Z',
+          snapshot_completed_at: '2026-05-02T17:00:01Z',
+          interval_seconds: 60,
+          tables: [
+            {
+              table: 'orders',
+              table_kind: 'state',
+              total: 10,
+              current: 5,
+              closed: 5,
+              archivable: 1,
+              is_stale: false,
+              last_sampled_at: '2026-05-02T17:00:01Z',
+            },
+          ],
+        },
+      }),
+    })
+    const result = await apiClient.getDbStats()
+
+    expect(result.payload.tables).toHaveLength(1)
+    expect(result.payload.tables[0]?.table).toBe('orders')
+    expect(result.payload.interval_seconds).toBe(60)
+  })
   it('getCandles returns candle data', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,

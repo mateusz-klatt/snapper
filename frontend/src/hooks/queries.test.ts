@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   useSystemStatus,
   useSystemMetrics,
+  useDbStats,
   useCandles,
   useExchanges,
   useExchangeInstruments,
@@ -135,6 +136,29 @@ vi.mock('../lib/apiClient', () => ({
             },
             tracemalloc_active: false,
             cgroup_version: null,
+          }),
+        })
+      )
+    ),
+    getDbStats: vi.fn(() =>
+      Promise.resolve(
+        envelope('db_stats_response', {
+          payload: envelope('db_stats', {
+            snapshot_started_at: '2026-05-02T17:00:00Z',
+            snapshot_completed_at: '2026-05-02T17:00:01Z',
+            interval_seconds: 60,
+            tables: [
+              {
+                table: 'orders',
+                table_kind: 'state',
+                total: 10,
+                current: 5,
+                closed: 5,
+                archivable: 1,
+                is_stale: false,
+                last_sampled_at: '2026-05-02T17:00:01Z',
+              },
+            ],
           }),
         })
       )
@@ -511,6 +535,16 @@ describe('queries', () => {
   describe('useSystemMetrics', () => {
     it('returns data when authenticated', async () => {
       const { result } = renderHook(() => useSystemMetrics(), { wrapper: createWrapper() })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data).toBeDefined()
+    })
+  })
+  describe('useDbStats', () => {
+    it('returns data when authenticated', async () => {
+      const { result } = renderHook(() => useDbStats(), { wrapper: createWrapper() })
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false)
@@ -1356,6 +1390,12 @@ describe('queries', () => {
     it('useSystemMetrics disables refetchInterval when time-traveling', async () => {
       appStoreModule.useAppStore.setState({ asOf: '2026-01-01T00:00:00Z', isTimeTraveling: true })
       const { result } = renderHook(() => useSystemMetrics(), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
+    })
+    it('useDbStats disables refetchInterval when time-traveling', async () => {
+      appStoreModule.useAppStore.setState({ asOf: '2026-01-01T00:00:00Z', isTimeTraveling: true })
+      const { result } = renderHook(() => useDbStats(), { wrapper: createWrapper() })
 
       await waitFor(() => expect(result.current.isLoading).toBe(false))
     })

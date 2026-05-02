@@ -123,3 +123,7 @@ export type DelegateCapsUpdateBody = Components['schemas']['DelegateCapsUpdateBo
 
 export type SystemMetricsResponse = Components['schemas']['SystemMetricsResponse']
 export type SystemMetricsData = Components['schemas']['SystemMetricsData']
+
+export type DbStatsResponse = Components['schemas']['DbStatsResponse']
+export type DbStatsData = Components['schemas']['DbStatsData']
+export type TableStatsItem = Components['schemas']['TableStatsItem']

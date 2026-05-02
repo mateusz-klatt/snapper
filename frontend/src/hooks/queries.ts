@@ -135,6 +135,19 @@ export const useSystemMetrics = () => {
   })
 }
 
+export const useDbStats = () => {
+  const { isAuthenticated } = useAuth()
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+
+  return useQuery({
+    queryKey: ['system', 'db-stats'] as const,
+    queryFn: () => apiClient.getDbStats(),
+    refetchInterval: isAuthenticated && !isTimeTraveling ? 30000 : false,
+    enabled: isAuthenticated,
+    throwOnError: false,
+  })
+}
+
 export const useCandles = (
   instrument: string,
   exchange: string,
