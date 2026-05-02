@@ -10,7 +10,6 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
-from types import ModuleType
 from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import AsyncMock
@@ -33,13 +32,22 @@ from snapper.application.system_metrics.snapshotter import _resolve_interval
 from snapper.application.system_metrics.tracemalloc_controller import TracemallocController
 
 
-def _resource_module() -> ModuleType:
-    """Return the POSIX resource module or skip on unsupported hosts."""
-    module = snapshotter._resource
-    if module is None:
-        pytest.skip("resource module is unavailable on this platform")
-    assert isinstance(module, ModuleType)
-    return module
+class _FakeResourceModule:
+    """Deterministic stand-in for the POSIX ``resource`` module."""
+
+    RLIMIT_NPROC: int = 1
+    RLIMIT_NOFILE: int = 2
+    RLIMIT_AS: int = 3
+    RLIM_INFINITY: int = -1
+
+    def getrlimit(self, limit: int) -> tuple[int, int]:
+        """Return deterministic soft/hard limits for the requested resource id."""
+        values = {
+            self.RLIMIT_NPROC: (11, 12),
+            self.RLIMIT_NOFILE: (21, 22),
+            self.RLIMIT_AS: (31, 32),
+        }
+        return values[limit]
 
 
 class TestSnapshotter:
@@ -459,17 +467,8 @@ class TestSnapshotter:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Covered by test body."""
-        resource_module = _resource_module()
-
-        def fake_getrlimit(limit: int) -> tuple[int, int]:
-            values = {
-                resource_module.RLIMIT_NPROC: (11, 12),
-                resource_module.RLIMIT_NOFILE: (21, 22),
-                resource_module.RLIMIT_AS: (31, 32),
-            }
-            return values[limit]
-
-        monkeypatch.setattr(resource_module, "getrlimit", fake_getrlimit)
+        resource_module = _FakeResourceModule()
+        monkeypatch.setattr(snapshotter, "_resource", resource_module)
 
         metrics = SystemMetricsSnapshotter._sample_limits_metrics()
 
@@ -479,9 +478,12 @@ class TestSnapshotter:
             "rlimit_as_bytes": 31,
         }
 
-    def test_sample_saturation_metrics_handles_finite_infinite_and_zero_limits(self) -> None:
+    def test_sample_saturation_metrics_handles_finite_infinite_and_zero_limits(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Covered by test body."""
-        resource_module = _resource_module()
+        resource_module = _FakeResourceModule()
+        monkeypatch.setattr(snapshotter, "_resource", resource_module)
         process_metrics = ProcessMetrics(
             pid=1,
             uptime_seconds=1.0,

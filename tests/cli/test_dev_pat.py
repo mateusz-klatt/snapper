@@ -12,6 +12,7 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
+from snapper.cli import dev_pat as dev_pat_module
 from snapper.cli.app import app
 from snapper.cli.dev_pat import DEFAULT_BASE_URL
 from snapper.cli.dev_pat import _decode_jwt_exp
@@ -614,6 +615,31 @@ class TestDevMintPatFileWriteHardening:
         _assert_private_file_mode(target)
         assert "warn:" in result.stderr
         assert str(loose_dir) in result.stderr
+
+    def test_strict_parent_mode_does_not_emit_warning(
+        self,
+        runner: CliRunner,
+        output_path: Path,
+        patch_httpx_client: Callable[[httpx.MockTransport], None],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Given parent dir at 0o700, when invoked, then no loose-dir warning is printed."""
+        patch_httpx_client(_build_mock_transport())
+
+        def _strict_mode(mode: int) -> int:
+            return mode & 0o700
+
+        with monkeypatch.context() as context:
+            context.setattr(dev_pat_module.stat, "S_IMODE", _strict_mode)
+            result = runner.invoke(
+                app,
+                ["dev-mint-pat", "--output", str(output_path)],
+            )
+
+        assert result.exit_code == 0
+        assert output_path.exists()
+        _assert_private_file_mode(output_path)
+        assert "warn:" not in result.stderr
 
     def test_atomic_create_uses_o_excl_mode_0600(
         self,
