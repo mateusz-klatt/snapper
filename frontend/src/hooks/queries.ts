@@ -122,6 +122,19 @@ export const useSystemStatus = () => {
   })
 }
 
+export const useSystemMetrics = () => {
+  const { isAuthenticated } = useAuth()
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+
+  return useQuery({
+    queryKey: ['system', 'metrics'] as const,
+    queryFn: () => apiClient.getSystemMetrics(),
+    refetchInterval: isAuthenticated && !isTimeTraveling ? 10000 : false,
+    enabled: isAuthenticated,
+    throwOnError: false,
+  })
+}
+
 export const useCandles = (
   instrument: string,
   exchange: string,

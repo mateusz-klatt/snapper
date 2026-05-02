@@ -515,6 +515,73 @@ describe('domain API methods', () => {
     expect(result.payload.trader.status).toBe('running')
     expect(result.payload.backtests).toEqual({})
   })
+  it('getSystemMetrics returns process metrics snapshot', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        type: 'system_metrics_response',
+        sequence_id: 0,
+        public_id: 'env-pid',
+        timestamp: '2026-05-02T17:00:00Z',
+        session_id: 'sid',
+        payload: {
+          type: 'system_metrics',
+          sequence_id: 1,
+          public_id: 'p-pid',
+          timestamp: '2026-05-02T17:00:00Z',
+          session_id: 'sid',
+          bus_time: '2026-05-02T17:00:00Z',
+          process: {
+            pid: 100,
+            uptime_seconds: 60,
+            status: 'running',
+            num_threads: 4,
+            num_fds: 12,
+            num_connections: 0,
+          },
+          cpu: {
+            process_percent: 1.5,
+            user_time_seconds: 0.4,
+            system_time_seconds: 0.2,
+            cgroup_quota_microseconds: null,
+            cgroup_throttled_count: null,
+          },
+          memory: {
+            rss_bytes: 1024,
+            rss_peak_bytes: 2048,
+            vms_bytes: 4096,
+            python_traced_bytes: null,
+            native_bytes: null,
+            cgroup_limit_bytes: null,
+            cgroup_current_bytes: null,
+            saturation_pct: null,
+          },
+          asyncio: { active_tasks: 1, pending_tasks: 0 },
+          gc: {
+            collections_gen0: 0,
+            collections_gen1: 0,
+            collections_gen2: 0,
+            uncollectable: 0,
+            current_objects: 100,
+          },
+          limits: { rlimit_nproc: 1024, rlimit_nofile: 4096, rlimit_as_bytes: 0 },
+          saturation: { threads_pct: null, fds_pct: null },
+          db_internal: {
+            aiosqlite_live_connections: 0,
+            pool_size: null,
+            pool_checked_out: null,
+          },
+          tracemalloc_active: false,
+          cgroup_version: null,
+        },
+      }),
+    })
+    const result = await apiClient.getSystemMetrics()
+
+    expect(result.payload.process.pid).toBe(100)
+    expect(result.payload.cpu.process_percent).toBeCloseTo(1.5)
+  })
   it('getCandles returns candle data', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,

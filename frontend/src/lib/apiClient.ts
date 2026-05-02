@@ -14,6 +14,7 @@ import {
   SettingCategoriesResponseSchema,
   SettingListResponseSchema,
   SettingResponseSchema,
+  SystemMetricsResponseSchema,
   SystemStatusResponseSchema,
   ConfiguredProcessesResponseSchema,
   ProcessSummaryResponseSchema,
@@ -56,6 +57,7 @@ import type {
   OperatorListResponse,
   WalletListResponse,
   CandleData,
+  SystemMetricsResponse,
   SystemStatusResponse,
   SettingListResponse,
   SettingResponse,
@@ -507,6 +509,11 @@ class APIClient {
     const data = await this.getJSON('/api/status')
 
     return validateResponse(data, SystemStatusResponseSchema, '/status')
+  }
+  async getSystemMetrics(): Promise<SystemMetricsResponse> {
+    const data = await this.getJSON('/api/metrics/system')
+
+    return validateResponse(data, SystemMetricsResponseSchema, '/metrics/system')
   }
   async getCandles(
     instrument: string,

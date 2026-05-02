@@ -120,3 +120,6 @@ export type DelegateCreatedPayload = Components['schemas']['DelegateCreatedPaylo
 export type DelegateCreateBody = Components['schemas']['DelegateCreateBody']
 export type DelegateCapsBody = Components['schemas']['DelegateCapsBody']
 export type DelegateCapsUpdateBody = Components['schemas']['DelegateCapsUpdateBody']
+
+export type SystemMetricsResponse = Components['schemas']['SystemMetricsResponse']
+export type SystemMetricsData = Components['schemas']['SystemMetricsData']

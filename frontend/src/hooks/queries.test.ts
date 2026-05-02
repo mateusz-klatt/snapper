@@ -4,6 +4,7 @@ import { renderHook, waitFor, act } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   useSystemStatus,
+  useSystemMetrics,
   useCandles,
   useExchanges,
   useExchangeInstruments,
@@ -83,6 +84,57 @@ vi.mock('../lib/apiClient', () => ({
           payload: envelope('system_status', {
             trader: { status: 'running' },
             backtests: {},
+          }),
+        })
+      )
+    ),
+    getSystemMetrics: vi.fn(() =>
+      Promise.resolve(
+        envelope('system_metrics_response', {
+          payload: envelope('system_metrics', {
+            bus_time: '2026-05-02T17:00:00Z',
+            process: {
+              pid: 1,
+              uptime_seconds: 1,
+              status: 'running',
+              num_threads: 1,
+              num_fds: 1,
+              num_connections: 0,
+            },
+            cpu: {
+              process_percent: 0,
+              user_time_seconds: 0,
+              system_time_seconds: 0,
+              cgroup_quota_microseconds: null,
+              cgroup_throttled_count: null,
+            },
+            memory: {
+              rss_bytes: 0,
+              rss_peak_bytes: 0,
+              vms_bytes: 0,
+              python_traced_bytes: null,
+              native_bytes: null,
+              cgroup_limit_bytes: null,
+              cgroup_current_bytes: null,
+              saturation_pct: null,
+            },
+            asyncio: { active_tasks: 0, pending_tasks: 0 },
+            gc: {
+              collections_gen0: 0,
+              collections_gen1: 0,
+              collections_gen2: 0,
+              uncollectable: 0,
+              current_objects: 0,
+            },
+            limits: { rlimit_nproc: 0, rlimit_nofile: 0, rlimit_as_bytes: 0 },
+            saturation: { threads_pct: null, fds_pct: null },
+            db_internal: {
+              aiosqlite_live_connections: 0,
+              pool_size: null,
+              pool_checked_out: null,
+            },
+            tracemalloc_active: false,
+            cgroup_version: null,
           }),
         })
       )
@@ -449,6 +501,16 @@ describe('queries', () => {
   describe('useSystemStatus', () => {
     it('returns data when authenticated', async () => {
       const { result } = renderHook(() => useSystemStatus(), { wrapper: createWrapper() })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data).toBeDefined()
+    })
+  })
+  describe('useSystemMetrics', () => {
+    it('returns data when authenticated', async () => {
+      const { result } = renderHook(() => useSystemMetrics(), { wrapper: createWrapper() })
 
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false)
@@ -1288,6 +1350,12 @@ describe('queries', () => {
     it('useProcessRuns disables refetchInterval when time-traveling', async () => {
       appStoreModule.useAppStore.setState({ asOf: '2026-01-01T00:00:00Z', isTimeTraveling: true })
       const { result } = renderHook(() => useProcessRuns(), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
+    })
+    it('useSystemMetrics disables refetchInterval when time-traveling', async () => {
+      appStoreModule.useAppStore.setState({ asOf: '2026-01-01T00:00:00Z', isTimeTraveling: true })
+      const { result } = renderHook(() => useSystemMetrics(), { wrapper: createWrapper() })
 
       await waitFor(() => expect(result.current.isLoading).toBe(false))
     })

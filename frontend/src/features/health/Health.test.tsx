@@ -10,6 +10,11 @@ vi.mock('../../hooks/queries', () => ({
     isLoading: false,
     error: null,
   })),
+  useSystemMetrics: vi.fn(() => ({
+    data: null,
+    isLoading: false,
+    error: null,
+  })),
 }))
 const createQueryClient = () =>
   new QueryClient({
