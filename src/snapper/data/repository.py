@@ -2984,9 +2984,9 @@ class Repository(ABC):
         row's ``(timestamp, public_id)`` — the repo applies the keyset
         predicate directly from those values, never re-derives them
         from the current active row, so pagination is stable even if
-        AlertEvent rows are SCD2-revised between fetches (closes
-        Copilot R2 MAJOR-1). Rows are returned strictly earlier than
-        the cursor, ordered ``(timestamp DESC, public_id DESC)``.
+        AlertEvent rows are SCD2-revised between fetches. Rows are
+        returned strictly earlier than the cursor, ordered
+        ``(timestamp DESC, public_id DESC)``.
         """
         ...
 
@@ -9590,9 +9590,8 @@ class SQLAlchemyRepository(Repository):
         When ``before`` is provided, applies the keyset predicate
         directly from the cursor's ``(timestamp, public_id)`` — no
         re-derivation from the current active row, so paging stays
-        stable even if the anchor alert_event is later SCD2-revised
-        (closes Copilot R2 MAJOR-1). Order:
-        ``(timestamp DESC, public_id DESC)``.
+        stable even if the anchor alert_event is later SCD2-revised.
+        Order: ``(timestamp DESC, public_id DESC)``.
         """
         async with self.session() as s:
             stmt = select(AlertEvent).where(
@@ -9764,8 +9763,7 @@ class SQLAlchemyRepository(Repository):
             previous ``mark_delivery_sent`` already ran — sequential
             idempotency);
           - another worker raced us to close this exact active row
-            (conditional UPDATE rowcount==0 — concurrent idempotency,
-            closes Copilot R2 MAJOR-3).
+            (conditional UPDATE rowcount==0 — concurrent idempotency).
 
         The close step is an atomic ``UPDATE ... WHERE id=:id AND
         known_to=MAX AND status='queued'`` — two concurrent workers
@@ -10083,12 +10081,11 @@ class SQLAlchemyRepository(Repository):
 
         Filters on the denormalised scope columns on ``alert_deliveries``
         itself — does NOT join ``alert_events`` — so SCD2 corrections
-        on the source event cannot cause misses (closes Copilot R1
-        MAJOR on SCD2-join correctness). Each matching active row is
-        SCD2-closed and a new version with ``status='cancelled_scope'``
-        is inserted via the per-row atomic close+insert helper so a
-        concurrent retry-loop transition on the same row is a race
-        the caller can win / lose safely (BE-3c R1 race-safety fix).
+        on the source event cannot cause misses. Each matching active
+        row is SCD2-closed and a new version with
+        ``status='cancelled_scope'`` is inserted via the per-row atomic
+        close+insert helper so a concurrent retry-loop transition on
+        the same row is a race the caller can win / lose safely.
         """
         async with self.session() as s:
             rows = await self._select_queued_deliveries_by_scope(

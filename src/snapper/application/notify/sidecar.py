@@ -15,8 +15,8 @@ Flow per received ``alerts.`` message:
    ``GET /api/alerts/history`` reads).
 4. Fan out: for each active device owned by the target user, insert
    one ``alert_deliveries`` row with ``status='queued'`` and
-   denormalised scope columns (closes Copilot R2 MAJOR-2 on the
-   scope-join race).
+   denormalised scope columns (avoids the scope-join race against
+   SCD2 corrections on ``alert_events``).
 5. Immediately attempt to send each queued row (happy path). Any
    non-terminal response (``throttled`` / ``server_error``) leaves
    the row ``queued`` and schedules a retry via ``next_attempt_at``.
@@ -27,7 +27,7 @@ attempt bumps ``attempt_count`` *before* the APNs call via
 and the APNs call leaves ``attempt_count=N`` and the retry loop will
 pick it up again as the Nth attempt. Terminal outcomes use the
 ``mark_delivery_*`` close-and-insert methods (SCD2 atomic transition
-under concurrent retry workers, closes Copilot R3 MAJOR-3).
+under concurrent retry workers).
 """
 
 import asyncio

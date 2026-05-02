@@ -194,12 +194,11 @@ class TestBearerAuthMiddleware:
     def test_rejection_with_unexpected_none_reason_falls_back_to_invalid(self) -> None:
         """Defensive: ``None`` rejection_reason maps to ``invalid_bearer_token``.
 
-         R2 (Copilot MINOR NEW FINDING): pin the defensive
-        default in ``_build_rejection_response`` so a future
-        ``VerifyOutcome`` with a ``None`` reason (which should never
-        happen in production but could emerge from a refactor bug)
-        falls through to ``invalid_bearer_token`` instead of
-        accidentally leaking ``user_deactivated``.
+        Pins the defensive default in ``_build_rejection_response``
+        so a future ``VerifyOutcome`` with a ``None`` reason (which
+        should never happen in production but could emerge from a
+        refactor bug) falls through to ``invalid_bearer_token``
+        instead of accidentally leaking ``user_deactivated``.
         """
         svc = _make_settings_service(enabled=True)
         app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())

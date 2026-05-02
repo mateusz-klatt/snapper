@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react'
 
 import { useNotificationMetrics } from '../../hooks/queries'
+import { formatNumber } from '../../lib/utils'
 
 interface CounterCellProps {
   readonly label: string
@@ -9,19 +10,24 @@ interface CounterCellProps {
   readonly tone?: 'neutral' | 'warning' | 'loss'
 }
 
+const TONE_CLASS_BY_TONE = {
+  loss: 'text-loss-700',
+  neutral: 'text-alpine-900',
+  warning: 'text-warning-700',
+} satisfies Record<NonNullable<CounterCellProps['tone']>, string>
+
 const CounterCell: React.FC<CounterCellProps> = ({
   label,
   value,
   description,
   tone = 'neutral',
 }) => {
-  const toneClass =
-    tone === 'loss' ? 'text-loss-700' : tone === 'warning' ? 'text-warning-700' : 'text-alpine-900'
+  const toneClass = TONE_CLASS_BY_TONE[tone]
 
   return (
     <div className='flex flex-col rounded-md border border-dark-600 bg-alpine-50 p-3'>
       <span className='text-xs uppercase tracking-wide text-muted-600'>{label}</span>
-      <span className={`mt-1 text-2xl font-semibold ${toneClass}`}>{value.toLocaleString()}</span>
+      <span className={`mt-1 text-2xl font-semibold ${toneClass}`}>{formatNumber(value)}</span>
       {description !== undefined && (
         <span className='mt-1 text-xs text-muted-600'>{description}</span>
       )}

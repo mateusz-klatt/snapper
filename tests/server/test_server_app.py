@@ -1437,18 +1437,16 @@ class TestCreateApp:
     def test_build_user_service_publisher_connects_to_broker_xsub(self) -> None:
         """Helper connects PUB socket to broker's XSUB endpoint.
 
-         R2 review (Copilot gpt-5.4) BLOCKER finding: the
-        original implementation connected the PUB socket to
-        `zmq_broker_xpub` (subscriber-facing) which silently drops
-        every message because publishers MUST connect to the
-        broker's XSUB side per the proxy contract documented in
-        `BootstrapSettingsLoader` and `ZmqBrokerProcess`. The fix
-        renames the parameter to `zmq_broker_xsub` and the lifespan
-        passes `settings.zmq_broker_xsub` so the kill-switch
-        `admin.user_deactivated` event actually reaches subscribers.
+        Connecting the PUB socket to ``zmq_broker_xpub``
+        (subscriber-facing) silently drops every message — publishers
+        MUST connect to the broker's XSUB side per the proxy contract
+        documented in :class:`BootstrapSettingsLoader` and
+        :class:`ZmqBrokerProcess`. The lifespan passes
+        ``settings.zmq_broker_xsub`` so the kill-switch
+        ``admin.user_deactivated`` event actually reaches subscribers.
 
         This test pins the endpoint so a future refactor that
-        accidentally swaps the value back to `zmq_broker_xpub`
+        accidentally swaps the value back to ``zmq_broker_xpub``
         fails CI loudly instead of silently breaking the kill switch.
         """
         with patch("snapper.server.app.zmq.asyncio.Context") as mock_context_cls:

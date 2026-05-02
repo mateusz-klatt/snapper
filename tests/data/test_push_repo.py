@@ -1670,19 +1670,21 @@ class TestConcurrencyInvariants:
         assert defaults[0]["alert_type"] == "order_fill_full"
 
     @pytest.mark.asyncio
-    async def test_mark_delivery_sent_concurrent_only_one_wins(
+    async def test_mark_delivery_sent_loses_close_race_returns_false(
         self,
         repo: SQLAlchemyRepository,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Concurrent ``mark_delivery_sent`` — the atomic close guarantees one winner.
+        """Deterministically exercise the ``rowcount=0`` close-race branch.
 
-        Two tasks observe the queued delivery, both try to
-        ``close+insert``. The loser's conditional UPDATE (``WHERE
-        id=:id AND known_to=MAX AND status='queued'``) returns
-        ``rowcount=0`` once the winner commits its close, so the
-        loser rolls back and returns False — no spurious successor
-        row, no IntegrityError leaks to the caller (closes Copilot
-        R2 MAJOR-3).
+        Installs an ``AsyncSession.execute`` interceptor that, exactly
+        once, pre-closes the active ``alert_deliveries`` row via a
+        side-session immediately before ``_scd2_transition_delivery``'s
+        own conditional UPDATE fires. The method's UPDATE then sees
+        ``known_to != MAX`` (we changed it) and returns ``rowcount=0``,
+        so the helper rolls back and ``mark_delivery_sent`` exits
+        without inserting a successor row — no spurious version, no
+        IntegrityError leaks to the caller.
         """
         public_id = await repo.insert_alert_delivery(
             AlertDeliveryInsertRow(
@@ -1697,21 +1699,50 @@ class TestConcurrencyInvariants:
             )
         )
 
-        async def transition(apns_id: str, seq: int) -> None:
-            await repo.mark_delivery_sent(
-                public_id,
-                apns_id=apns_id,
-                transition_at=_ts(seq),
-                session_id="s-conc",
-                sequence_id=seq,
-            )
+        original_execute = AsyncSession.execute
+        sabotaged = {"count": 0}
 
-        await asyncio.gather(
-            transition("apns-A", 2),
-            transition("apns-B", 3),
-            transition("apns-C", 4),
+        async def patched_execute(
+            self_session: AsyncSession,
+            statement: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            stmt_text = str(statement)
+            if (
+                sabotaged["count"] == 0
+                and "UPDATE alert_deliveries" in stmt_text
+                and "SET known_to" in stmt_text
+            ):
+                sabotaged["count"] += 1
+                side_cm = repo.session()
+                side = await side_cm.__aenter__()
+                try:
+                    await original_execute(
+                        side,
+                        _update(AlertDelivery)
+                        .where(
+                            AlertDelivery.public_id == public_id,
+                            AlertDelivery.known_to == KNOWN_TO_MAX,
+                        )
+                        .values(known_to=_ts(99)),
+                    )
+                    await side.commit()
+                finally:
+                    await side_cm.__aexit__(None, None, None)
+            return await original_execute(self_session, statement, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncSession, "execute", patched_execute)
+
+        await repo.mark_delivery_sent(
+            public_id,
+            apns_id="apns-loser",
+            transition_at=_ts(2),
+            session_id="s-conc",
+            sequence_id=2,
         )
 
+        assert sabotaged["count"] == 1
         async with repo.session() as s:
             rows = (
                 (
@@ -1723,8 +1754,8 @@ class TestConcurrencyInvariants:
                 .all()
             )
         active = [r for r in rows if r.known_to == KNOWN_TO_MAX]
-        assert len(active) == 1
-        assert active[0].status == "sent"
+        assert active == []
+        assert all(r.status == "queued" for r in rows)
 
     @pytest.mark.asyncio
     async def test_upsert_notification_device_close_race_branch(

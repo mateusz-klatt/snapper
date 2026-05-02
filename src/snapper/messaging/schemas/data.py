@@ -1385,8 +1385,8 @@ class AlertEventData(StrictDataSchema[Literal["alert_event"]]):
 
     Scope fields (``operator_public_id`` / ``wallet_public_id``) are
     denormalised at emit time from the source event so the delivery
-    outbox row gets a race-free view of the scope (closes Copilot R2
-    MAJOR-2 on SCD2-join scope races).
+    outbox row gets a race-free view of the scope (avoids SCD2-join
+    races against ``alert_events``).
 
     Attributes:
         type: Payload discriminator (always ``alert_event``).

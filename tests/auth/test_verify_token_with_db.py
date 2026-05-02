@@ -147,13 +147,11 @@ class TestVerifyTokenWithDB:
 class TestVerifyTokenWithReasonBranches:
     """Direct coverage of :meth:`TokenManager.verify_token_with_reason` reason paths.
 
-     R1 + R2 follow-up (Copilot MINOR NEW FINDING):
-    ``verify_token_with_db`` now delegates to
-    ``verify_token_with_reason``; the wrapper tests above only
-    exercise the ``TokenClaims | None`` projection. These tests
-    assert the ``rejection_reason`` field directly so a future
-    refactor that collapses the USER_DEACTIVATED / INVALID mapping
-    fails loudly.
+    ``verify_token_with_db`` delegates to ``verify_token_with_reason``;
+    the wrapper tests above only exercise the ``TokenClaims | None``
+    projection. These tests assert the ``rejection_reason`` field
+    directly so a future refactor that collapses the
+    USER_DEACTIVATED / INVALID mapping fails loudly.
     """
 
     @pytest.mark.asyncio
@@ -379,12 +377,12 @@ class TestVerifyCachePrune:
 
 
 class TestVerifyCacheGenerationRace:
-    """review MAJOR closure — cache can't be repopulated with stale data.
+    """Cache cannot be repopulated with stale data after invalidation.
 
-    Simulates the race codex-gpt-5.3 flagged: a concurrent
-    ``invalidate_user_cache`` bump during a DB read must prevent
-    the racing verify call from repopulating the cache with a
-    verdict that the admin event already superseded.
+    Simulates the race: a concurrent ``invalidate_user_cache`` bump
+    during a DB read must prevent the racing verify call from
+    repopulating the cache with a verdict that the admin event
+    already superseded.
     """
 
     @pytest.mark.asyncio
@@ -547,7 +545,7 @@ class TestVerifyCacheGenerationRace:
 
 
 class TestBlacklistHardCap:
-    """review MAJOR closure — JTI blacklist cannot leak unbounded.
+    """JTI blacklist cannot leak unbounded.
 
     Covers :meth:`_enforce_blacklist_cap`: when a mass deactivation
     pushes the set past :data:`BLACKLIST_MAX_ENTRIES`, the oldest

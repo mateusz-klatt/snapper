@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react'
 
 import { useSystemMetrics } from '../../hooks/queries'
+import { formatNumber } from '../../lib/utils'
 
 import type { SystemMetricsData } from '../../types/api'
 
@@ -107,7 +108,7 @@ const ProcessHealthGrid: React.FC<ProcessHealthGridProps> = ({ snapshot }) => {
       <MetricCell
         label='GC Gen0/1/2'
         value={`${gc.collections_gen0.toString()} / ${gc.collections_gen1.toString()} / ${gc.collections_gen2.toString()}`}
-        description={`Objects: ${gc.current_objects.toLocaleString()}`}
+        description={`Objects: ${formatNumber(gc.current_objects)}`}
       />
       <MetricCell label='Threads %' value={formatPercent(saturation.threads_pct)} />
       <MetricCell label='Network conns' value={process.num_connections.toString()} />

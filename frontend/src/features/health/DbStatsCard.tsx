@@ -1,13 +1,14 @@
 import React, { useMemo } from 'react'
 
 import { useDbStats } from '../../hooks/queries'
+import { formatNumber } from '../../lib/utils'
 
 import type { TableStatsItem } from '../../types/api'
 
 function formatCount(value: number | null): string {
   if (value === null) return '—'
 
-  return value.toLocaleString()
+  return formatNumber(value)
 }
 
 function formatRelativeAge(busTime: string, now: Date): string {

@@ -14,7 +14,7 @@ the opaque string into the internal pair and re-encodes the last row
 of each page into a ``next_cursor`` for the client. Because the
 cursor carries a snapshotted ``(timestamp, public_id)`` pair,
 pagination is stable even if the anchor alert_event is later
-SCD2-revised (closes Copilot R3 MAJOR-1).
+SCD2-revised.
 """
 
 from typing import Literal

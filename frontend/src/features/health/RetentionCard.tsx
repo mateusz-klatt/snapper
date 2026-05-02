@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react'
 
 import { useRetentionRun } from '../../hooks/queries'
+import { formatNumber } from '../../lib/utils'
 
 import type { RetentionPolicyResult } from '../../types/api'
 
@@ -34,10 +35,10 @@ const PolicyRow: React.FC<PolicyRowProps> = ({ policy }) => {
       </td>
       <td className='px-3 py-2 font-mono text-xs text-muted-600'>{window}</td>
       <td className='px-3 py-2 text-right font-mono text-xs text-alpine-900'>
-        {policy.archived_rows.toLocaleString()}
+        {formatNumber(policy.archived_rows)}
       </td>
       <td className='px-3 py-2 text-right font-mono text-xs text-alpine-900'>
-        {policy.purged_rows.toLocaleString()}
+        {formatNumber(policy.purged_rows)}
       </td>
       <td className='px-3 py-2 text-right font-mono text-xs text-alpine-900'>
         {policy.files_written.toString()}

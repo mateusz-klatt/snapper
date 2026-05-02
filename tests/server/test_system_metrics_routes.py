@@ -335,7 +335,7 @@ class TestGetSystemMetricsHistory:
 
     @pytest.mark.asyncio
     async def test_naive_datetime_bounds_are_normalized_to_utc(self) -> None:
-        """Naive ``since`` / ``until`` are treated as UTC, not 500 (Codex MAJOR)."""
+        """Naive ``since`` / ``until`` are treated as UTC, not 500."""
         snapshotter = _make_snapshotter()
         base = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
         snapshots = [

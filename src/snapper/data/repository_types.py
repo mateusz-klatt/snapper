@@ -1634,11 +1634,11 @@ class AlertListCursor(TypedDict):
     """Opaque keyset cursor for ``list_recent_alerts_for_user`` (SCD2-stable).
 
     Snapshots the anchor row's ``(timestamp, public_id)`` so paging is
-    not affected by subsequent SCD2 revisions of the anchor alert_event
-    (closes Copilot R2 MAJOR-1 — public_id-only cursor let a row's
-    timestamp move between page fetches once AlertEvent became
-    temporal). Constructed by the route layer from the last row of
-    each page; passed verbatim to the next request.
+    not affected by subsequent SCD2 revisions of the anchor
+    alert_event — a public_id-only cursor would let a row's timestamp
+    move between page fetches once AlertEvent became temporal.
+    Constructed by the route layer from the last row of each page;
+    passed verbatim to the next request.
     """
 
     timestamp: datetime

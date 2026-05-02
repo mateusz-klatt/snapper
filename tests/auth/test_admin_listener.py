@@ -68,9 +68,8 @@ class TestCloseUserConnections:
     async def test_disconnect_runs_before_ws_close_to_cancel_timers_first(self) -> None:
         """`disconnect()` (cancel timers) MUST run BEFORE `await ws.close()`.
 
-         R2 review (Copilot gpt-5.4) MAJOR finding: with the
-        original `await ws.close()` then `disconnect()` order, the
-        event loop COULD process a pending `warn_task` /
+        With the inverted `await ws.close()` then `disconnect()`
+        order, the event loop COULD process a pending `warn_task` /
         `hard_task` timer during the close yield, racing the kill
         switch. Cancelling timers FIRST eliminates the race —
         `cancel()` is synchronous so it lands before the event-loop

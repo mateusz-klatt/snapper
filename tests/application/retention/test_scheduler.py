@@ -3,8 +3,7 @@
 Covers:
 
 * Eager first run populates ``last_run_summary`` before the loop.
-* Loop tolerates a per-tick exception from ``run_once`` (Codex
-  re-review NEW MAJOR fix).
+* Loop tolerates a per-tick exception from ``run_once``.
 * ``stop`` cancels cleanly + closes the underlying service.
 * ``RETENTION_DISABLED=true`` skips the eager run + loop entirely.
 * Lifespan helper unit + integration shape: failure leaves the
@@ -218,8 +217,8 @@ class TestSchedulerLoop:
         """Disabled scheduler without an explicit service has no close to call.
 
         Default disabled-mode constructor path skips
-        :class:`RetentionService` construction entirely (Codex final-gate
-        BLOCKER fix); ``stop()`` MUST tolerate that no-service state.
+        :class:`RetentionService` construction entirely; ``stop()``
+        MUST tolerate that no-service state.
         """
 
         class _NopRepo:
@@ -271,7 +270,7 @@ class TestSchedulerLastRunSummaryNoService:
 
 
 class TestSchedulerConstructionDisabled:
-    """Codex final-gate BLOCKER fix: disabled scheduler skips service build."""
+    """Disabled scheduler must skip the RetentionService build entirely."""
 
     def test_disabled_default_skips_retention_service_construction(
         self, monkeypatch: pytest.MonkeyPatch

@@ -8,9 +8,9 @@ Two endpoints, both authenticated and server-side scoped on
 - ``GET /api/alerts/{public_id}`` — singleton by id.
 
 The history cursor is an **opaque base64url(JSON)** token carrying the
-snapshotted anchor ``(timestamp, public_id)`` pair — this is what
-closes Copilot R3 MAJOR-1 (cursor-stability under SCD2 revision of
-the anchor alert_event). The route layer is the encode/decode boundary;
+snapshotted anchor ``(timestamp, public_id)`` pair — guarantees
+cursor-stability under SCD2 revision of the anchor alert_event.
+The route layer is the encode/decode boundary;
 the repo takes the internal ``AlertListCursor`` TypedDict and applies
 the keyset predicate directly from the pair without hitting the DB.
 Malformed or tampered cursors are treated as "no cursor" — we return
@@ -144,9 +144,8 @@ async def list_alert_history(
     is opaque — decode it back into the internal ``AlertListCursor``,
     delegate to ``Repository.list_recent_alerts_for_user`` (which
     applies the keyset predicate from the pair directly, not from a
-    re-derivation of the anchor's current timestamp — closes Copilot
-    R3 MAJOR-1), and mint the next-page cursor from the last row of
-    the returned page.
+    re-derivation of the anchor's current timestamp), and mint the
+    next-page cursor from the last row of the returned page.
 
     Args:
         request: FastAPI request (provides REST tracker).

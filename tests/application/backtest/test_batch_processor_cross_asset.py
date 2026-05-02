@@ -189,11 +189,11 @@ class TestTargetAttribution:
         Given: a BUY signal on BTC-USD with an empty latest_closes map,
         When: process_time_batch runs,
         Then: simulate_market_fill is never invoked (assert_not_called
-            pins the short-circuit contract per R1 Codex MINOR),
-            cross_asset_blocked_fills == 1, a signal row is persisted
-            with signal.price as the recorded price (source-close fallback),
-            and the recorded instrument is the target (BTC-USD), not
-            the source (MNQU6-CME). Closes R3.1 BLOCKER.
+            pins the short-circuit contract), cross_asset_blocked_fills
+            == 1, a signal row is persisted with signal.price as the
+            recorded price (source-close fallback), and the recorded
+            instrument is the target (BTC-USD), not the source
+            (MNQU6-CME).
         """
         signal = StrategySignal(
             instrument="BTC-USD",

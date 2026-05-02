@@ -215,13 +215,12 @@ class TestCreateDelegate:
 
 
 class TestDelegateOperatorBinding:
-    """BLOCKER closure — delegates inherit a validated operator scope.
+    """Delegates inherit a validated operator scope.
 
-    Regression coverage for the 3-model review's BLOCKER: before
-    this fix, `create_delegate` minted JWTs with empty
-    `operator_public_ids`, which made the MCP wallet-scope
-    gate reject every freshly-created delegate on its first
-    `submit_manual_order`.
+    Pins the contract that ``create_delegate`` must mint JWTs whose
+    ``operator_public_ids`` are populated — an empty list makes the
+    MCP wallet-scope gate reject every freshly-created delegate on
+    its first ``submit_manual_order``.
     """
 
     @pytest.mark.asyncio
@@ -525,7 +524,7 @@ class TestUpdateCaps:
 
 
 class TestBlankOwnerGuard:
-    """R1 Copilot MAJOR — reject empty ``owner.user_public_id`` at every entry."""
+    """Empty ``owner.user_public_id`` is rejected at every entry point."""
 
     @pytest.mark.asyncio
     async def test_create_with_blank_owner_raises_invalid_principal(

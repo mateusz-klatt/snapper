@@ -489,7 +489,7 @@ class TestPlansCancelServiceR1:
 
     @pytest.mark.asyncio
     async def test_cancel_command_stamps_source_surface_mcp(self) -> None:
-        """R1 MAJOR 1: cancel TradeCommand carries ``source_surface='mcp'``.
+        """Cancel TradeCommand carries ``source_surface='mcp'``.
 
         Given: an active plan with a child order,
         When: :meth:`PlansCancelService.cancel_by_plan_public_id` emits
@@ -515,7 +515,7 @@ class TestPlansCancelServiceR1:
 
     @pytest.mark.asyncio
     async def test_non_integrity_insert_failure_compensates_and_raises(self) -> None:
-        """R1 BLOCKER 2: arbitrary insert exception → compensate + PlanCancelEmitError.
+        """Arbitrary insert exception → compensate + PlanCancelEmitError.
 
         Given: a repository that raises ``RuntimeError`` (NOT an
             :class:`IntegrityError`) on ``insert_trade_command``,
@@ -547,7 +547,7 @@ class TestPlansCancelServiceR1:
 
     @pytest.mark.asyncio
     async def test_race_loser_with_different_key_reclassifies_to_mismatch(self) -> None:
-        """R1 BLOCKER 1: race loser with conflicting key → IdempotencyKeyMismatchError.
+        """Race loser with conflicting key → IdempotencyKeyMismatchError.
 
         Given: two callers with different keys race a plan with no
             ``cancel_idempotency_key`` yet — the SCD2 update raises
@@ -575,7 +575,7 @@ class TestPlansCancelServiceR1:
 
     @pytest.mark.asyncio
     async def test_race_loser_terminal_post_reload_with_no_key_reclassifies(self) -> None:
-        """R1 BLOCKER 1: race loser sees a terminal plan w/ no key → AlreadyTerminalError.
+        """Race loser sees a terminal plan w/ no key → AlreadyTerminalError.
 
         Given: the loser's SCD2 update fails AND the post-reload plan
             shows a terminal status with NO ``cancel_idempotency_key``
@@ -601,7 +601,7 @@ class TestPlansCancelServiceR1:
     async def test_race_loser_against_keyless_cancel_reclassifies_to_in_progress(
         self,
     ) -> None:
-        """R1 BLOCKER 1: post-reload shows cancel_requested w/ no key → InProgress.
+        """post-reload shows cancel_requested w/ no key → InProgress.
 
         Given: the loser's SCD2 update fails AND the post-reload plan
             is in ``cancel_requested`` with NO ``cancel_idempotency_key``
@@ -628,7 +628,7 @@ class TestPlansCancelServiceR1:
     async def test_race_loser_with_matching_key_after_reload_returns_replay_success(
         self,
     ) -> None:
-        """R2 BLOCKER 1: post-reload key matches caller → idempotent replay success.
+        """post-reload key matches caller → idempotent replay success.
 
         Given: two callers send the SAME ``cancel_idempotency_key``
             concurrently; the first wins and writes the SCD2 cancel
@@ -661,7 +661,7 @@ class TestPlansCancelServiceR1:
     async def test_race_loser_post_reload_still_active_signals_cross_plan_conflict(
         self,
     ) -> None:
-        """R2 MAJOR 1: post-reload plan still active w/ no key → cross-plan reuse.
+        """post-reload plan still active w/ no key → cross-plan reuse.
 
         Given: the SCD2 update raises an :class:`IntegrityError` AND
             the post-reload plan is still in an actionable status
@@ -700,7 +700,7 @@ class TestPlansCancelServiceR1:
     async def test_race_loser_non_unique_integrity_falls_through_to_concurrent_change(
         self,
     ) -> None:
-        """R3 MAJOR 1: non-unique IntegrityError + caller key → fall-through.
+        """non-unique IntegrityError + caller key → fall-through.
 
         Given: the SCD2 update raises an :class:`IntegrityError` whose
             cause does NOT carry the
@@ -734,7 +734,7 @@ class TestPlansCancelServiceR1:
 
     @pytest.mark.asyncio
     async def test_caps_violation_with_replay_returns_success(self) -> None:
-        """R3 BLOCKER 1: caps rejection w/ same-key replay match → success.
+        """Caps rejection w/ same-key replay match → success.
 
         Given: a same-key concurrent caller's first call already
             claimed the cancel; a retry that gets rate-limited would
@@ -763,7 +763,7 @@ class TestPlansCancelServiceR1:
 
     @pytest.mark.asyncio
     async def test_caps_violation_without_replay_propagates(self) -> None:
-        """R3 BLOCKER 1: caps rejection without replay match → CapsViolationError raised.
+        """Caps rejection without replay match → CapsViolationError raised.
 
         Given: caps rejects the cancel guard AND the post-race plan
             does NOT carry the caller's key,
@@ -789,7 +789,7 @@ class TestPlansCancelServiceR1:
     async def test_caps_violation_with_different_existing_key_returns_mismatch(
         self,
     ) -> None:
-        """R4 BLOCKER 1: caps + post-rejection has DIFFERENT key → IdempotencyKeyMismatchError.
+        """Caps + post-rejection has DIFFERENT key → IdempotencyKeyMismatchError.
 
         Given: a different-key caller hits the cancel-rate cap; the
             post-rejection reload shows a winner already claimed a
@@ -818,7 +818,7 @@ class TestPlansCancelServiceR1:
     async def test_caps_violation_post_rejection_terminal_returns_already_terminal(
         self,
     ) -> None:
-        """R4 BLOCKER 1: caps + post-rejection terminal → AlreadyTerminalError.
+        """Caps + post-rejection terminal → AlreadyTerminalError.
 
         Given: a caller hits the cap AND the winner ran the cancel to
             terminal between the caller's pre-check and the cap
@@ -845,7 +845,7 @@ class TestPlansCancelServiceR1:
     async def test_caps_violation_post_rejection_in_progress_returns_in_progress(
         self,
     ) -> None:
-        """R4 BLOCKER 1: caps + post-rejection cancel_requested w/ no key → InProgressError.
+        """Caps + post-rejection cancel_requested w/ no key → InProgressError.
 
         Given: a caller hits the cap AND the post-rejection plan is in
             ``cancel_requested`` with NO key (REST-style winner
@@ -870,7 +870,7 @@ class TestPlansCancelServiceR1:
 
     @pytest.mark.asyncio
     async def test_caps_violation_with_no_caller_key_propagates(self) -> None:
-        """R3 BLOCKER 1: caller without key → caps violation always propagates.
+        """Caller without key → caps violation always propagates.
 
         ``_reclassify_post_caps_rejection`` falls through (caller has
         no replay handle and the plan is still actionable), so REST-
@@ -892,7 +892,7 @@ class TestPlansCancelServiceR1:
 
     @pytest.mark.asyncio
     async def test_caps_violation_replay_lookup_returns_none_propagates(self) -> None:
-        """R3 BLOCKER 1: caps violation + plan disappeared → caps violation propagates.
+        """Caps violation + plan disappeared → caps violation propagates.
 
         Covers the ``latest is None`` branch in
         :meth:`_maybe_caps_replay`.
@@ -914,7 +914,7 @@ class TestPlansCancelServiceR1:
     async def test_race_loser_with_no_caller_key_falls_through_to_concurrent_change(
         self,
     ) -> None:
-        """R2 BLOCKER 1: caller without a key + post-reload still active → fall-through.
+        """Caller without a key + post-reload still active → fall-through.
 
         Given: a (legacy / REST) caller passes ``idempotency_key=None``
             yet the SCD2 update raises an :class:`IntegrityError`
@@ -946,7 +946,7 @@ class TestPlansCancelServiceR1:
 
     @pytest.mark.asyncio
     async def test_race_loser_replay_on_keyless_plan_skips_command_emit(self) -> None:
-        """R2 BLOCKER 1: replay branch covered for plans without child cmd.
+        """Replay branch covered for plans without child cmd.
 
         Given: a plan WITHOUT ``child_client_order_id`` (so the cancel
             flow takes the no-cmd-emit branch) AND a same-key race
@@ -980,7 +980,7 @@ class TestPlansCancelServiceR1:
     async def test_race_loser_with_matching_key_on_terminal_plan_returns_replay(
         self,
     ) -> None:
-        """R2 BLOCKER 1: replay match wins over terminal status.
+        """Replay match wins over terminal status.
 
         Given: the loser sees a terminal post-race row that carries
             their key (the winner's cancel ran to terminal under the
@@ -1009,7 +1009,7 @@ class TestPlansCancelServiceR1:
     async def test_race_loser_plan_disappeared_falls_through_to_concurrent_change(
         self,
     ) -> None:
-        """R1 BLOCKER 1: post-reload returns None → reclassifier returns silently.
+        """post-reload returns None → reclassifier returns silently.
 
         Outer ``_claim_cancel_transition`` raises
         :class:`PlanConcurrentChangeError`. Covers the
@@ -1033,7 +1033,7 @@ class TestPlansCancelServiceR1:
 
     @pytest.mark.asyncio
     async def test_integrity_error_reload_matching_key_returns_replay(self) -> None:
-        """R5 BLOCKER 1 reclassifier: IntegrityError + matching key on reload → replay.
+        """Reclassifier: IntegrityError + matching key on reload → replay.
 
         Cross-plan key reuse can fail the partial-unique index. If
         the post-reload row coincidentally carries the caller's key
@@ -1066,7 +1066,7 @@ class TestPlansCancelServiceR1:
 
     @pytest.mark.asyncio
     async def test_integrity_error_reload_different_key_returns_mismatch(self) -> None:
-        """R5 BLOCKER 1 reclassifier: IntegrityError + different existing key → mismatch."""
+        """Reclassifier: IntegrityError + different existing key → mismatch."""
         plan_pre = _make_plan(status="active", cancel_idempotency_key=None)
         plan_post = _make_plan(status="cancel_requested", cancel_idempotency_key="winner-key")
         repo = _build_repo(
@@ -1088,7 +1088,7 @@ class TestPlansCancelServiceR1:
 
     @pytest.mark.asyncio
     async def test_integrity_error_reload_terminal_returns_terminal(self) -> None:
-        """R5 BLOCKER 1 reclassifier: IntegrityError + terminal post-reload → AlreadyTerminal."""
+        """Reclassifier: IntegrityError + terminal post-reload → AlreadyTerminal."""
         plan_pre = _make_plan(status="active")
         plan_terminal = _make_plan(status="cancelled", cancel_idempotency_key=None)
         repo = _build_repo(
@@ -1108,7 +1108,7 @@ class TestPlansCancelServiceR1:
 
     @pytest.mark.asyncio
     async def test_integrity_error_reload_in_progress_returns_in_progress(self) -> None:
-        """R5 BLOCKER 1 reclassifier: IntegrityError + cancel_requested-no-key → InProgress."""
+        """Reclassifier: IntegrityError + cancel_requested-no-key → InProgress."""
         plan_pre = _make_plan(status="active")
         plan_in_progress = _make_plan(status="cancel_requested", cancel_idempotency_key=None)
         repo = _build_repo(

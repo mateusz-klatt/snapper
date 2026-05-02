@@ -11,7 +11,7 @@ Lifecycle:
     ``run_once``. ``run_once`` is designed to swallow per-policy
     errors, but the loop itself wraps the call in a defensive
     try/except so a bug in ``run_once`` itself logs + the next tick
-    still runs (Codex re-review NEW MAJOR fix).
+    still runs.
   * :meth:`stop` signals the loop, cancels + awaits the task, then
     closes the underlying :class:`RetentionService`.
 """

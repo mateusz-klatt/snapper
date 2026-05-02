@@ -6954,15 +6954,15 @@ async def test_list_decisions_pagination(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_insert_decision_persists_source_surface(tmp_path: Path) -> None:
-    """MINOR closure — source_surface is threaded from DTO to the row.
+    """``source_surface`` is threaded from DTO to the persisted row.
 
     Given: an :class:`ExecutionPlanDecisionInsertRow` with
         ``source_surface='mcp'`` (the provenance value only an MCP
         caller would pick),
     When: the repository inserts the decision,
     Then: the persisted row carries ``source_surface='mcp'``
-        verbatim. Closes the review MINOR that the DTO used
-        to lack the field and every caller fell to the column's
+        verbatim — guards against regressions where the DTO drops
+        the field and callers silently fall back to the column's
         ``server_default='strategy'``.
     """
     db_path = tmp_path / "decision_source_surface.db"

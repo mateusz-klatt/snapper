@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { getCookie } from './utils'
+import { formatNumber, getCookie } from './utils'
 
 describe('getCookie', () => {
   beforeEach(() => {
@@ -32,5 +32,16 @@ describe('getCookie', () => {
     document.cookie = 'test=value1; path=/'
     document.cookie = 'test_long=value2; path=/'
     expect(getCookie('test')).toBe('value1')
+  })
+})
+
+describe('formatNumber', () => {
+  it('uses en-US grouping regardless of host locale', () => {
+    expect(formatNumber(1234567)).toBe('1,234,567')
+  })
+  it('forwards Intl.NumberFormatOptions for currency-style formatting', () => {
+    expect(formatNumber(1234.5, { minimumFractionDigits: 2, maximumFractionDigits: 2 })).toBe(
+      '1,234.50'
+    )
   })
 })
