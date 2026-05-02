@@ -456,6 +456,51 @@ class TradingEngineService:
             return True
         return False
 
+    async def _insert_strategy_trade_command(
+        self,
+        submission: TradeCommandSubmission,
+        insert_row: TradeCommandInsertRow,
+        *,
+        ai_review_public_id: str | None,
+        ai_review_dispatch_version: int | None,
+    ) -> None:
+        """Route the strategy emit through the appropriate caps gate.
+
+        Three-way selection per Plan D Phase 3 §3.1:
+            1. ``ai_review_public_id`` set → AI-attribution guard
+               (resolves user from cited row, runs caps).
+            2. caps_enforcer wired but no AI attribution →
+               ``guard_service_principal`` (existing audit-bypass
+               behaviour, byte-identical for non-AI strategy emits).
+            3. No caps_enforcer (test fixture) → direct insert.
+
+        Args:
+            submission: The constructed
+                :class:`TradeCommandSubmission` (already carries
+                attribution kwargs when present).
+            insert_row: The pre-built
+                :class:`TradeCommandInsertRow` for the SQL insert.
+            ai_review_public_id: Optional citation from the
+                ``SignalData`` envelope, threaded down through
+                :meth:`execute_desired_units` → :meth:`_send_order`.
+            ai_review_dispatch_version: Companion to the citation
+                per Plan A Q18 (transport-only).
+        """
+        assert self._repository is not None
+        if self._caps_enforcer is not None and ai_review_public_id is not None:
+            async with self._caps_enforcer.guard_with_ai_review_attribution(
+                submission,
+                ai_review_public_id=ai_review_public_id,
+                ai_review_dispatch_version=ai_review_dispatch_version,
+            ):
+                await self._repository.insert_trade_command(insert_row, ownership=self._ownership)
+            return
+        if self._caps_enforcer is not None:
+            async with self._caps_enforcer.guard_service_principal(submission):
+                await self._repository.insert_trade_command(insert_row, ownership=self._ownership)
+            return
+        await self._repository.insert_trade_command(insert_row, ownership=self._ownership)
+
     async def _send_order(
         self,
         side: TradeSide,
@@ -540,37 +585,23 @@ class TradingEngineService:
                 ai_review_public_id=ai_review_public_id,
                 ai_review_dispatch_version=ai_review_dispatch_version,
             )
-            if self._caps_enforcer is not None:
-                async with self._caps_enforcer.guard_service_principal(strategy_submission):
-                    await self._repository.insert_trade_command(
-                        self._build_strategy_insert_row(
-                            order_public_id=order_public_id,
-                            reason=reason,
-                            side=side,
-                            size=size,
-                            leverage=leverage,
-                            reduce_only=reduce_only,
-                            now=now,
-                            session_id=session_id,
-                            sequence_id=sequence_id,
-                        ),
-                        ownership=self._ownership,
-                    )
-            else:
-                await self._repository.insert_trade_command(
-                    self._build_strategy_insert_row(
-                        order_public_id=order_public_id,
-                        reason=reason,
-                        side=side,
-                        size=size,
-                        leverage=leverage,
-                        reduce_only=reduce_only,
-                        now=now,
-                        session_id=session_id,
-                        sequence_id=sequence_id,
-                    ),
-                    ownership=self._ownership,
-                )
+            insert_row = self._build_strategy_insert_row(
+                order_public_id=order_public_id,
+                reason=reason,
+                side=side,
+                size=size,
+                leverage=leverage,
+                reduce_only=reduce_only,
+                now=now,
+                session_id=session_id,
+                sequence_id=sequence_id,
+            )
+            await self._insert_strategy_trade_command(
+                strategy_submission,
+                insert_row,
+                ai_review_public_id=ai_review_public_id,
+                ai_review_dispatch_version=ai_review_dispatch_version,
+            )
 
         if self._outbox is not None:
             self._outbox.notify()

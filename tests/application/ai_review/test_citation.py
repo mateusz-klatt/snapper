@@ -19,6 +19,7 @@ import pytest
 
 from snapper.application.ai_review.citation import AiReviewCitationError
 from snapper.application.ai_review.citation import validate_ai_review_citation
+from snapper.application.ai_review.citation import validate_ai_review_citation_for_strategy
 from snapper.data.repository import SQLAlchemyRepository
 
 TEST_TIMEOUT = 15
@@ -205,3 +206,146 @@ async def test_non_approved_status_raises_citation_error(
             expected_user_public_id=user_pid,
             expected_wallet_public_id=wallet_pid,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_strategy_validator_happy_path_returns_row(tmp_path: Path) -> None:
+    """Plan D Phase 3 §2.1 — strategy validator returns the cited row.
+
+    Given a resolved_approved ai_review whose wallet matches the
+    submission's,
+    When validate_ai_review_citation_for_strategy runs,
+    Then the row is returned (so the caller can read user_public_id
+    without a duplicate fetch) and no exception is raised.
+    """
+    repo = await _build_repo(tmp_path)
+    user_pid = str(uuid7())
+    wallet_pid = str(uuid7())
+    review_pid = await _seed_review(repo, user_public_id=user_pid, wallet_public_id=wallet_pid)
+    row = await validate_ai_review_citation_for_strategy(
+        repo,
+        ai_review_public_id=review_pid,
+        expected_wallet_public_id=wallet_pid,
+    )
+    assert row["public_id"] == review_pid
+    assert row["user_public_id"] == user_pid
+    assert row["wallet_public_id"] == wallet_pid
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_strategy_validator_unknown_review_raises(tmp_path: Path) -> None:
+    """Plan D Phase 3 §2.1 — missing row raises AiReviewCitationError.
+
+    Given: a fresh repo with no ai_reviews rows,
+    When: the strategy validator is called with a fabricated UUID7,
+    Then: AiReviewCitationError fires with a "not found" message so
+        the engine's attribution gate aborts before invoking caps —
+        a rare race where the row was deleted between strategy emit
+        and the gate's row fetch surfaces loudly.
+    """
+    repo = await _build_repo(tmp_path)
+    bogus_id = str(uuid7())
+    with pytest.raises(AiReviewCitationError, match="not found"):
+        await validate_ai_review_citation_for_strategy(
+            repo,
+            ai_review_public_id=bogus_id,
+            expected_wallet_public_id=str(uuid7()),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_strategy_validator_wallet_mismatch_raises(tmp_path: Path) -> None:
+    """Plan D Phase 3 §2.1 — wallet mismatch raises citation error.
+
+    Given: a resolved_approved ai_review for wallet A,
+    When: the strategy validator is called with expected wallet B,
+    Then: AiReviewCitationError fires with a "wallet mismatch"
+        message. Defends against engine misrouting where an engine
+        instance's wallet diverges from the cited row's — a
+        configuration / sharding bug that must surface loudly rather
+        than silently bypass the AI delegate's wallet-scoped intent.
+    """
+    repo = await _build_repo(tmp_path)
+    user_pid = str(uuid7())
+    wallet_a = str(uuid7())
+    wallet_b = str(uuid7())
+    review_pid = await _seed_review(repo, user_public_id=user_pid, wallet_public_id=wallet_a)
+    with pytest.raises(AiReviewCitationError, match="wallet mismatch"):
+        await validate_ai_review_citation_for_strategy(
+            repo,
+            ai_review_public_id=review_pid,
+            expected_wallet_public_id=wallet_b,
+        )
+
+
+@pytest.mark.parametrize(
+    "non_approved_status",
+    ["pending", "fanout_dispatched", "resolved_rejected", "timeout", "superseded"],
+)
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_strategy_validator_non_approved_status_raises(
+    tmp_path: Path, non_approved_status: str
+) -> None:
+    """Plan D Phase 3 §2.1 — non-approved status raises citation error.
+
+    Given: an ai_review row in any non-approved status (pending,
+        fanout_dispatched, resolved_rejected, timeout, superseded),
+    When: the strategy validator runs against the row,
+    Then: AiReviewCitationError fires with a "cannot authorize a
+        strategy emit" message. Closes the supersede-after-await
+        race where the Phase 1 #3 reaper / scanner transitioned the
+        row away from resolved_approved between the strategy's
+        ``await create_ai_review_and_await`` and its emit — without
+        this status check the AI gate would happily accept a
+        superseded row and run caps under stale attribution.
+    """
+    repo = await _build_repo(tmp_path)
+    user_pid = str(uuid7())
+    wallet_pid = str(uuid7())
+    review_pid = await _seed_review(
+        repo,
+        user_public_id=user_pid,
+        wallet_public_id=wallet_pid,
+        status=non_approved_status,
+    )
+    with pytest.raises(AiReviewCitationError, match="cannot authorize a strategy emit"):
+        await validate_ai_review_citation_for_strategy(
+            repo,
+            ai_review_public_id=review_pid,
+            expected_wallet_public_id=wallet_pid,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_strategy_validator_ignores_dispatch_version_mismatch(tmp_path: Path) -> None:
+    """Plan D Phase 3 §2.6 — dispatch_version is TRANSPORT-ONLY.
+
+    Given a resolved_approved ai_review with dispatch_version=0 (the
+    seed default),
+    When the strategy attribution gate later carries
+    ai_review_dispatch_version=99 on the submission and the validator
+    runs,
+    Then the validator does NOT compare versions; it returns the row
+    silently. Q18 dedup is enforced at the bus publisher
+    (_publish_caps_violation_after_ai_approve reads the row's
+    dispatch_version at publish time), not in this validator.
+
+    Pinning this contract prevents a future refactor from accidentally
+    adding a version comparison that would break the strategy
+    primitive's transport-only semantic.
+    """
+    repo = await _build_repo(tmp_path)
+    user_pid = str(uuid7())
+    wallet_pid = str(uuid7())
+    review_pid = await _seed_review(repo, user_public_id=user_pid, wallet_public_id=wallet_pid)
+    row = await validate_ai_review_citation_for_strategy(
+        repo,
+        ai_review_public_id=review_pid,
+        expected_wallet_public_id=wallet_pid,
+    )
+    assert row["dispatch_version"] == 0

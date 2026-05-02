@@ -31,7 +31,7 @@ from pathlib import Path
 SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "snapper"
 
 CANONICAL_SITES: set[tuple[str, str]] = {
-    ("src/snapper/application/engine/service.py", "_send_order"),
+    ("src/snapper/application/engine/service.py", "_insert_strategy_trade_command"),
     ("src/snapper/application/plans/service.py", "_emit_trade_command"),
     ("src/snapper/application/plans/cancel_service.py", "_execute_cancel"),
     ("src/snapper/server/order_routes.py", "create_order"),
@@ -39,10 +39,20 @@ CANONICAL_SITES: set[tuple[str, str]] = {
     ("src/snapper/server/execution_plan_routes.py", "cancel_bracket"),
     ("src/snapper/mcp/tools.py", "submit_manual_order"),
 }
+"""§1.8 canonical insert-site matrix.
+
+Plan D Phase 3 §7 extracted the strategy emit's three-way gate
+selection from ``_send_order`` into the dedicated
+``_insert_strategy_trade_command`` helper so the
+``guard_with_ai_review_attribution`` branch could land without
+inflating ``_send_order``'s cognitive complexity past the linter
+ceiling. The helper is the new ownership-policy site for the
+strategy hot path.
+"""
 
 
 SITE_POLICY: dict[tuple[str, str], str] = {
-    ("src/snapper/application/engine/service.py", "_send_order"): "ownership",
+    ("src/snapper/application/engine/service.py", "_insert_strategy_trade_command"): "ownership",
     ("src/snapper/application/plans/service.py", "_emit_trade_command"): "none",
     ("src/snapper/application/plans/cancel_service.py", "_execute_cancel"): "none",
     ("src/snapper/server/order_routes.py", "create_order"): "none",

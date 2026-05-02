@@ -552,14 +552,17 @@ def _ai_review_row(
     wallet_public_id: str = "wallet-1",
     instrument_public_id: str = "inst-btc",
     dispatch_version: int = 3,
+    status: str = "resolved_approved",
 ) -> dict[str, object]:
-    """Build a minimal AiReviewRow dict for the publisher branch tests.
+    """Build a minimal AiReviewRow dict for publisher + strategy gate tests.
 
-    The enforcer reads ``user_public_id`` / ``strategy_public_id`` /
-    ``wallet_public_id`` / ``instrument_public_id`` / ``dispatch_version``
-    off the row before publishing the bus event; other columns are
-    irrelevant for that path so we cast a partial dict through the
-    Repository mock's ``get_ai_review`` AsyncMock return.
+    The publisher branch reads ``user_public_id`` / ``strategy_public_id``
+    / ``wallet_public_id`` / ``instrument_public_id`` /
+    ``dispatch_version`` off the row before publishing the bus event;
+    Plan D Phase 3 §7's strategy gate also reads ``status`` to enforce
+    the supersede-after-await invariant. Other columns are irrelevant
+    for those paths so we cast a partial dict through the Repository
+    mock's ``get_ai_review`` AsyncMock return.
     """
     return {
         "public_id": review_public_id,
@@ -568,6 +571,7 @@ def _ai_review_row(
         "wallet_public_id": wallet_public_id,
         "instrument_public_id": instrument_public_id,
         "dispatch_version": dispatch_version,
+        "status": status,
     }
 
 
@@ -853,3 +857,144 @@ class TestCapsViolationAfterAiApprovePublish:
         publisher.send.assert_awaited_once()
         _, payload = publisher.send.await_args.args
         assert payload.cap_type == "max_open_orders"
+
+
+class TestGuardWithAiReviewAttribution:
+    """Plan D Phase 3 §7 — strategy hot-path AI-attribution gate.
+
+    Verifies the new ``guard_with_ai_review_attribution`` context
+    manager closes the loop on Phase 3:
+
+    1. Resolves user_public_id from the cited row + delegates to
+       ``guard()`` so caps actually evaluate.
+    2. Cap rejection routes through
+       ``_publish_caps_violation_after_ai_approve`` with the row's
+       dispatch_version, NOT the carried tuple's value.
+    3. Empty submission wallet fails closed BEFORE the row fetch
+       (operator-actionable error).
+    4. ``ai_review_dispatch_version`` carried on the submission is
+       transport-only — a mismatch vs the row does NOT raise.
+    """
+
+    @pytest.mark.asyncio
+    async def test_happy_path_resolves_user_from_cited_row(self) -> None:
+        """The attribution gate stamps user_public_id from the row.
+
+        Given a strategy submission with ``user_public_id=None`` and a
+            cited row whose user is "user-1",
+        When the gate yields,
+        Then the wrapped ``guard()`` sees the rebuilt submission with
+            ``user_public_id="user-1"`` (proven by the recorded caps
+            evaluation falling through cleanly with no caps row).
+        """
+        repo = MagicMock()
+        repo.get_ai_review = AsyncMock(
+            return_value=_ai_review_row(review_public_id="rev-strat", dispatch_version=2)
+        )
+        repo.get_user_trading_caps = AsyncMock(return_value=None)
+        repo.count_user_open_commands = AsyncMock(return_value=0)
+        repo.get_user_recent_submits = AsyncMock(return_value=[])
+        repo.count_user_rolling_cancels = AsyncMock(return_value=0)
+        enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
+        submission = _submission(user=None)
+        async with enforcer.guard_with_ai_review_attribution(
+            submission,
+            ai_review_public_id="rev-strat",
+            ai_review_dispatch_version=2,
+        ) as guard:
+            assert guard.submission.user_public_id == "user-1"
+            assert guard.submission.ai_review_public_id == "rev-strat"
+            assert guard.submission.ai_review_dispatch_version == 2
+
+    @pytest.mark.asyncio
+    async def test_empty_wallet_fails_closed_before_row_fetch(self) -> None:
+        """Submission with empty wallet raises BEFORE repo.get_ai_review.
+
+        Plan D Phase 3 §8.3 wallet-preflight rationale: a strategy
+        operator who left ``StrategyConfig.wallet_public_id`` at the
+        default ``""`` sees a loud, operator-actionable failure on
+        first AI-attributed emit, NOT a confusing wallet-mismatch
+        deeper in the validator.
+        """
+        repo = MagicMock()
+        repo.get_ai_review = AsyncMock()
+        enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
+        empty_wallet = TradeCommandSubmission(
+            user_public_id=None,
+            operator_public_id="op-1",
+            wallet_public_id="",
+            instrument_public_id="inst-btc",
+            command_type="submit",
+            side="buy",
+            order_type="market",
+            quantity=Decimal("1"),
+            price=None,
+            source_surface="strategy",
+            idempotency_key=None,
+        )
+        with pytest.raises(CapsViolationError, match="missing_wallet_for_ai_review_attribution"):
+            async with enforcer.guard_with_ai_review_attribution(
+                empty_wallet,
+                ai_review_public_id="rev-strat",
+                ai_review_dispatch_version=1,
+            ):
+                pass
+        repo.get_ai_review.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cap_rejection_publishes_with_row_dispatch_version(self) -> None:
+        """Cap rejection on AI-attributed strategy emit publishes bus event.
+
+        Plan A Q18 transport-only contract: even if the carried
+        ``ai_review_dispatch_version`` differs from the row's, the
+        published event uses the row-of-record value.
+        """
+        caps = _caps(max_order_quantity_per_instrument=Decimal("10"))
+        repo = MagicMock()
+        repo.get_ai_review = AsyncMock(
+            return_value=_ai_review_row(review_public_id="rev-strat", dispatch_version=5)
+        )
+        repo.get_user_trading_caps = AsyncMock(return_value=caps)
+        repo.count_user_open_commands = AsyncMock(return_value=0)
+        repo.get_user_recent_submits = AsyncMock(return_value=[])
+        repo.count_user_rolling_cancels = AsyncMock(return_value=0)
+        enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
+        publisher = _publisher_with_tracker()
+        enforcer.set_msg_publisher(publisher)
+        big_submission = _submission(user=None, quantity=Decimal("99"))
+        with pytest.raises(CapsViolationError):
+            async with enforcer.guard_with_ai_review_attribution(
+                big_submission,
+                ai_review_public_id="rev-strat",
+                ai_review_dispatch_version=999,
+            ):
+                pass
+        publisher.send.assert_awaited_once()
+        _, payload = publisher.send.await_args.args
+        assert payload.review_public_id == "rev-strat"
+        assert payload.dispatch_version == 5
+
+    @pytest.mark.asyncio
+    async def test_ignores_dispatch_version_mismatch_on_happy_path(self) -> None:
+        """Plan D Phase 3 §2.6 — strategy validator does NOT compare versions.
+
+        The carried ``ai_review_dispatch_version`` differs from the
+        cited row's; the gate yields successfully (no
+        ``AiReviewCitationError`` raised).
+        """
+        repo = MagicMock()
+        repo.get_ai_review = AsyncMock(
+            return_value=_ai_review_row(review_public_id="rev-strat", dispatch_version=1)
+        )
+        repo.get_user_trading_caps = AsyncMock(return_value=None)
+        repo.count_user_open_commands = AsyncMock(return_value=0)
+        repo.get_user_recent_submits = AsyncMock(return_value=[])
+        repo.count_user_rolling_cancels = AsyncMock(return_value=0)
+        enforcer = TradingCapsEnforcer(cast(Repository, repo), _stub_pricing(), now=lambda: _NOW)
+        submission = _submission(user=None)
+        async with enforcer.guard_with_ai_review_attribution(
+            submission,
+            ai_review_public_id="rev-strat",
+            ai_review_dispatch_version=42,
+        ) as guard:
+            assert guard.submission.ai_review_dispatch_version == 42

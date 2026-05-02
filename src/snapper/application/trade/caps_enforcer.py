@@ -30,6 +30,7 @@ error code.
 """
 
 import asyncio
+import dataclasses
 import weakref
 from collections.abc import AsyncIterator
 from collections.abc import Callable
@@ -44,6 +45,7 @@ from uuid import uuid7
 
 from loguru import logger
 
+from snapper.application.ai_review.citation import validate_ai_review_citation_for_strategy
 from snapper.application.pricing.usd_converter import PriceUnavailableError
 from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.trade.submission import TradeCommandSubmission
@@ -270,6 +272,84 @@ class TradingCapsEnforcer:
         """
         assigned = str(uuid7())
         yield Guard(submission=submission, assigned_public_id=assigned)
+
+    @asynccontextmanager
+    async def guard_with_ai_review_attribution(
+        self,
+        submission: TradeCommandSubmission,
+        *,
+        ai_review_public_id: str,
+        ai_review_dispatch_version: int | None,
+    ) -> AsyncIterator[Guard]:
+        """Plan D Phase 3 — strategy hot-path AI-attribution gate.
+
+        Validates the citation, resolves ``user_public_id`` from the
+        cited ``ai_reviews`` row, rebuilds the submission with the
+        attribution + resolved user identity, and delegates to
+        :meth:`guard` so caps actually evaluate and
+        ``bus.caps_violation_after_ai_approve`` fires on rejection.
+        Mirrors the REST/MCP attribution pattern from Phase 2 #10.
+
+        Citation validation invariants (per
+        :func:`validate_ai_review_citation_for_strategy`):
+
+        - Row exists.
+        - ``row.status == "resolved_approved"`` (catches
+          supersede-after-await race).
+        - ``row.wallet_public_id == submission.wallet_public_id``
+          (defends against engine misrouting).
+
+        ``ai_review_dispatch_version`` is transport-only per Plan A
+        Q18: this method receives the value, threads it onto the
+        rebuilt submission, but the validator deliberately does NOT
+        compare it against the row's current ``dispatch_version``.
+        Q18 dedup is enforced at the bus publisher.
+
+        Args:
+            submission: Pre-insert DTO from the engine's strategy
+                hot-path. Carries a non-empty ``wallet_public_id``;
+                the user_public_id is intentionally None and is
+                resolved from the cited row inside this method.
+            ai_review_public_id: Citation forwarded from
+                :class:`SignalData` after the strategy primitive
+                returned a successful CONSULT outcome.
+            ai_review_dispatch_version: Companion to
+                ``ai_review_public_id`` per Q18 (transport-only).
+
+        Yields:
+            A :class:`Guard` from the underlying :meth:`guard`
+            invocation, carrying the attributed submission with the
+            resolved user.
+
+        Raises:
+            CapsViolationError: When ``submission.wallet_public_id``
+                is empty (fail-closed before the row fetch) OR when
+                :meth:`guard` raises on a cap violation.
+            AiReviewCitationError: When the citation fails any of
+                the three strategy-validator invariants.
+        """
+        if not submission.wallet_public_id:
+            raise CapsViolationError(
+                "missing_wallet_for_ai_review_attribution",
+                detail=(
+                    "submission.wallet_public_id required for the strategy "
+                    "AI gate; engine state must populate wallet on the "
+                    "submission before invoking this guard"
+                ),
+            )
+        review = await validate_ai_review_citation_for_strategy(
+            self._repository,
+            ai_review_public_id=ai_review_public_id,
+            expected_wallet_public_id=submission.wallet_public_id,
+        )
+        attributed = dataclasses.replace(
+            submission,
+            user_public_id=review["user_public_id"],
+            ai_review_public_id=ai_review_public_id,
+            ai_review_dispatch_version=ai_review_dispatch_version,
+        )
+        async with self.guard(attributed) as guard:
+            yield guard
 
     async def _evaluate_caps(self, submission: TradeCommandSubmission) -> None:
         """Dispatch cap evaluation on ``submission.command_type``.

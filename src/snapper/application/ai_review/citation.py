@@ -24,6 +24,7 @@ delegates' UIs (info leak + fanout spam). The validator enforces:
 """
 
 from snapper.data.repository import Repository
+from snapper.data.repository_types import AiReviewRow
 
 
 class AiReviewCitationError(ValueError):
@@ -79,3 +80,74 @@ async def validate_ai_review_citation(
             f"ai_review_public_id={ai_review_public_id!r} status="
             f"{review['status']!r} cannot authorize a manual order"
         )
+
+
+async def validate_ai_review_citation_for_strategy(
+    repo: Repository,
+    *,
+    ai_review_public_id: str,
+    expected_wallet_public_id: str,
+) -> AiReviewRow:
+    """Plan D Phase 3 §2.1 — strategy-path citation validator.
+
+    Returns the validated ``ai_reviews`` row so the caller (the
+    strategy attribution guard) can read ``user_public_id`` without
+    a duplicate fetch. NOT a security gate: the strategy primitive
+    is the gatekeeper because the strategy can only know a
+    ``review_public_id`` if its own ``create_ai_review_and_await``
+    call returned one — there is no input-attack vector across the
+    strategy process boundary.
+
+    The validator pins three invariants useful in the hot-path:
+
+    1. Row exists.
+    2. ``row.status == "resolved_approved"`` — catches a
+       supersede-after-await race where the row has been reaped or
+       otherwise transitioned away from the APPROVED state by the
+       Phase 1 #3 reaper / scanner between the strategy's
+       ``await create_ai_review_and_await`` and its emit call.
+    3. ``row.wallet_public_id == expected_wallet_public_id`` —
+       defends against engine misrouting (the engine instance
+       carries a wallet on init; the cited row must agree).
+
+    The companion ``ai_review_dispatch_version`` carried on the
+    submission is **transport-only** per Plan A Q18: the validator
+    deliberately does NOT compare it. Q18 dedup happens at the bus
+    publisher (`_publish_caps_violation_after_ai_approve` reads
+    ``dispatch_version`` from the cited row at publish time so the
+    fanout always uses the row-of-record version).
+
+    Args:
+        repo: Repository handle for the row fetch.
+        ai_review_public_id: UUID7 of the ``ai_reviews`` row that the
+            strategy is citing.
+        expected_wallet_public_id: ``wallet_public_id`` from the
+            engine's strategy submission. Must be non-empty; the
+            engine attribution guard fails closed beforehand if the
+            wallet is empty.
+
+    Returns:
+        The validated :class:`AiReviewRow` so callers can read
+        ``user_public_id`` and other fields without a re-fetch.
+
+    Raises:
+        AiReviewCitationError: When any of the three invariants
+            fails (row missing / non-approved status / wallet
+            mismatch). Each failure carries a predicate-specific
+            message suffix so audit logs can distinguish the cause.
+    """
+    review = await repo.get_ai_review(ai_review_public_id)
+    if review is None:
+        raise AiReviewCitationError(f"ai_review_public_id={ai_review_public_id!r} not found")
+    if review["status"] != "resolved_approved":
+        raise AiReviewCitationError(
+            f"ai_review_public_id={ai_review_public_id!r} status="
+            f"{review['status']!r} cannot authorize a strategy emit"
+        )
+    if review["wallet_public_id"] != expected_wallet_public_id:
+        raise AiReviewCitationError(
+            f"ai_review_public_id={ai_review_public_id!r} wallet mismatch "
+            f"(review.wallet_public_id={review['wallet_public_id']!r} "
+            f"vs submission wallet={expected_wallet_public_id!r})"
+        )
+    return review
