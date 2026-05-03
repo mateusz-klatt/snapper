@@ -44,15 +44,15 @@ function App() {
         />
       )}
       <aside
-        className={`fixed inset-y-0 left-0 z-50 w-72 shrink-0 border-r border-dark-600 bg-alpine-50 px-4 py-6 transition-transform duration-200 md:static md:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
+        className={`fixed inset-y-0 left-0 z-50 flex w-72 shrink-0 flex-col border-r border-dark-600 bg-alpine-50 px-4 py-6 transition-transform duration-200 md:static md:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
       >
-        <div className='mb-8 flex items-center justify-between px-2'>
+        <div className='mb-4 flex shrink-0 items-center justify-between px-2 md:mb-8'>
           <div>
             <div className='text-xs font-semibold tracking-[0.16em] text-muted-500 uppercase'>
               Snapper
             </div>
-            <h1 className='mt-2 text-xl font-semibold text-alpine-900'>Trading Console</h1>
-            <p className='mt-1 text-sm text-muted-600'>Precision workstation</p>
+            <h1 className='mt-1 text-xl font-semibold text-alpine-900 md:mt-2'>Trading Console</h1>
+            <p className='mt-1 hidden text-sm text-muted-600 md:block'>Precision workstation</p>
           </div>
           <button
             className='rounded-lg p-1 text-muted-600 hover:bg-dark-700 md:hidden'
@@ -62,7 +62,7 @@ function App() {
             <X size={20} />
           </button>
         </div>
-        <nav className='space-y-1.5'>
+        <nav className='flex-1 space-y-1.5 overflow-y-auto pr-1'>
           {tabs.map(tab => {
             const Icon = tab.icon
 
