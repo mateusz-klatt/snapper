@@ -74,7 +74,7 @@
 		5A50EF856475775A1EEA07E0 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
 		653637C037B012795FE84600 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		6798D055E36E2A96D2575882 /* LoginViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginViewModel.swift; sourceTree = "<group>"; };
-		6B649B56E9F5DB1981C9D47E /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		6B649B56E9F5DB1981C9D47E /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		77B5AF96CD39F790EE5DFFE3 /* PositionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PositionsView.swift; sourceTree = "<group>"; };
 		7A987AAE53C2CBDE34AE70BD /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
 		7DC7293CDEE72AC8C8C5341C /* NavigationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationCoordinator.swift; sourceTree = "<group>"; };
@@ -297,7 +297,6 @@
 				};
 			};
 			buildConfigurationList = C2CB0B358D0349B72E0074FC /* Build configuration list for PBXProject "Snapper" */;
-			compatibilityVersion = "Xcode 16.0.Superseded.1";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -306,6 +305,7 @@
 			);
 			mainGroup = AAA7E2168F538A29330F95E5;
 			minimizedProjectReferenceProxies = 1;
+
 			productRefGroup = 39B66CEE8EC32FBF47CADDFD /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -445,7 +445,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 26MP7QQP95;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -536,7 +536,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 26MP7QQP95;
 				ENABLE_NS_ASSERTIONS = NO;
