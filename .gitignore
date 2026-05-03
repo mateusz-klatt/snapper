@@ -25,6 +25,10 @@ reports/
 .DS_Store
 Thumbs.db.idea
 
+# Throwaway artefacts from local Playwright runs (icon previews, mobile
+# debugging, tab walkthroughs) — never meant to be tracked.
+/*.png
+
 # Environment files with secrets
 .env
 *.key
@@ -35,6 +39,9 @@ Thumbs.db.idea
 
 # Runtime data files (keep base files for Docker)
 data/*.db
+data/*.db-journal
+data/*.db-shm
+data/*.db-wal
 data/*.log
 data/*-pat.json
 data/seed/
