@@ -197,22 +197,75 @@ describe('parseInstrument', () => {
       expect(parseInstrument('2YYK6-CBOT', 'kraken_equities').underlyingTicker).toBe('US2Y')
     })
 
-    it('decodes GCM6-COMEX as GC-prefix commodity', (): void => {
+    it('decodes GCM6-COMEX → GOLD underlying (canonical name, registry-resolvable)', (): void => {
       expect(parseInstrument('GCM6-COMEX', 'kraken_equities')).toEqual({
         base: 'GCM6',
         quote: 'COMEX',
         assetClass: 'commodity-future',
-        underlyingTicker: 'GC',
+        underlyingTicker: 'GOLD',
       })
     })
 
-    it('decodes 6EM6-CME as 6E-prefix forex future', (): void => {
+    it('decodes MGCM6-COMEX → GOLD (Micro Gold)', (): void => {
+      expect(parseInstrument('MGCM6-COMEX', 'kraken_equities').underlyingTicker).toBe('GOLD')
+    })
+
+    it('decodes CLM6-NYMEX → WTI', (): void => {
+      expect(parseInstrument('CLM6-NYMEX', 'kraken_equities').underlyingTicker).toBe('WTI')
+    })
+
+    it('decodes BZM6-NYMEX → BRENT', (): void => {
+      expect(parseInstrument('BZM6-NYMEX', 'kraken_equities').underlyingTicker).toBe('BRENT')
+    })
+
+    it('decodes HGM6-COMEX → COPPER', (): void => {
+      expect(parseInstrument('HGM6-COMEX', 'kraken_equities').underlyingTicker).toBe('COPPER')
+    })
+
+    it('decodes NGM6-NYMEX → NATGAS', (): void => {
+      expect(parseInstrument('NGM6-NYMEX', 'kraken_equities').underlyingTicker).toBe('NATGAS')
+    })
+
+    it('decodes ZLM6-CBOT → SOYBEAN_OIL', (): void => {
+      expect(parseInstrument('ZLM6-CBOT', 'kraken_equities').underlyingTicker).toBe('SOYBEAN_OIL')
+    })
+
+    it('decodes 6EM6-CME → EUR/USD pair (canonical fx legs, not raw prefix/venue)', (): void => {
       expect(parseInstrument('6EM6-CME', 'kraken_equities')).toEqual({
-        base: '6EM6',
-        quote: 'CME',
+        base: 'EUR',
+        quote: 'USD',
         assetClass: 'forex',
-        underlyingTicker: '6E',
+        underlyingTicker: 'EURUSD',
       })
+    })
+
+    it('decodes 6CM6-CME → USD/CAD pair (CAD/USD inverse maps to USDCAD canonical)', (): void => {
+      expect(parseInstrument('6CM6-CME', 'kraken_equities')).toEqual({
+        base: 'USD',
+        quote: 'CAD',
+        assetClass: 'forex',
+        underlyingTicker: 'USDCAD',
+      })
+    })
+
+    it('decodes 6JM6-CME → USD/JPY pair (matches USDJPY underlying)', (): void => {
+      expect(parseInstrument('6JM6-CME', 'kraken_equities').underlyingTicker).toBe('USDJPY')
+    })
+
+    it('decodes 6AM6-CME → AUD/USD (AUD-base direct quote, AUDUSD canonical)', (): void => {
+      const r = parseInstrument('6AM6-CME', 'kraken_equities')
+
+      expect(r.base).toBe('AUD')
+      expect(r.quote).toBe('USD')
+      expect(r.underlyingTicker).toBe('AUDUSD')
+    })
+
+    it('decodes 6SM6-CME → USDCHF', (): void => {
+      expect(parseInstrument('6SM6-CME', 'kraken_equities').underlyingTicker).toBe('USDCHF')
+    })
+
+    it('decodes E7M6-CME → EURUSD (E-mini EUR/USD half-size)', (): void => {
+      expect(parseInstrument('E7M6-CME', 'kraken_equities').underlyingTicker).toBe('EURUSD')
     })
 
     it('returns unknown for unrecognised kraken_equities prefix', (): void => {

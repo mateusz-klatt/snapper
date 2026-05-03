@@ -116,20 +116,59 @@ describe('InstrumentIcon — smart-hybrid dispatcher', () => {
       expect(container.querySelectorAll('img').length).toBe(0)
     })
 
-    it('renders single lucide icon for GCM6-COMEX (gold future)', (): void => {
+    it('renders gold-coloured gem for GCM6-COMEX (canonical underlying GOLD resolves to gold #FFD700)', (): void => {
       const { container } = render(
         <InstrumentIcon symbol='GCM6-COMEX' exchange='kraken_equities' />
       )
+      const svg = container.querySelector('svg')
 
-      expect(container.querySelector('svg')).not.toBeNull()
+      expect(svg).not.toBeNull()
+      expect(svg?.getAttribute('stroke')).toBe('#FFD700')
+    })
+
+    it('renders WTI-coloured droplet for CLM6-NYMEX (canonical underlying WTI)', (): void => {
+      const { container } = render(
+        <InstrumentIcon symbol='CLM6-NYMEX' exchange='kraken_equities' />
+      )
+      const svg = container.querySelector('svg')
+
+      expect(svg?.getAttribute('stroke')).toBe('#475569')
     })
 
     it('renders single lucide icon for 10YK6-CBOT (yield future)', (): void => {
       const { container } = render(
         <InstrumentIcon symbol='10YK6-CBOT' exchange='kraken_equities' />
       )
+      const svg = container.querySelector('svg')
 
-      expect(container.querySelector('svg')).not.toBeNull()
+      expect(svg?.getAttribute('stroke')).toBe('#059669')
+    })
+  })
+
+  describe('CME forex futures (kraken_equities) render correct flag pair', () => {
+    it('renders EU + US flags for 6EM6-CME (EURUSD pair)', (): void => {
+      const { container } = render(<InstrumentIcon symbol='6EM6-CME' exchange='kraken_equities' />)
+      const imgs = container.querySelectorAll('img')
+
+      expect(imgs.length).toBe(2)
+      expect(imgs[0]?.getAttribute('src')).toContain('eu.svg')
+      expect(imgs[1]?.getAttribute('src')).toContain('us.svg')
+    })
+
+    it('renders US + CA flags for 6CM6-CME (USDCAD pair)', (): void => {
+      const { container } = render(<InstrumentIcon symbol='6CM6-CME' exchange='kraken_equities' />)
+      const imgs = container.querySelectorAll('img')
+
+      expect(imgs[0]?.getAttribute('src')).toContain('us.svg')
+      expect(imgs[1]?.getAttribute('src')).toContain('ca.svg')
+    })
+
+    it('renders US + JP flags for 6JM6-CME (USDJPY pair)', (): void => {
+      const { container } = render(<InstrumentIcon symbol='6JM6-CME' exchange='kraken_equities' />)
+      const imgs = container.querySelectorAll('img')
+
+      expect(imgs[0]?.getAttribute('src')).toContain('us.svg')
+      expect(imgs[1]?.getAttribute('src')).toContain('jp.svg')
     })
   })
 

@@ -152,7 +152,14 @@ function parseKrakenEquitiesSymbol(symbol: string): ParsedInstrument {
   const prefix = extractAlphaPrefix(contractCode)
 
   if (FOREX_PREFIXES.has(prefix)) {
-    return { base: contractCode, quote: venue, assetClass: 'forex', underlyingTicker: prefix }
+    const fx = forexPairFromPrefix(prefix)
+
+    return {
+      base: fx.base,
+      quote: fx.quote,
+      assetClass: 'forex',
+      underlyingTicker: `${fx.base}${fx.quote}`,
+    }
   }
 
   if (YIELD_PREFIXES.has(prefix)) {
@@ -178,7 +185,7 @@ function parseKrakenEquitiesSymbol(symbol: string): ParsedInstrument {
       base: contractCode,
       quote: venue,
       assetClass: 'commodity-future',
-      underlyingTicker: prefix,
+      underlyingTicker: commodityUnderlyingFromPrefix(prefix),
     }
   }
 
@@ -225,4 +232,58 @@ function yieldUnderlyingFromPrefix(prefix: string): string {
 
 function indexUnderlyingFromPrefix(prefix: string): string {
   return INDEX_UNDERLYING[prefix]
+}
+
+const COMMODITY_UNDERLYING: Record<string, string> = {
+  GC: 'GOLD',
+  MGC: 'GOLD',
+  '1OZ': 'GOLD',
+  SI: 'SILVER',
+  SIL: 'SILVER',
+  QI: 'SILVER',
+  PL: 'PLATINUM',
+  PA: 'PALLADIUM',
+  HG: 'COPPER',
+  MHG: 'COPPER',
+  QC: 'COPPER',
+  CL: 'WTI',
+  MCL: 'WTI',
+  QM: 'WTI',
+  BZ: 'BRENT',
+  HO: 'HEATING_OIL',
+  QH: 'HEATING_OIL',
+  RB: 'GASOLINE',
+  NG: 'NATGAS',
+  MNG: 'NATGAS',
+  QG: 'NATGAS',
+  ZL: 'SOYBEAN_OIL',
+  MZL: 'SOYBEAN_OIL',
+  ZM: 'SOYBEAN_MEAL',
+  MZM: 'SOYBEAN_MEAL',
+  ZR: 'ROUGH_RICE',
+  LBR: 'LUMBER',
+  GF: 'FEEDER_CATTLE',
+  HE: 'LEAN_HOGS',
+}
+
+const FOREX_PREFIX_PAIR: Record<string, { base: string; quote: string }> = {
+  '6A': { base: 'AUD', quote: 'USD' },
+  '6B': { base: 'GBP', quote: 'USD' },
+  '6C': { base: 'USD', quote: 'CAD' },
+  '6E': { base: 'EUR', quote: 'USD' },
+  '6J': { base: 'USD', quote: 'JPY' },
+  '6L': { base: 'USD', quote: 'BRL' },
+  '6M': { base: 'USD', quote: 'MXN' },
+  '6N': { base: 'NZD', quote: 'USD' },
+  '6S': { base: 'USD', quote: 'CHF' },
+  E7: { base: 'EUR', quote: 'USD' },
+  J7: { base: 'USD', quote: 'JPY' },
+}
+
+function commodityUnderlyingFromPrefix(prefix: string): string {
+  return COMMODITY_UNDERLYING[prefix]
+}
+
+function forexPairFromPrefix(prefix: string): { base: string; quote: string } {
+  return FOREX_PREFIX_PAIR[prefix]
 }
