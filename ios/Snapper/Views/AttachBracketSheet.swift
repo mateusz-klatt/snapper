@@ -139,7 +139,7 @@ extension AttachBracketSheet {
     ) -> BracketCreateCommand {
         let envelope = provenance ?? EnvelopeMinter.shared.next(.control)
         return BracketCreateCommand(
-            type: "bracket_create_command",
+            type: "create_bracket_command",
             sequenceId: envelope.sequenceId,
             publicId: envelope.publicId,
             timestamp: envelope.timestamp,

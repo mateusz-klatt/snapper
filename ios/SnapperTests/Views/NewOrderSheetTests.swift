@@ -137,6 +137,7 @@ final class NewOrderSheetTests: XCTestCase {
         let body = NewOrderSheet.buildBody(
             instrument: Self.makeInstrument(),
             walletPublicId: "wallet-9",
+            walletIsPaper: false,
             side: "sell",
             orderType: "limit",
             quantityText: "1.25",
@@ -166,10 +167,40 @@ final class NewOrderSheetTests: XCTestCase {
         XCTAssertNil(NewOrderSheet.buildBody(
             instrument: Self.makeInstrument(canTrade: false),
             walletPublicId: "wallet-9",
+            walletIsPaper: false,
             side: "buy", orderType: "market",
             quantityText: "1", priceText: "", stopPriceText: "",
             leverageText: "", reduceOnly: false
         ))
+    }
+
+    /// Critical safety regression guard from Copilot 5.4 review of
+    /// commit 0f041f1e: a paper wallet must always produce a body
+    /// with ``mode == "paper"`` so the backend's
+    /// ``CreateOrderBody.mode`` default of ``"live"`` cannot route
+    /// real money on a paper-wallet user's behalf.
+    func testBuildBodyForPaperWalletStampsPaperMode() {
+        let body = NewOrderSheet.buildBody(
+            instrument: Self.makeInstrument(),
+            walletPublicId: "paper-wallet",
+            walletIsPaper: true,
+            side: "buy", orderType: "market",
+            quantityText: "0.1", priceText: "", stopPriceText: "",
+            leverageText: "", reduceOnly: false
+        )
+        XCTAssertEqual(body?.mode, "paper")
+    }
+
+    func testBuildBodyForLiveWalletStampsLiveMode() {
+        let body = NewOrderSheet.buildBody(
+            instrument: Self.makeInstrument(),
+            walletPublicId: "live-wallet",
+            walletIsPaper: false,
+            side: "buy", orderType: "market",
+            quantityText: "0.1", priceText: "", stopPriceText: "",
+            leverageText: "", reduceOnly: false
+        )
+        XCTAssertEqual(body?.mode, "live")
     }
 
     func testMakeCommandStampsProvenance() {

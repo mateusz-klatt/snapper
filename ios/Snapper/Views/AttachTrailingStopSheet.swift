@@ -129,7 +129,7 @@ extension AttachTrailingStopSheet {
     ) -> TrailingStopCreateCommand {
         let envelope = provenance ?? EnvelopeMinter.shared.next(.control)
         return TrailingStopCreateCommand(
-            type: "trailing_stop_create_command",
+            type: "create_trailing_stop_command",
             sequenceId: envelope.sequenceId,
             publicId: envelope.publicId,
             timestamp: envelope.timestamp,

@@ -55,7 +55,7 @@ final class AttachTrailingStopSheetTests: XCTestCase {
             minLockPct: 0.5,
             provenance: Self.fixedProvenance
         )
-        XCTAssertEqual(command.type, "trailing_stop_create_command")
+        XCTAssertEqual(command.type, "create_trailing_stop_command")
         XCTAssertEqual(command.publicId, "test-public-id")
         XCTAssertEqual(command.sessionId, "session-test")
         XCTAssertEqual(command.sequenceId, 23)

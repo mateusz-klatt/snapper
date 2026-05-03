@@ -19,6 +19,7 @@ import os
 struct NewOrderSheet: View {
     let exchanges: [String]
     let walletPublicId: String
+    let walletIsPaper: Bool
     let onSubmit: (CreateOrderBody) async -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -45,11 +46,13 @@ struct NewOrderSheet: View {
     init(
         exchanges: [String],
         walletPublicId: String,
+        walletIsPaper: Bool,
         defaultExchange: String? = nil,
         onSubmit: @escaping (CreateOrderBody) async -> Void
     ) {
         self.exchanges = exchanges
         self.walletPublicId = walletPublicId
+        self.walletIsPaper = walletIsPaper
         self.onSubmit = onSubmit
         _selectedExchange = State(initialValue: defaultExchange ?? exchanges.first ?? "")
     }
@@ -210,6 +213,7 @@ struct NewOrderSheet: View {
         return Self.buildBody(
             instrument: selectedInstrument,
             walletPublicId: walletPublicId,
+            walletIsPaper: walletIsPaper,
             side: side,
             orderType: orderType,
             quantityText: quantityText,
@@ -282,9 +286,17 @@ struct NewOrderSheet: View {
     /// testing. Returns ``nil`` when the form fails the same gate
     /// that drives the submit-button disabled state, so the
     /// generated body never violates backend's validators.
+    ///
+    /// ``walletIsPaper`` derives the ``mode`` literal so a paper
+    /// wallet never accidentally routes as a live order. The
+    /// backend default at ``snapper.api.schemas.orders.CreateOrderBody``
+    /// is ``"live"`` — leaving ``mode`` at ``nil`` would route
+    /// real money on the user's behalf (Copilot 5.4 review finding
+    /// 0f041f1e).
     static func buildBody(
         instrument: InstrumentDetailData?,
         walletPublicId: String,
+        walletIsPaper: Bool,
         side: String,
         orderType: String,
         quantityText: String,
@@ -304,7 +316,7 @@ struct NewOrderSheet: View {
             instrument: instrument.symbol,
             instrumentPublicId: instrument.instrumentPublicId,
             exchange: instrument.exchange,
-            mode: nil,
+            mode: walletIsPaper ? "paper" : "live",
             side: side,
             orderType: orderType,
             quantity: quantity,

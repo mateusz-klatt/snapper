@@ -55,6 +55,7 @@ struct OrdersView: View {
                                     } label: {
                                         Label("Cancel", systemImage: "xmark.circle")
                                     }
+                                    .disabled(order.planPublicId == nil)
                                 }
                         }
                     case .recent:
@@ -88,10 +89,12 @@ struct OrdersView: View {
             await load()
         }
         .sheet(isPresented: $presentingNewOrder) {
-            if let walletId = appState.selectedWalletPublicId {
+            if let walletId = appState.selectedWalletPublicId,
+               let wallet = appState.availableWallets.first(where: { $0.publicId == walletId }) {
                 NewOrderSheet(
                     exchanges: derivedExchanges,
                     walletPublicId: walletId,
+                    walletIsPaper: wallet.isPaper,
                     onSubmit: { body in
                         await submitNewOrder(body: body)
                     }
@@ -251,8 +254,12 @@ struct OrdersView: View {
     }
 
     private func submitCancel(order: OrderStatus) async {
+        guard let planId = order.planPublicId else {
+            submitError = "This order has no execution plan to cancel."
+            return
+        }
         do {
-            _ = try await APIClient.shared.cancelOrder(planPublicId: order.publicId)
+            _ = try await APIClient.shared.cancelOrder(planPublicId: planId)
             await load()
         } catch {
             logger.error("Failed to cancel order: \(error.localizedDescription)")

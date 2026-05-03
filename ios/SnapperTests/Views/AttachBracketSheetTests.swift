@@ -60,7 +60,7 @@ final class AttachBracketSheetTests: XCTestCase {
             tpPrice: 110.0,
             provenance: Self.fixedProvenance
         )
-        XCTAssertEqual(command.type, "bracket_create_command")
+        XCTAssertEqual(command.type, "create_bracket_command")
         XCTAssertEqual(command.publicId, "test-public-id")
         XCTAssertEqual(command.sessionId, "session-test")
         XCTAssertEqual(command.sequenceId, 21)
