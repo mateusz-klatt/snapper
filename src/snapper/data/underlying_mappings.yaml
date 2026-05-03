@@ -58,6 +58,922 @@ underlyings:
         instrument_type: future
         contract_family: ETH
 
+  - ticker: USDT
+    name: "Tether USD"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "USDT-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "USDT-EUR"
+
+  - ticker: USDC
+    name: "USD Coin"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "USDC-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "USDC-EUR"
+
+  - ticker: DAI
+    name: "Dai Stablecoin"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "DAI-USD"
+
+  - ticker: PYUSD
+    name: "PayPal USD"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "PYUSD-USD"
+
+  - ticker: RLUSD
+    name: "Ripple USD"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "RLUSD-USD"
+
+  - ticker: SOL
+    name: "Solana"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "SOL-AUD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SOL-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SOL-CAD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SOL-ETH"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SOL-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SOL-EURC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SOL-GBP"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SOL-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SOL-USD1"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SOL-USDC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SOL-USDT"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "SOL-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "SOL-USD"
+      - exchange: kraken_futures
+        match_type: regex
+        pattern: '^SOL-USD-\d{6}$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: "SOL"
+
+  - ticker: XRP
+    name: "XRP"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "XRP-AUD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XRP-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XRP-CAD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XRP-ETH"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XRP-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XRP-GBP"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XRP-RLUSD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XRP-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XRP-USDC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XRP-USDT"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "XRP-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "XRP-AUD"
+      - exchange: polygon
+        match_type: exact
+        pattern: "XRP-BTC"
+      - exchange: polygon
+        match_type: exact
+        pattern: "XRP-USD"
+      - exchange: kraken_futures
+        match_type: regex
+        pattern: '^XRP-USD-\d{6}$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: "XRP"
+
+  - ticker: DOGE
+    name: "Dogecoin"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOGE-AUD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOGE-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOGE-CAD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOGE-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOGE-GBP"
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOGE-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOGE-USDC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOGE-USDT"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "DOGE-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "DOGE-USD"
+
+  - ticker: LTC
+    name: "Litecoin"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "LTC-AUD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LTC-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LTC-ETH"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LTC-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LTC-GBP"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LTC-JPY"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LTC-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LTC-USDC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LTC-USDT"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "LTC-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "LTC-AUD"
+      - exchange: polygon
+        match_type: exact
+        pattern: "LTC-BTC"
+      - exchange: polygon
+        match_type: exact
+        pattern: "LTC-EUR"
+      - exchange: polygon
+        match_type: exact
+        pattern: "LTC-USD"
+      - exchange: kraken_futures
+        match_type: regex
+        pattern: '^LTC-USD-\d{6}$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: "LTC"
+
+  - ticker: LINK
+    name: "Chainlink"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "LINK-AUD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LINK-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LINK-ETH"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LINK-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LINK-GBP"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LINK-JPY"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LINK-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LINK-USDC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "LINK-USDT"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "LINK-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "LINK-USD"
+
+  - ticker: DOT
+    name: "Polkadot"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOT-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOT-ETH"
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOT-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOT-GBP"
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOT-JPY"
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOT-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOT-USDC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "DOT-USDT"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "DOT-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "DOT-USD"
+
+  - ticker: ADA
+    name: "Cardano"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "ADA-AUD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ADA-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ADA-ETH"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ADA-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ADA-GBP"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ADA-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ADA-USDC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ADA-USDT"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "ADA-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "ADA-USD"
+
+  - ticker: AVAX
+    name: "Avalanche"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "AVAX-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "AVAX-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "AVAX-USDC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "AVAX-USDT"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "AVAX-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "AVAX-USD"
+
+  - ticker: UNI
+    name: "Uniswap"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "UNI-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "UNI-ETH"
+      - exchange: kraken
+        match_type: exact
+        pattern: "UNI-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "UNI-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "UNI-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "UNI-USD"
+
+  - ticker: AAVE
+    name: "Aave"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "AAVE-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "AAVE-ETH"
+      - exchange: kraken
+        match_type: exact
+        pattern: "AAVE-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "AAVE-GBP"
+      - exchange: kraken
+        match_type: exact
+        pattern: "AAVE-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "AAVE-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "AAVE-USD"
+
+  - ticker: ATOM
+    name: "Cosmos"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "ATOM-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ATOM-ETH"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ATOM-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ATOM-GBP"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ATOM-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ATOM-USDC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ATOM-USDT"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "ATOM-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "ATOM-USD"
+
+  - ticker: NEAR
+    name: "NEAR Protocol"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "NEAR-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "NEAR-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "NEAR-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "NEAR-USD"
+
+  - ticker: ALGO
+    name: "Algorand"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "ALGO-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ALGO-ETH"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ALGO-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ALGO-GBP"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ALGO-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ALGO-USDC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ALGO-USDT"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "ALGO-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "ALGO-USD"
+
+  - ticker: FIL
+    name: "Filecoin"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "FIL-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "FIL-ETH"
+      - exchange: kraken
+        match_type: exact
+        pattern: "FIL-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "FIL-GBP"
+      - exchange: kraken
+        match_type: exact
+        pattern: "FIL-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "FIL-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "FIL-USD"
+
+  - ticker: XLM
+    name: "Stellar"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "XLM-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XLM-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XLM-GBP"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XLM-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "XLM-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "XLM-USD"
+
+  - ticker: TRX
+    name: "TRON"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "TRX-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "TRX-ETH"
+      - exchange: kraken
+        match_type: exact
+        pattern: "TRX-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "TRX-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "TRX-USDD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "TRX-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "TRX-USD"
+
+  - ticker: ETC
+    name: "Ethereum Classic"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "ETC-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ETC-ETH"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ETC-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ETC-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "ETC-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "ETC-USD"
+
+  - ticker: APE
+    name: "ApeCoin"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "APE-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "APE-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "APE-USDC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "APE-USDT"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "APE-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "APE-USD"
+
+  - ticker: SHIB
+    name: "Shiba Inu"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "SHIB-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SHIB-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SHIB-USDC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SHIB-USDT"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "SHIB-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "SHIB-USD"
+
+  - ticker: RENDER
+    name: "Render"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "RENDER-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "RENDER-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "RENDER-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "RENDER-USD"
+
+  - ticker: TAO
+    name: "Bittensor"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "TAO-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "TAO-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "TAO-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "TAO-USD"
+
+  - ticker: ZEC
+    name: "Zcash"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "ZEC-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ZEC-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "ZEC-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "ZEC-USD"
+
+  - ticker: ONDO
+    name: "Ondo"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "ONDO-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ONDO-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "ONDO-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "ONDO-USD"
+
+  - ticker: TIA
+    name: "Celestia"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "TIA-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "TIA-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "TIA-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "TIA-USD"
+
+  - ticker: INJ
+    name: "Injective"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "INJ-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "INJ-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "INJ-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "INJ-USD"
+
+  - ticker: OP
+    name: "Optimism"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "OP-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "OP-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "OP-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "OP-USD"
+
+  - ticker: ARB
+    name: "Arbitrum"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "ARB-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ARB-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "ARB-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "ARB-USD"
+
+  - ticker: SUI
+    name: "Sui"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "SUI-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SUI-GBP"
+      - exchange: kraken
+        match_type: exact
+        pattern: "SUI-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "SUI-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "SUI-USD"
+
+  - ticker: XMR
+    name: "Monero"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "XMR-BTC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XMR-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XMR-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XMR-USDC"
+      - exchange: kraken
+        match_type: exact
+        pattern: "XMR-USDT"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "XMR-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "XMR-USD"
+
+  - ticker: POL
+    name: "Polygon"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "POL-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "POL-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "POL-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "POL-USD"
+
+  - ticker: HYPE
+    name: "Hyperliquid"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "HYPE-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "HYPE-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "HYPE-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "HYPE-USD"
+
+  - ticker: PEPE
+    name: "Pepe"
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "PEPE-AUD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "PEPE-CAD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "PEPE-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "PEPE-GBP"
+      - exchange: kraken
+        match_type: exact
+        pattern: "PEPE-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "PEPE-USD-PERP"
+        relationship_type: derivative
+      - exchange: polygon
+        match_type: exact
+        pattern: "PEPE-USD"
+
   - ticker: SPX
     name: "S&P 500"
     asset_class: index
@@ -206,6 +1122,76 @@ underlyings:
         relationship_type: derivative
         instrument_type: future
         contract_family: SI
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^SIL[FGHJKMNQUVXZ]\d{1,2}-COMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: SIL
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^QI[FGHJKMNQUVXZ]\d{1,2}-COMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: QI
+
+  - ticker: PLATINUM
+    name: Platinum
+    asset_class: commodity
+    sector: "Precious Metals"
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^PL[FGHJKMNQUVXZ]\d{1,2}-NYMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: PL
+
+  - ticker: PALLADIUM
+    name: Palladium
+    asset_class: commodity
+    sector: "Precious Metals"
+    patterns:
+      - exchange: polygon
+        match_type: exact
+        pattern: "PALL"
+        relationship_type: proxy
+        instrument_type: etf
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^PA[FGHJKMNQUVXZ]\d{1,2}-NYMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: PA
+
+  - ticker: COPPER
+    name: Copper
+    asset_class: commodity
+    sector: "Industrial Metals"
+    patterns:
+      - exchange: polygon
+        match_type: exact
+        pattern: "CPER"
+        relationship_type: proxy
+        instrument_type: etf
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^HG[FGHJKMNQUVXZ]\d{1,2}-COMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: HG
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^MHG[FGHJKMNQUVXZ]\d{1,2}-COMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: MHG
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^QC[FGHJKMNQUVXZ]\d{1,2}-COMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: QC
 
   - ticker: WTI
     name: "WTI Crude Oil"
@@ -229,6 +1215,54 @@ underlyings:
         relationship_type: derivative
         instrument_type: future
         contract_family: MCL
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^QM[FGHJKMNQUVXZ]\d{1,2}-NYMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: QM
+
+  - ticker: BRENT
+    name: "Brent Crude Oil"
+    asset_class: commodity
+    sector: "Energy"
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^BZ[FGHJKMNQUVXZ]\d{1,2}-NYMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: BZ
+
+  - ticker: HEATING_OIL
+    name: "Heating Oil"
+    asset_class: commodity
+    sector: "Energy"
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^HO[FGHJKMNQUVXZ]\d{1,2}-NYMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: HO
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^QH[FGHJKMNQUVXZ]\d{1,2}-NYMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: QH
+
+  - ticker: GASOLINE
+    name: "RBOB Gasoline"
+    asset_class: commodity
+    sector: "Energy"
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^RB[FGHJKMNQUVXZ]\d{1,2}-NYMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: RB
 
   - ticker: NATGAS
     name: Natural Gas
@@ -246,6 +1280,102 @@ underlyings:
         relationship_type: derivative
         instrument_type: future
         contract_family: NG
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^MNG[FGHJKMNQUVXZ]\d{1,2}-NYMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: MNG
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^QG[FGHJKMNQUVXZ]\d{1,2}-NYMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: QG
+
+  - ticker: SOYBEAN_OIL
+    name: "Soybean Oil"
+    asset_class: commodity
+    sector: "Agriculture"
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^ZL[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: ZL
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^MZL[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: MZL
+
+  - ticker: SOYBEAN_MEAL
+    name: "Soybean Meal"
+    asset_class: commodity
+    sector: "Agriculture"
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^ZM[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: ZM
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^MZM[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: MZM
+
+  - ticker: ROUGH_RICE
+    name: "Rough Rice"
+    asset_class: commodity
+    sector: "Agriculture"
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^ZR[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: ZR
+
+  - ticker: LUMBER
+    name: Lumber
+    asset_class: commodity
+    sector: "Agriculture"
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^LBR[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: LBR
+
+  - ticker: FEEDER_CATTLE
+    name: "Feeder Cattle"
+    asset_class: commodity
+    sector: "Livestock"
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^GF[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: GF
+
+  - ticker: LEAN_HOGS
+    name: "Lean Hogs"
+    asset_class: commodity
+    sector: "Livestock"
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^HE[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: HE
 
   - ticker: EURUSD
     name: "Euro / US Dollar"
@@ -295,6 +1425,9 @@ underlyings:
       - exchange: kraken
         match_type: exact
         pattern: "GBP-USD"
+      - exchange: walutomat
+        match_type: exact
+        pattern: "GBP-USD"
       - exchange: kraken_equities
         match_type: regex
         pattern: '^6B[FGHJKMNQUVXZ]\d{1,2}-CME$'
@@ -309,6 +1442,386 @@ underlyings:
       - exchange: kraken
         match_type: exact
         pattern: "EUR-GBP"
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-GBP"
+
+
+  - ticker: AUDPLN
+    name: "Australian Dollar / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "AUD-PLN"
+
+  - ticker: BGNPLN
+    name: "Bulgarian Lev / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "BGN-PLN"
+
+  - ticker: CADPLN
+    name: "Canadian Dollar / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "CAD-PLN"
+
+  - ticker: CHFPLN
+    name: "Swiss Franc / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "CHF-PLN"
+
+  - ticker: CNYPLN
+    name: "Chinese Yuan / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "CNY-PLN"
+
+  - ticker: CZKPLN
+    name: "Czech Koruna / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "CZK-PLN"
+
+  - ticker: DKKPLN
+    name: "Danish Krone / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "DKK-PLN"
+
+  - ticker: HKDPLN
+    name: "Hong Kong Dollar / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "HKD-PLN"
+
+  - ticker: HUFPLN
+    name: "Hungarian Forint / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "HUF-PLN"
+
+  - ticker: ILSPLN
+    name: "Israeli Shekel / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "ILS-PLN"
+
+  - ticker: JPYPLN
+    name: "Japanese Yen / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "JPY-PLN"
+
+  - ticker: NOKPLN
+    name: "Norwegian Krone / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "NOK-PLN"
+
+  - ticker: NZDPLN
+    name: "New Zealand Dollar / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "NZD-PLN"
+
+  - ticker: RONPLN
+    name: "Romanian Leu / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "RON-PLN"
+
+  - ticker: SEKPLN
+    name: "Swedish Krona / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "SEK-PLN"
+
+  - ticker: SGDPLN
+    name: "Singapore Dollar / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "SGD-PLN"
+
+  - ticker: TRYPLN
+    name: "Turkish Lira / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "TRY-PLN"
+
+  - ticker: ZARPLN
+    name: "South African Rand / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "ZAR-PLN"
+
+  - ticker: EURAUD
+    name: "Euro / Australian Dollar"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-AUD"
+
+  - ticker: EURBGN
+    name: "Euro / Bulgarian Lev"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-BGN"
+
+  - ticker: EURCAD
+    name: "Euro / Canadian Dollar"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-CAD"
+
+  - ticker: EURCHF
+    name: "Euro / Swiss Franc"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-CHF"
+
+  - ticker: EURCNY
+    name: "Euro / Chinese Yuan"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-CNY"
+
+  - ticker: EURCZK
+    name: "Euro / Czech Koruna"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-CZK"
+
+  - ticker: EURDKK
+    name: "Euro / Danish Krone"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-DKK"
+
+  - ticker: EURHKD
+    name: "Euro / Hong Kong Dollar"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-HKD"
+
+  - ticker: EURHUF
+    name: "Euro / Hungarian Forint"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-HUF"
+
+  - ticker: EURILS
+    name: "Euro / Israeli Shekel"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-ILS"
+
+  - ticker: EURJPY
+    name: "Euro / Japanese Yen"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-JPY"
+
+  - ticker: EURNOK
+    name: "Euro / Norwegian Krone"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-NOK"
+
+  - ticker: EURNZD
+    name: "Euro / New Zealand Dollar"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-NZD"
+
+  - ticker: EURRON
+    name: "Euro / Romanian Leu"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-RON"
+
+  - ticker: EURSEK
+    name: "Euro / Swedish Krona"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-SEK"
+
+  - ticker: EURSGD
+    name: "Euro / Singapore Dollar"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-SGD"
+
+  - ticker: EURTRY
+    name: "Euro / Turkish Lira"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-TRY"
+
+  - ticker: EURZAR
+    name: "Euro / South African Rand"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-ZAR"
+
+  - ticker: GBPCHF
+    name: "British Pound / Swiss Franc"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "GBP-CHF"
+
+  - ticker: USDCHF
+    name: "US Dollar / Swiss Franc"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "USD-CHF"
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^6S[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: "6S"
+
+  - ticker: AUDUSD
+    name: "Australian Dollar / US Dollar"
+    asset_class: forex
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^6A[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: "6A"
+
+  - ticker: USDCAD
+    name: "US Dollar / Canadian Dollar"
+    asset_class: forex
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^6C[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: "6C"
+
+  - ticker: USDJPY
+    name: "US Dollar / Japanese Yen"
+    asset_class: forex
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^6J[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: "6J"
+
+  - ticker: NZDUSD
+    name: "New Zealand Dollar / US Dollar"
+    asset_class: forex
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^6N[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: "6N"
+
+  - ticker: USDBRL
+    name: "US Dollar / Brazilian Real"
+    asset_class: forex
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^6L[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: "6L"
+
+  - ticker: USDMXN
+    name: "US Dollar / Mexican Peso"
+    asset_class: forex
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^6M[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: "6M"
 
   - ticker: US10Y
     name: "US 10-Year Treasury Note"
@@ -317,10 +1830,10 @@ underlyings:
     patterns:
       - exchange: kraken_equities
         match_type: regex
-        pattern: '^ZN[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        pattern: '^10Y[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
         relationship_type: derivative
         instrument_type: future
-        contract_family: ZN
+        contract_family: "10Y"
 
   - ticker: US30Y
     name: "US 30-Year Treasury Bond"
@@ -329,10 +1842,10 @@ underlyings:
     patterns:
       - exchange: kraken_equities
         match_type: regex
-        pattern: '^ZB[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        pattern: '^30Y[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
         relationship_type: derivative
         instrument_type: future
-        contract_family: ZB
+        contract_family: "30Y"
 
   - ticker: US2Y
     name: "US 2-Year Treasury Note"
@@ -341,10 +1854,10 @@ underlyings:
     patterns:
       - exchange: kraken_equities
         match_type: regex
-        pattern: '^ZT[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        pattern: '^2YY[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
         relationship_type: derivative
         instrument_type: future
-        contract_family: ZT
+        contract_family: "2YY"
 
   - ticker: US5Y
     name: "US 5-Year Treasury Note"
@@ -353,7 +1866,7 @@ underlyings:
     patterns:
       - exchange: kraken_equities
         match_type: regex
-        pattern: '^ZF[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        pattern: '^5YY[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
         relationship_type: derivative
         instrument_type: future
-        contract_family: ZF
+        contract_family: "5YY"
