@@ -23,12 +23,12 @@ category = "server"
 description = "Allowed UI origins for WebSocket CORS (comma-separated)"
 
 [[wallets]]
-label = "default"
+label = "paper"
 is_paper = true
-description = "Default paper-mode wallet seeded for open-source dev deployment"
+description = "Paper-mode wallet seeded for open-source dev deployment (10k USD bootstrap)"
 
 [[wallets.credentials]]
 exchange = "paper"
 credential_type = "paper"
 initial_balance = "10000.0"
-label = "default paper bootstrap"
+label = "paper bootstrap"
