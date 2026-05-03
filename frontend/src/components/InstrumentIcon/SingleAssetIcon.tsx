@@ -13,7 +13,7 @@ import {
   Wheat,
 } from 'lucide-react'
 import type { CSSProperties } from 'react'
-import { CIRCLE_FLAGS_CDN, CRYPTO_ICONS_CDN, RemoteSvg } from './RemoteSvg'
+import { CIRCLE_FLAGS_CDN, CRYPTO_ICONS_CDN, RemoteSvg, isVendored } from './RemoteSvg'
 import type { IconSpec, LucideName } from './types'
 
 const LUCIDE_MAP: Record<
@@ -49,6 +49,7 @@ export function SingleAssetIcon({
         src={`${CRYPTO_ICONS_CDN}/${spec.symbol}.svg`}
         label={spec.symbol.toUpperCase()}
         size={size}
+        vendored={isVendored('crypto', spec.symbol)}
       />
     )
   }
@@ -59,6 +60,7 @@ export function SingleAssetIcon({
         src={`${CIRCLE_FLAGS_CDN}/${spec.country}.svg`}
         label={spec.country.toUpperCase()}
         size={size}
+        vendored={isVendored('flag', spec.country)}
       />
     )
   }

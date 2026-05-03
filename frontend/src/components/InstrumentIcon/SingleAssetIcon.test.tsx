@@ -3,26 +3,24 @@ import { render } from '@testing-library/react'
 import { SingleAssetIcon } from './SingleAssetIcon'
 
 describe('SingleAssetIcon', () => {
-  it('renders crypto icon as img with spothq CDN url', (): void => {
+  it('renders crypto icon as img with vendored local path', (): void => {
     const { container } = render(
       <SingleAssetIcon spec={{ kind: 'crypto', symbol: 'btc' }} size={32} />
     )
     const img = container.querySelector('img')
 
     expect(img).not.toBeNull()
-    expect(img?.getAttribute('src')).toContain('spothq/cryptocurrency-icons')
-    expect(img?.getAttribute('src')).toContain('btc.svg')
+    expect(img?.getAttribute('src')).toBe('/icons/crypto/btc.svg')
     expect(img?.getAttribute('alt')).toBe('BTC')
   })
 
-  it('renders flag icon as img with circle-flags CDN url', (): void => {
+  it('renders flag icon as img with vendored local path', (): void => {
     const { container } = render(
       <SingleAssetIcon spec={{ kind: 'flag', country: 'us' }} size={28} />
     )
     const img = container.querySelector('img')
 
-    expect(img?.getAttribute('src')).toContain('hatscripts.github.io/circle-flags')
-    expect(img?.getAttribute('src')).toContain('us.svg')
+    expect(img?.getAttribute('src')).toBe('/icons/flags/us.svg')
     expect(img?.getAttribute('alt')).toBe('US')
   })
 

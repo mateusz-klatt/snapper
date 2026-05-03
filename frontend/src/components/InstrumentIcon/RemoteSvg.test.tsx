@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { fireEvent, render } from '@testing-library/react'
-import { RemoteSvg, CIRCLE_FLAGS_CDN, CRYPTO_ICONS_CDN } from './RemoteSvg'
+import { RemoteSvg, CIRCLE_FLAGS_CDN, CRYPTO_ICONS_CDN, isVendored } from './RemoteSvg'
 
 describe('RemoteSvg', () => {
   it('renders an img with the given src and label as alt', () => {
@@ -59,10 +59,50 @@ describe('RemoteSvg', () => {
     expect(badge.style.background).toBe('red')
   })
 
-  it('exports the public CDN constants', () => {
-    expect(CIRCLE_FLAGS_CDN).toBe('https://hatscripts.github.io/circle-flags/flags')
-    expect(CRYPTO_ICONS_CDN).toBe(
-      'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color'
+  it('exports vendored icon paths (no CDN — air-gap friendly)', () => {
+    expect(CIRCLE_FLAGS_CDN).toBe('/icons/flags')
+    expect(CRYPTO_ICONS_CDN).toBe('/icons/crypto')
+  })
+
+  it('renders fallback badge directly when vendored=false (skips img path)', () => {
+    const { container } = render(
+      <RemoteSvg src='/icons/crypto/notvendored.svg' label='NOTVEND' size={28} vendored={false} />
     )
+
+    expect(container.querySelector('img')).toBeNull()
+    const badge = container.querySelector('span[role="img"]')
+
+    expect(badge).not.toBeNull()
+    expect(badge?.textContent).toBe('NOT')
+    expect(badge?.getAttribute('aria-label')).toBe('NOTVEND')
+  })
+
+  describe('isVendored manifest lookup', () => {
+    it('returns true for known crypto symbols (BTC, ETH, USDT)', () => {
+      expect(isVendored('crypto', 'btc')).toBe(true)
+      expect(isVendored('crypto', 'eth')).toBe(true)
+      expect(isVendored('crypto', 'usdt')).toBe(true)
+    })
+
+    it('returns false for crypto symbols missing from upstream', () => {
+      expect(isVendored('crypto', 'shib')).toBe(false)
+      expect(isVendored('crypto', 'arb')).toBe(false)
+    })
+
+    it('returns true for known flag country codes', () => {
+      expect(isVendored('flag', 'us')).toBe(true)
+      expect(isVendored('flag', 'eu')).toBe(true)
+      expect(isVendored('flag', 'pl')).toBe(true)
+    })
+
+    it('is case-insensitive', () => {
+      expect(isVendored('crypto', 'BTC')).toBe(true)
+      expect(isVendored('flag', 'US')).toBe(true)
+    })
+
+    it('returns false for unknown symbols', () => {
+      expect(isVendored('crypto', 'doesnotexist')).toBe(false)
+      expect(isVendored('flag', 'xx')).toBe(false)
+    })
   })
 })

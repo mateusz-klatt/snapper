@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react'
-import { CIRCLE_FLAGS_CDN, CRYPTO_ICONS_CDN, RemoteSvg } from './RemoteSvg'
+import { CIRCLE_FLAGS_CDN, CRYPTO_ICONS_CDN, RemoteSvg, isVendored } from './RemoteSvg'
 import { SingleAssetIcon } from './SingleAssetIcon'
 import type { IconSpec } from './types'
 
@@ -61,6 +61,7 @@ function renderCircle(spec: IconSpec, innerSize: number): React.ReactElement {
         src={`${CRYPTO_ICONS_CDN}/${spec.symbol}.svg`}
         label={spec.symbol.toUpperCase()}
         size={innerSize}
+        vendored={isVendored('crypto', spec.symbol)}
       />
     )
   }
@@ -71,6 +72,7 @@ function renderCircle(spec: IconSpec, innerSize: number): React.ReactElement {
         src={`${CIRCLE_FLAGS_CDN}/${spec.country}.svg`}
         label={spec.country.toUpperCase()}
         size={innerSize}
+        vendored={isVendored('flag', spec.country)}
       />
     )
   }

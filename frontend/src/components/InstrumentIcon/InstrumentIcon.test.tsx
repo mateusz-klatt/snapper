@@ -201,6 +201,24 @@ describe('InstrumentIcon — smart-hybrid dispatcher', () => {
     })
   })
 
+  describe('vendored-icon manifest fallback (air-gap friendly)', () => {
+    it('renders textual badge for crypto missing from local manifest (e.g. SHIB)', (): void => {
+      const { container } = render(<InstrumentIcon symbol='SHIB-EUR' exchange='kraken' />)
+      const imgs = container.querySelectorAll('img')
+
+      expect(imgs.length).toBe(1)
+      const badges = container.querySelectorAll('span[role="img"]')
+
+      expect(badges.length).toBeGreaterThan(0)
+    })
+
+    it('renders textual badge for both legs when both miss the manifest', (): void => {
+      const { container } = render(<InstrumentIcon symbol='ARB-OP' exchange='kraken' />)
+
+      expect(container.querySelectorAll('img').length).toBe(0)
+    })
+  })
+
   describe('unknown / fallback', () => {
     it('renders single icon for unknown asset class (kraken_equities exotic)', (): void => {
       const { container } = render(
