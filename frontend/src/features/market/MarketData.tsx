@@ -1,5 +1,6 @@
 import { useMemo, useState, useRef, useEffect } from 'react'
 import { Card, LoadingSpinner } from '../../components/ui'
+import { InstrumentIcon } from '../../components/InstrumentIcon'
 import { MarketDataOnlyBadge } from '../../components/MarketDataOnlyBadge'
 import { LightweightChart } from '../../components/LightweightChart'
 import { useCandles, useExchanges, useExchangeInstrumentsDetail } from '../../hooks/queries'
@@ -179,6 +180,9 @@ export function MarketData() {
       {}
       <div className='flex items-center justify-between'>
         <div className='flex items-center space-x-3'>
+          {selectedInstrument !== null && selectedExchange !== null && (
+            <InstrumentIcon symbol={selectedInstrument} exchange={selectedExchange} size={32} />
+          )}
           <h2 className='text-xl font-bold'>Market Data</h2>
           {isSelectedMarketDataOnly && <MarketDataOnlyBadge size='md' />}
         </div>
@@ -252,7 +256,12 @@ export function MarketData() {
                         }}
                         className='flex w-full select-none items-center justify-between gap-3 px-3 py-2 text-sm text-alpine-900 rounded-sm hover:bg-dark-700 cursor-pointer'
                       >
-                        <span>{inst}</span>
+                        <span className='flex items-center gap-2'>
+                          {selectedExchange !== null && (
+                            <InstrumentIcon symbol={inst} exchange={selectedExchange} size={20} />
+                          )}
+                          {inst}
+                        </span>
                         {isMarketDataOnly && <MarketDataOnlyBadge size='sm' />}
                       </button>
                     )
