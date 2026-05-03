@@ -39,6 +39,8 @@ struct PositionsView: View {
     @State private var loadError: APIError?
     @State private var actionSheetPosition: PositionSnapshot?
     @State private var reduceModalPosition: IdentifiedPosition?
+    @State private var bracketModalPosition: IdentifiedPosition?
+    @State private var trailingStopModalPosition: IdentifiedPosition?
     @State private var pendingClosePosition: PositionSnapshot?
     @State private var submitError: String?
 
@@ -97,6 +99,14 @@ struct PositionsView: View {
             Button("Reduce position") {
                 reduceModalPosition = IdentifiedPosition(position: position)
             }
+            if position.positionCyclePublicId != nil {
+                Button("Attach SL / TP") {
+                    bracketModalPosition = IdentifiedPosition(position: position)
+                }
+                Button("Attach trailing stop") {
+                    trailingStopModalPosition = IdentifiedPosition(position: position)
+                }
+            }
             Button("Cancel", role: .cancel) {
                 actionSheetPosition = nil
             }
@@ -129,6 +139,22 @@ struct PositionsView: View {
                 position: wrapper.position,
                 onSubmit: { quantity in
                     await submitMarketReduce(position: wrapper.position, quantity: quantity)
+                }
+            )
+        }
+        .sheet(item: $bracketModalPosition) { wrapper in
+            AttachBracketSheet(
+                position: wrapper.position,
+                onSubmit: { slPrice, tpPrice in
+                    await submitBracket(position: wrapper.position, slPrice: slPrice, tpPrice: tpPrice)
+                }
+            )
+        }
+        .sheet(item: $trailingStopModalPosition) { wrapper in
+            AttachTrailingStopSheet(
+                position: wrapper.position,
+                onSubmit: { trailingPct, minLockPct in
+                    await submitTrailingStop(position: wrapper.position, trailingPct: trailingPct, minLockPct: minLockPct)
                 }
             )
         }
@@ -199,6 +225,44 @@ struct PositionsView: View {
         } catch {
             logger.error("Failed to submit reduce/close: \(error.localizedDescription)")
             submitError = "Couldn't submit the order. Try again."
+        }
+    }
+
+    private func submitBracket(position: PositionSnapshot, slPrice: Double?, tpPrice: Double?) async {
+        guard let cycleId = position.positionCyclePublicId else {
+            submitError = "Position has no active cycle to attach a bracket to."
+            return
+        }
+        do {
+            let command = AttachBracketSheet.makeCommand(
+                positionCyclePublicId: cycleId,
+                slPrice: slPrice,
+                tpPrice: tpPrice
+            )
+            _ = try await APIClient.shared.createBracket(command: command)
+            await load()
+        } catch {
+            logger.error("Failed to submit bracket: \(error.localizedDescription)")
+            submitError = "Couldn't attach bracket. Try again."
+        }
+    }
+
+    private func submitTrailingStop(position: PositionSnapshot, trailingPct: Double, minLockPct: Double?) async {
+        guard let cycleId = position.positionCyclePublicId else {
+            submitError = "Position has no active cycle to attach a trailing stop to."
+            return
+        }
+        do {
+            let command = AttachTrailingStopSheet.makeCommand(
+                positionCyclePublicId: cycleId,
+                trailingPct: trailingPct,
+                minLockPct: minLockPct
+            )
+            _ = try await APIClient.shared.createTrailingStop(command: command)
+            await load()
+        } catch {
+            logger.error("Failed to submit trailing stop: \(error.localizedDescription)")
+            submitError = "Couldn't attach trailing stop. Try again."
         }
     }
 

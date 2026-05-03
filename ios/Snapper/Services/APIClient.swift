@@ -120,19 +120,78 @@ final class APIClient: Sendable {
     /// Submit a manual order via the existing ``POST /api/orders``
     /// route (iOS-Position-Mutations).
     ///
-    /// Used by ``PositionsView`` to fire reduce / close actions —
-    /// the caller builds a ``CreateOrderCommand`` with
-    /// ``reduceOnly=true`` and the opposite side of the position to
-    /// liquidate. Backend handles routing into the existing
-    /// trade-command machinery; the response carries the spawned
-    /// ``ExecutionPlanData`` so the UI can confirm the submission
-    /// succeeded.
+    /// Used by ``PositionsView`` to fire reduce / close actions and
+    /// by ``NewOrderSheet`` to enter fresh orders — the caller
+    /// builds a ``CreateOrderCommand`` from ``EnvelopeMinter``.
+    /// Backend routes into the existing trade-command machinery; the
+    /// response carries the spawned ``ExecutionPlanData`` so the UI
+    /// can confirm the submission succeeded.
     func createOrder(command: CreateOrderCommand) async throws -> ExecutionPlanResponse {
         return try await request(
             endpoint: AppConfig.Endpoints.orders,
             method: "POST",
             body: command
         )
+    }
+
+    /// Cancel a live execution plan via
+    /// ``POST /api/orders/{plan_public_id}/cancel``. Backend
+    /// transitions the plan to ``cancel_requested`` and emits a
+    /// venue-facing cancel command for the active child order.
+    func cancelOrder(planPublicId: String, reason: String? = nil) async throws -> ExecutionPlanResponse {
+        let provenance = await MainActor.run {
+            EnvelopeMinter.shared.next(.control)
+        }
+        let command = CancelOrderCommand(
+            type: "cancel_order_command",
+            sequenceId: provenance.sequenceId,
+            publicId: provenance.publicId,
+            timestamp: provenance.timestamp,
+            sessionId: provenance.sessionId,
+            topic: nil,
+            payload: CancelOrderBody(reason: reason)
+        )
+        return try await request(
+            endpoint: "\(AppConfig.Endpoints.orders)/\(planPublicId)/cancel",
+            method: "POST",
+            body: command
+        )
+    }
+
+    /// Attach a stop-loss / take-profit bracket to a live position
+    /// cycle via ``POST /api/execution-plans`` (the bracket creation
+    /// route lives on the execution-plans router per
+    /// ``snapper.server.execution_plan_routes``).
+    func createBracket(command: BracketCreateCommand) async throws -> ExecutionPlanResponse {
+        return try await request(
+            endpoint: "/execution-plans",
+            method: "POST",
+            body: command
+        )
+    }
+
+    /// Attach a trailing-stop plan to a live position cycle via
+    /// ``POST /api/trailing-stops``. Backend validates the cycle is
+    /// open, the venue supports ``reduce_only``, and ``trailing_pct``
+    /// falls within configured bounds before spawning the plan.
+    func createTrailingStop(command: TrailingStopCreateCommand) async throws -> ExecutionPlanResponse {
+        return try await request(
+            endpoint: "/trailing-stops",
+            method: "POST",
+            body: command
+        )
+    }
+
+    /// Fetch capability-aware instrument rows for a venue via
+    /// ``GET /api/exchanges/{exchange}/instruments/detail``. Each
+    /// row carries ``can_trade``, ``can_market_data``, and
+    /// ``instrument_kind`` so order-entry can disable rows the
+    /// venue treats as market-data-only (TradFi mirrors).
+    func fetchInstruments(exchange: String) async throws -> [InstrumentDetailData] {
+        let envelope: InstrumentDetailListResponse = try await request(
+            endpoint: "/exchanges/\(exchange)/instruments/detail"
+        )
+        return envelope.payload
     }
 
     func fetchSystemStatus() async throws -> SystemStatus {

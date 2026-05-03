@@ -14,6 +14,7 @@
 		1C42056D6B73DB2475D007F4 /* APITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = C90AC0DDC55DFC58EF4590D7 /* APITypes.swift */; };
 		1FB7DA9DCC9A41F35A486136 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 653637C037B012795FE84600 /* HomeView.swift */; };
 		22A2FE8937BA167E5605A9F5 /* LatestAlertCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 152DF48318E7846A33D574CF /* LatestAlertCard.swift */; };
+		29D2E464A1B6080B18FBEF78 /* NewOrderSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF3BCDD96C1FD50ACC3B3C1F /* NewOrderSheet.swift */; };
 		2BB79204F7F83445708B92C4 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FBB6040DB0E53FB9C4060D1 /* AppState.swift */; };
 		2DBDD476BC339FFB12CEC0BF /* EditDevicePrefView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3F609F3E2355B212C12F18B /* EditDevicePrefView.swift */; };
 		375D6E54819C76EB85DF2E97 /* AlertsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F12F4A22AA39A55870A72C7B /* AlertsView.swift */; };
@@ -24,7 +25,9 @@
 		3B9060A9B55885A03C1316D0 /* SnapperApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB34EE347C68EC93D009F7F4 /* SnapperApp.swift */; };
 		4903E053BC2B9E8FC22EC62A /* WebSocketManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1499AF1C8B116093A1A9426D /* WebSocketManager.swift */; };
 		56F3E6E370F0017D26D4DE52 /* OrdersView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6535894EE04ECF4410862D9 /* OrdersView.swift */; };
+		7092C34F5D824310323A01BC /* AttachTrailingStopSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9E103AD848B68CF86D867CC /* AttachTrailingStopSheet.swift */; };
 		744C6DC56C03FBBCF9651D96 /* DeviceRegistrationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B312129A11E7B3A9371A79C5 /* DeviceRegistrationService.swift */; };
+		75F5DEB5B2F4FAEBB9389578 /* AttachBracketSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0959D7C3C41B87BE52156829 /* AttachBracketSheet.swift */; };
 		7A8AC6E7C86070E41475CF8F /* Environment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10C33334091D91D43D43B1C3 /* Environment.swift */; };
 		7AD9A1C58498FCB2B7883463 /* Configuration.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3AFFCD485E4541E995FC91CB /* Configuration.plist */; };
 		7FC94DE9822D377C7FE520DF /* NotificationPrefsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2862D7D7B1A4BC6B1BAE0FD /* NotificationPrefsView.swift */; };
@@ -56,6 +59,7 @@
 
 /* Begin PBXFileReference section */
 		039FE3D502C2D2EB294EB4AA /* Permissions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Permissions.swift; sourceTree = "<group>"; };
+		0959D7C3C41B87BE52156829 /* AttachBracketSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachBracketSheet.swift; sourceTree = "<group>"; };
 		0DB4E91D02D599DD1D40D952 /* AlertRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlertRow.swift; sourceTree = "<group>"; };
 		10C33334091D91D43D43B1C3 /* Environment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Environment.swift; sourceTree = "<group>"; };
 		1499AF1C8B116093A1A9426D /* WebSocketManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketManager.swift; sourceTree = "<group>"; };
@@ -70,7 +74,7 @@
 		5A50EF856475775A1EEA07E0 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
 		653637C037B012795FE84600 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		6798D055E36E2A96D2575882 /* LoginViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginViewModel.swift; sourceTree = "<group>"; };
-		6B649B56E9F5DB1981C9D47E /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		6B649B56E9F5DB1981C9D47E /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		77B5AF96CD39F790EE5DFFE3 /* PositionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PositionsView.swift; sourceTree = "<group>"; };
 		7A987AAE53C2CBDE34AE70BD /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
 		7DC7293CDEE72AC8C8C5341C /* NavigationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationCoordinator.swift; sourceTree = "<group>"; };
@@ -80,6 +84,7 @@
 		A9948BCE1220922C26E1E5D5 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
 		AA3A1CC61B90950DA6A44D16 /* Snapper.Debug.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Snapper.Debug.entitlements; sourceTree = "<group>"; };
 		B312129A11E7B3A9371A79C5 /* DeviceRegistrationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceRegistrationService.swift; sourceTree = "<group>"; };
+		B9E103AD848B68CF86D867CC /* AttachTrailingStopSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachTrailingStopSheet.swift; sourceTree = "<group>"; };
 		C69A0BFD6B16B0BD652D904F /* TypeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypeBridge.swift; sourceTree = "<group>"; };
 		C866C094E8868C0EF03F6809 /* AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthService.swift; sourceTree = "<group>"; };
 		C90AC0DDC55DFC58EF4590D7 /* APITypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APITypes.swift; sourceTree = "<group>"; };
@@ -87,6 +92,7 @@
 		CE27C35122A039D4B00DFFAC /* EnvelopeMinter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnvelopeMinter.swift; sourceTree = "<group>"; };
 		D203FD7280A91512EE623EE1 /* Protocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocols.swift; sourceTree = "<group>"; };
 		D839E5FB00056E88B45C4D34 /* WalletPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletPicker.swift; sourceTree = "<group>"; };
+		DF3BCDD96C1FD50ACC3B3C1F /* NewOrderSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewOrderSheet.swift; sourceTree = "<group>"; };
 		E2862D7D7B1A4BC6B1BAE0FD /* NotificationPrefsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationPrefsView.swift; sourceTree = "<group>"; };
 		E4646B48A09BA542FF6ABECD /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		E6605FA90A650CA70270A857 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -162,10 +168,13 @@
 			isa = PBXGroup;
 			children = (
 				F12F4A22AA39A55870A72C7B /* AlertsView.swift */,
+				0959D7C3C41B87BE52156829 /* AttachBracketSheet.swift */,
+				B9E103AD848B68CF86D867CC /* AttachTrailingStopSheet.swift */,
 				A3F609F3E2355B212C12F18B /* EditDevicePrefView.swift */,
 				653637C037B012795FE84600 /* HomeView.swift */,
 				A9948BCE1220922C26E1E5D5 /* LoginView.swift */,
 				5A50EF856475775A1EEA07E0 /* MainTabView.swift */,
+				DF3BCDD96C1FD50ACC3B3C1F /* NewOrderSheet.swift */,
 				E2862D7D7B1A4BC6B1BAE0FD /* NotificationPrefsView.swift */,
 				F6535894EE04ECF4410862D9 /* OrdersView.swift */,
 				77B5AF96CD39F790EE5DFFE3 /* PositionsView.swift */,
@@ -288,6 +297,7 @@
 				};
 			};
 			buildConfigurationList = C2CB0B358D0349B72E0074FC /* Build configuration list for PBXProject "Snapper" */;
+			compatibilityVersion = "Xcode 16.0.Superseded.1";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -296,7 +306,6 @@
 			);
 			mainGroup = AAA7E2168F538A29330F95E5;
 			minimizedProjectReferenceProxies = 1;
-
 			productRefGroup = 39B66CEE8EC32FBF47CADDFD /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -346,6 +355,8 @@
 				B0B776140121A53C950E09F7 /* AnyCodable.swift in Sources */,
 				0EDEF3790D6B1C22EF3699E4 /* AppDelegate.swift in Sources */,
 				2BB79204F7F83445708B92C4 /* AppState.swift in Sources */,
+				75F5DEB5B2F4FAEBB9389578 /* AttachBracketSheet.swift in Sources */,
+				7092C34F5D824310323A01BC /* AttachTrailingStopSheet.swift in Sources */,
 				8DB5E916777E3B48A477E414 /* AuthService.swift in Sources */,
 				744C6DC56C03FBBCF9651D96 /* DeviceRegistrationService.swift in Sources */,
 				2DBDD476BC339FFB12CEC0BF /* EditDevicePrefView.swift in Sources */,
@@ -357,6 +368,7 @@
 				D5A6C18290A3F9154ED7E741 /* LoginViewModel.swift in Sources */,
 				3847E72F3248A41EA8DCD9F2 /* MainTabView.swift in Sources */,
 				3A812C6207ED5A34EA4890E4 /* NavigationCoordinator.swift in Sources */,
+				29D2E464A1B6080B18FBEF78 /* NewOrderSheet.swift in Sources */,
 				7FC94DE9822D377C7FE520DF /* NotificationPrefsView.swift in Sources */,
 				9A375BEDC217E05D46F4F4E7 /* NotificationService.swift in Sources */,
 				56F3E6E370F0017D26D4DE52 /* OrdersView.swift in Sources */,

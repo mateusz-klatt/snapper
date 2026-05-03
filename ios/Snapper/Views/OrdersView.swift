@@ -24,6 +24,9 @@ struct OrdersView: View {
     @State private var executions: [ExecutionRecord] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
+    @State private var presentingNewOrder = false
+    @State private var pendingCancelOrder: OrderStatus?
+    @State private var submitError: String?
 
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Snapper",
@@ -46,6 +49,13 @@ struct OrdersView: View {
                     case .open:
                         ForEach(filteredOpen, id: \.publicId) { order in
                             OrderRow(order: order)
+                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                    Button(role: .destructive) {
+                                        pendingCancelOrder = order
+                                    } label: {
+                                        Label("Cancel", systemImage: "xmark.circle")
+                                    }
+                                }
                         }
                     case .recent:
                         ForEach(filteredRecent, id: \.publicId) { order in
@@ -63,10 +73,78 @@ struct OrdersView: View {
                 .refreshable { await load() }
             }
             .navigationTitle("Orders")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        presentingNewOrder = true
+                    } label: {
+                        Label("New order", systemImage: "plus.circle")
+                    }
+                    .disabled(appState.selectedWalletPublicId == nil)
+                }
+            }
         }
         .task(id: appState.selectedWalletPublicId) {
             await load()
         }
+        .sheet(isPresented: $presentingNewOrder) {
+            if let walletId = appState.selectedWalletPublicId {
+                NewOrderSheet(
+                    exchanges: derivedExchanges,
+                    walletPublicId: walletId,
+                    onSubmit: { body in
+                        await submitNewOrder(body: body)
+                    }
+                )
+            }
+        }
+        .alert(
+            "Cancel order?",
+            isPresented: Binding(
+                get: { pendingCancelOrder != nil },
+                set: { if !$0 { pendingCancelOrder = nil } }
+            ),
+            presenting: pendingCancelOrder
+        ) { order in
+            Button("Cancel order", role: .destructive) {
+                Task { await submitCancel(order: order) }
+            }
+            Button("Keep open", role: .cancel) {
+                pendingCancelOrder = nil
+            }
+        } message: { order in
+            Text("\(order.instrument) \(order.side.uppercased()) \(String(format: "%.4f", order.size)) @ \(order.price.map { String(format: "%.4f", $0) } ?? "market") will be cancelled at the venue.")
+        }
+        .alert(
+            "Submission failed",
+            isPresented: Binding(
+                get: { submitError != nil },
+                set: { if !$0 { submitError = nil } }
+            ),
+            presenting: submitError
+        ) { _ in
+            Button("OK", role: .cancel) {
+                submitError = nil
+            }
+        } message: { error in
+            Text(error)
+        }
+    }
+
+    /// Unique exchange identifiers derived from the orders + executions
+    /// already loaded into the view. Backend has no dedicated
+    /// "list venues" endpoint mounted on iOS yet, so the picker
+    /// bootstraps from the data already on screen — falls back to
+    /// `["kraken"]` so the form is still usable on first load.
+    var derivedExchanges: [String] {
+        var seen: Set<String> = []
+        var ordered: [String] = []
+        for value in orders.map(\.exchange) + executions.map(\.exchange) {
+            if seen.insert(value).inserted {
+                ordered.append(value)
+            }
+        }
+        return ordered.isEmpty ? ["kraken"] : ordered
     }
 
     var filteredOpen: [OrderStatus] {
@@ -158,6 +236,27 @@ struct OrdersView: View {
             executions = try await executionsResult
         } catch {
             logger.error("Failed to fetch executions: \(error)")
+        }
+    }
+
+    private func submitNewOrder(body: CreateOrderBody) async {
+        do {
+            let command = NewOrderSheet.makeCommand(body: body)
+            _ = try await APIClient.shared.createOrder(command: command)
+            await load()
+        } catch {
+            logger.error("Failed to submit new order: \(error.localizedDescription)")
+            submitError = "Couldn't submit the order. Try again."
+        }
+    }
+
+    private func submitCancel(order: OrderStatus) async {
+        do {
+            _ = try await APIClient.shared.cancelOrder(planPublicId: order.publicId)
+            await load()
+        } catch {
+            logger.error("Failed to cancel order: \(error.localizedDescription)")
+            submitError = "Couldn't cancel the order. Try again."
         }
     }
 }
