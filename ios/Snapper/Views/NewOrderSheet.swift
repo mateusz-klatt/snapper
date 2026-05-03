@@ -38,6 +38,13 @@ struct NewOrderSheet: View {
     @State private var isSubmitting: Bool = false
     @State private var loadError: String?
 
+    /// Idempotency token minted once per sheet presentation. Stable
+    /// across retries within the same sheet so a network failure +
+    /// re-submit by the user dedups at the backend instead of
+    /// creating two live orders. Re-presenting the sheet (cancel /
+    /// dismiss / re-open) gets a fresh state value and a fresh key.
+    @State private var idempotencyKey: String = UUID().uuidString
+
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Snapper",
         category: "NewOrderSheet"
@@ -68,6 +75,8 @@ struct NewOrderSheet: View {
     private var canSubmit: Bool {
         return Self.canSubmit(
             instrument: selectedInstrument,
+            selectedExchange: selectedExchange,
+            isLoadingInstruments: isLoadingInstruments,
             quantityText: quantityText,
             priceText: priceText,
             stopPriceText: stopPriceText,
@@ -196,16 +205,31 @@ struct NewOrderSheet: View {
 
     private func loadInstruments() async {
         guard !selectedExchange.isEmpty else { return }
+        // Synchronously clear stale rows BEFORE the await so the user
+        // cannot tap Submit during the fetch and ship the previous
+        // exchange's instrument under a new exchange's name (Codex
+        // 5.5 final-final-gate finding 55871e46).
+        let exchangeBeingLoaded = selectedExchange
+        if selectedInstrument?.exchange != exchangeBeingLoaded {
+            selectedInstrument = nil
+        }
+        availableInstruments = []
         isLoadingInstruments = true
         defer { isLoadingInstruments = false }
         do {
-            availableInstruments = try await APIClient.shared.fetchInstruments(exchange: selectedExchange)
+            let fetched = try await APIClient.shared.fetchInstruments(exchange: exchangeBeingLoaded)
+            // If the user changed exchange while we were waiting, the
+            // .task(id: selectedExchange) modifier already started a
+            // fresh task — but defensively bail if our load races
+            // past a newer one anyway.
+            guard exchangeBeingLoaded == selectedExchange else { return }
+            availableInstruments = fetched
             if let current = selectedInstrument,
-               !availableInstruments.contains(where: { $0.instrumentPublicId == current.instrumentPublicId }) {
+               !fetched.contains(where: { $0.instrumentPublicId == current.instrumentPublicId }) {
                 selectedInstrument = nil
             }
         } catch {
-            logger.error("Failed to load instruments for \(selectedExchange): \(error)")
+            logger.error("Failed to load instruments for \(exchangeBeingLoaded): \(error)")
             loadError = "Couldn't load instruments. Pull to refresh."
             availableInstruments = []
         }
@@ -214,6 +238,7 @@ struct NewOrderSheet: View {
     private func buildBody() -> CreateOrderBody? {
         return Self.buildBody(
             instrument: selectedInstrument,
+            selectedExchange: selectedExchange,
             walletPublicId: walletPublicId,
             walletIsPaper: walletIsPaper,
             side: side,
@@ -222,7 +247,8 @@ struct NewOrderSheet: View {
             priceText: priceText,
             stopPriceText: stopPriceText,
             leverageText: leverageText,
-            reduceOnly: reduceOnly
+            reduceOnly: reduceOnly,
+            idempotencyKey: idempotencyKey
         )
     }
 
@@ -264,6 +290,8 @@ struct NewOrderSheet: View {
 
     static func canSubmit(
         instrument: InstrumentDetailData?,
+        selectedExchange: String,
+        isLoadingInstruments: Bool,
         quantityText: String,
         priceText: String,
         stopPriceText: String,
@@ -271,8 +299,10 @@ struct NewOrderSheet: View {
         isSubmitting: Bool
     ) -> Bool {
         guard !isSubmitting,
+              !isLoadingInstruments,
               let instrument,
               instrument.canTrade,
+              instrument.exchange == selectedExchange,
               parsePositive(quantityText) != nil
         else { return false }
         if needsPrice(orderType: orderType), parsePositive(priceText) == nil {
@@ -297,6 +327,7 @@ struct NewOrderSheet: View {
     /// 0f041f1e).
     static func buildBody(
         instrument: InstrumentDetailData?,
+        selectedExchange: String,
         walletPublicId: String,
         walletIsPaper: Bool,
         side: String,
@@ -305,9 +336,13 @@ struct NewOrderSheet: View {
         priceText: String,
         stopPriceText: String,
         leverageText: String,
-        reduceOnly: Bool
+        reduceOnly: Bool,
+        idempotencyKey: String
     ) -> CreateOrderBody? {
-        guard let instrument, instrument.canTrade else { return nil }
+        guard let instrument,
+              instrument.canTrade,
+              instrument.exchange == selectedExchange
+        else { return nil }
         guard let quantity = parsePositive(quantityText) else { return nil }
         let price: Double? = needsPrice(orderType: orderType) ? parsePositive(priceText) : nil
         if needsPrice(orderType: orderType), price == nil { return nil }
@@ -330,7 +365,7 @@ struct NewOrderSheet: View {
             reduceOnly: reduceOnly,
             walletPublicId: walletPublicId,
             operatorPublicId: nil,
-            idempotencyKey: nil,
+            idempotencyKey: idempotencyKey,
             aiReviewPublicId: nil
         )
     }

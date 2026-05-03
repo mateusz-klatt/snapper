@@ -39,6 +39,8 @@ final class NewOrderSheetTests: XCTestCase {
         )
     }
 
+    private static let testIdempotencyKey: String = "test-idempotency-key"
+
     /// Two venues can list the same `symbol` (e.g. "BTC-USD" exists
     /// on both kraken-spot and kraken-futures) with distinct
     /// `instrumentPublicId`. Identifying the picked row by symbol
@@ -60,22 +62,45 @@ final class NewOrderSheetTests: XCTestCase {
         )
         let bodySpot = NewOrderSheet.buildBody(
             instrument: krakenSpot,
+            selectedExchange: "kraken",
             walletPublicId: "w", walletIsPaper: false,
             side: "buy", orderType: "market",
             quantityText: "1", priceText: "", stopPriceText: "",
-            leverageText: "", reduceOnly: false
+            leverageText: "", reduceOnly: false,
+            idempotencyKey: Self.testIdempotencyKey
         )
         let bodyFutures = NewOrderSheet.buildBody(
             instrument: krakenFutures,
+            selectedExchange: "kraken_futures",
             walletPublicId: "w", walletIsPaper: false,
             side: "buy", orderType: "market",
             quantityText: "1", priceText: "", stopPriceText: "",
-            leverageText: "", reduceOnly: false
+            leverageText: "", reduceOnly: false,
+            idempotencyKey: Self.testIdempotencyKey
         )
         XCTAssertEqual(bodySpot?.instrumentPublicId, "inst-kraken-spot-btc")
         XCTAssertEqual(bodySpot?.exchange, "kraken")
         XCTAssertEqual(bodyFutures?.instrumentPublicId, "inst-kraken-futures-btc")
         XCTAssertEqual(bodyFutures?.exchange, "kraken_futures")
+    }
+
+    /// Cross-exchange race regression guard from Codex 5.5
+    /// final-final-gate: when the picked instrument's exchange
+    /// does NOT match the currently-selected exchange (because the
+    /// instruments fetch is still in flight after a venue switch),
+    /// the builder must refuse to build a body — submitting one
+    /// venue's instrument under another venue's name is the worst
+    /// case the original symbol-keyed bug could produce.
+    func testBuildBodyRejectsExchangeMismatch() {
+        XCTAssertNil(NewOrderSheet.buildBody(
+            instrument: Self.makeInstrument(exchange: "kraken"),
+            selectedExchange: "kraken_futures",
+            walletPublicId: "w", walletIsPaper: false,
+            side: "buy", orderType: "market",
+            quantityText: "1", priceText: "", stopPriceText: "",
+            leverageText: "", reduceOnly: false,
+            idempotencyKey: Self.testIdempotencyKey
+        ))
     }
 
     /// `needsPrice` mirrors the frontend rule at
@@ -94,16 +119,18 @@ final class NewOrderSheetTests: XCTestCase {
         XCTAssertFalse(NewOrderSheet.needsStopPrice(orderType: "market"))
     }
 
-    /// Submit gate: instrument must be tradable, quantity must parse
-    /// positive, and any required price field must parse positive.
-    /// Mirrors the disabled-state rules in the SwiftUI Form so the
-    /// caller cannot fire requests that the backend would 422.
+    /// Submit gate: instrument must be tradable, exchange must
+    /// match the picker, instruments fetch must be settled,
+    /// quantity must parse positive, and any required price field
+    /// must parse positive. Mirrors the disabled-state rules in
+    /// the SwiftUI Form so the caller cannot fire requests that
+    /// the backend would 422.
     func testCanSubmitRejectsMissingInstrument() {
         XCTAssertFalse(NewOrderSheet.canSubmit(
             instrument: nil,
-            quantityText: "1",
-            priceText: "100",
-            stopPriceText: "",
+            selectedExchange: "kraken",
+            isLoadingInstruments: false,
+            quantityText: "1", priceText: "100", stopPriceText: "",
             orderType: "limit",
             isSubmitting: false
         ))
@@ -112,9 +139,35 @@ final class NewOrderSheetTests: XCTestCase {
     func testCanSubmitRejectsMarketDataOnlyInstrument() {
         XCTAssertFalse(NewOrderSheet.canSubmit(
             instrument: Self.makeInstrument(canTrade: false),
-            quantityText: "1",
-            priceText: "",
-            stopPriceText: "",
+            selectedExchange: "kraken",
+            isLoadingInstruments: false,
+            quantityText: "1", priceText: "", stopPriceText: "",
+            orderType: "market",
+            isSubmitting: false
+        ))
+    }
+
+    func testCanSubmitRejectsExchangeMismatch() {
+        XCTAssertFalse(NewOrderSheet.canSubmit(
+            instrument: Self.makeInstrument(exchange: "kraken"),
+            selectedExchange: "kraken_futures",
+            isLoadingInstruments: false,
+            quantityText: "1", priceText: "", stopPriceText: "",
+            orderType: "market",
+            isSubmitting: false
+        ))
+    }
+
+    /// While instruments are still loading after an exchange
+    /// switch, submit must stay disabled so a quick tap cannot
+    /// fire the previously-selected instrument under a new
+    /// exchange's name (Codex 5.5 final-final-gate).
+    func testCanSubmitBlockedWhileInstrumentsLoading() {
+        XCTAssertFalse(NewOrderSheet.canSubmit(
+            instrument: Self.makeInstrument(),
+            selectedExchange: "kraken",
+            isLoadingInstruments: true,
+            quantityText: "1", priceText: "", stopPriceText: "",
             orderType: "market",
             isSubmitting: false
         ))
@@ -123,13 +176,17 @@ final class NewOrderSheetTests: XCTestCase {
     func testCanSubmitRejectsZeroOrMissingQuantity() {
         let instrument = Self.makeInstrument()
         XCTAssertFalse(NewOrderSheet.canSubmit(
-            instrument: instrument, quantityText: "",
-            priceText: "", stopPriceText: "",
+            instrument: instrument,
+            selectedExchange: "kraken",
+            isLoadingInstruments: false,
+            quantityText: "", priceText: "", stopPriceText: "",
             orderType: "market", isSubmitting: false
         ))
         XCTAssertFalse(NewOrderSheet.canSubmit(
-            instrument: instrument, quantityText: "0",
-            priceText: "", stopPriceText: "",
+            instrument: instrument,
+            selectedExchange: "kraken",
+            isLoadingInstruments: false,
+            quantityText: "0", priceText: "", stopPriceText: "",
             orderType: "market", isSubmitting: false
         ))
     }
@@ -137,13 +194,17 @@ final class NewOrderSheetTests: XCTestCase {
     func testCanSubmitRequiresPriceForLimit() {
         let instrument = Self.makeInstrument()
         XCTAssertFalse(NewOrderSheet.canSubmit(
-            instrument: instrument, quantityText: "1",
-            priceText: "", stopPriceText: "",
+            instrument: instrument,
+            selectedExchange: "kraken",
+            isLoadingInstruments: false,
+            quantityText: "1", priceText: "", stopPriceText: "",
             orderType: "limit", isSubmitting: false
         ))
         XCTAssertTrue(NewOrderSheet.canSubmit(
-            instrument: instrument, quantityText: "1",
-            priceText: "100", stopPriceText: "",
+            instrument: instrument,
+            selectedExchange: "kraken",
+            isLoadingInstruments: false,
+            quantityText: "1", priceText: "100", stopPriceText: "",
             orderType: "limit", isSubmitting: false
         ))
     }
@@ -151,13 +212,17 @@ final class NewOrderSheetTests: XCTestCase {
     func testCanSubmitRequiresStopPriceForStopLimit() {
         let instrument = Self.makeInstrument()
         XCTAssertFalse(NewOrderSheet.canSubmit(
-            instrument: instrument, quantityText: "1",
-            priceText: "100", stopPriceText: "",
+            instrument: instrument,
+            selectedExchange: "kraken",
+            isLoadingInstruments: false,
+            quantityText: "1", priceText: "100", stopPriceText: "",
             orderType: "stop_limit", isSubmitting: false
         ))
         XCTAssertTrue(NewOrderSheet.canSubmit(
-            instrument: instrument, quantityText: "1",
-            priceText: "100", stopPriceText: "95",
+            instrument: instrument,
+            selectedExchange: "kraken",
+            isLoadingInstruments: false,
+            quantityText: "1", priceText: "100", stopPriceText: "95",
             orderType: "stop_limit", isSubmitting: false
         ))
     }
@@ -165,8 +230,10 @@ final class NewOrderSheetTests: XCTestCase {
     func testCanSubmitMarketOrderJustNeedsQuantity() {
         let instrument = Self.makeInstrument()
         XCTAssertTrue(NewOrderSheet.canSubmit(
-            instrument: instrument, quantityText: "0.25",
-            priceText: "", stopPriceText: "",
+            instrument: instrument,
+            selectedExchange: "kraken",
+            isLoadingInstruments: false,
+            quantityText: "0.25", priceText: "", stopPriceText: "",
             orderType: "market", isSubmitting: false
         ))
     }
@@ -180,6 +247,7 @@ final class NewOrderSheetTests: XCTestCase {
     func testBuildBodyPropagatesPickerSelectionsAndParsedNumbers() {
         let body = NewOrderSheet.buildBody(
             instrument: Self.makeInstrument(),
+            selectedExchange: "kraken",
             walletPublicId: "wallet-9",
             walletIsPaper: false,
             side: "sell",
@@ -188,7 +256,8 @@ final class NewOrderSheetTests: XCTestCase {
             priceText: "65000.5",
             stopPriceText: "",
             leverageText: "5",
-            reduceOnly: true
+            reduceOnly: true,
+            idempotencyKey: Self.testIdempotencyKey
         )
         XCTAssertNotNil(body)
         guard let body else { return }
@@ -205,16 +274,19 @@ final class NewOrderSheetTests: XCTestCase {
         XCTAssertEqual(body.walletPublicId, "wallet-9")
         XCTAssertEqual(body.timeInForce, "GTC")
         XCTAssertEqual(body.postOnly, false)
+        XCTAssertEqual(body.idempotencyKey, Self.testIdempotencyKey)
     }
 
     func testBuildBodyReturnsNilWhenGateFails() {
         XCTAssertNil(NewOrderSheet.buildBody(
             instrument: Self.makeInstrument(canTrade: false),
+            selectedExchange: "kraken",
             walletPublicId: "wallet-9",
             walletIsPaper: false,
             side: "buy", orderType: "market",
             quantityText: "1", priceText: "", stopPriceText: "",
-            leverageText: "", reduceOnly: false
+            leverageText: "", reduceOnly: false,
+            idempotencyKey: Self.testIdempotencyKey
         ))
     }
 
@@ -226,11 +298,13 @@ final class NewOrderSheetTests: XCTestCase {
     func testBuildBodyForPaperWalletStampsPaperMode() {
         let body = NewOrderSheet.buildBody(
             instrument: Self.makeInstrument(),
+            selectedExchange: "kraken",
             walletPublicId: "paper-wallet",
             walletIsPaper: true,
             side: "buy", orderType: "market",
             quantityText: "0.1", priceText: "", stopPriceText: "",
-            leverageText: "", reduceOnly: false
+            leverageText: "", reduceOnly: false,
+            idempotencyKey: Self.testIdempotencyKey
         )
         XCTAssertEqual(body?.mode, "paper")
     }
@@ -238,13 +312,32 @@ final class NewOrderSheetTests: XCTestCase {
     func testBuildBodyForLiveWalletStampsLiveMode() {
         let body = NewOrderSheet.buildBody(
             instrument: Self.makeInstrument(),
+            selectedExchange: "kraken",
             walletPublicId: "live-wallet",
             walletIsPaper: false,
             side: "buy", orderType: "market",
             quantityText: "0.1", priceText: "", stopPriceText: "",
-            leverageText: "", reduceOnly: false
+            leverageText: "", reduceOnly: false,
+            idempotencyKey: Self.testIdempotencyKey
         )
         XCTAssertEqual(body?.mode, "live")
+    }
+
+    /// Idempotency key propagates verbatim from the caller into the
+    /// outbound body so a network retry collides with the server's
+    /// dedup index instead of creating a duplicate live order
+    /// (Codex 5.5 final-final-gate finding 55871e46).
+    func testBuildBodyPropagatesIdempotencyKey() {
+        let body = NewOrderSheet.buildBody(
+            instrument: Self.makeInstrument(),
+            selectedExchange: "kraken",
+            walletPublicId: "w", walletIsPaper: false,
+            side: "buy", orderType: "market",
+            quantityText: "1", priceText: "", stopPriceText: "",
+            leverageText: "", reduceOnly: false,
+            idempotencyKey: "stable-key-42"
+        )
+        XCTAssertEqual(body?.idempotencyKey, "stable-key-42")
     }
 
     func testMakeCommandStampsProvenance() {

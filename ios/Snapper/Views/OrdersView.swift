@@ -81,7 +81,7 @@ struct OrdersView: View {
                     } label: {
                         Label("New order", systemImage: "plus.circle")
                     }
-                    .disabled(appState.selectedWalletPublicId == nil)
+                    .disabled(resolvedWallet == nil)
                 }
             }
         }
@@ -89,11 +89,10 @@ struct OrdersView: View {
             await load()
         }
         .sheet(isPresented: $presentingNewOrder) {
-            if let walletId = appState.selectedWalletPublicId,
-               let wallet = appState.availableWallets.first(where: { $0.publicId == walletId }) {
+            if let wallet = resolvedWallet {
                 NewOrderSheet(
                     exchanges: derivedExchanges,
-                    walletPublicId: walletId,
+                    walletPublicId: wallet.publicId,
                     walletIsPaper: wallet.isPaper,
                     onSubmit: { body in
                         await submitNewOrder(body: body)
@@ -132,6 +131,17 @@ struct OrdersView: View {
         } message: { error in
             Text(error)
         }
+    }
+
+    /// Resolves the user's selected wallet against the live
+    /// ``appState.availableWallets`` cache. A persisted public id
+    /// pointing at a wallet that no longer exists (revoked,
+    /// deleted, scope-handed-over) falls through to ``nil`` so the
+    /// `+` button gate disables instead of presenting a sheet that
+    /// cannot build a valid order body (Copilot 5.4 finding).
+    var resolvedWallet: WalletInfo? {
+        guard let id = appState.selectedWalletPublicId else { return nil }
+        return appState.availableWallets.first { $0.publicId == id }
     }
 
     /// Unique exchange identifiers derived from the orders + executions
