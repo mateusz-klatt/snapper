@@ -18,7 +18,7 @@ export function PairIcon({
   quote,
   size = 28,
   borderColor = 'var(--background, #fff)',
-}: PairIconProps): React.ReactElement {
+}: Readonly<PairIconProps>): React.ReactElement {
   const overlap = Math.round(size * 0.55)
   const containerStyle: CSSProperties = {
     position: 'relative',

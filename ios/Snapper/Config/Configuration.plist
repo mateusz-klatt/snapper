@@ -28,6 +28,8 @@
 		<string>/signals</string>
 		<key>Executions</key>
 		<string>/executions</string>
+		<key>ExecutionPlans</key>
+		<string>/execution-plans</string>
 		<key>Status</key>
 		<string>/status</string>
 		<key>Health</key>
@@ -42,6 +44,8 @@
 		<string>/alerts</string>
 		<key>System</key>
 		<string>/system</string>
+		<key>TrailingStops</key>
+		<string>/trailing-stops</string>
 		<key>Wallets</key>
 		<string>/wallets</string>
 		<key>AlertDefaults</key>

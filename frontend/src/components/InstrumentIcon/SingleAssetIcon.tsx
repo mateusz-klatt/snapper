@@ -42,7 +42,10 @@ type SingleAssetIconProps = {
   size?: number
 }
 
-export function SingleAssetIcon({ spec, size = 28 }: SingleAssetIconProps): React.ReactElement {
+export function SingleAssetIcon({
+  spec,
+  size = 28,
+}: Readonly<SingleAssetIconProps>): React.ReactElement {
   if (spec.kind === 'crypto') {
     return (
       <img

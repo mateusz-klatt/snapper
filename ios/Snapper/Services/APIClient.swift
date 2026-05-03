@@ -164,7 +164,7 @@ final class APIClient: Sendable {
     /// ``snapper.server.execution_plan_routes``).
     func createBracket(command: BracketCreateCommand) async throws -> ExecutionPlanResponse {
         return try await request(
-            endpoint: "/execution-plans",
+            endpoint: AppConfig.Endpoints.executionPlans,
             method: "POST",
             body: command
         )
@@ -176,7 +176,7 @@ final class APIClient: Sendable {
     /// falls within configured bounds before spawning the plan.
     func createTrailingStop(command: TrailingStopCreateCommand) async throws -> ExecutionPlanResponse {
         return try await request(
-            endpoint: "/trailing-stops",
+            endpoint: AppConfig.Endpoints.trailingStops,
             method: "POST",
             body: command
         )
