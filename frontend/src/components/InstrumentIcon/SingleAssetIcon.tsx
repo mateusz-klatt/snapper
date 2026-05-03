@@ -1,4 +1,3 @@
-import { CSSProperties } from 'react'
 import {
   Building2,
   ChartLine,
@@ -13,11 +12,9 @@ import {
   TrendingUp,
   Wheat,
 } from 'lucide-react'
+import type { CSSProperties } from 'react'
+import { CIRCLE_FLAGS_CDN, CRYPTO_ICONS_CDN, RemoteSvg } from './RemoteSvg'
 import type { IconSpec, LucideName } from './types'
-
-const CIRCLE_FLAGS_CDN = 'https://hatscripts.github.io/circle-flags/flags'
-const CRYPTO_ICONS_CDN =
-  'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color'
 
 const LUCIDE_MAP: Record<
   LucideName,
@@ -48,24 +45,20 @@ export function SingleAssetIcon({
 }: Readonly<SingleAssetIconProps>): React.ReactElement {
   if (spec.kind === 'crypto') {
     return (
-      <img
+      <RemoteSvg
         src={`${CRYPTO_ICONS_CDN}/${spec.symbol}.svg`}
-        alt={spec.symbol.toUpperCase()}
-        width={size}
-        height={size}
-        style={{ borderRadius: '50%', display: 'block', flexShrink: 0 }}
+        label={spec.symbol.toUpperCase()}
+        size={size}
       />
     )
   }
 
   if (spec.kind === 'flag') {
     return (
-      <img
+      <RemoteSvg
         src={`${CIRCLE_FLAGS_CDN}/${spec.country}.svg`}
-        alt={spec.country.toUpperCase()}
-        width={size}
-        height={size}
-        style={{ borderRadius: '50%', display: 'block', objectFit: 'cover', flexShrink: 0 }}
+        label={spec.country.toUpperCase()}
+        size={size}
       />
     )
   }
@@ -91,7 +84,7 @@ export function SingleAssetIcon({
   }
 
   return (
-    <span style={fallbackStyle} aria-label={spec.label}>
+    <span style={fallbackStyle} aria-label={spec.label} role='img'>
       {spec.label}
     </span>
   )

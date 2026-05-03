@@ -179,4 +179,22 @@ describe('useHashSubpath', () => {
     })
     expect(result.current).toEqual(['run-2'])
   })
+  it('strips ?query before segmenting (deep route + scope persistence)', () => {
+    globalThis.location.hash = '#backtests/01948f94-abcd?wallet=w-1'
+    const { result } = renderHook(() => useHashSubpath('backtests'))
+
+    expect(result.current).toEqual(['01948f94-abcd'])
+  })
+  it('strips ?query when only the tab is present with scope params', () => {
+    globalThis.location.hash = '#backtests?wallet=w-1&operator=o-1'
+    const { result } = renderHook(() => useHashSubpath('backtests'))
+
+    expect(result.current).toEqual([])
+  })
+  it('strips ?query across multiple deep segments', () => {
+    globalThis.location.hash = '#backtests/run-1/equity?wallet=w-1'
+    const { result } = renderHook(() => useHashSubpath('backtests'))
+
+    expect(result.current).toEqual(['run-1', 'equity'])
+  })
 })

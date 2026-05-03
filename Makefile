@@ -412,7 +412,7 @@ ui-gen-api-types:
 	$(info Generating TypeScript types from OpenAPI schema...)
 	$(info Exporting OpenAPI schema from FastAPI...)
 	$(GENSCRIPT) --openapi
-	$(PNPM) gen:api-types
+	$(PNPM) gen:api-types:from-file
 	$(GENSCRIPT) --postprocess-openapi-types
 	$(PRETTIER) src/types/api.generated.ts
 	$(info Generated frontend/src/types/api.generated.ts)

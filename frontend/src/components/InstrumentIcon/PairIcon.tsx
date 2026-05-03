@@ -1,10 +1,7 @@
-import { CSSProperties } from 'react'
+import type { CSSProperties } from 'react'
+import { CIRCLE_FLAGS_CDN, CRYPTO_ICONS_CDN, RemoteSvg } from './RemoteSvg'
 import { SingleAssetIcon } from './SingleAssetIcon'
 import type { IconSpec } from './types'
-
-const CIRCLE_FLAGS_CDN = 'https://hatscripts.github.io/circle-flags/flags'
-const CRYPTO_ICONS_CDN =
-  'https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/svg/color'
 
 type PairIconProps = {
   base: IconSpec
@@ -46,7 +43,11 @@ export function PairIcon({
   }
 
   return (
-    <span style={containerStyle} aria-label={`${describeIcon(base)} / ${describeIcon(quote)}`}>
+    <span
+      style={containerStyle}
+      aria-label={`${describeIcon(base)} / ${describeIcon(quote)}`}
+      role='img'
+    >
       <span style={baseStyle}>{renderCircle(base, size - 4)}</span>
       <span style={quoteStyle}>{renderCircle(quote, size - 4)}</span>
     </span>
@@ -56,24 +57,20 @@ export function PairIcon({
 function renderCircle(spec: IconSpec, innerSize: number): React.ReactElement {
   if (spec.kind === 'crypto') {
     return (
-      <img
+      <RemoteSvg
         src={`${CRYPTO_ICONS_CDN}/${spec.symbol}.svg`}
-        alt=''
-        width={innerSize}
-        height={innerSize}
-        style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+        label={spec.symbol.toUpperCase()}
+        size={innerSize}
       />
     )
   }
 
   if (spec.kind === 'flag') {
     return (
-      <img
+      <RemoteSvg
         src={`${CIRCLE_FLAGS_CDN}/${spec.country}.svg`}
-        alt=''
-        width={innerSize}
-        height={innerSize}
-        style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+        label={spec.country.toUpperCase()}
+        size={innerSize}
       />
     )
   }

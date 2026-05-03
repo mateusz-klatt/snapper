@@ -82,13 +82,23 @@ export function useTabRouting() {
  * `hashchange` independently of `useHashRouting` so a detail view can
  * mount/unmount without coupling to the tab-level navigator.
  *
+ * The `?query` portion of the hash (used by `useScopePersistence` for
+ * `?wallet=...&operator=...`) is stripped before segmentation — without
+ * that strip, a hash like `#backtests/<uuid>?wallet=X` would yield
+ * `["<uuid>?wallet=X"]` and contaminate any consumer that expects pure
+ * subpath tokens (e.g. a backtest-detail route looking up by uuid).
+ *
  * Example:
  *   `#backtests/01948f94-...` + `useHashSubpath("backtests")`
  *   → `["01948f94-..."]`
+ *   `#backtests/01948f94-...?wallet=w-1` + `useHashSubpath("backtests")`
+ *   → `["01948f94-..."]` (query stripped)
  */
 export function useHashSubpath(tab: string): string[] {
   const compute = useCallback((): string[] => {
-    const hash = globalThis.location.hash.slice(1)
+    const fullHash = globalThis.location.hash.slice(1)
+    const queryIdx = fullHash.indexOf('?')
+    const hash = queryIdx === -1 ? fullHash : fullHash.slice(0, queryIdx)
     const segments = hash.split('/')
 
     if (segments[0] !== tab) return []

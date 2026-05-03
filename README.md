@@ -13,10 +13,11 @@ make migrate-dev run-static
 make run-server
 ```
 
-Open <http://localhost:8000/> and log in:
-
-- **Username:** `admin`
-- **Password:** `AdminSnapper2026!`
+Open <http://localhost:8000/> and log in with the dev seed credentials —
+the default values are defined in `proprietary/data/seed/dev.toml` (the
+proprietary submodule). Override per-environment by editing the seed file
+before running `make migrate-dev`, or rotate after first login via
+`POST /api/auth/users/<username>/password`.
 
 ## Features
 

@@ -21,9 +21,9 @@
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
     "test:coverage:serial": "vitest run --coverage --maxWorkers=1 --no-file-parallelism",
-    "gen:api-types": "openapi-typescript ../build/openapi.json -o src/types/api.generated.ts --export-type",
-    "gen:api-types:live": "openapi-typescript http://localhost:8000/openapi.json -o src/types/api.generated.ts",
-    "gen:ws-types": "json2ts ../build/ws-schemas.json -o src/types/ws.generated.ts --additionalProperties false",
+    "gen:api-types": "openapi-typescript ${OPENAPI_SPEC:-http://localhost:8000/openapi.json} -o src/types/api.generated.ts --export-type",
+    "gen:api-types:from-file": "openapi-typescript ../build/openapi.json -o src/types/api.generated.ts --export-type",
+    "gen:ws-types": "json2ts ${WS_SCHEMA_FILE:-../build/ws-schemas.json} -o src/types/ws.generated.ts --additionalProperties false",
     "gen:zod": "echo 'Use make ui-gen-zod - requires Python script'"
   },
   "dependencies": {

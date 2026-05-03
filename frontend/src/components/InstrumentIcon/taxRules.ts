@@ -1,9 +1,25 @@
 /**
  * Tax-aware quote-currency classification.
  *
- * PL tax law: crypto ↔ stablecoin = not a tax point; crypto ↔ fiat = tax point.
- * Stablecoins MUST always render their own icon — never collapse to USD-implicit.
- * See `proprietary/memory/feedback_usdt_usdc_never_collapse.md`.
+ * Why USDT, USDC, DAI etc. are NOT collapsed into the USD-implicit bucket:
+ *
+ * Under Polish personal-income-tax practice (Ustawa o PIT, art. 17 ust. 1f
+ * pkt 11 — przychody z odpłatnego zbycia waluty wirtualnej), a swap between
+ * two virtual currencies (e.g. BTC↔USDT, BTC↔USDC) is treated as
+ * non-taxable continuation of the crypto position. A swap between a virtual
+ * currency and a fiat currency (BTC↔USD, BTC↔EUR, BTC↔PLN) is the taxable
+ * realisation event. See KIS interpretation 0114-KDIP3-1.4011.* lines for
+ * the case-law that backs this; rules are similar in several other EU
+ * jurisdictions (DE §23 EStG, FR Art. 150 VH bis CGI).
+ *
+ * The UI consequence is that the operator must be able to tell at a glance
+ * whether a position swap moved into fiat (tax event) or stayed in crypto
+ * (no tax event). Treating USDT/USDC visually as "USD" (collapsing the
+ * quote icon) hides that distinction. The dual icon for stablecoins is
+ * therefore a tax-relevance marker, not just a stylistic choice.
+ *
+ * If you fork this for a different jurisdiction, override the
+ * USD_EQUIVALENT / STABLECOINS sets to match local tax-event semantics.
  */
 
 export const USD_EQUIVALENT = new Set<string>(['USD'])
