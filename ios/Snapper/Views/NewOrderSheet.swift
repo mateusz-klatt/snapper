@@ -92,15 +92,17 @@ struct NewOrderSheet: View {
                         }
                     }
                     Picker("Instrument", selection: Binding(
-                        get: { selectedInstrument?.symbol ?? "" },
-                        set: { newSymbol in
-                            selectedInstrument = availableInstruments.first { $0.symbol == newSymbol }
+                        get: { selectedInstrument?.instrumentPublicId ?? "" },
+                        set: { newId in
+                            selectedInstrument = availableInstruments.first {
+                                $0.instrumentPublicId == newId
+                            }
                         }
                     )) {
                         Text(isLoadingInstruments ? "Loading…" : "Select instrument")
                             .tag("")
-                        ForEach(availableInstruments.filter { $0.canTrade }, id: \.symbol) { row in
-                            Text(row.symbol).tag(row.symbol)
+                        ForEach(availableInstruments.filter { $0.canTrade }, id: \.instrumentPublicId) { row in
+                            Text(row.symbol).tag(row.instrumentPublicId)
                         }
                     }
                 }
@@ -170,11 +172,11 @@ struct NewOrderSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Submit") {
-                        guard let body = buildBody() else { return }
+                        guard !isSubmitting, let body = buildBody() else { return }
+                        isSubmitting = true
                         Task {
-                            isSubmitting = true
+                            defer { isSubmitting = false }
                             await onSubmit(body)
-                            isSubmitting = false
                             dismiss()
                         }
                     }
@@ -199,7 +201,7 @@ struct NewOrderSheet: View {
         do {
             availableInstruments = try await APIClient.shared.fetchInstruments(exchange: selectedExchange)
             if let current = selectedInstrument,
-               !availableInstruments.contains(where: { $0.symbol == current.symbol }) {
+               !availableInstruments.contains(where: { $0.instrumentPublicId == current.instrumentPublicId }) {
                 selectedInstrument = nil
             }
         } catch {

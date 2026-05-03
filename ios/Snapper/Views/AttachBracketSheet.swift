@@ -85,10 +85,13 @@ struct AttachBracketSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Submit") {
+                        guard !isSubmitting else { return }
+                        let sl = parsedSL
+                        let tp = parsedTP
+                        isSubmitting = true
                         Task {
-                            isSubmitting = true
-                            await onSubmit(parsedSL, parsedTP)
-                            isSubmitting = false
+                            defer { isSubmitting = false }
+                            await onSubmit(sl, tp)
                             dismiss()
                         }
                     }

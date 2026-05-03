@@ -78,11 +78,12 @@ struct AttachTrailingStopSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Submit") {
-                        guard let trailing = parsedTrailing else { return }
+                        guard !isSubmitting, let trailing = parsedTrailing else { return }
+                        let minLock = parsedMinLock
+                        isSubmitting = true
                         Task {
-                            isSubmitting = true
-                            await onSubmit(trailing, parsedMinLock)
-                            isSubmitting = false
+                            defer { isSubmitting = false }
+                            await onSubmit(trailing, minLock)
                             dismiss()
                         }
                     }

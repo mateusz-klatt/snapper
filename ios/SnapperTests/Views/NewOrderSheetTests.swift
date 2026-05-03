@@ -14,7 +14,12 @@ final class NewOrderSheetTests: XCTestCase {
         timestampString: "2023-11-14T22:13:20.000Z"
     )
 
-    private static func makeInstrument(canTrade: Bool = true) -> InstrumentDetailData {
+    private static func makeInstrument(
+        canTrade: Bool = true,
+        instrumentPublicId: String = "inst-1",
+        symbol: String = "BTC-USD",
+        exchange: String = "kraken"
+    ) -> InstrumentDetailData {
         return InstrumentDetailData(
             type: "instrument_detail",
             sequenceId: 1,
@@ -22,16 +27,55 @@ final class NewOrderSheetTests: XCTestCase {
             timestamp: baseTimestamp,
             sessionId: "session-test",
             topic: nil,
-            instrumentPublicId: "inst-1",
+            instrumentPublicId: instrumentPublicId,
             symbolPublicId: "sym-1",
-            symbol: "BTC-USD",
-            exchange: "kraken",
+            symbol: symbol,
+            exchange: exchange,
             canTrade: canTrade,
             canMarketData: true,
             instrumentResolved: true,
             instrumentKind: "spot",
             expiryAt: nil
         )
+    }
+
+    /// Two venues can list the same `symbol` (e.g. "BTC-USD" exists
+    /// on both kraken-spot and kraken-futures) with distinct
+    /// `instrumentPublicId`. Identifying the picked row by symbol
+    /// alone routes orders to the wrong venue when the user
+    /// switches exchanges (Codex 5.5 final-gate finding bbac0f12).
+    /// The builder MUST use the picked row's
+    /// `instrumentPublicId` + `exchange` verbatim — no symbol
+    /// reconciliation.
+    func testBuildBodyPropagatesPickedInstrumentPublicIdNotSymbol() {
+        let krakenSpot = Self.makeInstrument(
+            instrumentPublicId: "inst-kraken-spot-btc",
+            symbol: "BTC-USD",
+            exchange: "kraken"
+        )
+        let krakenFutures = Self.makeInstrument(
+            instrumentPublicId: "inst-kraken-futures-btc",
+            symbol: "BTC-USD",
+            exchange: "kraken_futures"
+        )
+        let bodySpot = NewOrderSheet.buildBody(
+            instrument: krakenSpot,
+            walletPublicId: "w", walletIsPaper: false,
+            side: "buy", orderType: "market",
+            quantityText: "1", priceText: "", stopPriceText: "",
+            leverageText: "", reduceOnly: false
+        )
+        let bodyFutures = NewOrderSheet.buildBody(
+            instrument: krakenFutures,
+            walletPublicId: "w", walletIsPaper: false,
+            side: "buy", orderType: "market",
+            quantityText: "1", priceText: "", stopPriceText: "",
+            leverageText: "", reduceOnly: false
+        )
+        XCTAssertEqual(bodySpot?.instrumentPublicId, "inst-kraken-spot-btc")
+        XCTAssertEqual(bodySpot?.exchange, "kraken")
+        XCTAssertEqual(bodyFutures?.instrumentPublicId, "inst-kraken-futures-btc")
+        XCTAssertEqual(bodyFutures?.exchange, "kraken_futures")
     }
 
     /// `needsPrice` mirrors the frontend rule at
