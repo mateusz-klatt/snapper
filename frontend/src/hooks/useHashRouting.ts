@@ -36,10 +36,10 @@ function useHashRouting<T extends string>(
 ): [T, (route: T) => void] {
   const getRouteFromHash = useCallback((): T => {
     const hash = globalThis.location.hash.slice(1)
-    // Match first segment before "/" so `#backtests/{uuid7}`
-    // resolves to the "backtests" tab. Backwards-compatible because no
-    // existing VALID_TABS identifier contains a slash.
-    const firstSegment = hash.split('/')[0]
+    // Match first segment before "/" so `#backtests/{uuid7}` resolves to
+    // the "backtests" tab. Strip "?query" before route matching so that
+    // `#backtests?wallet=X` (scope-persistence params) also resolves.
+    const firstSegment = hash.split('/')[0].split('?')[0]
 
     return validRoutes.includes(firstSegment as T) ? (firstSegment as T) : defaultRoute
   }, [validRoutes, defaultRoute])
@@ -47,7 +47,10 @@ function useHashRouting<T extends string>(
 
   const navigateToRoute = (route: T) => {
     setCurrentRoute(route)
-    globalThis.location.hash = route
+    const queryIdx = globalThis.location.hash.indexOf('?')
+    const queryString = queryIdx === -1 ? '' : globalThis.location.hash.slice(queryIdx)
+
+    globalThis.location.hash = `${route}${queryString}`
   }
 
   useEffect(() => {

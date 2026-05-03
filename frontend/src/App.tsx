@@ -3,6 +3,7 @@ import { useAuth } from './stores/auth'
 import { useAppStore } from './stores/app'
 import { useTabRouting, type ValidTab } from './hooks/useHashRouting'
 import { useAppShell } from './hooks/useAppShell'
+import { useScopePersistence } from './hooks/useScopePersistence'
 import { AppRoutes } from './components/AppRoutes'
 import { ALL_TABS } from './components/tabs'
 import UserProfile from './components/auth/UserProfile'
@@ -15,6 +16,8 @@ function App() {
   const [activeTab, navigateToTab] = useTabRouting()
   const { canAccess } = useAuth()
   const { isConnected, connectionLag, subscribedTopicsCount } = useAppShell()
+
+  useScopePersistence()
   const isDarkMode = useAppStore(s => s.isDarkMode)
   const toggleDarkMode = useAppStore(s => s.toggleDarkMode)
   const isTimeTraveling = useAppStore(s => s.isTimeTraveling)

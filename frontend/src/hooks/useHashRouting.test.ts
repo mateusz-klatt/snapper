@@ -36,6 +36,21 @@ describe('useHashRouting', () => {
     expect(result.current[0]).toBe('processes')
     expect(globalThis.location.hash).toBe('#processes')
   })
+  it('preserves query string when navigating between routes', () => {
+    globalThis.location.hash = '#market?wallet=w-1&operator=o-1'
+    const { result } = renderHook(() => useTabRouting())
+
+    act(() => {
+      result.current[1]('positions')
+    })
+    expect(globalThis.location.hash).toBe('#positions?wallet=w-1&operator=o-1')
+  })
+  it('matches route even when hash includes query string', () => {
+    globalThis.location.hash = '#backtests?wallet=019ded78&operator=o-1'
+    const { result } = renderHook(() => useTabRouting())
+
+    expect(result.current[0]).toBe('backtests')
+  })
   it('handles all valid tabs', () => {
     const validTabs: ValidTab[] = [
       'overview',
