@@ -1,0 +1,28 @@
+import type { LucideIconSpec } from '../types'
+
+export const UNDERLYING_ICONS: Record<string, LucideIconSpec> = {
+  GOLD: { kind: 'lucide', name: 'gem', color: '#FFD700' },
+  SILVER: { kind: 'lucide', name: 'gem', color: '#C0C0C0' },
+  PLATINUM: { kind: 'lucide', name: 'gem', color: '#E5E4E2' },
+  PALLADIUM: { kind: 'lucide', name: 'gem', color: '#CED0CE' },
+  COPPER: { kind: 'lucide', name: 'hexagon', color: '#B87333' },
+  WTI: { kind: 'lucide', name: 'droplet', color: '#475569' },
+  BRENT: { kind: 'lucide', name: 'droplet', color: '#1e293b' },
+  HEATING_OIL: { kind: 'lucide', name: 'fuel', color: '#533483' },
+  GASOLINE: { kind: 'lucide', name: 'fuel', color: '#0f3460' },
+  NATGAS: { kind: 'lucide', name: 'flame', color: '#e94560' },
+  SOYBEAN_OIL: { kind: 'lucide', name: 'wheat', color: '#7B8D3E' },
+  SOYBEAN_MEAL: { kind: 'lucide', name: 'wheat', color: '#8B7D3C' },
+  ROUGH_RICE: { kind: 'lucide', name: 'wheat', color: '#D4C5A9' },
+  LUMBER: { kind: 'lucide', name: 'leaf', color: '#5d8a3a' },
+  FEEDER_CATTLE: { kind: 'lucide', name: 'leaf', color: '#a0825a' },
+  LEAN_HOGS: { kind: 'lucide', name: 'leaf', color: '#d4806b' },
+  SPX: { kind: 'lucide', name: 'trending-up', color: '#7c3aed' },
+  NDX: { kind: 'lucide', name: 'trending-up', color: '#7c3aed' },
+  DJI: { kind: 'lucide', name: 'trending-up', color: '#7c3aed' },
+  RUT: { kind: 'lucide', name: 'trending-up', color: '#7c3aed' },
+  US2Y: { kind: 'lucide', name: 'landmark', color: '#059669' },
+  US5Y: { kind: 'lucide', name: 'landmark', color: '#059669' },
+  US10Y: { kind: 'lucide', name: 'landmark', color: '#059669' },
+  US30Y: { kind: 'lucide', name: 'landmark', color: '#059669' },
+}

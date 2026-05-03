@@ -3,6 +3,7 @@ import clsx from 'clsx'
 import { Shield, TrendingDown } from 'lucide-react'
 import { usePositions, useTrailingStopForCycle } from '../../hooks/queries'
 import { useAppStore } from '../../stores/app'
+import { InstrumentIcon } from '../../components/InstrumentIcon'
 import { OrderCardSkeleton } from '../../components/Skeleton'
 import { EmptyState } from '../../components/ui'
 import { AttachBracketModal } from './AttachBracketModal'
@@ -97,6 +98,7 @@ const PositionRow: React.FC<PositionRowProps> = ({
     >
       <div className='mb-3 flex items-center justify-between'>
         <div className='flex items-center space-x-3'>
+          <InstrumentIcon symbol={position.instrument} exchange={position.exchange} size={28} />
           <span className='font-semibold text-alpine-900'>{position.instrument}</span>
           <span className='text-sm text-muted-500'>{position.exchange}</span>
           <span
