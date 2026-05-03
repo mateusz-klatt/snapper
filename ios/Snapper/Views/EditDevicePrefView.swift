@@ -405,12 +405,14 @@ struct EditDevicePrefView: View {
     }
 
     /// Build the iOS-side envelope for ``PATCH /api/devices/{id}/prefs``.
-    /// Provenance fields (sequenceId, publicId, sessionId) are
-    /// placeholders — the backend strips and re-mints them per
-    /// request. ``timezone`` is sourced from the device locale so
-    /// the backend's quiet-hours interpreter at
+    /// Provenance fields are minted via ``EnvelopeMinter`` so the
+    /// backend gap detector sees a coherent ``session_id`` +
+    /// monotonic ``sequence_id`` across iOS-originated commands.
+    /// ``timezone`` is sourced from the device locale so the
+    /// backend's quiet-hours interpreter at
     /// ``application/notify/routing.py`` evaluates the window in
     /// the user's wall-clock time, not UTC.
+    @MainActor
     static func makeDeviceCommand(
         alertType: String,
         operatorPublicId: String? = nil,
@@ -421,14 +423,16 @@ struct EditDevicePrefView: View {
         quietHoursEndMin: Int? = nil,
         muteUntil: Date? = nil,
         timezone: String = TimeZone.current.identifier,
-        timestamp: Date = Date()
+        provenance: EnvelopeMinter.Provenance? = nil
     ) -> UpdateDevicePrefCommand {
+        let envelope = provenance ?? EnvelopeMinter.shared.next(.control)
         return UpdateDevicePrefCommand(
             type: "update_device_pref_command",
-            sequenceId: 1,
-            publicId: "client-envelope",
-            timestamp: timestamp,
-            sessionId: "client-session",
+            sequenceId: envelope.sequenceId,
+            publicId: envelope.publicId,
+            timestamp: envelope.timestamp,
+            sessionId: envelope.sessionId,
+            topic: nil,
             payload: DeviceAlertPrefBody(
                 alertType: alertType,
                 operatorPublicId: operatorPublicId,

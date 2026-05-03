@@ -124,9 +124,27 @@ class WebSocketManager: ObservableObject {
         }
     }
 
+    /// Stamp top-level provenance fields onto a WS frame and send it.
+    /// Mirrors the frontend's ``stampProvenance`` in
+    /// `frontend/src/lib/websocket/client.ts`: provenance lives at
+    /// the top level alongside ``type`` and type-specific fields,
+    /// NOT wrapped in a ``payload`` envelope. Confirmed against
+    /// ``snapper.interface.websocket.schemas`` (e.g. ``WSAuthenticateRequest``
+    /// inherits ``StrictDataSchema`` so ``ws_token`` is a sibling of
+    /// the provenance fields).
+    func sendEnvelope(_ message: [String: Any], counter: EnvelopeMinter.Counter) {
+        let provenance = EnvelopeMinter.shared.next(counter)
+        var frame = message
+        frame["public_id"] = provenance.publicId
+        frame["session_id"] = provenance.sessionId
+        frame["sequence_id"] = provenance.sequenceId
+        frame["timestamp"] = provenance.timestampString
+        sendJSON(frame)
+    }
+
     func subscribe(topics: [String]) {
         if case .connected = connectionState {
-            sendJSON(["type": "subscribe", "topics": topics])
+            sendEnvelope(["type": "subscribe", "topics": topics], counter: .control)
             topics.forEach { subscribedTopics.insert($0) }
         } else {
             topics.forEach { pendingSubscriptions.insert($0) }
@@ -139,14 +157,14 @@ class WebSocketManager: ObservableObject {
             subscribedTopics.remove($0)
         }
         if case .connected = connectionState {
-            sendJSON(["type": "unsubscribe", "topics": topics])
+            sendEnvelope(["type": "unsubscribe", "topics": topics], counter: .control)
         }
     }
 
     private func replayPendingSubscriptions() {
         let toSend = subscribedTopics.union(pendingSubscriptions)
         guard !toSend.isEmpty else { return }
-        sendJSON(["type": "subscribe", "topics": Array(toSend)])
+        sendEnvelope(["type": "subscribe", "topics": Array(toSend)], counter: .control)
         subscribedTopics.formUnion(pendingSubscriptions)
         pendingSubscriptions.removeAll()
     }
@@ -367,7 +385,7 @@ class WebSocketManager: ObservableObject {
             await enterAuthFailedAndLogout(reason: "Token refresh failed")
             return
         }
-        sendJSON(["type": "authenticate", "ws_token": token])
+        sendEnvelope(["type": "authenticate", "ws_token": token], counter: .control)
     }
 
     private func performReauthentication() async {
@@ -378,7 +396,7 @@ class WebSocketManager: ObservableObject {
             await enterAuthFailedAndLogout(reason: "Token refresh failed")
             return
         }
-        sendJSON(["type": "reauth", "ws_token": token])
+        sendEnvelope(["type": "reauth", "ws_token": token], counter: .control)
     }
 
     /// Terminal auth-failure path. Stops reconnect loop, cancels the
@@ -409,7 +427,7 @@ class WebSocketManager: ObservableObject {
 
     private func sendPing() {
         guard case .connected = connectionState else { return }
-        sendJSON(["type": "ping"])
+        sendEnvelope(["type": "ping"], counter: .telemetry)
     }
 
     private func handleDisconnection() {

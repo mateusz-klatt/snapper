@@ -221,20 +221,24 @@ struct NotificationPrefsView: View {
     }
 
     /// Build the iOS-side envelope for ``PATCH /api/alert_defaults``.
-    /// Provenance fields are placeholders — the backend handler
-    /// strips and re-mints them per request.
+    /// Provenance comes from ``EnvelopeMinter`` so the backend gap
+    /// detector sees a coherent ``session_id`` + monotonic
+    /// ``sequence_id`` across iOS-originated commands.
+    @MainActor
     static func makeDefaultCommand(
         alertType: String,
         enabled: Bool,
         minPriority: String,
-        timestamp: Date = Date()
+        provenance: EnvelopeMinter.Provenance? = nil
     ) -> UpdateUserAlertDefaultCommand {
+        let envelope = provenance ?? EnvelopeMinter.shared.next(.control)
         return UpdateUserAlertDefaultCommand(
             type: "update_user_alert_default_command",
-            sequenceId: 1,
-            publicId: "client-envelope",
-            timestamp: timestamp,
-            sessionId: "client-session",
+            sequenceId: envelope.sequenceId,
+            publicId: envelope.publicId,
+            timestamp: envelope.timestamp,
+            sessionId: envelope.sessionId,
+            topic: nil,
             payload: UserAlertDefaultBody(
                 alertType: alertType,
                 enabled: enabled,

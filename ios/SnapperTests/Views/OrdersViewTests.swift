@@ -18,6 +18,7 @@ final class OrdersViewTests: XCTestCase {
             publicId: publicId,
             timestamp: Self.baseTimestamp,
             sessionId: "session-orders-test",
+            topic: nil,
             exchangeOrderId: nil,
             clientOrderId: "cli-\(publicId)",
             instrument: "BTCUSD",
@@ -39,7 +40,8 @@ final class OrdersViewTests: XCTestCase {
             reduceOnly: nil,
             walletPublicId: walletPublicId,
             operatorPublicId: nil,
-            userPublicId: nil
+            userPublicId: nil,
+            planPublicId: nil
         )
     }
 
@@ -53,6 +55,7 @@ final class OrdersViewTests: XCTestCase {
             publicId: publicId,
             timestamp: Self.baseTimestamp,
             sessionId: "session-orders-test",
+            topic: nil,
             tradeId: nil,
             exchangeOrderId: nil,
             clientOrderId: "cli-\(publicId)",

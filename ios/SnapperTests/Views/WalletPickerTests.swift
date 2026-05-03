@@ -21,6 +21,7 @@ final class WalletPickerTests: XCTestCase {
             publicId: publicId,
             timestamp: Self.baseTimestamp,
             sessionId: "session-test",
+            topic: nil,
             label: label,
             description: nil,
             isPaper: isPaper

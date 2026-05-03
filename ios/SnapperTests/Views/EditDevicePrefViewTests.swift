@@ -13,6 +13,7 @@ final class EditDevicePrefViewTests: XCTestCase {
             publicId: publicId,
             timestamp: Self.baseTimestamp,
             sessionId: "session-test",
+            topic: nil,
             label: label,
             description: nil,
             isPaper: isPaper
@@ -36,6 +37,7 @@ final class EditDevicePrefViewTests: XCTestCase {
             publicId: publicId,
             timestamp: Self.baseTimestamp,
             sessionId: "session-test",
+            topic: nil,
             devicePublicId: "dev-1",
             alertType: alertType,
             operatorPublicId: operatorPublicId,
@@ -121,6 +123,14 @@ final class EditDevicePrefViewTests: XCTestCase {
         XCTAssertEqual(EditDevicePrefView.minutesSinceMidnight(for: overflow, calendar: calendar), 1439)
     }
 
+    private static let fixedProvenance = EnvelopeMinter.Provenance(
+        publicId: "test-public-id",
+        sessionId: "session-test",
+        sequenceId: 11,
+        timestamp: baseTimestamp,
+        timestampString: "2023-11-14T22:13:20.000Z"
+    )
+
     func testMakeDeviceCommandShapeWithFullPayload() {
         let mute = Date(timeIntervalSince1970: 1_800_000_000)
         let command = EditDevicePrefView.makeDeviceCommand(
@@ -133,7 +143,7 @@ final class EditDevicePrefViewTests: XCTestCase {
             quietHoursEndMin: 7 * 60,
             muteUntil: mute,
             timezone: "Europe/Warsaw",
-            timestamp: Self.baseTimestamp
+            provenance: Self.fixedProvenance
         )
         XCTAssertEqual(command.payload.alertType, "margin_warning")
         XCTAssertEqual(command.payload.walletPublicId, "wallet-abc")
@@ -145,6 +155,10 @@ final class EditDevicePrefViewTests: XCTestCase {
         XCTAssertEqual(command.payload.muteUntil, mute)
         XCTAssertEqual(command.payload.timezone, "Europe/Warsaw")
         XCTAssertEqual(command.type, "update_device_pref_command")
+        XCTAssertEqual(command.publicId, "test-public-id")
+        XCTAssertEqual(command.sessionId, "session-test")
+        XCTAssertEqual(command.sequenceId, 11)
+        XCTAssertEqual(command.timestamp, Self.baseTimestamp)
     }
 
     /// The default ``timezone`` argument is sourced from

@@ -13,6 +13,7 @@ final class HomeViewTests: XCTestCase {
             publicId: publicId,
             timestamp: Self.baseTimestamp,
             sessionId: "session-home-test",
+            topic: nil,
             userPublicId: "user-1",
             operatorPublicId: nil,
             walletPublicId: nil,
@@ -35,6 +36,7 @@ final class HomeViewTests: XCTestCase {
             publicId: "envelope-1",
             timestamp: Self.baseTimestamp,
             sessionId: "session-home-test",
+            topic: nil,
             payload: payload,
             count: payload.count,
             nextCursor: nil

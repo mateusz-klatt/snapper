@@ -210,18 +210,21 @@ struct PositionsView: View {
     /// (negative) -> ``"buy"``. ``reduceOnly`` is always true so a
     /// venue cannot accidentally flip the position into the
     /// opposite direction.
+    @MainActor
     static func makeReduceCommand(
         position: PositionSnapshot,
         quantity: Double,
-        timestamp: Date = Date()
+        provenance: EnvelopeMinter.Provenance? = nil
     ) -> CreateOrderCommand {
+        let envelope = provenance ?? EnvelopeMinter.shared.next(.control)
         let side: String = position.quantity > 0 ? "sell" : "buy"
         return CreateOrderCommand(
             type: "create_order_command",
-            sequenceId: 1,
-            publicId: "client-envelope",
-            timestamp: timestamp,
-            sessionId: "client-session",
+            sequenceId: envelope.sequenceId,
+            publicId: envelope.publicId,
+            timestamp: envelope.timestamp,
+            sessionId: envelope.sessionId,
+            topic: nil,
             payload: CreateOrderBody(
                 instrument: position.instrument,
                 instrumentPublicId: position.instrumentPublicId ?? "",

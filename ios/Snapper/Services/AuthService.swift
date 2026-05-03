@@ -33,8 +33,22 @@ class AuthService: ObservableObject {
         request.httpMethod = "POST"
         request.setValue(AppConfig.ContentType.json, forHTTPHeaderField: AppConfig.HTTPHeader.contentType)
 
-        let body = ["username": username, "password": password]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        let provenance = EnvelopeMinter.shared.next(.control)
+        let envelope = LoginRequest(
+            type: "login_request",
+            sequenceId: provenance.sequenceId,
+            publicId: provenance.publicId,
+            timestamp: provenance.timestamp,
+            sessionId: provenance.sessionId,
+            topic: nil,
+            payload: LoginBody(username: username, password: password, rememberMe: nil)
+        )
+        do {
+            request.httpBody = try Self.envelopeEncoder.encode(envelope)
+        } catch {
+            errorMessage = "Failed to serialize login request"
+            return
+        }
 
         do {
             let (data, response) = try await session.data(for: request)
@@ -60,6 +74,20 @@ class AuthService: ObservableObject {
             errorMessage = "Network error: \(error.localizedDescription)"
         }
     }
+
+    /// Shared encoder for outbound provenance envelopes. The custom
+    /// date strategy emits millisecond-precision ISO 8601 so REST
+    /// and WebSocket frames carry timestamps in the same shape as
+    /// the frontend's ``new Date().toISOString()`` (`stampProvenance`
+    /// in `frontend/src/lib/apiClient.ts`).
+    private static let envelopeEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(EnvelopeMinter.formatTimestamp(date))
+        }
+        return encoder
+    }()
 
     func logout() async {
         await DeviceRegistrationService.shared().onLogout()

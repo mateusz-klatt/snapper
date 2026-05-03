@@ -113,12 +113,16 @@ actor DeviceRegistrationService {
             appVersion: appVersion ?? "unknown",
             previewsMode: nil
         )
+        let provenance = await MainActor.run {
+            EnvelopeMinter.shared.next(.control)
+        }
         let command = RegisterDeviceCommand(
             type: "register_device_command",
-            sequenceId: 1,
-            publicId: UUID().uuidString,
-            timestamp: Date(),
-            sessionId: UUID().uuidString,
+            sequenceId: provenance.sequenceId,
+            publicId: provenance.publicId,
+            timestamp: provenance.timestamp,
+            sessionId: provenance.sessionId,
+            topic: nil,
             payload: body
         )
         do {

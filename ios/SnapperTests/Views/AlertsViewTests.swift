@@ -51,6 +51,7 @@ final class AlertsViewTests: XCTestCase {
             publicId: "alert-1",
             timestamp: Date(),
             sessionId: "s",
+            topic: nil,
             userPublicId: "user-1",
             operatorPublicId: nil,
             walletPublicId: nil,

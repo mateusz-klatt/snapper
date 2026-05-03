@@ -23,6 +23,7 @@ final class NotificationPrefsViewTests: XCTestCase {
             publicId: publicId,
             timestamp: Self.baseTimestamp,
             sessionId: "session-test",
+            topic: nil,
             devicePublicId: "dev-1",
             alertType: alertType,
             operatorPublicId: operatorPublicId,
@@ -136,17 +137,28 @@ final class NotificationPrefsViewTests: XCTestCase {
         XCTAssertFalse(NotificationPrefsView.summaryLabel(for: pastMute).contains("muted until"))
     }
 
+    private static let fixedProvenance = EnvelopeMinter.Provenance(
+        publicId: "test-public-id",
+        sessionId: "session-test",
+        sequenceId: 13,
+        timestamp: baseTimestamp,
+        timestampString: "2023-11-14T22:13:20.000Z"
+    )
+
     func testMakeDefaultCommandShape() {
         let command = NotificationPrefsView.makeDefaultCommand(
             alertType: "order_fill_full",
             enabled: false,
             minPriority: "high",
-            timestamp: Self.baseTimestamp
+            provenance: Self.fixedProvenance
         )
         XCTAssertEqual(command.payload.alertType, "order_fill_full")
         XCTAssertEqual(command.payload.enabled, false)
         XCTAssertEqual(command.payload.minPriority, "high")
         XCTAssertEqual(command.timestamp, Self.baseTimestamp)
         XCTAssertEqual(command.type, "update_user_alert_default_command")
+        XCTAssertEqual(command.publicId, "test-public-id")
+        XCTAssertEqual(command.sessionId, "session-test")
+        XCTAssertEqual(command.sequenceId, 13)
     }
 }

@@ -36,6 +36,7 @@
 		BBB8164DA1ACDEF80598BF46 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 6B649B56E9F5DB1981C9D47E /* PrivacyInfo.xcprivacy */; };
 		D339ECEBC32C9FE4E3040546 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6605FA90A650CA70270A857 /* SettingsView.swift */; };
 		D4D538F756906829CC4ECC61 /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9948BCE1220922C26E1E5D5 /* LoginView.swift */; };
+		D515E87788756C2AD2AE4B53 /* EnvelopeMinter.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE27C35122A039D4B00DFFAC /* EnvelopeMinter.swift */; };
 		D5A6C18290A3F9154ED7E741 /* LoginViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6798D055E36E2A96D2575882 /* LoginViewModel.swift */; };
 		E00A59F35D84C52F5B093C9A /* WSMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FC42AFF6C9070E52403CC6A /* WSMessages.swift */; };
 		E26F0CF3DFE246A9C9E7F1CA /* WSState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A0B22DD35B1534E9A1AFFA3 /* WSState.swift */; };
@@ -83,6 +84,7 @@
 		C866C094E8868C0EF03F6809 /* AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthService.swift; sourceTree = "<group>"; };
 		C90AC0DDC55DFC58EF4590D7 /* APITypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APITypes.swift; sourceTree = "<group>"; };
 		CB3EEEA02ED3924700201EC3 /* SnapperTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SnapperTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		CE27C35122A039D4B00DFFAC /* EnvelopeMinter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnvelopeMinter.swift; sourceTree = "<group>"; };
 		D203FD7280A91512EE623EE1 /* Protocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocols.swift; sourceTree = "<group>"; };
 		D839E5FB00056E88B45C4D34 /* WalletPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletPicker.swift; sourceTree = "<group>"; };
 		E2862D7D7B1A4BC6B1BAE0FD /* NotificationPrefsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationPrefsView.swift; sourceTree = "<group>"; };
@@ -138,6 +140,7 @@
 				E4646B48A09BA542FF6ABECD /* AppDelegate.swift */,
 				C866C094E8868C0EF03F6809 /* AuthService.swift */,
 				B312129A11E7B3A9371A79C5 /* DeviceRegistrationService.swift */,
+				CE27C35122A039D4B00DFFAC /* EnvelopeMinter.swift */,
 				7DC7293CDEE72AC8C8C5341C /* NavigationCoordinator.swift */,
 				7A987AAE53C2CBDE34AE70BD /* NotificationService.swift */,
 				D203FD7280A91512EE623EE1 /* Protocols.swift */,
@@ -346,6 +349,7 @@
 				8DB5E916777E3B48A477E414 /* AuthService.swift in Sources */,
 				744C6DC56C03FBBCF9651D96 /* DeviceRegistrationService.swift in Sources */,
 				2DBDD476BC339FFB12CEC0BF /* EditDevicePrefView.swift in Sources */,
+				D515E87788756C2AD2AE4B53 /* EnvelopeMinter.swift in Sources */,
 				7A8AC6E7C86070E41475CF8F /* Environment.swift in Sources */,
 				1FB7DA9DCC9A41F35A486136 /* HomeView.swift in Sources */,
 				22A2FE8937BA167E5605A9F5 /* LatestAlertCard.swift in Sources */,
@@ -429,7 +433,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 26MP7QQP95;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -520,7 +524,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 26MP7QQP95;
 				ENABLE_NS_ASSERTIONS = NO;

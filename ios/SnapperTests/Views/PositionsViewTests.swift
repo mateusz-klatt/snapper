@@ -6,6 +6,18 @@ final class PositionsViewTests: XCTestCase {
 
     private static let baseTimestamp = Date(timeIntervalSince1970: 1_700_000_000)
 
+    /// Deterministic provenance for builder tests — the live minter
+    /// would advance counters across tests; here we want every
+    /// command tagged with the same fixture so assertions on
+    /// ``sessionId`` / ``sequenceId`` are stable.
+    private static let fixedProvenance = EnvelopeMinter.Provenance(
+        publicId: "test-public-id",
+        sessionId: "session-test",
+        sequenceId: 7,
+        timestamp: baseTimestamp,
+        timestampString: "2023-11-14T22:13:20.000Z"
+    )
+
     private func makePosition(
         publicId: String,
         walletPublicId: String?,
@@ -17,6 +29,7 @@ final class PositionsViewTests: XCTestCase {
             publicId: publicId,
             timestamp: Self.baseTimestamp,
             sessionId: "session-test",
+            topic: nil,
             instrument: "BTC-USD",
             instrumentPublicId: "inst-1",
             exchange: "kraken",
@@ -83,7 +96,7 @@ final class PositionsViewTests: XCTestCase {
         let command = PositionsView.makeReduceCommand(
             position: position,
             quantity: 0.25,
-            timestamp: Self.baseTimestamp
+            provenance: Self.fixedProvenance
         )
         XCTAssertEqual(command.payload.side, "sell")
         XCTAssertEqual(command.payload.orderType, "market")
@@ -100,7 +113,7 @@ final class PositionsViewTests: XCTestCase {
         let command = PositionsView.makeReduceCommand(
             position: position,
             quantity: 1.0,
-            timestamp: Self.baseTimestamp
+            provenance: Self.fixedProvenance
         )
         XCTAssertEqual(
             command.payload.side,
@@ -115,9 +128,26 @@ final class PositionsViewTests: XCTestCase {
         let command = PositionsView.makeReduceCommand(
             position: position,
             quantity: 2.5,
-            timestamp: Self.baseTimestamp
+            provenance: Self.fixedProvenance
         )
         XCTAssertEqual(command.payload.quantity, 2.5)
         XCTAssertEqual(command.payload.side, "buy")
+    }
+
+    /// Provenance plumbing — the builder must propagate the injected
+    /// envelope onto the outbound command so the backend gap
+    /// detector sees the iOS-minted ``session_id`` and
+    /// monotonic ``sequence_id``.
+    func testMakeReduceCommandStampsInjectedProvenance() {
+        let position = makePosition(publicId: "p-4", walletPublicId: "wallet-a", quantity: 1.0)
+        let command = PositionsView.makeReduceCommand(
+            position: position,
+            quantity: 1.0,
+            provenance: Self.fixedProvenance
+        )
+        XCTAssertEqual(command.publicId, "test-public-id")
+        XCTAssertEqual(command.sessionId, "session-test")
+        XCTAssertEqual(command.sequenceId, 7)
+        XCTAssertEqual(command.timestamp, Self.baseTimestamp)
     }
 }

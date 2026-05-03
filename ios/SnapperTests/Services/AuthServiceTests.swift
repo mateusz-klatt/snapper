@@ -113,6 +113,7 @@ final class AuthServiceTests: XCTestCase {
             publicId: "01961234-5678-7000-8000-000000000099",
             timestamp: Date(timeIntervalSince1970: 0),
             sessionId: "test-session",
+            topic: nil,
             username: "testuser",
             email: "test@example.com",
             role: role,
