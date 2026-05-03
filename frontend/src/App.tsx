@@ -93,10 +93,12 @@ function App() {
             >
               <Menu size={20} />
             </button>
-            <div className='ml-auto flex items-center gap-3'>
+            <div className='ml-auto flex flex-wrap items-center justify-end gap-3'>
               <OperatorPicker />
               <WalletPicker />
-              <TimeTravelPicker />
+              <div className='hidden md:flex'>
+                <TimeTravelPicker />
+              </div>
               {!isTimeTraveling && (
                 <span
                   className='hidden text-sm tabular-nums text-muted-600 sm:inline'
@@ -114,12 +116,15 @@ function App() {
               <span
                 className={
                   isConnected
-                    ? 'inline-flex items-center gap-1.5 rounded-full border border-accent-200 bg-accent-50 px-3 py-1 text-xs font-semibold text-accent-800'
-                    : 'inline-flex items-center gap-1.5 rounded-full border border-loss-200 bg-loss-50 px-3 py-1 text-xs font-semibold text-loss-800'
+                    ? 'inline-flex items-center gap-1.5 rounded-full border border-accent-200 bg-accent-50 px-2 py-1 text-xs font-semibold text-accent-800 sm:px-3'
+                    : 'inline-flex items-center gap-1.5 rounded-full border border-loss-200 bg-loss-50 px-2 py-1 text-xs font-semibold text-loss-800 sm:px-3'
                 }
+                title={isConnected ? 'Connected to WebSocket' : 'Disconnected from WebSocket'}
               >
                 {isConnected ? <Wifi size={13} /> : <WifiOff size={13} />}
-                {isConnected ? 'Connected' : 'Disconnected'}
+                <span className='hidden sm:inline'>
+                  {isConnected ? 'Connected' : 'Disconnected'}
+                </span>
               </span>
               <button
                 onClick={toggleDarkMode}
