@@ -1,6 +1,12 @@
 import Foundation
+import os
 
 enum AppConfig {
+
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "Snapper",
+        category: "Config"
+    )
 
     private static let configuration = AppConfiguration.load()
 
@@ -154,12 +160,15 @@ enum AppConfig {
                 let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
                 let dict = plist as? [String: Any]
             else {
+                let message = "Failed to load Configuration.plist from main bundle. Verify the file is included in target resources and contains valid plist data."
+                AppConfig.logger.error("\(message, privacy: .public)")
+                assertionFailure(message)
                 return empty
             }
 
             let endpoints = dict["Endpoints"] as? [String: Any] ?? [:]
 
-            return AppConfiguration(
+            let config = AppConfiguration(
                 baseURL: dict["BaseURL"] as? String ?? "",
                 apiPrefix: dict["APIPrefix"] as? String ?? "",
                 wsPath: dict["WSPath"] as? String ?? "",
@@ -184,6 +193,14 @@ enum AppConfig {
                     trailingStops: endpoints["TrailingStops"] as? String ?? ""
                 )
             )
+
+            if config.baseURL.isEmpty || config.apiPrefix.isEmpty {
+                let message = "Configuration.plist missing critical fields. BaseURL=\"\(config.baseURL)\" APIPrefix=\"\(config.apiPrefix)\". Check ios/Snapper/Config/Configuration.plist."
+                AppConfig.logger.error("\(message, privacy: .public)")
+                assertionFailure(message)
+            }
+
+            return config
         }
 
         static var empty: AppConfiguration {
