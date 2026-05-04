@@ -333,6 +333,7 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
     url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
     repo = SQLAlchemyRepository(url)
     await repo.create_all()
+    now = datetime.now(UTC)
     async with repo.session() as s:
         s.add(
             Symbol(
@@ -340,21 +341,21 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
-                created_at=datetime.now(UTC),
-                timestamp=datetime.now(UTC),
+                created_at=now,
+                timestamp=now,
                 session_id="test-session",
                 sequence_id=1,
             )
         )
         await s.commit()
-    spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
+    spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=now)
     assert spid is not None
     _, inst_pub_id = await repo.ensure_instrument(
         symbol_public_id=spid,
         exchange="kraken",
         session_id="test-session",
         sequence_id=1,
-        timestamp=datetime.now(UTC),
+        timestamp=now,
     )
     assert isinstance(inst_pub_id, str)
     inserted = await repo.upsert_candles(
@@ -424,6 +425,7 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
     url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
     repo = SQLAlchemyRepository(url)
     await repo.create_all()
+    now = datetime.now(UTC)
     async with repo.session() as s:
         s.add(
             Symbol(
@@ -431,21 +433,21 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
                 base="ETH",
                 quote="USD",
                 asset_type="crypto",
-                created_at=datetime.now(UTC),
-                timestamp=datetime.now(UTC),
+                created_at=now,
+                timestamp=now,
                 session_id="test-session",
                 sequence_id=1,
             )
         )
         await s.commit()
-    spid = await resolve_symbol_public_id(repo, "ETH-USD", as_of=datetime.now(UTC))
+    spid = await resolve_symbol_public_id(repo, "ETH-USD", as_of=now)
     assert spid is not None
     _, inst_pub_id = await repo.ensure_instrument(
         symbol_public_id=spid,
         exchange="kraken",
         session_id="test-session",
         sequence_id=1,
-        timestamp=datetime.now(UTC),
+        timestamp=now,
     )
     rows = [
         {
@@ -481,6 +483,7 @@ async def _make_repo_with_two_instruments(
     url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
     repo = SQLAlchemyRepository(url)
     await repo.create_all()
+    now = datetime.now(UTC)
     async with repo.session() as s:
         s.add(
             Symbol(
@@ -488,28 +491,28 @@ async def _make_repo_with_two_instruments(
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
-                created_at=datetime.now(UTC),
-                timestamp=datetime.now(UTC),
+                created_at=now,
+                timestamp=now,
                 session_id="test-session",
                 sequence_id=1,
             )
         )
         await s.commit()
-    spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
+    spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=now)
     assert spid is not None
     _, inst_a = await repo.ensure_instrument(
         symbol_public_id=spid,
         exchange="kraken",
         session_id="test-session",
         sequence_id=1,
-        timestamp=datetime.now(UTC),
+        timestamp=now,
     )
     _, inst_b = await repo.ensure_instrument(
         symbol_public_id=spid,
         exchange="walutomat",
         session_id="test-session",
         sequence_id=2,
-        timestamp=datetime.now(UTC),
+        timestamp=now,
     )
     return repo, inst_a, inst_b
 
@@ -619,6 +622,7 @@ async def test_upsert_ticks_sqlite(tmp_path: Path) -> None:
     url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
     repo = SQLAlchemyRepository(url)
     await repo.create_all()
+    now = datetime.now(UTC)
     async with repo.session() as s:
         s.add(
             Symbol(
@@ -626,21 +630,21 @@ async def test_upsert_ticks_sqlite(tmp_path: Path) -> None:
                 base="ETH",
                 quote="USD",
                 asset_type="crypto",
-                created_at=datetime.now(UTC),
-                timestamp=datetime.now(UTC),
+                created_at=now,
+                timestamp=now,
                 session_id="test-session",
                 sequence_id=1,
             )
         )
         await s.commit()
-    spid = await resolve_symbol_public_id(repo, "ETH-USD", as_of=datetime.now(UTC))
+    spid = await resolve_symbol_public_id(repo, "ETH-USD", as_of=now)
     assert spid is not None
     _, inst_pub_id = await repo.ensure_instrument(
         symbol_public_id=spid,
         exchange="kraken",
         session_id="test-session",
         sequence_id=1,
-        timestamp=datetime.now(UTC),
+        timestamp=now,
     )
     tick_rows = [
         {
