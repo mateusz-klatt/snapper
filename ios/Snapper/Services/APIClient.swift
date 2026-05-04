@@ -11,6 +11,32 @@ final class APIClient: Sendable {
         self.authService = authService
     }
 
+    /// Percent-encode a value for safe inclusion as a URL path segment.
+    ///
+    /// Used at every path interpolation site (publicIds, opaque ids,
+    /// venue names) so reserved characters do not silently produce
+    /// malformed URLs. Falls back to the raw segment only on the
+    /// (theoretical) case where the encoder fails.
+    private static func encodePathSegment(_ value: String) -> String {
+        return value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
+    }
+
+    /// Build the trailing query suffix from name/value pairs.
+    ///
+    /// Uses ``URLComponents`` so reserved characters in values (e.g.
+    /// ``+``, ``=``, ``/`` in opaque server-emitted cursors) get the
+    /// proper percent-encoding that ``URLQueryItem`` performs. Returns
+    /// the empty string when no items are supplied so callers can
+    /// concatenate unconditionally.
+    private static func querySuffix(_ items: [URLQueryItem]) -> String {
+        guard !items.isEmpty else {
+            return ""
+        }
+        var components = URLComponents()
+        components.queryItems = items
+        return components.percentEncodedQuery.map { "?\($0)" } ?? ""
+    }
+
     private func request<T: Decodable>(
         endpoint: String,
         method: String = "GET",
@@ -152,7 +178,7 @@ final class APIClient: Sendable {
             payload: CancelOrderBody(reason: reason)
         )
         return try await request(
-            endpoint: "\(AppConfig.Endpoints.orders)/\(planPublicId)/cancel",
+            endpoint: "\(AppConfig.Endpoints.orders)/\(Self.encodePathSegment(planPublicId))/cancel",
             method: "POST",
             body: command
         )
@@ -189,7 +215,7 @@ final class APIClient: Sendable {
     /// venue treats as market-data-only (TradFi mirrors).
     func fetchInstruments(exchange: String) async throws -> [InstrumentDetailData] {
         let envelope: InstrumentDetailListResponse = try await request(
-            endpoint: "/exchanges/\(exchange)/instruments/detail"
+            endpoint: "/exchanges/\(Self.encodePathSegment(exchange))/instruments/detail"
         )
         return envelope.payload
     }
@@ -234,15 +260,14 @@ final class APIClient: Sendable {
     /// cursor from the previous page's ``next_cursor`` — pass ``nil``
     /// for the first page.
     func fetchAlertHistory(limit: Int? = nil, before: String? = nil) async throws -> AlertHistoryResponse {
-        var query: [String] = []
+        var queryItems: [URLQueryItem] = []
         if let limit {
-            query.append("limit=\(limit)")
+            queryItems.append(URLQueryItem(name: "limit", value: "\(limit)"))
         }
         if let before, !before.isEmpty {
-            query.append("before=\(before)")
+            queryItems.append(URLQueryItem(name: "before", value: before))
         }
-        let suffix = query.isEmpty ? "" : "?\(query.joined(separator: "&"))"
-        return try await request(endpoint: "\(AppConfig.Endpoints.alerts)\(suffix)")
+        return try await request(endpoint: "\(AppConfig.Endpoints.alerts)\(Self.querySuffix(queryItems))")
     }
 
     /// Fetch a single alert by ``public_id`` (BE-1c — used for deep-linking).
@@ -253,7 +278,7 @@ final class APIClient: Sendable {
     /// Returns:
     ///   ``AlertEventResponse`` wrapping the one matching row.
     func fetchAlert(publicId: String) async throws -> AlertEventResponse {
-        return try await request(endpoint: "\(AppConfig.Endpoints.alerts)/\(publicId)")
+        return try await request(endpoint: "\(AppConfig.Endpoints.alerts)/\(Self.encodePathSegment(publicId))")
     }
 
     /// Fetch active per-(alert_type, scope) prefs for the addressed
@@ -268,7 +293,7 @@ final class APIClient: Sendable {
     ///   ``DeviceAlertPrefListResponse`` with zero-or-more prefs.
     func fetchDevicePrefs(devicePublicId: String) async throws -> DeviceAlertPrefListResponse {
         return try await request(
-            endpoint: "\(AppConfig.Endpoints.devices)/\(devicePublicId)/prefs"
+            endpoint: "\(AppConfig.Endpoints.devices)/\(Self.encodePathSegment(devicePublicId))/prefs"
         )
     }
 
@@ -284,7 +309,7 @@ final class APIClient: Sendable {
         command: UpdateDevicePrefCommand
     ) async throws -> DeviceAlertPrefResponse {
         return try await request(
-            endpoint: "\(AppConfig.Endpoints.devices)/\(devicePublicId)/prefs",
+            endpoint: "\(AppConfig.Endpoints.devices)/\(Self.encodePathSegment(devicePublicId))/prefs",
             method: "PATCH",
             body: command
         )
