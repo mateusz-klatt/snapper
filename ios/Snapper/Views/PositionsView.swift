@@ -93,11 +93,13 @@ struct PositionsView: View {
             ),
             presenting: actionSheetPosition
         ) { position in
-            Button("Close position", role: .destructive) {
-                pendingClosePosition = position
-            }
-            Button("Reduce position") {
-                reduceModalPosition = IdentifiedPosition(position: position)
+            if Self.canSubmitReduce(position: position) {
+                Button("Close position", role: .destructive) {
+                    pendingClosePosition = position
+                }
+                Button("Reduce position") {
+                    reduceModalPosition = IdentifiedPosition(position: position)
+                }
             }
             if position.positionCyclePublicId != nil {
                 Button("Attach SL / TP") {
@@ -228,14 +230,32 @@ struct PositionsView: View {
     }
 
     private func submitMarketReduce(position: PositionSnapshot, quantity: Double) async {
+        guard let command = Self.makeReduceCommand(position: position, quantity: quantity) else {
+            logger.error("Refusing to submit reduce/close: position missing instrument or wallet public id")
+            submitError = "Position is missing the wallet or instrument identifier the backend requires. Try refreshing the positions list."
+            return
+        }
         do {
-            let command = Self.makeReduceCommand(position: position, quantity: quantity)
             _ = try await APIClient.shared.createOrder(command: command)
             await load()
         } catch {
             logger.error("Failed to submit reduce/close: \(error.localizedDescription)")
             submitError = "Couldn't submit the order. Try again."
         }
+    }
+
+    /// Reduce / close eligibility: backend rejects ``CreateOrderBody``
+    /// with empty ``instrumentPublicId`` or ``walletPublicId`` so the
+    /// UI must hide the trading actions for legacy / system rows that
+    /// arrive without those ids.
+    static func canSubmitReduce(position: PositionSnapshot) -> Bool {
+        guard
+            let walletId = position.walletPublicId, !walletId.isEmpty,
+            let instrumentId = position.instrumentPublicId, !instrumentId.isEmpty
+        else {
+            return false
+        }
+        return true
     }
 
     private func submitBracket(
@@ -301,7 +321,13 @@ struct PositionsView: View {
         position: PositionSnapshot,
         quantity: Double,
         provenance: EnvelopeMinter.Provenance? = nil
-    ) -> CreateOrderCommand {
+    ) -> CreateOrderCommand? {
+        guard
+            let walletId = position.walletPublicId, !walletId.isEmpty,
+            let instrumentId = position.instrumentPublicId, !instrumentId.isEmpty
+        else {
+            return nil
+        }
         let envelope = provenance ?? EnvelopeMinter.shared.next(.control)
         let side: String = position.quantity > 0 ? "sell" : "buy"
         return CreateOrderCommand(
@@ -313,7 +339,7 @@ struct PositionsView: View {
             topic: nil,
             payload: CreateOrderBody(
                 instrument: position.instrument,
-                instrumentPublicId: position.instrumentPublicId ?? "",
+                instrumentPublicId: instrumentId,
                 exchange: position.exchange,
                 mode: position.mode,
                 side: side,
@@ -325,7 +351,7 @@ struct PositionsView: View {
                 postOnly: false,
                 leverage: nil,
                 reduceOnly: true,
-                walletPublicId: position.walletPublicId ?? "",
+                walletPublicId: walletId,
                 operatorPublicId: nil,
                 idempotencyKey: nil,
                 aiReviewPublicId: nil

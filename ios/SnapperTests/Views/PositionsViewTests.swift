@@ -98,6 +98,8 @@ final class PositionsViewTests: XCTestCase {
             quantity: 0.25,
             provenance: Self.fixedProvenance
         )
+        XCTAssertNotNil(command)
+        guard let command else { return }
         XCTAssertEqual(command.payload.side, "sell")
         XCTAssertEqual(command.payload.orderType, "market")
         XCTAssertEqual(command.payload.quantity, 0.25)
@@ -115,6 +117,8 @@ final class PositionsViewTests: XCTestCase {
             quantity: 1.0,
             provenance: Self.fixedProvenance
         )
+        XCTAssertNotNil(command)
+        guard let command else { return }
         XCTAssertEqual(
             command.payload.side,
             "buy",
@@ -130,6 +134,8 @@ final class PositionsViewTests: XCTestCase {
             quantity: 2.5,
             provenance: Self.fixedProvenance
         )
+        XCTAssertNotNil(command)
+        guard let command else { return }
         XCTAssertEqual(command.payload.quantity, 2.5)
         XCTAssertEqual(command.payload.side, "buy")
     }
@@ -145,9 +151,33 @@ final class PositionsViewTests: XCTestCase {
             quantity: 1.0,
             provenance: Self.fixedProvenance
         )
+        XCTAssertNotNil(command)
+        guard let command else { return }
         XCTAssertEqual(command.publicId, "test-public-id")
         XCTAssertEqual(command.sessionId, "session-test")
         XCTAssertEqual(command.sequenceId, 7)
         XCTAssertEqual(command.timestamp, Self.baseTimestamp)
+    }
+
+    /// Backend rejects orders with empty ``walletPublicId`` /
+    /// ``instrumentPublicId``; the builder must refuse to mint the
+    /// command (returns nil) when the source position arrives without
+    /// either id, and ``submitMarketReduce`` must surface the error to
+    /// the user instead of firing a malformed request.
+    func testMakeReduceCommandReturnsNilWhenWalletIdMissing() {
+        let position = makePosition(publicId: "p-5", walletPublicId: nil, quantity: 1.0)
+        let command = PositionsView.makeReduceCommand(
+            position: position,
+            quantity: 1.0,
+            provenance: Self.fixedProvenance
+        )
+        XCTAssertNil(command)
+    }
+
+    func testCanSubmitReduceRequiresBothIds() {
+        let ok = makePosition(publicId: "p-ok", walletPublicId: "wallet-a", quantity: 1.0)
+        let missingWallet = makePosition(publicId: "p-mw", walletPublicId: nil, quantity: 1.0)
+        XCTAssertTrue(PositionsView.canSubmitReduce(position: ok))
+        XCTAssertFalse(PositionsView.canSubmitReduce(position: missingWallet))
     }
 }
