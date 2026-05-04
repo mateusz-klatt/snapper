@@ -7,3 +7,6 @@
 [submodule "integrations/snapper-mcp"]
 	path = integrations/snapper-mcp
 	url = git@github.com:mateusz-klatt/snapper-mcp.git
+[submodule "frontend"]
+	path = frontend
+	url = git@github.com:mateusz-klatt/snapper-frontend.git

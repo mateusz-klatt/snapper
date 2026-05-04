@@ -1,1 +1,0 @@
-export { InstrumentIcon } from './InstrumentIcon'
