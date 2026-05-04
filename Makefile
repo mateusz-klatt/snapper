@@ -412,7 +412,7 @@ ui-gen-api-types:
 	$(info Generating TypeScript types from OpenAPI schema...)
 	$(info Exporting OpenAPI schema from FastAPI...)
 	$(GENSCRIPT) --openapi
-	$(PNPM) gen:api-types:from-file
+	$(PNPM) gen:api-types:from-monorepo
 	$(GENSCRIPT) --postprocess-openapi-types
 	$(PRETTIER) src/types/api.generated.ts
 	$(info Generated frontend/src/types/api.generated.ts)
@@ -420,7 +420,7 @@ ui-gen-api-types:
 ui-gen-ws-types:
 	$(info Generating TypeScript types from WebSocket schemas...)
 	$(GENSCRIPT) --export
-	$(PNPM) gen:ws-types
+	$(PNPM) gen:ws-types:from-monorepo
 	$(GENSCRIPT) --strip-eslint-disable
 	$(PRETTIER) src/types/ws.generated.ts
 	$(info Generated frontend/src/types/ws.generated.ts)
