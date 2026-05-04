@@ -36,7 +36,7 @@ struct SnapperApp: App {
 
     /// Connect on foreground / disconnect on background. Matches the
     /// iOS lifecycle: the socket must not hold the radio while the
-    /// app is suspended (plan §D8).
+    /// app is suspended.
     private func handleScenePhase(_ phase: ScenePhase) {
         switch phase {
         case .active:

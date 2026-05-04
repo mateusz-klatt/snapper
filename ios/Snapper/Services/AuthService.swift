@@ -105,10 +105,10 @@ class AuthService: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue(AppConfig.ContentType.json, forHTTPHeaderField: AppConfig.HTTPHeader.contentType)
-        // Per plan §D8: bound the logout/refresh endpoints at 10s so a
-        // dead network can't leave us wedged forever. `URLSession.shared`
-        // is immutable, so set this per-URLRequest — the test session
-        // is free to override via its own configuration.
+        // Bound the logout/refresh endpoints at 10s so a dead network
+        // can't leave us wedged forever. `URLSession.shared` is
+        // immutable, so set this per-URLRequest — the test session is
+        // free to override via its own configuration.
         request.timeoutInterval = 10
 
         _ = try? await session.data(for: request)
@@ -152,9 +152,9 @@ class AuthService: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue(AppConfig.ContentType.json, forHTTPHeaderField: AppConfig.HTTPHeader.contentType)
-        // Per plan §D8: cap refresh attempts at 10s — see logoutFromServer
-        // comment for rationale. Refresh payload is small, so 10s is
-        // generous for real networks; legitimate hang == network dead.
+        // Cap refresh attempts at 10s — see logoutFromServer comment for
+        // rationale. Refresh payload is small, so 10s is generous for
+        // real networks; a legitimate hang means the network is dead.
         request.timeoutInterval = 10
 
         do {

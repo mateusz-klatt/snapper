@@ -164,8 +164,7 @@ final class EditDevicePrefViewTests: XCTestCase {
     /// The default ``timezone`` argument is sourced from
     /// ``TimeZone.current.identifier`` so the backend's quiet-hours
     /// interpreter at ``application/notify/routing.py`` evaluates the
-    /// window in the user's wall-clock time, not UTC (Codex gpt-5.5
-    /// final gate finding).
+    /// window in the user's wall-clock time, not UTC.
     func testMakeDeviceCommandDefaultTimezoneTracksDeviceLocale() {
         let command = EditDevicePrefView.makeDeviceCommand(
             alertType: "order_fill_full",

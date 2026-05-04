@@ -1,16 +1,14 @@
 import SwiftUI
 import os
 
-/// Editor sheet for one device-scoped notification preference
-/// (iOS-NP-1b + iOS-NP-A4 scope picker re-enable).
+/// Editor sheet for one device-scoped notification preference.
 ///
 /// Two entry points:
 /// - Tap an existing row in
 ///   ``NotificationPrefsView``'s device-overrides section: opens in
-///   edit mode with ``alert_type`` AND scope tuple locked (the SCD2
+///   edit mode with ``alert_type`` AND scope tuple locked. The SCD2
 ///   key includes both, so changing either mid-edit would silently
-///   create a sibling row instead of mutating the tapped one —
-///   Codex gpt-5.5 final-gate finding).
+///   create a sibling row instead of mutating the tapped one.
 /// - "Add override" button: opens in new mode with the alert_type
 ///   picker + 3-mode scope picker enabled.
 ///
@@ -64,7 +62,7 @@ struct EditDevicePrefView: View {
     /// Preserved across save when editing — the SCD2 key on the row
     /// includes the operator+wallet tuple, so changing scope mid-edit
     /// would silently create a sibling row instead of mutating the
-    /// tapped one (Codex gpt-5.5 final gate finding).
+    /// tapped one.
     private let lockedOperatorPublicId: String?
     private let lockedWalletPublicId: String?
 

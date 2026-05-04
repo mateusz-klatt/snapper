@@ -2,7 +2,7 @@ import SwiftUI
 import os
 
 /// Notification preferences screen pushed from Settings → Notifications
-/// → "Manage preferences" (iOS-NP-1).
+/// → "Manage preferences".
 ///
 /// Two sections:
 /// - User defaults: each of the five backend ``alert_types`` is
@@ -10,11 +10,10 @@ import os
 ///   Toggling fires ``APIClient.updateAlertDefault`` immediately —
 ///   optimistic UI with revert-on-error so the user never sees a
 ///   stale toggle position after a network blip.
-/// - Device overrides: read-only list of active per-(alert_type,
-///   scope) rows for the registered device. iOS-NP-1b adds the
-///   editor (scope picker + quiet hours + mute_until); iOS-NP-1a
-///   ships read-only so the wallet-narrowed configuration is at
-///   least visible to the user even before the editor lands.
+/// - Device overrides: list of active per-(alert_type, scope) rows
+///   for the registered device. Each row opens an editor sheet with
+///   scope picker, quiet hours, and mute_until controls so the
+///   wallet-narrowed configuration is editable end-to-end.
 ///
 /// On appear the view fetches both surfaces in parallel via
 /// ``async let``. Empty list is the legitimate "no overrides" state
@@ -365,8 +364,7 @@ private struct AlertDefaultRow: View {
         // updates the existing row underneath us. The guard inside the
         // .onChange-of-enabled / -minPriority handlers above bails when
         // the new local value matches the new baseline, so this sync
-        // does not recurse into an extra PATCH (Codex gpt-5.5 final
-        // gate finding).
+        // does not recurse into an extra PATCH.
         .onChange(of: existing?.publicId) { _, _ in
             if let existing {
                 if enabled != existing.enabled { enabled = existing.enabled }

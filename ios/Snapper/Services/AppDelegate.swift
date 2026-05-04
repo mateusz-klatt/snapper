@@ -22,7 +22,7 @@ import os
 /// All callbacks hop to `@MainActor` before touching observable state
 /// — the delegate methods themselves are not `@MainActor` in
 /// `UIApplicationDelegate`, so we use `Task { @MainActor in ... }`
-/// per plan §D9.
+/// to mark the boundary explicitly.
 @MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate, @preconcurrency UNUserNotificationCenterDelegate {
     private let logger = Logger(

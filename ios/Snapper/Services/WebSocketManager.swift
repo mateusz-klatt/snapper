@@ -29,11 +29,11 @@ class WebSocketManager: ObservableObject {
     /// Per-attempt ceiling for backoff (5 minutes). No hard cap on the
     /// attempt counter — the client keeps trying forever so that a phone
     /// returning online after an extended offline period recovers without
-    /// user intervention (plan SC#4).
+    /// user intervention.
     private let maxReconnectDelay: TimeInterval = 300
     /// Cancelled on disconnect + re-scheduled after every `auth_complete`
     /// so the proactive refresh fires before the server-issued ws_token
-    /// actually expires (plan SC#5).
+    /// actually expires.
     private var proactiveRefreshTask: Task<Void, Never>?
     /// Cancellable handle for the backoff-delayed reconnect attempt.
     /// Cleared whenever the manager reaches a terminal/paused state so

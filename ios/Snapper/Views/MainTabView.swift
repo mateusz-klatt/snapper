@@ -81,8 +81,8 @@ struct MainTabView: View {
             }
         }
         // WS lifecycle is owned by `SnapperApp` (scenePhase + isAuthenticated
-        // observers per plan §D8). Putting connect/disconnect here would
-        // kill the socket whenever a modal sheet covered the tab view.
+        // observers). Putting connect/disconnect here would kill the
+        // socket whenever a modal sheet covered the tab view.
     }
 
     /// Deep-link routing path-prefix mapping (post-iOS-3):

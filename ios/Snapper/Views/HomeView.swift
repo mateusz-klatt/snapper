@@ -98,7 +98,7 @@ struct HomeView: View {
         }
     }
 
-    /// Heartbeat-freshness thresholds wired per plan SC#1.
+    /// Heartbeat-freshness thresholds for the connection-health badge.
     /// Green: heartbeat within 5s. Amber: 5–30s. Red: >30s or never arrived
     /// while the socket is already `.connected` (i.e. healthy connection,
     /// stale heartbeats — distinct from socket-level disconnect).

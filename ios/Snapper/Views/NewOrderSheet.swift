@@ -207,8 +207,7 @@ struct NewOrderSheet: View {
         guard !selectedExchange.isEmpty else { return }
         // Synchronously clear stale rows BEFORE the await so the user
         // cannot tap Submit during the fetch and ship the previous
-        // exchange's instrument under a new exchange's name (Codex
-        // 5.5 final-final-gate finding 55871e46).
+        // exchange's instrument under a new exchange's name.
         let exchangeBeingLoaded = selectedExchange
         if selectedInstrument?.exchange != exchangeBeingLoaded {
             selectedInstrument = nil
@@ -323,8 +322,7 @@ struct NewOrderSheet: View {
     /// wallet never accidentally routes as a live order. The
     /// backend default at ``snapper.api.schemas.orders.CreateOrderBody``
     /// is ``"live"`` — leaving ``mode`` at ``nil`` would route
-    /// real money on the user's behalf (Copilot 5.4 review finding
-    /// 0f041f1e).
+    /// real money on the user's behalf.
     static func buildBody(
         instrument: InstrumentDetailData?,
         selectedExchange: String,

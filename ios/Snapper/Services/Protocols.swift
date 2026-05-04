@@ -16,7 +16,7 @@ protocol AuthRefreshing: AnyObject, Sendable {
 /// protocol minimal to avoid fake-test drift. `cancel` and `resume` are
 /// synchronous nonisolated requirements on `URLSessionWebSocketTask`, so
 /// this protocol mirrors that — any fake must be `@unchecked Sendable`
-/// with internal synchronization (see plan §D1.5).
+/// with internal synchronization.
 ///
 /// `Sendable` is required because the manager hands tasks to detached
 /// `Task` closures for async `receive()` loops.

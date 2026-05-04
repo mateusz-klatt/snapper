@@ -23,8 +23,8 @@ import os
 /// service from `AppDelegate` callbacks (already running inside
 /// `Task { @MainActor in }`) and from `AuthService` `@MainActor`
 /// methods, so the factory hop is a no-op on the hot path and
-/// sidesteps module-load-time `APIClient.shared` touches per Plan
-/// v1.2 fix.
+/// sidesteps module-load-time `APIClient.shared` touches that
+/// produced Sendable-isolation crashes during launch.
 /// Externally observable lifecycle state for the registration flow.
 ///
 /// ``SettingsView`` reads this to show a meaningful state instead of

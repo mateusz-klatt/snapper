@@ -138,7 +138,7 @@ struct OrdersView: View {
     /// pointing at a wallet that no longer exists (revoked,
     /// deleted, scope-handed-over) falls through to ``nil`` so the
     /// `+` button gate disables instead of presenting a sheet that
-    /// cannot build a valid order body (Copilot 5.4 finding).
+    /// cannot build a valid order body.
     var resolvedWallet: WalletInfo? {
         guard let id = appState.selectedWalletPublicId else { return nil }
         return appState.availableWallets.first { $0.publicId == id }

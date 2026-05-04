@@ -70,7 +70,7 @@ final class APIClient: Sendable {
 
         // 401 retry path: refresh ws_token exactly once, then replay.
         // Second 401 → force logout so the UI routes to LoginView via
-        // SnapperApp's isAuthenticated observer (see plan §D7).
+        // SnapperApp's isAuthenticated observer.
         if httpResponse.statusCode == 401 {
             if isRetry {
                 await authService.logout()
@@ -128,7 +128,7 @@ final class APIClient: Sendable {
         return envelope.payload
     }
 
-    /// Fetch operators the caller may act AS (iOS-NP-A4 / multi-tenant).
+    /// Fetch operators the caller may act AS (multi-tenant).
     ///
     /// Powers ``EditDevicePrefView``'s scope picker — operator scope
     /// AND wallet scope (the latter requires an accompanying
@@ -282,7 +282,7 @@ final class APIClient: Sendable {
     }
 
     /// Fetch active per-(alert_type, scope) prefs for the addressed
-    /// device (BE-NP-1).
+    /// device.
     ///
     /// Caller-scoped server-side: the backend filters by
     /// ``principal.user_public_id`` and 404s when the device is not
@@ -297,8 +297,7 @@ final class APIClient: Sendable {
         )
     }
 
-    /// Upsert one per-(device, alert_type, scope) preference
-    /// (BE-NP-1 / iOS-NP-1).
+    /// Upsert one per-(device, alert_type, scope) preference.
     ///
     /// Sends ``PATCH /api/devices/{public_id}/prefs`` with a full
     /// ``UpdateDevicePrefCommand`` envelope. The handler strips and
@@ -315,8 +314,7 @@ final class APIClient: Sendable {
         )
     }
 
-    /// Fetch the caller's user-level alert default fallbacks
-    /// (BE-NP-1).
+    /// Fetch the caller's user-level alert default fallbacks.
     ///
     /// Empty list is the legitimate "no overrides" state — the
     /// alert-routing layer falls through to the in-app defaults.
@@ -324,8 +322,7 @@ final class APIClient: Sendable {
         return try await request(endpoint: AppConfig.Endpoints.alertDefaults)
     }
 
-    /// Upsert one ``(user, alert_type)`` fallback default
-    /// (BE-NP-1 / iOS-NP-1).
+    /// Upsert one ``(user, alert_type)`` fallback default.
     ///
     /// Sends ``PATCH /api/alert_defaults``. ``user_public_id`` is
     /// sourced server-side from the principal; the

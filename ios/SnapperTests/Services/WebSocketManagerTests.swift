@@ -319,9 +319,9 @@ final class WebSocketManagerTests: XCTestCase {
         XCTAssertEqual(logoutCalls, 1, "authService.logout() must be invoked exactly once")
     }
 
-    /// Direct unit test on `nextReconnectDelay()` — per plan §D5 the
-    /// delay should be bounded by `[baseInterval * 2^n, baseInterval * 2^n * 1.3]`
-    /// up to a 300s cap, with infinite-attempt semantics (no hard attempt
+    /// Direct unit test on `nextReconnectDelay()` — the delay should be
+    /// bounded by `[baseInterval * 2^n, baseInterval * 2^n * 1.3]` up to
+    /// a 300s cap, with infinite-attempt semantics (no hard attempt
     /// ceiling). Exposed `internal` via `@testable import`.
     func testReconnectBackoffExponentialWithJitter() {
         let fakeTask = FakeWebSocketTask()
@@ -440,8 +440,8 @@ final class WebSocketManagerTests: XCTestCase {
         let logoutCalls = await fakeAuth.logoutCalls
         // Expected: 0 logouts — disconnect is not auth failure.
         // The explicit user-initiated `disconnect()` path does not call
-        // `authService.logout()` either (plan §D4 restricts forced
-        // logout to the .authFailed terminal state).
+        // `authService.logout()` either — forced logout is reserved for
+        // the .authFailed terminal state.
         XCTAssertEqual(logoutCalls, 0, "disconnect mid-refresh must NOT trigger AuthService.logout()")
         // And state must be .disconnected (set by disconnect()), not
         // .authFailed.

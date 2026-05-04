@@ -45,8 +45,7 @@ final class NewOrderSheetTests: XCTestCase {
     /// on both kraken-spot and kraken-futures) with distinct
     /// `instrumentPublicId`. Identifying the picked row by symbol
     /// alone routes orders to the wrong venue when the user
-    /// switches exchanges (Codex 5.5 final-gate finding bbac0f12).
-    /// The builder MUST use the picked row's
+    /// switches exchanges. The builder MUST use the picked row's
     /// `instrumentPublicId` + `exchange` verbatim — no symbol
     /// reconciliation.
     func testBuildBodyPropagatesPickedInstrumentPublicIdNotSymbol() {
@@ -84,13 +83,13 @@ final class NewOrderSheetTests: XCTestCase {
         XCTAssertEqual(bodyFutures?.exchange, "kraken_futures")
     }
 
-    /// Cross-exchange race regression guard from Codex 5.5
-    /// final-final-gate: when the picked instrument's exchange
-    /// does NOT match the currently-selected exchange (because the
-    /// instruments fetch is still in flight after a venue switch),
-    /// the builder must refuse to build a body — submitting one
-    /// venue's instrument under another venue's name is the worst
-    /// case the original symbol-keyed bug could produce.
+    /// Cross-exchange race regression guard: when the picked
+    /// instrument's exchange does NOT match the currently-selected
+    /// exchange (because the instruments fetch is still in flight
+    /// after a venue switch), the builder must refuse to build a
+    /// body — submitting one venue's instrument under another
+    /// venue's name is the worst case the original symbol-keyed bug
+    /// could produce.
     func testBuildBodyRejectsExchangeMismatch() {
         XCTAssertNil(NewOrderSheet.buildBody(
             instrument: Self.makeInstrument(exchange: "kraken"),
@@ -161,7 +160,7 @@ final class NewOrderSheetTests: XCTestCase {
     /// While instruments are still loading after an exchange
     /// switch, submit must stay disabled so a quick tap cannot
     /// fire the previously-selected instrument under a new
-    /// exchange's name (Codex 5.5 final-final-gate).
+    /// exchange's name.
     func testCanSubmitBlockedWhileInstrumentsLoading() {
         XCTAssertFalse(NewOrderSheet.canSubmit(
             instrument: Self.makeInstrument(),
@@ -290,9 +289,8 @@ final class NewOrderSheetTests: XCTestCase {
         ))
     }
 
-    /// Critical safety regression guard from Copilot 5.4 review of
-    /// commit 0f041f1e: a paper wallet must always produce a body
-    /// with ``mode == "paper"`` so the backend's
+    /// Critical safety regression guard: a paper wallet must always
+    /// produce a body with ``mode == "paper"`` so the backend's
     /// ``CreateOrderBody.mode`` default of ``"live"`` cannot route
     /// real money on a paper-wallet user's behalf.
     func testBuildBodyForPaperWalletStampsPaperMode() {
@@ -325,8 +323,7 @@ final class NewOrderSheetTests: XCTestCase {
 
     /// Idempotency key propagates verbatim from the caller into the
     /// outbound body so a network retry collides with the server's
-    /// dedup index instead of creating a duplicate live order
-    /// (Codex 5.5 final-final-gate finding 55871e46).
+    /// dedup index instead of creating a duplicate live order.
     func testBuildBodyPropagatesIdempotencyKey() {
         let body = NewOrderSheet.buildBody(
             instrument: Self.makeInstrument(),
