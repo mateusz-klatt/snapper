@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin py-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ts-bridge bridge-regen bridge-check ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin py-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ts-bridge bridge-regen bridge-check ios-gen-types docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -86,15 +86,9 @@ help:
 	$(info ui-check           UI quality checks [lint + format + dead-code])
 	$(info ui-fix             UI quality fixes)
 	$(info )
-	$(info iOS [Xcode]:)
-	$(info ios-setup     Setup iOS project [xcodegen + test target])
-	$(info ios-gen-types Generate Swift types from OpenAPI + WebSocket)
-	$(info ios-build     Build iOS app)
-	$(info ios-test      Run iOS unit tests)
-	$(info ios-clean     Clean iOS build artifacts)
-	$(info ios-archive   Archive iOS app [Release, generic iOS device])
-	$(info ios-export    Export IPA from xcarchive [App Store Connect options])
-	$(info ios-ipa       Build IPA [archive + export])
+	$(info iOS [snapper-ios submodule]:)
+	$(info ios-gen-types Generate Swift types from OpenAPI + WebSocket [writes into submodule])
+	$(info Other iOS targets live in the snapper-ios submodule \(cd ios && make ...\))
 	$(info )
 	$(info Docker:)
 	$(info docker-build-dev              Build Docker image [caller UID])
@@ -138,8 +132,6 @@ endif
 DOCKER_NAME := snapper
 IMAGE_NAME := klattm/snapper
 IMAGE_TAG := latest
-IOS_DIR := ios
-IOS_SCHEME ?= Snapper
 PYRUN := $(VENV_PY) -m
 PYTEST_TIMEOUT := --timeout=15 --timeout-method=thread
 ROOT_DIR := $(CURDIR)
@@ -149,11 +141,6 @@ UI_DIR := frontend
 DOCKER_BASE := docker run --env-file "$(CURDIR)/.env" -v "$(CURDIR)/data":/app/data
 DOCKER_RUN := $(DOCKER_BASE) --rm $(IMAGE_NAME):$(IMAGE_TAG)
 GENSCRIPT := @$(VENV_PY) scripts/generate_types.py
-IOS_ARCHIVE_PATH ?= $(IOS_DIR)/build/$(IOS_SCHEME).xcarchive
-IOS_EXPORT_OPTIONS ?= $(IOS_DIR)/ExportOptions.plist
-IOS_EXPORT_PATH ?= $(IOS_DIR)/build/export
-IOS_PROJECT := $(IOS_DIR)/Snapper.xcodeproj
-IOS_SIMULATOR_DESTINATION ?= platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1
 PNPM := @cd $(UI_DIR) && pnpm
 PRETTIER := $(PNPM) exec prettier --write
 PYTEST_PARALLEL := -n $(shell $(PYTHON) -c "import os,math; print(math.ceil(os.cpu_count()/2))")
@@ -487,44 +474,11 @@ docs-pdf:
 	$(VENV_PY) scripts/build_docs_pdf.py
 	$(info Generated snapper.pdf)
 
-ios-setup:
-	$(info Setting up iOS project...)
-	@command -v xcodegen >/dev/null 2>&1 || { echo "Installing xcodegen..."; brew install xcodegen; }
-	cd ios && xcodegen generate
-	$(PYTHON) scripts/add_test_target.py ios/Snapper.xcodeproj
-	$(MAKE) ios-gen-types
-	$(info iOS project setup complete!)
-
 ios-gen-types:
 	$(info Generating Swift types from backend schemas...)
 	$(GENSCRIPT) --openapi --export --ios
 	$(info Generated iOS types in ios/Snapper/Models/Generated/)
-
-ios-build:
-	$(info Building iOS app...)
-	cd "$(IOS_DIR)" && xcodebuild -scheme "$(IOS_SCHEME)" -destination '$(IOS_SIMULATOR_DESTINATION)' build
-
-ios-test:
-	$(info Running iOS tests...)
-	cd "$(IOS_DIR)" && xcodebuild -scheme "$(IOS_SCHEME)" -destination '$(IOS_SIMULATOR_DESTINATION)' test
-
-ios-archive:
-	$(info Archiving iOS app [Release]...)
-	rm -rf "$(IOS_ARCHIVE_PATH)"
-	xcodebuild -project "$(IOS_PROJECT)" -scheme "$(IOS_SCHEME)" -configuration Release -destination 'generic/platform=iOS' -archivePath "$(IOS_ARCHIVE_PATH)" -allowProvisioningUpdates archive
-
-ios-export:
-	$(info Exporting IPA from archive...)
-	rm -rf "$(IOS_EXPORT_PATH)"
-	xcodebuild -exportArchive -archivePath "$(IOS_ARCHIVE_PATH)" -exportPath "$(IOS_EXPORT_PATH)" -exportOptionsPlist "$(IOS_EXPORT_OPTIONS)" -allowProvisioningUpdates
-
-ios-ipa: ios-archive ios-export
-	$(info IPA exported to $(IOS_EXPORT_PATH))
-	ls -1 "$(IOS_EXPORT_PATH)"/*.ipa
-
-ios-clean:
-	$(info Cleaning iOS build artifacts...)
-	rm -rf "$(IOS_DIR)/DerivedData" "$(IOS_DIR)/build"
+	$(info Commit + push from inside the ios submodule, then bump the parent pointer.)
 
 DOCKER_PROD_UID := 888
 ifeq ($(OS),Windows_NT)

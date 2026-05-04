@@ -16,10 +16,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Init public submodules (frontend, snapper-mcp)
+      - name: Init public submodules (frontend, snapper-mcp, ios)
         run: |
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init frontend integrations/snapper-mcp
+          git submodule update --init frontend integrations/snapper-mcp ios
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
@@ -80,36 +80,6 @@ jobs:
         if: always()
         run: make docker-stop
 
-  ios-test:
-    runs-on: macos-15
-    timeout-minutes: 20
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: '3.14'
-
-      - name: Setup Python environment
-        run: make setup
-
-      - name: Select Xcode version
-        run: sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
-
-      - name: Show Xcode version
-        run: xcodebuild -version
-
-      - name: Install XcodeGen
-        run: brew install xcodegen
-
-      - name: Setup iOS project
-        run: make ios-setup
-
-      - name: Build iOS app
-        run: make ios-build
-
-      - name: Run iOS tests
-        run: make ios-test
+  # iOS validation lives in the snapper-ios submodule's own CI.
+  # See https://github.com/mateusz-klatt/snapper-ios/actions for build / test /
+  # SonarCloud / gitleaks runs against the public repo.
