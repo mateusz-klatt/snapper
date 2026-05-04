@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>BaseURL</key>
-	<string>https://snapper.ch</string>
+	<string>http://localhost:8000</string>
 	<key>APIPrefix</key>
 	<string>/api</string>
 	<key>WSPath</key>
