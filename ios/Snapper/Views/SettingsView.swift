@@ -9,6 +9,8 @@ struct SettingsView: View {
 
     @State private var showingLogoutAlert = false
     @State private var registeredDevicePublicId: String?
+    @State private var registrationStatus: DeviceRegistrationStatus = .idle
+    @State private var isRetrying = false
 
     var body: some View {
         NavigationView {
@@ -78,22 +80,18 @@ struct SettingsView: View {
                         }
                     }
 
-                    if let pid = registeredDevicePublicId {
-                        HStack {
-                            Text("Device")
-                            Spacer()
-                            Text(String(pid.prefix(12)) + "…")
-                                .font(.caption.monospaced())
-                                .foregroundColor(.secondary)
+                    deviceStatusRow
+
+                    if case .failed = registrationStatus {
+                        Button(action: triggerRetry) {
+                            HStack {
+                                if isRetrying {
+                                    ProgressView()
+                                }
+                                Text(isRetrying ? "Retrying…" : "Retry registration")
+                            }
                         }
-                    } else {
-                        HStack {
-                            Text("Device")
-                            Spacer()
-                            Text("Not registered")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                        .disabled(isRetrying)
                     }
 
                     NavigationLink("Manage preferences") {
@@ -132,7 +130,7 @@ struct SettingsView: View {
             .background(Color.bgBase)
             .task {
                 await notificationService.refreshAuthorizationStatus()
-                registeredDevicePublicId = await DeviceRegistrationService.shared().currentDevicePublicId()
+                await refreshDeviceState()
             }
         }
         .alert("Logout", isPresented: $showingLogoutAlert) {
@@ -230,6 +228,56 @@ struct SettingsView: View {
         Task {
             await authService.logout()
         }
+    }
+
+    @ViewBuilder
+    private var deviceStatusRow: some View {
+        HStack {
+            Text("Device")
+            Spacer()
+            switch registrationStatus {
+            case .succeeded:
+                if let pid = registeredDevicePublicId {
+                    Text(String(pid.prefix(12)) + "…")
+                        .font(.caption.monospaced())
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Registered")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            case .inFlight:
+                Text("Registering…")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            case .failed(let attempt, _):
+                Text("Failed (attempt \(attempt))")
+                    .font(.caption)
+                    .foregroundColor(.brandRed)
+            case .awaitingLogin, .awaitingToken, .idle:
+                Text("Not registered")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func triggerRetry() {
+        guard !isRetrying else { return }
+        isRetrying = true
+        Task {
+            defer { isRetrying = false }
+            let service = DeviceRegistrationService.shared()
+            await service.retryNow()
+            await refreshDeviceState()
+        }
+    }
+
+    @MainActor
+    private func refreshDeviceState() async {
+        let service = DeviceRegistrationService.shared()
+        registeredDevicePublicId = await service.currentDevicePublicId()
+        registrationStatus = await service.currentStatus()
     }
 }
 

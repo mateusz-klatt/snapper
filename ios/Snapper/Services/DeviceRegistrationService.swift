@@ -25,6 +25,21 @@ import os
 /// methods, so the factory hop is a no-op on the hot path and
 /// sidesteps module-load-time `APIClient.shared` touches per Plan
 /// v1.2 fix.
+/// Externally observable lifecycle state for the registration flow.
+///
+/// ``SettingsView`` reads this to show a meaningful state instead of
+/// the previous binary "registered / not registered" — a transient
+/// failure plus pending retry should not look identical to a fresh
+/// install before the APNs token has even arrived.
+enum DeviceRegistrationStatus: Equatable, Sendable {
+    case idle
+    case awaitingLogin
+    case awaitingToken
+    case inFlight
+    case succeeded
+    case failed(attempt: Int, message: String)
+}
+
 actor DeviceRegistrationService {
     @MainActor
     static func shared() -> DeviceRegistrationService {
@@ -38,7 +53,14 @@ actor DeviceRegistrationService {
 
     @MainActor private static var _shared: DeviceRegistrationService?
 
+    /// Exponential-ish backoff capped to four retries (~80s wall-clock
+    /// upper bound). Beyond four the user is expected to take action
+    /// from Settings (toggle airplane mode, re-grant push permission,
+    /// etc.) rather than the device looping forever in the background.
+    private static let retryDelaysSeconds: [TimeInterval] = [1, 4, 16, 60]
+
     private let apiClient: APIClient
+    private let sleeper: Sleeper
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Snapper",
         category: "DeviceRegistration"
@@ -46,9 +68,12 @@ actor DeviceRegistrationService {
     private var pendingToken: Data?
     private var isLoggedIn: Bool = false
     private var lastRegisteredDevicePublicId: String?
+    private var status: DeviceRegistrationStatus = .idle
+    private var retryTask: Task<Void, Never>?
 
-    init(apiClient: APIClient) {
+    init(apiClient: APIClient, sleeper: Sleeper = TaskSleeper()) {
         self.apiClient = apiClient
+        self.sleeper = sleeper
     }
 
     /// Store an incoming APNs token; register immediately if logged-in.
@@ -58,9 +83,12 @@ actor DeviceRegistrationService {
     /// before sending so the backend gets the canonical device-token
     /// string APNs itself expects as a URL segment on provider API.
     func onTokenReceived(_ token: Data) async {
+        cancelPendingRetry()
         pendingToken = token
         if isLoggedIn {
-            await register()
+            await register(attempt: 1)
+        } else {
+            status = .awaitingLogin
         }
     }
 
@@ -71,9 +99,12 @@ actor DeviceRegistrationService {
     /// (cold-start permission prompt on a previously-authorized device)
     /// it is registered now.
     func onLogin() async {
+        cancelPendingRetry()
         isLoggedIn = true
         if pendingToken != nil {
-            await register()
+            await register(attempt: 1)
+        } else {
+            status = .awaitingToken
         }
     }
 
@@ -85,8 +116,10 @@ actor DeviceRegistrationService {
     /// deletion happens on explicit user-initiated unregister via
     /// `DELETE /api/devices/{public_id}` (covered by iOS-5 Settings).
     func onLogout() {
+        cancelPendingRetry()
         isLoggedIn = false
         pendingToken = nil
+        status = .idle
     }
 
     /// Public_id of the last-registered device (nil until first register).
@@ -97,10 +130,31 @@ actor DeviceRegistrationService {
         lastRegisteredDevicePublicId
     }
 
-    private func register() async {
+    /// Externally observable status (idle / inFlight / succeeded /
+    /// failed). Settings UI reads this to surface a transient
+    /// registration failure instead of pretending the device simply
+    /// has not registered yet.
+    func currentStatus() -> DeviceRegistrationStatus {
+        return status
+    }
+
+    /// Manual retry trigger fired from Settings UI when a user wants
+    /// to bypass the backoff window after seeing the failed status.
+    /// Resets the attempt counter so the user-initiated try gets the
+    /// full retry envelope rather than tail-end backoff.
+    func retryNow() async {
+        cancelPendingRetry()
+        guard isLoggedIn, pendingToken != nil else {
+            return
+        }
+        await register(attempt: 1)
+    }
+
+    private func register(attempt: Int) async {
         guard let token = pendingToken else {
             return
         }
+        status = .inFlight
         let hex = token.map { String(format: "%02x", $0) }.joined()
         let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         let deviceId = await MainActor.run {
@@ -128,10 +182,40 @@ actor DeviceRegistrationService {
         do {
             let response = try await apiClient.registerDevice(command: command)
             lastRegisteredDevicePublicId = response.payload.publicId
+            status = .succeeded
             logger.info("Device registered: \(response.payload.publicId)")
         } catch {
-            logger.error("Device registration failed: \(error)")
+            let message = error.localizedDescription
+            status = .failed(attempt: attempt, message: message)
+            logger.error("Device registration failed (attempt \(attempt)): \(error)")
+            if attempt < Self.retryDelaysSeconds.count {
+                let delay = Self.retryDelaysSeconds[attempt - 1]
+                scheduleRetry(after: delay, nextAttempt: attempt + 1)
+            } else {
+                logger.error("Device registration giving up after \(attempt) attempts; user can retry from Settings")
+            }
         }
+    }
+
+    private func scheduleRetry(after delay: TimeInterval, nextAttempt: Int) {
+        retryTask = Task { [weak self, sleeper] in
+            try? await sleeper.sleep(seconds: delay)
+            if Task.isCancelled { return }
+            await self?.attemptRetryIfPending(attempt: nextAttempt)
+        }
+    }
+
+    private func attemptRetryIfPending(attempt: Int) async {
+        if Task.isCancelled { return }
+        guard isLoggedIn, pendingToken != nil else {
+            return
+        }
+        await register(attempt: attempt)
+    }
+
+    private func cancelPendingRetry() {
+        retryTask?.cancel()
+        retryTask = nil
     }
 
     private func currentEnv() -> String {
