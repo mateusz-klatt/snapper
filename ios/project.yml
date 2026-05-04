@@ -1,7 +1,7 @@
 name: Snapper
 options:
   deploymentTarget:
-    iOS: "26.4"
+    iOS: "26.2"
   xcodeVersion: "2620"
 
 settings:
