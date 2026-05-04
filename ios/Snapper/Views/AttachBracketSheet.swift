@@ -18,12 +18,19 @@ import os
 /// HTTP 400.
 struct AttachBracketSheet: View {
     let position: PositionSnapshot
-    let onSubmit: (Double?, Double?) async -> Void
+    let onSubmit: (Double?, Double?, String) async -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var slPriceText: String = ""
     @State private var tpPriceText: String = ""
     @State private var isSubmitting = false
+
+    /// Idempotency token minted once per sheet presentation. Stable
+    /// across in-sheet retries so a network failure plus user re-tap
+    /// dedups at the backend instead of creating two protective brackets.
+    /// Re-presenting the sheet (cancel/dismiss/re-open) gets a fresh
+    /// state value and a fresh key. Mirrors ``NewOrderSheet``.
+    @State private var idempotencyKey: String = UUID().uuidString
 
     private var parsedSL: Double? {
         return Self.parsePrice(slPriceText)
@@ -88,10 +95,11 @@ struct AttachBracketSheet: View {
                         guard !isSubmitting else { return }
                         let sl = parsedSL
                         let tp = parsedTP
+                        let key = idempotencyKey
                         isSubmitting = true
                         Task {
                             defer { isSubmitting = false }
-                            await onSubmit(sl, tp)
+                            await onSubmit(sl, tp, key)
                             dismiss()
                         }
                     }
@@ -138,6 +146,7 @@ extension AttachBracketSheet {
         positionCyclePublicId: String,
         slPrice: Double?,
         tpPrice: Double?,
+        idempotencyKey: String,
         provenance: EnvelopeMinter.Provenance? = nil
     ) -> BracketCreateCommand {
         let envelope = provenance ?? EnvelopeMinter.shared.next(.control)
@@ -152,7 +161,7 @@ extension AttachBracketSheet {
                 positionCyclePublicId: positionCyclePublicId,
                 slPrice: slPrice,
                 tpPrice: tpPrice,
-                idempotencyKey: nil
+                idempotencyKey: idempotencyKey
             )
         )
     }

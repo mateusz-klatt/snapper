@@ -53,6 +53,7 @@ final class AttachTrailingStopSheetTests: XCTestCase {
             positionCyclePublicId: "cycle-2",
             trailingPct: 1.5,
             minLockPct: 0.5,
+            idempotencyKey: "trail-idem-2",
             provenance: Self.fixedProvenance
         )
         XCTAssertEqual(command.type, "create_trailing_stop_command")
@@ -62,7 +63,7 @@ final class AttachTrailingStopSheetTests: XCTestCase {
         XCTAssertEqual(command.payload.positionCyclePublicId, "cycle-2")
         XCTAssertEqual(command.payload.trailingPct, 1.5)
         XCTAssertEqual(command.payload.minLockPct, 0.5)
-        XCTAssertNil(command.payload.idempotencyKey)
+        XCTAssertEqual(command.payload.idempotencyKey, "trail-idem-2")
     }
 
     func testMakeCommandWithoutMinLockPct() {
@@ -70,9 +71,11 @@ final class AttachTrailingStopSheetTests: XCTestCase {
             positionCyclePublicId: "cycle-3",
             trailingPct: 2.0,
             minLockPct: nil,
+            idempotencyKey: "trail-idem-3",
             provenance: Self.fixedProvenance
         )
         XCTAssertEqual(command.payload.trailingPct, 2.0)
         XCTAssertNil(command.payload.minLockPct)
+        XCTAssertEqual(command.payload.idempotencyKey, "trail-idem-3")
     }
 }

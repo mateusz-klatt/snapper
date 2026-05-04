@@ -58,6 +58,7 @@ final class AttachBracketSheetTests: XCTestCase {
             positionCyclePublicId: "cycle-1",
             slPrice: 95.5,
             tpPrice: 110.0,
+            idempotencyKey: "bracket-idem-1",
             provenance: Self.fixedProvenance
         )
         XCTAssertEqual(command.type, "create_bracket_command")
@@ -68,6 +69,6 @@ final class AttachBracketSheetTests: XCTestCase {
         XCTAssertEqual(command.payload.positionCyclePublicId, "cycle-1")
         XCTAssertEqual(command.payload.slPrice, 95.5)
         XCTAssertEqual(command.payload.tpPrice, 110.0)
-        XCTAssertNil(command.payload.idempotencyKey)
+        XCTAssertEqual(command.payload.idempotencyKey, "bracket-idem-1")
     }
 }

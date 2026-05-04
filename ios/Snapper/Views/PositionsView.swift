@@ -145,16 +145,26 @@ struct PositionsView: View {
         .sheet(item: $bracketModalPosition) { wrapper in
             AttachBracketSheet(
                 position: wrapper.position,
-                onSubmit: { slPrice, tpPrice in
-                    await submitBracket(position: wrapper.position, slPrice: slPrice, tpPrice: tpPrice)
+                onSubmit: { slPrice, tpPrice, idempotencyKey in
+                    await submitBracket(
+                        position: wrapper.position,
+                        slPrice: slPrice,
+                        tpPrice: tpPrice,
+                        idempotencyKey: idempotencyKey
+                    )
                 }
             )
         }
         .sheet(item: $trailingStopModalPosition) { wrapper in
             AttachTrailingStopSheet(
                 position: wrapper.position,
-                onSubmit: { trailingPct, minLockPct in
-                    await submitTrailingStop(position: wrapper.position, trailingPct: trailingPct, minLockPct: minLockPct)
+                onSubmit: { trailingPct, minLockPct, idempotencyKey in
+                    await submitTrailingStop(
+                        position: wrapper.position,
+                        trailingPct: trailingPct,
+                        minLockPct: minLockPct,
+                        idempotencyKey: idempotencyKey
+                    )
                 }
             )
         }
@@ -228,7 +238,12 @@ struct PositionsView: View {
         }
     }
 
-    private func submitBracket(position: PositionSnapshot, slPrice: Double?, tpPrice: Double?) async {
+    private func submitBracket(
+        position: PositionSnapshot,
+        slPrice: Double?,
+        tpPrice: Double?,
+        idempotencyKey: String
+    ) async {
         guard let cycleId = position.positionCyclePublicId else {
             submitError = "Position has no active cycle to attach a bracket to."
             return
@@ -237,7 +252,8 @@ struct PositionsView: View {
             let command = AttachBracketSheet.makeCommand(
                 positionCyclePublicId: cycleId,
                 slPrice: slPrice,
-                tpPrice: tpPrice
+                tpPrice: tpPrice,
+                idempotencyKey: idempotencyKey
             )
             _ = try await APIClient.shared.createBracket(command: command)
             await load()
@@ -247,7 +263,12 @@ struct PositionsView: View {
         }
     }
 
-    private func submitTrailingStop(position: PositionSnapshot, trailingPct: Double, minLockPct: Double?) async {
+    private func submitTrailingStop(
+        position: PositionSnapshot,
+        trailingPct: Double,
+        minLockPct: Double?,
+        idempotencyKey: String
+    ) async {
         guard let cycleId = position.positionCyclePublicId else {
             submitError = "Position has no active cycle to attach a trailing stop to."
             return
@@ -256,7 +277,8 @@ struct PositionsView: View {
             let command = AttachTrailingStopSheet.makeCommand(
                 positionCyclePublicId: cycleId,
                 trailingPct: trailingPct,
-                minLockPct: minLockPct
+                minLockPct: minLockPct,
+                idempotencyKey: idempotencyKey
             )
             _ = try await APIClient.shared.createTrailingStop(command: command)
             await load()

@@ -11,12 +11,17 @@ import SwiftUI
 /// the trail from moving below a locked-in profit threshold.
 struct AttachTrailingStopSheet: View {
     let position: PositionSnapshot
-    let onSubmit: (Double, Double?) async -> Void
+    let onSubmit: (Double, Double?, String) async -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var trailingPctText: String = ""
     @State private var minLockPctText: String = ""
     @State private var isSubmitting = false
+
+    /// Idempotency token minted once per sheet presentation. Stable
+    /// across in-sheet retries so a network failure plus user re-tap
+    /// dedups at the backend instead of creating two trailing-stop plans.
+    @State private var idempotencyKey: String = UUID().uuidString
 
     private var parsedTrailing: Double? {
         return Self.parsePercent(trailingPctText)
@@ -80,10 +85,11 @@ struct AttachTrailingStopSheet: View {
                     Button("Submit") {
                         guard !isSubmitting, let trailing = parsedTrailing else { return }
                         let minLock = parsedMinLock
+                        let key = idempotencyKey
                         isSubmitting = true
                         Task {
                             defer { isSubmitting = false }
-                            await onSubmit(trailing, minLock)
+                            await onSubmit(trailing, minLock, key)
                             dismiss()
                         }
                     }
@@ -126,6 +132,7 @@ extension AttachTrailingStopSheet {
         positionCyclePublicId: String,
         trailingPct: Double,
         minLockPct: Double?,
+        idempotencyKey: String,
         provenance: EnvelopeMinter.Provenance? = nil
     ) -> TrailingStopCreateCommand {
         let envelope = provenance ?? EnvelopeMinter.shared.next(.control)
@@ -140,7 +147,7 @@ extension AttachTrailingStopSheet {
                 positionCyclePublicId: positionCyclePublicId,
                 trailingPct: trailingPct,
                 minLockPct: minLockPct,
-                idempotencyKey: nil
+                idempotencyKey: idempotencyKey
             )
         )
     }
