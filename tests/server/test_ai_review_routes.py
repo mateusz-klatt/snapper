@@ -290,6 +290,8 @@ class TestListPendingRoute:
         public_id: str,
         fanout_after: datetime,
         wallet_public_id: str = "wal-1",
+        instrument: str | None = None,
+        signal_envelope: dict[str, object] | None = None,
     ) -> PendingReviewSummary:
         return cast(
             PendingReviewSummary,
@@ -301,6 +303,8 @@ class TestListPendingRoute:
                 "status": "pending",
                 "deadline": fanout_after + timedelta(seconds=60),
                 "fanout_after": fanout_after,
+                "instrument": instrument,
+                "signal_envelope": signal_envelope,
             },
         )
 

@@ -42,6 +42,7 @@ def _make_run_row(
         strategy_name=strategy_name,
         strategy_params={"fast": 10},
         instrument_public_id="BTC-USD",
+        instrument=None,
         exchange="kraken",
         mode="paper",
         timeframe="1h",

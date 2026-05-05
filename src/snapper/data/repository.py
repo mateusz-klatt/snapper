@@ -10587,7 +10587,13 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str | None = None,
         limit: int = 100,
     ) -> list[PendingReviewSummary]:
-        """Fast-path input: pending rows for one delegate past fanout."""
+        """Fast-path input: pending rows for one delegate past fanout.
+
+        Joins ``Instrument`` + ``Symbol`` so the returned rows carry the
+        resolved ``instrument`` ticker and the raw ``signal_envelope``
+        payload (``thesis`` + signal metadata), giving the inbox enough
+        context to render a row without a follow-up read.
+        """
         predicates = [
             AiReview.selected_delegate_public_id == selected_delegate_public_id,
             AiReview.status == "pending",
@@ -10606,6 +10612,22 @@ class SQLAlchemyRepository(Repository):
                         AiReview.status,
                         AiReview.deadline,
                         AiReview.fanout_after,
+                        Symbol.native_symbol,
+                        AiReview.signal_envelope,
+                    )
+                    .outerjoin(
+                        Instrument,
+                        and_(
+                            AiReview.instrument_public_id == Instrument.public_id,
+                            *where_active(Instrument, now),
+                        ),
+                    )
+                    .outerjoin(
+                        Symbol,
+                        and_(
+                            Instrument.symbol_public_id == Symbol.public_id,
+                            *where_active(Symbol, now),
+                        ),
                     )
                     .where(*predicates)
                     .order_by(AiReview.fanout_after.asc())
@@ -10623,6 +10645,8 @@ class SQLAlchemyRepository(Repository):
                         "status": str(r[4]),
                         "deadline": r[5],
                         "fanout_after": r[6],
+                        "instrument": r[7],
+                        "signal_envelope": r[8],
                     },
                 )
                 for r in rows

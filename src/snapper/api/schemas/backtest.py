@@ -191,6 +191,9 @@ class BacktestRunData(StrictDataSchema[Literal["backtest_run"]]):
         strategy_name: Strategy class name.
         strategy_params: Strategy parameters.
         instrument_public_id: Source-feed instrument.
+        instrument: Resolved native ticker (e.g. ``BTC-USD-PERP``)
+            joined from the symbol table when available; ``None`` when
+            the instrument was archived or the symbol JOIN failed.
         exchange: Source-feed exchange name.
         target_execution_exchange: Target order venue when set; ``None``
             attributes fills to ``exchange`` (single-exchange run).
@@ -209,6 +212,7 @@ class BacktestRunData(StrictDataSchema[Literal["backtest_run"]]):
     strategy_name: str
     strategy_params: JsonObject = {}
     instrument_public_id: str
+    instrument: str | None = None
     exchange: str
     timeframe: str
     start_date: datetime

@@ -111,7 +111,13 @@ class AiReviewDecisionResponse(StrictBody):
 
 
 class PendingReviewSummaryItem(StrictBody):
-    """Per-row shape returned by ``GET /api/ai-reviews/pending``."""
+    """Per-row shape returned by ``GET /api/ai-reviews/pending``.
+
+    Carries the resolved ``instrument`` ticker and the raw
+    ``signal_envelope`` payload (``thesis``, ``side``, news anchors)
+    so the AI delegate inbox can render a meaningful row without a
+    follow-up detail read.
+    """
 
     review_public_id: str
     selected_delegate_public_id: str
@@ -120,6 +126,8 @@ class PendingReviewSummaryItem(StrictBody):
     status: str
     deadline: datetime
     fanout_after: datetime
+    instrument: str | None = None
+    signal_envelope: JsonObject | None = None
 
 
 class PendingReviewListResponse(StrictBody):
@@ -305,6 +313,8 @@ async def list_pending_ai_reviews(
             deadline=row["deadline"],
             fanout_after=row["fanout_after"],
             wallet_public_id=row["wallet_public_id"],
+            instrument=row.get("instrument"),
+            signal_envelope=row.get("signal_envelope"),
         )
         for row in rows
     ]

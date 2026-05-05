@@ -1191,7 +1191,14 @@ class BacktestRunInsertRow(TypedDict, total=False):
 
 
 class BacktestRunRow(TypedDict):
-    """Read projection for backtest_runs queries."""
+    """Read projection for backtest_runs queries.
+
+    ``instrument`` is the resolved native symbol (e.g. ``BTC-USD-PERP``)
+    populated when the read path joins on ``symbols``. List/detail
+    queries set it; mutation paths that return a freshly inserted run
+    without the join leave it ``None`` so the caller can fall back to
+    ``instrument_public_id``.
+    """
 
     public_id: str
     timestamp: datetime
@@ -1202,6 +1209,7 @@ class BacktestRunRow(TypedDict):
     strategy_name: str
     strategy_params: dict[str, Any]
     instrument_public_id: str
+    instrument: str | None
     exchange: str
     mode: str
     timeframe: str
@@ -1910,9 +1918,11 @@ class PendingReviewSummary(TypedDict):
     timeouts. The offline / fast-path scanners use the same shape minus
     the deadline (offline dispatch is gated by ``fanout_after`` instead).
     The ``GET /api/ai-reviews/pending`` REST surface adds
-    ``wallet_public_id`` so dashboards / the bridge can render the
-    review without a follow-up read. Keeping a single shared TypedDict
-    avoids drift between the four callers.
+    ``wallet_public_id`` plus ``instrument`` (resolved native ticker)
+    and ``signal_envelope`` (the raw signal payload — ``thesis``,
+    ``side``, ``strength``, anchored news) so dashboards / the bridge
+    can render the review without a follow-up read. Keeping a single
+    shared TypedDict avoids drift between the four callers.
     """
 
     public_id: str
@@ -1922,3 +1932,5 @@ class PendingReviewSummary(TypedDict):
     status: str
     deadline: datetime
     fanout_after: datetime
+    instrument: str | None
+    signal_envelope: dict[str, Any] | None

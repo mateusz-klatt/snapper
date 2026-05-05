@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any
 from typing import cast
 
+from sqlalchemy import and_
 from sqlalchemy import select
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +25,8 @@ from snapper.data.models import BacktestResult
 from snapper.data.models import BacktestRun
 from snapper.data.models import BacktestSignal
 from snapper.data.models import BacktestTrade
+from snapper.data.models import Instrument
+from snapper.data.models import Symbol
 from snapper.data.repository import where_active
 from snapper.data.repository_types import BacktestComparisonInsertRow
 from snapper.data.repository_types import BacktestComparisonRow
@@ -41,8 +44,14 @@ from snapper.data.repository_types import BacktestTradeInsertRow
 from snapper.data.repository_types import BacktestTradeRow
 
 
-def _run_to_dict(row: BacktestRun) -> BacktestRunRow:
-    """Project a BacktestRun ORM row into the TypedDict shape."""
+def _run_to_dict(row: BacktestRun, native_symbol: str | None = None) -> BacktestRunRow:
+    """Project a BacktestRun ORM row into the TypedDict shape.
+
+    ``native_symbol`` is the resolved instrument ticker (joined via
+    ``Instrument`` + ``Symbol``) when the caller does the lookup; left
+    ``None`` for paths that only have the ORM row and no joined symbol
+    (e.g. fresh insert returns).
+    """
     return BacktestRunRow(
         public_id=row.public_id,
         timestamp=row.timestamp,
@@ -53,6 +62,7 @@ def _run_to_dict(row: BacktestRun) -> BacktestRunRow:
         strategy_name=row.strategy_name,
         strategy_params=row.strategy_params,
         instrument_public_id=row.instrument_public_id,
+        instrument=native_symbol,
         exchange=row.exchange,
         mode=row.mode,
         timeframe=row.timeframe,
@@ -250,6 +260,11 @@ class BacktestRepository:
     async def get_run(self, public_id: str, as_of: datetime) -> BacktestRunRow | None:
         """Retrieve a backtest run by public_id.
 
+        Joins ``Instrument`` + ``Symbol`` so the returned row carries
+        the resolved ``instrument`` ticker (native symbol) for UI
+        rendering — frontend lists no longer need a per-row exchange
+        lookup to display the strategy / instrument pair.
+
         Args:
             public_id: Run public identifier.
             as_of: Bus time for temporal query.
@@ -258,21 +273,32 @@ class BacktestRepository:
             Run row or None.
         """
         async with self.session() as s:
-            row = (
-                (
-                    await s.execute(
-                        select(BacktestRun).where(
-                            BacktestRun.public_id == public_id,
-                            *where_active(BacktestRun, as_of),
-                        )
-                    )
+            result = await s.execute(
+                select(BacktestRun, Symbol.native_symbol)
+                .outerjoin(
+                    Instrument,
+                    and_(
+                        BacktestRun.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
                 )
-                .scalars()
-                .first()
+                .outerjoin(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(
+                    BacktestRun.public_id == public_id,
+                    *where_active(BacktestRun, as_of),
+                )
             )
+            row = result.first()
             if row is None:
                 return None
-            return _run_to_dict(row)
+            run, native_symbol = row
+            return _run_to_dict(run, native_symbol=native_symbol)
 
     async def list_runs(
         self,
@@ -310,20 +336,28 @@ class BacktestRepository:
                 conditions.append(BacktestRun.status == status)
             if config_hash is not None:
                 conditions.append(BacktestRun.config_hash == config_hash)
-            rows = (
-                (
-                    await s.execute(
-                        select(BacktestRun)
-                        .where(*conditions)
-                        .order_by(BacktestRun.timestamp.desc())
-                        .limit(limit)
-                        .offset(offset)
-                    )
+            result = await s.execute(
+                select(BacktestRun, Symbol.native_symbol)
+                .outerjoin(
+                    Instrument,
+                    and_(
+                        BacktestRun.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
                 )
-                .scalars()
-                .all()
+                .outerjoin(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(*conditions)
+                .order_by(BacktestRun.timestamp.desc())
+                .limit(limit)
+                .offset(offset)
             )
-            return [_run_to_dict(r) for r in rows]
+            return [_run_to_dict(run, native_symbol=sym) for run, sym in result.all()]
 
     async def update_run_status(
         self,
