@@ -122,6 +122,32 @@ def _stub_submit_decision(
     return stub
 
 
+def _decision_envelope(
+    *,
+    decision: str,
+    rationale: str | None = None,
+    public_id: str = "req-decision-1",
+    sequence_id: int = 1,
+) -> dict[str, Any]:
+    """Return a canonical ``AiReviewDecisionCommand`` envelope.
+
+    Mirrors the ``CreateOrderCommand`` shape used by every other
+    mutating REST endpoint: provenance fields on the envelope,
+    domain payload (decision + rationale) under ``payload``.
+    """
+    payload: dict[str, Any] = {"decision": decision}
+    if rationale is not None:
+        payload["rationale"] = rationale
+    return {
+        "type": "ai_review_decision_command",
+        "session_id": "s1",
+        "sequence_id": sequence_id,
+        "public_id": public_id,
+        "timestamp": datetime(2026, 4, 26, 12, 0, 0, tzinfo=UTC).isoformat(),
+        "payload": payload,
+    }
+
+
 class TestSubmitDecisionRoute:
     """``POST /api/ai-reviews/{id}/decision`` HTTP-status mapping."""
 
@@ -148,7 +174,7 @@ class TestSubmitDecisionRoute:
         client = _create_client(repo=AsyncMock(), principal=_delegate_principal())
         response = client.post(
             "/api/ai-reviews/rev-1/decision",
-            json={"decision": "approve", "rationale": "LGTM"},
+            json=_decision_envelope(decision="approve", rationale="LGTM"),
         )
         assert response.status_code == 200
         body = response.json()
@@ -182,7 +208,7 @@ class TestSubmitDecisionRoute:
         client = _create_client(repo=AsyncMock(), principal=_delegate_principal())
         response = client.post(
             "/api/ai-reviews/rev-1/decision",
-            json={"decision": "approve"},
+            json=_decision_envelope(decision="approve"),
         )
         assert response.status_code == 200
         body = response.json()
@@ -226,7 +252,7 @@ class TestSubmitDecisionRoute:
         client = _create_client(repo=AsyncMock(), principal=_delegate_principal())
         response = client.post(
             "/api/ai-reviews/rev-1/decision",
-            json={"decision": "reject"},
+            json=_decision_envelope(decision="reject"),
         )
         assert response.status_code == expected_status
         envelope = response.json()["detail"]
@@ -258,13 +284,31 @@ class TestSubmitDecisionRoute:
         client = _create_client(repo=AsyncMock(), principal=_delegate_principal())
         response = client.post(
             "/api/ai-reviews/rev-1/decision",
-            json={"decision": "maybe"},
+            json=_decision_envelope(decision="maybe"),
         )
         assert response.status_code == 422
         envelope = response.json()["detail"]
         assert envelope["success"] is False
         assert envelope["error_code"] == "invalid_decision"
         stub.assert_not_called()
+
+    def test_flat_body_without_envelope_is_rejected(self) -> None:
+        """Legacy flat ``{decision, rationale}`` body -> 422.
+
+        Locks in the envelope contract: every mutating REST endpoint
+        (orders, brackets, trailing stops, backtests, AI review
+        decisions) MUST receive a ``PayloadRequest`` envelope with
+        provenance fields and a nested ``payload``. A flat body lacks
+        the discriminator ``type`` and the ``payload`` wrapper, so
+        :class:`AiReviewDecisionCommand` validation rejects it before
+        the route body runs.
+        """
+        client = _create_client(repo=AsyncMock(), principal=_delegate_principal())
+        response = client.post(
+            "/api/ai-reviews/rev-1/decision",
+            json={"decision": "approve", "rationale": "LGTM"},
+        )
+        assert response.status_code == 422
 
     def test_permission_denied_for_role_without_create_orders(self) -> None:
         """VIEWER role -> 403 from require_permission(CREATE_ORDERS).
@@ -276,7 +320,7 @@ class TestSubmitDecisionRoute:
         client = _create_client(repo=AsyncMock(), principal=_viewer_principal())
         response = client.post(
             "/api/ai-reviews/rev-1/decision",
-            json={"decision": "approve"},
+            json=_decision_envelope(decision="approve"),
         )
         assert response.status_code == 403
 

@@ -485,8 +485,13 @@ def _seed_ai_delegate_review(
     )
 
 
-def main() -> None:
-    """Run the demo seed end-to-end."""
+def main() -> int:
+    """Run the demo seed end-to-end.
+
+    Returns:
+        ``0`` on successful completion. Errors raise ``RuntimeError``
+        before reaching the return statement.
+    """
     db_url = _sync_db_url(BootstrapSettingsLoader().db_url)
     engine = create_engine(db_url, poolclass=NullPool)
     tracker = SequenceTracker()
@@ -513,7 +518,7 @@ def main() -> None:
         existing_orders = conn.execute(text("SELECT COUNT(*) FROM orders")).scalar() or 0
         if existing_orders > 0:
             print(f"orders table already has {existing_orders} rows, skipping demo seed")
-            return
+            return 0
 
         order1_t = datetime(2026, 4, 21, 9, 14, 32, tzinfo=UTC)
         order1 = _insert_order(
@@ -716,7 +721,8 @@ def main() -> None:
         conn.commit()
     engine.dispose()
     print("demo seed inserted: 4 orders, 2 executions, 2 positions, 3 backtests")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

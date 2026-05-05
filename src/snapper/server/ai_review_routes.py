@@ -30,6 +30,7 @@ from datetime import UTC
 from datetime import datetime
 from typing import Annotated
 from typing import Any
+from typing import Literal
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -37,6 +38,7 @@ from fastapi import HTTPException
 from fastapi import Query
 from fastapi import status
 
+from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import StrictBody
 from snapper.application.ai_review.service import ERROR_DECISION_ALREADY_RECORDED
 from snapper.application.ai_review.service import ERROR_NOT_AUTHORIZED
@@ -96,6 +98,25 @@ class AiReviewDecisionRequest(StrictBody):
     rationale: str | None = None
 
 
+class AiReviewDecisionCommand(
+    PayloadRequest[Literal["ai_review_decision_command"], AiReviewDecisionRequest],
+):
+    """Request envelope for ``POST /api/ai-reviews/{id}/decision``.
+
+    Brings the AI-review decision REST surface in line with every
+    other mutating REST endpoint (orders, brackets, trailing stops,
+    backtests, wallets, scope grants, credentials): the client stamps
+    a provenance envelope (``public_id``, ``session_id``,
+    ``sequence_id``, ``timestamp``) around the inner
+    :class:`AiReviewDecisionRequest` payload. The MCP tool surface
+    keeps its flat-args convention because FastMCP owns the JSON-RPC
+    framing and provenance is minted server-side from JWT claims +
+    ``event_metadata`` when the audit event hits the bus.
+    """
+
+    type: Literal["ai_review_decision_command"] = "ai_review_decision_command"
+
+
 class AiReviewDecisionResponse(StrictBody):
     """Canonical envelope wrapped in a JSON body for the REST surface.
 
@@ -152,7 +173,7 @@ def _build_envelope(
 
 @router.post(
     "/{review_public_id}/decision",
-    openapi_extra=openapi_schema(AiReviewDecisionRequest),
+    openapi_extra=openapi_schema(AiReviewDecisionCommand),
     responses={
         status.HTTP_404_NOT_FOUND: {"description": "Review not found"},
         status.HTTP_403_FORBIDDEN: {"description": "Caller not authorized"},
@@ -163,7 +184,7 @@ def _build_envelope(
 )
 async def submit_ai_review_decision_route(
     review_public_id: str,
-    body: Annotated[AiReviewDecisionRequest, Depends(json_body(AiReviewDecisionRequest))],
+    command: Annotated[AiReviewDecisionCommand, Depends(json_body(AiReviewDecisionCommand))],
     principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.CREATE_ORDERS))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _csrf: Annotated[None, Depends(validate_csrf_token)] = None,
@@ -176,8 +197,9 @@ async def submit_ai_review_decision_route(
 
     Args:
         review_public_id: UUID7 of the ``ai_reviews`` row.
-        body: :class:`AiReviewDecisionRequest` with decision +
-            optional rationale.
+        command: :class:`AiReviewDecisionCommand` envelope wrapping
+            the inner :class:`AiReviewDecisionRequest` (decision +
+            optional rationale).
         principal: Authenticated caller (must hold
             :data:`Permission.CREATE_ORDERS`).
         repo: Repository handle.
@@ -191,6 +213,7 @@ async def submit_ai_review_decision_route(
         HTTPException: 404 / 403 / 409 / 410 / 422 / 503 mapped from
             the service's ``error_code``.
     """
+    body = command.payload
     try:
         decision_enum = AiReviewDecisionEnum(body.decision)
     except ValueError as exc:

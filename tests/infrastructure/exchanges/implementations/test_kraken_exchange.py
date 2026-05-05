@@ -4196,12 +4196,25 @@ class TestKrakenExchangeClientSimpleEdgeCases:
         assert not client.sandbox
 
     def test_init_sandbox_mode(self) -> None:
-        """Verify init sandbox mode."""
+        """Verify init sandbox mode raises when Kraken lacks a sandbox URL.
+
+        Kraken Spot has no public sandbox endpoint, so initialising
+        with ``sandbox=True`` MUST raise. Older ccxt versions
+        produced a ``NotSupported`` with the explicit
+        ``"does not have a sandbox URL"`` message; newer ccxt
+        releases (4.5+) raise a bare ``TypeError`` because the
+        ``urls['test']`` lookup yields ``None`` and downstream
+        ``self.extend(None)`` fails. We accept either as proof that
+        the sandbox flag does not silently fall through to a live
+        URL.
+        """
         try:
             KrakenExchangeClient(api_key="key", api_secret="secret", sandbox=True)
-            raise AssertionError("Expected NotSupported exception")
-        except Exception as e:
-            assert "does not have a sandbox URL" in str(e)
+        except Exception as exc:
+            message = str(exc)
+            assert "does not have a sandbox URL" in message or "NoneType" in message
+        else:
+            raise AssertionError("Expected sandbox initialisation to raise")
 
     @pytest.mark.asyncio
     async def test_disconnect_without_connection(self, client: KrakenExchangeClient) -> None:
