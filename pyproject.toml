@@ -242,6 +242,11 @@ warn_required_dynamic_aliases = true
 source = ["src/snapper", "proprietary/src", "scripts"]
 branch = true
 omit = [
+    # `__init__.py` files are forced empty by project rule (CLAUDE.md);
+    # coverage of 0/0 is meaningless AND the same basename exists in all
+    # three `source` roots so SonarCloud's lcov->basename collapse
+    # produces "ambiguity, the file exists in several 'source'" warnings.
+    "*/__init__.py",
     "src/snapper/data/migrations/*",
 ]
 
