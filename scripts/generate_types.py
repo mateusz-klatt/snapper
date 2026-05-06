@@ -2184,7 +2184,9 @@ def _strip_jsdoc_blocks(content: str, keep_first: bool = True) -> str:
     return "".join(result)
 
 
-def postprocess_openapi_typescript_file(file_path: Path) -> None:
+def postprocess_openapi_typescript_file(
+    file_path: Path, *, openapi_spec_path: Path | None = None
+) -> None:
     """Normalize openapi-typescript root export naming + strip JSDoc noise.
 
     This repository enforces naming conventions that prefer PascalCase for
@@ -2197,6 +2199,11 @@ def postprocess_openapi_typescript_file(file_path: Path) -> None:
 
     Args:
         file_path: Path to the generated `api.generated.ts` file.
+        openapi_spec_path: Path to the source OpenAPI JSON. When provided,
+            the response-side widening pass uses the spec's ``requestBody``
+            references (transitively closed) to identify request-side schemas
+            that must NOT be widened, instead of falling back to a name-suffix
+            heuristic. Pass None to skip the widening entirely.
     """
     if not file_path.is_file():
         return
@@ -2225,10 +2232,148 @@ def postprocess_openapi_typescript_file(file_path: Path) -> None:
     for old, new in _json_type_replacements.items():
         updated = updated.replace(old, new)
 
+    if openapi_spec_path is not None and openapi_spec_path.is_file():
+        request_schema_names = _request_schema_names_from_openapi(openapi_spec_path)
+    else:
+        request_schema_names = frozenset()
+    updated = _widen_optional_nullable_to_undefined(updated, request_schema_names)
     updated = _strip_jsdoc_blocks(updated)
 
     if updated != content:
         file_path.write_text(updated, encoding="utf-8")
+
+
+_OPTIONAL_NULLABLE_PATTERN = re.compile(r"(?P<prefix>\?:\s*[^;\n]*?\|\s*null)(?P<suffix>;)")
+_SCHEMA_BLOCK_OPEN = re.compile(r"^\s+(?P<name>[A-Za-z][A-Za-z0-9_]*):\s*\{\s*$")
+_OPENAPI_REF_PATTERN = re.compile(r"#/components/schemas/(\w+)")
+
+
+def _widen_optional_nullable_to_undefined(
+    content: str, request_schema_names: frozenset[str]
+) -> str:
+    """Widen ``key?: T | null;`` to ``key?: T | null | undefined;``.
+
+    Reconciles ``openapi-typescript`` output (which omits ``| undefined`` on
+    optional properties) with Zod-inferred response shapes (Zod's
+    ``.nullable().optional()`` returns ``T | null | undefined``). Without this
+    widening, ``exactOptionalPropertyTypes: true`` rejects the assignment of
+    Zod's parse output to the OpenAPI type because the optional property's
+    value type does not include ``undefined``.
+
+    The patch is idempotent: a property already widened to
+    ``key?: T | null | undefined;`` will not match the regex (the trailing
+    ``| null`` capture requires a semicolon immediately after).
+
+    Scope rules:
+
+    1. Only ``key?: T | null;`` (trailing ``| null`` + semicolon) is widened.
+       Plain ``key?: T;`` patterns are mostly request-body framework or
+       discrimination (``?: never``); leaving them alone is safe.
+    2. **Request-side schemas are excluded.** ``request_schema_names`` is the
+       transitively-closed set of schema names reachable from any
+       ``requestBody.$ref`` in the OpenAPI spec. Those types are JS→server
+       inputs whose contract is "absent OR null, never explicit
+       ``undefined``"; widening them would let callers pass literal
+       ``undefined``, weakening the input contract.
+
+    Args:
+        content: Generated TypeScript source.
+        request_schema_names: Schemas reachable from request bodies (including
+            payload sub-schemas). Pass an empty frozenset to widen everything.
+
+    Returns:
+        Source with response-side optional nullable properties widened.
+    """
+    out_lines: list[str] = []
+    block_stack: list[str | None] = []
+
+    for line in content.splitlines(keepends=True):
+        stripped_open = _SCHEMA_BLOCK_OPEN.match(line)
+        if stripped_open:
+            block_stack.append(stripped_open.group("name"))
+        elif line.lstrip().startswith("};") or line.lstrip().startswith("}"):
+            if block_stack:
+                block_stack.pop()
+
+        innermost_named_block = next(
+            (name for name in reversed(block_stack) if name is not None),
+            None,
+        )
+        is_request_block = (
+            innermost_named_block is not None and innermost_named_block in request_schema_names
+        )
+
+        if is_request_block:
+            out_lines.append(line)
+            continue
+
+        out_lines.append(_OPTIONAL_NULLABLE_PATTERN.sub(_widen_optional_nullable_replace, line))
+
+    return "".join(out_lines)
+
+
+def _widen_optional_nullable_replace(match: re.Match[str]) -> str:
+    return f"{match.group('prefix')} | undefined{match.group('suffix')}"
+
+
+def _request_schema_names_from_openapi(openapi_spec_path: Path) -> frozenset[str]:
+    """Transitively close schemas reachable from any ``requestBody`` in the spec.
+
+    Returns the canonical "do-not-widen" set: every schema that's reachable
+    by walking ``$ref`` links starting from each operation's
+    ``requestBody.content.*.schema``. Includes inner payload schemas wrapped
+    in request envelopes (e.g. ``RefreshTokenPayload`` referenced via
+    ``RefreshTokenRequest.payload``).
+
+    Args:
+        openapi_spec_path: Path to the OpenAPI JSON spec.
+
+    Returns:
+        Schema names that participate in any request body.
+    """
+    spec = json.loads(openapi_spec_path.read_text(encoding="utf-8"))
+    schemas = spec.get("components", {}).get("schemas", {})
+
+    request_roots: set[str] = set()
+    for path_item in spec.get("paths", {}).values():
+        if not isinstance(path_item, dict):
+            continue
+        for operation in path_item.values():
+            if not isinstance(operation, dict):
+                continue
+            request_body = operation.get("requestBody")
+            if isinstance(request_body, dict):
+                _collect_refs(request_body, request_roots)
+
+    seen: set[str] = set()
+    pending = set(request_roots)
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        schema = schemas.get(name)
+        if schema is None:
+            continue
+        sub_refs: set[str] = set()
+        _collect_refs(schema, sub_refs)
+        pending |= sub_refs - seen
+
+    return frozenset(seen)
+
+
+def _collect_refs(node: object, refs: set[str]) -> None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "$ref" and isinstance(value, str):
+                match = _OPENAPI_REF_PATTERN.match(value)
+                if match:
+                    refs.add(match.group(1))
+            else:
+                _collect_refs(value, refs)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_refs(item, refs)
 
 
 def main() -> int:
@@ -2437,7 +2582,8 @@ def _run_openapi_typescript_postprocess(args: GenerateTypesArgs, project_root: P
         return
 
     file_path = project_root.resolve() / _OPENAPI_TYPESCRIPT_TARGET
-    postprocess_openapi_typescript_file(file_path)
+    openapi_spec_path = project_root.resolve() / "build" / "openapi.json"
+    postprocess_openapi_typescript_file(file_path, openapi_spec_path=openapi_spec_path)
 
 
 if __name__ == "__main__":
