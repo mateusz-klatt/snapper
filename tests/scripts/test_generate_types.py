@@ -1,9 +1,13 @@
 """Tests for scripts/generate_types.py."""
 
+import builtins
 import json
 import sys
+from collections.abc import Iterable
+from collections.abc import Set
 from pathlib import Path
 from typing import Any
+from typing import Self
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -13,8 +17,11 @@ import scripts.generate_types as generate_types
 from scripts.generate_types import ENTITY_EXCLUDE_FIELDS
 from scripts.generate_types import ENTITY_UNION_ID_FIELDS
 from scripts.generate_types import SWIFT_KEYWORD_RENAMES
+from scripts.generate_types import _collect_refs
 from scripts.generate_types import _register_openapi_schema
+from scripts.generate_types import _request_schema_names_from_openapi
 from scripts.generate_types import _strip_jsdoc_blocks
+from scripts.generate_types import _widen_optional_nullable_to_undefined
 from scripts.generate_types import camel_to_lower
 from scripts.generate_types import derive_entity_name
 from scripts.generate_types import discover_ws_schemas
@@ -48,6 +55,54 @@ from scripts.generate_types import strip_eslint_disable_file
 from scripts.generate_types import strip_primitive_titles
 from scripts.generate_types import to_camel_case
 from scripts.generate_types import topological_sort_schemas
+from snapper.core.json_types import JsonObject
+
+
+def _order_openapi_fixture() -> JsonObject:
+    """Builds a minimal OpenAPI fixture with transitive request-body refs."""
+    return {
+        "components": {
+            "schemas": {
+                "OrderRequest": {
+                    "type": "object",
+                    "properties": {
+                        "payload": {"$ref": "#/components/schemas/OrderBody"},
+                    },
+                },
+                "OrderBody": {
+                    "type": "object",
+                    "properties": {
+                        "side": {"$ref": "#/components/schemas/OrderSide"},
+                    },
+                },
+                "OrderSide": {"type": "string", "enum": ["buy", "sell"]},
+                "OrderResponse": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {"type": "string", "nullable": True},
+                    },
+                },
+            },
+        },
+        "paths": {
+            "/ignored": "not a path item",
+            "/orders": {
+                "parameters": [],
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/OrderRequest",
+                                },
+                            },
+                        },
+                    },
+                },
+                "put": {"requestBody": "not a request body object"},
+            },
+        },
+    }
 
 
 class TestFixRefsPydantic:
@@ -318,6 +373,241 @@ class TestPostprocessOpenapiTypescriptFile:
         assert "export type Operations" in updated
         assert "operations['op']" not in updated
         assert "Operations['op']" in updated
+
+    def test_widens_optional_nullable_properties(self) -> None:
+        """Adds undefined to optional nullable properties."""
+        ts_source = "\n".join(
+            [
+                "export interface Components {",
+                "  schemas: {",
+                "    OrderBody: {",
+                '      side?: "buy" | "sell" | null;',
+                "      note?: string;",
+                "      already?: string | null | undefined;",
+                "    };",
+                "    OrderResponse: {",
+                "      topic?: string | null;",
+                "    };",
+                "  };",
+                "}",
+                "",
+            ]
+        )
+        expected = "\n".join(
+            [
+                "export interface Components {",
+                "  schemas: {",
+                "    OrderBody: {",
+                '      side?: "buy" | "sell" | null | undefined;',
+                "      note?: string;",
+                "      already?: string | null | undefined;",
+                "    };",
+                "    OrderResponse: {",
+                "      topic?: string | null | undefined;",
+                "    };",
+                "  };",
+                "}",
+                "",
+            ]
+        )
+
+        updated = _widen_optional_nullable_to_undefined(ts_source, frozenset())
+        assert updated == expected
+        assert _widen_optional_nullable_to_undefined(updated, frozenset()) == updated
+
+    def test_widening_skips_request_schema_blocks(self) -> None:
+        """Leaves request-side schema blocks unchanged."""
+        ts_source = "\n".join(
+            [
+                "export interface Components {",
+                "  schemas: {",
+                "    OrderBody: {",
+                '      side?: "buy" | "sell" | null;',
+                "    };",
+                "    OrderResponse: {",
+                "      topic?: string | null;",
+                "    };",
+                "  };",
+                "}",
+                "",
+            ]
+        )
+
+        updated = _widen_optional_nullable_to_undefined(
+            ts_source,
+            frozenset({"OrderBody"}),
+        )
+        assert 'side?: "buy" | "sell" | null;' in updated
+        assert 'side?: "buy" | "sell" | null | undefined;' not in updated
+        assert "topic?: string | null | undefined;" in updated
+
+    def test_postprocess_uses_openapi_spec_request_schema_exclusions(self, tmp_path: Path) -> None:
+        """Uses the OpenAPI spec to avoid widening request schemas."""
+        file_path = tmp_path / "api.generated.ts"
+        spec_path = tmp_path / "openapi.json"
+        spec_path.write_text(json.dumps(_order_openapi_fixture()), encoding="utf-8")
+        file_path.write_text(
+            "\n".join(
+                [
+                    "export interface paths {",
+                    "  '/orders': {",
+                    "    post: {",
+                    "      requestBody: {",
+                    "        content: {",
+                    "          'application/json': components['schemas']['OrderRequest'];",
+                    "        };",
+                    "      };",
+                    "      responses: {",
+                    "        200: { content: { 'application/json': components['schemas']['OrderResponse'] } };",
+                    "      };",
+                    "    };",
+                    "  };",
+                    "}",
+                    "export interface components {",
+                    "  schemas: {",
+                    "    OrderRequest: {",
+                    "      payload?: components['schemas']['OrderBody'] | null;",
+                    "    };",
+                    "    OrderBody: {",
+                    "      side?: components['schemas']['OrderSide'] | null;",
+                    "    };",
+                    "    OrderSide: 'buy' | 'sell';",
+                    "    OrderResponse: {",
+                    "      topic?: string | null;",
+                    '      metadata?: components["schemas"]["JsonObject"] | null;',
+                    "    };",
+                    "  };",
+                    "}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        postprocess_openapi_typescript_file(file_path, openapi_spec_path=spec_path)
+
+        updated = file_path.read_text(encoding="utf-8")
+        assert "export interface Paths" in updated
+        assert "export interface Components" in updated
+        assert "components[" not in updated
+        assert "payload?: Components['schemas']['OrderBody'] | null;" in updated
+        assert "payload?: Components['schemas']['OrderBody'] | null | undefined;" not in updated
+        assert "side?: Components['schemas']['OrderSide'] | null;" in updated
+        assert "side?: Components['schemas']['OrderSide'] | null | undefined;" not in updated
+        assert "topic?: string | null | undefined;" in updated
+        assert "metadata?: Record<string, unknown> | null | undefined;" in updated
+
+
+class TestOpenapiRequestSchemaHelpers:
+    """Tests for OpenAPI request schema postprocess helpers."""
+
+    def test_collect_refs_recurses_through_dicts_and_lists(self) -> None:
+        """Collects component refs from nested dictionaries and lists."""
+        node: JsonObject = {
+            "$ref": "#/components/schemas/Foo",
+            "x": [
+                {"$ref": "#/components/schemas/Bar"},
+                {"$ref": "#/other/Baz"},
+                {"$ref": 123},
+                {"nested": [{"$ref": "#/components/schemas/Foo"}]},
+            ],
+        }
+        refs: set[str] = set()
+
+        _collect_refs(node, refs)
+
+        assert refs == {"Foo", "Bar"}
+
+    def test_request_schema_names_from_openapi_closes_transitive_refs(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Returns request body schemas plus transitive payload refs."""
+        spec_path = tmp_path / "openapi.json"
+        spec_path.write_text(json.dumps(_order_openapi_fixture()), encoding="utf-8")
+
+        result = _request_schema_names_from_openapi(spec_path)
+
+        assert result == frozenset({"OrderRequest", "OrderBody", "OrderSide"})
+
+    def test_request_schema_names_keeps_dangling_request_ref(self, tmp_path: Path) -> None:
+        """Keeps request roots even when the schema is missing."""
+        spec: JsonObject = {
+            "components": {"schemas": {}},
+            "paths": {
+                "/orders": {
+                    "post": {
+                        "requestBody": {
+                            "$ref": "#/components/schemas/MissingRequest",
+                        },
+                    },
+                },
+            },
+        }
+        spec_path = tmp_path / "openapi.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+        result = _request_schema_names_from_openapi(spec_path)
+
+        assert result == frozenset({"MissingRequest"})
+
+    def test_request_schema_names_ignores_already_seen_pending_schema(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Exercises the defensive already-seen pending guard."""
+
+        class PendingSet(set[str]):
+            """Re-adds the first popped schema name once."""
+
+            def __init__(self, values: Iterable[str]) -> None:
+                super().__init__(values)
+                self._name_to_readd: str | None = None
+
+            def pop(self) -> str:
+                value = super().pop()
+                self._name_to_readd = value
+                return value
+
+            def __ior__(self, values: Set[str]) -> Self:
+                super().__ior__(values)
+                if self._name_to_readd is not None:
+                    self.add(self._name_to_readd)
+                    self._name_to_readd = None
+                return self
+
+        def defensive_set_factory(values: Iterable[str] = ()) -> set[str]:
+            if isinstance(values, builtins.set) and values == {"OrderRequest"}:
+                return PendingSet(values)
+            return builtins.set(values)
+
+        spec: JsonObject = {
+            "components": {
+                "schemas": {
+                    "OrderRequest": {
+                        "type": "object",
+                        "properties": {},
+                    },
+                },
+            },
+            "paths": {
+                "/orders": {
+                    "post": {
+                        "requestBody": {
+                            "$ref": "#/components/schemas/OrderRequest",
+                        },
+                    },
+                },
+            },
+        }
+        spec_path = tmp_path / "openapi.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        monkeypatch.setattr(generate_types, "set", defensive_set_factory, raising=False)
+
+        result = _request_schema_names_from_openapi(spec_path)
+
+        assert result == frozenset({"OrderRequest"})
 
 
 class TestRunOpenapiTypescriptPostprocess:
