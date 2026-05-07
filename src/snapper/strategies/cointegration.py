@@ -58,11 +58,24 @@ class CointegrationPairs(BaseStrategy):
     def __init__(self, config: StrategyConfig) -> None:
         """Initialize cointegration strategy.
 
+        Two valid invocation shapes:
+
+        - **Live ZMQ process** — ``inputs`` is a 2-element list of
+          market-data candle topics, one per leg. Pair instruments
+          are extracted from the topic strings.
+
+        - **Direct-DB backtest** — ``DirectDbEngine`` synthesises a
+          single ``candles.{exchange}.synthetic.{timeframe}`` input
+          and passes the pair instruments through ``outputs``.
+          Detected by the ``synthetic`` marker in the input topic;
+          ``outputs`` must then carry exactly two instrument symbols.
+
         Args:
             config: Strategy configuration.
 
         Raises:
-            ValueError: If not exactly 2 inputs provided.
+            ValueError: If neither invocation shape produces exactly
+                two pair instruments.
         """
         super().__init__(config)
         self.beta = float(self.params.get("beta", 0.05))
@@ -71,15 +84,35 @@ class CointegrationPairs(BaseStrategy):
         self.lookback_window = int(self.params.get("lookback_window", 50))
         self.min_data_points = int(self.params.get("min_data_points", 30))
         self._position: str | None = None
-        if len(self.inputs) != 2:
-            raise ValueError(
-                f"CointegrationPairs requires exactly 2 inputs, got {len(self.inputs)}"
-            )
-        self.instrument1 = self._extract_instrument(self.inputs[0])
-        self.instrument2 = self._extract_instrument(self.inputs[1])
+        instrument1, instrument2 = self._resolve_pair_instruments()
+        self.instrument1 = instrument1
+        self.instrument2 = instrument2
         logger.info(
             f"CointegrationPairs initialized: {self.instrument1} vs {self.instrument2}, "
             f"beta={self.beta}, entry_threshold={self.entry_threshold}sigma"
+        )
+
+    def _resolve_pair_instruments(self) -> tuple[str, str]:
+        """Resolve the two pair-trade instruments from inputs or outputs.
+
+        Returns:
+            Ordered tuple ``(instrument1, instrument2)``.
+
+        Raises:
+            ValueError: If neither invocation shape carries exactly
+                two pair instruments.
+        """
+        if len(self.inputs) == 2:
+            return (
+                self._extract_instrument(self.inputs[0]),
+                self._extract_instrument(self.inputs[1]),
+            )
+        if len(self.inputs) == 1 and "synthetic" in self.inputs[0] and len(self.outputs) == 2:
+            return (self.outputs[0], self.outputs[1])
+        raise ValueError(
+            "CointegrationPairs requires either 2 inputs (live ZMQ) or "
+            "1 synthetic input + 2 outputs (direct-DB backtest); got "
+            f"inputs={self.inputs} outputs={self.outputs}"
         )
 
     @staticmethod

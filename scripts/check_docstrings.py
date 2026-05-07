@@ -30,6 +30,7 @@ SKIP_DIRS = {
     ".pytest_cache",
     "data",
     "migrations",
+    "notebooks",
 }
 
 TEST_DIRS = {"tests", "proprietary/tests"}

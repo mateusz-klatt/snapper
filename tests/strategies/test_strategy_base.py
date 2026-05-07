@@ -4308,17 +4308,18 @@ class TestCointegrationInitialization:
         assert strategy._position is None
         assert len(strategy.candle_buffer) == 0
 
-    def test_initialization_with_single_input_raises_error(
+    def test_initialization_with_single_non_synthetic_input_raises_error(
         self, strategy_config: StrategyConfig
     ) -> None:
-        """Verify single input raises ValueError.
+        """Verify single non-synthetic input raises ValueError.
 
-        Given: Config with only one input,
+        Given: Config with one regular ZMQ topic input (live process
+            shape requires exactly two leg topics),
         When: CointegrationPairs instantiated,
-        Then: ValueError with 'requires exactly 2 inputs'.
+        Then: ValueError naming both supported invocation shapes.
         """
         strategy_config.inputs = ["market.paper.kraken.BTC-USD.candles.1h"]
-        with pytest.raises(ValueError, match="requires exactly 2 inputs"):
+        with pytest.raises(ValueError, match="2 inputs.*1 synthetic"):
             CointegrationPairs(config=strategy_config)
 
     def test_initialization_with_three_inputs_raises_error(
@@ -4326,16 +4327,48 @@ class TestCointegrationInitialization:
     ) -> None:
         """Verify three inputs raises ValueError.
 
-        Given: Config with three inputs,
+        Given: Config with three inputs (neither shape accepts more than
+            two),
         When: CointegrationPairs instantiated,
-        Then: ValueError with 'requires exactly 2 inputs'.
+        Then: ValueError naming both supported invocation shapes.
         """
         strategy_config.inputs = [
             "market.paper.kraken.BTC-USD.candles.1h",
             "market.paper.kraken.ETH-USD.candles.1h",
             "market.paper.kraken.SOL-USD.candles.1h",
         ]
-        with pytest.raises(ValueError, match="requires exactly 2 inputs"):
+        with pytest.raises(ValueError, match="2 inputs.*1 synthetic"):
+            CointegrationPairs(config=strategy_config)
+
+    def test_initialization_direct_db_synthetic_input(
+        self, strategy_config: StrategyConfig
+    ) -> None:
+        """Verify direct-DB backtest invocation shape is accepted.
+
+        Given: Config with a single synthetic input + two output
+            instruments — the shape ``DirectDbEngine`` produces,
+        When: CointegrationPairs instantiated,
+        Then: instrument1 and instrument2 are read from outputs,
+            no ValueError.
+        """
+        strategy_config.inputs = ["candles.kraken.synthetic.1d"]
+        strategy_config.outputs = ["FET-USD", "RENDER-USD"]
+        strategy = CointegrationPairs(config=strategy_config)
+        assert strategy.instrument1 == "FET-USD"
+        assert strategy.instrument2 == "RENDER-USD"
+
+    def test_initialization_synthetic_input_requires_two_outputs(
+        self, strategy_config: StrategyConfig
+    ) -> None:
+        """Verify direct-DB shape with wrong outputs count raises.
+
+        Given: Synthetic input but outputs has only one instrument,
+        When: CointegrationPairs instantiated,
+        Then: ValueError naming both supported invocation shapes.
+        """
+        strategy_config.inputs = ["candles.kraken.synthetic.1d"]
+        strategy_config.outputs = ["FET-USD"]
+        with pytest.raises(ValueError, match="2 inputs.*1 synthetic"):
             CointegrationPairs(config=strategy_config)
 
     def test_extract_instrument_from_topic(self) -> None:
