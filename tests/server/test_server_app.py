@@ -2654,6 +2654,30 @@ class TestAppCoverageImprovement:
         assert "zmq_bridge" in data["payload"]
         assert "config" in data["payload"]
 
+    def test_websocket_stats_endpoint_falls_back_when_settings_db_unavailable(
+        self,
+    ) -> None:
+        """Verify the heartbeat interval falls back to default on DB-less settings.
+
+        Given: Application with ``state.settings`` whose
+            ``zmq_heartbeat_interval_ms`` raises ``RuntimeError`` because
+            no ``SettingsService`` was wired,
+        When: GET /ws/stats is called,
+        Then: The endpoint returns 200 with the bootstrap default of 1000ms
+            instead of bubbling the RuntimeError into a 500.
+        """
+
+        class _SettingsStub:
+            @property
+            def zmq_heartbeat_interval_ms(self) -> int:
+                raise RuntimeError("SettingsService not initialized")
+
+        self.app.state.settings = _SettingsStub()
+        response = self.client.get("/api/ws/stats")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["payload"]["config"]["heartbeat_interval_ms"] == 1000
+
     def test_zmq_health_check_success(self) -> None:
         """Verify ZMQ health check returns healthy status.
 

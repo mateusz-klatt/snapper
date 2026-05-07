@@ -868,6 +868,35 @@ def _normalize_strategy_status(status: dict[str, Any]) -> dict[str, Any]:
     return {str(key): value for key, value in status.items()}
 
 
+_ZMQ_HEARTBEAT_INTERVAL_DEFAULT_MS = 1000
+
+
+def _resolve_zmq_heartbeat_interval_ms(request: Request) -> int:
+    """Resolve the ZMQ heartbeat interval from DB-aware settings when available.
+
+    The ``zmq_bridge.settings`` instance is a bootstrap-only ``AppSettings``
+    without a ``SettingsService``, so reading
+    ``zmq_heartbeat_interval_ms`` directly off it raises ``RuntimeError``.
+    The lifespan startup hook attaches the DB-aware settings instance to
+    ``request.app.state.settings``; fall back to the static default
+    when state is missing (e.g. ``TestClient`` setups that bypass the
+    lifespan).
+
+    Args:
+        request: FastAPI request whose app state we consult.
+
+    Returns:
+        Heartbeat interval in milliseconds.
+    """
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None:
+        return _ZMQ_HEARTBEAT_INTERVAL_DEFAULT_MS
+    try:
+        return int(settings.zmq_heartbeat_interval_ms)
+    except RuntimeError:
+        return _ZMQ_HEARTBEAT_INTERVAL_DEFAULT_MS
+
+
 def _build_strategy_payload(
     raw_status: dict[str, Any],
 ) -> StrategyStatusPayload | None:
@@ -1628,7 +1657,7 @@ def _create_monitoring_endpoints_router(
                 ),
                 config=WsStatsConfig(
                     broker_xpub=zmq_bridge.settings.zmq_broker_xpub,
-                    heartbeat_interval_ms=zmq_bridge.settings.zmq_heartbeat_interval_ms,
+                    heartbeat_interval_ms=_resolve_zmq_heartbeat_interval_ms(request),
                 ),
             ),
         )
