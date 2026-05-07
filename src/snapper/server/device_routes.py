@@ -37,6 +37,8 @@ from snapper.api.schemas.devices import NotificationDeviceInfo
 from snapper.api.schemas.devices import NotificationDeviceListResponse
 from snapper.api.schemas.devices import NotificationDeviceResponse
 from snapper.api.schemas.devices import RegisterDeviceCommand
+from snapper.api.schemas.devices import RevokeDevicePrefCommand
+from snapper.api.schemas.devices import RevokeDevicePrefResponse
 from snapper.api.schemas.devices import UpdateDevicePrefCommand
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
@@ -49,6 +51,7 @@ from snapper.data.repository_types import NotificationDeviceUpsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
+from snapper.server.json_body import openapi_schema
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
@@ -120,7 +123,7 @@ def _device_info_from_row(row: NotificationDeviceRow) -> NotificationDeviceInfo:
     )
 
 
-@router.post("")
+@router.post("", openapi_extra=openapi_schema(RegisterDeviceCommand))
 async def register_device(
     request: Request,
     command: Annotated[RegisterDeviceCommand, Depends(json_body(RegisterDeviceCommand))],
@@ -268,7 +271,7 @@ async def delete_device(
     )
 
 
-@router.patch("/{device_public_id}/prefs")
+@router.patch("/{device_public_id}/prefs", openapi_extra=openapi_schema(UpdateDevicePrefCommand))
 async def update_device_pref(
     request: Request,
     device_public_id: str,
@@ -345,6 +348,81 @@ async def update_device_pref(
             mute_until=body.mute_until,
             timezone=body.timezone,
         ),
+    )
+
+
+@router.post(
+    "/{device_public_id}/prefs/{pref_public_id}/revoke",
+    openapi_extra=openapi_schema(RevokeDevicePrefCommand),
+)
+async def revoke_device_pref(
+    request: Request,
+    device_public_id: str,
+    pref_public_id: str,
+    command: Annotated[RevokeDevicePrefCommand, Depends(json_body(RevokeDevicePrefCommand))],
+    principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+) -> RevokeDevicePrefResponse:
+    """Close one device-scoped alert preference (SCD2 in place).
+
+    Backend convention is POST + envelope (not DELETE) so every write
+    carries client-side provenance for the gap detector — same as
+    ``cancel_order`` / ``revoke_scope_grant``. The pref row is closed
+    by stamping ``known_to`` at the revoke timestamp; no successor is
+    inserted (the prefs table has no ``token_status``-style
+    discriminator). The slot in the partial unique index is freed
+    immediately so a subsequent re-create at the same scope tuple
+    does not collide.
+
+    Ownership is double-checked: the route validates the device
+    belongs to the caller, and the repo also filters the close on
+    ``device_public_id`` so a forged ``pref_public_id`` belonging to
+    a different device cannot be closed.
+
+    Args:
+        request: FastAPI request (provides REST tracker).
+        device_public_id: Owning device — must belong to the caller.
+        pref_public_id: Pref row to close.
+        command: Envelope carrying the audit reason (optional).
+        principal: Authenticated caller.
+        repo: Repository dependency.
+
+    Returns:
+        ``RevokeDevicePrefResponse`` with the closed row's projection
+        so the iOS UI can drop it from its local list without an
+        extra GET.
+
+    Raises:
+        HTTPException: 404 when the device is not owned by the caller
+            or the pref does not exist (idempotent: a re-revoke of an
+            already-closed pref also 404s).
+    """
+    owned = await repo.list_active_notification_devices_for_user(principal.user_public_id)
+    if not any(d["public_id"] == device_public_id for d in owned):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Device {device_public_id} not found or not owned by caller.",
+        )
+    _, _, ts, _ = _next_provenance(request)
+    closed = await repo.deactivate_device_alert_pref_scd2(
+        pref_public_id,
+        device_public_id=device_public_id,
+        timestamp=ts,
+    )
+    if closed is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Pref {pref_public_id} not found on device {device_public_id}.",
+        )
+    _ = command.payload.reason
+    envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(request)
+    return RevokeDevicePrefResponse(
+        session_id=envelope_sid,
+        sequence_id=envelope_seq,
+        public_id=envelope_pid,
+        timestamp=envelope_ts,
+        payload=_device_alert_pref_info_from_row(closed),
     )
 
 

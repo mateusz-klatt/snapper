@@ -208,6 +208,54 @@ class DeviceAlertPrefListResponse(
     type: Literal["device_alert_pref_list_response"] = "device_alert_pref_list_response"
 
 
+class RevokeDevicePrefBody(StrictBody):
+    """Request body for ``POST /api/devices/{public_id}/prefs/{pref_public_id}/revoke``.
+
+    Mirrors ``RevokeScopeGrantBody``: the SCD2 close happens in place
+    and no successor row carries the audit reason, so ``reason`` is
+    a free-form note kept on the close transition log only. The route
+    plumbs it straight to ``deactivate_device_alert_pref_scd2``'s
+    ``reason`` argument and returns the closed projection so the iOS
+    UI can drop the row from its local list without an extra GET.
+
+    Attributes:
+        reason: Optional audit note (e.g. ``"removed via Settings"``).
+    """
+
+    reason: str | None = Field(default=None, max_length=512)
+
+
+class RevokeDevicePrefCommand(
+    PayloadRequest[Literal["revoke_device_pref_command"], RevokeDevicePrefBody]
+):
+    """Request envelope for the per-(device, pref) revoke route.
+
+    Backend convention is POST + envelope (not DELETE) so every
+    write carries client-side provenance for the gap detector — same
+    pattern as ``CancelOrderCommand`` / ``RevokeScopeGrantCommand``.
+    See ``feedback_no_delete_use_post`` (referenced indirectly by
+    every existing revoke / cancel route) for the rule rationale.
+    """
+
+    type: Literal["revoke_device_pref_command"] = "revoke_device_pref_command"
+
+
+class RevokeDevicePrefResponse(
+    PayloadResponse[Literal["revoke_device_pref_response"], DeviceAlertPrefInfo]
+):
+    """Singleton wrapper returned by the device-pref revoke route.
+
+    Payload is the pref row as it exists immediately after SCD2
+    close — ``known_to`` is stamped at the revoke timestamp and the
+    row is no longer surfaced by ``list_active_device_alert_prefs``,
+    so the iOS UI uses the response purely as a confirmation echo
+    (the row's content is unchanged from the pre-revoke active
+    projection beyond the ``known_to`` stamp).
+    """
+
+    type: Literal["revoke_device_pref_response"] = "revoke_device_pref_response"
+
+
 class UserAlertDefaultBody(StrictBody):
     """Per-(user, alert_type) fallback preference upsert body.
 

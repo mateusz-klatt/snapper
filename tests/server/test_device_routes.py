@@ -20,6 +20,8 @@ from fastapi import Request
 from snapper.api.schemas.devices import DeviceAlertPrefBody
 from snapper.api.schemas.devices import RegisterDeviceBody
 from snapper.api.schemas.devices import RegisterDeviceCommand
+from snapper.api.schemas.devices import RevokeDevicePrefBody
+from snapper.api.schemas.devices import RevokeDevicePrefCommand
 from snapper.api.schemas.devices import UpdateDevicePrefCommand
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
@@ -30,6 +32,7 @@ from snapper.server.device_routes import delete_device
 from snapper.server.device_routes import list_device_prefs
 from snapper.server.device_routes import list_devices
 from snapper.server.device_routes import register_device
+from snapper.server.device_routes import revoke_device_pref
 from snapper.server.device_routes import router as device_router
 from snapper.server.device_routes import update_device_pref
 from snapper.server.json_body import json_body
@@ -429,6 +432,93 @@ class TestListDevicePrefs:
 
         assert exc.value.status_code == 404
         repo.list_device_alert_prefs_for_user.assert_not_awaited()
+
+
+def _revoke_command(reason: str | None = None) -> RevokeDevicePrefCommand:
+    """Return a default ``RevokeDevicePrefCommand`` with optional audit reason."""
+    return RevokeDevicePrefCommand(
+        session_id="client-sid",
+        sequence_id=1,
+        public_id="client-envelope-pid",
+        timestamp=_ts(),
+        payload=RevokeDevicePrefBody(reason=reason),
+    )
+
+
+class TestRevokeDevicePref:
+    """Behaviour of ``POST /api/devices/{id}/prefs/{pref_id}/revoke``."""
+
+    @pytest.mark.asyncio
+    async def test_revokes_owned_pref_and_synthesizes_response(self) -> None:
+        """Closed projection from repo is wrapped into the response envelope."""
+        repo = AsyncMock()
+        repo.list_active_notification_devices_for_user = AsyncMock(
+            return_value=[_device_row("dev-own")]
+        )
+        repo.deactivate_device_alert_pref_scd2 = AsyncMock(
+            return_value=_pref_row("pref-1", device_public_id="dev-own")
+        )
+
+        response = await revoke_device_pref(
+            request=_make_request(),
+            device_public_id="dev-own",
+            pref_public_id="pref-1",
+            command=_revoke_command(reason="user removed"),
+            principal=_principal(),
+            _csrf=None,
+            repo=repo,
+        )
+
+        assert response.payload.public_id == "pref-1"
+        assert response.payload.device_public_id == "dev-own"
+        repo.deactivate_device_alert_pref_scd2.assert_awaited_once()
+        call_kwargs = repo.deactivate_device_alert_pref_scd2.await_args.kwargs
+        assert call_kwargs["device_public_id"] == "dev-own"
+
+    @pytest.mark.asyncio
+    async def test_returns_404_when_device_not_owned(self) -> None:
+        """Foreign device id is rejected before the repo is touched."""
+        repo = AsyncMock()
+        repo.list_active_notification_devices_for_user = AsyncMock(
+            return_value=[_device_row("dev-own")]
+        )
+        repo.deactivate_device_alert_pref_scd2 = AsyncMock()
+
+        with pytest.raises(HTTPException) as exc:
+            await revoke_device_pref(
+                request=_make_request(),
+                device_public_id="dev-other",
+                pref_public_id="pref-1",
+                command=_revoke_command(),
+                principal=_principal(),
+                _csrf=None,
+                repo=repo,
+            )
+
+        assert exc.value.status_code == 404
+        repo.deactivate_device_alert_pref_scd2.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_returns_404_when_pref_already_closed_or_missing(self) -> None:
+        """Repo returning ``None`` (no active row) maps to 404 — idempotent re-revoke."""
+        repo = AsyncMock()
+        repo.list_active_notification_devices_for_user = AsyncMock(
+            return_value=[_device_row("dev-own")]
+        )
+        repo.deactivate_device_alert_pref_scd2 = AsyncMock(return_value=None)
+
+        with pytest.raises(HTTPException) as exc:
+            await revoke_device_pref(
+                request=_make_request(),
+                device_public_id="dev-own",
+                pref_public_id="pref-already-closed",
+                command=_revoke_command(),
+                principal=_principal(),
+                _csrf=None,
+                repo=repo,
+            )
+
+        assert exc.value.status_code == 404
 
 
 class _StubRequest:

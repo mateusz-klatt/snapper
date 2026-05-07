@@ -44,6 +44,7 @@ from snapper.data.repository_types import UserAlertDefaultUpsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
+from snapper.server.json_body import openapi_schema
 
 router = APIRouter(prefix="/alert_defaults", tags=["alert-defaults"])
 
@@ -115,7 +116,7 @@ async def list_alert_defaults(
     )
 
 
-@router.patch("")
+@router.patch("", openapi_extra=openapi_schema(UpdateUserAlertDefaultCommand))
 async def update_alert_default(
     request: Request,
     command: Annotated[

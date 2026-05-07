@@ -323,6 +323,129 @@ class TestNotificationDeviceRepo:
         assert prefs[0]["min_priority"] == "high"
         assert prefs[0]["known_to"] == KNOWN_TO_MAX
 
+    @pytest.mark.asyncio
+    async def test_deactivate_device_alert_pref_scd2_closes_active_row_in_place(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Active row drops out of list + closed projection is returned."""
+        device_pid = await _seed_user_and_device(repo, user_public_id="user-revoke-1")
+        pref_pid = await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                device_public_id=device_pid,
+                alert_type="margin_warning",
+                enabled=True,
+                min_priority="high",
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+        revoke_at = _ts(1)
+
+        closed = await repo.deactivate_device_alert_pref_scd2(
+            pref_pid, device_public_id=device_pid, timestamp=revoke_at
+        )
+
+        assert closed is not None
+        assert closed["public_id"] == pref_pid
+        assert closed["alert_type"] == "margin_warning"
+        assert closed["min_priority"] == "high"
+        post = await repo.list_device_alert_prefs_for_user("user-revoke-1")
+        assert post == []
+
+    @pytest.mark.asyncio
+    async def test_deactivate_device_alert_pref_scd2_idempotent_returns_none(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Second close-call on the already-closed pref returns None."""
+        device_pid = await _seed_user_and_device(repo, user_public_id="user-revoke-2")
+        pref_pid = await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                device_public_id=device_pid,
+                alert_type="critical_system_error",
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+        await repo.deactivate_device_alert_pref_scd2(
+            pref_pid, device_public_id=device_pid, timestamp=_ts(1)
+        )
+
+        second = await repo.deactivate_device_alert_pref_scd2(
+            pref_pid, device_public_id=device_pid, timestamp=_ts(2)
+        )
+
+        assert second is None
+
+    @pytest.mark.asyncio
+    async def test_deactivate_device_alert_pref_scd2_blocks_foreign_device(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Closing with a wrong ``device_public_id`` returns None — no leak across owners."""
+        own_device = await _seed_user_and_device(repo, user_public_id="user-revoke-3")
+        pref_pid = await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                device_public_id=own_device,
+                alert_type="order_rejected",
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+
+        result = await repo.deactivate_device_alert_pref_scd2(
+            pref_pid,
+            device_public_id="some-other-device-public-id",
+            timestamp=_ts(1),
+        )
+
+        assert result is None
+        post = await repo.list_device_alert_prefs_for_user("user-revoke-3")
+        assert len(post) == 1
+        assert post[0]["public_id"] == pref_pid
+
+    @pytest.mark.asyncio
+    async def test_deactivate_device_alert_pref_scd2_releases_unique_index_slot(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """After close, a fresh upsert at the same scope tuple succeeds."""
+        device_pid = await _seed_user_and_device(repo, user_public_id="user-revoke-4")
+        first_pid = await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                device_public_id=device_pid,
+                alert_type="order_fill_full",
+                operator_public_id="op-x",
+                enabled=False,
+                min_priority="low",
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+        await repo.deactivate_device_alert_pref_scd2(
+            first_pid, device_public_id=device_pid, timestamp=_ts(1)
+        )
+
+        second_pid = await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                device_public_id=device_pid,
+                alert_type="order_fill_full",
+                operator_public_id="op-x",
+                enabled=True,
+                min_priority="high",
+                session_id="s1",
+                sequence_id=2,
+                timestamp=_ts(2),
+            )
+        )
+
+        assert second_pid != first_pid
+        post = await repo.list_device_alert_prefs_for_user("user-revoke-4")
+        assert len(post) == 1
+        assert post[0]["public_id"] == second_pid
+        assert post[0]["enabled"] is True
+
 
 class TestUserAlertDefaultRepo:
     """SCD2 behaviour of user-level fallback preference methods."""

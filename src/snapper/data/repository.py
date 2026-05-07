@@ -2942,6 +2942,40 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def deactivate_device_alert_pref_scd2(
+        self,
+        pref_public_id: str,
+        *,
+        device_public_id: str,
+        timestamp: datetime,
+    ) -> DeviceAlertPrefRow | None:
+        """Close one active ``device_alert_prefs`` row in place (SCD2).
+
+        Unlike ``deactivate_notification_device_scd2`` the prefs table
+        carries no ``token_status`` discriminator, so the close is a
+        bare ``known_to := timestamp`` on the active row — no successor
+        is inserted. The row remains queryable as-of historical
+        instants but drops out of the ``known_to == KNOWN_TO_MAX``
+        active set, releasing the partial-unique-index slot for a
+        future re-create at the same scope tuple.
+
+        Args:
+            pref_public_id: Target preference row to close.
+            device_public_id: Owning device — guards against a foreign
+                pref id being smuggled past the route's ownership
+                check; mismatch returns ``None`` (404 at the route).
+            timestamp: Transition time stamped onto ``known_to``.
+
+        Returns:
+            The closed row's pre-close projection
+            (``DeviceAlertPrefRow``) so callers can synthesize a
+            response without a follow-up read; ``None`` when no
+            active row matches both ``pref_public_id`` and
+            ``device_public_id`` (already closed, or wrong device).
+        """
+        ...
+
+    @abstractmethod
     async def list_user_alert_defaults(self, user_public_id: str) -> list[UserAlertDefaultRow]:
         """Active user-level fallback prefs per alert type."""
         ...
@@ -9413,6 +9447,39 @@ class SQLAlchemyRepository(Repository):
             err=type(last_error).__name__,
         )
         raise last_error
+
+    async def deactivate_device_alert_pref_scd2(
+        self,
+        pref_public_id: str,
+        *,
+        device_public_id: str,
+        timestamp: datetime,
+    ) -> DeviceAlertPrefRow | None:
+        """SCD2 close in place; idempotent + ownership-guarded.
+
+        Filters by both ``public_id`` and ``device_public_id`` so a
+        caller who owns device A cannot close a pref attached to
+        device B by submitting B's pref id; the route's
+        ``list_active_notification_devices_for_user`` ownership check
+        already gates on the device, this filter belt-and-braces
+        that gate at the storage layer.
+        """
+        async with self.session() as s:
+            existing = (
+                await s.execute(
+                    select(DeviceAlertPref).where(
+                        DeviceAlertPref.public_id == pref_public_id,
+                        DeviceAlertPref.device_public_id == device_public_id,
+                        DeviceAlertPref.known_to == KNOWN_TO_MAX,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                return None
+            projection = self._device_alert_pref_row_from(existing)
+            existing.known_to = timestamp
+            await s.commit()
+            return projection
 
     async def list_user_alert_defaults(self, user_public_id: str) -> list[UserAlertDefaultRow]:
         """Active user-level fallback prefs."""
