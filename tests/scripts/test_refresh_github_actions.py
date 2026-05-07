@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from scripts.refresh_github_actions import _gh_api
 from scripts.refresh_github_actions import compute_new_tag_ref
 from scripts.refresh_github_actions import ensure_gh_authenticated
 from scripts.refresh_github_actions import find_workflow_files
@@ -195,8 +196,6 @@ class TestGhApi:
         When: _gh_api is invoked,
         Then: The parsed dict is returned.
         """
-        from scripts.refresh_github_actions import _gh_api
-
         with patch("scripts.refresh_github_actions.subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess(
                 ["gh", "api", "x"], 0, stdout='{"tag_name": "v1"}', stderr=""
