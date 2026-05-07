@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin py-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ts-bridge bridge-regen bridge-check ios-gen-types docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ts-bridge bridge-regen bridge-check ios-gen-types docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -7,8 +7,10 @@ help:
 	$(info system-deps Install system dependencies [Linux/macOS])
 	$(info setup       Create virtual environment and install dependencies)
 	$(info pre-refresh Sync pre-commit hooks with pyproject versions)
-	$(info py-refresh  Refresh Python dependencies [upgrade to latest])
-	$(info refresh     Refresh pre-commit, Python, and UI dependencies)
+	$(info py-refresh      Refresh Python dependencies [upgrade to latest])
+	$(info mcp-refresh     Refresh snapper-mcp dependencies [upgrade to latest])
+	$(info actions-refresh Bump GitHub Actions versions across all workflow files)
+	$(info refresh         Refresh pre-commit, Python, UI, snapper-mcp deps + Actions)
 	$(info update      Refresh deps, local tools, and Dockerfile tool pins)
 	$(info setup-full  Install system deps + setup [Linux/macOS only])
 	$(info local-plugin Render local Snapper MCP plugin into data/ + patch ~/.claude/settings.json)
@@ -191,7 +193,15 @@ py-refresh:
 	$(PYRUN) poetry update
 	$(info Python dependencies refreshed!)
 
-refresh: py-refresh ui-refresh pre-refresh
+mcp-refresh:
+	$(info Refreshing snapper-mcp dependencies...)
+	$(VENV_PY) -m scripts.mcp_refresh
+
+actions-refresh:
+	$(info Refreshing GitHub Actions versions across parent + submodule workflows...)
+	$(VENV_PY) -m scripts.refresh_github_actions
+
+refresh: py-refresh ui-refresh mcp-refresh actions-refresh pre-refresh
 	$(info All dependencies refreshed!)
 
 sync-docker-tool-pins:
