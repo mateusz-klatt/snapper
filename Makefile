@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ts-bridge bridge-regen bridge-check ios-gen-types docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ts-bridge bridge-regen bridge-check ios-gen-types docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -52,7 +52,9 @@ help:
 	$(info migrate-prod               Run migrations + seed prod data)
 	$(info )
 	$(info Development [hot reload]:)
-	$(info dev-backend  Start backend with auto-reload)
+	$(info dev-backend  Start backend with auto-reload [REST + WS + ZMQ broker in-process])
+	$(info dev-notify   Start APNs notify sidecar [ZMQ alerts.* -> APNs HTTP/2])
+	$(info dev-all      Start backend + notify sidecar in parallel [Ctrl-C stops both])
 	$(info dev-frontend Start frontend dev server [Vite with HMR + proxy])
 	$(info )
 	$(info ZeroMQ IPC:)
@@ -306,7 +308,35 @@ dev-backend:
 	$(info Starting backend with hot reload...)
 	$(info Backend API: http://localhost:8000/api)
 	$(info WebSocket: ws://localhost:8000/api/ws)
-	@bash -c 'script -q -e -c "$(PYRUN) snapper server --host 0.0.0.0 --reload" /dev/null 2>&1 | tee >(sed "s/\x1b\[[0-9;]*m//g" > data/snapper.log)'
+	$(info Backend log: data/snapper.log)
+	@mkdir -p data
+	@bash -c '$(PYRUN) snapper server --host 0.0.0.0 --reload 2>&1 | sed "s/\x1b\[[0-9;]*m//g" | tee data/snapper.log'
+
+dev-notify:
+	$(info Starting iOS Push Foundation sidecar (ZMQ alerts -> APNs)...)
+	$(info Topic + APNs creds read from settings cache (apns_*).)
+	$(info Sidecar log: data/snapper-notify.log)
+	@mkdir -p data
+	@bash -c '$(PYRUN) snapper notify 2>&1 | sed "s/\x1b\[[0-9;]*m//g" | tee data/snapper-notify.log'
+
+dev-all:
+	$(info Starting backend + notify sidecar in parallel...)
+	$(info Backend API: http://localhost:8000/api)
+	$(info WebSocket: ws://localhost:8000/api/ws)
+	$(info Notify sidecar fans out alerts.* -> APNs.)
+	$(info Logs: data/snapper.log + data/snapper-notify.log)
+	$(info Press Ctrl-C to stop both processes.)
+	@mkdir -p data
+	@bash -c 'set -m; trap "kill 0 2>/dev/null; exit" SIGINT SIGTERM EXIT; \
+		($(PYRUN) snapper server --host 0.0.0.0 --reload 2>&1 \
+			| sed "s/\x1b\[[0-9;]*m//g" \
+			| awk "{print \"[backend] \" \$$0; fflush()}" \
+			| tee data/snapper.log) & \
+		($(PYRUN) snapper notify 2>&1 \
+			| sed "s/\x1b\[[0-9;]*m//g" \
+			| awk "{print \"[notify]  \" \$$0; fflush()}" \
+			| tee data/snapper-notify.log) & \
+		wait'
 
 dev-frontend:
 	$(info Starting frontend dev server...)
