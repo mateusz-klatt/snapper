@@ -208,19 +208,27 @@ class CointegrationPairs(BaseStrategy):
     ) -> StrategySignal | None:
         """Generate signal based on spread z-score.
 
+        Returns the signal for the current instrument and queues the
+        partner-leg signal via :meth:`emit_paired_signal` so both legs
+        of the spread enter and exit together. The partner-leg price
+        is read from ``self.candle_buffer`` (last close) — both legs'
+        candles for the current timestep have already been buffered
+        by the time this method runs.
+
         Args:
             z_score: Current spread z-score.
             instrument: The instrument for the signal.
             price: Current price.
 
         Returns:
-            Entry or exit signal based on z-score thresholds.
+            Entry or exit signal for the current instrument; the
+            partner-leg signal is queued for downstream draining.
         """
         entry_strength = min(abs(z_score) / self.entry_threshold, 1.0)
         if self._position is None:
             if z_score > self.entry_threshold:
                 self._position = "short_spread"
-                return self._build_signal(
+                return self._build_paired_entry(
                     instrument,
                     price,
                     z_score,
@@ -231,7 +239,7 @@ class CointegrationPairs(BaseStrategy):
                 )
             if z_score < -self.entry_threshold:
                 self._position = "long_spread"
-                return self._build_signal(
+                return self._build_paired_entry(
                     instrument,
                     price,
                     z_score,
@@ -242,7 +250,7 @@ class CointegrationPairs(BaseStrategy):
                 )
         elif self._position == "short_spread" and z_score < self.exit_threshold:
             self._position = None
-            return self._build_signal(
+            return self._build_paired_entry(
                 instrument,
                 price,
                 z_score,
@@ -253,7 +261,7 @@ class CointegrationPairs(BaseStrategy):
             )
         elif self._position == "long_spread" and z_score > -self.exit_threshold:
             self._position = None
-            return self._build_signal(
+            return self._build_paired_entry(
                 instrument,
                 price,
                 z_score,
@@ -263,6 +271,65 @@ class CointegrationPairs(BaseStrategy):
                 0.0,
             )
         return None
+
+    def _partner_price(self, current_instrument: str) -> float | None:
+        """Return the partner leg's last buffered close, or ``None`` if absent."""
+        partner = self.instrument2 if current_instrument == self.instrument1 else self.instrument1
+        bars = self.candle_buffer.get(partner, [])
+        if not bars:
+            return None
+        return float(bars[-1].close)
+
+    def _build_paired_entry(
+        self,
+        instrument: str,
+        price: float,
+        z_score: float,
+        primary_side: TradeSide,
+        hedge_side: TradeSide,
+        action: str,
+        strength: float,
+    ) -> StrategySignal:
+        """Build the current-instrument signal AND queue the partner-leg signal.
+
+        Mirrors :meth:`_build_signal` but additionally enqueues the
+        partner leg via :meth:`emit_paired_signal` so the engine /
+        live executor receives both legs in the same timestep.
+
+        Args:
+            instrument: The instrument the current ``on_candle`` is
+                processing.
+            price: Current instrument's last close.
+            z_score: Spread z-score (used in the reason string).
+            primary_side: Side for ``instrument1``.
+            hedge_side: Side for ``instrument2``.
+            action: Reason prefix (e.g. ``"Enter short spread"``).
+            strength: Signal strength scalar for the primary leg; the
+                hedge leg's strength is scaled by ``self.beta``.
+
+        Returns:
+            Signal for the current instrument. The partner-leg signal
+            is queued and drained by ``batch_processor`` (or the live
+            ZMQ executor) immediately after.
+        """
+        current_signal = self._build_signal(
+            instrument, price, z_score, primary_side, hedge_side, action, strength
+        )
+        partner_price = self._partner_price(instrument)
+        if partner_price is not None:
+            partner = self.instrument2 if instrument == self.instrument1 else self.instrument1
+            self.emit_paired_signal(
+                self._build_signal(
+                    partner,
+                    partner_price,
+                    z_score,
+                    primary_side,
+                    hedge_side,
+                    action,
+                    strength,
+                )
+            )
+        return current_signal
 
     async def reset(self) -> None:
         """Reset strategy state for replay."""

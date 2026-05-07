@@ -313,3 +313,62 @@ class TestTargetAttribution:
         assert collector.signals[0]["price"] == 100.0
         assert len(collector.trades) == 1
         assert collector.trades[0]["instrument"] == "BTC-USD"
+
+
+class TestPairedSignalDrain:
+    """``process_time_batch`` drains paired signals queued by the strategy."""
+
+    @pytest.mark.asyncio
+    async def test_paired_signals_are_processed_alongside_primary(self) -> None:
+        """Drained paired signals reach the fill simulation.
+
+        Given: a strategy whose ``_handle_candle_data`` returns a primary
+            BUY signal on BTC-USD AND queues a paired SELL signal on
+            ETH-USD via ``drain_pending_signals`` (the contract used by
+            CointegrationPairs after the Bug L fix),
+        When: ``process_time_batch`` runs over a single candle event,
+        Then: both signals get fills — the trades collection contains
+            one BTC-USD entry and one ETH-USD entry.
+        """
+        primary = StrategySignal(
+            instrument="BTC-USD",
+            side=TradeSideEnum.BUY,
+            strength=1.0,
+            reason="paired-entry-primary",
+            price=42_000.0,
+        )
+        partner = StrategySignal(
+            instrument="ETH-USD",
+            side=TradeSideEnum.BUY,
+            strength=1.0,
+            reason="paired-entry-partner",
+            price=2_500.0,
+        )
+        strategy = MagicMock(spec=BaseStrategy)
+        strategy._handle_candle_data = AsyncMock(return_value=primary)
+        strategy.drain_pending_signals = MagicMock(side_effect=[[partner], []])
+
+        collector = ResultCollector()
+        portfolio = PortfolioTracker(cash=10_000.0)
+        latest_closes: dict[str, float] = {"BTC-USD": 42_000.0, "ETH-USD": 2_500.0}
+        await process_time_batch(
+            batch=[
+                _event(
+                    source_exchange="kraken",
+                    source_instrument="BTC-USD",
+                    close=42_000.0,
+                )
+            ],
+            run_public_id="run-paired",
+            config=_config(target_execution_exchange="kraken"),
+            strategy=strategy,
+            portfolio=portfolio,
+            latest_closes=latest_closes,
+            collector=collector,
+            tracker=SequenceTracker(),
+            snapshot_as_of=_BUS_TIME,
+        )
+
+        instruments = {trade["instrument"] for trade in collector.trades}
+        assert instruments == {"BTC-USD", "ETH-USD"}
+        assert len(collector.signals) == 2

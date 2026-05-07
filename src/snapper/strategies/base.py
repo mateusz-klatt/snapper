@@ -137,6 +137,43 @@ class BaseStrategy(ABC):
         self._is_paper_input = any(StrategyConfig._is_paper_or_replay(inp) for inp in self.inputs)
         self._health_monitor = StrategyHealthMonitor(self)
         self._system_router = SystemMessageRouter(self)
+        self._pending_signals: list[StrategySignal] = []
+
+    def emit_paired_signal(self, signal: StrategySignal) -> None:
+        """Queue a partner-leg signal alongside the current ``on_candle`` return.
+
+        Pair-trade strategies need to emit signals for BOTH legs at the
+        same timestep (entry on instrument1 and instrument2 together,
+        same on exit). The ``on_candle`` contract returns one optional
+        signal per call, which is fine for single-instrument
+        strategies but cannot express paired emissions.
+
+        This helper accumulates extra signals on the strategy instance.
+        The ``batch_processor`` drains the queue immediately after the
+        primary ``on_candle`` return, so paired signals share the
+        timestamp + execution treatment of the primary signal.
+
+        Single-instrument strategies do not call this method and the
+        queue stays empty, preserving the legacy ``on_candle`` →
+        single signal flow byte-for-byte.
+
+        Args:
+            signal: The partner-leg ``StrategySignal`` to enqueue.
+        """
+        self._pending_signals.append(signal)
+
+    def drain_pending_signals(self) -> list[StrategySignal]:
+        """Take and clear the queue of partner-leg signals.
+
+        Returns:
+            All signals queued via ``emit_paired_signal`` since the
+            last drain.
+        """
+        if not self._pending_signals:
+            return []
+        drained = self._pending_signals
+        self._pending_signals = []
+        return drained
 
     @property
     def is_running(self) -> bool:

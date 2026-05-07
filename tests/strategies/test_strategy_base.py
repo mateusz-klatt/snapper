@@ -26,6 +26,7 @@ from snapper.application.ai_review.service import AiReviewDecisionOutcome
 from snapper.application.services.signals.service import signal_service
 from snapper.cli.app import _alembic_cfg
 from snapper.core.types import AiReviewStatusEnum
+from snapper.core.types import TradeSideEnum
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
@@ -4370,6 +4371,74 @@ class TestCointegrationInitialization:
         strategy_config.outputs = ["FET-USD"]
         with pytest.raises(ValueError, match="2 inputs.*1 synthetic"):
             CointegrationPairs(config=strategy_config)
+
+    @pytest.mark.asyncio
+    async def test_entry_emits_paired_signal_for_partner_leg(
+        self, coint_strategy_config: StrategyConfig
+    ) -> None:
+        """Verify spread entry queues a partner-leg signal alongside the primary.
+
+        Given: A CointegrationPairs strategy with two legs buffered to
+            min_data_points + lookback_window with prices that diverge
+            enough on the last candle to push the z-score past the
+            entry threshold,
+        When: ``on_candle`` is called for instrument1,
+        Then: the returned signal is for instrument1 AND
+            ``drain_pending_signals`` returns exactly one signal for
+            instrument2 with the opposite side and proportional strength.
+        """
+        coint_strategy_config.params = {
+            "beta": 1.0,
+            "entry_threshold": 1.5,
+            "exit_threshold": 0.5,
+            "lookback_window": 30,
+            "min_data_points": 30,
+        }
+        strategy = CointegrationPairs(config=coint_strategy_config)
+        for _ in range(40):
+            await feed_bar_to_strategy(strategy, "BTC-USD", 100.0)
+            await feed_bar_to_strategy(strategy, "ETH-USD", 100.0)
+
+        signal = await feed_bar_to_strategy(strategy, "BTC-USD", 130.0)
+
+        assert signal is not None
+        assert signal.instrument == "BTC-USD"
+        assert signal.side == TradeSideEnum.SELL
+        paired = strategy.drain_pending_signals()
+        assert len(paired) == 1
+        assert paired[0].instrument == "ETH-USD"
+        assert paired[0].side == TradeSideEnum.BUY
+        assert strategy.drain_pending_signals() == []
+
+    @pytest.mark.asyncio
+    async def test_drain_pending_signals_returns_empty_after_drain(
+        self, coint_strategy_config: StrategyConfig
+    ) -> None:
+        """Verify the queue is one-shot per drain.
+
+        Given: A strategy with a paired signal queued,
+        When: ``drain_pending_signals`` is called twice,
+        Then: the first call returns the signals; the second returns
+            an empty list (queue cleared).
+        """
+        coint_strategy_config.params = {
+            "beta": 1.0,
+            "entry_threshold": 1.5,
+            "exit_threshold": 0.5,
+            "lookback_window": 30,
+            "min_data_points": 30,
+        }
+        strategy = CointegrationPairs(config=coint_strategy_config)
+        for _ in range(40):
+            await feed_bar_to_strategy(strategy, "BTC-USD", 100.0)
+            await feed_bar_to_strategy(strategy, "ETH-USD", 100.0)
+        await feed_bar_to_strategy(strategy, "BTC-USD", 130.0)
+
+        first = strategy.drain_pending_signals()
+        second = strategy.drain_pending_signals()
+
+        assert len(first) == 1
+        assert second == []
 
     def test_extract_instrument_from_topic(self) -> None:
         """Verify _extract_instrument parses topic correctly.

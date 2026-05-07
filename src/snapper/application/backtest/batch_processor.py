@@ -224,6 +224,8 @@ async def process_time_batch(
         signal = await strategy._handle_candle_data(event.instrument, payload)
         if signal is not None:
             signals_and_events.append((signal, event))
+        for paired in strategy.drain_pending_signals():
+            signals_and_events.append((paired, event))
 
     if batch[0].open_at < config.start_date:
         return
