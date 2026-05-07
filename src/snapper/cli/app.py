@@ -137,6 +137,11 @@ from snapper.messaging.infrastructure.validated_socket import ValidatedSubscribe
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.server.app import create_app
+from snapper.strategies.cointegration import CointegrationPairs
+from snapper.strategies.macd import MACDCrossover
+from snapper.strategies.rsi import RSIReversion
+
+_REGISTERED_STRATEGIES = (RSIReversion, MACDCrossover, CointegrationPairs)
 
 _FORCE_UPDATE_HELP = "Force update even if recently updated"
 _CLI_SYMBOL_SOURCE_ALL_MAPPED = "all mapped"
