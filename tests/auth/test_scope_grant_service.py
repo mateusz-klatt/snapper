@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
 from snapper.data.repository import ScopeGrantNotFoundError
 from snapper.data.repository_types import ScopeGrantRow
@@ -323,6 +325,99 @@ class TestHasGrantForDelegate:
         second = ScopeGrantService()
         assert first is second
         assert second._msg_publisher is first._msg_publisher
+
+
+class TestListAccessibleWalletPublicIds:
+    """Wrapper for ``list_accessible_wallets_for_operators`` + ``list_active_wallets``.
+
+    Drives the v0.7.0 RBAC-symmetry filter for ``orders.events.*`` WS
+    frames; also called by REST scoping indirectly via the same
+    repository methods.
+    """
+
+    @pytest.mark.asyncio
+    async def test_admin_returns_all_active_wallets(self) -> None:
+        """ADMIN bypasses operator-scope filtering.
+
+        Given an ADMIN principal,
+        When list_accessible_wallet_public_ids is called,
+        Then the service queries ``list_active_wallets`` (not the
+            operator-scoped variant) and returns every active wallet's
+            public_id.
+        """
+        service = ScopeGrantService()
+        as_of = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
+        admin = AuthPrincipal(
+            username="admin-x",
+            role=UserRole.ADMIN,
+            user_public_id="user-admin",
+            operator_public_ids=["op-1"],
+        )
+        rows = [{"public_id": "wal-A"}, {"public_id": "wal-B"}, {"public_id": "wal-C"}]
+        service.repository.list_active_wallets = AsyncMock(return_value=rows)
+        service.repository.list_accessible_wallets_for_operators = AsyncMock()
+
+        result = await service.list_accessible_wallet_public_ids(principal=admin, as_of=as_of)
+
+        assert result == {"wal-A", "wal-B", "wal-C"}
+        active_mock: AsyncMock = service.repository.list_active_wallets
+        active_mock.assert_awaited_once_with(as_of=as_of)
+        scoped_mock: AsyncMock = service.repository.list_accessible_wallets_for_operators
+        scoped_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_viewer_with_empty_operator_set_returns_empty(self) -> None:
+        """Non-ADMIN with no operator memberships -> empty set, no DB hit.
+
+        Matches the wallet-picker contract: "no operator membership =
+        no wallet visibility".
+        """
+        service = ScopeGrantService()
+        viewer = AuthPrincipal(
+            username="viewer-x",
+            role=UserRole.VIEWER,
+            user_public_id="user-viewer",
+            operator_public_ids=[],
+        )
+        service.repository.list_active_wallets = AsyncMock()
+        service.repository.list_accessible_wallets_for_operators = AsyncMock()
+
+        result = await service.list_accessible_wallet_public_ids(
+            principal=viewer, as_of=datetime.now(UTC)
+        )
+
+        assert result == set()
+        active_mock: AsyncMock = service.repository.list_active_wallets
+        active_mock.assert_not_called()
+        scoped_mock: AsyncMock = service.repository.list_accessible_wallets_for_operators
+        scoped_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_viewer_with_operators_uses_scoped_query(self) -> None:
+        """VIEWER with operator memberships forwards to the scoped repo query.
+
+        Wallet rows are projected down to a public_id set.
+        """
+        service = ScopeGrantService()
+        as_of = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
+        viewer = AuthPrincipal(
+            username="viewer-x",
+            role=UserRole.VIEWER,
+            user_public_id="user-viewer",
+            operator_public_ids=["op-1", "op-2"],
+        )
+        service.repository.list_active_wallets = AsyncMock()
+        service.repository.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": "wal-A"}, {"public_id": "wal-B"}]
+        )
+
+        result = await service.list_accessible_wallet_public_ids(principal=viewer, as_of=as_of)
+
+        assert result == {"wal-A", "wal-B"}
+        active_mock: AsyncMock = service.repository.list_active_wallets
+        active_mock.assert_not_called()
+        scoped_mock: AsyncMock = service.repository.list_accessible_wallets_for_operators
+        scoped_mock.assert_awaited_once_with(operator_public_ids=["op-1", "op-2"], as_of=as_of)
 
 
 class TestStatelessness:

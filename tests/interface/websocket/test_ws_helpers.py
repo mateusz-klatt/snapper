@@ -154,33 +154,35 @@ class TestRoleCategorySecurityMatrix:
     and topic patterns, with no over- or under-provisioning.
     """
 
-    def test_viewer_gets_market_system_and_backtest(self) -> None:
-        """VIEWER role receives read-only categories (market, system, backtest).
+    def test_viewer_gets_market_system_backtest_and_trade_events(self) -> None:
+        """VIEWER role receives read-only categories (market, system, backtest, trade_events).
 
         Given: A VIEWER role,
         When: Getting allowed categories,
-        Then: market, system, backtest are allowed (no trade, strategy, admin).
+        Then: market, system, backtest, and trade_events are allowed (no
+            trade, strategy, admin). ``trade_events`` is the v0.7.0
+            split for live ``orders.events.*`` streams — gated by
+            ``READ_ORDERS`` so VIEWER's WebSocket access mirrors the
+            REST `/api/orders` snapshot they already see.
         """
         categories = role_allowed_categories(UserRole.VIEWER)
-        assert categories == {"market", "system", "backtest"}
+        assert categories == {"market", "system", "backtest", "trade_events"}
 
-    def test_operator_gets_market_trade_signals_strategy_system_backtest(self) -> None:
-        """OPERATOR receives market, trade, signals, strategy, system, backtest, ai_reviews.
+    def test_operator_gets_full_trade_categories(self) -> None:
+        """OPERATOR receives both trade categories + signals/strategy/system/backtest/ai_reviews.
 
         Given: An OPERATOR role,
         When: Getting allowed categories,
-        Then: market, trade, signals, strategy, system, backtest, ai_reviews
-            allowed but NOT admin. The ``signals`` category is separate from
-            ``strategy`` so AI_DELEGATE (READ_SIGNALS only, no
-            START_STRATEGIES) can subscribe to ``signals.*`` without the
-            operator-level strategy-management surface. ``ai_reviews`` is
-            the CONSULT-pattern category — AI_DELEGATE delivers
-            review requests + receives decisions over it.
+        Then: market, trade, trade_events, signals, strategy, system, backtest,
+            ai_reviews allowed but NOT admin. ``trade`` is gated by
+            ``CREATE_ORDERS`` (write commands); ``trade_events`` by
+            ``READ_ORDERS`` (read-side echo). OPERATOR holds both.
         """
         categories = role_allowed_categories(UserRole.OPERATOR)
         assert categories == {
             "market",
             "trade",
+            "trade_events",
             "signals",
             "strategy",
             "system",
@@ -190,18 +192,19 @@ class TestRoleCategorySecurityMatrix:
         assert "admin" not in categories
 
     def test_admin_gets_all_categories_including_admin(self) -> None:
-        """ADMIN role receives all categories including admin + backtest + ai_reviews.
+        """ADMIN role receives all categories including admin + trade_events.
 
         Given: An ADMIN role,
         When: Getting allowed categories,
-        Then: All eight categories are allowed
-            (market, trade, signals, strategy, system, admin, backtest,
-            ai_reviews — CONSULT-pattern surface).
+        Then: All nine categories are allowed
+            (market, trade, trade_events, signals, strategy, system, admin,
+            backtest, ai_reviews).
         """
         categories = role_allowed_categories(UserRole.ADMIN)
         assert categories == {
             "market",
             "trade",
+            "trade_events",
             "signals",
             "strategy",
             "system",
@@ -230,17 +233,21 @@ class TestRoleCategorySecurityMatrix:
         topics = get_allowed_topics_for_role(UserRole.OPERATOR)
         assert "admin." not in topics
 
-    def test_viewer_available_topics_exclude_trade_and_strategy(self) -> None:
-        """VIEWER available topics exclude trade and strategy patterns.
+    def test_viewer_available_topics_exclude_commands_and_strategy(self) -> None:
+        """VIEWER available topics exclude write-command and strategy patterns.
 
         Given: A VIEWER role,
         When: Getting allowed topics,
-        Then: No trade or strategy patterns are present.
+        Then: ``orders.commands.`` (write intent — CREATE_ORDERS gate)
+            is absent, ``signals.`` is absent. ``orders.events.``
+            (read-side echo — READ_ORDERS gate, v0.7.0 trade_events
+            split) IS present so VIEWER's WS surface mirrors the REST
+            ``/api/orders`` they already see.
         """
         topics = get_allowed_topics_for_role(UserRole.VIEWER)
         assert "orders.commands." not in topics
-        assert "orders.events." not in topics
         assert "signals." not in topics
+        assert "orders.events." in topics
 
     def test_viewer_available_topics_include_market(self) -> None:
         """VIEWER available topics include market pattern.

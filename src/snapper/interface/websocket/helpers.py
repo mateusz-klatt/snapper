@@ -251,8 +251,10 @@ def determine_topic_category(topic: str) -> str | None:
     direct_result = direct_prefix_map.get(topic)
     if direct_result is not None:
         return direct_result
-    if parse_order_command_topic(topic) is not None or parse_order_event_topic(topic) is not None:
+    if parse_order_command_topic(topic) is not None:
         return "trade"
+    if parse_order_event_topic(topic) is not None:
+        return "trade_events"
     if parse_market_topic(topic) is not None:
         return "market"
     if parse_signal_topic(topic) is not None:
@@ -273,8 +275,8 @@ def determine_topic_category(topic: str) -> str | None:
         "candle": "market",
         "tick": "market",
         "signal": "signals",
-        "order": "trade",
-        "execution": "trade",
+        "order": "trade_events",
+        "execution": "trade_events",
         "heartbeat": "system",
     }
     return category_map.get(topic)

@@ -20,6 +20,8 @@ from uuid import uuid7
 
 from loguru import logger
 
+from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings import get_settings
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import ScopeGrantRow
@@ -180,6 +182,51 @@ class ScopeGrantService:
                 grant_public_id,
                 exc,
             )
+
+    async def list_accessible_wallet_public_ids(
+        self,
+        *,
+        principal: AuthPrincipal,
+        as_of: datetime,
+    ) -> set[str]:
+        """Return the set of wallet ``public_id`` values the principal can read.
+
+        Mirrors the REST `/api/wallets` and `/api/orders` server-side
+        wallet-scope filter so the WebSocket per-frame
+        ``orders.events.*`` filter sees the same set of wallets as the
+        REST snapshot endpoints — closes the v0.7.0 RBAC asymmetry
+        where REST applied scope filtering and WS bridge did not.
+
+        ADMIN role bypass: returns the public_ids of EVERY active
+        wallet (caller can short-circuit by checking
+        ``principal.role == UserRole.ADMIN`` first; this method
+        preserves the same contract regardless to keep call-site
+        decisions optional). Empty operator-set on a non-ADMIN
+        principal returns an empty set without hitting the
+        repository's joined query path — matches the wallet-picker
+        contract that "no operator membership = no wallet visibility".
+
+        Args:
+            principal: Authenticated caller — role + ``operator_public_ids``
+                drive the wallet-scope filter.
+            as_of: Wall-clock for SCD2-active filtering on operator
+                memberships and scope grants.
+
+        Returns:
+            Set of wallet ``public_id`` strings the principal can read.
+            Empty set when the principal has no operator memberships
+            (non-ADMIN) and no scope grants reach them transitively.
+        """
+        if principal.role == UserRole.ADMIN:
+            rows = await self.repository.list_active_wallets(as_of=as_of)
+        elif not principal.operator_public_ids:
+            return set()
+        else:
+            rows = await self.repository.list_accessible_wallets_for_operators(
+                operator_public_ids=list(principal.operator_public_ids),
+                as_of=as_of,
+            )
+        return {row["public_id"] for row in rows}
 
     async def has_grant_for_delegate(
         self,

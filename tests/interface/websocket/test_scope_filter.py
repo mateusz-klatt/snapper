@@ -17,6 +17,7 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
 from snapper.interface.websocket.scope_filter import enforce_ai_review_scope
+from snapper.interface.websocket.scope_filter import enforce_orders_events_scope
 
 
 def _delegate_principal(
@@ -281,3 +282,218 @@ async def test_default_as_of_uses_datetime_now_utc() -> None:
     assert has_grant_mock.await_args is not None
     kwargs = has_grant_mock.await_args.kwargs
     assert before <= kwargs["as_of"] <= after
+
+
+def _viewer_principal(
+    *,
+    operator_public_ids: list[str] | None = None,
+    user_public_id: str = "user-viewer",
+) -> AuthPrincipal:
+    """Build a VIEWER principal exercising the trade_events scope filter.
+
+    The wallet-set check uses :class:`ScopeGrantService`.
+    """
+    return AuthPrincipal(
+        username="viewer-x",
+        role=UserRole.VIEWER,
+        user_public_id=user_public_id,
+        operator_public_ids=operator_public_ids if operator_public_ids is not None else ["op-1"],
+        primary_operator_public_id="op-1",
+    )
+
+
+def _admin_principal() -> AuthPrincipal:
+    """Build an ADMIN principal — exercises the trade_events ADMIN bypass."""
+    return AuthPrincipal(
+        username="admin-x",
+        role=UserRole.ADMIN,
+        user_public_id="user-admin",
+        operator_public_ids=["op-1"],
+        primary_operator_public_id="op-1",
+    )
+
+
+def _mock_orders_events_service(accessible: set[str]) -> ScopeGrantService:
+    """Stub ScopeGrantService returning ``accessible`` from the wallet query.
+
+    The patched method is ``list_accessible_wallet_public_ids``.
+    """
+    svc = ScopeGrantService.__new__(ScopeGrantService)
+    svc.list_accessible_wallet_public_ids = AsyncMock(return_value=accessible)
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_orders_events_passes_through_non_orders_events_topic() -> None:
+    """Non-``orders.events.*`` topics short-circuit to True.
+
+    Given: A topic outside the ``orders.events.*`` prefix,
+    When: The orders.events scope filter is invoked,
+    Then: It returns True without consulting the scope service.
+    """
+    service = _mock_orders_events_service(accessible={"wallet-A"})
+    result = await enforce_orders_events_scope(
+        topic="market.kraken.BTC-USD",
+        connection_principal=_viewer_principal(),
+        payload={"wallet_public_id": "wallet-A"},
+        scope_grant_service=service,
+    )
+    assert result is True
+    list_mock: AsyncMock = service.list_accessible_wallet_public_ids
+    list_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_orders_events_drops_when_principal_missing() -> None:
+    """Missing principal yields a fail-closed drop on orders.events frames.
+
+    Given: An ``orders.events.*`` frame with no connection principal,
+    When: The orders.events scope filter is invoked,
+    Then: It returns False and never calls the scope service.
+    """
+    service = _mock_orders_events_service(accessible={"wallet-A"})
+    result = await enforce_orders_events_scope(
+        topic="orders.events.kraken.BTC-USD.executed",
+        connection_principal=None,
+        payload={"wallet_public_id": "wallet-A"},
+        scope_grant_service=service,
+    )
+    assert result is False
+    list_mock: AsyncMock = service.list_accessible_wallet_public_ids
+    list_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_orders_events_admin_bypasses_scope_check() -> None:
+    """ADMIN role bypasses the scope service for orders.events frames.
+
+    Given: An ADMIN principal and an ``orders.events.*`` frame,
+    When: The orders.events scope filter is invoked,
+    Then: It returns True without consulting the scope service (REST parity).
+    """
+    service = _mock_orders_events_service(accessible=set())
+    result = await enforce_orders_events_scope(
+        topic="orders.events.kraken.BTC-USD.executed",
+        connection_principal=_admin_principal(),
+        payload={"wallet_public_id": "wallet-Z"},
+        scope_grant_service=service,
+    )
+    assert result is True
+    list_mock: AsyncMock = service.list_accessible_wallet_public_ids
+    list_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_orders_events_drops_when_wallet_field_missing() -> None:
+    """Missing ``wallet_public_id`` triggers a fail-closed drop.
+
+    Given: An ``orders.events.*`` payload without ``wallet_public_id``,
+    When: The orders.events scope filter is invoked,
+    Then: It returns False (fail-closed against malformed frames).
+    """
+    service = _mock_orders_events_service(accessible={"wallet-A"})
+    result = await enforce_orders_events_scope(
+        topic="orders.events.kraken.BTC-USD.executed",
+        connection_principal=_viewer_principal(),
+        payload={"client_order_id": "o-1"},
+        scope_grant_service=service,
+    )
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_orders_events_drops_when_wallet_field_non_string() -> None:
+    """Non-string ``wallet_public_id`` triggers a fail-closed drop.
+
+    Given: An ``orders.events.*`` payload with a non-string ``wallet_public_id``,
+    When: The orders.events scope filter is invoked,
+    Then: It returns False (fail-closed against malformed frames).
+    """
+    service = _mock_orders_events_service(accessible={"wallet-A"})
+    result = await enforce_orders_events_scope(
+        topic="orders.events.kraken.BTC-USD.executed",
+        connection_principal=_viewer_principal(),
+        payload={"wallet_public_id": 12345},
+        scope_grant_service=service,
+    )
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_orders_events_forwards_when_wallet_in_accessible_set() -> None:
+    """Frames whose wallet is accessible to the VIEWER are forwarded.
+
+    Given: A VIEWER principal and a payload wallet in the accessible set,
+    When: The orders.events scope filter is invoked,
+    Then: It returns True (frame is forwarded to the WS client).
+    """
+    service = _mock_orders_events_service(accessible={"wallet-A", "wallet-B"})
+    result = await enforce_orders_events_scope(
+        topic="orders.events.kraken.BTC-USD.executed",
+        connection_principal=_viewer_principal(),
+        payload={"wallet_public_id": "wallet-A"},
+        scope_grant_service=service,
+    )
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_orders_events_drops_when_wallet_outside_accessible_set() -> None:
+    """Frames whose wallet is not accessible to the VIEWER are dropped.
+
+    Given: A VIEWER principal and a payload wallet outside the accessible set,
+    When: The orders.events scope filter is invoked,
+    Then: It returns False (cross-tenant data leak guard).
+    """
+    service = _mock_orders_events_service(accessible={"wallet-A"})
+    result = await enforce_orders_events_scope(
+        topic="orders.events.kraken.BTC-USD.executed",
+        connection_principal=_viewer_principal(),
+        payload={"wallet_public_id": "wallet-Z"},
+        scope_grant_service=service,
+    )
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_orders_events_uses_provided_as_of_for_scope_check() -> None:
+    """Caller-supplied ``as_of`` propagates to the scope service unchanged.
+
+    Given: A VIEWER frame with an explicit ``as_of`` timestamp,
+    When: The orders.events scope filter is invoked,
+    Then: The scope service receives that exact ``as_of`` value.
+    """
+    service = _mock_orders_events_service(accessible={"wallet-A"})
+    pinned = datetime(2025, 6, 1, tzinfo=UTC)
+    await enforce_orders_events_scope(
+        topic="orders.events.kraken.BTC-USD.executed",
+        connection_principal=_viewer_principal(),
+        payload={"wallet_public_id": "wallet-A"},
+        scope_grant_service=service,
+        as_of=pinned,
+    )
+    list_mock: AsyncMock = service.list_accessible_wallet_public_ids
+    assert list_mock.await_args is not None
+    assert list_mock.await_args.kwargs["as_of"] == pinned
+
+
+@pytest.mark.asyncio
+async def test_orders_events_default_as_of_uses_datetime_now_utc() -> None:
+    """When no ``as_of`` is supplied, the filter uses the current UTC time.
+
+    Given: A VIEWER frame without an explicit ``as_of``,
+    When: The orders.events scope filter is invoked,
+    Then: The scope service receives an ``as_of`` between before and after now.
+    """
+    service = _mock_orders_events_service(accessible={"wallet-A"})
+    before = datetime.now(UTC)
+    await enforce_orders_events_scope(
+        topic="orders.events.kraken.BTC-USD.executed",
+        connection_principal=_viewer_principal(),
+        payload={"wallet_public_id": "wallet-A"},
+        scope_grant_service=service,
+    )
+    after = datetime.now(UTC)
+    list_mock: AsyncMock = service.list_accessible_wallet_public_ids
+    assert list_mock.await_args is not None
+    assert before <= list_mock.await_args.kwargs["as_of"] <= after

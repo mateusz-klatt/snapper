@@ -100,24 +100,26 @@ async def test_forward_to_clients_backpressure_trade_disconnects_client() -> Non
     """
     bridge = ZmqWebSocketBridgeService(connection_manager=None)
     ws: Any = DummyWebSocket()
-    topic = "orders.events.kraken."
+    topic = "orders.commands.kraken."
     sub = TopicSubscriptionModel(websocket=ws, throttle_ms=0, client_id="c1")
     sub.pending_count = bridge._get_max_pending(topic)
     bridge.topic_subscriptions[topic] = [sub]
     bridge.topic_metrics[topic] = TopicMetricsModel()
     bridge.disconnect_client = AsyncMock()
-    order_payload = {
-        "public_id": "1",
-        "instrument": "BTC-USD",
-        "exchange": "kraken",
-        "side": "buy",
-        "order_type": "limit",
-        "size": 1.0,
-        "price": 10_000.0,
-        "status": "open",
-        "created_at": datetime.now(tz=UTC).isoformat(),
-        "updated_at": datetime.now(tz=UTC).isoformat(),
-    }
+    order_payload = json.dumps(
+        {
+            "public_id": "1",
+            "instrument": "BTC-USD",
+            "exchange": "kraken",
+            "side": "buy",
+            "order_type": "limit",
+            "size": 1.0,
+            "price": 10_000.0,
+            "status": "open",
+            "created_at": datetime.now(tz=UTC).isoformat(),
+            "updated_at": datetime.now(tz=UTC).isoformat(),
+        }
+    )
     await bridge._forward_to_clients(topic, topic, order_payload)
     assert bridge.topic_metrics[topic].dropped_count == 1
     bridge.disconnect_client.assert_awaited_once_with(ws)
@@ -1192,7 +1194,7 @@ class TestForwardToClientsBackpressure:
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         bridge.disconnect_client = AsyncMock()
-        topic = "orders.events."
+        topic = "orders.commands."
         mock_ws = AsyncMock()
         sub = TopicSubscriptionModel(
             websocket=mock_ws,
@@ -1201,7 +1203,7 @@ class TestForwardToClientsBackpressure:
         )
         bridge.topic_subscriptions[topic] = [sub]
         bridge.topic_metrics[topic] = TopicMetricsModel()
-        message_str = '{"type": "order", "public_id": "123"}'
+        message_str = '{"type": "order_request", "public_id": "123"}'
         await bridge._forward_to_clients(topic, topic, message_str)
         bridge.disconnect_client.assert_awaited_once()
 

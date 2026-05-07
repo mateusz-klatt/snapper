@@ -20,6 +20,8 @@ import zmq
 import zmq.asyncio
 from fastapi import WebSocket
 
+from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.app import AppSettings
 from snapper.interface.websocket.bridge import MAX_PENDING_MESSAGES_MARKET
 from snapper.interface.websocket.bridge import MAX_PENDING_MESSAGES_TRADE
@@ -186,7 +188,7 @@ def _make_candle_json() -> str:
 def _make_order_json() -> str:
     return json.dumps(
         {
-            "type": "order",
+            "type": "order_request",
             "public_id": "1",
             "instrument": "BTCUSD",
             "exchange": "kraken",
@@ -210,7 +212,7 @@ async def test_forward_to_clients_trade_backpressure(
     When: Another message is forwarded,
     Then: The client is disconnected and message is dropped.
     """
-    topic = "orders.events."
+    topic = "orders.commands."
     subscription = TopicSubscriptionModel(
         websocket=AsyncMock(),
         throttle_ms=0,
@@ -237,7 +239,7 @@ async def test_forward_to_clients_trade_backpressure_without_metrics(
     When: Another message is forwarded,
     Then: The client is disconnected without metrics update.
     """
-    topic = "orders.events."
+    topic = "orders.commands."
     subscription = TopicSubscriptionModel(
         websocket=AsyncMock(),
         throttle_ms=0,
@@ -2963,9 +2965,30 @@ class TestZmqWsBridgeE2ESmoke:
             bridge.context = MagicMock(spec=zmq.asyncio.Context)
             return bridge
 
+    @pytest.fixture
+    def admin_auth_patch(self) -> Generator[MagicMock]:
+        """Patch WebSocketAuthManager so the scope filter sees an ADMIN principal.
+
+        The bypass keeps these passthrough/backpressure tests focused on
+        transport behavior rather than RBAC for ``orders.events.*`` frames.
+        """
+        admin_principal = AuthPrincipal(
+            username="test-admin",
+            role=UserRole.ADMIN,
+            user_public_id="user-admin-1",
+            operator_public_ids=[],
+        )
+        manager_stub = MagicMock()
+        manager_stub.get_authenticated_user.return_value = admin_principal
+        with patch("snapper.interface.websocket.bridge.WebSocketAuthManager") as mock_manager_cls:
+            mock_manager_cls.get_instance.return_value = manager_stub
+            yield manager_stub
+
     @pytest.mark.asyncio
     async def test_raw_json_passthrough_for_fills(
-        self, bridge_with_context: ZmqWebSocketBridgeService
+        self,
+        bridge_with_context: ZmqWebSocketBridgeService,
+        admin_auth_patch: MagicMock,
     ) -> None:
         """Verify execution data JSON is passed through unchanged.
 
@@ -3004,6 +3027,7 @@ class TestZmqWsBridgeE2ESmoke:
             fee_asset="USD",
             status="filled",
             executed_at=datetime(2024, 1, 1, tzinfo=UTC),
+            wallet_public_id="wallet-test-1",
         )
         raw_json = fill.model_dump_json()
         await bridge_with_context._forward_to_clients(
@@ -3013,7 +3037,9 @@ class TestZmqWsBridgeE2ESmoke:
 
     @pytest.mark.asyncio
     async def test_raw_json_passthrough_for_orders(
-        self, bridge_with_context: ZmqWebSocketBridgeService
+        self,
+        bridge_with_context: ZmqWebSocketBridgeService,
+        admin_auth_patch: MagicMock,
     ) -> None:
         """Verify order data JSON is passed through unchanged.
 
@@ -3049,6 +3075,7 @@ class TestZmqWsBridgeE2ESmoke:
             status="accepted",
             filled_size=0.0,
             created_at=datetime(2024, 1, 1, tzinfo=UTC),
+            wallet_public_id="wallet-test-1",
         )
         raw_json = order.model_dump_json()
         await bridge_with_context._forward_to_clients(
@@ -3127,7 +3154,7 @@ class TestBackpressure:
         """
         mock_ws = AsyncMock()
         bridge.disconnect_client = AsyncMock()
-        topic = "orders.events."
+        topic = "orders.commands."
         sub = TopicSubscriptionModel(
             websocket=mock_ws,
             throttle_ms=0,
@@ -3136,8 +3163,8 @@ class TestBackpressure:
         )
         bridge.topic_subscriptions[topic] = [sub]
         bridge.topic_metrics[topic] = TopicMetricsModel()
-        raw_json = '{"type": "order", "public_id": "123"}'
-        await bridge._forward_to_clients(topic, "orders.events.kraken.BTC-USD.accepted", raw_json)
+        raw_json = '{"type": "order_request", "public_id": "123"}'
+        await bridge._forward_to_clients(topic, "orders.commands.kraken.BTC-USD.submit", raw_json)
         bridge.disconnect_client.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -3409,3 +3436,186 @@ class TestBridgeControlRecording:
         assert row.message_type == "zmq_disconnect"
         assert row.outcome == "ok"
         assert "1 topics" in row.detail
+
+
+class TestOrdersEventsFailClosedParsing:
+    """Bridge fail-closed parsing for ``orders.events.*`` frames.
+
+    Four guards in :meth:`_maybe_parse_orders_events_payload` must drop
+    the frame BEFORE :func:`enforce_orders_events_scope` is invoked, so
+    the filter never sees malformed input. Each guard increments the
+    bridge's ``invalid_messages`` topic metric and emits a warning.
+    """
+
+    @pytest.fixture
+    def bridge(self) -> ZmqWebSocketBridgeService:
+        """Provide ZMQ bridge with mocked context."""
+        with patch("snapper.interface.websocket.bridge.get_settings") as mock_settings:
+            mock_settings.return_value.zmq_broker_xpub = "tcp://localhost:5556"
+            mock_settings.return_value.zmq_publisher = "tcp://localhost:5555"
+            return ZmqWebSocketBridgeService(connection_manager=MagicMock())
+
+    def _seed_orders_events_subscription(
+        self, bridge: ZmqWebSocketBridgeService
+    ) -> tuple[AsyncMock, str]:
+        """Wire one ``orders.events.`` subscriber + return the mock ws."""
+        topic = "orders.events."
+        mock_ws = AsyncMock()
+        sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, client_id="viewer-1")
+        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_metrics[topic] = TopicMetricsModel()
+        return mock_ws, topic
+
+    @pytest.mark.asyncio
+    async def test_drops_malformed_json_payload(self, bridge: ZmqWebSocketBridgeService) -> None:
+        """Non-parsable JSON drops without forwarding."""
+        mock_ws, topic = self._seed_orders_events_subscription(bridge)
+        await bridge._forward_to_clients(
+            topic, "orders.events.kraken.BTC-USD.executed", "{not-json"
+        )
+        mock_ws.send_text.assert_not_awaited()
+        assert bridge.topic_metrics[topic].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_drops_non_dict_payload(self, bridge: ZmqWebSocketBridgeService) -> None:
+        """Top-level non-dict (list / string / number) drops."""
+        mock_ws, topic = self._seed_orders_events_subscription(bridge)
+        await bridge._forward_to_clients(
+            topic, "orders.events.kraken.BTC-USD.executed", "[1, 2, 3]"
+        )
+        mock_ws.send_text.assert_not_awaited()
+        assert bridge.topic_metrics[topic].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_drops_payload_missing_wallet_public_id(
+        self, bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Missing ``wallet_public_id`` key drops (cannot authorize)."""
+        mock_ws, topic = self._seed_orders_events_subscription(bridge)
+        await bridge._forward_to_clients(
+            topic,
+            "orders.events.kraken.BTC-USD.executed",
+            '{"type": "execution", "client_order_id": "o-1"}',
+        )
+        mock_ws.send_text.assert_not_awaited()
+        assert bridge.topic_metrics[topic].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_drops_payload_with_non_string_wallet_public_id(
+        self, bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Non-string ``wallet_public_id`` (int / null / dict) drops."""
+        mock_ws, topic = self._seed_orders_events_subscription(bridge)
+        await bridge._forward_to_clients(
+            topic,
+            "orders.events.kraken.BTC-USD.executed",
+            '{"type": "execution", "wallet_public_id": null}',
+        )
+        mock_ws.send_text.assert_not_awaited()
+        assert bridge.topic_metrics[topic].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_drops_malformed_frame_without_topic_metrics_entry(
+        self, bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Malformed frame on a topic missing from topic_metrics still drops cleanly.
+
+        Given: A subscription on ``orders.events.`` with no ``topic_metrics`` entry,
+        When: A malformed ``orders.events.*`` frame arrives,
+        Then: The frame is dropped without raising; no metric is updated.
+        """
+        topic = "orders.events."
+        mock_ws = AsyncMock()
+        sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, client_id="viewer-1")
+        bridge.topic_subscriptions[topic] = [sub]
+        await bridge._forward_to_clients(
+            topic, "orders.events.kraken.BTC-USD.executed", "{not-json"
+        )
+        mock_ws.send_text.assert_not_awaited()
+        assert topic not in bridge.topic_metrics
+
+
+class TestOrdersEventsTwoPrincipalLeakGuard:
+    """Two-principal cross-tenant leak guard test (Codex acceptance §5#3).
+
+    Single ZMQ frame for wallet-A; only the principal whose accessible
+    wallet set contains wallet-A receives the forward. The other
+    principal (different operators / scope grants) does not.
+    """
+
+    @pytest.fixture
+    def bridge(self) -> ZmqWebSocketBridgeService:
+        """Provide ZMQ bridge with mocked context."""
+        with patch("snapper.interface.websocket.bridge.get_settings") as mock_settings:
+            mock_settings.return_value.zmq_broker_xpub = "tcp://localhost:5556"
+            mock_settings.return_value.zmq_publisher = "tcp://localhost:5555"
+            return ZmqWebSocketBridgeService(connection_manager=MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_orders_events_frame_isolates_wallets_across_principals(
+        self, bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """``orders.events.*`` frame for wallet-A reaches VIEWER-A but not VIEWER-B.
+
+        VIEWER-B has no scope grant on wallet-A, so the per-frame filter
+        must drop the frame for that socket while delivering it to VIEWER-A.
+        """
+        topic = "orders.events."
+        ws_a = AsyncMock()
+        ws_b = AsyncMock()
+        bridge.topic_subscriptions[topic] = [
+            TopicSubscriptionModel(websocket=ws_a, throttle_ms=0, client_id="viewer-A"),
+            TopicSubscriptionModel(websocket=ws_b, throttle_ms=0, client_id="viewer-B"),
+        ]
+        bridge.topic_metrics[topic] = TopicMetricsModel()
+
+        principal_a = AuthPrincipal(
+            username="viewer-a",
+            role=UserRole.VIEWER,
+            user_public_id="user-A",
+            operator_public_ids=["op-A"],
+        )
+        principal_b = AuthPrincipal(
+            username="viewer-b",
+            role=UserRole.VIEWER,
+            user_public_id="user-B",
+            operator_public_ids=["op-B"],
+        )
+
+        accessible_by_user: dict[str, set[str]] = {
+            "user-A": {"wallet-A"},
+            "user-B": {"wallet-B"},
+        }
+
+        async def _list_accessible(*, principal: AuthPrincipal, as_of: Any) -> set[str]:
+            return accessible_by_user[principal.user_public_id]
+
+        mock_service = MagicMock()
+        mock_service.list_accessible_wallet_public_ids = AsyncMock(side_effect=_list_accessible)
+        manager_stub = MagicMock()
+        manager_stub.get_authenticated_user.side_effect = lambda ws: {
+            ws_a: principal_a,
+            ws_b: principal_b,
+        }[ws]
+
+        with (
+            patch("snapper.interface.websocket.bridge.WebSocketAuthManager") as mock_manager_cls,
+            patch(
+                "snapper.interface.websocket.bridge.get_scope_grant_service",
+                return_value=mock_service,
+            ),
+        ):
+            mock_manager_cls.get_instance.return_value = manager_stub
+            payload = json.dumps(
+                {
+                    "type": "execution",
+                    "wallet_public_id": "wallet-A",
+                    "client_order_id": "o-1",
+                }
+            )
+            await bridge._forward_to_clients(
+                topic, "orders.events.kraken.BTC-USD.executed", payload
+            )
+
+        ws_a.send_text.assert_awaited_once_with(payload)
+        ws_b.send_text.assert_not_awaited()

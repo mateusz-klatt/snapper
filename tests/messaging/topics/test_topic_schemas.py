@@ -76,20 +76,36 @@ class TestTopicRegistry:
         assert all(isinstance(s, TopicSchema) for s in TOPIC_REGISTRY)
 
     def test_trade_topics_have_zero_throttle(self) -> None:
-        """Order command and event topics have zero throttle.
+        """Order command and plan-decision topics have zero throttle.
 
-        Given: TOPIC_REGISTRY with trade topics,
+        Given: TOPIC_REGISTRY with trade-category topics,
         When: Checking throttle_ms for trade category,
         Then: All trade topics have throttle_ms=0.
+
+        Note: ``orders.events.`` moved to category ``trade_events`` in
+        v0.7.0 (RBAC symmetry — read-side echo gated by READ_ORDERS,
+        not CREATE_ORDERS) and is asserted in
+        :meth:`test_trade_events_topics_have_zero_throttle`.
         """
         trade = [s for s in TOPIC_REGISTRY if s.category == "trade"]
-        assert len(trade) == 3
+        assert len(trade) == 2
         assert {s.pattern for s in trade} == {
             "orders.commands.",
-            "orders.events.",
             "plans.decisions.",
         }
         assert all(s.throttle_ms == 0 for s in trade)
+
+    def test_trade_events_topics_have_zero_throttle(self) -> None:
+        """``orders.events.`` lives in the trade_events category at zero throttle.
+
+        Given: TOPIC_REGISTRY with the trade_events category,
+        When: Checking throttle_ms for trade_events category,
+        Then: ``orders.events.`` is the sole entry, with throttle_ms=0.
+        """
+        trade_events = [s for s in TOPIC_REGISTRY if s.category == "trade_events"]
+        assert len(trade_events) == 1
+        assert trade_events[0].pattern == "orders.events."
+        assert trade_events[0].throttle_ms == 0
 
 
 class TestTopicUtilities:

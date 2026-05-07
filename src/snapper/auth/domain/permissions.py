@@ -115,6 +115,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
 CATEGORY_PERMISSIONS: dict[str, frozenset[Permission]] = {
     "market": frozenset({Permission.READ_MARKET_DATA}),
     "trade": frozenset({Permission.CREATE_ORDERS}),
+    "trade_events": frozenset({Permission.READ_ORDERS}),
     "signals": frozenset({Permission.READ_SIGNALS}),
     "strategy": frozenset({Permission.START_STRATEGIES}),
     "system": frozenset({Permission.READ_SYSTEM_STATUS}),

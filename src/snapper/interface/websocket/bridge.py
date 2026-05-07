@@ -37,7 +37,9 @@ from snapper.interface.websocket.models import TopicMetricSnapshot
 from snapper.interface.websocket.models import TopicSubscriptionModel
 from snapper.interface.websocket.schemas import WSErrorResponse
 from snapper.interface.websocket.scope_filter import AI_REVIEWS_TOPIC_PREFIX
+from snapper.interface.websocket.scope_filter import ORDERS_EVENTS_TOPIC_PREFIX
 from snapper.interface.websocket.scope_filter import enforce_ai_review_scope
+from snapper.interface.websocket.scope_filter import enforce_orders_events_scope
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
@@ -708,6 +710,17 @@ class ZmqWebSocketBridgeService:
                 topic,
             )
             return
+        orders_events_payload = self._maybe_parse_orders_events_payload(topic, message_str)
+        if topic.startswith(ORDERS_EVENTS_TOPIC_PREFIX) and orders_events_payload is None:
+            logger.warning(
+                "Dropping malformed orders.events.* frame (failed JSON / non-dict envelope / "
+                "missing or non-string wallet_public_id) for topic=%s — would otherwise "
+                "bypass per-frame scope filter",
+                topic,
+            )
+            if topic in self.topic_metrics:
+                self.topic_metrics[topic].invalid_messages += 1
+            return
         for subscription in self.topic_subscriptions[topic][:]:
             try:
                 if self._is_throttled(subscription, current_time, topic):
@@ -716,6 +729,15 @@ class ZmqWebSocketBridgeService:
                     subscription=subscription,
                     topic=topic,
                     payload=ai_review_payload,
+                ):
+                    continue
+                if (
+                    orders_events_payload is not None
+                    and not await self._enforce_orders_events_scope(
+                        subscription=subscription,
+                        topic=topic,
+                        payload=orders_events_payload,
+                    )
                 ):
                     continue
                 if await self._handle_backpressure(subscription, topic, max_pending, is_trade):
@@ -743,6 +765,67 @@ class ZmqWebSocketBridgeService:
         if not isinstance(parsed, dict):
             return None
         return parsed
+
+    def _maybe_parse_orders_events_payload(
+        self, topic: str, message_str: str
+    ) -> dict[str, Any] | None:
+        """Parse an ``orders.events.*`` frame's JSON payload exactly once.
+
+        Returns ``None`` for non-orders.events. topics (no per-frame
+        scope check needed) AND for malformed payloads. Fail-closed:
+        the four guards below MUST drop the frame before
+        :func:`enforce_orders_events_scope` is invoked, so the filter
+        never sees malformed input.
+
+        Guards (each returns ``None``):
+
+        - JSON decode failure.
+        - Non-dict top-level payload.
+        - Missing ``wallet_public_id`` key.
+        - Non-string ``wallet_public_id`` value.
+
+        The ``wallet_public_id`` discriminator is what the per-frame
+        filter consults. A non-string value would otherwise reach the
+        filter and get dropped there anyway, but pre-screening at the
+        bridge keeps the filter contract clean and lets the bridge
+        increment ``invalid_messages`` at the canonical drop site.
+        """
+        if not topic.startswith(ORDERS_EVENTS_TOPIC_PREFIX):
+            return None
+        try:
+            parsed = json.loads(message_str)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        wallet_public_id = parsed.get("wallet_public_id")
+        if not isinstance(wallet_public_id, str):
+            return None
+        return parsed
+
+    async def _enforce_orders_events_scope(
+        self,
+        *,
+        subscription: TopicSubscriptionModel,
+        topic: str,
+        payload: Mapping[str, Any],
+    ) -> bool:
+        """Per-frame scope filter for the ``orders.events.*`` family.
+
+        Resolves the destination socket's principal via the
+        :class:`WebSocketAuthManager` singleton and delegates to
+        :func:`enforce_orders_events_scope`. Forward iff the helper
+        returns ``True``.
+        """
+        principal = WebSocketAuthManager.get_instance().get_authenticated_user(
+            subscription.websocket
+        )
+        return await enforce_orders_events_scope(
+            topic=topic,
+            connection_principal=principal,
+            payload=payload,
+            scope_grant_service=get_scope_grant_service(),
+        )
 
     async def _enforce_ai_review_scope(
         self,
