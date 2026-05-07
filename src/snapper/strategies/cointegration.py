@@ -17,6 +17,7 @@ from snapper.strategies.base import StrategyConfig
 from snapper.strategies.base import StrategySignal
 from snapper.strategies.decorators import create_strategy_process
 from snapper.strategies.decorators import register_strategy
+from snapper.strategies.process_wrapper import create_strategy_process as _create_strategy_process
 
 
 @register_strategy("CointegrationPairs")
@@ -335,3 +336,44 @@ class CointegrationPairs(BaseStrategy):
         """Reset strategy state for replay."""
         self._position = None
         logger.info(f"Strategy {self.name} reset")
+
+
+_FET_RENDER_DEFAULT_CONFIG: dict[str, object] = {
+    "name": "cointegration_fet_render",
+    "inputs": [
+        "market.paper.kraken.FET-USD.candles.1d",
+        "market.paper.kraken.RENDER-USD.candles.1d",
+    ],
+    "outputs": ["FET-USD", "RENDER-USD"],
+    "exchange": ExchangeEnum.PAPER,
+    "params": {
+        "beta": 0.257463,
+        "entry_threshold": 2.0,
+        "exit_threshold": 0.5,
+        "lookback_window": 60,
+        "min_data_points": 30,
+    },
+}
+"""Forward-test config for the FET-USD / RENDER-USD pair-trade.
+
+Sweet-spot params from the cointegration screening session:
+
+- ``beta=0.257463`` — OLS hedge ratio fit on linear prices in the
+  train window 2023-11-09 → 2024-12-31 (the engine uses linear
+  prices, not log).
+- ``entry_threshold=2.0`` / ``exit_threshold=0.5`` /
+  ``lookback_window=60`` — sweet-spot region of the OOS walk-forward
+  heatmap (Sharpe 0.7-0.98 across this neighbourhood).
+
+Engine FET/RENDER backtest with these params produced Sharpe 0.61 /
+return +60% / max DD -65% over the 2023-11 → 2026-05 period after
+the Bug L paired-signal fix. See
+``proprietary/plans/plan_2026_05_07_fet_render_forward_test.md``
+for the full spec + decision criteria.
+"""
+
+_create_strategy_process(
+    process_name="strategy_cointegration_fet_render",
+    strategy_class="CointegrationPairs",
+    default_config=_FET_RENDER_DEFAULT_CONFIG,
+)
