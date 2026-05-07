@@ -43,6 +43,7 @@ from snapper.data.repository_types import UserAlertDefaultRow
 from snapper.data.repository_types import UserAlertDefaultUpsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
+from snapper.server.json_body import json_body
 
 router = APIRouter(prefix="/alert_defaults", tags=["alert-defaults"])
 
@@ -117,7 +118,9 @@ async def list_alert_defaults(
 @router.patch("")
 async def update_alert_default(
     request: Request,
-    command: UpdateUserAlertDefaultCommand,
+    command: Annotated[
+        UpdateUserAlertDefaultCommand, Depends(json_body(UpdateUserAlertDefaultCommand))
+    ],
     principal: Annotated[AuthPrincipal, Depends(require_authentication)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],

@@ -48,6 +48,7 @@ from snapper.data.repository_types import NotificationDeviceRow
 from snapper.data.repository_types import NotificationDeviceUpsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
+from snapper.server.json_body import json_body
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
@@ -122,7 +123,7 @@ def _device_info_from_row(row: NotificationDeviceRow) -> NotificationDeviceInfo:
 @router.post("")
 async def register_device(
     request: Request,
-    command: RegisterDeviceCommand,
+    command: Annotated[RegisterDeviceCommand, Depends(json_body(RegisterDeviceCommand))],
     principal: Annotated[AuthPrincipal, Depends(require_authentication)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
@@ -271,7 +272,7 @@ async def delete_device(
 async def update_device_pref(
     request: Request,
     device_public_id: str,
-    command: UpdateDevicePrefCommand,
+    command: Annotated[UpdateDevicePrefCommand, Depends(json_body(UpdateDevicePrefCommand))],
     principal: Annotated[AuthPrincipal, Depends(require_authentication)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],

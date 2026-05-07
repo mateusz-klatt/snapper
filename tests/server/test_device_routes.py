@@ -30,7 +30,9 @@ from snapper.server.device_routes import delete_device
 from snapper.server.device_routes import list_device_prefs
 from snapper.server.device_routes import list_devices
 from snapper.server.device_routes import register_device
+from snapper.server.device_routes import router as device_router
 from snapper.server.device_routes import update_device_pref
+from snapper.server.json_body import json_body
 
 
 def _ts() -> datetime:
@@ -427,3 +429,67 @@ class TestListDevicePrefs:
 
         assert exc.value.status_code == 404
         repo.list_device_alert_prefs_for_user.assert_not_awaited()
+
+
+class _StubRequest:
+    """Minimal Request stub with pre-set body bytes for ``json_body`` exercises."""
+
+    def __init__(self, raw: bytes) -> None:
+        self._raw = raw
+
+    async def body(self) -> bytes:
+        """Return pre-set raw bytes."""
+        return self._raw
+
+
+class TestEnvelopeWireFormatRegression:
+    """Pin the contract: iOS / TS clients ship ISO 8601 datetime strings.
+
+    iOS encodes ``timestamp`` as a wire-format ISO 8601 string
+    (``"2026-05-07T14:39:47Z"``) using ``JSONEncoder.dateEncodingStrategy
+    = .iso8601``. The route MUST validate via ``json_body()`` (Pydantic
+    JSON mode, accepts string datetimes) — direct FastAPI body injection
+    runs ``model_validate(dict)`` in strict-Python mode and rejects the
+    same string with ``"Input should be a valid datetime"``. This was
+    a real production bug observed on TestFlight v0.4.0 build 17 against
+    the live backend until ``Depends(json_body(...))`` was wired in.
+    """
+
+    @pytest.mark.asyncio()
+    async def test_register_device_accepts_iso8601_z_timestamp_via_json_body(self) -> None:
+        """``json_body(RegisterDeviceCommand)`` accepts a ``Z``-suffixed timestamp."""
+        raw = (
+            b'{"type":"register_device_command",'
+            b'"sequence_id":1,'
+            b'"public_id":"a1b2c3d4-e5f6-7890-1234-567890abcdef",'
+            b'"timestamp":"2026-05-07T14:39:47Z",'
+            b'"session_id":"client-sid",'
+            b'"topic":null,'
+            b'"payload":{"device_token":"' + b"a" * 64 + b'",'
+            b'"device_id":"BBC04A23-FF41-4D31-B515-AC0D7DC26C37",'
+            b'"env":"sandbox","app_version":"0.4.0","previews_mode":"private"}}'
+        )
+        dep = json_body(RegisterDeviceCommand)
+        cmd: RegisterDeviceCommand = await dep(_StubRequest(raw))
+        assert isinstance(cmd.timestamp, datetime)
+        assert cmd.payload.env == "sandbox"
+
+    def test_register_device_post_route_wired_through_json_body(self) -> None:
+        """The POST /devices route's ``command`` dependency is ``json_body``-bound.
+
+        Smoke-pin so a future refactor that drops ``Annotated[..., Depends(json_body(...))]``
+        in favour of direct injection (the original bug shape) is caught at unit-test
+        time rather than at the next end-to-end client retry. The detection works
+        because every ``json_body()``-minted closure shares the qualified name
+        ``json_body.<locals>.dependency``; a naive direct-body injection would not
+        register any sub-dependency at all and the ``any(...)`` check fails fast.
+        """
+        post_route = next(
+            r
+            for r in device_router.routes
+            if getattr(r, "path", "") == "/devices" and "POST" in r.methods
+        )
+        body_param = post_route.dependant.dependencies
+        assert any(
+            getattr(d.call, "__qualname__", "").startswith("json_body.") for d in body_param
+        ), "register_device must inject body via json_body() to accept str datetime envelopes"

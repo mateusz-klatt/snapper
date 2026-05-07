@@ -23,7 +23,9 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository_types import UserAlertDefaultRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.alert_default_routes import list_alert_defaults
+from snapper.server.alert_default_routes import router as alert_default_router
 from snapper.server.alert_default_routes import update_alert_default
+from snapper.server.json_body import json_body
 
 
 def _ts() -> datetime:
@@ -184,3 +186,52 @@ class TestUpdateAlertDefault:
         assert response.payload.user_public_id == "user-bravo"
         upsert_call = repo.upsert_user_alert_default.await_args
         assert upsert_call.args[0]["user_public_id"] == "user-bravo"
+
+
+class _StubRequest:
+    """Minimal Request stub with pre-set body bytes for ``json_body`` exercises."""
+
+    def __init__(self, raw: bytes) -> None:
+        self._raw = raw
+
+    async def body(self) -> bytes:
+        """Return pre-set raw bytes."""
+        return self._raw
+
+
+class TestEnvelopeWireFormatRegression:
+    """Pin the contract: PATCH /api/alert_defaults accepts ISO 8601 string timestamps.
+
+    Mirrors the regression class on ``test_device_routes`` — same root cause,
+    same shape of fix. Pydantic strict-Python mode rejects ``"...Z"`` datetime
+    strings, so the route MUST validate via ``json_body()``.
+    """
+
+    @pytest.mark.asyncio()
+    async def test_update_alert_default_accepts_iso8601_z_timestamp_via_json_body(self) -> None:
+        """``json_body(UpdateUserAlertDefaultCommand)`` accepts a ``Z``-suffixed timestamp."""
+        raw = (
+            b'{"type":"update_user_alert_default_command",'
+            b'"sequence_id":1,'
+            b'"public_id":"a1b2c3d4-e5f6-7890-1234-567890abcdef",'
+            b'"timestamp":"2026-05-07T14:39:47Z",'
+            b'"session_id":"client-sid",'
+            b'"topic":null,'
+            b'"payload":{"alert_type":"order_fill_full","enabled":true,"min_priority":"medium"}}'
+        )
+        dep = json_body(UpdateUserAlertDefaultCommand)
+        cmd: UpdateUserAlertDefaultCommand = await dep(_StubRequest(raw))
+        assert isinstance(cmd.timestamp, datetime)
+        assert cmd.payload.alert_type == "order_fill_full"
+
+    def test_patch_route_wired_through_json_body(self) -> None:
+        """The PATCH /alert_defaults route's ``command`` is ``json_body``-bound."""
+        patch_route = next(
+            r
+            for r in alert_default_router.routes
+            if getattr(r, "path", "") == "/alert_defaults" and "PATCH" in r.methods
+        )
+        body_param = patch_route.dependant.dependencies
+        assert any(
+            getattr(d.call, "__qualname__", "").startswith("json_body.") for d in body_param
+        ), "update_alert_default must inject body via json_body() to accept str datetime envelopes"
