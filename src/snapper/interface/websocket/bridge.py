@@ -699,9 +699,6 @@ class ZmqWebSocketBridgeService:
             return
         if not self._validate_topic_match(topic, received_topic):
             return
-        current_time = time.time()
-        max_pending = self._get_max_pending(topic)
-        is_trade = self._is_trade_topic(topic)
         ai_review_payload = self._maybe_parse_ai_review_payload(topic, message_str)
         if topic.startswith(AI_REVIEWS_TOPIC_PREFIX) and ai_review_payload is None:
             logger.warning(
@@ -711,42 +708,89 @@ class ZmqWebSocketBridgeService:
             )
             return
         orders_events_payload = self._maybe_parse_orders_events_payload(topic, message_str)
-        if topic.startswith(ORDERS_EVENTS_TOPIC_PREFIX) and orders_events_payload is None:
-            logger.warning(
-                "Dropping malformed orders.events.* frame (failed JSON / non-dict envelope / "
-                "missing or non-string wallet_public_id) for topic=%s — would otherwise "
-                "bypass per-frame scope filter",
-                topic,
-            )
-            if topic in self.topic_metrics:
-                self.topic_metrics[topic].invalid_messages += 1
+        if not self._orders_events_frame_is_valid(topic, orders_events_payload):
             return
+        current_time = time.time()
+        max_pending = self._get_max_pending(topic)
+        is_trade = self._is_trade_topic(topic)
         for subscription in self.topic_subscriptions[topic][:]:
-            try:
-                if self._is_throttled(subscription, current_time, topic):
-                    continue
-                if ai_review_payload is not None and not await self._enforce_ai_review_scope(
-                    subscription=subscription,
-                    topic=topic,
-                    payload=ai_review_payload,
-                ):
-                    continue
-                if (
-                    orders_events_payload is not None
-                    and not await self._enforce_orders_events_scope(
-                        subscription=subscription,
-                        topic=topic,
-                        payload=orders_events_payload,
-                    )
-                ):
-                    continue
-                if await self._handle_backpressure(subscription, topic, max_pending, is_trade):
-                    continue
-                await self._try_send_message(subscription, topic, message_str, current_time)
-            except Exception as e:
-                logger.warning(f"Failed to send message to client {subscription.client_id}: {e}")
-                with contextlib.suppress(Exception):
-                    await self.disconnect_client(subscription.websocket)
+            await self._dispatch_to_subscription(
+                subscription=subscription,
+                topic=topic,
+                message_str=message_str,
+                current_time=current_time,
+                max_pending=max_pending,
+                is_trade=is_trade,
+                ai_review_payload=ai_review_payload,
+                orders_events_payload=orders_events_payload,
+            )
+
+    def _orders_events_frame_is_valid(
+        self, topic: str, orders_events_payload: dict[str, Any] | None
+    ) -> bool:
+        """Return False (and log + count) when an ``orders.events.*`` frame is malformed.
+
+        Non-orders.events topics short-circuit to ``True``. A ``None``
+        payload on an orders.events.* topic means
+        :meth:`_maybe_parse_orders_events_payload` already rejected the
+        frame (JSON / shape / discriminator). The metrics counter is
+        bumped at this canonical drop site rather than inside the parse
+        helper to keep the parser side-effect-free.
+        """
+        if not topic.startswith(ORDERS_EVENTS_TOPIC_PREFIX):
+            return True
+        if orders_events_payload is not None:
+            return True
+        logger.warning(
+            "Dropping malformed orders.events.* frame (failed JSON / non-dict envelope / "
+            "missing or non-string wallet_public_id) for topic=%s — would otherwise "
+            "bypass per-frame scope filter",
+            topic,
+        )
+        if topic in self.topic_metrics:
+            self.topic_metrics[topic].invalid_messages += 1
+        return False
+
+    async def _dispatch_to_subscription(
+        self,
+        *,
+        subscription: TopicSubscriptionModel,
+        topic: str,
+        message_str: str,
+        current_time: float,
+        max_pending: int,
+        is_trade: bool,
+        ai_review_payload: dict[str, Any] | None,
+        orders_events_payload: dict[str, Any] | None,
+    ) -> None:
+        """Apply throttle + per-frame scope + backpressure filters to one subscriber.
+
+        Sends the message through :meth:`_try_send_message` when all
+        gates pass. Disconnects the client on any send-side exception
+        so a misbehaving socket cannot wedge the fan-out loop.
+        """
+        try:
+            if self._is_throttled(subscription, current_time, topic):
+                return
+            if ai_review_payload is not None and not await self._enforce_ai_review_scope(
+                subscription=subscription,
+                topic=topic,
+                payload=ai_review_payload,
+            ):
+                return
+            if orders_events_payload is not None and not await self._enforce_orders_events_scope(
+                subscription=subscription,
+                topic=topic,
+                payload=orders_events_payload,
+            ):
+                return
+            if await self._handle_backpressure(subscription, topic, max_pending, is_trade):
+                return
+            await self._try_send_message(subscription, topic, message_str, current_time)
+        except Exception as e:
+            logger.warning(f"Failed to send message to client {subscription.client_id}: {e}")
+            with contextlib.suppress(Exception):
+                await self.disconnect_client(subscription.websocket)
 
     def _maybe_parse_ai_review_payload(self, topic: str, message_str: str) -> dict[str, Any] | None:
         """Parse an ``ai_reviews.*`` frame's JSON payload exactly once.
