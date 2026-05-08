@@ -40,6 +40,15 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 KNOWN_TO_MAX_STR = "9999-12-31 23:59:59.000000"
 
+_DEMO_SESSION_ID = "019e0500-0000-0000-0000-0000000d3e70"
+"""Stable session_id stamped on every row this script inserts.
+
+The skip gate in ``main`` checks for rows carrying this exact session_id
+to detect a previous seed run. Manually-inserted orders / e2e-test rows
+use different session_ids, so they no longer trip the skip gate and
+the demo data lands as a complete additive set on top of them.
+"""
+
 
 def _sync_db_url(url: str) -> str:
     """Convert async sqlite URL to sync for direct engine use."""
@@ -70,6 +79,29 @@ def _lookup_paper_wallet(conn: Connection) -> str | None:
             "WHERE label = 'paper' AND is_paper = 1 "
             "ORDER BY id ASC LIMIT 1"
         ),
+    ).first()
+    return row[0] if row else None
+
+
+def _lookup_user_by_role(conn: Connection, role: str) -> str | None:
+    """Find an active user public_id by role (admin / operator / viewer).
+
+    The demo alerts seed loops over the three seeded roles so each
+    iOS Alerts tab renders a non-empty list when the matching user
+    is the authenticated principal. The lookup intentionally compares
+    ``known_to`` with a strftime-derived sentinel rather than
+    ``KNOWN_TO_MAX_STR`` because seeded users are written with a
+    timezone-aware string (``9999-12-31 23:59:59+00:00``) while other
+    insert paths use the bare ``9999-12-31 23:59:59.000000`` form.
+    """
+    row = conn.execute(
+        text(
+            "SELECT public_id FROM users "
+            "WHERE role = :role AND is_active = 1 "
+            "AND known_to > strftime('%Y-%m-%dT%H:%M:%S','now') "
+            "ORDER BY id ASC LIMIT 1"
+        ),
+        {"role": role},
     ).first()
     return row[0] if row else None
 
@@ -231,6 +263,169 @@ def _insert_position(
         },
     )
     return public_id
+
+
+def _insert_alert_event(
+    conn: Connection,
+    tracker: SequenceTracker,
+    *,
+    user_public_id: str,
+    alert_type: str,
+    priority: str,
+    is_safety_critical: bool,
+    title: str,
+    body: str,
+    payload: dict[str, object],
+    dedup_key: str,
+    thread_key: str,
+    source_topic: str,
+    occurred_at: datetime,
+    wallet_public_id: str | None = None,
+    operator_public_id: str | None = None,
+) -> str:
+    """Insert one temporal (SCD2) alert_events row and return its public_id.
+
+    Mirrors what the production sidecar bypass writer does when an
+    ``alerts.{user}.{alert_type}`` ZMQ frame is consumed: every row
+    gets ``known_to = KNOWN_TO_MAX_STR`` (active) and provenance
+    pulled from ``tracker``. The iOS Alerts tab reads these rows
+    via ``Repository.list_recent_alerts_for_user`` filtered on
+    ``user_public_id == principal.user_public_id``.
+    """
+    public_id = str(uuid7())
+    conn.execute(
+        text(
+            "INSERT INTO alert_events "
+            "(public_id, user_public_id, operator_public_id, wallet_public_id, "
+            " alert_type, priority, is_safety_critical, title, body, payload, "
+            " dedup_key, thread_key, source_topic, "
+            " timestamp, known_to, session_id, sequence_id) "
+            "VALUES "
+            "(:public_id, :user, :operator, :wallet, "
+            " :atype, :priority, :critical, :title, :body, :payload, "
+            " :dedup, :thread, :topic, "
+            " :ts, :known_to, :sid, :seq)"
+        ),
+        {
+            "public_id": public_id,
+            "user": user_public_id,
+            "operator": operator_public_id,
+            "wallet": wallet_public_id,
+            "atype": alert_type,
+            "priority": priority,
+            "critical": is_safety_critical,
+            "title": title,
+            "body": body,
+            "payload": json.dumps(payload),
+            "dedup": dedup_key,
+            "thread": thread_key,
+            "topic": source_topic,
+            "ts": str(occurred_at),
+            "known_to": KNOWN_TO_MAX_STR,
+            "sid": tracker.session_id,
+            "seq": tracker.next_sequence("alert_events"),
+        },
+    )
+    return public_id
+
+
+def _seed_demo_alerts_for_user(
+    conn: Connection,
+    tracker: SequenceTracker,
+    *,
+    user_public_id: str,
+    operator_public_id: str,
+    wallet_public_id: str,
+    base_time: datetime,
+) -> int:
+    """Insert one realistic alert per ``AlertType`` for the given user.
+
+    Five rows total (one per ``AlertType`` literal): order_fill_full,
+    order_rejected, position_stop_loss_fired, margin_warning,
+    critical_system_error. Spaced by 30 minutes so the iOS Alerts
+    tab renders chronologically. Returns the count inserted.
+    """
+    short = user_public_id[:8]
+    alerts: list[tuple[str, str, bool, str, str, dict[str, object]]] = [
+        (
+            "order_fill_full",
+            "medium",
+            False,
+            "Order filled",
+            "BUY 0.1421 BTC-USD-PERP @ $76,820.50 filled on kraken_futures",
+            {
+                "client_order_id": f"demo-{short}-1",
+                "exchange_order_id": f"demo-exch-{short}-1",
+                "instrument": "BTC-USD-PERP",
+                "exchange": "kraken_futures",
+                "side": "buy",
+                "size": 0.1421,
+                "price": 76820.50,
+            },
+        ),
+        (
+            "order_rejected",
+            "high",
+            False,
+            "Order rejected",
+            "BUY 2.0 BTC-USD-PERP rejected: insufficient margin",
+            {
+                "client_order_id": f"demo-{short}-2",
+                "exchange_order_id": f"demo-exch-{short}-2",
+                "instrument": "BTC-USD-PERP",
+                "exchange": "kraken_futures",
+                "reason": "insufficient_margin",
+            },
+        ),
+        (
+            "position_stop_loss_fired",
+            "high",
+            False,
+            "Stop-loss fired",
+            "ETH-USD-PERP stop @ $3,000 triggered, position reduced to 0",
+            {
+                "instrument": "ETH-USD-PERP",
+                "exchange": "kraken_futures",
+                "stop_price": 3000.0,
+            },
+        ),
+        (
+            "margin_warning",
+            "high",
+            False,
+            "Margin warning",
+            "Wallet margin utilisation 82% — consider reducing exposure",
+            {"utilisation_pct": 82.0},
+        ),
+        (
+            "critical_system_error",
+            "high",
+            True,
+            "Trader heartbeat stale",
+            "ZMQ trader has not produced a heartbeat in 60 seconds",
+            {"component": "trader", "stale_seconds": 60},
+        ),
+    ]
+    for offset, (alert_type, priority, critical, title, body, payload) in enumerate(alerts):
+        occurred = base_time + timedelta(minutes=30 * offset)
+        _insert_alert_event(
+            conn,
+            tracker,
+            user_public_id=user_public_id,
+            wallet_public_id=wallet_public_id,
+            operator_public_id=operator_public_id,
+            alert_type=alert_type,
+            priority=priority,
+            is_safety_critical=critical,
+            title=title,
+            body=body,
+            payload=payload,
+            dedup_key=f"demo.{short}.{alert_type}",
+            thread_key=f"snapper.demo.{short}",
+            source_topic=f"alerts.{user_public_id}.{alert_type}",
+            occurred_at=occurred,
+        )
+    return len(alerts)
 
 
 def _insert_backtest_run(
@@ -495,6 +690,7 @@ def main() -> int:
     db_url = _sync_db_url(BootstrapSettingsLoader().db_url)
     engine = create_engine(db_url, poolclass=NullPool)
     tracker = SequenceTracker()
+    tracker._session_id = _DEMO_SESSION_ID
 
     with engine.connect() as conn:
         wallet = _lookup_paper_wallet(conn)
@@ -515,9 +711,15 @@ def main() -> int:
                 "run `make run-static` to populate symbols"
             )
 
-        existing_orders = conn.execute(text("SELECT COUNT(*) FROM orders")).scalar() or 0
-        if existing_orders > 0:
-            print(f"orders table already has {existing_orders} rows, skipping demo seed")
+        existing_demo_rows = (
+            conn.execute(
+                text("SELECT COUNT(*) FROM orders WHERE session_id = :sid"),
+                {"sid": _DEMO_SESSION_ID},
+            ).scalar()
+            or 0
+        )
+        if existing_demo_rows > 0:
+            print(f"demo seed already inserted ({existing_demo_rows} demo orders), skipping")
             return 0
 
         order1_t = datetime(2026, 4, 21, 9, 14, 32, tzinfo=UTC)
@@ -718,9 +920,26 @@ def main() -> int:
                 instrument=clm6,
             )
 
+        alerts_base = datetime(2026, 5, 7, 9, 0, tzinfo=UTC)
+        alerts_inserted = 0
+        for role in ("admin", "operator", "viewer"):
+            user_pid = _lookup_user_by_role(conn, role)
+            if user_pid:
+                alerts_inserted += _seed_demo_alerts_for_user(
+                    conn,
+                    tracker,
+                    user_public_id=user_pid,
+                    operator_public_id=operator,
+                    wallet_public_id=wallet,
+                    base_time=alerts_base,
+                )
+
         conn.commit()
     engine.dispose()
-    print("demo seed inserted: 4 orders, 2 executions, 2 positions, 3 backtests")
+    print(
+        "demo seed inserted: 4 orders, 2 executions, 2 positions, "
+        f"3 backtests, {alerts_inserted} alerts"
+    )
     return 0
 
 

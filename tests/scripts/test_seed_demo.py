@@ -155,6 +155,36 @@ def _seed_required_instruments(conn: Connection) -> None:
     )
 
 
+def _seed_demo_users(conn: Connection) -> dict[str, str]:
+    """Insert admin / operator / viewer users so the alerts seed loop finds them.
+
+    Returns a mapping from role name to the inserted ``public_id`` so
+    individual tests can verify per-user alert counts.
+    """
+    out: dict[str, str] = {}
+    for role in ("admin", "operator", "viewer"):
+        public_id = str(uuid7())
+        out[role] = public_id
+        conn.execute(
+            text(
+                "INSERT INTO users "
+                "(public_id, username, email, password_hash, role, is_active, "
+                " created_at, timestamp, known_to, session_id, sequence_id) "
+                "VALUES (:pid, :username, :email, 'x', :role, 1, "
+                " :ts, :ts, :ka, 's', 1)"
+            ),
+            {
+                "pid": public_id,
+                "username": role,
+                "email": f"{role}@snapper.local",
+                "role": role,
+                "ts": str(datetime.now(UTC)),
+                "ka": KNOWN_TO_MAX_STR,
+            },
+        )
+    return out
+
+
 def _seed_optional_commodity_instruments(conn: Connection) -> None:
     """Insert CLM6-NYMEX + GCM6-COMEX on kraken_equities (the optional commodity pair)."""
     _seed_instrument(
@@ -233,6 +263,7 @@ class TestMain:
             _seed_default_operator(conn)
             _seed_required_instruments(conn)
             _seed_optional_commodity_instruments(conn)
+            _seed_demo_users(conn)
 
         monkeypatch.setenv("DB_URL", db_url)
         rc = seed_demo.main()
@@ -246,25 +277,77 @@ class TestMain:
             assert conn.execute(text("SELECT COUNT(*) FROM ai_reviews")).scalar() == 1
             assert conn.execute(text("SELECT COUNT(*) FROM ai_delegates")).scalar() == 1
             assert conn.execute(text("SELECT COUNT(*) FROM ai_review_events")).scalar() == 2
+            assert conn.execute(text("SELECT COUNT(*) FROM alert_events")).scalar() == 15
+            for role in ("admin", "operator", "viewer"):
+                row_count = conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM alert_events "
+                        "WHERE user_public_id = (SELECT public_id FROM users WHERE role = :role)"
+                    ),
+                    {"role": role},
+                ).scalar()
+                assert row_count == 5, f"expected 5 alerts for role {role}, got {row_count}"
 
-    def test_idempotent_skip_when_orders_exist(
+    def test_idempotent_skip_when_demo_session_exists(
         self,
         migrated_db: tuple[sa.Engine, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Re-running with existing orders is a no-op.
+        """Re-running after a previous demo seed run is a no-op.
 
-        Given: a DB with the pre-reqs seeded AND one order row already present,
+        Given: a DB where ``main()`` has already produced the demo dataset
+            (rows tagged with the well-known ``_DEMO_SESSION_ID``),
+        When: ``main()`` runs again,
+        Then: the function returns 0 without inserting new rows because
+            the skip gate matches the demo-session marker.
+        """
+        engine, db_url = migrated_db
+        with engine.begin() as conn:
+            _seed_paper_wallet(conn)
+            _seed_default_operator(conn)
+            _seed_required_instruments(conn)
+            _seed_optional_commodity_instruments(conn)
+            _seed_demo_users(conn)
+
+        monkeypatch.setenv("DB_URL", db_url)
+        first_rc = seed_demo.main()
+        assert first_rc == 0
+
+        with engine.connect() as conn:
+            first_orders = conn.execute(text("SELECT COUNT(*) FROM orders")).scalar()
+            first_alerts = conn.execute(text("SELECT COUNT(*) FROM alert_events")).scalar()
+            assert first_orders == 4
+            assert first_alerts == 15
+
+        second_rc = seed_demo.main()
+        assert second_rc == 0
+
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM orders")).scalar() == first_orders
+            assert conn.execute(text("SELECT COUNT(*) FROM alert_events")).scalar() == first_alerts
+
+    def test_runs_alongside_unrelated_orders(
+        self,
+        migrated_db: tuple[sa.Engine, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pre-existing non-demo orders do not block the demo seed.
+
+        Given: a DB with the pre-reqs seeded AND one unrelated order row
+            (different ``session_id`` than ``_DEMO_SESSION_ID``),
         When: ``main()`` runs,
-        Then: the function returns 0 without inserting new rows
-            (the screenshot tool is intentionally idempotent so re-runs
-            after an aborted demo don't double up the dataset).
+        Then: the function still inserts the full demo dataset on top of
+            the unrelated row (5 orders total). This is the new behaviour
+            after the skip gate moved from ``EXISTS(orders)`` to a
+            session-id match — manual e2e test rows on a shared dev DB
+            no longer prevent screenshots / iOS UAT data from landing.
         """
         engine, db_url = migrated_db
         with engine.begin() as conn:
             wallet = _seed_paper_wallet(conn)
             operator = _seed_default_operator(conn)
             _seed_required_instruments(conn)
+            _seed_demo_users(conn)
             inst_pid = str(uuid7())
             conn.execute(
                 text(
@@ -279,7 +362,7 @@ class TestMain:
                     " 'pre-existing', NULL, :ts, :ts, 'buy', 'market', "
                     " 100.0, 1.0, 'filled', 'gtc', 1.0, 100.0, NULL, "
                     " NULL, 0, NULL, "
-                    " :ts, :ka, 's', 1)"
+                    " :ts, :ka, 'unrelated-session', 1)"
                 ),
                 {
                     "pid": str(uuid7()),
@@ -296,10 +379,16 @@ class TestMain:
         assert rc == 0
 
         with engine.connect() as conn:
-            assert conn.execute(text("SELECT COUNT(*) FROM orders")).scalar() == 1
-            assert conn.execute(text("SELECT COUNT(*) FROM executions")).scalar() == 0
-            assert conn.execute(text("SELECT COUNT(*) FROM positions")).scalar() == 0
-            assert conn.execute(text("SELECT COUNT(*) FROM backtest_runs")).scalar() == 0
+            assert conn.execute(text("SELECT COUNT(*) FROM orders")).scalar() == 5
+            assert conn.execute(text("SELECT COUNT(*) FROM executions")).scalar() == 2
+            assert (
+                conn.execute(
+                    text("SELECT COUNT(*) FROM orders WHERE session_id = :sid"),
+                    {"sid": seed_demo._DEMO_SESSION_ID},
+                ).scalar()
+                == 4
+            )
+            assert conn.execute(text("SELECT COUNT(*) FROM alert_events")).scalar() == 15
 
     def test_raises_when_paper_wallet_missing(
         self,
