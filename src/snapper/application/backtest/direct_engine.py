@@ -19,6 +19,8 @@ from snapper.application.backtest.batch_processor import CandleEvent
 from snapper.application.backtest.batch_processor import candle_row_to_data
 from snapper.application.backtest.batch_processor import process_time_batch
 from snapper.application.backtest.cancel import CancelProbe
+from snapper.application.backtest.candle_stream import merge_sorted_streams
+from snapper.application.backtest.candle_stream import stream_candles_for_instrument
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.progress import BacktestProgressEmitter
 from snapper.application.backtest.result_collector import ResultCollector
@@ -46,45 +48,50 @@ async def iter_sorted_candle_chunks(
     repository: Repository,
     snapshot_as_of: datetime,
 ) -> AsyncIterator[list[CandleEvent]]:
-    """Async generator yielding sorted candle chunks.
+    """Stream candle batches per timestamp via k-way merge.
 
-    Loads candles per (exchange, instruments) pair and yields them
-    sorted by (open_at, exchange, instrument) for deterministic ordering.
+    Each yielded batch contains every ``CandleEvent`` whose ``open_at``
+    matches a single timestamp, ordered by ``(exchange, instrument)``
+    within the batch. The cross-batch sequence preserves global
+    ascending order over ``(open_at, exchange, instrument)``.
+
+    Memory footprint: O(N_streams x per_stream_buffer) — one row per
+    instrument is held by the merge heap at any given time. The
+    repository still materializes its own row list per call, so peak
+    memory remains O(per-instrument-rows + N_streams). Future work
+    pushes pagination into the repository layer for true streaming.
 
     Args:
         config: Backtest configuration with instruments and date range.
         repository: Database repository for candle queries.
         snapshot_as_of: Temporal snapshot for all reads.
-        warmup_bars: Extra bars before start_date for indicator warm-up.
 
     Yields:
-        Lists of CandleEvent sorted by (open_at, exchange, instrument).
+        Lists of ``CandleEvent`` sharing one ``open_at``, ordered
+        ``(exchange, instrument)``.
     """
-    all_events: list[CandleEvent] = []
-    for exchange, instruments in config.instruments.items():
-        for instrument in instruments:
-            rows = await repository.get_candles(
-                instrument=instrument,
-                timeframe=config.timeframe,
-                start=None,
-                end=config.end_date,
-                exchange=cast(Any, exchange),
-                as_of=snapshot_as_of,
-                order="asc",
-            )
-            for row in rows:
-                all_events.append(
-                    CandleEvent(
-                        open_at=row["open_at"],
-                        exchange=exchange,
-                        instrument=instrument,
-                        row=row,
-                    )
-                )
-
-    all_events.sort(key=lambda e: (e.open_at, e.exchange, e.instrument))
-    if all_events:
-        yield all_events
+    streams = [
+        stream_candles_for_instrument(
+            repository=repository,
+            exchange=exchange,
+            instrument=instrument,
+            timeframe=config.timeframe,
+            end_date=config.end_date,
+            snapshot_as_of=snapshot_as_of,
+        )
+        for exchange, instruments in config.instruments.items()
+        for instrument in instruments
+    ]
+    batch: list[CandleEvent] = []
+    prev_time: datetime | None = None
+    async for event in merge_sorted_streams(streams):
+        if prev_time is not None and event.open_at != prev_time and batch:
+            yield batch
+            batch = []
+        batch.append(event)
+        prev_time = event.open_at
+    if batch:
+        yield batch
 
 
 class DirectDbEngine:
@@ -169,41 +176,22 @@ class DirectDbEngine:
         latest_closes: dict[str, float] = {}
         tracker = SequenceTracker()
 
-        async for chunk in iter_sorted_candle_chunks(
+        async for batch in iter_sorted_candle_chunks(
             config, self._repository, self._snapshot_as_of
         ):
-            prev_time: datetime | None = None
-            time_batch: list[CandleEvent] = []
-
-            for event in chunk:
-                if prev_time is not None and event.open_at != prev_time and time_batch:
-                    await self._maybe_check_cancel(run_public_id)
-                    await self._process_time_batch(
-                        time_batch,
-                        run_public_id,
-                        config,
-                        strategy,
-                        portfolio,
-                        latest_closes,
-                        collector,
-                        tracker,
-                    )
-                    time_batch = []
-                time_batch.append(event)
-                prev_time = event.open_at
-
-            if time_batch:
-                await self._maybe_check_cancel(run_public_id)
-                await self._process_time_batch(
-                    time_batch,
-                    run_public_id,
-                    config,
-                    strategy,
-                    portfolio,
-                    latest_closes,
-                    collector,
-                    tracker,
-                )
+            if not batch:
+                continue
+            await self._maybe_check_cancel(run_public_id)
+            await self._process_time_batch(
+                batch,
+                run_public_id,
+                config,
+                strategy,
+                portfolio,
+                latest_closes,
+                collector,
+                tracker,
+            )
 
         logger.info(
             "Backtest {} complete: {} signals, {} trades, {} equity points",

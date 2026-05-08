@@ -11,12 +11,13 @@ from snapper.core.types import ExchangeEnum
 from snapper.core.types import TradeSide
 from snapper.core.types import TradeSideEnum
 from snapper.messaging.schemas.data import CandleData
-from snapper.messaging.topics.builders import parse_market_topic
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.base import StrategyConfig
 from snapper.strategies.base import StrategySignal
 from snapper.strategies.decorators import create_strategy_process
 from snapper.strategies.decorators import register_strategy
+from snapper.strategies.multi_leg import MultiLegSpreadMixin
+from snapper.strategies.multi_leg import _extract_instrument_from_topic
 from snapper.strategies.process_wrapper import create_strategy_process as _create_strategy_process
 
 
@@ -40,7 +41,7 @@ from snapper.strategies.process_wrapper import create_strategy_process as _creat
         },
     },
 )
-class CointegrationPairs(BaseStrategy):
+class CointegrationPairs(BaseStrategy, MultiLegSpreadMixin):
     """Pairs trading strategy based on cointegration.
 
     Trades the spread between two cointegrated instruments,
@@ -52,24 +53,22 @@ class CointegrationPairs(BaseStrategy):
         exit_threshold: Z-score threshold for exit.
         lookback_window: Window for spread statistics.
         min_data_points: Minimum data points required.
-        instrument1: First instrument symbol.
-        instrument2: Second instrument symbol.
+        instrument1: First instrument symbol — backwards-compatible alias
+            for ``self.legs[0]``.
+        instrument2: Second instrument symbol — alias for ``self.legs[1]``.
     """
 
     def __init__(self, config: StrategyConfig) -> None:
         """Initialize cointegration strategy.
 
-        Two valid invocation shapes:
+        Two valid invocation shapes (resolved via
+        :func:`snapper.strategies.multi_leg.resolve_legs`):
 
         - **Live ZMQ process** — ``inputs`` is a 2-element list of
-          market-data candle topics, one per leg. Pair instruments
-          are extracted from the topic strings.
-
+          market-data candle topics, one per leg.
         - **Direct-DB backtest** — ``DirectDbEngine`` synthesises a
           single ``candles.{exchange}.synthetic.{timeframe}`` input
           and passes the pair instruments through ``outputs``.
-          Detected by the ``synthetic`` marker in the input topic;
-          ``outputs`` must then carry exactly two instrument symbols.
 
         Args:
             config: Strategy configuration.
@@ -85,51 +84,29 @@ class CointegrationPairs(BaseStrategy):
         self.lookback_window = int(self.params.get("lookback_window", 50))
         self.min_data_points = int(self.params.get("min_data_points", 30))
         self._position: str | None = None
-        instrument1, instrument2 = self._resolve_pair_instruments()
-        self.instrument1 = instrument1
-        self.instrument2 = instrument2
+        self._init_legs(expected_count=2)
+        self.instrument1 = self.legs[0]
+        self.instrument2 = self.legs[1]
         logger.info(
             f"CointegrationPairs initialized: {self.instrument1} vs {self.instrument2}, "
             f"beta={self.beta}, entry_threshold={self.entry_threshold}sigma"
         )
 
-    def _resolve_pair_instruments(self) -> tuple[str, str]:
-        """Resolve the two pair-trade instruments from inputs or outputs.
-
-        Returns:
-            Ordered tuple ``(instrument1, instrument2)``.
-
-        Raises:
-            ValueError: If neither invocation shape carries exactly
-                two pair instruments.
-        """
-        if len(self.inputs) == 2:
-            return (
-                self._extract_instrument(self.inputs[0]),
-                self._extract_instrument(self.inputs[1]),
-            )
-        if len(self.inputs) == 1 and "synthetic" in self.inputs[0] and len(self.outputs) == 2:
-            return (self.outputs[0], self.outputs[1])
-        raise ValueError(
-            "CointegrationPairs requires either 2 inputs (live ZMQ) or "
-            "1 synthetic input + 2 outputs (direct-DB backtest); got "
-            f"inputs={self.inputs} outputs={self.outputs}"
-        )
-
     @staticmethod
     def _extract_instrument(topic: str) -> str:
-        """Extract instrument symbol from topic string.
+        """Backwards-compat alias for :func:`_extract_instrument_from_topic`.
+
+        Kept so existing call sites and unit tests that reach into this
+        static method (e.g. ``CointegrationPairs._extract_instrument``)
+        keep working after the migration to the multi-leg helper module.
 
         Args:
-            topic: The ZMQ topic string.
+            topic: ZMQ topic string.
 
         Returns:
             Extracted instrument symbol.
         """
-        parsed = parse_market_topic(topic)
-        if parsed is not None:
-            return parsed.instrument
-        return topic
+        return _extract_instrument_from_topic(topic)
 
     async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Process incoming candle and generate spread trading signal.

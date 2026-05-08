@@ -88,11 +88,18 @@ class TestIterSortedCandleChunks:
     @pytest.mark.asyncio
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     async def test_single_instrument_sorted(self) -> None:
-        """Candles for one instrument are sorted by open_at."""
+        """Per-timestamp batches preserve global ascending open_at order.
+
+        After the streaming refactor (plan_2026_05_08_engine_streaming_nleg_paired
+        Phase 1), ``iter_sorted_candle_chunks`` yields one batch per
+        unique timestamp instead of one giant sorted batch. For two
+        candles at distinct timestamps that's two single-event batches,
+        emitted earliest-first.
+        """
         t1 = NOW
         t2 = NOW + timedelta(hours=1)
         repo = AsyncMock()
-        repo.get_candles = AsyncMock(return_value=[_candle_row(t2, 101), _candle_row(t1, 100)])
+        repo.get_candles = AsyncMock(return_value=[_candle_row(t1, 100), _candle_row(t2, 101)])
         config = MagicMock(spec=BacktestConfig)
         config.instruments = {"kraken": ["BTC-USD"]}
         config.timeframe = "1h"
@@ -102,9 +109,11 @@ class TestIterSortedCandleChunks:
         chunks = []
         async for chunk in iter_sorted_candle_chunks(config, repo, NOW):
             chunks.append(chunk)
-        assert len(chunks) == 1
+        assert len(chunks) == 2
+        assert len(chunks[0]) == 1
         assert chunks[0][0].open_at == t1
-        assert chunks[0][1].open_at == t2
+        assert len(chunks[1]) == 1
+        assert chunks[1][0].open_at == t2
 
     @pytest.mark.asyncio
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
