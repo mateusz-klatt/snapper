@@ -302,6 +302,81 @@ class TestMultiLegHostProtocol:
         legs = resolve_legs(host.config, expected_count=2)
         assert legs == ("A", "B")
 
+    def test_three_leg_strategy_emits_two_partner_signals(self) -> None:
+        """3-leg strategy emits 1 primary + 2 paired = 3 signals per timestep.
+
+        Plan #1 §4.4 acceptance test: a strategy that uses
+        ``MultiLegSpreadMixin._emit_partner_signals`` for 3 legs
+        produces 1 primary signal returned from ``on_candle`` plus 2
+        partner signals queued via ``emit_paired_signal``. After the
+        primary returns, ``drain_pending_signals`` (BaseStrategy contract,
+        stubbed here on the test host) returns exactly 2 partner
+        signals.
+
+        This proves the N-leg generalization works for N>2 — the engine
+        already drains a list, so the only missing piece was the
+        strategy-side scaffolding the mixin provides.
+        """
+
+        class _ThreeLegHost(MultiLegSpreadMixin):
+            def __init__(self, config: _StubConfig) -> None:
+                """Construct a 3-leg test host."""
+                self.config = config
+                self.candle_buffer: dict[str, list[CandleData]] = {}
+                self._pending: list[StrategySignal] = []
+
+            def emit_paired_signal(self, signal: StrategySignal) -> None:
+                """Queue a partner-leg signal."""
+                self._pending.append(signal)
+
+            def drain_pending_signals(self) -> list[StrategySignal]:
+                """Return and clear the queue."""
+                out = list(self._pending)
+                self._pending.clear()
+                return out
+
+            def fire(self) -> StrategySignal:
+                """Simulate one timestep: emit 1 primary + queue 2 partners."""
+                primary = StrategySignal(
+                    instrument=self.legs[0],
+                    side="buy",
+                    strength=1.0,
+                    reason="primary",
+                    price=self.candle_buffer[self.legs[0]][-1].close,
+                )
+                self._emit_partner_signals(
+                    self.legs[0],
+                    lambda leg, price: StrategySignal(
+                        instrument=leg,
+                        side="sell",
+                        strength=1.0,
+                        reason=f"partner-{leg}",
+                        price=price,
+                    ),
+                )
+                return primary
+
+        config = _config(
+            inputs=["candles.kraken.synthetic.1d"],
+            outputs=["FET-USD", "RENDER-USD", "TAO-USD"],
+        )
+        host = _ThreeLegHost(config)
+        host._init_legs(expected_count=3)
+        host.candle_buffer["FET-USD"] = [_candle(NOW, 100.0)]
+        host.candle_buffer["RENDER-USD"] = [_candle(NOW, 200.0)]
+        host.candle_buffer["TAO-USD"] = [_candle(NOW, 300.0)]
+
+        primary = host.fire()
+        partners = host.drain_pending_signals()
+
+        assert primary.instrument == "FET-USD"
+        assert primary.side == "buy"
+        assert len(partners) == 2
+        partner_legs = sorted(sig.instrument for sig in partners)
+        assert partner_legs == ["RENDER-USD", "TAO-USD"]
+        for sig in partners:
+            assert sig.side == "sell"
+
     def test_mixin_emit_paired_signal_stub_raises_without_host(self) -> None:
         """Mixin's emit_paired_signal stub raises if no BaseStrategy host overrides it.
 
