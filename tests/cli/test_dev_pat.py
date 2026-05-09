@@ -19,6 +19,9 @@ from snapper.cli.dev_pat import _decode_jwt_exp
 from snapper.cli.dev_pat import _stamp_provenance
 from snapper.cli.dev_pat import dev_mint_pat
 from snapper.cli.dev_pat import redact_token
+from snapper.cli.dev_pat import resolve_admin_credentials_from_seed
+from snapper.data.seed.loader import SeedProfile
+from snapper.data.seed.loader import SeedUser
 
 
 @pytest.fixture
@@ -811,3 +814,258 @@ class TestDevMintPatEnvVarResolution:
         assert all(req.url.host == "custom.example" for req in captured)
         document = json.loads(output_path.read_text())
         assert document["SNAPPER_BASE_URL"] == "https://custom.example/api/mcp"
+
+
+class TestResolveAdminCredentialsFromSeed:
+    """Cover the seed-TOML resolution helper.
+
+    The helper drives ``snapper.data.seed.loader.load_seed_profile`` over
+    the (mcp, dev) tuple and picks the first admin user found. Tests use
+    monkeypatching to inject controlled seed profiles instead of writing
+    real TOML files — that keeps the CWD-dependent file lookup out of
+    the unit-test scope (it's exercised by the seed loader's own tests).
+    """
+
+    def test_returns_admin_from_mcp_profile_when_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Given a non-empty mcp profile with an admin user, when invoked, then mcp credentials win."""
+        mcp_profile = SeedProfile(
+            users=[
+                SeedUser(
+                    username="mcp-admin",
+                    email="mcp-admin@x",
+                    password="MCP_PROFILE_PW",
+                    role="admin",
+                ),
+            ],
+        )
+        dev_profile = SeedProfile(
+            users=[
+                SeedUser(
+                    username="dev-admin",
+                    email="dev-admin@x",
+                    password="DEV_PROFILE_PW",
+                    role="admin",
+                ),
+            ],
+        )
+
+        def _loader(profile: str) -> SeedProfile:
+            if profile == "mcp":
+                return mcp_profile
+            return dev_profile
+
+        monkeypatch.setattr(dev_pat_module, "load_seed_profile", _loader)
+        username, password = resolve_admin_credentials_from_seed()
+        assert username == "mcp-admin"
+        assert password == "MCP_PROFILE_PW"
+
+    def test_falls_back_to_dev_profile_when_mcp_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Given mcp profile not on disk, when invoked, then dev profile admin wins."""
+        dev_profile = SeedProfile(
+            users=[
+                SeedUser(
+                    username="dev-admin",
+                    email="dev-admin@x",
+                    password="DEV_FALLBACK_PW",
+                    role="admin",
+                ),
+            ],
+        )
+
+        def _loader(profile: str) -> SeedProfile:
+            if profile == "mcp":
+                raise FileNotFoundError("no mcp.toml on disk in any tier")
+            return dev_profile
+
+        monkeypatch.setattr(dev_pat_module, "load_seed_profile", _loader)
+        username, password = resolve_admin_credentials_from_seed()
+        assert username == "dev-admin"
+        assert password == "DEV_FALLBACK_PW"
+
+    def test_skips_non_admin_users_in_mcp_profile(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Given mcp profile lacks an admin role, when invoked, then dev profile admin wins."""
+        mcp_profile = SeedProfile(
+            users=[
+                SeedUser(
+                    username="mcp-viewer",
+                    email="v@x",
+                    password="VIEW_PW",
+                    role="viewer",
+                ),
+                SeedUser(
+                    username="mcp-operator",
+                    email="o@x",
+                    password="OP_PW",
+                    role="operator",
+                ),
+            ],
+        )
+        dev_profile = SeedProfile(
+            users=[
+                SeedUser(
+                    username="dev-admin",
+                    email="da@x",
+                    password="DEV_PW",
+                    role="admin",
+                ),
+            ],
+        )
+
+        def _loader(profile: str) -> SeedProfile:
+            return mcp_profile if profile == "mcp" else dev_profile
+
+        monkeypatch.setattr(dev_pat_module, "load_seed_profile", _loader)
+        username, password = resolve_admin_credentials_from_seed()
+        assert username == "dev-admin"
+
+    def test_exits_when_no_profile_yields_admin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Given neither profile resolves an admin user, when invoked, then exit 1 with stderr message."""
+
+        def _loader(profile: str) -> SeedProfile:
+            raise FileNotFoundError(f"{profile} profile missing")
+
+        monkeypatch.setattr(dev_pat_module, "load_seed_profile", _loader)
+        with pytest.raises(Exception) as exc_info:
+            resolve_admin_credentials_from_seed()
+        message = str(exc_info.value).lower() + " " + getattr(exc_info.value, "code", "").__str__()
+        assert exc_info.value.__class__.__name__ in {"Exit", "SystemExit"} or "exit" in message
+
+    def test_exits_when_profiles_have_users_but_no_admin(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Given both profiles exist but neither has admin role, when invoked, then exit 1."""
+        non_admin_profile = SeedProfile(
+            users=[
+                SeedUser(
+                    username="viewer",
+                    email="v@x",
+                    password="VIEW",
+                    role="viewer",
+                ),
+            ],
+        )
+        monkeypatch.setattr(
+            dev_pat_module,
+            "load_seed_profile",
+            lambda _profile: non_admin_profile,
+        )
+        with pytest.raises(Exception) as exc_info:
+            resolve_admin_credentials_from_seed()
+        assert exc_info.value.__class__.__name__ in {"Exit", "SystemExit"}
+
+
+class TestDevMintPatSeedFallback:
+    """Cover end-to-end seed-resolution behaviour at the CLI entry point."""
+
+    def test_no_args_no_env_resolves_full_creds_from_seed(
+        self,
+        runner: CliRunner,
+        output_path: Path,
+        patch_httpx_client: Callable,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Given neither flag nor env, when invoked, then seed admin reaches the login body."""
+        seed_profile = SeedProfile(
+            users=[
+                SeedUser(
+                    username="seed-admin",
+                    email="sa@x",
+                    password="SEEDED_ADMIN_PW",
+                    role="admin",
+                ),
+            ],
+        )
+        monkeypatch.setattr(
+            dev_pat_module,
+            "load_seed_profile",
+            lambda _profile: seed_profile,
+        )
+        monkeypatch.delenv("SNAPPER_DEV_ADMIN_USERNAME", raising=False)
+        monkeypatch.delenv("SNAPPER_DEV_ADMIN_PASSWORD", raising=False)
+
+        captured: list[httpx.Request] = []
+        patch_httpx_client(_build_mock_transport(captured_requests=captured))
+
+        result = runner.invoke(app, ["dev-mint-pat", "--output", str(output_path)])
+        assert result.exit_code == 0
+        login_body = json.loads(captured[0].content)
+        assert login_body["payload"]["username"] == "seed-admin"
+        assert login_body["payload"]["password"] == "SEEDED_ADMIN_PW"
+
+    def test_password_env_with_seed_username(
+        self,
+        runner: CliRunner,
+        output_path: Path,
+        patch_httpx_client: Callable,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Given only password env var, when invoked, then username comes from seed and password from env."""
+        seed_profile = SeedProfile(
+            users=[
+                SeedUser(
+                    username="seed-admin",
+                    email="sa@x",
+                    password="WONT_BE_USED",
+                    role="admin",
+                ),
+            ],
+        )
+        monkeypatch.setattr(
+            dev_pat_module,
+            "load_seed_profile",
+            lambda _profile: seed_profile,
+        )
+        monkeypatch.delenv("SNAPPER_DEV_ADMIN_USERNAME", raising=False)
+        monkeypatch.setenv("SNAPPER_DEV_ADMIN_PASSWORD", "FROM_ENV_PW")
+
+        captured: list[httpx.Request] = []
+        patch_httpx_client(_build_mock_transport(captured_requests=captured))
+
+        result = runner.invoke(app, ["dev-mint-pat", "--output", str(output_path)])
+        assert result.exit_code == 0
+        login_body = json.loads(captured[0].content)
+        assert login_body["payload"]["username"] == "seed-admin"
+        assert login_body["payload"]["password"] == "FROM_ENV_PW"
+
+    def test_both_flags_skip_seed_lookup(
+        self,
+        runner: CliRunner,
+        output_path: Path,
+        patch_httpx_client: Callable,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Given both flags supplied, when invoked, then seed loader is never called."""
+        loader_calls: list[str] = []
+
+        def _loader(profile: str) -> SeedProfile:
+            loader_calls.append(profile)
+            raise AssertionError("seed loader must not be called when both flags supplied")
+
+        monkeypatch.setattr(dev_pat_module, "load_seed_profile", _loader)
+        monkeypatch.delenv("SNAPPER_DEV_ADMIN_USERNAME", raising=False)
+        monkeypatch.delenv("SNAPPER_DEV_ADMIN_PASSWORD", raising=False)
+
+        captured: list[httpx.Request] = []
+        patch_httpx_client(_build_mock_transport(captured_requests=captured))
+
+        result = runner.invoke(
+            app,
+            [
+                "dev-mint-pat",
+                "--output",
+                str(output_path),
+                "--admin-username",
+                "explicit",
+                "--admin-password",
+                "explicit-pw",
+            ],
+        )
+        assert result.exit_code == 0
+        assert loader_calls == []
+        login_body = json.loads(captured[0].content)
+        assert login_body["payload"]["username"] == "explicit"
+        assert login_body["payload"]["password"] == "explicit-pw"

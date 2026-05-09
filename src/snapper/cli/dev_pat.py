@@ -3,10 +3,23 @@
 Drives the production endpoints (POST /api/auth/login + POST /api/ai-delegates)
 the AI Integration UI uses, then writes the minted JWT to a JSON file consumed
 by snapper-mcp's --config=PATH flag. Lets the dev-iteration cycle
-``rm data/snapper.db && make dev-backend && snapper dev-mint-pat`` regenerate
+``rm data/snapper.db && make dev-backend && make mcp-pat`` regenerate
 working credentials without browser clicks; ``~/.claude.json`` mcpServers
 entry references the file via --config=PATH and picks up the freshly
 minted token on the next bridge spawn.
+
+**Credentials resolution** — admin username/password are resolved from the
+seed TOML using the same three-tier lookup as ``snapper db-seed``:
+
+    1. ``data/seed/{profile}.toml`` (deployment / volume override)
+    2. ``proprietary/data/seed/{profile}.toml`` (private dev workspace)
+    3. Package-bundled ``snapper/data/seed/{profile}.toml`` (OSS fallback)
+
+Profile resolution: ``mcp`` is tried first (lets operators drop a
+custom override outside open source); falls back to ``dev`` when no
+``mcp`` profile exists. Within the chosen profile, the first user with
+``role == "admin"`` provides the credentials. CLI / env-var overrides
+short-circuit the seed lookup when explicitly supplied.
 """
 
 import base64
@@ -25,14 +38,16 @@ from uuid import uuid7
 
 import httpx
 import typer
+from loguru import logger
+
+from snapper.data.seed.loader import load_seed_profile
 
 DEFAULT_BASE_URL: Final = "http://localhost:8000"
-DEFAULT_ADMIN_USERNAME: Final = "admin"
-DEFAULT_ADMIN_PASSWORD: Final = "AdminSnapper2026!"
 DEFAULT_OUTPUT: Final = Path("data/dev-pat.json")
 DEFAULT_LABEL: Final = "Local Dev MCP"
 HTTP_TIMEOUT_SECONDS: Final = 10.0
 ERROR_BODY_MAX_CHARS: Final = 200
+SEED_PROFILE_LOOKUP_ORDER: Final = ("mcp", "dev")
 
 _JWT_SHAPE_RE: Final = re.compile(r"[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}")
 
@@ -42,9 +57,56 @@ def _fatal(message: str) -> NoReturn:
 
     Bypasses Typer's rich-formatted error UI so test assertions can match
     substrings of the message without box-drawing/line-wrapping noise.
+
+    Args:
+        message: Single-line stderr message to echo before exiting.
+
+    Raises:
+        typer.Exit: Always — exit code 1.
     """
     typer.echo(message, err=True)
     raise typer.Exit(code=1)
+
+
+def resolve_admin_credentials_from_seed() -> tuple[str, str]:
+    """Resolve (username, password) for the admin role from a seed TOML.
+
+    Tries each profile in :data:`SEED_PROFILE_LOOKUP_ORDER` in turn,
+    using :func:`snapper.data.seed.loader.load_seed_profile` for the
+    three-tier file lookup (data/ → proprietary/ → bundled OSS). The
+    first profile that exists AND contains a user with ``role == "admin"``
+    wins. ``mcp`` is checked before ``dev`` so operators can drop a
+    private override outside open source without touching dev.toml.
+
+    Returns:
+        Tuple of (username, password) for the seed admin user.
+
+    Raises:
+        typer.Exit: When no profile in the lookup order yields an admin
+            user; exits the CLI with a stderr message naming the
+            profiles that were attempted.
+    """
+    profiles_tried: list[str] = []
+    for profile in SEED_PROFILE_LOOKUP_ORDER:
+        profiles_tried.append(profile)
+        try:
+            seed = load_seed_profile(profile)
+        except FileNotFoundError:
+            continue
+        for user in seed.users:
+            if user.role == "admin":
+                logger.info(
+                    f"Resolved admin credentials from seed profile '{profile}' "
+                    f"(user: {user.username})"
+                )
+                return user.username, user.password
+    _fatal(
+        "Could not resolve admin credentials from seed TOML. Tried profiles "
+        f"{profiles_tried} via three-tier lookup (data/ -> proprietary/ -> "
+        "bundled OSS). Add an admin user to data/seed/mcp.toml or "
+        "data/seed/dev.toml, or pass --admin-username and --admin-password "
+        "explicitly."
+    )
 
 
 def redact_token(value: str) -> str:
@@ -273,15 +335,19 @@ def dev_mint_pat(
         envvar="SNAPPER_DEV_BASE_URL",
         help="Snapper backend base URL (without /api/mcp suffix).",
     ),
-    admin_username: str = typer.Option(
-        DEFAULT_ADMIN_USERNAME,
+    admin_username: str | None = typer.Option(
+        None,
         envvar="SNAPPER_DEV_ADMIN_USERNAME",
-        help="Seeded admin username (matches dev.toml).",
+        help=(
+            "Admin username override. When omitted, resolved from the seed "
+            "TOML (mcp profile, falls back to dev) via the standard three-tier "
+            "lookup (data/ -> proprietary/ -> bundled OSS)."
+        ),
     ),
-    admin_password: str = typer.Option(
-        DEFAULT_ADMIN_PASSWORD,
+    admin_password: str | None = typer.Option(
+        None,
         envvar="SNAPPER_DEV_ADMIN_PASSWORD",
-        help="Seeded admin password (matches dev.toml). NEVER logged.",
+        help=("Admin password override. When omitted, resolved from seed TOML. NEVER logged."),
     ),
     output: Path = typer.Option(
         DEFAULT_OUTPUT,
@@ -301,16 +367,37 @@ def dev_mint_pat(
     next spawn; operator's ~/.claude.json mcpServers entry only needs
     the file path, never the token bytes.
 
+    Admin credentials are resolved per-field from the seed TOML by
+    default (:func:`resolve_admin_credentials_from_seed`); pass
+    --admin-username and/or --admin-password (or the matching env vars)
+    to override one or both fields. Partial overrides are honoured —
+    e.g. setting only ``SNAPPER_DEV_ADMIN_PASSWORD`` keeps the seed
+    username while taking the password from env, which is the natural
+    pattern for CI environments that share the seed admin user but
+    rotate the password through CI secrets.
+
     All error paths exit 1 with a stderr message; tokens are redacted via
     JWT-shape regex before any HTTP error body reaches stderr.
 
     Args:
         base_url: Snapper backend base URL (without /api/mcp suffix).
-        admin_username: Seeded admin username (matches dev.toml).
-        admin_password: Seeded admin password (NEVER logged).
+        admin_username: Optional admin username override. Empty -> seed lookup.
+        admin_password: Optional admin password override. NEVER logged.
         output: Filesystem path to write the dev PAT JSON envelope (mode 0600).
         label: Human-readable label for the minted delegate.
+
+    Raises:
+        typer.Exit: On any validation, network, or filesystem error
+            (exit code 1).
     """
+    seed_username: str | None = None
+    seed_password: str | None = None
+    if admin_username is None or admin_password is None:
+        seed_username, seed_password = resolve_admin_credentials_from_seed()
+    resolved_username = admin_username if admin_username is not None else seed_username
+    resolved_password = admin_password if admin_password is not None else seed_password
+    assert resolved_username is not None
+    assert resolved_password is not None
     base = base_url.rstrip("/")
     out = output.expanduser().resolve()
     session_id = str(uuid7())
@@ -319,8 +406,8 @@ def dev_mint_pat(
         admin_token = _login(
             client,
             base_url=base,
-            username=admin_username,
-            password=admin_password,
+            username=resolved_username,
+            password=resolved_password,
             sequence_id=1,
             session_id=session_id,
         )
@@ -345,13 +432,13 @@ def dev_mint_pat(
 __all__ = [
     "dev_mint_pat",
     "redact_token",
+    "resolve_admin_credentials_from_seed",
     "_stamp_provenance",
     "_login",
     "_create_delegate",
     "_write_pat_file",
     "DEFAULT_BASE_URL",
-    "DEFAULT_ADMIN_USERNAME",
-    "DEFAULT_ADMIN_PASSWORD",
     "DEFAULT_OUTPUT",
     "DEFAULT_LABEL",
+    "SEED_PROFILE_LOOKUP_ORDER",
 ]
