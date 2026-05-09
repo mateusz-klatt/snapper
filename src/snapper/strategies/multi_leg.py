@@ -146,6 +146,14 @@ class MultiLegSpreadMixin:
         implementation comes from the cooperating ``BaseStrategy``
         subclass and the ``BaseStrategy.emit_paired_signal`` method
         will be the one actually called at runtime via the MRO.
+
+        Args:
+            signal: The partner-leg ``StrategySignal`` to enqueue.
+
+        Raises:
+            NotImplementedError: When the mixin is used without a
+                cooperating ``BaseStrategy`` host that supplies the
+                concrete ``emit_paired_signal`` implementation.
         """
         raise NotImplementedError(
             "MultiLegSpreadMixin requires a BaseStrategy host providing emit_paired_signal"
