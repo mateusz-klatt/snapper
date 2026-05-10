@@ -31,6 +31,7 @@ from snapper.core.types import OrderExchange
 from snapper.core.types import OrderTypeEnum
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.core.types import TradeSideEnum
+from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.interface.websocket.schemas import ExecutionMode
@@ -93,7 +94,7 @@ def _compute_shard_key(
     Structure
         Base: ``{exchange}.{instrument}.{mode}``
         Wallet segment (appended when ``wallet_public_id`` is set)
-          ``.w{short}`` where ``short`` is the first 12 lowercase hex
+          ``.w{short}`` where ``short`` is the last 12 lowercase hex
           characters of the wallet id with dashes stripped.
         Strategy tag (paper mode only, when non-empty)
           ``.{strategy_tag}``
@@ -111,7 +112,7 @@ def _compute_shard_key(
     """
     base = f"{exchange}.{instrument}.{mode}"
     if wallet_public_id:
-        wallet_short = wallet_public_id.replace("-", "")[:12].lower()
+        wallet_short = compute_wallet_short(wallet_public_id)
         base = f"{base}.w{wallet_short}"
     if mode == ExecutionModeEnum.PAPER and strategy_tag:
         return f"{base}.{strategy_tag}"

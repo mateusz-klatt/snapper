@@ -33,6 +33,7 @@ from datetime import UTC
 from datetime import datetime
 from typing import Annotated
 from typing import Any
+from typing import Literal
 from uuid import uuid7
 
 from fastapi import APIRouter
@@ -62,6 +63,9 @@ from snapper.api.schemas.process import ProcessStopResponse
 from snapper.api.schemas.process import ProcessSummaryData
 from snapper.api.schemas.process import ProcessSummaryResponse
 from snapper.application.process_manager.config_resolver import resolve_mode
+from snapper.application.process_manager.executor_naming import is_executor_instance
+from snapper.application.process_manager.executor_naming import is_executor_template
+from snapper.application.process_manager.executor_naming import parent_template_for_instance
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import get_registered_processes
@@ -92,6 +96,7 @@ _PROCESS_FORBIDDEN_RESPONSE: dict[int | str, dict[str, Any]] = {
 _PROCESS_START_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"description": "Invalid process request"},
     403: {"description": "Process scope denied"},
+    422: {"description": "Bare executor template — start a per-wallet instance instead"},
 }
 
 
@@ -389,31 +394,85 @@ async def list_configured_processes(
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
 ) -> ConfiguredProcessesResponse:
+    """List configured processes — DB templates plus runtime per-wallet instances.
+
+    Two row shapes share the response:
+
+    - **Template rows** come from the ``Setting`` table and represent
+      executor templates (``executor_<exchange>``) plus regular
+      processes (broker, feeds, strategies). Executor templates have
+      ``kind="template"`` with ``running=False`` (they are config-only
+      and never run directly). All other DB rows have ``kind="instance"``.
+    - **Synthetic per-wallet rows** are pulled from
+      ``factory.instance_configs`` and represent live per-wallet
+      executor instances (``executor_<exchange>_w<wallet_short>``).
+      They carry ``kind="instance"`` plus the ``wallet_public_id`` and
+      ``parent_template`` discriminators so the UI can render them
+      grouped under their template.
+    """
     sid, seq, pid, ts = _mint_provenance(request)
     configs = await factory.get_process_configs()
-    processes: list[ConfiguredProcess] = [
-        ConfiguredProcess(
-            session_id=sid,
-            sequence_id=seq,
-            public_id=str(uuid7()),
-            timestamp=ts,
-            name=config.name,
-            enabled=config.enabled,
-            mode=config.mode,
-            class_path=config.class_path,
-            method=config.method,
-            parameters=config.parameters,
-            note=config.note,
-            lifecycle=config.lifecycle,
-            role=config.role,
-            tags=list(config.tags),
-            parameters_schema=config.parameters_schema,
-            running=config.name in factory.started_processes,
-            is_one_shot=config.lifecycle is ProcessLifecycleEnum.ONE_SHOT,
-            active_public_id=factory.active_runs.get(config.name),
+    processes: list[ConfiguredProcess] = []
+    for config in configs:
+        is_template_row = is_executor_template(config.name)
+        kind: Literal["template", "instance"] = "template" if is_template_row else "instance"
+        running = False if is_template_row else config.name in factory.started_processes
+        active_public_id = None if is_template_row else factory.active_runs.get(config.name)
+        processes.append(
+            ConfiguredProcess(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=str(uuid7()),
+                timestamp=ts,
+                name=config.name,
+                enabled=config.enabled,
+                mode=config.mode,
+                class_path=config.class_path,
+                method=config.method,
+                parameters=config.parameters,
+                note=config.note,
+                lifecycle=config.lifecycle,
+                role=config.role,
+                tags=list(config.tags),
+                parameters_schema=config.parameters_schema,
+                running=running,
+                is_one_shot=config.lifecycle is ProcessLifecycleEnum.ONE_SHOT,
+                active_public_id=active_public_id,
+                kind=kind,
+                wallet_public_id=None,
+                parent_template=None,
+            )
         )
-        for config in configs
-    ]
+    for instance_name, instance_config in factory.instance_configs.items():
+        if not is_executor_instance(instance_name):
+            continue
+        wallet_param = instance_config.parameters.get("wallet_public_id")
+        wallet_id = wallet_param if isinstance(wallet_param, str) else None
+        processes.append(
+            ConfiguredProcess(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=str(uuid7()),
+                timestamp=ts,
+                name=instance_name,
+                enabled=instance_config.enabled,
+                mode=instance_config.mode,
+                class_path=instance_config.class_path,
+                method=instance_config.method,
+                parameters=instance_config.parameters,
+                note=instance_config.note,
+                lifecycle=instance_config.lifecycle,
+                role=instance_config.role,
+                tags=list(instance_config.tags),
+                parameters_schema=instance_config.parameters_schema,
+                running=instance_name in factory.started_processes,
+                is_one_shot=instance_config.lifecycle is ProcessLifecycleEnum.ONE_SHOT,
+                active_public_id=factory.active_runs.get(instance_name),
+                kind="instance",
+                wallet_public_id=wallet_id,
+                parent_template=parent_template_for_instance(instance_name),
+            )
+        )
     return ConfiguredProcessesResponse(
         session_id=sid,
         sequence_id=seq,
@@ -464,12 +523,16 @@ async def get_process_summary(
         elif config.role is ProcessRoleEnum.STRATEGY:
             strategies_total += 1
             strategies_running += int(is_running)
-        elif config.name.startswith("executor_"):
-            executors_total += 1
-            executors_running += int(is_running)
+        elif is_executor_template(config.name):
+            continue
         elif config.name == "zmq_broker":
             brokers_total += 1
             brokers_running += int(is_running)
+    for instance_name in factory.instance_configs:
+        if not is_executor_instance(instance_name):
+            continue
+        executors_total += 1
+        executors_running += int(instance_name in running)
 
     sid, seq, pid, ts = _mint_provenance(request)
     data = ProcessSummaryData(
@@ -680,6 +743,14 @@ async def start_process(
     between create-time and start-time fails closed instead of running
     on a wallet the caller no longer controls.
     """
+    if is_executor_template(name):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"'{name}' is an executor template — start "
+                f"'{name}_w<wallet_short>' for a specific wallet"
+            ),
+        )
     payload = body.payload
     overrides = payload.parameters or {}
     persisted = await _read_persisted_strategy_parameters(repo, name)

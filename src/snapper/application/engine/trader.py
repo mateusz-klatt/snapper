@@ -62,6 +62,8 @@ from snapper.core.types import OrderType
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import TradeSideEnum
+from snapper.core.wallet_short import compute_legacy_wallet_short
+from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import AccrualLedgerInsertRow
@@ -277,7 +279,7 @@ class TraderCoordinator(RegisterableProcess):
 
         Wallet-aware sharding: when ``wallet_public_id`` is
         non-empty, the key gets a ``-w{wallet_short}`` suffix where
-        ``wallet_short`` is the first 12 hex characters of the wallet
+        ``wallet_short`` is the last 12 hex characters of the wallet
         UUID7 with dashes stripped (matching the spawner naming used
         by ``ProcessLauncherService.spawn_per_wallet_executors`` and
         the ``TradingEngineService._shard_key`` segment). Empty
@@ -295,7 +297,7 @@ class TraderCoordinator(RegisterableProcess):
         """
         base = f"{instrument}@{exchange}-{mode_or_tag}"
         if wallet_public_id:
-            wallet_short = wallet_public_id.replace("-", "")[:12].lower()
+            wallet_short = compute_wallet_short(wallet_public_id)
             return f"{base}-w{wallet_short}"
         return base
 
@@ -460,18 +462,38 @@ class TraderCoordinator(RegisterableProcess):
         cache: dict[str, str] = {}
         for row in credentials:
             wallet_public_id = row["wallet_public_id"]
-            wallet_short = wallet_public_id.replace("-", "")[:12].lower()
-            existing = cache.get(wallet_short)
-            if existing and existing != wallet_public_id:
-                logger.error(
-                    f"ZMQTrader: wallet_short collision on '{wallet_short}' "
-                    f"between {existing} and {wallet_public_id}; signal routing "
-                    f"to the second wallet will fail"
-                )
-                continue
-            cache[wallet_short] = wallet_public_id
+            new_short = compute_wallet_short(wallet_public_id)
+            legacy_short = compute_legacy_wallet_short(wallet_public_id)
+            self._populate_short_cache(cache, new_short, wallet_public_id)
+            if legacy_short != new_short:
+                self._populate_short_cache(cache, legacy_short, wallet_public_id)
         self._wallet_short_to_id = cache
         logger.info(f"ZMQTrader: wallet_short cache populated with {len(cache)} entries")
+
+    @staticmethod
+    def _populate_short_cache(
+        cache: dict[str, str],
+        wallet_short: str,
+        wallet_public_id: str,
+    ) -> None:
+        """Insert a ``wallet_short → wallet_public_id`` entry, warning on collision.
+
+        The cache holds both canonical (last-12) and legacy (first-12)
+        suffixes per wallet so persisted ``shard_key`` strings written
+        under either algorithm still resolve. A collision means two
+        DIFFERENT wallets share the suffix, which leaves signal
+        routing for the second wallet broken — log error and skip
+        the second insertion.
+        """
+        existing = cache.get(wallet_short)
+        if existing and existing != wallet_public_id:
+            logger.error(
+                f"ZMQTrader: wallet_short collision on '{wallet_short}' "
+                f"between {existing} and {wallet_public_id}; signal routing "
+                f"to the second wallet will fail"
+            )
+            return
+        cache[wallet_short] = wallet_public_id
 
     async def _recover_engine_state(self) -> None:
         """Rebuild engine confirmed state from checkpoints, executions, and active orders.

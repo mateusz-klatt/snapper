@@ -173,6 +173,7 @@ class TestListConfiguredProcesses:
         )
         mock_factory.started_processes = {"zmq_broker": MagicMock()}
         mock_factory.active_runs = {}
+        mock_factory.instance_configs = {}
         result = await list_configured_processes(
             request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
         )
@@ -189,6 +190,9 @@ class TestListConfiguredProcesses:
         assert process.lifecycle == "long_running"
         assert process.running is True
         assert process.is_one_shot is False
+        assert process.kind == "instance"
+        assert process.wallet_public_id is None
+        assert process.parent_template is None
 
     @pytest.mark.asyncio
     async def test_list_configured_processes_empty(self) -> None:
@@ -201,11 +205,162 @@ class TestListConfiguredProcesses:
         mock_factory = MagicMock()
         mock_factory.get_process_configs = AsyncMock(return_value=[])
         mock_factory.started_processes = {}
+        mock_factory.instance_configs = {}
         result = await list_configured_processes(
             request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
         )
         assert result.count == 0
         assert result.payload == []
+
+    @pytest.mark.asyncio
+    async def test_executor_template_marked_as_template_with_running_false(self) -> None:
+        """Bare ``executor_kraken`` row carries ``kind=template`` and ``running=False``.
+
+        Templates are config-only — even if the launcher has somehow
+        tracked a process under the template name (legacy state), the
+        response forces ``running=False`` so the UI never renders a
+        Stop button on a config-only row.
+        """
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="executor_kraken",
+                    enabled=False,
+                    mode="thread",
+                    class_path="snapper.executors.Kraken",
+                    method="run",
+                    parameters={"throttle": 5},
+                ),
+            ]
+        )
+        mock_factory.started_processes = {"executor_kraken": MagicMock()}
+        mock_factory.active_runs = {"executor_kraken": "stale-public-id"}
+        mock_factory.instance_configs = {}
+        result = await list_configured_processes(
+            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+        )
+        assert result.count == 1
+        process = result.payload[0]
+        assert process.name == "executor_kraken"
+        assert process.kind == "template"
+        assert process.running is False
+        assert process.active_public_id is None
+        assert process.wallet_public_id is None
+        assert process.parent_template is None
+
+    @pytest.mark.asyncio
+    async def test_synthetic_per_wallet_instance_appears_with_discriminators(self) -> None:
+        """Per-wallet instance from ``instance_configs`` joins the response.
+
+        Asserts the synthetic row carries the runtime-only fields:
+        ``kind=instance``, ``wallet_public_id`` (from instance config
+        parameters), and ``parent_template`` (``executor_<exchange>``).
+        """
+        wallet = "00000000-0000-7000-8000-0000000000a1"
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(return_value=[])
+        instance = ProcessConfigModel(
+            name="executor_kraken_w0000000000a1",
+            enabled=True,
+            mode="thread",
+            class_path="snapper.executors.Kraken",
+            method="run",
+            parameters={"wallet_public_id": wallet, "throttle": 5},
+            note=f"Per-wallet executor for exchange=kraken wallet={wallet}",
+        )
+        mock_factory.instance_configs = {"executor_kraken_w0000000000a1": instance}
+        mock_factory.started_processes = {"executor_kraken_w0000000000a1": MagicMock()}
+        mock_factory.active_runs = {"executor_kraken_w0000000000a1": "run-public-id"}
+        result = await list_configured_processes(
+            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+        )
+        assert result.count == 1
+        synthetic = result.payload[0]
+        assert synthetic.name == "executor_kraken_w0000000000a1"
+        assert synthetic.kind == "instance"
+        assert synthetic.running is True
+        assert synthetic.wallet_public_id == wallet
+        assert synthetic.parent_template == "executor_kraken"
+        assert synthetic.active_public_id == "run-public-id"
+
+    @pytest.mark.asyncio
+    async def test_non_executor_entry_in_instance_configs_skipped(self) -> None:
+        """Defensive guard: non-executor name in ``instance_configs`` is skipped.
+
+        ``instance_configs`` is only ever populated with per-wallet executor
+        names by the launcher, but the route checks ``is_executor_instance``
+        before synthesizing a row. This pins the defensive guard so an
+        accidental future caller polluting the dict cannot leak a malformed
+        row into ``/configured``.
+        """
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(return_value=[])
+        spurious = ProcessConfigModel(
+            name="zmq_broker",
+            enabled=True,
+            mode="thread",
+            class_path="snapper.broker",
+            method="run",
+            parameters={},
+        )
+        mock_factory.instance_configs = {"zmq_broker": spurious}
+        mock_factory.started_processes = {"zmq_broker": MagicMock()}
+        mock_factory.active_runs = {}
+        result = await list_configured_processes(
+            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+        )
+        assert result.count == 0
+
+    @pytest.mark.asyncio
+    async def test_template_and_instance_appear_together(self) -> None:
+        """Mixed list: one DB template plus one synthetic instance row.
+
+        Mirrors the runtime steady state of a deployed system —
+        ``executor_kraken`` template config in DB and
+        ``executor_kraken_w<short>`` running instance synthesized at
+        spawn time.
+        """
+        wallet = "00000000-0000-7000-8000-0000000000a1"
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="executor_kraken",
+                    enabled=False,
+                    mode="thread",
+                    class_path="snapper.executors.Kraken",
+                    method="run",
+                    parameters={"throttle": 5},
+                ),
+            ]
+        )
+        instance = ProcessConfigModel(
+            name="executor_kraken_w0000000000a1",
+            enabled=True,
+            mode="thread",
+            class_path="snapper.executors.Kraken",
+            method="run",
+            parameters={"wallet_public_id": wallet, "throttle": 5},
+        )
+        mock_factory.instance_configs = {"executor_kraken_w0000000000a1": instance}
+        mock_factory.started_processes = {"executor_kraken_w0000000000a1": MagicMock()}
+        mock_factory.active_runs = {}
+        result = await list_configured_processes(
+            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+        )
+        assert result.count == 2
+        kinds = {row.name: row.kind for row in result.payload}
+        assert kinds == {
+            "executor_kraken": "template",
+            "executor_kraken_w0000000000a1": "instance",
+        }
+        template_row = next(r for r in result.payload if r.name == "executor_kraken")
+        instance_row = next(r for r in result.payload if r.name == "executor_kraken_w0000000000a1")
+        assert template_row.running is False
+        assert instance_row.running is True
+        assert instance_row.wallet_public_id == wallet
+        assert instance_row.parent_template == "executor_kraken"
 
 
 class TestGetProcessSummary:
@@ -217,6 +372,7 @@ class TestGetProcessSummary:
         mock_factory = MagicMock()
         mock_factory.get_process_configs = AsyncMock(return_value=[])
         mock_factory.started_processes = {}
+        mock_factory.instance_configs = {}
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
         )
@@ -231,7 +387,13 @@ class TestGetProcessSummary:
 
     @pytest.mark.asyncio
     async def test_mixed_processes_categorization(self) -> None:
-        """Test processes are correctly categorized by name and role."""
+        """Templates are excluded; per-wallet instances drive executor counts.
+
+        ``executor_kraken`` is a template (config-only) so it does NOT
+        contribute to the executor totals. Two synthesized per-wallet
+        instances on ``factory.instance_configs`` provide the count
+        instead, mirroring what the launcher actually runs.
+        """
         mock_factory = MagicMock()
         mock_factory.get_process_configs = AsyncMock(
             return_value=[
@@ -278,10 +440,31 @@ class TestGetProcessSummary:
                 ),
             ]
         )
+        instance_a = ProcessConfigModel(
+            name="executor_kraken_w000000000001",
+            enabled=True,
+            mode="thread",
+            class_path="snapper.executors.Kraken",
+            method="run",
+            parameters={"wallet_public_id": "00000000-0000-7000-8000-000000000001"},
+        )
+        instance_b = ProcessConfigModel(
+            name="executor_kraken_w000000000002",
+            enabled=True,
+            mode="thread",
+            class_path="snapper.executors.Kraken",
+            method="run",
+            parameters={"wallet_public_id": "00000000-0000-7000-8000-000000000002"},
+        )
+        mock_factory.instance_configs = {
+            "executor_kraken_w000000000001": instance_a,
+            "executor_kraken_w000000000002": instance_b,
+        }
         mock_factory.started_processes = {
             "kraken_feed_publisher": MagicMock(),
             "momentum_strategy": MagicMock(),
             "zmq_broker": MagicMock(),
+            "executor_kraken_w000000000001": MagicMock(),
         }
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
@@ -290,10 +473,36 @@ class TestGetProcessSummary:
         assert result.payload.feeds.total == 2
         assert result.payload.strategies.running == 1
         assert result.payload.strategies.total == 1
-        assert result.payload.executors.running == 0
-        assert result.payload.executors.total == 1
+        assert result.payload.executors.running == 1
+        assert result.payload.executors.total == 2
         assert result.payload.brokers.running == 1
         assert result.payload.brokers.total == 1
+
+    @pytest.mark.asyncio
+    async def test_summary_skips_non_executor_in_instance_configs(self) -> None:
+        """Summary defensive guard: non-executor entry in ``instance_configs`` skipped.
+
+        Pins the symmetric defensive guard in ``/processes/summary`` so a
+        future caller polluting ``instance_configs`` with a non-executor name
+        cannot inflate the executor count.
+        """
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(return_value=[])
+        mock_factory.started_processes = {}
+        spurious = ProcessConfigModel(
+            name="zmq_broker",
+            enabled=True,
+            mode="thread",
+            class_path="snapper.broker",
+            method="run",
+            parameters={},
+        )
+        mock_factory.instance_configs = {"zmq_broker": spurious}
+        result = await get_process_summary(
+            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+        )
+        assert result.payload.executors.total == 0
+        assert result.payload.executors.running == 0
 
     @pytest.mark.asyncio
     async def test_uncategorized_process_not_counted(self) -> None:
@@ -313,6 +522,7 @@ class TestGetProcessSummary:
             ]
         )
         mock_factory.started_processes = {"backfill_symbols": MagicMock()}
+        mock_factory.instance_configs = {}
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
         )
@@ -546,6 +756,68 @@ class TestStartProcess:
         assert result.payload.status == "success"
         mock_factory.start_process_by_name.assert_awaited_once_with(
             name="zmq_broker", mode=None, parameters=None
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_bare_executor_template_returns_422(self) -> None:
+        """Bare executor template start raises 422 with helpful redirect message.
+
+        Templates are config-only; the operator must target a per-wallet
+        instance. The handler short-circuits before any factory call.
+        """
+        mock_factory = MagicMock()
+        mock_factory.start_process_by_name = AsyncMock()
+        body = ProcessStartRequest(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name="executor_kraken",
+                body=body,
+                factory=mock_factory,
+                user=MagicMock(operator_public_ids=[]),
+                repo=MagicMock(),
+                _csrf=None,
+            )
+        assert exc_info.value.status_code == 422
+        assert "executor_kraken" in str(exc_info.value.detail)
+        assert "_w<wallet_short>" in str(exc_info.value.detail)
+        mock_factory.start_process_by_name.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_per_wallet_executor_instance_succeeds(self) -> None:
+        """Per-wallet instance name passes through to ``start_process_by_name``."""
+        mock_factory = MagicMock()
+        mock_factory.start_process_by_name = AsyncMock(
+            return_value=ProcessStartResult(
+                status="success", message="started", public_id="run-002"
+            )
+        )
+        body = ProcessStartRequest(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        result = await start_process(
+            http_request=_make_rest_request(),
+            name="executor_kraken_w0000000000a1",
+            body=body,
+            factory=mock_factory,
+            user=MagicMock(operator_public_ids=[]),
+            repo=MagicMock(),
+            _csrf=None,
+        )
+        assert result.payload.status == "success"
+        assert result.payload.process_public_id == "run-002"
+        mock_factory.start_process_by_name.assert_awaited_once_with(
+            name="executor_kraken_w0000000000a1", mode=None, parameters=None
         )
 
 

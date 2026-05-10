@@ -38,6 +38,7 @@ from snapper.core.types import OrderEventEnum
 from snapper.core.types import OrderEventType
 from snapper.core.types import OrderExchange
 from snapper.core.types import ReplaceEventType
+from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
@@ -981,7 +982,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         strategy_tag = params.get("strategy_tag")
         base = f"{exchange_name}.{instrument}.{mode}"
         if self.wallet_public_id:
-            wallet_short = self.wallet_public_id.replace("-", "")[:12].lower()
+            wallet_short = compute_wallet_short(self.wallet_public_id)
             base = f"{base}.w{wallet_short}"
         shard_key = (
             f"{base}.{strategy_tag}" if mode == ExecutionModeEnum.PAPER and strategy_tag else base
@@ -1656,9 +1657,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         have not migrated to the per-wallet path).
         """
         exchange_name = self._get_exchange_name()
-        wallet_short = (
-            self.wallet_public_id.replace("-", "")[:12].lower() if self.wallet_public_id else ""
-        )
+        wallet_short = compute_wallet_short(self.wallet_public_id) if self.wallet_public_id else ""
         component = (
             f"executor.{exchange_name}.{wallet_short}"
             if wallet_short

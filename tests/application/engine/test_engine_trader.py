@@ -3114,8 +3114,8 @@ class TestRecovery:
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         coord.repository = mock_repo
         await coord._recover_engine_state()
-        wallet_a_short = wallet_a.replace("-", "")[:12].lower()
-        wallet_b_short = wallet_b.replace("-", "")[:12].lower()
+        wallet_a_short = wallet_a.replace("-", "")[-12:].lower()
+        wallet_b_short = wallet_b.replace("-", "")[-12:].lower()
         key_a = f"BTC-USD@kraken-live-w{wallet_a_short}"
         key_b = f"BTC-USD@kraken-live-w{wallet_b_short}"
         key_legacy = "BTC-USD@kraken-live"
@@ -3183,7 +3183,7 @@ class TestRecovery:
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         coord.repository = mock_repo
         await coord._recover_engine_state()
-        wallet_short = wallet.replace("-", "")[:12].lower()
+        wallet_short = wallet.replace("-", "")[-12:].lower()
         key = f"BTC-USD@kraken-live-w{wallet_short}"
         assert key in coord.engines
         engine = coord.engines[key]
@@ -3242,7 +3242,7 @@ class TestRecovery:
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         coord.repository = mock_repo
         await coord._recover_engine_state()
-        wallet_short = wallet.replace("-", "")[:12].lower()
+        wallet_short = wallet.replace("-", "")[-12:].lower()
         key = f"BTC-USD@kraken-live-w{wallet_short}"
         assert key in coord.engines
         engine = coord.engines[key]
@@ -3334,7 +3334,7 @@ class TestRecovery:
             await coord._recover_engine_state()
         finally:
             logger.remove(sink_id)
-        wallet_short = wallet.replace("-", "")[:12].lower()
+        wallet_short = wallet.replace("-", "")[-12:].lower()
         key = f"BTC-USD@kraken-live-w{wallet_short}"
         assert key in coord.engines
         engine = coord.engines[key]
@@ -3425,7 +3425,7 @@ class TestRecovery:
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         coord.repository = mock_repo
         await coord._recover_engine_state()
-        wallet_short = wallet.replace("-", "")[:12].lower()
+        wallet_short = wallet.replace("-", "")[-12:].lower()
         key = f"BTC-USD@kraken-live-w{wallet_short}"
         assert key in coord.engines
         engine = coord.engines[key]
@@ -3822,7 +3822,7 @@ def test_build_engine_key_includes_wallet_short_when_populated() -> None:
     When: ``_build_engine_key`` is invoked,
     Then: The returned key has the legacy ``{instrument}@{exchange}-{mode}``
         prefix plus ``-w{wallet_short}`` where ``wallet_short`` is the
-        first 12 hex characters of the wallet UUID7 with dashes
+        last 12 hex characters of the wallet UUID7 with dashes
         stripped and lowercased — matching the
         ``ProcessLauncherService`` per-wallet executor instance name
         and the ``TradingEngineService._shard_key`` segment so live
@@ -3831,7 +3831,7 @@ def test_build_engine_key_includes_wallet_short_when_populated() -> None:
     key = TraderCoordinator._build_engine_key(
         "BTC-USD", "kraken", "live", "01975A8B-3C7D-7000-8000-AAAAAAAAAAAA"
     )
-    assert key == "BTC-USD@kraken-live-w01975a8b3c7d"
+    assert key == "BTC-USD@kraken-live-waaaaaaaaaaaa"
 
 
 def test_build_engine_key_legacy_flat_key_when_wallet_empty() -> None:
@@ -3973,7 +3973,13 @@ class TestBuildWalletShortCache:
 
     @pytest.mark.asyncio
     async def test_populates_cache_from_credentials(self) -> None:
-        """Two active credentials produce two cache entries."""
+        """Two active credentials produce dual (canonical + legacy) cache entries.
+
+        Each wallet contributes BOTH its canonical (last-12) and its
+        legacy (first-12) suffix → wallet_id mapping. The legacy entry
+        keeps recovery from old persisted ``shard_key`` strings working
+        after the algorithm change from first-12 to last-12.
+        """
         trader = self._make_trader()
         repo = MagicMock(spec=SQLAlchemyRepository)
         repo.list_active_wallet_credentials = AsyncMock(
@@ -4005,21 +4011,59 @@ class TestBuildWalletShortCache:
         trader.repository = repo
         await trader._build_wallet_short_cache()
         assert trader._wallet_short_to_id == {
+            "aaaaaaaaaaaa": "01975A8B-3C7D-7000-8000-AAAAAAAAAAAA",
             "01975a8b3c7d": "01975A8B-3C7D-7000-8000-AAAAAAAAAAAA",
+            "bbbbbbbbbbbb": "01abcdef-0000-7000-8000-bbbbbbbbbbbb",
             "01abcdef0000": "01abcdef-0000-7000-8000-bbbbbbbbbbbb",
         }
 
     @pytest.mark.asyncio
+    async def test_skips_legacy_populate_when_equal_to_canonical(self) -> None:
+        """Pathological wallet whose first-12 equals last-12 only inserts once.
+
+        Given: A wallet UUID whose first 12 hex chars equal its last
+            12 hex chars (only possible if all 32 hex chars are
+            identical),
+        When: ``_build_wallet_short_cache`` is invoked,
+        Then: The cache holds exactly one entry — no duplicate
+            insertion attempt.
+        """
+        trader = self._make_trader()
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        identical_wallet = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-eq",
+                    "wallet_public_id": identical_wallet,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+            ]
+        )
+        trader.repository = repo
+        await trader._build_wallet_short_cache()
+        assert trader._wallet_short_to_id == {"aaaaaaaaaaaa": identical_wallet}
+
+    @pytest.mark.asyncio
     async def test_detects_wallet_short_collision_and_skips_second(self) -> None:
-        """Collision on the first-12-hex prefix logs error and keeps winner.
+        """Legacy first-12 collision logs error and keeps winner; canonical wins independently.
 
         Given: Two wallets whose UUID7 values collide on the first 12
-            hex characters (birthday-bound unlikely in production but
-            covered here for defensive behaviour),
+            hex characters (timestamp + version + random_a) — possible
+            for two wallets created in the same millisecond,
         When: ``_build_wallet_short_cache`` is invoked,
-        Then: The first wallet wins the cache slot and the second is
-            dropped with an error log — the operator notices and can
-            regenerate one wallet.
+        Then: The canonical (last-12) keys for BOTH wallets are
+            installed (no collision there), the first wallet wins the
+            legacy (first-12) slot, the second's legacy entry is
+            dropped with an error log, and the operator notices the
+            collision warning. Routing for the second wallet still
+            works via its canonical last-12 key.
         """
         trader = self._make_trader()
         repo = MagicMock(spec=SQLAlchemyRepository)
@@ -4052,7 +4096,9 @@ class TestBuildWalletShortCache:
         trader.repository = repo
         await trader._build_wallet_short_cache()
         assert trader._wallet_short_to_id == {
+            "aaaaaaaaaaaa": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
             "01975a8b3c7d": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
+            "bbbbbbbbbbbb": "01975a8b-3c7d-cccc-8000-bbbbbbbbbbbb",
         }
 
 
@@ -4080,7 +4126,7 @@ class TestEngineShardKeyWithWallet:
             exchange="kraken",
             wallet_public_id="01975A8B-3C7D-7000-8000-AAAAAAAAAAAA",
         )
-        assert engine._shard_key == "kraken.BTC-USD.live.w01975a8b3c7d"
+        assert engine._shard_key == "kraken.BTC-USD.live.waaaaaaaaaaaa"
 
     def test_shard_key_wallet_short_precedes_strategy_tag_for_paper(self) -> None:
         """Paper engine: wallet_short segment comes before strategy_tag.
@@ -4101,7 +4147,7 @@ class TestEngineShardKeyWithWallet:
             strategy_tag="scalp",
             wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         )
-        assert engine._shard_key == "paper.BTC-USD.paper.w01975a8b3c7d.scalp"
+        assert engine._shard_key == "paper.BTC-USD.paper.waaaaaaaaaaaa.scalp"
 
 
 class TestComputePendingBoundaries:

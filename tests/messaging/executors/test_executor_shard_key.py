@@ -18,7 +18,7 @@ from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.schemas.data import OrderRequestData
 
 WALLET_UUID = "01968a3b-7c4d-7e0f-8a1b-2c3d4e5f6a7b"
-WALLET_SHORT = WALLET_UUID.replace("-", "")[:12].lower()
+WALLET_SHORT = WALLET_UUID.replace("-", "")[-12:].lower()
 
 
 class ShardKeyExecutor(ExchangeExecutorService[Any]):
@@ -171,11 +171,13 @@ async def test_venue_event_shard_key_backwards_compatible() -> None:
 
 @pytest.mark.asyncio
 async def test_venue_event_shard_key_wallet_short_format() -> None:
-    """Wallet short is UUID stripped of dashes, first 12 chars, lowercase.
+    """Wallet short is UUID stripped of dashes, last 12 chars, lowercase.
 
     Given: a known UUID7 wallet_public_id,
     When: shard_key is computed,
-    Then: wallet segment matches expected transformation.
+    Then: wallet segment matches the canonical (collision-resistant)
+        last-12-hex transformation defined in
+        :mod:`snapper.core.wallet_short`.
     """
     ex: Any = ShardKeyExecutor(wallet_public_id=WALLET_UUID)
     repo = _mock_repo()
@@ -188,7 +190,7 @@ async def test_venue_event_shard_key_wallet_short_format() -> None:
         }
     )
     call_dict = repo.insert_venue_event.call_args.args[0]
-    expected_short = "01968a3b7c4d"
+    expected_short = "2c3d4e5f6a7b"
     assert f".w{expected_short}" in call_dict["shard_key"]
     assert call_dict["shard_key"] == f"kraken.ETH-USD.live.w{expected_short}"
 

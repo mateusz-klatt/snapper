@@ -443,6 +443,18 @@ class ConfiguredProcess(StrictDataSchema[Literal["configured_process"]]):
     Describes a process configuration with its current runtime state.
     First-class payload in ConfiguredProcessesResponse.
 
+    The ``kind`` discriminator separates two response shapes:
+
+    - ``kind="template"``: a bare executor template
+      (``executor_<exchange>``) that the per-wallet spawner expands
+      into one runnable instance per active credential. Templates are
+      configuration-only — UI should not render Start/Stop affordances
+      and the ``running`` flag is always ``False``.
+    - ``kind="instance"``: a directly runnable process — either a
+      regular process (broker, feed, strategy) or a per-wallet
+      executor instance synthesized at runtime. Per-wallet instances
+      additionally populate ``wallet_public_id`` and ``parent_template``.
+
     Attributes:
         type: Payload item type discriminator.
         name: Unique process name.
@@ -459,6 +471,13 @@ class ConfiguredProcess(StrictDataSchema[Literal["configured_process"]]):
         parameters_schema: JSON Schema for parameters.
         is_one_shot: Whether process is one-shot task.
         active_public_id: Active public ID if running.
+        kind: ``template`` for config-only executor templates;
+            ``instance`` for runnable processes.
+        wallet_public_id: Wallet UUID7 for per-wallet executor
+            instances; ``None`` for templates and non-per-wallet rows.
+        parent_template: Template name (e.g. ``executor_kraken``)
+            this instance was synthesized from; ``None`` for templates
+            and non-per-wallet rows.
     """
 
     type: Literal["configured_process"] = "configured_process"
@@ -476,6 +495,15 @@ class ConfiguredProcess(StrictDataSchema[Literal["configured_process"]]):
     parameters_schema: JsonObject | None = Field(None, description="JSON Schema for parameters")
     is_one_shot: bool = Field(description="Whether process is one-shot task")
     active_public_id: str | None = Field(None, description="Active public ID if running")
+    kind: Literal["template", "instance"] = Field(
+        description="``template`` for config-only executor templates; ``instance`` for runnable rows"
+    )
+    wallet_public_id: str | None = Field(
+        None, description="Wallet UUID7 for per-wallet executor instances; None otherwise"
+    )
+    parent_template: str | None = Field(
+        None, description="Template the per-wallet instance was synthesized from; None otherwise"
+    )
 
 
 class ConfiguredProcessesResponse(

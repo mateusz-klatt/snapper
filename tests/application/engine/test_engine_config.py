@@ -903,8 +903,8 @@ class TestTraderSignalHandling:
         wallet_engine = MagicMock()
         wallet_engine.execute_desired_units = AsyncMock()
         wallet_engine.pending_client_order_id = None
-        wallet_engine._shard_key = "kraken.BTC-USD.live.w01975a8b3c7d"
-        trader.engines["BTC-USD@kraken-live-w01975a8b3c7d"] = wallet_engine
+        wallet_engine._shard_key = "kraken.BTC-USD.live.waaaaaaaaaaaa"
+        trader.engines["BTC-USD@kraken-live-waaaaaaaaaaaa"] = wallet_engine
         wallet_signal = SignalData(
             session_id="",
             sequence_id=0,

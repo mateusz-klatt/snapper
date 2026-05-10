@@ -17,6 +17,7 @@ import contextlib
 import inspect
 import json
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -32,6 +33,9 @@ from snapper.application.process_manager.config_resolver import resolve_mode
 from snapper.application.process_manager.config_resolver import resolve_parameters_schema
 from snapper.application.process_manager.config_resolver import resolve_role
 from snapper.application.process_manager.config_resolver import resolve_tags
+from snapper.application.process_manager.executor_naming import is_executor_instance
+from snapper.application.process_manager.executor_naming import is_executor_template
+from snapper.application.process_manager.executor_naming import parse_executor_instance
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import ProcessRegistryEntry
@@ -54,9 +58,11 @@ from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRunStatusEnum
 from snapper.core.types import StartProcessStatusEnum
 from snapper.core.types import StopProcessStatusEnum
+from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
+from snapper.data.repository_types import WalletCredentialRow
 
 
 class CoreProcessStartupError(RuntimeError):
@@ -67,6 +73,21 @@ class CoreProcessStartupError(RuntimeError):
         self.failed_processes = failed_processes
         names = ", ".join(failed_processes)
         super().__init__(f"CORE process startup failed: {names}")
+
+
+@dataclass
+class _PerWalletSpawnOutcome:
+    """Per-credential outcome from :meth:`_spawn_one_per_wallet_instance`.
+
+    Carries the resolved instance metadata so the spawn-loop can
+    decide whether a failure escalates to
+    :class:`CoreProcessStartupError`. ``error=None`` means the spawn
+    succeeded.
+    """
+
+    instance_name: str
+    entry: ProcessRegistryEntry
+    error: Exception | None
 
 
 class ProcessLauncherService:
@@ -104,6 +125,7 @@ class ProcessLauncherService:
         self.process_tasks: dict[str, asyncio.Task[object]] = {}
         self.process_lifecycles: dict[str, ProcessLifecycleEnum] = {}
         self.process_roles: dict[str, ProcessRoleEnum] = {}
+        self.instance_configs: dict[str, ProcessConfigModel] = {}
         self.active_runs: dict[str, str] = {}
         self.spawner = ProcessSpawnerService()
         self.expected_terminations: set[str] = set()
@@ -185,10 +207,32 @@ class ProcessLauncherService:
     async def get_process_configs(self) -> list[ProcessConfigModel]:
         """Load process configurations from database.
 
+        Executor templates have ``enabled`` forced to ``False`` at read
+        time and any ``wallet_public_id`` leak is stripped from
+        ``parameters``. Templates are config-only — never directly
+        runnable — so the persisted ``enabled=True`` flag from the
+        legacy single-wallet era must not flow back into
+        :meth:`start_all_processes` (which would try to launch the
+        template directly, defeating the per-wallet design). Stripping
+        the wallet leak keeps the template a clean source of operator
+        defaults shared across all wallets on that exchange.
+
         Returns:
-            List of ProcessConfigModel instances.
+            List of ProcessConfigModel instances with executor
+            templates normalized.
         """
-        return await get_process_configs(self.settings)
+        configs = await get_process_configs(self.settings)
+        for config in configs:
+            if not is_executor_template(config.name):
+                continue
+            config.enabled = False
+            if "wallet_public_id" in config.parameters:
+                config.parameters = {
+                    key: value
+                    for key, value in config.parameters.items()
+                    if key != "wallet_public_id"
+                }
+        return configs
 
     def import_class(self, class_path: str, process_name: str | None = None) -> type:
         """Import a class by its fully qualified path.
@@ -243,6 +287,7 @@ class ProcessLauncherService:
         self.process_tasks.pop(config_name, None)
         self.started_processes.pop(config_name, None)
         self.process_roles.pop(config_name, None)
+        self.instance_configs.pop(config_name, None)
 
     def _validate_parameters(self, config: ProcessConfigModel) -> dict[str, Any]:
         """Validate process parameters against the registered model.
@@ -455,6 +500,223 @@ class ProcessLauncherService:
         if failed_core_names:
             raise CoreProcessStartupError(failed_core_names)
 
+    PER_WALLET_REGISTRY_FIXED_FIELDS: frozenset[str] = frozenset(
+        {"class", "class_path", "method", "role", "lifecycle", "tags"}
+    )
+    """Fields whose values come exclusively from the registry decorator.
+
+    Setting attempts to override these are logged and ignored when
+    building per-wallet instance configs. The Setting captures
+    operator-tunable runtime config; class identity / role / lifecycle
+    / tags are wired by ``@register_process`` and must not drift across
+    instances of the same exchange.
+    """
+
+    async def _load_template_setting(self, template_name: str) -> dict[str, Any]:
+        """Read the active ``process_<template_name>`` Setting value.
+
+        Returns the parsed JSON dict on success. Returns an empty dict
+        when the row is absent, the JSON cannot be parsed, or the
+        top-level value is not an object. Caller treats empty dict as
+        "fall back to registry defaults".
+
+        Args:
+            template_name: Process template name (e.g. ``executor_kraken``).
+
+        Returns:
+            Parsed Setting JSON dict, or empty dict on absence/parse error.
+        """
+        repository = get_repository(self.settings.db_url)
+        config_key = f"process_{template_name}"
+        async with repository.session() as session:
+            result = await session.execute(
+                select(Setting).where(Setting.key == config_key, *where_active_now(Setting))
+            )
+            setting = result.scalar_one_or_none()
+        if setting is None:
+            return {}
+        try:
+            parsed = json.loads(setting.value)
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "Per-wallet instance build: failed to parse Setting '{}': {}; "
+                "falling back to registry defaults",
+                config_key,
+                exc,
+            )
+            return {}
+        if not isinstance(parsed, dict):
+            logger.warning(
+                "Per-wallet instance build: Setting '{}' is not a JSON object "
+                "(got {}); falling back to registry defaults",
+                config_key,
+                type(parsed).__name__,
+            )
+            return {}
+        return parsed
+
+    def _resolve_per_wallet_mode(
+        self,
+        template_name: str,
+        template_config: dict[str, Any],
+        entry: ProcessRegistryEntry,
+    ) -> ProcessMode:
+        """Resolve the execution mode for a per-wallet instance.
+
+        Template Setting may override mode. Invalid values fall back to
+        the registry default with a warning rather than aborting the
+        instance build.
+        """
+        template_mode = template_config.get("mode")
+        if template_mode is None:
+            return entry.mode
+        try:
+            return resolve_mode(template_mode, template_name)
+        except ValueError as exc:
+            logger.warning(
+                "Per-wallet instance build for '{}': invalid Setting mode '{}' ({}); "
+                "falling back to registry mode '{}'",
+                template_name,
+                template_mode,
+                exc,
+                entry.mode,
+            )
+            return entry.mode
+
+    def _build_per_wallet_instance_config(
+        self,
+        exchange: str,
+        wallet_public_id: str,
+        entry: ProcessRegistryEntry,
+        template_config: dict[str, Any],
+    ) -> ProcessConfigModel:
+        """Merge registry + template Setting + per-wallet overlay.
+
+        Precedence (lowest → highest):
+
+        1. Registry entry: ``class_path``, ``method``, ``role``,
+           ``lifecycle``, ``tags`` are immutable. ``mode`` and
+           ``parameters_schema`` provide defaults.
+        2. Template ``process_executor_<exchange>`` Setting: may override
+           ``parameters``, ``note``, ``parameters_schema``, ``mode``.
+           Setting attempts to override registry-fixed fields are logged
+           and dropped (registry wins).
+        3. Per-instance overlay: ``name = executor_<exchange>_w<short>``,
+           ``enabled = True`` (templates are config-only, never runnable),
+           ``parameters["wallet_public_id"] = wallet_public_id`` (any
+           template-side leak of the same key is stripped first).
+
+        Args:
+            exchange: Exchange identifier (e.g. ``kraken``, ``paper``).
+            wallet_public_id: Wallet UUID7. First 12 hex chars become
+                the instance name suffix.
+            entry: Registry entry for ``executor_<exchange>``. Mandatory.
+            template_config: Parsed ``process_executor_<exchange>``
+                Setting JSON dict. Empty dict when no Setting row is
+                active.
+
+        Returns:
+            Fully resolved per-wallet ``ProcessConfigModel``.
+        """
+        template_name = f"executor_{exchange}"
+        rejected = sorted(self.PER_WALLET_REGISTRY_FIXED_FIELDS & template_config.keys())
+        if rejected:
+            logger.warning(
+                "Per-wallet instance build for '{}': ignoring Setting overrides for {} "
+                "(registry values are authoritative)",
+                template_name,
+                rejected,
+            )
+        template_parameters_raw = template_config.get("parameters", {})
+        if isinstance(template_parameters_raw, dict):
+            template_parameters: dict[str, Any] = {
+                key: value
+                for key, value in template_parameters_raw.items()
+                if key != "wallet_public_id"
+            }
+        else:
+            template_parameters = {}
+        parameters: JsonObject = {
+            **template_parameters,
+            "wallet_public_id": wallet_public_id,
+        }
+        template_note = template_config.get("note")
+        if isinstance(template_note, str) and template_note:
+            note: str | None = template_note
+        else:
+            note = f"Per-wallet executor for exchange={exchange} wallet={wallet_public_id}"
+        mode = self._resolve_per_wallet_mode(template_name, template_config, entry)
+        template_schema = template_config.get("parameters_schema")
+        if isinstance(template_schema, dict):
+            parameters_schema: JsonObject | None = template_schema
+        else:
+            parameters_schema = entry.parameters_schema
+        wallet_short = compute_wallet_short(wallet_public_id)
+        instance_name = f"executor_{exchange}_w{wallet_short}"
+        return ProcessConfigModel(
+            name=instance_name,
+            enabled=True,
+            mode=mode,
+            class_path=entry.class_path,
+            method=entry.method,
+            parameters=parameters,
+            note=note,
+            lifecycle=entry.lifecycle,
+            role=entry.role,
+            tags=entry.tags,
+            parameters_schema=parameters_schema,
+        )
+
+    async def _spawn_one_per_wallet_instance(
+        self,
+        credential: WalletCredentialRow,
+        template_configs: dict[str, dict[str, Any]],
+    ) -> _PerWalletSpawnOutcome | None:
+        """Attempt one per-wallet spawn; return ``None`` when skipped.
+
+        The outcome captures the resolved ``instance_name`` and registry
+        ``entry`` plus the optional ``error`` from
+        :meth:`start_process`. The caller uses ``error`` + ``entry``
+        to decide whether a CORE/LONG_RUNNING failure should escalate
+        to :class:`CoreProcessStartupError`.
+
+        Returns:
+            ``None`` when the credential is skipped (template missing
+            or instance already running). Otherwise a populated
+            outcome — ``error=None`` on success, exception otherwise.
+        """
+        exchange = credential["exchange"]
+        wallet_public_id = credential["wallet_public_id"]
+        template_name = f"executor_{exchange}"
+        registry = get_registered_processes()
+        entry = registry.get(template_name)
+        if entry is None:
+            logger.warning(
+                f"Per-wallet spawner: template '{template_name}' not "
+                f"registered, skipping wallet={wallet_public_id}"
+            )
+            return None
+        wallet_short = compute_wallet_short(wallet_public_id)
+        instance_name = f"executor_{exchange}_w{wallet_short}"
+        if instance_name in self.started_processes:
+            logger.info(f"Per-wallet spawner: instance '{instance_name}' already running, skipping")
+            return None
+        if exchange not in template_configs:
+            template_configs[exchange] = await self._load_template_setting(template_name)
+        instance_config = self._build_per_wallet_instance_config(
+            exchange=exchange,
+            wallet_public_id=wallet_public_id,
+            entry=entry,
+            template_config=template_configs[exchange],
+        )
+        try:
+            await self.start_process(instance_config)
+        except Exception as exc:
+            return _PerWalletSpawnOutcome(instance_name=instance_name, entry=entry, error=exc)
+        self.instance_configs[instance_name] = instance_config
+        logger.info(f"Per-wallet spawner: started '{instance_name}' for wallet={wallet_public_id}")
+        return _PerWalletSpawnOutcome(instance_name=instance_name, entry=entry, error=None)
+
     async def spawn_per_wallet_executors(self) -> int:
         """Spawn one executor instance per active ``wallet_credentials`` row.
 
@@ -462,9 +724,17 @@ class ProcessLauncherService:
         per-wallet executor instance for each ``(exchange,
         wallet_public_id)`` pair via :meth:`start_process`. The dynamic
         process name is ``executor_{exchange}_w{wallet_short}`` where
-        ``wallet_short`` is the first 12 hex characters of the wallet
-        UUID7 (shard_key segment, populated here so the cache is
-        consistent at boot).
+        ``wallet_short`` is the last 12 hex characters of the wallet
+        UUID7 (the random portion — see
+        :mod:`snapper.core.wallet_short`).
+
+        Each per-wallet ``ProcessConfigModel`` is built by
+        :meth:`_build_per_wallet_instance_config`, which merges the
+        registry decorator metadata with the active template Setting
+        ``process_executor_<exchange>``. The Setting may tune
+        ``parameters``, ``note``, ``parameters_schema``, ``mode`` for
+        all wallets sharing an exchange; ``class_path``, ``method``,
+        ``role``, ``lifecycle``, ``tags`` are fixed by the registry.
 
         The spawn loop is intentionally **additive**: executor templates
         registered with ``enabled=True`` continue to run as the legacy
@@ -503,59 +773,25 @@ class ProcessLauncherService:
         if not credentials:
             logger.info("Per-wallet spawner: no wallet credentials, skipping")
             return 0
-        registry = get_registered_processes()
+        template_configs: dict[str, dict[str, Any]] = {}
         spawned = 0
         failed_core_names: list[str] = []
         for credential in credentials:
-            template_name = f"executor_{credential['exchange']}"
-            entry = registry.get(template_name)
-            if entry is None:
-                logger.warning(
-                    f"Per-wallet spawner: template '{template_name}' not "
-                    f"registered, skipping wallet={credential['wallet_public_id']}"
-                )
+            outcome = await self._spawn_one_per_wallet_instance(credential, template_configs)
+            if outcome is None:
                 continue
-            wallet_short = credential["wallet_public_id"].replace("-", "")[:12].lower()
-            instance_name = f"executor_{credential['exchange']}_w{wallet_short}"
-            if instance_name in self.started_processes:
-                logger.info(
-                    f"Per-wallet spawner: instance '{instance_name}' already running, skipping"
-                )
-                continue
-            instance_config = ProcessConfigModel(
-                name=instance_name,
-                enabled=True,
-                mode=entry.mode,
-                class_path=entry.class_path,
-                method=entry.method,
-                parameters={"wallet_public_id": credential["wallet_public_id"]},
-                note=(
-                    f"Per-wallet executor for "
-                    f"exchange={credential['exchange']} "
-                    f"wallet={credential['wallet_public_id']}"
-                ),
-                lifecycle=entry.lifecycle,
-                role=entry.role,
-                tags=entry.tags,
-                parameters_schema=None,
-            )
-            try:
-                await self.start_process(instance_config)
+            if outcome.error is None:
                 spawned += 1
-                logger.info(
-                    f"Per-wallet spawner: started '{instance_name}' for "
-                    f"wallet={credential['wallet_public_id']}"
-                )
-            except Exception as exc:
-                logger.error(
-                    f"Per-wallet spawner: failed to start '{instance_name}' "
-                    f"for wallet={credential['wallet_public_id']}: {exc}"
-                )
-                if (
-                    entry.role is ProcessRoleEnum.CORE
-                    and entry.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
-                ):
-                    failed_core_names.append(instance_name)
+                continue
+            logger.error(
+                f"Per-wallet spawner: failed to start '{outcome.instance_name}' "
+                f"for wallet={credential['wallet_public_id']}: {outcome.error}"
+            )
+            if (
+                outcome.entry.role is ProcessRoleEnum.CORE
+                and outcome.entry.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
+            ):
+                failed_core_names.append(outcome.instance_name)
         logger.info(f"Per-wallet spawner: started {spawned} per-wallet executor(s)")
         if failed_core_names:
             raise CoreProcessStartupError(failed_core_names)
@@ -599,6 +835,7 @@ class ProcessLauncherService:
         self.started_processes.clear()
         self.process_tasks.clear()
         self.process_lifecycles.clear()
+        self.instance_configs.clear()
         self.expected_terminations.clear()
         logger.info("All processes stopped")
 
@@ -819,6 +1056,13 @@ class ProcessLauncherService:
     def _cleanup_task_tracking(self, name: str, task: asyncio.Task[Any]) -> None:
         """Remove process from all tracking dictionaries.
 
+        Note: ``instance_configs`` is intentionally NOT popped here.
+        Per-wallet instances stay tracked across stop/restart cycles
+        so the API can render stopped instances with a working Start
+        button. ``instance_configs`` is cleared only on full
+        :meth:`stop_all_processes` (full reset) and on
+        :meth:`_cleanup_failed_start` (the entry was never legitimate).
+
         Args:
             name: Process name to clean up.
             task: Task to remove if it matches the stored task.
@@ -844,7 +1088,10 @@ class ProcessLauncherService:
             else:
                 run_status = self._resolve_task_success_status(name, lifecycle, expected)
             self._cleanup_task_tracking(name, task)
-            if not isinstance(task.exception(), (GeneratorExit, StopAsyncIteration)):
+            should_finalize = task.cancelled() or not isinstance(
+                task.exception(), (GeneratorExit, StopAsyncIteration)
+            )
+            if should_finalize:
                 await self._finalize_process_run(name, run_status, error=error_message)
         except Exception as e:
             if not isinstance(e, (GeneratorExit, StopAsyncIteration, asyncio.CancelledError)):
@@ -928,6 +1175,106 @@ class ProcessLauncherService:
             parameters_schema=parameters_schema,
         )
 
+    async def start_per_wallet_instance_by_name(self, name: str) -> ProcessStartResult:
+        """Resolve a per-wallet executor instance name and start it.
+
+        For ``name`` matching ``executor_<exchange>_w<wallet_short>``:
+
+        1. Parse the exchange + 12-hex wallet prefix from the name.
+        2. Look up the active ``wallet_credentials`` row matching both
+           the exchange AND the wallet prefix.
+        3. Build the instance config via
+           :meth:`_build_per_wallet_instance_config` — same merge logic
+           the boot-time spawner uses, so a manual restart picks up
+           any Setting edits made since boot.
+        4. Call :meth:`start_process` and register the live config in
+           ``instance_configs`` so the API surface keeps mirroring it.
+
+        Args:
+            name: Per-wallet instance name in the form
+                ``executor_<exchange>_w<wallet_short>``.
+
+        Returns:
+            ``ProcessStartResult`` with status ``SUCCESS`` on a clean
+            start, ``ALREADY_RUNNING`` when the instance is already in
+            ``started_processes``, or ``ERROR`` when the name does not
+            parse, the template is not registered, no matching active
+            credential exists, or the underlying ``start_process``
+            raises.
+        """
+        if name in self.started_processes:
+            logger.warning(f"Process '{name}' is already running")
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ALREADY_RUNNING,
+                message=f"Process '{name}' is already running",
+            )
+        parsed = parse_executor_instance(name)
+        if parsed is None:
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=f"'{name}' is not a per-wallet executor instance name",
+            )
+        exchange, wallet_short = parsed
+        registry = get_registered_processes()
+        template_name = f"executor_{exchange}"
+        entry = registry.get(template_name)
+        if entry is None:
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=f"Template '{template_name}' is not registered",
+            )
+        repository = get_repository(self.settings.db_url)
+        try:
+            credentials = await repository.list_active_wallet_credentials(as_of=datetime.now(UTC))
+        except Exception as exc:
+            logger.error(f"Per-wallet start: failed to query wallet_credentials: {exc}")
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=f"Cannot query wallet credentials: {exc}",
+            )
+        match = next(
+            (
+                cred
+                for cred in credentials
+                if cred["exchange"] == exchange
+                and compute_wallet_short(cred["wallet_public_id"]) == wallet_short
+            ),
+            None,
+        )
+        if match is None:
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=(
+                    f"No active wallet credential for '{name}' "
+                    f"(exchange={exchange}, wallet prefix={wallet_short}); "
+                    f"create the credential or use a different instance name"
+                ),
+            )
+        template_config = await self._load_template_setting(template_name)
+        instance_config = self._build_per_wallet_instance_config(
+            exchange=exchange,
+            wallet_public_id=match["wallet_public_id"],
+            entry=entry,
+            template_config=template_config,
+        )
+        try:
+            await self.start_process(instance_config)
+            self.instance_configs[name] = instance_config
+        except Exception as exc:
+            logger.error(f"Per-wallet start: failed to start '{name}': {exc}")
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=f"Failed to start '{name}': {exc}",
+            )
+        self._start_native_process_monitoring()
+        public_id = self.active_runs.get(name)
+        logger.info(f"Per-wallet start: '{name}' started successfully")
+        return ProcessStartResult(
+            status=StartProcessStatusEnum.SUCCESS,
+            message=f"Process '{name}' started successfully",
+            public_id=public_id,
+        )
+
     async def start_process_by_name(
         self,
         name: str,
@@ -939,6 +1286,13 @@ class ProcessLauncherService:
         Overrides (mode, parameters) are applied at runtime only and
         are not persisted back to the database.
 
+        Per-wallet executor instance names (``executor_<exchange>_w<short>``)
+        are routed to :meth:`start_per_wallet_instance_by_name` which
+        resolves the matching ``wallet_credentials`` row and rebuilds
+        the instance config. Bare executor template names
+        (``executor_<exchange>``) are rejected as ERROR — templates
+        are config-only and never directly runnable.
+
         Args:
             name: Process name from registry.
             mode: Execution mode override (thread/process).
@@ -947,6 +1301,16 @@ class ProcessLauncherService:
         Returns:
             Typed result with operation status, message, and optional public_id.
         """
+        if is_executor_instance(name):
+            return await self.start_per_wallet_instance_by_name(name)
+        if is_executor_template(name):
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=(
+                    f"'{name}' is an executor template — start "
+                    f"'{name}_w<wallet_short>' for a specific wallet"
+                ),
+            )
         if name in self.started_processes:
             logger.warning(f"Process '{name}' is already running")
             return ProcessStartResult(
@@ -1096,6 +1460,13 @@ class ProcessLauncherService:
         running, or "error" when any are missing. Disabled CORE processes
         and completed one-shot CORE processes are ignored.
 
+        Bare executor templates (``executor_<exchange>``) are skipped:
+        they are config-only entries expanded into per-wallet instances
+        by :meth:`spawn_per_wallet_executors`. Instance-level CORE
+        startup failures already escalate via
+        :class:`CoreProcessStartupError` at boot, so health checks do
+        not need to re-validate each per-wallet instance individually.
+
         In API-only mode (no autostart), returns "healthy" unconditionally
         since processes are intentionally not started.
 
@@ -1106,6 +1477,8 @@ class ProcessLauncherService:
             return HealthStatusEnum.HEALTHY
         configs = await self.get_process_configs()
         for config in configs:
+            if is_executor_template(config.name):
+                continue
             if (
                 config.enabled
                 and config.role is ProcessRoleEnum.CORE

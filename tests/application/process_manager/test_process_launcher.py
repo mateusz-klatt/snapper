@@ -26,6 +26,7 @@ from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import ProcessRegistryEntry
+from snapper.application.process_manager.models import ProcessStartResult
 from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.application.process_manager.spawner import ProcessSpawnerService
 from snapper.config.app import AppSettings
@@ -1763,6 +1764,43 @@ async def test_handle_task_completion_skips_finalize_on_generator_exit(
     monkeypatch.setattr(factory, "_finalize_process_run", finalize_mock)
     await factory._handle_task_completion("job", task)
     finalize_mock.assert_not_awaited()
+    assert "job" not in factory.started_processes
+    assert "job" not in factory.process_tasks
+
+
+@pytest.mark.asyncio()
+async def test_handle_task_completion_cancelled_finalizes_run_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify cancelled tasks finalize their DB run record.
+
+    Given: A task that was cancelled (e.g. by ``stop_all_processes``),
+    When: ``_handle_task_completion`` is called via the done-callback,
+    Then: ``_finalize_process_run`` IS called with CANCELLED so the
+        DB run record does not stay stuck as "running" — guards
+        ``task.exception()`` raising ``CancelledError`` (a
+        ``BaseException`` not caught by the surrounding ``except
+        Exception``).
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+
+    async def _runs_until_cancelled() -> None:
+        await asyncio.sleep(60)
+
+    task = asyncio.create_task(_runs_until_cancelled())
+    await asyncio.sleep(0)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    factory.process_tasks["job"] = task
+    factory.started_processes["job"] = object()
+    factory.process_lifecycles["job"] = ProcessLifecycleEnum.LONG_RUNNING
+    factory.process_roles["job"] = ProcessRoleEnum.CORE
+    finalize_mock = mock.AsyncMock()
+    monkeypatch.setattr(factory, "_finalize_process_run", finalize_mock)
+    await factory._handle_task_completion("job", task)
+    finalize_mock.assert_awaited_once_with("job", ProcessRunStatusEnum.CANCELLED, error=None)
     assert "job" not in factory.started_processes
     assert "job" not in factory.process_tasks
 
@@ -4886,6 +4924,67 @@ async def test_get_core_health_one_shot_completed_ignored(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio()
+async def test_get_core_health_skips_executor_templates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bare executor templates do not contribute to the CORE health check.
+
+    Given: An enabled CORE long-running ``executor_kraken`` template
+        config that is NOT in ``started_processes``,
+    When: ``get_core_health`` is called,
+    Then: It returns "healthy" — templates are config-only and the
+        per-wallet spawner expands them into runnable instances.
+        Instance-level CORE startup failures already escalate via
+        :class:`CoreProcessStartupError` at boot.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    template_config = ProcessConfigModel(
+        name="executor_kraken",
+        enabled=True,
+        mode="thread",
+        class_path="test.KrakenExecutor",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+    )
+    monkeypatch.setattr(
+        factory, "get_process_configs", mock.AsyncMock(return_value=[template_config])
+    )
+    assert await factory.get_core_health() == "healthy"
+
+
+@pytest.mark.asyncio()
+async def test_get_core_health_non_executor_core_still_checked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-executor CORE missing still flips health to error.
+
+    Given: An enabled CORE long-running ``zmq_broker`` config that is
+        NOT in ``started_processes``,
+    When: ``get_core_health`` is called,
+    Then: It returns "error" — the template-skip is scoped strictly
+        to ``executor_<exchange>`` names; other CORE long-running
+        processes (broker, feeds) keep their original semantic.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    config = ProcessConfigModel(
+        name="zmq_broker",
+        enabled=True,
+        mode="thread",
+        class_path="test.Broker",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+    )
+    monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+    assert await factory.get_core_health() == "error"
+
+
+@pytest.mark.asyncio()
 async def test_get_core_health_api_only_returns_healthy() -> None:
     """Verify healthy in API-only mode.
 
@@ -5084,13 +5183,14 @@ class TestSpawnPerWalletExecutors:
         )
         start_mock = AsyncMock()
         monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
         result = await factory.spawn_per_wallet_executors()
         assert result == 2
         assert start_mock.await_count == 2
         names = [call.args[0].name for call in start_mock.await_args_list]
         assert names == [
-            "executor_kraken_w000000000000",
-            "executor_paper_w000000000000",
+            "executor_kraken_w0000000000a1",
+            "executor_paper_w0000000000b2",
         ]
         params = [call.args[0].parameters for call in start_mock.await_args_list]
         assert params == [
@@ -5155,7 +5255,7 @@ class TestSpawnPerWalletExecutors:
         """
         factory = self._make_factory()
         wallet = "00000000-0000-7000-8000-0000000000d1"
-        factory.started_processes["executor_paper_w000000000000"] = cast(Any, MagicMock())
+        factory.started_processes["executor_paper_w0000000000d1"] = cast(Any, MagicMock())
         repo = MagicMock()
         repo.list_active_wallet_credentials = AsyncMock(
             return_value=[
@@ -5242,10 +5342,11 @@ class TestSpawnPerWalletExecutors:
         )
         start_mock = AsyncMock(side_effect=[RuntimeError("client init"), None])
         monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
         with pytest.raises(CoreProcessStartupError) as exc_info:
             await factory.spawn_per_wallet_executors()
         assert start_mock.await_count == 2
-        assert "executor_kraken_w000000000000" in str(exc_info.value)
+        assert "executor_kraken_w0000000000e1" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_spawn_continues_after_non_core_per_instance_failure(
@@ -5314,6 +5415,1104 @@ class TestSpawnPerWalletExecutors:
         )
         start_mock = AsyncMock(side_effect=[RuntimeError("client init"), None])
         monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
         result = await factory.spawn_per_wallet_executors()
         assert result == 1
         assert start_mock.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_spawn_inherits_template_parameters_from_setting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Active template Setting params propagate to per-wallet instance.
+
+        Given: An active ``process_executor_kraken`` Setting carrying a
+            ``parameters`` dict {"max_qty": 1.5},
+        When: ``spawn_per_wallet_executors`` is called for a kraken wallet,
+        Then: The instance config passed to ``start_process`` carries
+            both the template's ``max_qty=1.5`` AND the per-instance
+            ``wallet_public_id`` overlay.
+        """
+        factory = self._make_factory()
+        wallet = "00000000-0000-7000-8000-0000000000a1"
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-a",
+                    "wallet_public_id": wallet,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry()},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(
+            factory,
+            "_load_template_setting",
+            AsyncMock(return_value={"parameters": {"max_qty": 1.5}}),
+        )
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 1
+        instance_config = start_mock.await_args_list[0].args[0]
+        assert instance_config.parameters == {
+            "max_qty": 1.5,
+            "wallet_public_id": wallet,
+        }
+
+    @pytest.mark.asyncio
+    async def test_spawn_template_class_path_override_ignored(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Setting attempts to override registry-fixed fields are dropped.
+
+        Given: A template Setting carrying a malicious ``class``
+            override pointing at an arbitrary class path,
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: The instance ``class_path`` is the registry value, not
+            the Setting override — registry decorator wins for code
+            identity.
+        """
+        factory = self._make_factory()
+        wallet = "00000000-0000-7000-8000-0000000000a2"
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-a",
+                    "wallet_public_id": wallet,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry("snapper.executors.RegistryClass")},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(
+            factory,
+            "_load_template_setting",
+            AsyncMock(return_value={"class": "evil.Hacked", "parameters": {"safe": True}}),
+        )
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 1
+        instance_config = start_mock.await_args_list[0].args[0]
+        assert instance_config.class_path == "snapper.executors.RegistryClass"
+        assert instance_config.parameters == {"safe": True, "wallet_public_id": wallet}
+
+    @pytest.mark.asyncio
+    async def test_spawn_populates_instance_configs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Successful spawn registers the live config in ``instance_configs``.
+
+        The route layer reads ``instance_configs`` to synthesize
+        per-wallet rows in ``/processes/configured`` and to count
+        running executors in ``/processes/summary``. This test pins
+        the contract.
+        """
+        factory = self._make_factory()
+        wallet = "00000000-0000-7000-8000-0000000000aa"
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-aa",
+                    "wallet_public_id": wallet,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry()},
+        )
+        monkeypatch.setattr(factory, "start_process", AsyncMock())
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 1
+        instance_name = "executor_kraken_w0000000000aa"
+        assert instance_name in factory.instance_configs
+        registered_config = factory.instance_configs[instance_name]
+        assert registered_config.parameters["wallet_public_id"] == wallet
+        assert registered_config.name == instance_name
+
+    @pytest.mark.asyncio
+    async def test_spawn_failure_does_not_populate_instance_configs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Failed spawn leaves ``instance_configs`` clean (registered only on success)."""
+        factory = self._make_factory()
+        wallet = "00000000-0000-7000-8000-0000000000bb"
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-bb",
+                    "wallet_public_id": wallet,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry()},
+        )
+        monkeypatch.setattr(
+            factory,
+            "start_process",
+            AsyncMock(side_effect=RuntimeError("client init")),
+        )
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        with pytest.raises(CoreProcessStartupError):
+            await factory.spawn_per_wallet_executors()
+        assert factory.instance_configs == {}
+
+    @pytest.mark.asyncio
+    async def test_spawn_same_millisecond_wallets_get_distinct_names(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Wallets sharing the UUID7 timestamp prefix get distinct instance names.
+
+        Given: Two wallets whose UUID7 first-12 hex chars (timestamp +
+            version + random_a) are IDENTICAL — what happens when two
+            wallets are created in the same millisecond on the same
+            exchange,
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: Both wallets spawn distinct instances. The canonical
+            ``wallet_short`` derives from the LAST 12 hex chars (the
+            random portion) so collisions reduce to ~1 in 2^48 rather
+            than the deterministic timestamp collision the legacy
+            first-12 algorithm produced.
+        """
+        factory = self._make_factory()
+        wallet_first_ms_a = "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa"
+        wallet_first_ms_b = "01975a8b-3c7d-cccc-8000-bbbbbbbbbbbb"
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-a",
+                    "wallet_public_id": wallet_first_ms_a,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+                {
+                    "public_id": "cred-b",
+                    "wallet_public_id": wallet_first_ms_b,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 2,
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry()},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 2
+        names = {call.args[0].name for call in start_mock.await_args_list}
+        assert names == {
+            "executor_kraken_waaaaaaaaaaaa",
+            "executor_kraken_wbbbbbbbbbbbb",
+        }
+
+    @pytest.mark.asyncio
+    async def test_spawn_two_wallets_share_template_parameters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two wallets on the same exchange share template parameters.
+
+        Given: Two credentials for the same kraken exchange and one
+            active template Setting with ``parameters={"throttle": 5}``,
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: Both instance configs carry the same ``throttle=5`` value
+            (from the shared template), but distinct ``wallet_public_id``
+            overlays — and the loader is consulted only once thanks to
+            per-exchange caching.
+        """
+        factory = self._make_factory()
+        wallet_a = "00000000-0000-7000-8000-0000000000a3"
+        wallet_b = "00000000-0000-7000-8000-0000000000a4"
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-a",
+                    "wallet_public_id": wallet_a,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+                {
+                    "public_id": "cred-b",
+                    "wallet_public_id": wallet_b,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 2,
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry()},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        load_mock = AsyncMock(return_value={"parameters": {"throttle": 5}})
+        monkeypatch.setattr(factory, "_load_template_setting", load_mock)
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 2
+        assert load_mock.await_count == 1
+        params = [call.args[0].parameters for call in start_mock.await_args_list]
+        assert params == [
+            {"throttle": 5, "wallet_public_id": wallet_a},
+            {"throttle": 5, "wallet_public_id": wallet_b},
+        ]
+
+
+class TestGetProcessConfigsExecutorTemplateNormalization:
+    """``get_process_configs`` normalizes executor templates at read time.
+
+    Templates are config-only — never directly runnable — so a
+    persisted ``enabled=True`` flag from the legacy single-wallet era
+    must not flow through. The launcher's ``get_process_configs``
+    forces ``enabled=False`` and strips any leaked
+    ``wallet_public_id`` from template ``parameters``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_executor_template_enabled_forced_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Persisted ``enabled=True`` on template is forced to False at read."""
+        settings = _create_settings()
+        factory = ProcessLauncherService(settings)
+        template_config = ProcessConfigModel(
+            name="executor_kraken",
+            enabled=True,
+            mode="thread",
+            class_path="test.KrakenExecutor",
+            method="start",
+            parameters={"throttle": 5},
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_process_configs",
+            mock.AsyncMock(return_value=[template_config]),
+        )
+        configs = await factory.get_process_configs()
+        assert len(configs) == 1
+        assert configs[0].name == "executor_kraken"
+        assert configs[0].enabled is False
+        assert configs[0].parameters == {"throttle": 5}
+
+    @pytest.mark.asyncio
+    async def test_executor_template_strips_wallet_leak(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Leaked ``wallet_public_id`` in template params is stripped at read."""
+        settings = _create_settings()
+        factory = ProcessLauncherService(settings)
+        template_config = ProcessConfigModel(
+            name="executor_kraken",
+            enabled=False,
+            mode="thread",
+            class_path="test.KrakenExecutor",
+            method="start",
+            parameters={
+                "throttle": 5,
+                "wallet_public_id": "00000000-0000-7000-8000-000000000999",
+            },
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_process_configs",
+            mock.AsyncMock(return_value=[template_config]),
+        )
+        configs = await factory.get_process_configs()
+        assert configs[0].parameters == {"throttle": 5}
+
+    @pytest.mark.asyncio
+    async def test_non_template_config_passes_through_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-executor configs (broker, feeds) are not touched by normalization."""
+        settings = _create_settings()
+        factory = ProcessLauncherService(settings)
+        broker_config = ProcessConfigModel(
+            name="zmq_broker",
+            enabled=True,
+            mode="thread",
+            class_path="test.Broker",
+            method="start",
+            parameters={"endpoint": "tcp://0.0.0.0:5555"},
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_process_configs",
+            mock.AsyncMock(return_value=[broker_config]),
+        )
+        configs = await factory.get_process_configs()
+        assert configs[0].enabled is True
+        assert configs[0].parameters == {"endpoint": "tcp://0.0.0.0:5555"}
+
+    @pytest.mark.asyncio
+    async def test_executor_instance_name_in_db_passes_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-wallet instance names (if persisted) bypass normalization.
+
+        Per-wallet instances are normally synthesized at runtime, but
+        if one ever ended up in the ``Setting`` table (e.g. legacy
+        data) the normalization should NOT strip its
+        ``wallet_public_id`` — the instance needs it.
+        """
+        settings = _create_settings()
+        factory = ProcessLauncherService(settings)
+        instance_config = ProcessConfigModel(
+            name="executor_kraken_w0000000000a1",
+            enabled=True,
+            mode="thread",
+            class_path="test.KrakenExecutor",
+            method="start",
+            parameters={"wallet_public_id": "00000000-0000-7000-8000-0000000000a1"},
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_process_configs",
+            mock.AsyncMock(return_value=[instance_config]),
+        )
+        configs = await factory.get_process_configs()
+        assert configs[0].enabled is True
+        assert configs[0].parameters == {"wallet_public_id": "00000000-0000-7000-8000-0000000000a1"}
+
+
+class TestStartPerWalletInstanceByName:
+    """Coverage for ``start_per_wallet_instance_by_name`` resolver.
+
+    Manual restart of ``executor_<exchange>_w<short>`` parses the
+    name, looks up the matching credential, rebuilds the config via
+    ``_build_per_wallet_instance_config`` (so Setting edits since boot
+    take effect), and registers the instance on success.
+    """
+
+    _WALLET = "00000000-0000-7000-8000-0000000000a1"
+    _INSTANCE_NAME = "executor_kraken_w0000000000a1"
+
+    def _make_factory(self) -> ProcessLauncherService:
+        settings = MagicMock()
+        settings.db_url = "sqlite+aiosqlite:///:memory:"
+        return ProcessLauncherService(settings)
+
+    def _make_entry(self, class_path: str = "test.KrakenExecutor") -> ProcessRegistryEntry:
+        return ProcessRegistryEntry(
+            class_ref=cast(Any, MagicMock()),
+            class_path=class_path,
+            method="start",
+            description="kraken executor template",
+            priority=30,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=("execution", "orders", "kraken"),
+            parameters_model=None,
+            parameters_schema=None,
+            enabled=True,
+            mode="thread",
+        )
+
+    def _credential_for_wallet(self, wallet: str, exchange: str) -> dict[str, Any]:
+        return {
+            "public_id": "cred-1",
+            "wallet_public_id": wallet,
+            "exchange": exchange,
+            "credential_type": "api_key_secret",
+            "encrypted_payload": "enc",
+            "label": None,
+            "timestamp": datetime.now(UTC),
+            "session_id": "s",
+            "sequence_id": 1,
+        }
+
+    @pytest.mark.asyncio
+    async def test_already_running_returns_already_running(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Idempotent: instance already in ``started_processes`` short-circuits."""
+        factory = self._make_factory()
+        factory.started_processes[self._INSTANCE_NAME] = cast(Any, MagicMock())
+        result = await factory.start_per_wallet_instance_by_name(self._INSTANCE_NAME)
+        assert result.status == "already_running"
+
+    @pytest.mark.asyncio
+    async def test_invalid_instance_name_returns_error(self) -> None:
+        """Names that do not match the instance pattern produce ERROR."""
+        factory = self._make_factory()
+        result = await factory.start_per_wallet_instance_by_name("zmq_broker")
+        assert result.status == "error"
+        assert "not a per-wallet executor instance" in result.message
+
+    @pytest.mark.asyncio
+    async def test_template_not_registered_returns_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No registry entry → ERROR with template-name context."""
+        factory = self._make_factory()
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {},
+        )
+        result = await factory.start_per_wallet_instance_by_name(self._INSTANCE_NAME)
+        assert result.status == "error"
+        assert "executor_kraken" in result.message
+
+    @pytest.mark.asyncio
+    async def test_credential_query_fails_returns_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DB error during credential lookup propagates as ERROR."""
+        factory = self._make_factory()
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(side_effect=RuntimeError("db down"))
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry()},
+        )
+        result = await factory.start_per_wallet_instance_by_name(self._INSTANCE_NAME)
+        assert result.status == "error"
+        assert "wallet credentials" in result.message
+
+    @pytest.mark.asyncio
+    async def test_no_matching_credential_returns_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Active credentials exist but none match the wallet prefix → ERROR."""
+        factory = self._make_factory()
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                self._credential_for_wallet("abcdef12-3456-7890-abcd-ef0123456789", "kraken"),
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry()},
+        )
+        result = await factory.start_per_wallet_instance_by_name(self._INSTANCE_NAME)
+        assert result.status == "error"
+        assert "No active wallet credential" in result.message
+
+    @pytest.mark.asyncio
+    async def test_happy_path_starts_and_registers_instance(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Resolver builds config, starts process, and registers in ``instance_configs``.
+
+        Asserts both the success status AND the side effect on
+        ``instance_configs`` so a subsequent ``/configured`` call sees
+        the live row.
+        """
+        factory = self._make_factory()
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[self._credential_for_wallet(self._WALLET, "kraken")]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry()},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(
+            factory,
+            "_load_template_setting",
+            AsyncMock(return_value={"parameters": {"max_qty": 2.5}}),
+        )
+        result = await factory.start_per_wallet_instance_by_name(self._INSTANCE_NAME)
+        assert result.status == "success"
+        assert self._INSTANCE_NAME in factory.instance_configs
+        registered = factory.instance_configs[self._INSTANCE_NAME]
+        assert registered.parameters == {
+            "max_qty": 2.5,
+            "wallet_public_id": self._WALLET,
+        }
+        start_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_start_process_failure_returns_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``start_process`` raise → ERROR result and no entry in ``instance_configs``."""
+        factory = self._make_factory()
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[self._credential_for_wallet(self._WALLET, "kraken")]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry()},
+        )
+        monkeypatch.setattr(
+            factory, "start_process", AsyncMock(side_effect=RuntimeError("client init"))
+        )
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        result = await factory.start_per_wallet_instance_by_name(self._INSTANCE_NAME)
+        assert result.status == "error"
+        assert "client init" in result.message
+        assert self._INSTANCE_NAME not in factory.instance_configs
+
+
+class TestStartProcessByNameDispatch:
+    """``start_process_by_name`` dispatches by name pattern.
+
+    - ``executor_<exchange>_w<short>`` → per-wallet resolver
+    - ``executor_<exchange>`` → ERROR (template, never directly runnable)
+    - everything else → existing DB-Setting flow
+    """
+
+    def _make_factory(self) -> ProcessLauncherService:
+        settings = MagicMock()
+        settings.db_url = "sqlite+aiosqlite:///:memory:"
+        return ProcessLauncherService(settings)
+
+    @pytest.mark.asyncio
+    async def test_executor_instance_name_dispatches_to_resolver(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-wallet name routes to ``start_per_wallet_instance_by_name``."""
+        factory = self._make_factory()
+        resolver = AsyncMock(
+            return_value=ProcessStartResult(status="success", message="ok"),
+        )
+        monkeypatch.setattr(factory, "start_per_wallet_instance_by_name", resolver)
+        result = await factory.start_process_by_name("executor_kraken_w0000000000a1")
+        assert result.status == "success"
+        resolver.assert_awaited_once_with("executor_kraken_w0000000000a1")
+
+    @pytest.mark.asyncio
+    async def test_executor_template_name_returns_error(self) -> None:
+        """Bare ``executor_<exchange>`` returns ERROR with template-rejected message."""
+        factory = self._make_factory()
+        result = await factory.start_process_by_name("executor_kraken")
+        assert result.status == "error"
+        assert "is an executor template" in result.message
+        assert "executor_kraken_w<wallet_short>" in result.message
+
+
+class TestInstanceConfigsCleanup:
+    """``instance_configs`` survives individual stops; clears on full reset.
+
+    Per-wallet instance entries are intentionally retained in
+    ``instance_configs`` after individual stops so the
+    ``/processes/configured`` API can render a stopped row with a
+    working Start button. The dict is cleared only on full
+    :meth:`stop_all_processes` (system reset) and on
+    :meth:`_cleanup_failed_start` (the entry was never legitimately
+    inserted).
+    """
+
+    def _make_factory(self) -> ProcessLauncherService:
+        settings = MagicMock()
+        settings.db_url = "sqlite+aiosqlite:///:memory:"
+        return ProcessLauncherService(settings)
+
+    def _seed_instance(self, factory: ProcessLauncherService, name: str) -> None:
+        factory.instance_configs[name] = ProcessConfigModel(
+            name=name,
+            enabled=True,
+            mode="thread",
+            class_path="test.PaperExecutor",
+            method="start",
+            parameters={"wallet_public_id": "00000000-0000-7000-8000-0000000000a1"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_stop_process_by_name_keeps_instance_config(self) -> None:
+        """``stop_process_by_name`` retains the entry so UI can offer Start.
+
+        The stopped instance still appears in ``/processes/configured``
+        with ``running=False`` and ``kind="instance"`` — the operator
+        clicks Start and the resolver rebuilds the live config.
+        """
+        factory = self._make_factory()
+        instance_name = "executor_paper_w0000000000a1"
+        instance = MagicMock()
+        instance.stop = AsyncMock()
+        factory.started_processes[instance_name] = cast(Any, instance)
+        self._seed_instance(factory, instance_name)
+        result = await factory.stop_process_by_name(instance_name)
+        assert result.status == "success"
+        assert instance_name in factory.instance_configs
+        assert instance_name not in factory.started_processes
+
+    @pytest.mark.asyncio
+    async def test_stop_all_processes_clears_instance_configs(self) -> None:
+        """``stop_all_processes`` empties ``instance_configs`` entirely."""
+        factory = self._make_factory()
+        for short in ("a", "b"):
+            instance_name = f"executor_kraken_w00000000000{short}"
+            instance = MagicMock()
+            instance.stop = AsyncMock()
+            factory.started_processes[instance_name] = cast(Any, instance)
+            self._seed_instance(factory, instance_name)
+        await factory.stop_all_processes()
+        assert factory.instance_configs == {}
+
+
+class TestBuildPerWalletInstanceConfig:
+    """Pure-merge helper coverage.
+
+    ``_build_per_wallet_instance_config`` merges a registry entry, the
+    parsed template Setting JSON, and the per-instance overlay into a
+    single ``ProcessConfigModel``. The tests cover registry-only
+    fallback, template inheritance for allowed fields, override
+    rejection for registry-fixed fields, and the wallet-overlay
+    sanitization of leaked ``wallet_public_id`` keys.
+    """
+
+    _WALLET_A = "00000000-0000-7000-8000-0000000000a1"
+
+    def _make_factory(self) -> ProcessLauncherService:
+        settings = MagicMock()
+        settings.db_url = "sqlite+aiosqlite:///:memory:"
+        return ProcessLauncherService(settings)
+
+    def _make_entry(
+        self,
+        *,
+        class_path: str = "test.PaperExecutor",
+        method: str = "start",
+        mode: str = "thread",
+        parameters_schema: JsonObject | None = None,
+        role: ProcessRoleEnum = ProcessRoleEnum.CORE,
+        lifecycle: ProcessLifecycleEnum = ProcessLifecycleEnum.LONG_RUNNING,
+        tags: tuple[str, ...] = ("execution", "orders"),
+    ) -> ProcessRegistryEntry:
+        return ProcessRegistryEntry(
+            class_ref=cast(Any, MagicMock()),
+            class_path=class_path,
+            method=method,
+            description="paper executor template",
+            priority=30,
+            lifecycle=lifecycle,
+            role=role,
+            tags=tags,
+            parameters_model=None,
+            parameters_schema=parameters_schema,
+            enabled=True,
+            mode=cast(Any, mode),
+        )
+
+    def test_no_template_uses_registry_defaults(self) -> None:
+        """Empty template_config → registry defaults + wallet overlay."""
+        factory = self._make_factory()
+        entry = self._make_entry(parameters_schema={"type": "object"})
+        config = factory._build_per_wallet_instance_config(
+            exchange="paper",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={},
+        )
+        assert config.name == "executor_paper_w0000000000a1"
+        assert config.enabled is True
+        assert config.mode == "thread"
+        assert config.class_path == "test.PaperExecutor"
+        assert config.method == "start"
+        assert config.parameters == {"wallet_public_id": self._WALLET_A}
+        assert config.note == (f"Per-wallet executor for exchange=paper wallet={self._WALLET_A}")
+        assert config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
+        assert config.role is ProcessRoleEnum.CORE
+        assert config.tags == ("execution", "orders")
+        assert config.parameters_schema == {"type": "object"}
+
+    def test_template_parameters_merged(self) -> None:
+        """Template params propagate, wallet overlay wins on collision."""
+        factory = self._make_factory()
+        entry = self._make_entry()
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"parameters": {"throttle": 5, "max_qty": 1.5}},
+        )
+        assert config.parameters == {
+            "throttle": 5,
+            "max_qty": 1.5,
+            "wallet_public_id": self._WALLET_A,
+        }
+
+    def test_template_leaked_wallet_id_stripped(self) -> None:
+        """Template ``parameters.wallet_public_id`` is stripped before overlay."""
+        factory = self._make_factory()
+        entry = self._make_entry()
+        leaked = "leaked-wallet-id"
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={
+                "parameters": {"throttle": 5, "wallet_public_id": leaked},
+            },
+        )
+        assert config.parameters == {"throttle": 5, "wallet_public_id": self._WALLET_A}
+
+    def test_template_parameters_non_dict_falls_back_empty(self) -> None:
+        """Malformed template parameters (list) → ignored, only wallet overlay."""
+        factory = self._make_factory()
+        entry = self._make_entry()
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"parameters": ["not", "a", "dict"]},
+        )
+        assert config.parameters == {"wallet_public_id": self._WALLET_A}
+
+    def test_class_path_override_rejected(self) -> None:
+        """Template ``class`` override is dropped; registry class_path wins."""
+        factory = self._make_factory()
+        entry = self._make_entry(class_path="snapper.executors.RegistryClass")
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"class": "evil.Hacked"},
+        )
+        assert config.class_path == "snapper.executors.RegistryClass"
+
+    def test_class_path_alias_override_rejected(self) -> None:
+        """Template ``class_path`` (alias key) override also dropped."""
+        factory = self._make_factory()
+        entry = self._make_entry(class_path="snapper.executors.RegistryClass")
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"class_path": "evil.Hacked"},
+        )
+        assert config.class_path == "snapper.executors.RegistryClass"
+
+    def test_method_override_rejected(self) -> None:
+        """Template ``method`` override dropped; registry method wins."""
+        factory = self._make_factory()
+        entry = self._make_entry(method="start")
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"method": "shutdown_now"},
+        )
+        assert config.method == "start"
+
+    def test_role_override_rejected(self) -> None:
+        """Template ``role`` override dropped; registry role wins."""
+        factory = self._make_factory()
+        entry = self._make_entry(role=ProcessRoleEnum.CORE)
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"role": "task"},
+        )
+        assert config.role is ProcessRoleEnum.CORE
+
+    def test_lifecycle_override_rejected(self) -> None:
+        """Template ``lifecycle`` override dropped; registry lifecycle wins."""
+        factory = self._make_factory()
+        entry = self._make_entry(lifecycle=ProcessLifecycleEnum.LONG_RUNNING)
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"lifecycle": "one_shot"},
+        )
+        assert config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
+
+    def test_tags_override_rejected(self) -> None:
+        """Template ``tags`` override dropped; registry tags win."""
+        factory = self._make_factory()
+        entry = self._make_entry(tags=("execution", "orders"))
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"tags": ["evil-tag"]},
+        )
+        assert config.tags == ("execution", "orders")
+
+    def test_template_note_overrides_default(self) -> None:
+        """Non-empty template note replaces auto-generated description."""
+        factory = self._make_factory()
+        entry = self._make_entry()
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"note": "Bumped throttle for peak hours"},
+        )
+        assert config.note == "Bumped throttle for peak hours"
+
+    def test_template_empty_note_falls_back_default(self) -> None:
+        """Empty template note → default per-wallet description used."""
+        factory = self._make_factory()
+        entry = self._make_entry()
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"note": ""},
+        )
+        assert config.note == (f"Per-wallet executor for exchange=kraken wallet={self._WALLET_A}")
+
+    def test_template_non_string_note_falls_back_default(self) -> None:
+        """Non-string template note → default per-wallet description used."""
+        factory = self._make_factory()
+        entry = self._make_entry()
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"note": 12345},
+        )
+        assert config.note == (f"Per-wallet executor for exchange=kraken wallet={self._WALLET_A}")
+
+    def test_template_mode_overrides_registry(self) -> None:
+        """Template ``mode`` overrides registry default."""
+        factory = self._make_factory()
+        entry = self._make_entry(mode="thread")
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"mode": "process"},
+        )
+        assert config.mode == "process"
+
+    def test_invalid_mode_falls_back_to_registry(self) -> None:
+        """Invalid template mode → warning logged + registry mode used."""
+        factory = self._make_factory()
+        entry = self._make_entry(mode="thread")
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"mode": "garbage"},
+        )
+        assert config.mode == "thread"
+
+    def test_template_schema_overrides_registry(self) -> None:
+        """Template parameters_schema overrides registry default."""
+        factory = self._make_factory()
+        entry = self._make_entry(parameters_schema={"type": "object", "from": "registry"})
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"parameters_schema": {"type": "object", "from": "template"}},
+        )
+        assert config.parameters_schema == {"type": "object", "from": "template"}
+
+    def test_template_non_dict_schema_falls_back_to_registry(self) -> None:
+        """Malformed parameters_schema → registry value used."""
+        factory = self._make_factory()
+        entry = self._make_entry(parameters_schema={"type": "object", "from": "registry"})
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"parameters_schema": "not-a-dict"},
+        )
+        assert config.parameters_schema == {"type": "object", "from": "registry"}
+
+    def test_enabled_always_true(self) -> None:
+        """Per-wallet instances are always ``enabled=True`` regardless of template."""
+        factory = self._make_factory()
+        entry = self._make_entry()
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id=self._WALLET_A,
+            entry=entry,
+            template_config={"enabled": False},
+        )
+        assert config.enabled is True
+
+    def test_instance_name_uses_lowercase_12_hex_suffix(self) -> None:
+        """Instance suffix is the last 12 lowercase hex chars of the wallet UUID.
+
+        The last 12 chars are the random portion of UUID7; using them
+        avoids the deterministic same-millisecond collision that the
+        first-12 (timestamp) portion has.
+        """
+        factory = self._make_factory()
+        entry = self._make_entry()
+        config = factory._build_per_wallet_instance_config(
+            exchange="kraken",
+            wallet_public_id="ABCDEF12-3456-7890-ABCD-EF0123456789",
+            entry=entry,
+            template_config={},
+        )
+        assert config.name == "executor_kraken_wef0123456789"
+
+
+class TestLoadTemplateSetting:
+    """``_load_template_setting`` async DB helper coverage."""
+
+    def _make_factory(self) -> ProcessLauncherService:
+        settings = MagicMock()
+        settings.db_url = "sqlite+aiosqlite:///:memory:"
+        return ProcessLauncherService(settings)
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_setting_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Missing Setting row → empty dict (caller treats as registry-only)."""
+        factory = self._make_factory()
+        repo = _DummyRepository(setting=None)
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        result = await factory._load_template_setting("executor_kraken")
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_returns_parsed_dict_when_setting_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Active Setting row → parsed JSON dict returned."""
+        factory = self._make_factory()
+        setting = Setting(
+            key="process_executor_kraken",
+            value=json.dumps({"parameters": {"throttle": 7}, "note": "tuning"}),
+            session_id="test-session",
+            sequence_id=1,
+        )
+        repo = _DummyRepository(setting=setting)
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        result = await factory._load_template_setting("executor_kraken")
+        assert result == {"parameters": {"throttle": 7}, "note": "tuning"}
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_invalid_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Malformed JSON in Setting value → empty dict + warning."""
+        factory = self._make_factory()
+        setting = Setting(
+            key="process_executor_kraken",
+            value="not-json{",
+            session_id="test-session",
+            sequence_id=1,
+        )
+        repo = _DummyRepository(setting=setting)
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        result = await factory._load_template_setting("executor_kraken")
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_top_level_not_dict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Top-level JSON list (not object) → empty dict + warning."""
+        factory = self._make_factory()
+        setting = Setting(
+            key="process_executor_kraken",
+            value=json.dumps(["not", "a", "dict"]),
+            session_id="test-session",
+            sequence_id=1,
+        )
+        repo = _DummyRepository(setting=setting)
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        result = await factory._load_template_setting("executor_kraken")
+        assert result == {}
