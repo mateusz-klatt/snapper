@@ -189,6 +189,116 @@ class _MatchResult:
         self.expiry_override = expiry_override
 
 
+class _RuleCandidate:
+    """Indexed rule with enough ordering metadata to rebuild match results."""
+
+    __slots__ = ("rule", "rule_index", "ticker")
+
+    def __init__(
+        self,
+        ticker: str,
+        rule: PatternRule,
+        rule_index: int,
+    ) -> None:
+        self.ticker = ticker
+        self.rule = rule
+        self.rule_index = rule_index
+
+
+class _RuleMatcher:
+    """Exchange-scoped rule index for repeated instrument matching."""
+
+    __slots__ = ("_definition_indexes", "_exact", "_regex_by_exchange")
+
+    def __init__(self) -> None:
+        self._definition_indexes: dict[str, int] = {}
+        self._exact: dict[tuple[str, str], list[_RuleCandidate]] = {}
+        self._regex_by_exchange: dict[str, list[_RuleCandidate]] = {}
+
+    @classmethod
+    def from_definitions(cls, definitions: list[UnderlyingDefinition]) -> Self:
+        """Build a matcher from a validated list of definitions.
+
+        Args:
+            definitions: Underlying definitions in YAML order.
+
+        Returns:
+            Matcher containing exact and regex indexes.
+        """
+        matcher = cls()
+        for definition_index, definition in enumerate(definitions):
+            matcher.add_definition(definition, definition_index)
+        return matcher
+
+    def add_definition(
+        self,
+        definition: UnderlyingDefinition,
+        definition_index: int,
+    ) -> None:
+        """Add a full underlying definition to the index.
+
+        Args:
+            definition: Underlying definition to index.
+            definition_index: Stable position of the definition in config order.
+        """
+        self._definition_indexes[definition.ticker] = definition_index
+        for rule_index, rule in enumerate(definition.patterns):
+            self.add_rule(definition.ticker, rule, rule_index)
+
+    def add_rule(self, ticker: str, rule: PatternRule, rule_index: int) -> None:
+        """Add one rule for an already indexed definition.
+
+        Args:
+            ticker: Ticker of the already indexed definition.
+            rule: Pattern rule to add.
+            rule_index: Stable position of the rule in its definition.
+        """
+        candidate = _RuleCandidate(
+            ticker=ticker,
+            rule=rule,
+            rule_index=rule_index,
+        )
+        if rule.match_type == "exact":
+            self._exact.setdefault((rule.exchange.value, rule.pattern), []).append(candidate)
+            return
+        self._regex_by_exchange.setdefault(rule.exchange.value, []).append(candidate)
+
+    def find_matches(self, inst: _InstrumentInfo) -> tuple[list[_MatchResult], bool]:
+        """Find matches using exact lookup plus exchange-scoped regex scan.
+
+        Args:
+            inst: Instrument to match.
+
+        Returns:
+            ``(matches, has_intra_conflict)`` with result semantics matching
+            :meth:`UnderlyingUpdater._find_matches`.
+        """
+        per_underlying: dict[str, list[_RuleCandidate]] = {}
+
+        for candidate in self._exact.get((inst.exchange, inst.native_symbol), []):
+            per_underlying.setdefault(candidate.ticker, []).append(candidate)
+
+        for candidate in self._regex_by_exchange.get(inst.exchange, []):
+            if rule_matches(candidate.rule, inst.native_symbol):
+                per_underlying.setdefault(candidate.ticker, []).append(candidate)
+
+        results: list[_MatchResult] = []
+        has_intra_conflict = False
+        for ticker, candidates in sorted(
+            per_underlying.items(),
+            key=lambda item: self._definition_indexes[item[0]],
+        ):
+            ordered = sorted(candidates, key=lambda candidate: candidate.rule_index)
+            rules = [candidate.rule for candidate in ordered]
+            match = UnderlyingUpdater._build_underlying_match(ticker, rules, inst)
+            if match is None:
+                has_intra_conflict = True
+                continue
+            results.append(match)
+
+        return results, has_intra_conflict
+
+
 class UnderlyingUpdater:
     """Syncs underlying asset definitions from YAML into the database."""
 
@@ -355,12 +465,13 @@ class UnderlyingUpdater:
         """
         definitions = list(config.underlyings)
         by_ticker = {definition.ticker: definition for definition in definitions}
+        matcher = _RuleMatcher.from_definitions(definitions)
         new_tickers: set[str] = set()
         extended_tickers: set[str] = set()
         generated_patterns = 0
 
         for inst in sorted(instruments, key=self._auto_coverage_sort_key):
-            kind = self._auto_coverage_apply(inst, definitions, by_ticker)
+            kind = self._auto_coverage_apply(inst, definitions, by_ticker, matcher)
             if kind == "skipped":
                 continue
             ticker = self._fallback_ticker(inst)
@@ -384,16 +495,17 @@ class UnderlyingUpdater:
         inst: _InstrumentInfo,
         definitions: list[UnderlyingDefinition],
         by_ticker: dict[str, UnderlyingDefinition],
+        matcher: _RuleMatcher,
     ) -> Literal["skipped", "new", "extended"]:
         """Apply auto-coverage for a single instrument.
 
         Args:
             inst: The instrument to consider.
             definitions: Mutable list of definitions being built. The
-                method matches against this list directly so previously
-                generated fallback rules are visible to subsequent
-                instruments without rebuilding the validated config.
+                method appends new definitions here after rule validation.
             by_ticker: Mutable ticker → definition lookup.
+            matcher: Mutable rule index kept in sync with generated
+                fallback rules.
 
         Returns:
             ``"new"`` when a new underlying was created and a rule
@@ -402,7 +514,7 @@ class UnderlyingUpdater:
             already-matched, asset-class collision, or invalid-input
             cases.
         """
-        matches, has_intra_conflict = self._find_matches_in(definitions, inst)
+        matches, has_intra_conflict = matcher.find_matches(inst)
         if matches or has_intra_conflict:
             return "skipped"
 
@@ -421,7 +533,9 @@ class UnderlyingUpdater:
         if existing is None:
             definitions.append(definition)
             by_ticker[definition.ticker] = definition
+            matcher.add_definition(definition, len(definitions) - 1)
             return "new"
+        matcher.add_rule(existing.ticker, target.patterns[-1], len(target.patterns) - 1)
         return "extended"
 
     @staticmethod
@@ -508,9 +622,10 @@ class UnderlyingUpdater:
         desired: dict[str, _MatchResult] = {}
         conflicted: set[str] = set()
         unmapped: list[tuple[str, str]] = []
+        matcher = _RuleMatcher.from_definitions(config.underlyings)
 
         for inst in instruments:
-            matches, has_intra_conflict = self._find_matches(config, inst)
+            matches, has_intra_conflict = matcher.find_matches(inst)
 
             if has_intra_conflict:
                 conflicted.add(inst.instrument_public_id)
@@ -576,7 +691,7 @@ class UnderlyingUpdater:
             matches is empty, to prevent stale cleanup from removing its
             existing mapping.
         """
-        return self._find_matches_in(config.underlyings, inst)
+        return _RuleMatcher.from_definitions(config.underlyings).find_matches(inst)
 
     def _find_matches_in(
         self,
@@ -597,35 +712,7 @@ class UnderlyingUpdater:
         Returns:
             ``(matches, has_intra_conflict)`` — see :meth:`_find_matches`.
         """
-        per_underlying: dict[str, list[PatternRule]] = {}
-
-        for defn in definitions:
-            matching_rules = self._matching_rules_for_definition(defn, inst)
-            if matching_rules:
-                per_underlying[defn.ticker] = matching_rules
-
-        results: list[_MatchResult] = []
-        has_intra_conflict = False
-        for ticker, rules in per_underlying.items():
-            match = self._build_underlying_match(ticker, rules, inst)
-            if match is None:
-                has_intra_conflict = True
-                continue
-            results.append(match)
-
-        return results, has_intra_conflict
-
-    @staticmethod
-    def _matching_rules_for_definition(
-        defn: UnderlyingDefinition,
-        inst: _InstrumentInfo,
-    ) -> list[PatternRule]:
-        """Collect the rules from one underlying that match an instrument."""
-        return [
-            rule
-            for rule in defn.patterns
-            if rule.exchange.value == inst.exchange and rule_matches(rule, inst.native_symbol)
-        ]
+        return _RuleMatcher.from_definitions(definitions).find_matches(inst)
 
     @staticmethod
     def _build_underlying_match(

@@ -17,6 +17,7 @@ from snapper.application.updaters.underlying_updater import UnderlyingMappingCon
 from snapper.application.updaters.underlying_updater import UnderlyingUpdater
 from snapper.application.updaters.underlying_updater import _InstrumentInfo
 from snapper.application.updaters.underlying_updater import _MatchResult
+from snapper.application.updaters.underlying_updater import _RuleMatcher
 from snapper.application.updaters.underlying_updater import rule_matches
 from snapper.data.repository_types import InstrumentSpecRow
 
@@ -213,6 +214,94 @@ class TestExchangeScoping:
 
 class TestUnderlyingUpdater:
     """Tests for the full updater lifecycle."""
+
+    def test_rule_matcher_uses_exact_index_before_regex_scan(self) -> None:
+        """Given exact and off-exchange regex rules, When matching, Then exact lookup wins."""
+        config = UnderlyingMappingConfig(
+            underlyings=[
+                UnderlyingDefinition(
+                    ticker="BTC",
+                    name="Bitcoin",
+                    asset_class="crypto",
+                    patterns=[
+                        PatternRule(exchange="kraken", match_type="exact", pattern="BTC-USD"),
+                    ],
+                ),
+                UnderlyingDefinition(
+                    ticker="BTCX",
+                    name="Bitcoin Regex",
+                    asset_class="crypto",
+                    patterns=[
+                        PatternRule(exchange="polygon", match_type="regex", pattern="^BTC-USD$"),
+                    ],
+                ),
+            ],
+        )
+        matcher = _RuleMatcher.from_definitions(config.underlyings)
+        instrument = _InstrumentInfo("i1", "kraken", "BTC-USD", "BTC", "USD", "crypto")
+
+        with patch(
+            "snapper.application.updaters.underlying_updater.rule_matches",
+            wraps=rule_matches,
+        ) as match_spy:
+            matches, has_intra_conflict = matcher.find_matches(instrument)
+
+        assert has_intra_conflict is False
+        assert [match.underlying_ticker for match in matches] == ["BTC"]
+        match_spy.assert_not_called()
+
+    def test_auto_coverage_builds_rule_index_once(self) -> None:
+        """Given many fallback instruments, When expanding, Then rule index is reused."""
+        config = UnderlyingMappingConfig(underlyings=[])
+        updater = UnderlyingUpdater(db_url="test://")
+        instruments = [
+            _InstrumentInfo("i1", "kraken", "AAA-USD", "AAA", "USD", "crypto"),
+            _InstrumentInfo("i2", "kraken", "BBB-USD", "BBB", "USD", "crypto"),
+            _InstrumentInfo("i3", "kraken", "AAA-EUR", "AAA", "EUR", "crypto"),
+        ]
+
+        with patch.object(
+            _RuleMatcher,
+            "from_definitions",
+            wraps=_RuleMatcher.from_definitions,
+        ) as build_spy:
+            expanded = updater._expand_auto_coverage(config, instruments)
+
+        assert build_spy.call_count == 1
+        assert {definition.ticker for definition in expanded.underlyings} == {"AAA", "BBB"}
+
+    def test_find_match_helpers_use_indexed_regex_semantics(self) -> None:
+        """Given exact and nonmatching regex rules, When matching, Then helpers agree."""
+        config = UnderlyingMappingConfig(
+            underlyings=[
+                UnderlyingDefinition(
+                    ticker="BTC",
+                    name="Bitcoin",
+                    asset_class="crypto",
+                    patterns=[
+                        PatternRule(exchange="kraken", match_type="exact", pattern="BTC-USD"),
+                    ],
+                ),
+                UnderlyingDefinition(
+                    ticker="ETH",
+                    name="Ethereum",
+                    asset_class="crypto",
+                    patterns=[
+                        PatternRule(exchange="kraken", match_type="regex", pattern="^ETH-USD$"),
+                    ],
+                ),
+            ],
+        )
+        updater = UnderlyingUpdater(db_url="test://")
+        instrument = _InstrumentInfo("i1", "kraken", "BTC-USD", "BTC", "USD", "crypto")
+
+        config_matches, config_conflict = updater._find_matches(config, instrument)
+        list_matches, list_conflict = updater._find_matches_in(config.underlyings, instrument)
+
+        assert config_conflict is False
+        assert list_conflict is False
+        assert [match.underlying_ticker for match in config_matches] == ["BTC"]
+        assert [match.underlying_ticker for match in list_matches] == ["BTC"]
 
     def test_auto_coverage_generates_fallback_definitions(self) -> None:
         """Given unmatched active instruments, When expanded, Then fallback rules cover them."""
