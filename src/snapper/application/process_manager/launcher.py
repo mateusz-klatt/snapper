@@ -261,10 +261,15 @@ class ProcessLauncherService:
         self._register_task_completion(config.name, task)
         logger.info(f"Process '{config.name}' started as async task")
         await asyncio.sleep(0.1)
-        if task.done():
-            exception = task.exception()
-            if exception is not None:
-                raise exception
+        if not task.done():
+            return
+        if task.cancelled():
+            raise asyncio.CancelledError(
+                f"Process '{config.name}' cancelled during startup grace window"
+            )
+        exception = task.exception()
+        if exception is not None:
+            raise exception
 
     async def _start_as_sync_executor(self, config: ProcessConfigModel, method: Any) -> None:
         """Start a sync method in a thread executor.
@@ -1175,7 +1180,11 @@ class ProcessLauncherService:
             parameters_schema=parameters_schema,
         )
 
-    async def start_per_wallet_instance_by_name(self, name: str) -> ProcessStartResult:
+    async def start_per_wallet_instance_by_name(
+        self,
+        name: str,
+        mode: ProcessMode | None = None,
+    ) -> ProcessStartResult:
         """Resolve a per-wallet executor instance name and start it.
 
         For ``name`` matching ``executor_<exchange>_w<wallet_short>``:
@@ -1187,12 +1196,20 @@ class ProcessLauncherService:
            :meth:`_build_per_wallet_instance_config` — same merge logic
            the boot-time spawner uses, so a manual restart picks up
            any Setting edits made since boot.
-        4. Call :meth:`start_process` and register the live config in
+        4. Apply the optional ``mode`` override on the resolved config
+           so the operator's selection in the execution-mode modal
+           (Thread vs Process) actually takes effect at start time.
+        5. Call :meth:`start_process` and register the live config in
            ``instance_configs`` so the API surface keeps mirroring it.
 
         Args:
             name: Per-wallet instance name in the form
                 ``executor_<exchange>_w<wallet_short>``.
+            mode: Optional execution mode override (``thread`` or
+                ``process``). When set, replaces the mode merged from
+                registry + template Setting on the resolved instance
+                config. The override is runtime-only and does not
+                persist back to the template Setting.
 
         Returns:
             ``ProcessStartResult`` with status ``SUCCESS`` on a clean
@@ -1257,6 +1274,8 @@ class ProcessLauncherService:
             entry=entry,
             template_config=template_config,
         )
+        if mode is not None:
+            instance_config.mode = mode
         try:
             await self.start_process(instance_config)
             self.instance_configs[name] = instance_config
@@ -1302,7 +1321,7 @@ class ProcessLauncherService:
             Typed result with operation status, message, and optional public_id.
         """
         if is_executor_instance(name):
-            return await self.start_per_wallet_instance_by_name(name)
+            return await self.start_per_wallet_instance_by_name(name, mode=mode)
         if is_executor_template(name):
             return ProcessStartResult(
                 status=StartProcessStatusEnum.ERROR,

@@ -4101,6 +4101,158 @@ class TestBuildWalletShortCache:
             "bbbbbbbbbbbb": "01975a8b-3c7d-cccc-8000-bbbbbbbbbbbb",
         }
 
+    @pytest.mark.asyncio
+    async def test_canonical_collision_skips_second_with_error_log(self) -> None:
+        """Two wallets sharing the canonical (last-12) suffix log error and route only the first.
+
+        Given: Two wallets whose UUID7 random portion (last 12 hex)
+            collides — birthday-bound to ~1 in 2^48 per same-exchange
+            wallet pair, so vanishingly rare in production but still a
+            possibility,
+        When: ``_build_wallet_short_cache`` is invoked,
+        Then: The first wallet wins the canonical slot, the second is
+            dropped from the canonical pass with an error log, and
+            ``_wallet_short_to_id`` does NOT contain a canonical
+            mapping for the second wallet — operator must regenerate.
+        """
+        trader = self._make_trader()
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        wallet_first = "11111111-1111-7000-8000-aaaaaaaaaaaa"
+        wallet_collide = "22222222-2222-7000-8000-aaaaaaaaaaaa"
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-first",
+                    "wallet_public_id": wallet_first,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+                {
+                    "public_id": "cred-collide",
+                    "wallet_public_id": wallet_collide,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 2,
+                },
+            ]
+        )
+        trader.repository = repo
+        await trader._build_wallet_short_cache()
+        assert trader._wallet_short_to_id == {
+            "aaaaaaaaaaaa": wallet_first,
+            "111111111111": wallet_first,
+            "222222222222": wallet_collide,
+        }
+
+    @pytest.mark.asyncio
+    async def test_same_wallet_multiple_exchanges_reinserts_idempotently(self) -> None:
+        """A wallet with credentials on 2 exchanges is reinserted as a no-op.
+
+        Given: One wallet UUID with active credentials on both kraken
+            and paper (the multi-tenant default for a personal wallet),
+        When: ``_build_wallet_short_cache`` is invoked,
+        Then: The wallet's canonical and legacy keys land exactly once
+            with the same wallet id; the second iteration sees its own
+            mapping and returns early without warning. Cache stays
+            consistent regardless of credential row count.
+        """
+        trader = self._make_trader()
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        wallet = "01975A8B-3C7D-7000-8000-AAAAAAAAAAAA"
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-kraken",
+                    "wallet_public_id": wallet,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+                {
+                    "public_id": "cred-paper",
+                    "wallet_public_id": wallet,
+                    "exchange": "paper",
+                    "credential_type": "paper",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 2,
+                },
+            ]
+        )
+        trader.repository = repo
+        await trader._build_wallet_short_cache()
+        assert trader._wallet_short_to_id == {
+            "aaaaaaaaaaaa": wallet,
+            "01975a8b3c7d": wallet,
+        }
+
+    @pytest.mark.asyncio
+    async def test_legacy_alias_does_not_shadow_other_wallets_canonical(self) -> None:
+        """Wallet B's canonical key MUST win even when wallet A's legacy alias would shadow it.
+
+        Given: Two wallets whose suffixes cross-collide — wallet A's
+            legacy (first-12) prefix matches wallet B's canonical
+            (last-12) suffix, and vice versa,
+        When: ``_build_wallet_short_cache`` is invoked,
+        Then: Both wallets' canonical keys land in pass 1, the legacy
+            aliases are refused in pass 2 with a warning, and routing
+            for new shard_keys resolves each wallet to itself via its
+            canonical key. Iteration order is irrelevant — pass 1
+            installs all canonicals before pass 2 considers any
+            legacy alias.
+        """
+        trader = self._make_trader()
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        wallet_a = "aaaaaaaa-aaaa-7000-8000-111111111111"
+        wallet_b = "11111111-1111-7000-8000-aaaaaaaaaaaa"
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-a",
+                    "wallet_public_id": wallet_a,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+                {
+                    "public_id": "cred-b",
+                    "wallet_public_id": wallet_b,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 2,
+                },
+            ]
+        )
+        trader.repository = repo
+        await trader._build_wallet_short_cache()
+        assert trader._wallet_short_to_id == {
+            "111111111111": wallet_a,
+            "aaaaaaaaaaaa": wallet_b,
+        }
+
 
 class TestEngineShardKeyWithWallet:
     """``TradingEngineService._shard_key`` wallet segment."""

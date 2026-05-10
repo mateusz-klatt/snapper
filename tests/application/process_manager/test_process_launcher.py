@@ -341,6 +341,64 @@ class TestStartProcess:
             await task
 
     @pytest.mark.asyncio
+    @patch("snapper.application.process_manager.launcher.ProcessLauncherService.import_class")
+    async def test_start_async_task_cancelled_in_grace_window_raises_cancelled(
+        self, mock_import: MagicMock
+    ) -> None:
+        """Cancellation during the 100ms startup grace surfaces cleanly.
+
+        Given: A process whose async ``run`` task gets cancelled
+            within the 100ms grace window after ``start_process``
+            launches it (e.g. by a concurrent ``stop_all_processes``),
+        When: ``start_process`` examines ``task.done()``,
+        Then: It raises :class:`asyncio.CancelledError` with a clear
+            message instead of letting the bare ``task.exception()``
+            call leak the cancellation as an uncaught
+            :class:`BaseException`.
+        """
+
+        async def cancellable_task() -> None:
+            await asyncio.sleep(60)
+
+        cancel_target: dict[str, asyncio.Task[object]] = {}
+
+        async def patched_sleep(_seconds: float) -> None:
+            task = cancel_target.get("task")
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+        mock_class = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.run = cancellable_task
+        mock_class.return_value = mock_instance
+        mock_import.return_value = mock_class
+        settings = MagicMock()
+        factory = ProcessLauncherService(settings)
+        config = ProcessConfigModel(
+            name="grace_cancel_proc",
+            enabled=True,
+            mode="thread",
+            class_path="test.GraceCancel",
+            method="run",
+            parameters={},
+        )
+        original_create_task = asyncio.create_task
+
+        def capturing_create_task(coro: object) -> asyncio.Task[object]:
+            task = original_create_task(cast(Any, coro))
+            cancel_target["task"] = task
+            return task
+
+        with (
+            mock.patch("asyncio.create_task", side_effect=capturing_create_task),
+            mock.patch("asyncio.sleep", side_effect=patched_sleep),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await factory.start_process(config)
+
+    @pytest.mark.asyncio
     async def test_start_process_async_method_process_mode(self) -> None:
         """Verify start_process spawns subprocess in process mode.
 
@@ -6020,6 +6078,45 @@ class TestStartPerWalletInstanceByName:
         start_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_mode_override_applied_to_instance_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Operator-selected ``mode`` overrides the merged template/registry mode.
+
+        Given: A ``mode='process'`` argument from the execution-mode
+            modal forwarded through ``start_process_by_name`` to the
+            per-wallet resolver, with a registry entry whose default
+            mode is ``thread``,
+        When: ``start_per_wallet_instance_by_name`` is invoked,
+        Then: The instance config registered in ``instance_configs``
+            and handed to ``start_process`` carries the operator's
+            ``process`` mode — not the registry default — so the
+            operator's selection actually takes effect.
+        """
+        factory = self._make_factory()
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[self._credential_for_wallet(self._WALLET, "kraken")]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry()},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        result = await factory.start_per_wallet_instance_by_name(
+            self._INSTANCE_NAME, mode="process"
+        )
+        assert result.status == "success"
+        registered = factory.instance_configs[self._INSTANCE_NAME]
+        assert registered.mode == "process"
+
+    @pytest.mark.asyncio
     async def test_start_process_failure_returns_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -6072,7 +6169,28 @@ class TestStartProcessByNameDispatch:
         monkeypatch.setattr(factory, "start_per_wallet_instance_by_name", resolver)
         result = await factory.start_process_by_name("executor_kraken_w0000000000a1")
         assert result.status == "success"
-        resolver.assert_awaited_once_with("executor_kraken_w0000000000a1")
+        resolver.assert_awaited_once_with("executor_kraken_w0000000000a1", mode=None)
+
+    @pytest.mark.asyncio
+    async def test_executor_instance_dispatch_forwards_mode_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``mode`` from the modal flows through dispatch to the resolver.
+
+        Given: ``start_process_by_name`` invoked with
+            ``mode='process'`` for a per-wallet instance name,
+        When: dispatch routes to ``start_per_wallet_instance_by_name``,
+        Then: The resolver receives the ``mode`` keyword argument so
+            the operator's selection actually applies to the rebuilt
+            instance config.
+        """
+        factory = self._make_factory()
+        resolver = AsyncMock(
+            return_value=ProcessStartResult(status="success", message="ok"),
+        )
+        monkeypatch.setattr(factory, "start_per_wallet_instance_by_name", resolver)
+        await factory.start_process_by_name("executor_kraken_w0000000000a1", mode="process")
+        resolver.assert_awaited_once_with("executor_kraken_w0000000000a1", mode="process")
 
     @pytest.mark.asyncio
     async def test_executor_template_name_returns_error(self) -> None:

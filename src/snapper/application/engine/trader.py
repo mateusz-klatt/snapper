@@ -463,37 +463,73 @@ class TraderCoordinator(RegisterableProcess):
         for row in credentials:
             wallet_public_id = row["wallet_public_id"]
             new_short = compute_wallet_short(wallet_public_id)
+            self._install_canonical_short(cache, new_short, wallet_public_id)
+        for row in credentials:
+            wallet_public_id = row["wallet_public_id"]
+            new_short = compute_wallet_short(wallet_public_id)
             legacy_short = compute_legacy_wallet_short(wallet_public_id)
-            self._populate_short_cache(cache, new_short, wallet_public_id)
-            if legacy_short != new_short:
-                self._populate_short_cache(cache, legacy_short, wallet_public_id)
+            if legacy_short == new_short:
+                continue
+            self._install_legacy_alias(cache, legacy_short, wallet_public_id)
         self._wallet_short_to_id = cache
         logger.info(f"ZMQTrader: wallet_short cache populated with {len(cache)} entries")
 
     @staticmethod
-    def _populate_short_cache(
+    def _install_canonical_short(
         cache: dict[str, str],
         wallet_short: str,
         wallet_public_id: str,
     ) -> None:
-        """Insert a ``wallet_short → wallet_public_id`` entry, warning on collision.
+        """Insert a canonical (last-12) ``wallet_short → wallet_public_id`` entry.
 
-        The cache holds both canonical (last-12) and legacy (first-12)
-        suffixes per wallet so persisted ``shard_key`` strings written
-        under either algorithm still resolve. A collision means two
-        DIFFERENT wallets share the suffix, which leaves signal
-        routing for the second wallet broken — log error and skip
-        the second insertion.
+        Two different wallets sharing the canonical short means a real
+        collision in the random portion of their UUID7s — birthday-bound
+        to ~1 in 2^48 per same-exchange wallet pair. Log error and skip
+        the second insertion so signal routing for the first wallet
+        keeps working; the operator regenerates the second wallet.
         """
         existing = cache.get(wallet_short)
         if existing and existing != wallet_public_id:
             logger.error(
-                f"ZMQTrader: wallet_short collision on '{wallet_short}' "
+                f"ZMQTrader: canonical wallet_short collision on '{wallet_short}' "
                 f"between {existing} and {wallet_public_id}; signal routing "
                 f"to the second wallet will fail"
             )
             return
         cache[wallet_short] = wallet_public_id
+
+    @staticmethod
+    def _install_legacy_alias(
+        cache: dict[str, str],
+        legacy_short: str,
+        wallet_public_id: str,
+    ) -> None:
+        """Install a legacy (first-12) alias only when the slot is empty.
+
+        The legacy alias keeps recovery from old persisted ``shard_key``
+        strings working after the algorithm change from first-12 to
+        last-12. The canonical pass MUST run first so canonical keys
+        own their slots; this pass refuses to overwrite a canonical
+        owner — that would silently re-route live signals away from
+        the legitimate wallet to one whose timestamp prefix happened
+        to match. When the legacy alias would shadow another wallet's
+        canonical key, log a warning so the operator notices that
+        old persisted shard_keys for ``wallet_public_id`` will now
+        recover to the canonical owner instead.
+        """
+        existing = cache.get(legacy_short)
+        if existing is None:
+            cache[legacy_short] = wallet_public_id
+            return
+        if existing == wallet_public_id:
+            return
+        logger.warning(
+            f"ZMQTrader: legacy wallet_short alias '{legacy_short}' for "
+            f"{wallet_public_id} collides with canonical owner {existing}; "
+            f"persisted shard_keys with first-12={legacy_short} will resolve "
+            f"to {existing} — verify recovery for {wallet_public_id} if it "
+            f"has older shard_keys in DB"
+        )
 
     async def _recover_engine_state(self) -> None:
         """Rebuild engine confirmed state from checkpoints, executions, and active orders.
