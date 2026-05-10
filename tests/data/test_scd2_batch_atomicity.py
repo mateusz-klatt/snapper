@@ -32,25 +32,23 @@ The three tests below pin the same contract at the integration layer:
 
 The mid-batch fault injection uses ``monkeypatch.setattr`` on
 ``AsyncSession.execute``. In the ``upsert_candles`` flow for a 2-row
-batch where both rows target existing natural keys, the per-batch
-execute sequence is (staging by ``s.add(...)`` and autoflushed INSERTs
-fire at the Connection layer, below ``AsyncSession.execute``, so only
-Session-level ``execute`` calls are counted):
+batch where both rows target unique existing natural keys, the
+per-batch execute sequence is (staging by ``s.add(...)`` and
+autoflushed INSERTs fire at the Connection layer, below
+``AsyncSession.execute``, so only Session-level ``execute`` calls are
+counted):
 
-- call 1 — SELECT ... FOR UPDATE for row 1 (finds existing A)
+- call 1 — SELECT ... FOR UPDATE for both natural keys
 - call 2 — UPDATE Candle SET known_to=bus_time WHERE id=A.id
 - (s.add(new_row_1) stages the new candle in the identity map)
-- call 3 — SELECT ... FOR UPDATE for row 2 (autoflush first emits an
-  INSERT for new_row_1 at connection level; THEN the SELECT runs and
-  finds existing B)
-- call 4 — UPDATE Candle SET known_to=bus_time WHERE id=B.id
+- call 3 — UPDATE Candle SET known_to=bus_time WHERE id=B.id
 
-Raising on call 4 aborts the transaction AFTER new_row_1's INSERT has
-been flushed to the connection (uncommitted) AND after B's close UPDATE
-has been planned but never emitted — so the transaction rollback must
-undo both the UPDATE-close and the flushed-but-uncommitted INSERT from
-row 1, plus leave row 2 completely untouched. This exercises the full
-close+insert rollback path rather than a bare UPDATE-only rollback.
+Raising on call 3 aborts the transaction AFTER new_row_1's INSERT has
+been flushed to the connection (uncommitted) and before row 2's close
+UPDATE lands. The transaction rollback must undo both the UPDATE-close
+and the flushed-but-uncommitted INSERT from row 1, plus leave row 2
+completely untouched. This exercises the full close+insert rollback
+path rather than a bare UPDATE-only rollback.
 """
 
 import asyncio
@@ -231,7 +229,7 @@ async def test_upsert_candles_mid_batch_failure_rolls_back_all(
     assert len(seeded_rows) == 2
     original_public_ids = {row.open_at: row.public_id for row in seeded_rows}
 
-    wrapped, get_n = _fail_on_nth_execute(target=4)
+    wrapped, get_n = _fail_on_nth_execute(target=3)
     monkeypatch.setattr(AsyncSession, "execute", wrapped)
 
     batch: list[CandleUpsertRow] = [
@@ -240,7 +238,7 @@ async def test_upsert_candles_mid_batch_failure_rolls_back_all(
     ]
     with pytest.raises(RuntimeError, match="injected mid-batch fault"):
         await repo.upsert_candles(batch)
-    assert get_n() == 4
+    assert get_n() == 3
 
     monkeypatch.undo()
 

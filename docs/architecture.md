@@ -451,9 +451,8 @@ Key concepts:
 
 ### Batch atomicity guarantees
 
-True SCD2 batch writes (`upsert_candles` at `repository.py:2552-2599`
-+ `upsert_market_snapshots` at `:3019-3061`) and single-row close+insert
-methods (`revise_*`, `close_and_insert` at `:292-342`) commit as
+True SCD2 batch writes (`upsert_candles`, `upsert_market_snapshots`) and
+single-row close+insert methods (`revise_*`, `close_and_insert`) commit as
 all-or-nothing transactions. The pattern is:
 
 ```python
@@ -470,22 +469,27 @@ connection drop, `await` cancellation), the transaction aborts and
 **no** close/insert pair from this batch lands in the DB. The batch
 must be retried in full; there is no partial-progress mode.
 
+`upsert_candles` batch-loads existing versions for unique
+`(instrument_public_id, timeframe, open_at)` keys before closing and
+inserting rows. If the incoming batch contains duplicate candle natural
+keys, those rows keep the sequential close+insert path because an
+earlier row in that group can create the version a later row must close.
+Lookup batches are chunked to stay below SQLite parameter limits.
+
 Append-only batch writes do NOT use the SCD2 close-insert pattern and
 split into two shapes:
 
--   `upsert_trades` (`repository.py:2601-2605`) delegates to the
-    dialect-aware `_upsert_batch` (`:2505-2550`). On native dialects
-    (SQLite / Postgres) it uses `INSERT ... ON CONFLICT DO NOTHING` in a
-    single `s.execute` — atomic per-batch, and duplicates are silently
-    skipped. On the fallback row-by-row path it wraps each row in a
+-   `upsert_trades` delegates to the dialect-aware `_upsert_batch`. On
+    native dialects (SQLite / Postgres) it uses `INSERT ... ON CONFLICT DO
+    NOTHING` in a single `s.execute` — atomic per-batch, and duplicates are
+    silently skipped. On the fallback row-by-row path it wraps each row in a
     `begin_nested()` SAVEPOINT; successful rows stay in the outer
-    transaction and are committed at the final `await s.commit()`,
-    while rows that hit `IntegrityError` are skipped. This trades
-    all-or-nothing for conflict tolerance.
--   `upsert_ticks` (`repository.py:2607-2617`) is plain
-    `session.add_all(rows)` + single `await s.commit()`. Atomic
-    per-batch on every dialect — it is not routed through
-    `_upsert_batch` and has no duplicate-skipping behaviour.
+    transaction and are committed at the final `await s.commit()`, while
+    rows that hit `IntegrityError` are skipped. This trades all-or-nothing
+    for conflict tolerance.
+-   `upsert_ticks` is plain `session.add_all(rows)` + single
+    `await s.commit()`. Atomic per-batch on every dialect — it is not routed
+    through `_upsert_batch` and has no duplicate-skipping behaviour.
 
 Serialization on the same natural key: on **PostgreSQL**, row-level
 `SELECT ... FOR UPDATE` serializes concurrent transactions via MVCC

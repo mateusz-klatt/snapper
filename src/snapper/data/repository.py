@@ -62,6 +62,7 @@ from sqlalchemy import insert
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import text
+from sqlalchemy import tuple_
 from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -360,6 +361,8 @@ _TRADE_COMMAND_TERMINAL_STATUSES: tuple[str, ...] = (
     TradeCommandStatusEnum.REJECTED,
     TradeCommandStatusEnum.FAILED,
 )
+_CandleNaturalKey = tuple[str, str, datetime]
+_CANDLE_LOOKUP_CHUNK_SIZE = 300
 
 
 def where_active(model: type[Any], at: datetime) -> tuple[Any, Any]:
@@ -4232,35 +4235,129 @@ class SQLAlchemyRepository(Repository):
             if "known_to" not in r:
                 r["known_to"] = KNOWN_TO_MAX
         async with self.session() as s:
-            count = 0
-            for r in rows:
-                bus_time = r["timestamp"]
-                existing = (
-                    (
-                        await s.execute(
-                            select(Candle)
-                            .where(
-                                Candle.instrument_public_id == r["instrument_public_id"],
-                                Candle.timeframe == r["timeframe"],
-                                Candle.open_at == r["open_at"],
-                                Candle.timestamp <= bus_time,
-                                Candle.known_to > bus_time,
-                            )
-                            .with_for_update()
-                        )
-                    )
-                    .scalars()
-                    .first()
-                )
-                if existing:
-                    await s.execute(
-                        update(Candle).where(Candle.id == existing.id).values(known_to=bus_time)
-                    )
-                    r["public_id"] = existing.public_id
-                s.add(Candle(**r))
+            unique_rows, sequential_rows = self._split_candle_rows_by_duplicate_key(rows)
+            existing_by_key = await self._load_existing_candles_for_rows(s, unique_rows)
+            count = await self._upsert_unique_candle_rows(s, unique_rows, existing_by_key)
+            for r in sequential_rows:
+                await self._upsert_candle_row(s, r)
                 count += 1
             await s.commit()
         return count
+
+    @staticmethod
+    def _candle_natural_key(row: CandleUpsertRow) -> _CandleNaturalKey:
+        """Return the SCD2 natural key for a candle upsert row."""
+        return row["instrument_public_id"], row["timeframe"], row["open_at"]
+
+    @classmethod
+    def _split_candle_rows_by_duplicate_key(
+        cls,
+        rows: list[CandleUpsertRow],
+    ) -> tuple[list[CandleUpsertRow], list[CandleUpsertRow]]:
+        """Separate rows safe for batch lookup from duplicate-key rows.
+
+        Rows sharing a natural key in the same incoming batch must keep
+        the old sequential close+insert flow because earlier rows can
+        create the version that later rows need to close.
+        """
+        seen: set[_CandleNaturalKey] = set()
+        duplicate_keys: set[_CandleNaturalKey] = set()
+        for row in rows:
+            key = cls._candle_natural_key(row)
+            if key in seen:
+                duplicate_keys.add(key)
+            seen.add(key)
+        if not duplicate_keys:
+            return rows, []
+        unique_rows = [row for row in rows if cls._candle_natural_key(row) not in duplicate_keys]
+        sequential_rows = [row for row in rows if cls._candle_natural_key(row) in duplicate_keys]
+        return unique_rows, sequential_rows
+
+    @classmethod
+    async def _load_existing_candles_for_rows(
+        cls,
+        session: AsyncSession,
+        rows: list[CandleUpsertRow],
+    ) -> dict[_CandleNaturalKey, Candle]:
+        """Load existing SCD2 candle versions for unique-key rows in one query."""
+        if not rows:
+            return {}
+        row_by_key = {cls._candle_natural_key(row): row for row in rows}
+        keys = list(row_by_key)
+        existing_by_key: dict[_CandleNaturalKey, Candle] = {}
+        for offset in range(0, len(keys), _CANDLE_LOOKUP_CHUNK_SIZE):
+            key_chunk = keys[offset : offset + _CANDLE_LOOKUP_CHUNK_SIZE]
+            row_chunk = [row_by_key[key] for key in key_chunk]
+            min_timestamp = min(row["timestamp"] for row in row_chunk)
+            max_timestamp = max(row["timestamp"] for row in row_chunk)
+            result = await session.execute(
+                select(Candle)
+                .where(
+                    tuple_(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).in_(
+                        key_chunk
+                    ),
+                    Candle.timestamp <= max_timestamp,
+                    Candle.known_to > min_timestamp,
+                )
+                .with_for_update()
+            )
+            for candle in result.scalars().all():
+                key = (candle.instrument_public_id, candle.timeframe, candle.open_at)
+                row = row_by_key[key]
+                bus_time = row["timestamp"]
+                if candle.timestamp <= bus_time and candle.known_to > bus_time:
+                    existing_by_key[key] = candle
+        return existing_by_key
+
+    @classmethod
+    async def _upsert_unique_candle_rows(
+        cls,
+        session: AsyncSession,
+        rows: list[CandleUpsertRow],
+        existing_by_key: dict[_CandleNaturalKey, Candle],
+    ) -> int:
+        """Close matched candle rows and stage inserts for unique-key rows."""
+        for row in rows:
+            existing = existing_by_key.get(cls._candle_natural_key(row))
+            if existing is not None:
+                await session.execute(
+                    update(Candle).where(Candle.id == existing.id).values(known_to=row["timestamp"])
+                )
+                row["public_id"] = existing.public_id
+            session.add(Candle(**row))
+        return len(rows)
+
+    @classmethod
+    async def _upsert_candle_row(
+        cls,
+        session: AsyncSession,
+        row: CandleUpsertRow,
+    ) -> None:
+        """Run the sequential SCD2 close+insert path for one candle row."""
+        bus_time = row["timestamp"]
+        existing = (
+            (
+                await session.execute(
+                    select(Candle)
+                    .where(
+                        Candle.instrument_public_id == row["instrument_public_id"],
+                        Candle.timeframe == row["timeframe"],
+                        Candle.open_at == row["open_at"],
+                        Candle.timestamp <= bus_time,
+                        Candle.known_to > bus_time,
+                    )
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if existing:
+            await session.execute(
+                update(Candle).where(Candle.id == existing.id).values(known_to=bus_time)
+            )
+            row["public_id"] = existing.public_id
+        session.add(Candle(**row))
 
     async def upsert_trades(self, rows: list[TradeUpsertRow]) -> int:
         """Insert trades with dialect-specific conflict handling."""

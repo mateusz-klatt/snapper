@@ -54,6 +54,7 @@ from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
 from snapper.data.repository_types import AccrualLedgerInsertRow
+from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import FundingRateInsertRow
 from snapper.data.repository_types import OrderInsertRow
@@ -195,7 +196,15 @@ async def test_upsert_candles_closes_old_and_inserts_new(
     Then: Old row is closed (known_to set) and new row is added.
     """
     ts = datetime(2024, 1, 1, tzinfo=UTC)
-    existing_candle = SimpleNamespace(id=42, public_id="existing-uuid")
+    existing_candle = SimpleNamespace(
+        id=42,
+        public_id="existing-uuid",
+        instrument_public_id="fake-inst-pid",
+        timeframe="1m",
+        open_at=ts,
+        timestamp=ts,
+        known_to=KNOWN_TO_MAX,
+    )
     call_count = 0
     added_objects: list[Any] = []
 
@@ -203,7 +212,7 @@ async def test_upsert_candles_closes_old_and_inserts_new(
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: existing_candle))
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [existing_candle]))
         return SimpleNamespace(rowcount=1)
 
     session = _DummyAsyncSession()
@@ -268,7 +277,7 @@ async def test_upsert_candles_inserts_new_when_no_existing(
     added_objects: list[Any] = []
 
     async def _execute(stmt: Any) -> Any:
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
 
     session = _DummyAsyncSession()
     session.execute = _execute
@@ -311,7 +320,7 @@ async def test_upsert_candles_preserves_caller_supplied_public_id(
     added_objects: list[Any] = []
 
     async def _execute(stmt: Any) -> Any:
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
 
     session = _DummyAsyncSession()
     session.execute = _execute
@@ -351,7 +360,7 @@ async def test_upsert_candles_preserves_caller_supplied_known_to(
     added_objects: list[Any] = []
 
     async def _execute(stmt: Any) -> Any:
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
 
     session = _DummyAsyncSession()
     session.execute = _execute
@@ -390,7 +399,7 @@ async def test_upsert_candles_requires_caller_timestamp(
     added_objects: list[Any] = []
 
     async def _execute(stmt: Any) -> Any:
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
 
     session = _DummyAsyncSession()
     session.execute = _execute
@@ -416,6 +425,170 @@ async def test_upsert_candles_requires_caller_timestamp(
     ]
     await repo.upsert_candles(rows)
     assert rows[0]["timestamp"] == fixed_time
+
+
+@pytest.mark.asyncio
+async def test_upsert_candles_duplicate_keys_use_sequential_path() -> None:
+    """Verify duplicate natural keys keep the sequential SCD2 path.
+
+    Given: Two rows in one batch with the same candle natural key,
+    When: upsert_candles is called,
+    Then: The batch lookup is skipped and each row runs sequential SCD2.
+    """
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    existing_candle = SimpleNamespace(id=42, public_id="existing-uuid")
+    call_count = 0
+    added_objects: list[object] = []
+
+    async def _execute(stmt: object) -> object:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: existing_candle))
+        if call_count == 2:
+            return SimpleNamespace(rowcount=1)
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
+    session.add = lambda obj: added_objects.append(obj)
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    rows = [
+        {
+            "instrument_public_id": "fake-inst-pid",
+            "open_at": ts,
+            "timestamp": ts,
+            "timeframe": "1m",
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 1000.0,
+            "vwap": None,
+            "trades": 10,
+            "session_id": "test-session",
+            "sequence_id": 1,
+        },
+        {
+            "instrument_public_id": "fake-inst-pid",
+            "open_at": ts,
+            "timestamp": ts,
+            "timeframe": "1m",
+            "open": 101.0,
+            "high": 102.0,
+            "low": 100.0,
+            "close": 101.5,
+            "volume": 1200.0,
+            "vwap": None,
+            "trades": 12,
+            "session_id": "test-session",
+            "sequence_id": 2,
+        },
+    ]
+
+    inserted = await repo.upsert_candles(rows)
+
+    assert inserted == 2
+    assert session.commit_called is True
+    assert len(added_objects) == 2
+    assert call_count == 3
+    assert rows[0]["public_id"] == "existing-uuid"
+
+
+@pytest.mark.asyncio
+async def test_load_existing_candles_filters_timestamp_window() -> None:
+    """Verify broad batch lookup candidates are filtered per row timestamp.
+
+    Given: A candidate candle with the same natural key but a future timestamp,
+    When: batch existing candles are loaded,
+    Then: The candidate is ignored for the earlier upsert row.
+    """
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    candidate = SimpleNamespace(
+        id=42,
+        public_id="future-uuid",
+        instrument_public_id="fake-inst-pid",
+        timeframe="1m",
+        open_at=ts,
+        timestamp=datetime(2024, 1, 2, tzinfo=UTC),
+        known_to=KNOWN_TO_MAX,
+    )
+
+    async def _execute(stmt: object) -> object:
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [candidate]))
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
+    rows = [
+        {
+            "instrument_public_id": "fake-inst-pid",
+            "open_at": ts,
+            "timestamp": ts,
+            "timeframe": "1m",
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 1000.0,
+            "vwap": None,
+            "trades": 10,
+            "session_id": "test-session",
+            "sequence_id": 1,
+        },
+    ]
+
+    existing = await SQLAlchemyRepository._load_existing_candles_for_rows(
+        cast(AsyncSession, session),
+        rows,
+    )
+
+    assert existing == {}
+
+
+@pytest.mark.asyncio
+async def test_load_existing_candles_chunks_large_lookup() -> None:
+    """Verify batch candle lookup chunks natural keys below SQL parameter limits.
+
+    Given: More than one lookup chunk worth of unique candle rows,
+    When: existing candles are loaded,
+    Then: Multiple SELECTs are executed and no row is matched.
+    """
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    call_count = 0
+
+    async def _execute(stmt: object) -> object:
+        nonlocal call_count
+        call_count += 1
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
+    rows: list[CandleUpsertRow] = [
+        {
+            "instrument_public_id": f"fake-inst-{index}",
+            "open_at": ts,
+            "timestamp": ts,
+            "timeframe": "1m",
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 1000.0,
+            "vwap": None,
+            "trades": 10,
+            "session_id": "test-session",
+            "sequence_id": index,
+        }
+        for index in range(301)
+    ]
+
+    existing = await SQLAlchemyRepository._load_existing_candles_for_rows(
+        cast(AsyncSession, session),
+        rows,
+    )
+
+    assert existing == {}
+    assert call_count == 2
 
 
 @pytest.mark.asyncio
@@ -1652,7 +1825,7 @@ class TestSQLAlchemyRepositoryDialects:
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
         scalars_mock = Mock()
-        scalars_mock.first.return_value = None
+        scalars_mock.all.return_value = []
         select_result = Mock()
         select_result.scalars.return_value = scalars_mock
         mock_session.execute.return_value = select_result
@@ -1695,7 +1868,7 @@ class TestSQLAlchemyRepositoryDialects:
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
         scalars_mock = Mock()
-        scalars_mock.first.return_value = None
+        scalars_mock.all.return_value = []
         select_result = Mock()
         select_result.scalars.return_value = scalars_mock
         mock_session.execute.return_value = select_result
@@ -1736,7 +1909,7 @@ class TestSQLAlchemyRepositoryDialects:
             ]
             result = await mock_other_repo.upsert_candles(rows)
             assert result == 2
-            assert mock_session.execute.call_count == 2
+            assert mock_session.execute.call_count == 1
             assert mock_session.add.call_count == 2
             mock_session.commit.assert_called_once()
 
@@ -1752,9 +1925,17 @@ class TestSQLAlchemyRepositoryDialects:
         """
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
-        existing_candle = SimpleNamespace(id=42, public_id="old-uuid")
+        existing_candle = SimpleNamespace(
+            id=42,
+            public_id="old-uuid",
+            instrument_public_id="fake-inst-pid",
+            timeframe="1m",
+            open_at=datetime(2024, 1, 1, tzinfo=UTC),
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            known_to=KNOWN_TO_MAX,
+        )
         scalars_mock = Mock()
-        scalars_mock.first.return_value = existing_candle
+        scalars_mock.all.return_value = [existing_candle]
         select_result = Mock()
         select_result.scalars.return_value = scalars_mock
         update_result = Mock(rowcount=1)
