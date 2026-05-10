@@ -20,6 +20,7 @@ Two filters live here today:
 """
 
 from collections.abc import Mapping
+from collections.abc import MutableMapping
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -31,6 +32,8 @@ from snapper.auth.scope_grant_service import ScopeGrantService
 __all__ = [
     "AI_REVIEWS_TOPIC_PREFIX",
     "ORDERS_EVENTS_TOPIC_PREFIX",
+    "OrdersEventsAccessCache",
+    "orders_events_access_cache_key",
     "enforce_ai_review_scope",
     "enforce_orders_events_scope",
 ]
@@ -38,6 +41,8 @@ __all__ = [
 
 AI_REVIEWS_TOPIC_PREFIX = "ai_reviews."
 ORDERS_EVENTS_TOPIC_PREFIX = "orders.events."
+OrdersEventsAccessCacheKey = tuple[str, str, tuple[str, ...], str, str | None, str | None]
+OrdersEventsAccessCache = MutableMapping[OrdersEventsAccessCacheKey, frozenset[str]]
 """Topic-family prefix the orders.events. per-frame filter gates.
 
 Frames whose topic does NOT start with this prefix bypass the filter
@@ -55,6 +60,27 @@ subscribe-time RBAC check). Frames inside the family go through
 see CONSULT events for ``(wallet, instrument)`` tuples their scope
 grant covers.
 """
+
+
+def orders_events_access_cache_key(principal: AuthPrincipal) -> OrdersEventsAccessCacheKey:
+    """Return the authorization identity key for frame-local wallet access caching.
+
+    Args:
+        principal: Authenticated principal whose wallet-scope query
+            result is being cached.
+
+    Returns:
+        Immutable identity tuple suitable for a single-frame fan-out
+        cache key.
+    """
+    return (
+        principal.role.value,
+        principal.user_public_id,
+        tuple(principal.operator_public_ids),
+        principal.primary_operator_public_id,
+        principal.active_wallet_public_id,
+        principal.delegate_public_id,
+    )
 
 
 async def enforce_ai_review_scope(
@@ -131,6 +157,7 @@ async def enforce_orders_events_scope(
     payload: Mapping[str, Any],
     scope_grant_service: ScopeGrantService,
     as_of: datetime | None = None,
+    accessible_wallets_cache: OrdersEventsAccessCache | None = None,
 ) -> bool:
     """Return ``True`` iff principal may receive this ``orders.events.*`` frame.
 
@@ -166,6 +193,11 @@ async def enforce_orders_events_scope(
             check; bridge passes the lifespan-attached instance.
         as_of: Wall-clock for SCD2-active filtering on memberships
             and grants. Defaults to ``datetime.now(UTC)``.
+        accessible_wallets_cache: Optional frame-local cache keyed by
+            principal authorization identity. Bridge fan-out passes one
+            cache per ZMQ frame so repeated subscriptions for the same
+            principal reuse a single wallet-scope query without carrying
+            access state across frames.
 
     Returns:
         ``True`` to forward the frame, ``False`` to drop it.
@@ -180,8 +212,22 @@ async def enforce_orders_events_scope(
     if not isinstance(wallet_public_id, str):
         return False
     wall_clock = as_of if as_of is not None else datetime.now(UTC)
-    accessible = await scope_grant_service.list_accessible_wallet_public_ids(
-        principal=connection_principal,
-        as_of=wall_clock,
-    )
+    accessible: set[str] | frozenset[str]
+    if accessible_wallets_cache is None:
+        accessible = await scope_grant_service.list_accessible_wallet_public_ids(
+            principal=connection_principal,
+            as_of=wall_clock,
+        )
+    else:
+        cache_key = orders_events_access_cache_key(connection_principal)
+        cached_accessible = accessible_wallets_cache.get(cache_key)
+        if cached_accessible is None:
+            cached_accessible = frozenset(
+                await scope_grant_service.list_accessible_wallet_public_ids(
+                    principal=connection_principal,
+                    as_of=wall_clock,
+                )
+            )
+            accessible_wallets_cache[cache_key] = cached_accessible
+        accessible = cached_accessible
     return wallet_public_id in accessible

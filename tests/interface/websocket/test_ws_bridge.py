@@ -3619,3 +3619,61 @@ class TestOrdersEventsTwoPrincipalLeakGuard:
 
         ws_a.send_text.assert_awaited_once_with(payload)
         ws_b.send_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_orders_events_reuses_wallet_access_query_for_same_principal(
+        self, bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Repeated same-principal subscriptions share one frame-local scope lookup."""
+        topic = "orders.events."
+        ws_primary = AsyncMock()
+        ws_secondary = AsyncMock()
+        bridge.topic_subscriptions[topic] = [
+            TopicSubscriptionModel(websocket=ws_primary, throttle_ms=0, client_id="viewer-1"),
+            TopicSubscriptionModel(websocket=ws_secondary, throttle_ms=0, client_id="viewer-2"),
+        ]
+        bridge.topic_metrics[topic] = TopicMetricsModel()
+
+        principal_primary = AuthPrincipal(
+            username="viewer-a",
+            role=UserRole.VIEWER,
+            user_public_id="user-A",
+            operator_public_ids=["op-A"],
+        )
+        principal_secondary = AuthPrincipal(
+            username="viewer-a",
+            role=UserRole.VIEWER,
+            user_public_id="user-A",
+            operator_public_ids=["op-A"],
+        )
+
+        mock_service = MagicMock()
+        mock_service.list_accessible_wallet_public_ids = AsyncMock(return_value={"wallet-A"})
+        manager_stub = MagicMock()
+        manager_stub.get_authenticated_user.side_effect = lambda ws: {
+            ws_primary: principal_primary,
+            ws_secondary: principal_secondary,
+        }[ws]
+
+        with (
+            patch("snapper.interface.websocket.bridge.WebSocketAuthManager") as mock_manager_cls,
+            patch(
+                "snapper.interface.websocket.bridge.get_scope_grant_service",
+                return_value=mock_service,
+            ),
+        ):
+            mock_manager_cls.get_instance.return_value = manager_stub
+            payload = json.dumps(
+                {
+                    "type": "execution",
+                    "wallet_public_id": "wallet-A",
+                    "client_order_id": "o-1",
+                }
+            )
+            await bridge._forward_to_clients(
+                topic, "orders.events.kraken.BTC-USD.executed", payload
+            )
+
+        ws_primary.send_text.assert_awaited_once_with(payload)
+        ws_secondary.send_text.assert_awaited_once_with(payload)
+        mock_service.list_accessible_wallet_public_ids.assert_awaited_once()

@@ -38,6 +38,7 @@ from snapper.interface.websocket.models import TopicSubscriptionModel
 from snapper.interface.websocket.schemas import WSErrorResponse
 from snapper.interface.websocket.scope_filter import AI_REVIEWS_TOPIC_PREFIX
 from snapper.interface.websocket.scope_filter import ORDERS_EVENTS_TOPIC_PREFIX
+from snapper.interface.websocket.scope_filter import OrdersEventsAccessCache
 from snapper.interface.websocket.scope_filter import enforce_ai_review_scope
 from snapper.interface.websocket.scope_filter import enforce_orders_events_scope
 from snapper.messaging.infrastructure.gap_detector import GapDetector
@@ -710,6 +711,8 @@ class ZmqWebSocketBridgeService:
         orders_events_payload = self._maybe_parse_orders_events_payload(topic, message_str)
         if not self._orders_events_frame_is_valid(topic, orders_events_payload):
             return
+        orders_events_access_cache: OrdersEventsAccessCache = {}
+        orders_events_as_of = datetime.now(UTC) if orders_events_payload is not None else None
         current_time = time.time()
         max_pending = self._get_max_pending(topic)
         is_trade = self._is_trade_topic(topic)
@@ -723,6 +726,8 @@ class ZmqWebSocketBridgeService:
                 is_trade=is_trade,
                 ai_review_payload=ai_review_payload,
                 orders_events_payload=orders_events_payload,
+                orders_events_access_cache=orders_events_access_cache,
+                orders_events_as_of=orders_events_as_of,
             )
 
     def _orders_events_frame_is_valid(
@@ -762,6 +767,8 @@ class ZmqWebSocketBridgeService:
         is_trade: bool,
         ai_review_payload: dict[str, Any] | None,
         orders_events_payload: dict[str, Any] | None,
+        orders_events_access_cache: OrdersEventsAccessCache,
+        orders_events_as_of: datetime | None,
     ) -> None:
         """Apply throttle + per-frame scope + backpressure filters to one subscriber.
 
@@ -782,6 +789,8 @@ class ZmqWebSocketBridgeService:
                 subscription=subscription,
                 topic=topic,
                 payload=orders_events_payload,
+                access_cache=orders_events_access_cache,
+                as_of=orders_events_as_of,
             ):
                 return
             if await self._handle_backpressure(subscription, topic, max_pending, is_trade):
@@ -853,6 +862,8 @@ class ZmqWebSocketBridgeService:
         subscription: TopicSubscriptionModel,
         topic: str,
         payload: Mapping[str, Any],
+        access_cache: OrdersEventsAccessCache,
+        as_of: datetime | None,
     ) -> bool:
         """Per-frame scope filter for the ``orders.events.*`` family.
 
@@ -869,6 +880,8 @@ class ZmqWebSocketBridgeService:
             connection_principal=principal,
             payload=payload,
             scope_grant_service=get_scope_grant_service(),
+            as_of=as_of,
+            accessible_wallets_cache=access_cache,
         )
 
     async def _enforce_ai_review_scope(
