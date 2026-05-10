@@ -12,8 +12,10 @@ import pytest
 import yaml
 
 from snapper.application.updaters.underlying_updater import PatternRule
+from snapper.application.updaters.underlying_updater import UnderlyingDefinition
 from snapper.application.updaters.underlying_updater import UnderlyingMappingConfig
 from snapper.application.updaters.underlying_updater import UnderlyingUpdater
+from snapper.application.updaters.underlying_updater import _InstrumentInfo
 from snapper.application.updaters.underlying_updater import _MatchResult
 from snapper.application.updaters.underlying_updater import rule_matches
 from snapper.data.repository_types import InstrumentSpecRow
@@ -212,6 +214,129 @@ class TestExchangeScoping:
 class TestUnderlyingUpdater:
     """Tests for the full updater lifecycle."""
 
+    def test_auto_coverage_generates_fallback_definitions(self) -> None:
+        """Given unmatched active instruments, When expanded, Then fallback rules cover them."""
+        config = UnderlyingMappingConfig(underlyings=[])
+        updater = UnderlyingUpdater(db_url="test://")
+
+        expanded = updater._expand_auto_coverage(
+            config,
+            [
+                _InstrumentInfo("i1", "kraken", "NEW-USD", "NEW", "USD", "crypto"),
+                _InstrumentInfo("i2", "polygon", "AAPL", "AAPL", None, "equity"),
+                _InstrumentInfo("i3", "kraken", "BOB-USD", "BOB", "USD", "forex"),
+                _InstrumentInfo(
+                    "i4",
+                    "kraken_futures",
+                    "ALT-USD-PERP",
+                    "ALT",
+                    "USD",
+                    "crypto",
+                ),
+            ],
+        )
+
+        by_ticker = {definition.ticker: definition for definition in expanded.underlyings}
+
+        assert {"NEW", "AAPL", "BOBUSD", "ALT"} <= set(by_ticker)
+        assert by_ticker["BOBUSD"].name == "BOB / USD"
+        assert {
+            (rule.exchange.value, rule.pattern, rule.relationship_type.value)
+            for rule in by_ticker["ALT"].patterns
+        } == {("kraken_futures", "ALT-USD-PERP", "derivative")}
+
+    def test_auto_coverage_prefers_forex_metadata_for_duplicate_symbols(self) -> None:
+        """Given duplicate native symbols, When expanded, Then forex rows win over crypto."""
+        config = UnderlyingMappingConfig(underlyings=[])
+        updater = UnderlyingUpdater(db_url="test://")
+
+        expanded = updater._expand_auto_coverage(
+            config,
+            [
+                _InstrumentInfo("i1", "kraken", "BOB-USD", "BOB", "USD", "crypto"),
+                _InstrumentInfo("i2", "kraken", "BOB-USD", "BOB", "USD", "forex"),
+            ],
+        )
+
+        by_ticker = {definition.ticker: definition for definition in expanded.underlyings}
+
+        assert "BOBUSD" in by_ticker
+        assert "BOB" not in by_ticker
+
+    def test_auto_coverage_coerces_loaded_symbol_metadata(self) -> None:
+        """Given DB row values, When coerced, Then valid values are preserved."""
+        assert UnderlyingUpdater._coerce_symbol_part("BTC", "XBT-USD") == "BTC"
+        assert UnderlyingUpdater._coerce_optional_symbol_part("USD") == "USD"
+        assert UnderlyingUpdater._coerce_asset_type("equity") == "equity"
+
+    def test_auto_coverage_skips_invalid_fallback_inputs(self) -> None:
+        """Given invalid fallback metadata, When expanded, Then no rule is generated."""
+        config = UnderlyingMappingConfig(underlyings=[])
+        updater = UnderlyingUpdater(db_url="test://")
+
+        expanded = updater._expand_auto_coverage(
+            config,
+            [
+                _InstrumentInfo("i1", "unknown", "NEW-USD", "NEW", "USD", "crypto"),
+                _InstrumentInfo("i2", "kraken", "-USD", "", "USD", "crypto"),
+                _InstrumentInfo("i3", "kraken", "ODD-USD", "ODD", "USD", "unknown"),
+            ],
+        )
+
+        assert expanded.underlyings == []
+
+    def test_auto_coverage_does_not_append_duplicate_rules(self) -> None:
+        """Given existing fallback rule, When appended again, Then definition is unchanged."""
+        updater = UnderlyingUpdater(db_url="test://")
+        definition = UnderlyingDefinition(
+            ticker="DUP",
+            name="DUP",
+            asset_class="crypto",
+            patterns=[],
+        )
+        instrument = _InstrumentInfo("i1", "kraken", "DUP-USD", "DUP", "USD", "crypto")
+
+        assert updater._append_fallback_rule(definition, instrument) is True
+        assert updater._append_fallback_rule(definition, instrument) is False
+        assert len(definition.patterns) == 1
+
+    def test_auto_coverage_marks_equity_futures_as_derivatives(self) -> None:
+        """Given futures venue suffix, When fallback relationship is built, Then derivative."""
+        instrument = _InstrumentInfo("i1", "kraken_equities", "ESM6-CME", "ESM6", None, "index")
+
+        relationship = UnderlyingUpdater._fallback_relationship_type(instrument)
+
+        assert relationship.value == "derivative"
+
+    @pytest.mark.asyncio
+    async def test_match_and_upsert_preserves_unmapped_without_auto_coverage(self) -> None:
+        """Given unmatched instrument, When matching directly, Then no mapping is written."""
+        config = UnderlyingMappingConfig(underlyings=[])
+        updater = UnderlyingUpdater(db_url="test://")
+        repo = AsyncMock()
+        repo.upsert_instrument_underlying_mapping = AsyncMock(return_value="created")
+        repo.get_instrument_spec = AsyncMock(return_value=None)
+        repo.close_instrument_underlying_mapping = AsyncMock(return_value=True)
+
+        mock_s = AsyncMock()
+        existing_result = MagicMock()
+        existing_result.scalars.return_value.all.return_value = []
+        mock_s.execute = AsyncMock(return_value=existing_result)
+        mock_s.__aenter__ = AsyncMock(return_value=mock_s)
+        mock_s.__aexit__ = AsyncMock(return_value=False)
+        repo.session = MagicMock(return_value=mock_s)
+
+        updater._repo = repo
+
+        await updater._match_and_upsert(
+            config,
+            {},
+            [_InstrumentInfo("inst-1", "kraken", "MISS-USD", "MISS", "USD", "crypto")],
+            _ts(),
+        )
+
+        repo.upsert_instrument_underlying_mapping.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_run_creates_underlyings_and_mappings(self, tmp_path: Path) -> None:
         """Given valid YAML, When running, Then upserts underlyings and mappings."""
@@ -339,8 +464,8 @@ class TestUnderlyingUpdater:
         assert repo.close_instrument_underlying_mapping.call_count == 3
 
     @pytest.mark.asyncio
-    async def test_unmapped_instruments_not_mapped(self, tmp_path: Path) -> None:
-        """Given instruments not matching any pattern, When running, Then not mapped."""
+    async def test_auto_coverage_maps_unmatched_instruments(self, tmp_path: Path) -> None:
+        """Given instruments not matching YAML, When running, Then fallback maps them."""
         yaml_content = {
             "underlyings": [
                 {
@@ -375,7 +500,8 @@ class TestUnderlyingUpdater:
             updater = UnderlyingUpdater(db_url="test://", yaml_path=yaml_file)
             await updater.run()
 
-        repo.upsert_instrument_underlying_mapping.assert_called_once()
+        assert repo.upsert_underlying_asset.call_count == 2
+        assert repo.upsert_instrument_underlying_mapping.call_count == 2
 
     @pytest.mark.asyncio
     async def test_idempotent_rerun(self, tmp_path: Path) -> None:
@@ -415,8 +541,11 @@ class TestUnderlyingUpdater:
         repo.close_instrument_underlying_mapping.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_exchange_scoping_skips_wrong_exchange(self, tmp_path: Path) -> None:
-        """Given pattern for kraken, When instrument on polygon, Then no match."""
+    async def test_auto_coverage_extends_existing_ticker_to_unmatched_exchange(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Given same base on another exchange, When running, Then fallback maps it."""
         yaml_content = {
             "underlyings": [
                 {
@@ -446,7 +575,8 @@ class TestUnderlyingUpdater:
             updater = UnderlyingUpdater(db_url="test://", yaml_path=yaml_file)
             await updater.run()
 
-        repo.upsert_instrument_underlying_mapping.assert_not_called()
+        repo.upsert_underlying_asset.assert_called_once()
+        repo.upsert_instrument_underlying_mapping.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_intra_underlying_metadata_conflict(self, tmp_path: Path) -> None:

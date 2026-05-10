@@ -1,6 +1,7 @@
 """Underlying asset updater — syncs YAML definitions to the database.
 
 Reads underlying_mappings.yaml, matches patterns against active instruments,
+adds deterministic coverage for active instruments not listed explicitly,
 and upserts UnderlyingAsset + InstrumentUnderlyingMapping rows via SCD2.
 """
 
@@ -35,6 +36,16 @@ from snapper.data.repository_types import InstrumentSpecRow
 _DEFAULT_YAML = Path(__file__).resolve().parents[2] / "data" / "underlying_mappings.yaml"
 
 _SAFETY_THRESHOLD = 0.25
+_ASSET_PRIORITY = {
+    AssetTypeEnum.FOREX.value: 0,
+    AssetTypeEnum.EQUITY.value: 1,
+    AssetTypeEnum.INDEX.value: 2,
+    AssetTypeEnum.COMMODITY.value: 3,
+    AssetTypeEnum.YIELD.value: 4,
+    AssetTypeEnum.CRYPTO.value: 5,
+}
+_DERIVATIVE_EXCHANGES = {ExchangeEnum.KRAKEN_FUTURES.value}
+_FUTURES_VENUES = {"CME", "CBOT", "COMEX", "NYMEX"}
 
 
 class PatternRule(BaseModel):
@@ -126,12 +137,30 @@ def rule_matches(rule: PatternRule, native_symbol: str) -> bool:
 class _InstrumentInfo:
     """Lightweight struct for an active instrument during matching."""
 
-    __slots__ = ("instrument_public_id", "exchange", "native_symbol")
+    __slots__ = (
+        "asset_category",
+        "base_symbol",
+        "exchange",
+        "instrument_public_id",
+        "native_symbol",
+        "quote_symbol",
+    )
 
-    def __init__(self, instrument_public_id: str, exchange: str, native_symbol: str) -> None:
+    def __init__(
+        self,
+        instrument_public_id: str,
+        exchange: str,
+        native_symbol: str,
+        base: str,
+        quote: str | None,
+        asset_type: str,
+    ) -> None:
         self.instrument_public_id = instrument_public_id
         self.exchange = exchange
         self.native_symbol = native_symbol
+        self.base_symbol = base
+        self.quote_symbol = quote
+        self.asset_category = asset_type
 
 
 class _MatchResult:
@@ -187,9 +216,10 @@ class UnderlyingUpdater:
         now = datetime.now(UTC)
 
         config = self._load_config()
+        instruments = await self._load_instruments(now)
+        config = self._expand_auto_coverage(config, instruments)
         underlying_ids = await self._upsert_underlyings(config, now)
         await self._cleanup_stale_underlyings(config, now)
-        instruments = await self._load_instruments(now)
         await self._match_and_upsert(config, underlying_ids, instruments, now)
 
     def _load_config(self) -> UnderlyingMappingConfig:
@@ -235,12 +265,12 @@ class UnderlyingUpdater:
         config: UnderlyingMappingConfig,
         now: datetime,
     ) -> None:
-        """Close underlying assets that are no longer defined in YAML."""
+        """Close underlying assets that are no longer present in the mapping config."""
         assert self._repo is not None
-        yaml_tickers = {defn.ticker for defn in config.underlyings}
+        config_tickers = {defn.ticker for defn in config.underlyings}
         active = await self._repo.get_underlying_assets(now)
         session_id = f"underlying-updater-{now:%Y%m%d%H%M%S}"
-        stale = [row for row in active if row["ticker"] not in yaml_tickers]
+        stale = [row for row in active if row["ticker"] not in config_tickers]
         for seq, row in enumerate(stale, start=1):
             await self._repo.close_underlying_asset(
                 public_id=row["public_id"],
@@ -249,7 +279,7 @@ class UnderlyingUpdater:
                 timestamp=now,
             )
         if stale:
-            logger.info(f"Closed {len(stale)} stale underlying(s) removed from YAML")
+            logger.info(f"Closed {len(stale)} stale underlying(s) removed from mapping config")
 
     async def _load_instruments(self, now: datetime) -> list[_InstrumentInfo]:
         """Load all active instruments with their native symbols."""
@@ -260,6 +290,9 @@ class UnderlyingUpdater:
                     Instrument.public_id.label("instrument_public_id"),
                     Instrument.exchange,
                     Symbol.native_symbol,
+                    Symbol.base,
+                    Symbol.quote,
+                    Symbol.asset_type,
                 )
                 .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
                 .where(*where_active(Instrument, now), *where_active(Symbol, now))
@@ -270,9 +303,141 @@ class UnderlyingUpdater:
                 instrument_public_id=r.instrument_public_id,
                 exchange=r.exchange,
                 native_symbol=r.native_symbol,
+                base=self._coerce_symbol_part(getattr(r, "base", None), r.native_symbol),
+                quote=self._coerce_optional_symbol_part(getattr(r, "quote", None)),
+                asset_type=self._coerce_asset_type(getattr(r, "asset_type", None)),
             )
             for r in rows
         ]
+
+    @staticmethod
+    def _coerce_symbol_part(value: object, native_symbol: str) -> str:
+        """Return a usable symbol base from a database row or test double."""
+        if isinstance(value, str) and value:
+            return value
+        return native_symbol.split("-", maxsplit=1)[0]
+
+    @staticmethod
+    def _coerce_optional_symbol_part(value: object) -> str | None:
+        """Return a usable optional symbol quote from a database row or test double."""
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    @staticmethod
+    def _coerce_asset_type(value: object) -> str:
+        """Return a known asset type from a database row or test double."""
+        if isinstance(value, str) and value in _ASSET_PRIORITY:
+            return value
+        return AssetTypeEnum.CRYPTO.value
+
+    def _expand_auto_coverage(
+        self,
+        config: UnderlyingMappingConfig,
+        instruments: list[_InstrumentInfo],
+    ) -> UnderlyingMappingConfig:
+        """Add exact rules for active instruments not matched by explicit YAML."""
+        definitions = list(config.underlyings)
+        by_ticker = {definition.ticker: definition for definition in definitions}
+        generated_tickers: set[str] = set()
+        generated_patterns = 0
+
+        for inst in sorted(instruments, key=self._auto_coverage_sort_key):
+            matches, has_intra_conflict = self._find_matches(config, inst)
+            if matches or has_intra_conflict:
+                continue
+
+            definition = self._fallback_definition_for_instrument(inst)
+            if definition is None:
+                continue
+
+            existing = by_ticker.get(definition.ticker)
+            if existing is None:
+                definitions.append(definition)
+                by_ticker[definition.ticker] = definition
+                generated_tickers.add(definition.ticker)
+                existing = definition
+
+            if self._append_fallback_rule(existing, inst):
+                generated_patterns += 1
+                config = UnderlyingMappingConfig(underlyings=definitions)
+
+        if generated_patterns:
+            logger.info(
+                f"Auto-covered {generated_patterns} active instrument(s) "
+                f"across {len(generated_tickers)} generated underlying(s)"
+            )
+        return config
+
+    @staticmethod
+    def _auto_coverage_sort_key(inst: _InstrumentInfo) -> tuple[int, str, str]:
+        """Prefer semantic non-crypto rows when an exchange symbol is duplicated."""
+        return (
+            _ASSET_PRIORITY.get(inst.asset_category, len(_ASSET_PRIORITY)),
+            inst.exchange,
+            inst.native_symbol,
+        )
+
+    @staticmethod
+    def _fallback_definition_for_instrument(
+        inst: _InstrumentInfo,
+    ) -> UnderlyingDefinition | None:
+        """Build a fallback underlying definition from symbol metadata."""
+        ticker = UnderlyingUpdater._fallback_ticker(inst)
+        if not ticker:
+            return None
+        try:
+            asset_class = AssetTypeEnum(inst.asset_category)
+        except ValueError:
+            return None
+        return UnderlyingDefinition(
+            ticker=ticker,
+            name=UnderlyingUpdater._fallback_name(inst, ticker),
+            asset_class=asset_class,
+            patterns=[],
+        )
+
+    @staticmethod
+    def _fallback_ticker(inst: _InstrumentInfo) -> str:
+        """Return the canonical fallback ticker for an instrument."""
+        if inst.asset_category == AssetTypeEnum.FOREX.value and inst.quote_symbol:
+            return f"{inst.base_symbol}{inst.quote_symbol}"
+        return inst.base_symbol
+
+    @staticmethod
+    def _fallback_name(inst: _InstrumentInfo, ticker: str) -> str:
+        """Return the fallback display name for an instrument."""
+        if inst.asset_category == AssetTypeEnum.FOREX.value and inst.quote_symbol:
+            return f"{inst.base_symbol} / {inst.quote_symbol}"
+        return ticker
+
+    @staticmethod
+    def _append_fallback_rule(definition: UnderlyingDefinition, inst: _InstrumentInfo) -> bool:
+        """Append an exact fallback rule if the definition does not already match."""
+        try:
+            exchange = ExchangeEnum(inst.exchange)
+        except ValueError:
+            return False
+        rule = PatternRule(
+            exchange=exchange,
+            match_type="exact",
+            pattern=inst.native_symbol,
+            relationship_type=UnderlyingUpdater._fallback_relationship_type(inst),
+        )
+        if any(existing == rule for existing in definition.patterns):
+            return False
+        definition.patterns.append(rule)
+        return True
+
+    @staticmethod
+    def _fallback_relationship_type(inst: _InstrumentInfo) -> RelationshipTypeEnum:
+        """Return relationship metadata for a fallback rule."""
+        if inst.exchange in _DERIVATIVE_EXCHANGES:
+            return RelationshipTypeEnum.DERIVATIVE
+        suffix = inst.native_symbol.rsplit("-", maxsplit=1)[-1]
+        if inst.exchange == ExchangeEnum.KRAKEN_EQUITIES.value and suffix in _FUTURES_VENUES:
+            return RelationshipTypeEnum.DERIVATIVE
+        return RelationshipTypeEnum.EXACT
 
     async def _match_and_upsert(
         self,
