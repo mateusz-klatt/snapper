@@ -2455,6 +2455,28 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_instrument_public_ids_by_symbols(
+        self,
+        native_symbols: set[str],
+        exchange: str,
+        as_of: datetime,
+    ) -> dict[str, str]:
+        """Resolve native symbols on an exchange to instrument public IDs.
+
+        Returns only symbols that have an active Symbol and Instrument row
+        at ``as_of``.
+
+        Args:
+            native_symbols: Native symbol strings to resolve.
+            exchange: Exchange name.
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Mapping from native symbol to instrument public ID.
+        """
+        ...
+
+    @abstractmethod
     async def get_symbol_for_instrument(
         self,
         instrument_public_id: str,
@@ -8575,6 +8597,41 @@ class SQLAlchemyRepository(Repository):
                 s, native_symbol=native_symbol, exchange=exchange, as_of=as_of
             )
             return instrument.public_id if instrument is not None else None
+
+    async def get_instrument_public_ids_by_symbols(
+        self,
+        native_symbols: set[str],
+        exchange: str,
+        as_of: datetime,
+    ) -> dict[str, str]:
+        """Resolve native symbols on an exchange to instrument public IDs.
+
+        Args:
+            native_symbols: Native symbol strings to resolve.
+            exchange: Exchange name.
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Mapping from native symbol to active instrument public ID.
+            Missing symbols and symbols without an active exchange
+            instrument are omitted.
+        """
+        async with self.session() as s:
+            s_ts, s_kt = where_active(Symbol, as_of)
+            i_ts, i_kt = where_active(Instrument, as_of)
+            result = await s.execute(
+                select(Symbol.native_symbol, Instrument.public_id)
+                .join(Instrument, Instrument.symbol_public_id == Symbol.public_id)
+                .where(
+                    Symbol.native_symbol.in_(tuple(native_symbols)),
+                    Instrument.exchange == exchange,
+                    s_ts,
+                    s_kt,
+                    i_ts,
+                    i_kt,
+                )
+            )
+            return dict(result.tuples().all())
 
     async def get_symbol_for_instrument(
         self,

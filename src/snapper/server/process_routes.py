@@ -276,16 +276,12 @@ async def _find_uncovered_outputs(
     as_of: datetime,
 ) -> list[str]:
     """Return the subset of output symbols whose instrument is not covered."""
-    uncovered: list[str] = []
-    for symbol in outputs:
-        instrument_public_id = await repo.get_instrument_public_id_by_symbol(
-            native_symbol=symbol,
-            exchange=exchange,
-            as_of=as_of,
-        )
-        if instrument_public_id is None or instrument_public_id not in covered:
-            uncovered.append(symbol)
-    return uncovered
+    instrument_public_ids = await repo.get_instrument_public_ids_by_symbols(
+        native_symbols=set(outputs),
+        exchange=exchange,
+        as_of=as_of,
+    )
+    return [symbol for symbol in outputs if instrument_public_ids.get(symbol) not in covered]
 
 
 async def _enforce_strategy_scope(

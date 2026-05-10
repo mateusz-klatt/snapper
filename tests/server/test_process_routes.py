@@ -1591,7 +1591,7 @@ class TestScopeHelpers:
         """All outputs map to covered instrument_public_ids -> return."""
         repo = MagicMock(spec=SQLAlchemyRepository)
         repo.list_grant_covered_instrument_public_ids = AsyncMock(return_value={"i-btc"})
-        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="i-btc")
+        repo.get_instrument_public_ids_by_symbols = AsyncMock(return_value={"BTC-USD": "i-btc"})
         await _enforce_strategy_outputs_covered(
             repo,
             {"outputs": ["BTC-USD"], "exchange": "kraken"},
@@ -1599,14 +1599,36 @@ class TestScopeHelpers:
             "w-1",
             datetime.now(UTC),
         )
-        repo.get_instrument_public_id_by_symbol.assert_awaited_once()
+        repo.get_instrument_public_ids_by_symbols.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_enforce_strategy_outputs_covered_batches_symbol_lookup(self) -> None:
+        """Multiple outputs are resolved by one repository call."""
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.list_grant_covered_instrument_public_ids = AsyncMock(return_value={"i-btc", "i-eth"})
+        repo.get_instrument_public_ids_by_symbols = AsyncMock(
+            return_value={"BTC-USD": "i-btc", "ETH-USD": "i-eth"}
+        )
+        as_of = datetime.now(UTC)
+        await _enforce_strategy_outputs_covered(
+            repo,
+            {"outputs": ["BTC-USD", "ETH-USD", "BTC-USD"], "exchange": "kraken"},
+            "op-1",
+            "w-1",
+            as_of,
+        )
+        repo.get_instrument_public_ids_by_symbols.assert_awaited_once_with(
+            native_symbols={"BTC-USD", "ETH-USD"},
+            exchange="kraken",
+            as_of=as_of,
+        )
 
     @pytest.mark.asyncio
     async def test_enforce_strategy_outputs_covered_rejects_uncovered(self) -> None:
         """An uncovered output -> 403 with the offending symbol in detail."""
         repo = MagicMock(spec=SQLAlchemyRepository)
         repo.list_grant_covered_instrument_public_ids = AsyncMock(return_value={"i-eth"})
-        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="i-btc")
+        repo.get_instrument_public_ids_by_symbols = AsyncMock(return_value={"BTC-USD": "i-btc"})
         with pytest.raises(HTTPException) as exc_info:
             await _enforce_strategy_outputs_covered(
                 repo,
@@ -1623,7 +1645,7 @@ class TestScopeHelpers:
         """A symbol that doesn't resolve to any instrument is treated as uncovered."""
         repo = MagicMock(spec=SQLAlchemyRepository)
         repo.list_grant_covered_instrument_public_ids = AsyncMock(return_value=set())
-        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        repo.get_instrument_public_ids_by_symbols = AsyncMock(return_value={})
         with pytest.raises(HTTPException) as exc_info:
             await _enforce_strategy_outputs_covered(
                 repo,

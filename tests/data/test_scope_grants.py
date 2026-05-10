@@ -1107,6 +1107,62 @@ class TestGetInstrumentPublicIdBySymbol:
         )
         assert result is not None
 
+    @pytest.mark.asyncio
+    async def test_batch_resolves_known_pairs_and_omits_unknowns(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Batch symbol resolver returns active instrument IDs for known symbols only."""
+        async with repo.session() as s:
+            s.add_all(
+                [
+                    Symbol(
+                        public_id="00000000-0000-7000-8000-0000000000d1",
+                        native_symbol="BTC-USD",
+                        base="BTC",
+                        quote="USD",
+                        asset_type="crypto",
+                        created_at=datetime.now(UTC),
+                        session_id="t",
+                        sequence_id=1,
+                        timestamp=datetime.now(UTC),
+                    ),
+                    Symbol(
+                        public_id="00000000-0000-7000-8000-0000000000d2",
+                        native_symbol="ETH-USD",
+                        base="ETH",
+                        quote="USD",
+                        asset_type="crypto",
+                        created_at=datetime.now(UTC),
+                        session_id="t",
+                        sequence_id=2,
+                        timestamp=datetime.now(UTC),
+                    ),
+                ]
+            )
+            await s.commit()
+        _btc_id, btc_public_id = await repo.ensure_instrument(
+            symbol_public_id="00000000-0000-7000-8000-0000000000d1",
+            exchange="kraken",
+            session_id="t",
+            sequence_id=3,
+            timestamp=datetime.now(UTC),
+        )
+        _eth_id, eth_public_id = await repo.ensure_instrument(
+            symbol_public_id="00000000-0000-7000-8000-0000000000d2",
+            exchange="kraken",
+            session_id="t",
+            sequence_id=4,
+            timestamp=datetime.now(UTC),
+        )
+
+        result = await repo.get_instrument_public_ids_by_symbols(
+            native_symbols={"BTC-USD", "ETH-USD", "ZZZ-USD"},
+            exchange="kraken",
+            as_of=datetime.now(UTC),
+        )
+
+        assert result == {"BTC-USD": btc_public_id, "ETH-USD": eth_public_id}
+
 
 class TestGetSymbolForInstrument:
     """Tests for the new instrument-to-symbol reverse resolver."""
