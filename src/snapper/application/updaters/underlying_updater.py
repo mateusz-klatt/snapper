@@ -336,7 +336,18 @@ class UnderlyingUpdater:
         config: UnderlyingMappingConfig,
         instruments: list[_InstrumentInfo],
     ) -> UnderlyingMappingConfig:
-        """Add exact rules for active instruments not matched by explicit YAML."""
+        """Add exact rules for active instruments not matched by explicit YAML.
+
+        Skips instruments whose fallback ticker already exists in the
+        config under a different ``asset_class`` — preserves explicit
+        YAML intent against semantic-collision contamination (e.g.
+        ``SPX`` index vs SPX6900 crypto memecoin sharing
+        ``base='SPX'``; ``CVX`` Chevron equity vs Convex Finance
+        crypto). The append-after-validate ordering also prevents
+        leaving an empty generated underlying behind when
+        :meth:`_append_fallback_rule` rejects an instrument with an
+        unrecognised exchange.
+        """
         definitions = list(config.underlyings)
         by_ticker = {definition.ticker: definition for definition in definitions}
         generated_tickers: set[str] = set()
@@ -352,15 +363,20 @@ class UnderlyingUpdater:
                 continue
 
             existing = by_ticker.get(definition.ticker)
+            if existing is not None and existing.asset_class != definition.asset_class:
+                continue
+
+            target = existing if existing is not None else definition
+            if not self._append_fallback_rule(target, inst):
+                continue
+
             if existing is None:
                 definitions.append(definition)
                 by_ticker[definition.ticker] = definition
                 generated_tickers.add(definition.ticker)
-                existing = definition
 
-            if self._append_fallback_rule(existing, inst):
-                generated_patterns += 1
-                config = UnderlyingMappingConfig(underlyings=definitions)
+            generated_patterns += 1
+            config = UnderlyingMappingConfig(underlyings=definitions)
 
         if generated_patterns:
             logger.info(

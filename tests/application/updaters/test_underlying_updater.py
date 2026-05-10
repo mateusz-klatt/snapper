@@ -308,6 +308,91 @@ class TestUnderlyingUpdater:
 
         assert relationship.value == "derivative"
 
+    def test_auto_coverage_skips_asset_class_collision_with_existing_yaml(self) -> None:
+        """Given YAML ticker with one asset_class, When fallback instrument has another, Then skip.
+
+        Reproduces the SPX vs SPX6900 contamination class of bug:
+        an explicit YAML SPX ticker (asset_class=index, S&P 500) must
+        not absorb a fallback instrument whose Symbol.asset_type is
+        ``crypto`` (Kraken's SPX6900 memecoin) just because both share
+        ``base='SPX'``.
+        """
+        config = UnderlyingMappingConfig(
+            underlyings=[
+                UnderlyingDefinition(
+                    ticker="SPX",
+                    name="S&P 500",
+                    asset_class="index",
+                    patterns=[
+                        PatternRule(exchange="polygon", match_type="exact", pattern="SPY"),
+                    ],
+                ),
+            ],
+        )
+        updater = UnderlyingUpdater(db_url="test://")
+
+        expanded = updater._expand_auto_coverage(
+            config,
+            [
+                _InstrumentInfo("i1", "kraken", "SPX-USD", "SPX", "USD", "crypto"),
+                _InstrumentInfo("i2", "kraken", "SPX-EUR", "SPX", "EUR", "crypto"),
+                _InstrumentInfo("i3", "kraken_futures", "SPX-USD-PERP", "SPX", "USD", "crypto"),
+            ],
+        )
+
+        spx = next(definition for definition in expanded.underlyings if definition.ticker == "SPX")
+        patterns = {(rule.exchange.value, rule.pattern) for rule in spx.patterns}
+        assert patterns == {("polygon", "SPY")}
+        assert spx.asset_class.value == "index"
+
+    def test_auto_coverage_skips_asset_class_collision_in_generated_tickers(self) -> None:
+        """Given equity fallback ticker, When crypto with same base arrives later, Then skip.
+
+        Reproduces the CVX/OPEN/PEP class of bug: a generated equity
+        ticker (e.g. NYSE Chevron CVX) must not absorb later-iterated
+        crypto instruments with the same base (Convex Finance CVX-USD)
+        just because both share ``base='CVX'``.
+        """
+        config = UnderlyingMappingConfig(underlyings=[])
+        updater = UnderlyingUpdater(db_url="test://")
+
+        expanded = updater._expand_auto_coverage(
+            config,
+            [
+                _InstrumentInfo("i1", "polygon", "CVX", "CVX", None, "equity"),
+                _InstrumentInfo("i2", "kraken", "CVX-USD", "CVX", "USD", "crypto"),
+                _InstrumentInfo("i3", "kraken", "CVX-EUR", "CVX", "EUR", "crypto"),
+            ],
+        )
+
+        cvx_definitions = [d for d in expanded.underlyings if d.ticker == "CVX"]
+        assert len(cvx_definitions) == 1
+        cvx = cvx_definitions[0]
+        assert cvx.asset_class.value == "equity"
+        patterns = {(rule.exchange.value, rule.pattern) for rule in cvx.patterns}
+        assert patterns == {("polygon", "CVX")}
+
+    def test_auto_coverage_does_not_emit_empty_definition_when_exchange_invalid(self) -> None:
+        """Given fallback rule with unrecognised exchange, When expanding, Then no empty entry leaks.
+
+        Append-after-validate ordering must prevent leaving a generated
+        underlying behind with ``patterns=[]`` when
+        :meth:`_append_fallback_rule` rejects an instrument because the
+        exchange enum lookup fails.
+        """
+        config = UnderlyingMappingConfig(underlyings=[])
+        updater = UnderlyingUpdater(db_url="test://")
+
+        expanded = updater._expand_auto_coverage(
+            config,
+            [
+                _InstrumentInfo("i1", "no-such-exchange", "FOO-USD", "FOO", "USD", "crypto"),
+            ],
+        )
+
+        assert all(len(definition.patterns) > 0 for definition in expanded.underlyings)
+        assert not any(definition.ticker == "FOO" for definition in expanded.underlyings)
+
     @pytest.mark.asyncio
     async def test_match_and_upsert_preserves_unmapped_without_auto_coverage(self) -> None:
         """Given unmatched instrument, When matching directly, Then no mapping is written."""
