@@ -1490,7 +1490,7 @@ class TestRevokeScopeGrant:
             await repo.revoke_scope_grant(
                 grant_public_id=original["public_id"],
                 revoked_by_user_public_id=ids["user_admin"],
-                revoked_at=datetime.now(UTC),
+                revoked_at=original["timestamp"] + timedelta(seconds=1),
                 reason=None,
             )
         assert lock_mock.await_count == 1
