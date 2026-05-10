@@ -166,6 +166,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: ETH-USD-PERP-INV
+    relationship_type: derivative
 - ticker: USDT
   name: Tether USD
   asset_class: crypto
@@ -197,6 +198,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: USDT-USD-PERP
+    relationship_type: derivative
 - ticker: USDC
   name: USD Coin
   asset_class: crypto
@@ -228,6 +230,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: USDC-USD-PERP
+    relationship_type: derivative
 - ticker: DAI
   name: Dai Stablecoin
   asset_class: crypto
@@ -382,6 +385,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: XRP-USD-PERP-INV
+    relationship_type: derivative
 - ticker: DOGE
   name: Dogecoin
   asset_class: crypto
@@ -473,6 +477,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: LTC-USD-PERP-INV
+    relationship_type: derivative
 - ticker: LINK
   name: Chainlink
   asset_class: crypto
@@ -1124,6 +1129,8 @@ underlyings:
   name: S&P 500
   asset_class: index
   sector: US Large Cap
+  description: S&P 500 exposure via SPY, SPYx perpetual, and ES/MES futures. Excludes
+    crypto SPX6900 spot/perp symbols.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1146,18 +1153,6 @@ underlyings:
     relationship_type: derivative
     instrument_type: future
     contract_family: MES
-  - exchange: kraken
-    match_type: exact
-    pattern: SPX-EUR
-  - exchange: kraken
-    match_type: exact
-    pattern: SPX-USD
-  - exchange: polygon
-    match_type: exact
-    pattern: SPX-USD
-  - exchange: kraken_futures
-    match_type: exact
-    pattern: SPX-USD-PERP
 - ticker: NDX
   name: Nasdaq 100
   asset_class: index
@@ -1222,6 +1217,9 @@ underlyings:
   name: Gold
   asset_class: commodity
   sector: Precious Metals
+  description: Return-level gold exposure. GLD/IAU are gold trust share units while
+    PAXG is a 1 fine troy ounce token; do not compare raw price levels without unit
+    normalization.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1240,7 +1238,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: PAXG-USD-PERP
-    relationship_type: proxy
+    relationship_type: derivative
   - exchange: kraken_equities
     match_type: regex
     pattern: ^GC[FGHJKMNQUVXZ]\d{1,2}-COMEX$
@@ -1534,6 +1532,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: EUR-USD-PERP
+    relationship_type: derivative
   - exchange: polygon
     match_type: exact
     pattern: EUR-USD
@@ -1586,6 +1585,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: GBP-USD-PERP
+    relationship_type: derivative
   - exchange: polygon
     match_type: exact
     pattern: GBP-USD
@@ -1979,15 +1979,6 @@ underlyings:
   - exchange: walutomat
     match_type: exact
     pattern: USD-CHF
-  - exchange: kraken_equities
-    match_type: regex
-    pattern: ^6S[FGHJKMNQUVXZ]\d{1,2}-CME$
-    relationship_type: derivative
-    instrument_type: future
-    contract_family: 6S
-  - exchange: kraken_futures
-    match_type: exact
-    pattern: CHF-USD-PERP
   - exchange: kraken
     match_type: exact
     pattern: USD-CHF
@@ -2007,6 +1998,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: AUD-USD-PERP
+    relationship_type: derivative
   - exchange: kraken
     match_type: exact
     pattern: AUD-USD
@@ -2017,12 +2009,6 @@ underlyings:
   name: US Dollar / Canadian Dollar
   asset_class: forex
   patterns:
-  - exchange: kraken_equities
-    match_type: regex
-    pattern: ^6C[FGHJKMNQUVXZ]\d{1,2}-CME$
-    relationship_type: derivative
-    instrument_type: future
-    contract_family: 6C
   - exchange: kraken
     match_type: exact
     pattern: USD-CAD
@@ -2033,15 +2019,6 @@ underlyings:
   name: US Dollar / Japanese Yen
   asset_class: forex
   patterns:
-  - exchange: kraken_equities
-    match_type: regex
-    pattern: ^6J[FGHJKMNQUVXZ]\d{1,2}-CME$
-    relationship_type: derivative
-    instrument_type: future
-    contract_family: 6J
-  - exchange: kraken_futures
-    match_type: exact
-    pattern: JPY-USD-PERP
   - exchange: kraken
     match_type: exact
     pattern: USD-JPY
@@ -2058,26 +2035,6 @@ underlyings:
     relationship_type: derivative
     instrument_type: future
     contract_family: 6N
-- ticker: USDBRL
-  name: US Dollar / Brazilian Real
-  asset_class: forex
-  patterns:
-  - exchange: kraken_equities
-    match_type: regex
-    pattern: ^6L[FGHJKMNQUVXZ]\d{1,2}-CME$
-    relationship_type: derivative
-    instrument_type: future
-    contract_family: 6L
-- ticker: USDMXN
-  name: US Dollar / Mexican Peso
-  asset_class: forex
-  patterns:
-  - exchange: kraken_equities
-    match_type: regex
-    pattern: ^6M[FGHJKMNQUVXZ]\d{1,2}-CME$
-    relationship_type: derivative
-    instrument_type: future
-    contract_family: 6M
 - ticker: US10Y
   name: US 10-Year Treasury Note
   asset_class: yield
@@ -2135,6 +2092,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: 2Z-USD-PERP
+    relationship_type: derivative
 - ticker: AI3
   name: AI3
   asset_class: crypto
@@ -2161,6 +2119,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: ALEO-USD-PERP
+    relationship_type: derivative
   - exchange: polygon
     match_type: exact
     pattern: ALEO-USD
@@ -2187,6 +2146,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: BIO-USD-PERP
+    relationship_type: derivative
 - ticker: C98
   name: C98
   asset_class: crypto
@@ -2200,6 +2160,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: C98-USD-PERP
+    relationship_type: derivative
   - exchange: polygon
     match_type: exact
     pattern: C98-USD
@@ -2216,6 +2177,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: CFG-USD-PERP
+    relationship_type: derivative
   - exchange: polygon
     match_type: exact
     pattern: CFG-USD
@@ -2232,6 +2194,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: FLUX-USD-PERP
+    relationship_type: derivative
 - ticker: ICX
   name: ICX
   asset_class: crypto
@@ -2245,6 +2208,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: ICX-USD-PERP
+    relationship_type: derivative
   - exchange: polygon
     match_type: exact
     pattern: ICX-USD
@@ -2261,6 +2225,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: KAVA-USD-PERP
+    relationship_type: derivative
   - exchange: polygon
     match_type: exact
     pattern: KAVA-USD
@@ -2395,6 +2360,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: PROMPT-USD-PERP
+    relationship_type: derivative
 - ticker: RAIIN
   name: RAIIN
   asset_class: crypto
@@ -2418,6 +2384,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: RARE-USD-PERP
+    relationship_type: derivative
   - exchange: polygon
     match_type: exact
     pattern: RARE-USD
@@ -2434,6 +2401,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: REZ-USD-PERP
+    relationship_type: derivative
   - exchange: polygon
     match_type: exact
     pattern: REZ-USD
@@ -2483,6 +2451,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: STBL-USD-PERP
+    relationship_type: derivative
 - ticker: SUNDOG
   name: SUNDOG
   asset_class: crypto
@@ -2506,6 +2475,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: SUSHI-USD-PERP
+    relationship_type: derivative
   - exchange: polygon
     match_type: exact
     pattern: SUSHI-USD
@@ -2585,6 +2555,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: WLD-USD-PERP
+    relationship_type: derivative
 - ticker: XAUT
   name: XAUT
   asset_class: crypto
@@ -2598,6 +2569,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: XAUT-USD-PERP
+    relationship_type: derivative
   - exchange: polygon
     match_type: exact
     pattern: XAUT-USD
@@ -2659,6 +2631,7 @@ underlyings:
   - exchange: kraken_futures
     match_type: exact
     pattern: XTZ-USD-PERP
+    relationship_type: derivative
   - exchange: polygon
     match_type: exact
     pattern: XTZ-USD
