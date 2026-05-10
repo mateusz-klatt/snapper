@@ -347,43 +347,82 @@ class UnderlyingUpdater:
         leaving an empty generated underlying behind when
         :meth:`_append_fallback_rule` rejects an instrument with an
         unrecognised exchange.
+
+        Construction of the resulting ``UnderlyingMappingConfig``
+        happens once at the end. Rebuilding it per iteration would
+        re-run the O(n) duplicate-ticker validator, making the loop
+        O(n²) on the active-instrument count.
         """
         definitions = list(config.underlyings)
         by_ticker = {definition.ticker: definition for definition in definitions}
-        generated_tickers: set[str] = set()
+        new_tickers: set[str] = set()
+        extended_tickers: set[str] = set()
         generated_patterns = 0
 
         for inst in sorted(instruments, key=self._auto_coverage_sort_key):
-            matches, has_intra_conflict = self._find_matches(config, inst)
-            if matches or has_intra_conflict:
+            kind = self._auto_coverage_apply(inst, definitions, by_ticker)
+            if kind == "skipped":
                 continue
-
-            definition = self._fallback_definition_for_instrument(inst)
-            if definition is None:
-                continue
-
-            existing = by_ticker.get(definition.ticker)
-            if existing is not None and existing.asset_class != definition.asset_class:
-                continue
-
-            target = existing if existing is not None else definition
-            if not self._append_fallback_rule(target, inst):
-                continue
-
-            if existing is None:
-                definitions.append(definition)
-                by_ticker[definition.ticker] = definition
-                generated_tickers.add(definition.ticker)
-
+            ticker = self._fallback_ticker(inst)
+            if kind == "new":
+                new_tickers.add(ticker)
+            else:
+                extended_tickers.add(ticker)
             generated_patterns += 1
-            config = UnderlyingMappingConfig(underlyings=definitions)
 
-        if generated_patterns:
-            logger.info(
-                f"Auto-covered {generated_patterns} active instrument(s) "
-                f"across {len(generated_tickers)} generated underlying(s)"
-            )
-        return config
+        if not generated_patterns:
+            return config
+
+        logger.info(
+            f"Auto-covered {generated_patterns} active instrument(s) "
+            f"across {len(new_tickers)} new + {len(extended_tickers)} extended underlying(s)"
+        )
+        return UnderlyingMappingConfig(underlyings=definitions)
+
+    def _auto_coverage_apply(
+        self,
+        inst: _InstrumentInfo,
+        definitions: list[UnderlyingDefinition],
+        by_ticker: dict[str, UnderlyingDefinition],
+    ) -> Literal["skipped", "new", "extended"]:
+        """Apply auto-coverage for a single instrument.
+
+        Args:
+            inst: The instrument to consider.
+            definitions: Mutable list of definitions being built. The
+                method matches against this list directly so previously
+                generated fallback rules are visible to subsequent
+                instruments without rebuilding the validated config.
+            by_ticker: Mutable ticker → definition lookup.
+
+        Returns:
+            ``"new"`` when a new underlying was created and a rule
+            appended, ``"extended"`` when a rule was appended to an
+            existing same-class underlying, and ``"skipped"`` for
+            already-matched, asset-class collision, or invalid-input
+            cases.
+        """
+        matches, has_intra_conflict = self._find_matches_in(definitions, inst)
+        if matches or has_intra_conflict:
+            return "skipped"
+
+        definition = self._fallback_definition_for_instrument(inst)
+        if definition is None:
+            return "skipped"
+
+        existing = by_ticker.get(definition.ticker)
+        if existing is not None and existing.asset_class != definition.asset_class:
+            return "skipped"
+
+        target = existing if existing is not None else definition
+        if not self._append_fallback_rule(target, inst):
+            return "skipped"
+
+        if existing is None:
+            definitions.append(definition)
+            by_ticker[definition.ticker] = definition
+            return "new"
+        return "extended"
 
     @staticmethod
     def _auto_coverage_sort_key(inst: _InstrumentInfo) -> tuple[int, str, str]:
@@ -537,9 +576,30 @@ class UnderlyingUpdater:
             matches is empty, to prevent stale cleanup from removing its
             existing mapping.
         """
+        return self._find_matches_in(config.underlyings, inst)
+
+    def _find_matches_in(
+        self,
+        definitions: list[UnderlyingDefinition],
+        inst: _InstrumentInfo,
+    ) -> tuple[list[_MatchResult], bool]:
+        """Find matches against an arbitrary list of underlying definitions.
+
+        Bypasses :class:`UnderlyingMappingConfig` so callers iterating
+        over a live, mutating definition list (e.g.
+        :meth:`_expand_auto_coverage`) avoid paying the O(n) duplicate
+        validator on every call.
+
+        Args:
+            definitions: Mapping definitions to scan.
+            inst: Instrument to match against.
+
+        Returns:
+            ``(matches, has_intra_conflict)`` — see :meth:`_find_matches`.
+        """
         per_underlying: dict[str, list[PatternRule]] = {}
 
-        for defn in config.underlyings:
+        for defn in definitions:
             matching_rules = self._matching_rules_for_definition(defn, inst)
             if matching_rules:
                 per_underlying[defn.ticker] = matching_rules
