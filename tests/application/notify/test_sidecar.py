@@ -916,9 +916,23 @@ class TestSidecarStart:
         """
         sidecar, _ = _make_sidecar(repo)
         cancelled = asyncio.Event()
+        retry_running = asyncio.Event()
 
         async def _unstoppable_retry_loop() -> None:
-            """Sleep indefinitely; only a direct task.cancel() ends us."""
+            """Signal `retry_running`, then sleep indefinitely; only a direct task.cancel() ends us.
+
+            Without the explicit ``retry_running.set()`` rendezvous, the
+            assertion below is racy: ``start()`` does an ``await``-heavy
+            outbox drain before ``create_task(_process_retry_queue_loop)``,
+            so a fixed sleep in the test can return before the retry task
+            has even been scheduled. If the test then calls ``stop()`` and
+            the finally-block cancel() lands on a task that has not yet
+            started its coroutine, the task transitions straight to
+            cancelled without entering the ``try`` body — the
+            ``CancelledError`` handler never fires and ``cancelled`` stays
+            unset.
+            """
+            retry_running.set()
             try:
                 await asyncio.sleep(3600)
             except asyncio.CancelledError:
@@ -934,12 +948,12 @@ class TestSidecarStart:
 
         sidecar._subscriber.recv_multipart = _blocks_forever
         task = asyncio.create_task(sidecar.start())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(retry_running.wait(), timeout=2.0)
         await sidecar.stop()
         await asyncio.wait_for(task, timeout=2.0)
 
         assert sidecar._retry_task is not None
-        await asyncio.sleep(0)
+        await asyncio.gather(sidecar._retry_task, return_exceptions=True)
         assert cancelled.is_set()
 
     @pytest.mark.asyncio

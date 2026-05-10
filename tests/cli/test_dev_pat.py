@@ -135,6 +135,37 @@ def patch_httpx_client(monkeypatch: pytest.MonkeyPatch) -> Callable[[httpx.MockT
     return _apply
 
 
+@pytest.fixture(autouse=True)
+def isolate_seed_profile_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate every test from the operator's local ``data/seed/*.toml``.
+
+    Without this, ``resolve_admin_credentials_from_seed`` reads whichever
+    profile happens to live on the operator's checkout (e.g. an ``mcp.toml``
+    written after running ``make mcp-pat`` with personalized admin
+    credentials). That leaks operator credentials into test stderr and
+    breaks happy-path equality assertions on the login payload.
+
+    The stub returns a deterministic admin user matching the values the
+    happy-path tests assert against. Test classes that explicitly cover
+    seed-resolution logic install their own monkeypatch, which runs after
+    this autouse fixture and therefore wins.
+    """
+
+    def _stub(profile: str) -> SeedProfile:
+        return SeedProfile(
+            users=[
+                SeedUser(
+                    username="admin",
+                    email="admin@example.com",
+                    password="AdminSnapper2026!",
+                    role="admin",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(dev_pat_module, "load_seed_profile", _stub)
+
+
 class TestRedactToken:
     """Cover the JWT-shape redaction helper."""
 
