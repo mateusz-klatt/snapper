@@ -363,6 +363,7 @@ _TRADE_COMMAND_TERMINAL_STATUSES: tuple[str, ...] = (
 )
 _CandleNaturalKey = tuple[str, str, datetime]
 _CANDLE_LOOKUP_CHUNK_SIZE = 300
+ScopeExpansionKey = tuple[str, str | None, str | None]
 
 
 def where_active(model: type[Any], at: datetime) -> tuple[Any, Any]:
@@ -7383,35 +7384,68 @@ class SQLAlchemyRepository(Repository):
         )
         return list(result.scalars().all())
 
-    async def _expand_to_instruments(
-        self,
-        s: AsyncSession,
+    @staticmethod
+    def _scope_expansion_key(
         scope_kind: str,
         underlying_public_id: str | None,
         instrument_public_id: str | None,
-        as_of: datetime,
-    ) -> set[str]:
-        """Resolve a scope reference to its concrete instrument set.
+    ) -> ScopeExpansionKey:
+        """Build the immutable key used by batched scope expansion.
 
-        For ``scope_kind == "instrument"`` this is the singleton set
-        ``{instrument_public_id}``. For ``scope_kind == "underlying"`` this
-        queries ``instrument_underlying_mappings`` (active at ``as_of``) and
-        returns every instrument currently linked to the underlying.
-        Underlying-scope grants are dynamic — newly added mappings
-        expand the grant transparently. Callers MUST have already
-        validated the XOR invariant (either via ``_validate_scope_xor``
-        for requests or via the DB ``ck_scope_grants_scope_kind_xor``
-        CHECK constraint for grants loaded from the database).
+        Args:
+            scope_kind: Scope discriminator from a grant or request.
+            underlying_public_id: Underlying public ID for underlying scopes.
+            instrument_public_id: Instrument public ID for instrument scopes.
+
+        Returns:
+            Tuple identity for a scope reference.
         """
-        if scope_kind == "instrument":
-            return {cast(str, instrument_public_id)}
+        return (scope_kind, underlying_public_id, instrument_public_id)
+
+    async def _expand_scope_refs_to_instruments(
+        self,
+        s: AsyncSession,
+        refs: set[ScopeExpansionKey],
+        as_of: datetime,
+    ) -> dict[ScopeExpansionKey, set[str]]:
+        """Resolve scope references to concrete instrument sets in one batch.
+
+        Instrument scopes resolve locally to singleton sets. Underlying
+        scopes are expanded with a single ``instrument_underlying_mappings``
+        query for all requested underlying IDs active at ``as_of``.
+
+        Args:
+            s: Active SQLAlchemy async session.
+            refs: Scope reference keys to expand.
+            as_of: Wall-clock timestamp for SCD2-active mappings.
+
+        Returns:
+            Mapping from each input scope reference to its covered
+            instrument public IDs.
+        """
+        expanded: dict[ScopeExpansionKey, set[str]] = {ref: set() for ref in refs}
+        underlying_refs: dict[str, list[ScopeExpansionKey]] = {}
+        for ref in refs:
+            scope_kind, underlying_public_id, instrument_public_id = ref
+            if scope_kind == "instrument":
+                expanded[ref].add(cast(str, instrument_public_id))
+            else:
+                underlying_refs.setdefault(cast(str, underlying_public_id), []).append(ref)
+        if not underlying_refs:
+            return expanded
         result = await s.execute(
-            select(InstrumentUnderlyingMapping.instrument_public_id).where(
-                InstrumentUnderlyingMapping.underlying_public_id == cast(str, underlying_public_id),
+            select(
+                InstrumentUnderlyingMapping.underlying_public_id,
+                InstrumentUnderlyingMapping.instrument_public_id,
+            ).where(
+                InstrumentUnderlyingMapping.underlying_public_id.in_(tuple(underlying_refs)),
                 *where_active(InstrumentUnderlyingMapping, as_of),
             )
         )
-        return {row[0] for row in result.all()}
+        for underlying_public_id, instrument_public_id in result.all():
+            for ref in underlying_refs[underlying_public_id]:
+                expanded[ref].add(instrument_public_id)
+        return expanded
 
     async def _find_overlap(
         self,
@@ -7435,14 +7469,15 @@ class SQLAlchemyRepository(Repository):
            insert time).
 
         2. **Expanded-set intersection.** Otherwise expand both sides to
-           instrument sets via ``_expand_to_instruments`` (which honors the
-           dynamic-scope rule by querying ``instrument_underlying_mappings``
-           ACTIVE at ``as_of``) and report the first grant whose expansion
-           intersects the request's.
+           instrument sets via ``_expand_scope_refs_to_instruments`` (which
+           honors the dynamic-scope rule by querying
+           ``instrument_underlying_mappings`` ACTIVE at ``as_of``) and report
+           the first grant whose expansion intersects the request's.
         """
         req_kind = request["scope_kind"]
         req_underlying = request.get("underlying_public_id")
         req_instrument = request.get("instrument_public_id")
+        request_key = self._scope_expansion_key(req_kind, req_underlying, req_instrument)
         for grant in existing:
             if (
                 grant.scope_kind == req_kind
@@ -7451,22 +7486,26 @@ class SQLAlchemyRepository(Repository):
             ):
                 return grant
 
-        target = await self._expand_to_instruments(
-            s,
-            req_kind,
-            req_underlying,
-            req_instrument,
-            as_of,
-        )
+        refs = {
+            request_key,
+            *(
+                self._scope_expansion_key(
+                    grant.scope_kind,
+                    grant.underlying_public_id,
+                    grant.instrument_public_id,
+                )
+                for grant in existing
+            ),
+        }
+        expanded = await self._expand_scope_refs_to_instruments(s, refs, as_of)
+        target = expanded[request_key]
         for grant in existing:
-            grant_set = await self._expand_to_instruments(
-                s,
+            grant_key = self._scope_expansion_key(
                 grant.scope_kind,
                 grant.underlying_public_id,
                 grant.instrument_public_id,
-                as_of,
             )
-            if target & grant_set:
+            if target & expanded[grant_key]:
                 return grant
         return None
 
@@ -8493,19 +8532,29 @@ class SQLAlchemyRepository(Repository):
         underlyings currently have zero active instrument mappings.
         """
         async with self.session() as s:
-            grants = await self._load_active_grants_for_wallet(s, wallet_public_id, as_of)
-            covered: set[str] = set()
-            for grant in grants:
-                if grant.operator_public_id != operator_public_id:
-                    continue
-                expanded = await self._expand_to_instruments(
-                    s,
-                    scope_kind=grant.scope_kind,
-                    underlying_public_id=grant.underlying_public_id,
-                    instrument_public_id=grant.instrument_public_id,
-                    as_of=as_of,
+            result = await s.execute(
+                select(
+                    WalletOperatorScopeGrant.scope_kind,
+                    WalletOperatorScopeGrant.underlying_public_id,
+                    WalletOperatorScopeGrant.instrument_public_id,
                 )
-                covered.update(expanded)
+                .where(
+                    WalletOperatorScopeGrant.wallet_public_id == wallet_public_id,
+                    WalletOperatorScopeGrant.operator_public_id == operator_public_id,
+                    *where_active(WalletOperatorScopeGrant, as_of),
+                )
+                .order_by(WalletOperatorScopeGrant.timestamp.asc())
+            )
+            refs = {
+                self._scope_expansion_key(scope_kind, underlying_public_id, instrument_public_id)
+                for scope_kind, underlying_public_id, instrument_public_id in result.all()
+            }
+            if not refs:
+                return set()
+            expanded = await self._expand_scope_refs_to_instruments(s, refs, as_of)
+            covered: set[str] = set()
+            for instrument_ids in expanded.values():
+                covered.update(instrument_ids)
             return covered
 
     async def get_instrument_public_id_by_symbol(

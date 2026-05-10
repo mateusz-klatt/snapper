@@ -312,7 +312,7 @@ class TestCreateScopeGrant:
         """Duplicate underlying grants conflict even when mappings are empty.
 
         Regression for a Codex phase-close finding: when an underlying has
-        zero active ``instrument_underlying_mappings`` rows, ``_expand_to_instruments``
+        zero active ``instrument_underlying_mappings`` rows, scope expansion
         returns an empty set on both sides and the set-intersection overlap
         check would fall through to the DB partial unique index,
         surfacing a raw IntegrityError to the caller instead of a clean
@@ -1019,6 +1019,47 @@ class TestListGrantCoveredInstrumentPublicIds:
             as_of=datetime.now(UTC),
         )
         assert covered == set()
+
+    @pytest.mark.asyncio
+    async def test_multiple_grants_use_one_batched_expansion(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Multiple same-operator grants are expanded by one helper call."""
+        ids = await _seed_world(repo)
+        extra_instrument = "00000000-0000-7000-8000-0000000000cc"
+        await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="underlying",
+                underlying_public_id=ids["underlying_btc"],
+            )
+        )
+        await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="instrument",
+                instrument_public_id=extra_instrument,
+                sequence_id=101,
+            )
+        )
+
+        with patch.object(
+            repo,
+            "_expand_scope_refs_to_instruments",
+            wraps=repo._expand_scope_refs_to_instruments,
+        ) as expand_mock:
+            covered = await repo.list_grant_covered_instrument_public_ids(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                as_of=datetime.now(UTC),
+            )
+
+        assert covered == {ids["btc_perp"], ids["btc_spot"], extra_instrument}
+        expand_mock.assert_awaited_once()
 
 
 class TestGetInstrumentPublicIdBySymbol:
