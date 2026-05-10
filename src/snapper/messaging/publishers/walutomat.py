@@ -58,6 +58,23 @@ class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeC
         return ExchangeEnum.WALUTOMAT
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:
+        """Validate and filter symbols for Walutomat.
+
+        The wildcard ``["*"]`` passes through untouched —
+        :class:`WalutomatExchangeClient` accepts ``"*"`` as a
+        subscribe-all sentinel (already used by
+        :class:`WalutomatSnapshotUpdaterService`) so the publisher
+        forwards it verbatim and skips per-symbol mapping.
+
+        Args:
+            symbols: Input symbols in native format, or ``["*"]``.
+
+        Returns:
+            Valid symbols that can be streamed from Walutomat, or
+            ``["*"]`` when the caller requested subscribe-all.
+        """
+        if symbols == ["*"]:
+            return ["*"]
         native_symbols: list[str] = []
         seen_symbols: set[str] = set()
         for symbol in symbols:

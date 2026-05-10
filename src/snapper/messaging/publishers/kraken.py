@@ -114,14 +114,22 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         """Validate and filter symbols for Kraken.
 
         Converts symbols to Kraken WebSocket format to validate them.
-        Invalid symbols are logged and skipped.
+        Invalid symbols are logged and skipped. The wildcard ``["*"]``
+        passes through untouched — Kraken's WebSocket accepts ``"*"``
+        as a subscribe-all sentinel (already used by
+        :class:`KrakenSnapshotUpdaterService`) so the publisher
+        forwards it verbatim and bypasses both per-symbol mapping and
+        the 20-symbol-per-connection limit.
 
         Args:
-            symbols: Input symbols in native format.
+            symbols: Input symbols in native format, or ``["*"]``.
 
         Returns:
-            Valid symbols that can be streamed from Kraken.
+            Valid symbols that can be streamed from Kraken, or
+            ``["*"]`` when the caller requested subscribe-all.
         """
+        if symbols == ["*"]:
+            return ["*"]
         native_symbols: list[str] = []
         seen_symbols: set[str] = set()
         for symbol in symbols:
@@ -142,6 +150,10 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         """Get Kraken's WebSocket symbol limit.
 
         Returns:
-            20 symbols maximum per connection.
+            ``0`` when ``self.symbols == ["*"]`` (wildcard subscribe-all
+            uses a single connection unconstrained by the per-symbol
+            limit) or ``20`` for the explicit-symbol path.
         """
+        if self.symbols == ["*"]:
+            return 0
         return 20

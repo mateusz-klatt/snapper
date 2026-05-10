@@ -72,6 +72,31 @@ class TestKrakenMarketDataPublisher:
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         assert publisher._get_max_symbols_per_connection() == 20
 
+    def test_validate_symbols_passes_through_wildcard(self) -> None:
+        """Verify ``["*"]`` survives validation as a subscribe-all sentinel.
+
+        Given: A KrakenMarketDataPublisher constructed with ``["*"]``,
+        When: ``_validate_symbols`` is invoked on the wildcard list,
+        Then: It returns ``["*"]`` verbatim — bypassing per-symbol
+            ``native_to_kraken_websocket`` mapping. Kraken's WebSocket
+            accepts ``"*"`` as subscribe-all (already used by
+            ``KrakenSnapshotUpdaterService``).
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["*"])
+        assert publisher._validate_symbols(["*"]) == ["*"]
+        assert publisher.symbols == ["*"]
+
+    def test_get_max_symbols_per_connection_unlimited_for_wildcard(self) -> None:
+        """Wildcard subscribers run a single connection without per-symbol cap.
+
+        Given: A KrakenMarketDataPublisher constructed with ``["*"]``,
+        When: ``_get_max_symbols_per_connection`` is invoked,
+        Then: It returns ``0`` (unlimited) so the base class does not
+            truncate the wildcard sentinel to the first 20 entries.
+        """
+        publisher = KrakenMarketDataPublisher(symbols=["*"])
+        assert publisher._get_max_symbols_per_connection() == 0
+
     def test_get_default_parameters_from_settings(self) -> None:
         """Verify default kwargs extracts kraken symbols from settings.
 

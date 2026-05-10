@@ -40,6 +40,20 @@ class TestWalutomatPublisherUnknownSymbols:
             valid_symbols = publisher._validate_symbols(["BTC-PLN", "BTC-PLN", "BTC-PLN"])
         assert valid_symbols == ["BTC-PLN"]
 
+    def test_validate_symbols_passes_through_wildcard(self) -> None:
+        """Verify ``["*"]`` survives validation as a subscribe-all sentinel.
+
+        Given: A WalutomatMarketDataPublisher constructed with ``["*"]``,
+        When: ``_validate_symbols`` is invoked on the wildcard list,
+        Then: It returns ``["*"]`` verbatim — bypassing per-symbol
+            ``native_to_walutomat_ws`` mapping. Walutomat's WebSocket
+            accepts ``"*"`` as subscribe-all (already used by
+            ``WalutomatSnapshotUpdaterService``).
+        """
+        publisher = WalutomatMarketDataPublisher(symbols=["*"])
+        assert publisher._validate_symbols(["*"]) == ["*"]
+        assert publisher.symbols == ["*"]
+
 
 class TestWalutomatPublisher:
     """Tests for WalutomatMarketDataPublisher functionality."""
