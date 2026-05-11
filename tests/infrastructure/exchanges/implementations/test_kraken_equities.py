@@ -14,6 +14,7 @@ from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.implementations import kraken_equities as ke
 from snapper.infrastructure.exchanges.implementations.kraken_equities import (
     KrakenEquitiesExchangeClient,
 )
@@ -80,8 +81,6 @@ class TestEnqueueOrDropOldest:
         When: 50 drop-oldest events fire within the same interval,
         Then: At most one warning summary line is emitted.
         """
-        from snapper.infrastructure.exchanges.implementations import kraken_equities as ke
-
         ke._drop_counters.clear()
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
         queue.put_nowait("seed")

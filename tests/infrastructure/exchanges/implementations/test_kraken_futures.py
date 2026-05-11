@@ -25,6 +25,7 @@ from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.implementations import kraken_futures as kf
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
@@ -207,8 +208,6 @@ class TestEnqueueOrDropOldest:
         When: 50 drop-oldest events fire within the same interval,
         Then: At most one warning summary line is emitted.
         """
-        from snapper.infrastructure.exchanges.implementations import kraken_futures as kf
-
         kf._drop_counters.clear()
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
         queue.put_nowait("seed")

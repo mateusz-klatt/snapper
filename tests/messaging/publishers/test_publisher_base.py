@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 import zmq
+from loguru import logger
 from sqlalchemy.exc import IntegrityError
 
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -22,6 +23,8 @@ from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.base import _cleanup_pending_future
+from snapper.messaging.publishers.base import _enqueue_or_drop_oldest_tick_write
+from snapper.messaging.publishers.base import _tick_writer_drop_counters
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import HeartbeatData
@@ -175,6 +178,7 @@ async def test_start_warns_on_symbol_limit(monkeypatch: pytest.MonkeyPatch) -> N
     pub._heartbeat_loop = AsyncMock()
     pub._symbol_aliases_loop = AsyncMock()
     pub._tick_loop = AsyncMock()
+    pub._tick_writer_loop = AsyncMock()
     pub._trade_loop = AsyncMock()
     pub._candle_loop = AsyncMock()
     await pub.start()
@@ -591,6 +595,7 @@ async def test_start_handles_cancelled_tasks(monkeypatch: pytest.MonkeyPatch) ->
     pub._heartbeat_loop = noop
     pub._symbol_aliases_loop = noop
     pub._tick_loop = noop
+    pub._tick_writer_loop = noop
     pub._trade_loop = noop
     pub._candle_loop = noop
     loop = asyncio.get_running_loop()
@@ -1226,6 +1231,7 @@ async def test_start_skips_trade_loop_when_unsupported(monkeypatch: pytest.Monke
     pub._heartbeat_loop = AsyncMock()
     pub._symbol_aliases_loop = AsyncMock()
     pub._tick_loop = AsyncMock()
+    pub._tick_writer_loop = AsyncMock()
     pub._trade_loop = AsyncMock()
     pub._candle_loop = AsyncMock()
     await pub.start()
@@ -1541,6 +1547,7 @@ class TestFeedPublisherCoverage:
             ),
             patch.object(publisher, "_candle_loop", new=AsyncMock()),
             patch.object(publisher, "_tick_loop", new=AsyncMock()),
+            patch.object(publisher, "_tick_writer_loop", new=AsyncMock()),
             patch.object(publisher, "_trade_loop", new=AsyncMock()),
             patch.object(publisher, "_create_exchange_client", return_value=mock_exchange_client),
         ):
@@ -1879,11 +1886,14 @@ class TestFeedPublisherCoverage:
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
     async def test_tick_loop_processes_tick_message(self, mock_get_settings: MagicMock) -> None:
-        """Verify tick loop processes tick messages.
+        """Verify tick loop publishes via ZMQ and hands the row to the writer queue.
 
         Given: A running publisher with mock exchange client,
-        When: _tick_loop processes ticks,
-        Then: Tick messages are published and batch flushed.
+        When: ``_tick_loop`` processes ticks,
+        Then: ZMQ publish is awaited and the row reaches
+            ``_tick_write_queue`` — DB persistence is the writer task's
+            job in the post-HV2-H7 decoupled architecture, not the
+            consumer's.
         """
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
@@ -1923,7 +1933,8 @@ class TestFeedPublisherCoverage:
         await publisher_any._tick_loop(["BTC-USD"])
         publish_mock.assert_awaited_once()
         assert "BTC-USD" in publisher_any._last_data_timestamps
-        publisher_any.repository.upsert_ticks.assert_awaited_once()
+        publisher_any.repository.upsert_ticks.assert_not_awaited()
+        assert publisher_any._tick_write_queue.qsize() == 1
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2851,11 +2862,13 @@ async def test_build_trade_row_persists_when_no_trade_id() -> None:
 
 @pytest.mark.asyncio
 async def test_tick_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify tick loop publishes to ZMQ and flushes batch to DB.
+    """Verify tick loop publishes to ZMQ and hands the row to the writer queue.
 
     Given: A running publisher with tick data,
     When: Tick arrives and stream ends,
-    Then: Message is published and batch flushed on exit.
+    Then: Message is published to ZMQ and the row reaches
+        ``_tick_write_queue`` (DB persistence now lives in
+        ``_tick_writer_loop``, not ``_tick_loop``).
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -2879,7 +2892,7 @@ async def test_tick_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) ->
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
     await pub._tick_loop(["BTC-USD"])
     pub.msg_publisher.send.assert_awaited()
-    pub.repository.upsert_ticks.assert_awaited_once()
+    assert pub._tick_write_queue.qsize() == 1
 
 
 @pytest.mark.asyncio
@@ -3090,12 +3103,14 @@ async def test_candle_loop_cancelled_error_during_publish() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tick_loop_age_trigger_flush() -> None:
-    """Verify tick loop flushes batch on age timeout.
+async def test_tick_loop_does_not_flush_directly() -> None:
+    """Verify ``_tick_loop`` is ingest-only after the HV2-H7 decouple.
 
-    Given: A publisher with a tick in the batch and no new data arriving,
-    When: The age timer expires,
-    Then: The batch is flushed.
+    Given: A publisher with a tick in the stream,
+    When: ``_tick_loop`` runs to completion,
+    Then: No DB upsert happens inside the consumer — the row sits on
+        ``_tick_write_queue`` for the dedicated writer task. Flushing
+        decoupled from ingest is the whole point of HV2-H7.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -3104,7 +3119,6 @@ async def test_tick_loop_age_trigger_flush() -> None:
     pub._exchange_client = SimpleNamespace()
     pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
     pub._batch_max_age_s = 0.01
-    flush_count = 0
 
     async def gen() -> AsyncIterator[Any]:
         yield SimpleNamespace(
@@ -3116,23 +3130,24 @@ async def test_tick_loop_age_trigger_flush() -> None:
             is_delayed=False,
             is_extended_hours=None,
         )
-        nonlocal flush_count
         await asyncio.sleep(0.05)
-        flush_count = pub.repository.upsert_ticks.await_count
         pub.running = False
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
     await pub._tick_loop(["BTC-USD"])
-    assert flush_count >= 1
+    pub.repository.upsert_ticks.assert_not_awaited()
+    assert pub._tick_write_queue.qsize() == 1
 
 
 @pytest.mark.asyncio
-async def test_tick_loop_batch_size_threshold_flush() -> None:
-    """Verify tick loop flushes when batch reaches max size.
+async def test_tick_loop_enqueues_every_tick_for_writer() -> None:
+    """Verify ``_tick_loop`` enqueues each ingested tick onto the writer queue.
 
-    Given: A publisher with _tick_batch_max_rows=2,
-    When: Two ticks arrive,
-    Then: The batch is flushed mid-loop.
+    Given: A publisher with three ticks in the WS stream,
+    When: ``_tick_loop`` drains the stream,
+    Then: All three rows land on ``_tick_write_queue`` in order. The
+        per-batch size trigger that used to live in ``_tick_loop`` is
+        now the writer's responsibility — the consumer just forwards.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -3140,11 +3155,8 @@ async def test_tick_loop_batch_size_threshold_flush() -> None:
     pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
     pub._exchange_client = SimpleNamespace()
     pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
-    pub._tick_batch_max_rows = 2
-    flush_after_two = 0
 
     async def gen() -> AsyncIterator[Any]:
-        nonlocal flush_after_two
         for i in range(3):
             yield SimpleNamespace(
                 symbol="BTC-USD",
@@ -3155,14 +3167,12 @@ async def test_tick_loop_batch_size_threshold_flush() -> None:
                 is_delayed=False,
                 is_extended_hours=None,
             )
-            if i == 1:
-                await asyncio.sleep(0)
-                flush_after_two = pub.repository.upsert_ticks.await_count
         pub.running = False
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
     await pub._tick_loop(["BTC-USD"])
-    assert flush_after_two >= 1
+    assert pub._tick_write_queue.qsize() == 3
+    pub.repository.upsert_ticks.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3200,11 +3210,15 @@ async def test_tick_loop_skips_db_when_instrument_is_none() -> None:
 
 @pytest.mark.asyncio
 async def test_tick_loop_cancelled_error() -> None:
-    """Verify tick loop flushes and re-raises CancelledError.
+    """Verify ``_tick_loop`` re-raises ``CancelledError`` and leaves the queued row.
 
-    Given: A publisher whose publish raises CancelledError on second tick,
-    When: _tick_loop is running,
-    Then: Pending batch is flushed in finally and CancelledError propagates.
+    Given: A publisher whose ZMQ publish raises ``CancelledError`` on
+        the second tick after the first reaches the writer queue,
+    When: ``_tick_loop`` is running,
+    Then: The first row stays on ``_tick_write_queue`` (no DB upsert
+        attempted from the consumer side — that contract moved to
+        ``_tick_writer_loop`` in HV2-H7) and ``CancelledError``
+        propagates up.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -3247,7 +3261,8 @@ async def test_tick_loop_cancelled_error() -> None:
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
     with pytest.raises(asyncio.CancelledError):
         await pub._tick_loop(["BTC-USD"])
-    pub.repository.upsert_ticks.assert_awaited_once()
+    pub.repository.upsert_ticks.assert_not_awaited()
+    assert pub._tick_write_queue.qsize() == 1
 
 
 @pytest.mark.asyncio
@@ -3547,3 +3562,193 @@ async def test_flush_trade_batch_empty_is_noop() -> None:
     pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
     await pub._flush_trade_batch([])
     pub.repository.upsert_trades.assert_not_awaited()
+
+
+def _dummy_tick_row(idx: int) -> dict[str, Any]:
+    """Build a placeholder tick row for writer-queue tests."""
+    return {
+        "instrument_public_id": f"inst-{idx:04d}",
+        "session_id": "test",
+        "sequence_id": idx,
+        "timestamp": datetime(2026, 4, 21, tzinfo=UTC),
+        "bid": 100.0,
+        "ask": 101.0,
+        "last_price": 100.5,
+        "volume": 1.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_tick_writer_loop_decouples_consumer_from_flush() -> None:
+    """``_tick_writer_loop`` does not block the writer queue's producer on flush.
+
+    Given: An event-gated ``_flush_tick_batch`` that does not return until
+        a test-controlled event is set, plus 100 tick rows enqueued onto
+        the writer queue.
+    When: The writer loop runs concurrently with the producer,
+    Then: The producer completes all 100 enqueues before the flush is
+        unblocked (proves the consumer is decoupled from the flush
+        latency); after the event fires, the writer drains the queue and
+        flushes the batch.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._tick_batch_max_rows = 1000
+    pub._batch_max_age_s = 60.0
+    pub.running = True
+    flush_gate = asyncio.Event()
+    flushed_rows: list[dict[str, Any]] = []
+
+    async def gated_flush(batch: list[dict[str, Any]]) -> None:
+        flushed_rows.extend(batch)
+        await flush_gate.wait()
+
+    pub._flush_tick_batch = gated_flush
+    writer = asyncio.create_task(pub._tick_writer_loop())
+
+    async def producer() -> None:
+        for i in range(100):
+            await pub._tick_write_queue.put(_dummy_tick_row(i))
+
+    producer_task = asyncio.create_task(producer())
+    await asyncio.wait_for(producer_task, timeout=2.0)
+    assert pub._tick_write_queue.qsize() <= pub._tick_batch_max_rows + 1
+    flush_gate.set()
+    pub.running = False
+    await asyncio.wait_for(pub._tick_write_queue.join(), timeout=2.0)
+    await asyncio.wait_for(writer, timeout=2.0)
+    assert len(flushed_rows) == 100
+    for i, row in enumerate(flushed_rows):
+        assert row["sequence_id"] == i
+
+
+@pytest.mark.asyncio
+async def test_tick_writer_loop_drains_queue_on_shutdown() -> None:
+    """``_tick_writer_loop`` keeps running while items remain in the queue.
+
+    Given: 50 rows queued on the writer queue and ``running`` flipped
+        to False BEFORE the writer task starts,
+    When: The writer loop runs,
+    Then: All 50 rows reach ``_flush_tick_batch`` and the queue ends
+        empty — the drain guard ``not self._tick_write_queue.empty()``
+        keeps the loop alive past the ``running`` flip.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._tick_batch_max_rows = 1000
+    pub._batch_max_age_s = 0.05
+    flushed_rows: list[dict[str, Any]] = []
+
+    async def collect_flush(batch: list[dict[str, Any]]) -> None:
+        flushed_rows.extend(batch)
+
+    pub._flush_tick_batch = collect_flush
+    for i in range(50):
+        await pub._tick_write_queue.put(_dummy_tick_row(i))
+    pub.running = False
+    await asyncio.wait_for(pub._tick_writer_loop(), timeout=2.0)
+    assert len(flushed_rows) == 50
+    assert pub._tick_write_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_tick_writer_loop_size_trigger_flushes_at_max_rows() -> None:
+    """Size trigger fires when batch reaches ``_tick_batch_max_rows``.
+
+    Given: Batch size cap of 5 and 12 rows queued,
+    When: The writer loop runs to completion,
+    Then: ``_flush_tick_batch`` is invoked at least twice (5 + 5 + 2 or
+        similar partition); cumulative row count is 12.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._tick_batch_max_rows = 5
+    pub._batch_max_age_s = 0.05
+    flush_calls = 0
+    flushed_rows: list[dict[str, Any]] = []
+
+    async def counting_flush(batch: list[dict[str, Any]]) -> None:
+        nonlocal flush_calls
+        flush_calls += 1
+        flushed_rows.extend(batch)
+
+    pub._flush_tick_batch = counting_flush
+    for i in range(12):
+        await pub._tick_write_queue.put(_dummy_tick_row(i))
+    pub.running = False
+    await asyncio.wait_for(pub._tick_writer_loop(), timeout=2.0)
+    assert flush_calls >= 2
+    assert len(flushed_rows) == 12
+
+
+@pytest.mark.asyncio
+async def test_tick_writer_loop_balances_task_done_against_put() -> None:
+    """Every successful ``put`` reaches a matching ``task_done``.
+
+    Given: 30 rows enqueued via the writer-queue helper and consumed,
+    When: ``await self._tick_write_queue.join()`` is invoked after the
+        writer drains,
+    Then: ``join()`` returns promptly (no outstanding ``task_done`` debt
+        would deadlock here).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._tick_batch_max_rows = 1000
+    pub._batch_max_age_s = 0.05
+
+    async def noop_flush(batch: list[dict[str, Any]]) -> None:
+        return None
+
+    pub._flush_tick_batch = noop_flush
+    for i in range(30):
+        await pub._tick_write_queue.put(_dummy_tick_row(i))
+    pub.running = False
+    await asyncio.wait_for(pub._tick_writer_loop(), timeout=2.0)
+    await asyncio.wait_for(pub._tick_write_queue.join(), timeout=0.5)
+    assert pub._tick_write_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_tick_writer_queue_drop_oldest_balances_task_done() -> None:
+    """Drop-oldest helper calls ``task_done`` for every evicted row.
+
+    Given: A bounded queue of size 3 already at capacity,
+    When: A new row is enqueued via the writer helper (which evicts the
+        oldest),
+    Then: ``join()`` reaches a balanced state once the remaining 3 rows
+        are consumed — the evicted row's ``task_done`` is properly
+        accounted for inside the helper.
+    """
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=3)
+    for i in range(3):
+        await queue.put(_dummy_tick_row(i))
+    _tick_writer_drop_counters.clear()
+    _enqueue_or_drop_oldest_tick_write(queue, _dummy_tick_row(99), "test-label")
+    assert queue.qsize() == 3
+    while not queue.empty():
+        queue.get_nowait()
+        queue.task_done()
+    await asyncio.wait_for(queue.join(), timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_tick_writer_drop_log_uses_persistence_backlog_label(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Writer-queue drop log message identifies persistence backlog explicitly.
+
+    Given: A full writer queue and a forced overflow,
+    When: The drop summary is emitted (one per
+        ``_TICK_WRITER_DROP_LOG_INTERVAL_S`` window),
+    Then: The log message contains the persistence-backlog phrasing so
+        operators do not confuse it with an upstream WS feed drop.
+    """
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+    await queue.put(_dummy_tick_row(0))
+    _tick_writer_drop_counters.clear()
+    sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+    try:
+        _enqueue_or_drop_oldest_tick_write(queue, _dummy_tick_row(1), "kraken")
+    finally:
+        logger.remove(sink_id)
+    _tick_writer_drop_counters.clear()
+    summaries = [rec for rec in caplog.records if "tick-writer queue full" in rec.message]
+    assert len(summaries) == 1
+    assert "persistence backlog" in summaries[0].message
+    assert "ZMQ subscribers" in summaries[0].message

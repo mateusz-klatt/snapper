@@ -13,6 +13,7 @@ from collections.abc import Callable
 from collections.abc import Coroutine
 from datetime import UTC
 from datetime import datetime
+from time import monotonic
 from typing import Any
 from typing import Final
 from typing import cast
@@ -64,6 +65,53 @@ from snapper.utils.logging import set_log_context
 _EXCHANGE_NOT_INIT_MSG = "Exchange client not initialized"
 _REPO_NOT_INIT_MSG = "Repository not initialized"
 _STREAM_END: Final = object()
+
+_TICK_WRITE_QUEUE_MAX = 20_000
+_TICK_WRITER_DROP_LOG_INTERVAL_S = 1.0
+_TICK_WRITER_SHUTDOWN_POLL_S = 0.5
+_tick_writer_drop_counters: dict[str, list[float]] = {}
+
+
+def _enqueue_or_drop_oldest_tick_write(
+    queue: asyncio.Queue[TickUpsertRow], row: TickUpsertRow, label: str
+) -> None:
+    """Put a tick row on the writer queue, dropping the oldest if full.
+
+    Distinct from the exchange-client-level drop helper because:
+
+    1. Overflow here means "ZMQ subscribers already got the tick; the DB
+       persistence path fell behind" — a different operator failure mode
+       than the upstream WS-queue drop, so the log label and counter
+       deliberately call out "persistence backlog".
+    2. ``asyncio.Queue.join()`` requires one ``task_done()`` per
+       successful ``put_nowait()``; the evicted row would otherwise leave
+       an outstanding count and deadlock graceful shutdown. The helper
+       calls ``task_done()`` for the evicted row to keep the join
+       balance correct.
+
+    Args:
+        queue: Bounded writer queue.
+        row: Tick row to enqueue for persistence.
+        label: Human-readable label (typically the exchange name).
+    """
+    try:
+        queue.put_nowait(row)
+    except asyncio.QueueFull:
+        counters = _tick_writer_drop_counters.setdefault(label, [0.0, 0.0])
+        counters[0] += 1
+        now = monotonic()
+        if now - counters[1] >= _TICK_WRITER_DROP_LOG_INTERVAL_S:
+            logger.warning(
+                f"{label}:tick-writer queue full, dropped {int(counters[0])} rows "
+                f"in last {now - counters[1]:.1f}s "
+                f"(persistence backlog — ticks delivered to ZMQ subscribers but not persisted)"
+            )
+            counters[0] = 0.0
+            counters[1] = now
+        evicted = queue.get_nowait()
+        queue.task_done()
+        del evicted
+        queue.put_nowait(row)
 
 
 def _cleanup_pending_future(fut: asyncio.Future[Any] | None) -> None:
@@ -122,6 +170,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._tick_batch_max_rows: int = 500
         self._trade_batch_max_rows: int = 500
         self._batch_max_age_s: float = 0.05
+        self._tick_write_queue: asyncio.Queue[TickUpsertRow] = asyncio.Queue(
+            maxsize=_TICK_WRITE_QUEUE_MAX
+        )
+        self._tick_consumer_task: asyncio.Task[None] | None = None
+        self._tick_writer_task: asyncio.Task[None] | None = None
 
     @abstractmethod
     def _create_exchange_client(self) -> T:
@@ -227,7 +280,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             asyncio.create_task(self._candle_loop(symbols_to_subscribe, timeframe))
             for timeframe in timeframes
         )
-        tasks.append(asyncio.create_task(self._tick_loop(symbols_to_subscribe)))
+        self._tick_consumer_task = asyncio.create_task(self._tick_loop(symbols_to_subscribe))
+        tasks.append(self._tick_consumer_task)
+        self._tick_writer_task = asyncio.create_task(self._tick_writer_loop())
+        tasks.append(self._tick_writer_task)
         if self._supports_public_trades():
             tasks.append(asyncio.create_task(self._trade_loop(symbols_to_subscribe)))
         else:
@@ -239,10 +295,46 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             raise
 
     async def stop(self) -> None:
-        """Stop the publisher service and disconnect from exchange."""
-        if not self.running:
+        """Stop the publisher service and disconnect from exchange.
+
+        Shutdown ordering — Codex+Copilot review 2026-05-11:
+
+        1. Flip ``self.running = False`` so every loop sees the stop
+           signal at its next checkpoint.
+        2. Await the tick consumer task so no new rows enter the writer
+           queue while we drain.
+        3. ``await self._tick_write_queue.join()`` blocks until every
+           queued row has been matched by a ``task_done()`` call —
+           safe now because the consumer task is done, no new puts will
+           happen, and the writer's drain guard keeps it running until
+           the queue is empty.
+        4. Await the writer task so the final batch flushes and the
+           coroutine returns cleanly.
+        5. Existing exchange/publisher/subscriber/context disposal as
+           before.
+
+        The early-return guard is keyed on ``running`` AND the absence
+        of any writer task / non-empty queue so a partially-initialised
+        publisher (e.g. start failure during setup) still gets a chance
+        to drain.
+        """
+        has_pending_writer = self._tick_writer_task is not None or (
+            self._tick_write_queue is not None and not self._tick_write_queue.empty()
+        )
+        if not self.running and not has_pending_writer:
             return
         self.running = False
+        if self._tick_consumer_task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._tick_consumer_task
+            self._tick_consumer_task = None
+        if self._tick_write_queue is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._tick_write_queue.join()
+        if self._tick_writer_task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._tick_writer_task
+            self._tick_writer_task = None
         if self._exchange_client:
             await self._exchange_client.disconnect()
             self._exchange_client = None
@@ -516,10 +608,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         return True
 
     async def _tick_loop(self, symbols: list[str]) -> None:
-        """Subscribe to tick data, publish to ZMQ, and batch DB writes.
+        """Subscribe to tick data, publish to ZMQ, and hand off DB rows to the writer.
 
-        Publish-first: ZMQ publish happens before instrument resolution,
-        so missing instruments skip DB but not ZMQ delivery.
+        Ingest-only: drains the exchange WS queue, publishes to ZMQ via
+        ``_process_tick``, and enqueues the resulting row on
+        :attr:`_tick_write_queue` for the dedicated writer task. Never
+        awaits ``_flush_tick_batch`` — that responsibility lives entirely
+        in :meth:`_tick_writer_loop` so SQLite commit latency cannot
+        block the WS-queue consumer.
 
         Args:
             symbols: List of symbols to subscribe to for tick data.
@@ -528,20 +624,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
         exchange = self._get_data_exchange()
-        batch: list[TickUpsertRow] = []
-        batch_start: float | None = None
-        ev_loop = asyncio.get_event_loop()
+        exchange_label = self._get_exchange_name()
         iterator = self._exchange_client.subscribe_ticks(symbols).__aiter__()
         next_fut: asyncio.Future[TickerUpdate | object] | None = None
         try:
             while self.running:
                 next_fut = next_fut or asyncio.ensure_future(anext(iterator, _STREAM_END))
-                done, _ = await asyncio.wait(
-                    {next_fut}, timeout=self._batch_age_remaining(batch_start, ev_loop)
-                )
+                done, _ = await asyncio.wait({next_fut}, timeout=self._batch_max_age_s)
                 if not done:
-                    await self._flush_on_age(batch, self._flush_tick_batch)
-                    batch_start = None
                     continue
                 next_fut = None
                 message = done.pop().result()
@@ -549,20 +639,89 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     break
                 row = await self._process_tick(cast(TickerUpdate, message), exchange)
                 if row is not None:
-                    batch.append(row)
-                    batch_start = self._track_batch_start(batch_start, ev_loop)
-                if len(batch) >= self._tick_batch_max_rows:
-                    await self._flush_tick_batch(batch)
-                    batch.clear()
-                    batch_start = None
+                    _enqueue_or_drop_oldest_tick_write(self._tick_write_queue, row, exchange_label)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"Tick loop error for {symbols}: {e}")
         finally:
             _cleanup_pending_future(next_fut)
-            if batch:
-                await self._flush_tick_batch(batch)
+
+    async def _tick_writer_loop(self) -> None:
+        """Drain :attr:`_tick_write_queue` and flush ticks to the database.
+
+        Drain semantics: the loop continues as long as the publisher is
+        running OR the write queue still has items OR an in-flight batch
+        hasn't been flushed yet. This guarantees a graceful shutdown
+        cannot leave persisted-but-not-flushed rows in memory.
+
+        ``task_done()`` accounting: every successful ``put`` on
+        :attr:`_tick_write_queue` must be matched by exactly one
+        ``task_done()`` call somewhere downstream — either at flush time
+        (one per row in the batch) or at drop-oldest time (one per
+        evicted row, handled by :func:`_enqueue_or_drop_oldest_tick_write`).
+        Without this, :meth:`asyncio.Queue.join` in :meth:`stop` would
+        deadlock.
+
+        ``timeout <= 0`` branch: :meth:`_batch_age_remaining` legitimately
+        returns ``0.0`` when the batch is already past its age budget.
+        ``asyncio.wait_for(get(), timeout=0.0)`` would raise
+        ``TimeoutError`` even with items queued, so the loop flushes the
+        current batch immediately and `continue`s instead.
+        """
+        batch: list[TickUpsertRow] = []
+        batch_start: float | None = None
+        ev_loop = asyncio.get_event_loop()
+        while self.running or not self._tick_write_queue.empty() or batch:
+            if not self.running and self._tick_write_queue.empty() and batch:
+                await self._flush_tick_writer_batch(batch)
+                batch_start = None
+                continue
+            timeout = self._batch_age_remaining(batch_start, ev_loop)
+            if timeout <= 0.0:
+                await self._flush_tick_writer_batch(batch)
+                batch_start = None
+                continue
+            try:
+                row = await asyncio.wait_for(
+                    self._tick_write_queue.get(),
+                    timeout=min(timeout, _TICK_WRITER_SHUTDOWN_POLL_S),
+                )
+            except TimeoutError:
+                if batch_start is None or self._batch_age_remaining(batch_start, ev_loop) <= 0.0:
+                    await self._flush_tick_writer_batch(batch)
+                    batch_start = None
+                continue
+            batch.append(row)
+            batch_start = self._track_batch_start(batch_start, ev_loop)
+            if len(batch) >= self._tick_batch_max_rows:
+                await self._flush_tick_writer_batch(batch)
+                batch_start = None
+
+    async def _flush_tick_writer_batch(self, batch: list[TickUpsertRow]) -> None:
+        """Flush the writer batch and balance the queue's ``task_done`` debt.
+
+        Extracted from :meth:`_tick_writer_loop` so the same flush +
+        accounting sequence is reused by all four exit branches (shutdown
+        drain, age-expired, get-timeout, size-trigger) without
+        duplicating the loop body.
+
+        Captures ``flushed_count`` **before** awaiting the flush so a
+        future mutation of ``batch`` during ``_flush_tick_batch`` cannot
+        desync the ``task_done`` count (Codex reviewer guardrail).
+
+        Args:
+            batch: In-flight write batch. Cleared in place on a
+                successful flush; left empty otherwise. Callers reset
+                their own ``batch_start`` cursor after this returns.
+        """
+        if not batch:
+            return
+        flushed_count = len(batch)
+        await self._flush_tick_batch(batch)
+        for _ in range(flushed_count):
+            self._tick_write_queue.task_done()
+        batch.clear()
 
     async def _process_tick(
         self, message: TickerUpdate, exchange: MarketDataExchange

@@ -32,6 +32,7 @@ from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.implementations import kraken as kr
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.implementations.kraken import _enqueue_or_drop_oldest
 
@@ -5293,8 +5294,6 @@ class TestEnqueueOrDropOldest:
         Then: At most one warning line lands in the captured log (per-tick
             spam is eliminated; the line carries the count summary).
         """
-        from snapper.infrastructure.exchanges.implementations import kraken as kr
-
         kr._drop_counters.clear()
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
         queue.put_nowait("seed")
@@ -5323,8 +5322,6 @@ class TestEnqueueOrDropOldest:
         Then: A warning is emitted (proves the interval gate eventually
             re-opens, not just suppresses everything after the first).
         """
-        from snapper.infrastructure.exchanges.implementations import kraken as kr
-
         kr._drop_counters["kraken-spot-tick"] = [0.0, 0.0]
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
         queue.put_nowait("seed")

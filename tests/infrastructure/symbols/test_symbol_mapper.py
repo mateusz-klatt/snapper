@@ -20,6 +20,7 @@ from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketSubscribeExchange
 from snapper.core.types import OrderExchange
 from snapper.data.models import SymbolAlias
+from snapper.infrastructure.symbols import mapper as mapper_module
 from snapper.infrastructure.symbols.functions import ccxt_to_kraken_websocket
 from snapper.infrastructure.symbols.functions import ccxt_to_native
 from snapper.infrastructure.symbols.functions import get_available_exchanges
@@ -30,6 +31,7 @@ from snapper.infrastructure.symbols.functions import get_available_kraken_symbol
 from snapper.infrastructure.symbols.functions import get_available_polygon_rest_symbols
 from snapper.infrastructure.symbols.functions import get_available_polygon_symbols
 from snapper.infrastructure.symbols.functions import get_available_symbols
+from snapper.infrastructure.symbols.functions import get_available_symbols_set
 from snapper.infrastructure.symbols.functions import get_available_walutomat_rest_symbols
 from snapper.infrastructure.symbols.functions import get_available_walutomat_symbols
 from snapper.infrastructure.symbols.functions import get_available_ws_symbols
@@ -37,6 +39,7 @@ from snapper.infrastructure.symbols.functions import get_market_data_exchanges
 from snapper.infrastructure.symbols.functions import get_market_data_symbols
 from snapper.infrastructure.symbols.functions import get_market_subscribe_exchanges
 from snapper.infrastructure.symbols.functions import get_tradeable_symbols
+from snapper.infrastructure.symbols.functions import invalidate_available_symbols_cache
 from snapper.infrastructure.symbols.functions import is_market_data_available
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.functions import kraken_equities_ws_to_native
@@ -1306,8 +1309,6 @@ class TestDatabaseSymbolMapperFunctions:
         When: get_available_symbols is called,
         Then: Returns sorted deduplicated union.
         """
-        from snapper.infrastructure.symbols.functions import invalidate_available_symbols_cache
-
         invalidate_available_symbols_cache()
         with (
             patch(
@@ -1350,9 +1351,6 @@ class TestAvailableSymbolsSetCache:
         When: get_available_symbols_set is called,
         Then: A frozenset containing every symbol is returned.
         """
-        from snapper.infrastructure.symbols.functions import get_available_symbols_set
-        from snapper.infrastructure.symbols.functions import invalidate_available_symbols_cache
-
         invalidate_available_symbols_cache()
         with (
             patch(
@@ -1389,9 +1387,6 @@ class TestAvailableSymbolsSetCache:
         Then: Each per-exchange getter is invoked exactly once (during the
             initial rebuild).
         """
-        from snapper.infrastructure.symbols.functions import get_available_symbols_set
-        from snapper.infrastructure.symbols.functions import invalidate_available_symbols_cache
-
         invalidate_available_symbols_cache()
         with (
             patch(
@@ -1432,9 +1427,6 @@ class TestAvailableSymbolsSetCache:
         Then: The next get_available_symbols_set call re-invokes the
             per-exchange getters and reflects the new universe.
         """
-        from snapper.infrastructure.symbols.functions import get_available_symbols_set
-        from snapper.infrastructure.symbols.functions import invalidate_available_symbols_cache
-
         invalidate_available_symbols_cache()
         with (
             patch(
@@ -1496,10 +1488,6 @@ class TestAvailableSymbolsSetCache:
             per-exchange getters because the callback registered at
             functions-module import fired.
         """
-        from snapper.infrastructure.symbols.functions import get_available_symbols_set
-        from snapper.infrastructure.symbols.functions import invalidate_available_symbols_cache
-        from snapper.infrastructure.symbols.mapper import SymbolMapperService
-
         invalidate_available_symbols_cache()
         with (
             patch(
@@ -1568,9 +1556,6 @@ class TestRegisterInvalidationCallback:
         Then: The internal list still contains one entry — the
             ``mapper.trigger_cache_invalidation`` for-loop fires it once.
         """
-        from snapper.infrastructure.symbols import mapper as mapper_module
-        from snapper.infrastructure.symbols.functions import invalidate_available_symbols_cache
-
         before = list(mapper_module._invalidation_callbacks)
         mapper_module.register_invalidation_callback(invalidate_available_symbols_cache)
         after = list(mapper_module._invalidation_callbacks)
