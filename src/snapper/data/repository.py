@@ -183,6 +183,7 @@ from snapper.data.repository_types import SettingRow
 from snapper.data.repository_types import SignalRow
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TickUpsertRow
+from snapper.data.repository_types import TradeCommandDispatchUpdate
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import TradeProjectionCheckpointRow
@@ -365,6 +366,7 @@ _CandleNaturalKey = tuple[str, str, datetime]
 _CANDLE_LOOKUP_CHUNK_SIZE = 300
 _SnapshotNaturalKey = str
 _SNAPSHOT_LOOKUP_CHUNK_SIZE = 500
+_OUTBOX_BULK_LOOKUP_CHUNK_SIZE = 200
 ScopeExpansionKey = tuple[str, str | None, str | None]
 
 
@@ -6258,6 +6260,100 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             await s.refresh(new_cmd)
             return new_cmd.id
+
+    async def bulk_dispatch_trade_commands(self, updates: list[TradeCommandDispatchUpdate]) -> int:
+        """Apply N CREATED -> DISPATCHED SCD2 transitions in one session + commit.
+
+        Replaces the per-row ``update_trade_command_status`` round-trip on
+        the OutboxDispatcher hot loop. Each input describes one command's
+        success-side transition. Within a single ``async with self.session``
+        block we bulk-load the active source rows by ``public_id`` (chunked
+        by ``_OUTBOX_BULK_LOOKUP_CHUNK_SIZE``), close each match, and stage
+        its successor INSERT — then commit once.
+
+        Inputs whose ``public_id`` no longer points to an active row are
+        skipped silently; the returned count reflects only rows actually
+        transitioned. Per-row ``last_error`` is cleared on the new
+        version (success path never carries a previous error forward).
+
+        Failure semantics: any DB error rolls back the entire transaction.
+        The OutboxDispatcher therefore falls back to per-row
+        ``update_trade_command_status`` for non-success transitions (e.g.
+        revert-to-CREATED on publish failure) so a bulk-write blow-up only
+        risks one tick's batch, never the per-row error-recovery path.
+        """
+        if not updates:
+            return 0
+        spec_by_pid = {u["public_id"]: u for u in updates}
+        public_ids = list(spec_by_pid)
+        new_status = TradeCommandStatusEnum.DISPATCHED.value
+        applied = 0
+        async with self.session() as s:
+            for offset in range(0, len(public_ids), _OUTBOX_BULK_LOOKUP_CHUNK_SIZE):
+                pid_chunk = public_ids[offset : offset + _OUTBOX_BULK_LOOKUP_CHUNK_SIZE]
+                spec_chunk = [spec_by_pid[pid] for pid in pid_chunk]
+                min_bus_time = min(spec["bus_time"] for spec in spec_chunk)
+                max_bus_time = max(spec["bus_time"] for spec in spec_chunk)
+                result = await s.execute(
+                    select(TradeCommand)
+                    .where(
+                        TradeCommand.public_id.in_(pid_chunk),
+                        TradeCommand.timestamp <= max_bus_time,
+                        TradeCommand.known_to > min_bus_time,
+                    )
+                    .with_for_update()
+                )
+                for existing in result.scalars().all():
+                    spec = spec_by_pid.get(existing.public_id)
+                    if spec is None:
+                        continue
+                    bus_time = spec["bus_time"]
+                    if not (existing.timestamp <= bus_time and existing.known_to > bus_time):
+                        continue
+                    await s.execute(
+                        update(TradeCommand)
+                        .where(TradeCommand.id == existing.id)
+                        .values(known_to=bus_time)
+                    )
+                    new_cmd = TradeCommand(
+                        public_id=existing.public_id,
+                        command_type=existing.command_type,
+                        shard_key=existing.shard_key,
+                        exchange=existing.exchange,
+                        instrument=existing.instrument,
+                        mode=existing.mode,
+                        strategy_id=existing.strategy_id,
+                        client_order_id=existing.client_order_id,
+                        venue_client_id=existing.venue_client_id,
+                        idempotency_key=existing.idempotency_key,
+                        side=existing.side,
+                        order_type=existing.order_type,
+                        quantity=existing.quantity,
+                        price=existing.price,
+                        leverage=existing.leverage,
+                        reduce_only=existing.reduce_only,
+                        status=new_status,
+                        attempt_count=spec["attempt_count"],
+                        last_error=None,
+                        created_at=existing.created_at,
+                        dispatched_at=spec["dispatched_at"],
+                        acked_at=existing.acked_at,
+                        terminal_at=existing.terminal_at,
+                        exchange_order_id=existing.exchange_order_id,
+                        supersedes_command_id=existing.supersedes_command_id,
+                        correlation_id=existing.correlation_id,
+                        plan_public_id=existing.plan_public_id,
+                        session_id=spec["session_id"],
+                        sequence_id=spec["sequence_id"],
+                        timestamp=bus_time,
+                        wallet_public_id=existing.wallet_public_id,
+                        operator_public_id=existing.operator_public_id,
+                        user_public_id=existing.user_public_id,
+                    )
+                    s.add(new_cmd)
+                    applied += 1
+            await s.commit()
+        return applied
 
     async def get_undispatched_commands(
         self,

@@ -339,6 +339,24 @@ class TradeCommandRow(TypedDict):
     plan_public_id: NotRequired[str | None]
 
 
+class TradeCommandDispatchUpdate(TypedDict):
+    """One row in a bulk DISPATCHED-status SCD2 transition.
+
+    Consumed by
+    :py:meth:`~snapper.data.repository.SQLAlchemyRepository.bulk_dispatch_trade_commands`
+    to commit N close+insert transitions inside a single session+commit
+    instead of paying per-row round-trips on the outbox dispatcher hot
+    loop.
+    """
+
+    public_id: str
+    bus_time: datetime
+    session_id: str
+    sequence_id: int
+    dispatched_at: datetime
+    attempt_count: int
+
+
 class UserTradingCapsRow(TypedDict):
     """Active per-user trading-caps row projection.
 

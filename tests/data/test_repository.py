@@ -4413,6 +4413,157 @@ async def test_update_trade_command_status_carries_forward_leverage_and_reduce_o
 
 
 @pytest.mark.asyncio
+async def test_bulk_dispatch_trade_commands_transitions_all_to_dispatched(
+    tmp_path: Path,
+) -> None:
+    """Verify bulk_dispatch_trade_commands SCD2-transitions N commands in one session.
+
+    Given: Two trade commands persisted in 'created' status,
+    When: bulk_dispatch_trade_commands is called with both public_ids in a single batch,
+    Then: Both rows transition created → dispatched via SCD2 close+insert with the
+        per-row attempt_count + dispatched_at applied, and a single round-trip
+        sequence (one bulk SELECT + per-row UPDATE/INSERT) replaces N calls to
+        update_trade_command_status.
+    """
+    db_path = tmp_path / "cmd_bulk_dispatch.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    inserted_pids: list[str] = []
+    for idx in range(2):
+        _, pid = await r.insert_trade_command(
+            {
+                "command_type": "submit",
+                "shard_key": "kraken.BTC-USD.live",
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "mode": "live",
+                "strategy_id": "engine-bulk",
+                "client_order_id": f"cid-bulk-{idx}",
+                "venue_client_id": f"vcid-bulk-{idx}",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 0.5,
+                "price": None,
+                "status": "created",
+                "created_at": now,
+                "correlation_id": f"corr-bulk-{idx}",
+                "session_id": "s1",
+                "sequence_id": 10 + idx,
+                "timestamp": now,
+            }
+        )
+        inserted_pids.append(pid)
+    later = now + timedelta(seconds=1)
+    applied = await r.bulk_dispatch_trade_commands(
+        [
+            {
+                "public_id": inserted_pids[0],
+                "bus_time": later,
+                "session_id": "s1",
+                "sequence_id": 100,
+                "dispatched_at": later,
+                "attempt_count": 1,
+            },
+            {
+                "public_id": inserted_pids[1],
+                "bus_time": later,
+                "session_id": "s1",
+                "sequence_id": 101,
+                "dispatched_at": later,
+                "attempt_count": 1,
+            },
+        ]
+    )
+    assert applied == 2
+    undispatched = await r.get_undispatched_commands(as_of=later, limit=10)
+    assert undispatched == []
+    active = await r.get_active_commands_for_shard("kraken.BTC-USD.live", later)
+    statuses = sorted(row["status"] for row in active)
+    assert statuses == ["dispatched", "dispatched"]
+    attempt_counts = sorted(row["attempt_count"] for row in active)
+    assert attempt_counts == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_bulk_dispatch_trade_commands_empty_returns_zero(tmp_path: Path) -> None:
+    """Empty input returns 0 without opening a session.
+
+    Given: Empty updates list,
+    When: bulk_dispatch_trade_commands is called,
+    Then: Returns 0; no DB round-trip.
+    """
+    db_path = tmp_path / "cmd_bulk_dispatch_empty.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    applied = await r.bulk_dispatch_trade_commands([])
+    assert applied == 0
+
+
+@pytest.mark.asyncio
+async def test_bulk_dispatch_trade_commands_skips_missing_public_id(tmp_path: Path) -> None:
+    """Unknown public_ids are silently skipped; valid rows still dispatched.
+
+    Given: One persisted command and one update spec referencing an unknown public_id,
+    When: bulk_dispatch_trade_commands is called with both,
+    Then: Only the existing command transitions to 'dispatched'; the unknown
+        public_id is dropped without raising.
+    """
+    db_path = tmp_path / "cmd_bulk_dispatch_skip.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _, real_pid = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-skip",
+            "client_order_id": "cid-skip-1",
+            "venue_client_id": "vcid-skip-1",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-skip",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
+    )
+    later = now + timedelta(seconds=1)
+    applied = await r.bulk_dispatch_trade_commands(
+        [
+            {
+                "public_id": real_pid,
+                "bus_time": later,
+                "session_id": "s1",
+                "sequence_id": 100,
+                "dispatched_at": later,
+                "attempt_count": 1,
+            },
+            {
+                "public_id": "01975a8b-3c7d-7000-8000-ffffffffffff",
+                "bus_time": later,
+                "session_id": "s1",
+                "sequence_id": 101,
+                "dispatched_at": later,
+                "attempt_count": 1,
+            },
+        ]
+    )
+    assert applied == 1
+    active = await r.get_active_commands_for_shard("kraken.BTC-USD.live", later)
+    assert len(active) == 1
+    assert active[0]["status"] == "dispatched"
+    assert active[0]["public_id"] == real_pid
+
+
+@pytest.mark.asyncio
 async def test_update_trade_command_status_carries_forward_multi_tenant_ids(
     tmp_path: Path,
 ) -> None:

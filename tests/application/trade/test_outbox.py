@@ -64,7 +64,7 @@ async def test_dispatch_publishes_and_updates_status() -> None:
 
     Given: a repository returning one undispatched command,
     When: the dispatcher runs one cycle,
-    Then: publish_fn is called and update_trade_command_status sets 'dispatched'.
+    Then: publish_fn is called and bulk_dispatch_trade_commands marks dispatched.
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
@@ -79,6 +79,7 @@ async def test_dispatch_publishes_and_updates_status() -> None:
 
     repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
     repo.update_trade_command_status = AsyncMock(return_value=1)
+    repo.bulk_dispatch_trade_commands = AsyncMock(return_value=1)
     publish_fn = AsyncMock()
 
     dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn, poll_interval=0.01)
@@ -91,9 +92,12 @@ async def test_dispatch_publishes_and_updates_status() -> None:
 
     await _run_briefly()
     publish_fn.assert_called_once_with(cmd)
-    repo.update_trade_command_status.assert_called()
-    call_kwargs = repo.update_trade_command_status.call_args_list[0].kwargs
-    assert call_kwargs["new_status"] == "dispatched"
+    repo.bulk_dispatch_trade_commands.assert_called()
+    repo.update_trade_command_status.assert_not_called()
+    success_arg = repo.bulk_dispatch_trade_commands.call_args_list[0].args[0]
+    assert len(success_arg) == 1
+    assert success_arg[0]["public_id"] == cmd["public_id"]
+    assert success_arg[0]["attempt_count"] == cmd["attempt_count"] + 1
 
 
 @pytest.mark.asyncio
@@ -192,11 +196,11 @@ async def test_stop_gracefully() -> None:
 
 @pytest.mark.asyncio
 async def test_no_publish_fn_skips_publish() -> None:
-    """Dispatcher with no publish_fn still updates command status.
+    """Dispatcher with no publish_fn still marks command dispatched.
 
     Given: a dispatcher with publish_fn=None,
     When: an undispatched command is found,
-    Then: update_trade_command_status is called (status='dispatched'), no error.
+    Then: bulk_dispatch_trade_commands marks it dispatched, no error.
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
@@ -211,6 +215,7 @@ async def test_no_publish_fn_skips_publish() -> None:
 
     repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
     repo.update_trade_command_status = AsyncMock(return_value=1)
+    repo.bulk_dispatch_trade_commands = AsyncMock(return_value=1)
 
     dispatcher = OutboxDispatcher(repository=repo, publish_fn=None, poll_interval=0.01)
 
@@ -219,9 +224,11 @@ async def test_no_publish_fn_skips_publish() -> None:
     dispatcher.stop()
     await task
 
-    repo.update_trade_command_status.assert_called()
-    call_kwargs = repo.update_trade_command_status.call_args_list[0].kwargs
-    assert call_kwargs["new_status"] == "dispatched"
+    repo.bulk_dispatch_trade_commands.assert_called()
+    repo.update_trade_command_status.assert_not_called()
+    success_arg = repo.bulk_dispatch_trade_commands.call_args_list[0].args[0]
+    assert len(success_arg) == 1
+    assert success_arg[0]["public_id"] == cmd["public_id"]
 
 
 @pytest.mark.asyncio
@@ -248,9 +255,10 @@ async def test_cancelled_error_propagates() -> None:
 async def test_dispatch_post_publish_db_failure_no_revert() -> None:
     """Dispatcher does not revert to created after successful publish + DB failure.
 
-    Given: a repository where publish succeeds but status update raises,
+    Given: a repository where publish succeeds but bulk DB write raises,
     When: the dispatcher runs one cycle,
-    Then: the command is NOT reverted to 'created' (prevents replay).
+    Then: the command is NOT reverted to 'created' (prevents replay) —
+    update_trade_command_status is NEVER called on the success path.
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
@@ -264,7 +272,8 @@ async def test_dispatch_post_publish_db_failure_no_revert() -> None:
         return []
 
     repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
-    repo.update_trade_command_status = AsyncMock(side_effect=RuntimeError("DB down"))
+    repo.update_trade_command_status = AsyncMock(return_value=1)
+    repo.bulk_dispatch_trade_commands = AsyncMock(side_effect=RuntimeError("DB down"))
     publish_fn = AsyncMock()
 
     dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn, poll_interval=0.01)
@@ -275,9 +284,8 @@ async def test_dispatch_post_publish_db_failure_no_revert() -> None:
     await task
 
     publish_fn.assert_called_once()
-    assert repo.update_trade_command_status.call_count == 1
-    call_kwargs = repo.update_trade_command_status.call_args_list[0].kwargs
-    assert call_kwargs["new_status"] == "dispatched"
+    repo.bulk_dispatch_trade_commands.assert_called_once()
+    repo.update_trade_command_status.assert_not_called()
 
 
 @pytest.mark.asyncio
