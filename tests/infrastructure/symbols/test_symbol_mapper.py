@@ -234,14 +234,16 @@ class TestSymbolMapperServiceIntegration:
         session_cm.__exit__ = Mock(return_value=None)
         mock_repo.get_session.return_value = session_cm
         SymbolMapperService.clear_instance()
-        with patch(
-            "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
-            return_value=mock_settings,
-        ), patch(
-            "snapper.infrastructure.symbols.mapper.DatabaseRepository",
-            return_value=mock_repo,
-        ), patch.object(
-            SymbolMapperService, "load_mappings_from_db", return_value=[]
+        with (
+            patch(
+                "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
+                return_value=mock_settings,
+            ),
+            patch(
+                "snapper.infrastructure.symbols.mapper.DatabaseRepository",
+                return_value=mock_repo,
+            ),
+            patch.object(SymbolMapperService, "load_mappings_from_db", return_value=[]),
         ):
             instance1 = SymbolMapperService()
             instance2 = SymbolMapperService()
@@ -266,14 +268,16 @@ class TestSymbolMapperServiceIntegration:
         session_cm.__exit__ = Mock(return_value=None)
         mock_repo.get_session.return_value = session_cm
         SymbolMapperService.clear_instance()
-        with patch(
-            "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
-            return_value=mock_settings,
-        ), patch(
-            "snapper.infrastructure.symbols.mapper.DatabaseRepository",
-            return_value=mock_repo,
-        ), patch.object(
-            SymbolMapperService, "trigger_cache_invalidation"
+        with (
+            patch(
+                "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
+                return_value=mock_settings,
+            ),
+            patch(
+                "snapper.infrastructure.symbols.mapper.DatabaseRepository",
+                return_value=mock_repo,
+            ),
+            patch.object(SymbolMapperService, "trigger_cache_invalidation"),
         ):
             mapper = SymbolMapperService()
             result = mapper.load_mappings_from_db()
@@ -290,12 +294,14 @@ class TestSymbolMapperServiceIntegration:
         mock_settings.db_url = "sqlite:///:memory:"
         mock_settings.zmq_broker_xpub = "tcp://localhost:5556"
         SymbolMapperService.clear_instance()
-        with patch(
-            "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
-            return_value=mock_settings,
-        ), patch("snapper.infrastructure.symbols.mapper.DatabaseRepository"), patch.object(
-            SymbolMapperService, "load_cache_if_needed", autospec=True
-        ) as mock_load:
+        with (
+            patch(
+                "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
+                return_value=mock_settings,
+            ),
+            patch("snapper.infrastructure.symbols.mapper.DatabaseRepository"),
+            patch.object(SymbolMapperService, "load_cache_if_needed", autospec=True) as mock_load,
+        ):
             mapper = SymbolMapperService()
             mock_load.reset_mock()
             mapper.trigger_cache_invalidation(fail_fast=True)
@@ -312,11 +318,13 @@ class TestSymbolMapperServiceIntegration:
         mock_settings.db_url = "sqlite:///:memory:"
         mock_settings.zmq_broker_xpub = "tcp://localhost:5556"
         SymbolMapperService.clear_instance()
-        with patch(
-            "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
-            return_value=mock_settings,
-        ), patch("snapper.infrastructure.symbols.mapper.DatabaseRepository"), patch.object(
-            SymbolMapperService, "load_cache_if_needed", autospec=True
+        with (
+            patch(
+                "snapper.infrastructure.symbols.mapper._get_bootstrap_settings",
+                return_value=mock_settings,
+            ),
+            patch("snapper.infrastructure.symbols.mapper.DatabaseRepository"),
+            patch.object(SymbolMapperService, "load_cache_if_needed", autospec=True),
         ):
             instance1 = SymbolMapperService.get_instance()
             instance2 = SymbolMapperService.get_instance()
@@ -1298,6 +1306,9 @@ class TestDatabaseSymbolMapperFunctions:
         When: get_available_symbols is called,
         Then: Returns sorted deduplicated union.
         """
+        from snapper.infrastructure.symbols.functions import invalidate_available_symbols_cache
+
+        invalidate_available_symbols_cache()
         with (
             patch(
                 "snapper.infrastructure.symbols.functions.get_available_kraken_symbols",
@@ -1326,6 +1337,244 @@ class TestDatabaseSymbolMapperFunctions:
                 "USD-PLN",
             ]
             assert result == expected
+        invalidate_available_symbols_cache()
+
+
+class TestAvailableSymbolsSetCache:
+    """Tests for the publisher hot-path frozenset cache (HV2-H5)."""
+
+    def test_set_returns_frozenset_with_all_symbols(self) -> None:
+        """Frozenset is built from the union of per-exchange getters.
+
+        Given: Per-exchange getters return disjoint lists,
+        When: get_available_symbols_set is called,
+        Then: A frozenset containing every symbol is returned.
+        """
+        from snapper.infrastructure.symbols.functions import get_available_symbols_set
+        from snapper.infrastructure.symbols.functions import invalidate_available_symbols_cache
+
+        invalidate_available_symbols_cache()
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_symbols",
+                return_value=["BTC-USD", "ETH-USD"],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_futures_symbols",
+                return_value=["BTC-USD-PERP"],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_equities_symbols",
+                return_value=["MNQM6-CME"],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_walutomat_symbols",
+                return_value=["EUR-PLN"],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_polygon_symbols",
+                return_value=["BTC-USD"],
+            ),
+        ):
+            result = get_available_symbols_set()
+        invalidate_available_symbols_cache()
+        assert isinstance(result, frozenset)
+        assert result == frozenset({"BTC-USD", "ETH-USD", "BTC-USD-PERP", "MNQM6-CME", "EUR-PLN"})
+
+    def test_set_is_cached_across_calls(self) -> None:
+        """Per-exchange getters are NOT re-invoked once the cache is warm.
+
+        Given: A warm cache,
+        When: get_available_symbols_set is called 10 times,
+        Then: Each per-exchange getter is invoked exactly once (during the
+            initial rebuild).
+        """
+        from snapper.infrastructure.symbols.functions import get_available_symbols_set
+        from snapper.infrastructure.symbols.functions import invalidate_available_symbols_cache
+
+        invalidate_available_symbols_cache()
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_symbols",
+                return_value=["BTC-USD"],
+            ) as m_kraken,
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_futures_symbols",
+                return_value=[],
+            ) as m_futures,
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_equities_symbols",
+                return_value=[],
+            ) as m_equities,
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_walutomat_symbols",
+                return_value=[],
+            ) as m_walutomat,
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_polygon_symbols",
+                return_value=[],
+            ) as m_polygon,
+        ):
+            for _ in range(10):
+                get_available_symbols_set()
+            assert m_kraken.call_count == 1
+            assert m_futures.call_count == 1
+            assert m_equities.call_count == 1
+            assert m_walutomat.call_count == 1
+            assert m_polygon.call_count == 1
+        invalidate_available_symbols_cache()
+
+    def test_invalidate_forces_rebuild(self) -> None:
+        """invalidate_available_symbols_cache restores cold-start semantics.
+
+        Given: A warm cache,
+        When: invalidate_available_symbols_cache is called,
+        Then: The next get_available_symbols_set call re-invokes the
+            per-exchange getters and reflects the new universe.
+        """
+        from snapper.infrastructure.symbols.functions import get_available_symbols_set
+        from snapper.infrastructure.symbols.functions import invalidate_available_symbols_cache
+
+        invalidate_available_symbols_cache()
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_symbols",
+                return_value=["BTC-USD"],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_futures_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_equities_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_walutomat_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_polygon_symbols",
+                return_value=[],
+            ),
+        ):
+            first = get_available_symbols_set()
+        assert first == frozenset({"BTC-USD"})
+        invalidate_available_symbols_cache()
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_symbols",
+                return_value=["BTC-USD", "ETH-USD"],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_futures_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_equities_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_walutomat_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_polygon_symbols",
+                return_value=[],
+            ),
+        ):
+            second = get_available_symbols_set()
+        assert second == frozenset({"BTC-USD", "ETH-USD"})
+        invalidate_available_symbols_cache()
+
+    def test_mapper_trigger_invalidation_fires_callback(self) -> None:
+        """SymbolMapperService.trigger_cache_invalidation invalidates the set cache.
+
+        Given: A warm get_available_symbols_set cache and a mapper instance,
+        When: mapper.trigger_cache_invalidation runs,
+        Then: The next get_available_symbols_set call re-invokes the
+            per-exchange getters because the callback registered at
+            functions-module import fired.
+        """
+        from snapper.infrastructure.symbols.functions import get_available_symbols_set
+        from snapper.infrastructure.symbols.functions import invalidate_available_symbols_cache
+        from snapper.infrastructure.symbols.mapper import SymbolMapperService
+
+        invalidate_available_symbols_cache()
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_symbols",
+                return_value=["BTC-USD"],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_futures_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_equities_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_walutomat_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_polygon_symbols",
+                return_value=[],
+            ),
+        ):
+            first = get_available_symbols_set()
+            assert first == frozenset({"BTC-USD"})
+            mapper = SymbolMapperService.get_instance()
+            with patch.object(
+                SymbolMapperService, "load_cache_if_needed", lambda self, fail_fast=False: None
+            ):
+                mapper.trigger_cache_invalidation(fail_fast=False)
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_symbols",
+                return_value=["XRP-USD"],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_futures_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_equities_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_walutomat_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_polygon_symbols",
+                return_value=[],
+            ),
+        ):
+            second = get_available_symbols_set()
+        invalidate_available_symbols_cache()
+        assert second == frozenset({"XRP-USD"})
+
+
+class TestRegisterInvalidationCallback:
+    """Tests for the mapper.register_invalidation_callback hook."""
+
+    def test_register_is_idempotent(self) -> None:
+        """Re-registering the same callback does not stack duplicate invocations.
+
+        Given: A callback already registered (functions-module import did this),
+        When: register_invalidation_callback is called with the same callback,
+        Then: The internal list still contains one entry — the
+            ``mapper.trigger_cache_invalidation`` for-loop fires it once.
+        """
+        from snapper.infrastructure.symbols import mapper as mapper_module
+        from snapper.infrastructure.symbols.functions import invalidate_available_symbols_cache
+
+        before = list(mapper_module._invalidation_callbacks)
+        mapper_module.register_invalidation_callback(invalidate_available_symbols_cache)
+        after = list(mapper_module._invalidation_callbacks)
+        assert before == after
 
 
 class TestDatabaseSymbolMapperZMQIntegration:
@@ -1466,12 +1715,15 @@ class TestWalutomatHelpers:
         When: native_to_walutomat_ws is called,
         Then: Raises ValueError.
         """
-        with patch(
-            "snapper.infrastructure.symbols.functions._get_db_mapper",
-            return_value=mock_mapper,
-        ), pytest.raises(
-            ValueError,
-            match=r"Unknown native symbol \(not available on Walutomat WS\): INVALID-SYMBOL",
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions._get_db_mapper",
+                return_value=mock_mapper,
+            ),
+            pytest.raises(
+                ValueError,
+                match=r"Unknown native symbol \(not available on Walutomat WS\): INVALID-SYMBOL",
+            ),
         ):
             native_to_walutomat_ws("INVALID-SYMBOL")
 
@@ -1498,10 +1750,13 @@ class TestWalutomatHelpers:
         When: walutomat_ws_to_native is called,
         Then: Raises ValueError.
         """
-        with patch(
-            "snapper.infrastructure.symbols.functions._get_db_mapper",
-            return_value=mock_mapper,
-        ), pytest.raises(ValueError, match=r"Unknown Walutomat WebSocket symbol: INVALID_SYMBOL"):
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions._get_db_mapper",
+                return_value=mock_mapper,
+            ),
+            pytest.raises(ValueError, match=r"Unknown Walutomat WebSocket symbol: INVALID_SYMBOL"),
+        ):
             walutomat_ws_to_native("INVALID_SYMBOL")
 
     def test_native_to_walutomat_rest_success(self, mock_mapper: MagicMock) -> None:
@@ -1527,12 +1782,15 @@ class TestWalutomatHelpers:
         When: native_to_walutomat_rest is called,
         Then: Raises ValueError.
         """
-        with patch(
-            "snapper.infrastructure.symbols.functions._get_db_mapper",
-            return_value=mock_mapper,
-        ), pytest.raises(
-            ValueError,
-            match=r"Unknown native symbol \(not available on Walutomat REST\): INVALID-SYMBOL",
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions._get_db_mapper",
+                return_value=mock_mapper,
+            ),
+            pytest.raises(
+                ValueError,
+                match=r"Unknown native symbol \(not available on Walutomat REST\): INVALID-SYMBOL",
+            ),
         ):
             native_to_walutomat_rest("INVALID-SYMBOL")
 
@@ -1559,10 +1817,13 @@ class TestWalutomatHelpers:
         When: walutomat_rest_to_native is called,
         Then: Raises ValueError.
         """
-        with patch(
-            "snapper.infrastructure.symbols.functions._get_db_mapper",
-            return_value=mock_mapper,
-        ), pytest.raises(ValueError, match=r"Unknown Walutomat REST symbol: INVALID_SYMBOL"):
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions._get_db_mapper",
+                return_value=mock_mapper,
+            ),
+            pytest.raises(ValueError, match=r"Unknown Walutomat REST symbol: INVALID_SYMBOL"),
+        ):
             walutomat_rest_to_native("INVALID_SYMBOL")
 
     def test_get_available_walutomat_rest_symbols_returns_sorted_list(
@@ -1624,12 +1885,15 @@ class TestPolygonHelpers:
         When: native_to_polygon_rest is called,
         Then: Raises ValueError.
         """
-        with patch(
-            "snapper.infrastructure.symbols.functions._get_db_mapper",
-            return_value=mock_mapper,
-        ), pytest.raises(
-            ValueError,
-            match=r"Unknown native symbol \(not available on Polygon\): INVALID-SYMBOL",
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions._get_db_mapper",
+                return_value=mock_mapper,
+            ),
+            pytest.raises(
+                ValueError,
+                match=r"Unknown native symbol \(not available on Polygon\): INVALID-SYMBOL",
+            ),
         ):
             native_to_polygon_rest("INVALID-SYMBOL")
 
@@ -1656,10 +1920,13 @@ class TestPolygonHelpers:
         When: polygon_rest_to_native is called,
         Then: Raises ValueError.
         """
-        with patch(
-            "snapper.infrastructure.symbols.functions._get_db_mapper",
-            return_value=mock_mapper,
-        ), pytest.raises(ValueError, match=r"Unknown Polygon REST symbol: INVALID:SYMBOL"):
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions._get_db_mapper",
+                return_value=mock_mapper,
+            ),
+            pytest.raises(ValueError, match=r"Unknown Polygon REST symbol: INVALID:SYMBOL"),
+        ):
             polygon_rest_to_native("INVALID:SYMBOL")
 
     def test_get_available_polygon_rest_symbols_returns_sorted_list(
@@ -1703,10 +1970,13 @@ class TestKrakenFuturesHelpers:
         When: native_to_kraken_futures_ws is called,
         Then: Raises ValueError.
         """
-        with patch(
-            "snapper.infrastructure.symbols.functions._get_db_mapper",
-            return_value=mock_mapper,
-        ), pytest.raises(ValueError, match=r"Unknown native symbol: INVALID"):
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions._get_db_mapper",
+                return_value=mock_mapper,
+            ),
+            pytest.raises(ValueError, match=r"Unknown native symbol: INVALID"),
+        ):
             native_to_kraken_futures_ws("INVALID")
 
     def test_kraken_futures_ws_to_native_success(self, mock_mapper: MagicMock) -> None:
@@ -1730,10 +2000,13 @@ class TestKrakenFuturesHelpers:
         When: kraken_futures_ws_to_native is called,
         Then: Raises ValueError.
         """
-        with patch(
-            "snapper.infrastructure.symbols.functions._get_db_mapper",
-            return_value=mock_mapper,
-        ), pytest.raises(ValueError, match=r"Unknown Kraken Futures WS symbol: INVALID"):
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions._get_db_mapper",
+                return_value=mock_mapper,
+            ),
+            pytest.raises(ValueError, match=r"Unknown Kraken Futures WS symbol: INVALID"),
+        ):
             kraken_futures_ws_to_native("INVALID")
 
     def test_get_available_kraken_futures_symbols(self, mock_mapper: MagicMock) -> None:

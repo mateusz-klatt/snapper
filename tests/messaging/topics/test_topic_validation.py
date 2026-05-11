@@ -49,7 +49,7 @@ def _patch_env(monkeypatch: pytest.MonkeyPatch, exchanges: set[str], symbols: se
     monkeypatch.setattr(validation, "get_available_exchanges", lambda: exchanges)
     monkeypatch.setattr(validation, "get_market_subscribe_exchanges", lambda: exchanges)
     monkeypatch.setattr(validation, "get_market_data_exchanges", lambda: exchanges)
-    monkeypatch.setattr(validation, "get_available_symbols", lambda: symbols)
+    monkeypatch.setattr(validation, "get_available_symbols_set", lambda: frozenset(symbols))
 
 
 def test_market_candles_missing_timeframe(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -457,17 +457,19 @@ def patch_symbol_data(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     )
     monkeypatch.setattr(
         validation,
-        "get_available_symbols",
-        lambda: [
-            "AAPL",
-            "BTC-EUR",
-            "BTC-PLN",
-            "BTC-USD",
-            "ETH-USD",
-            "EUR-PLN",
-            "EUR-USD",
-            "USD-PLN",
-        ],
+        "get_available_symbols_set",
+        lambda: frozenset(
+            {
+                "AAPL",
+                "BTC-EUR",
+                "BTC-PLN",
+                "BTC-USD",
+                "ETH-USD",
+                "EUR-PLN",
+                "EUR-USD",
+                "USD-PLN",
+            }
+        ),
     )
     yield
 
@@ -3199,7 +3201,7 @@ def test_prefix_patterns_reject_invalid_exchange(
     monkeypatch.setattr(validation, "get_available_exchanges", lambda: ["kraken", "paper"])
     monkeypatch.setattr(validation, "get_market_subscribe_exchanges", lambda: ["kraken"])
     monkeypatch.setattr(validation, "get_market_data_exchanges", lambda: ["kraken"])
-    monkeypatch.setattr(validation, "get_available_symbols", lambda: {"BTC-USD"})
+    monkeypatch.setattr(validation, "get_available_symbols_set", lambda: frozenset({"BTC-USD"}))
     valid, message = validate_subscription_pattern(pattern)
     assert valid is False
     assert expected_message in message
@@ -3522,7 +3524,7 @@ def test_valid_prefix_patterns_are_accepted(monkeypatch: pytest.MonkeyPatch, pat
     monkeypatch.setattr(validation, "get_available_exchanges", lambda: ["kraken", "paper"])
     monkeypatch.setattr(validation, "get_market_subscribe_exchanges", lambda: ["kraken"])
     monkeypatch.setattr(validation, "get_market_data_exchanges", lambda: ["kraken"])
-    monkeypatch.setattr(validation, "get_available_symbols", lambda: {"BTC-USD"})
+    monkeypatch.setattr(validation, "get_available_symbols_set", lambda: frozenset({"BTC-USD"}))
     valid, message = validate_subscription_pattern(pattern)
     assert valid is True
     assert message == ""

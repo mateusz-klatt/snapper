@@ -34,6 +34,7 @@ from snapper.data.models import Symbol
 from snapper.data.repository import Repository
 from snapper.data.repository import where_active
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
+from snapper.infrastructure.symbols.mapper import register_invalidation_callback
 
 __all__ = [
     "resolve_symbol_public_id",
@@ -563,21 +564,100 @@ def get_available_polygon_symbols() -> list[str]:
     return sorted(mapper.polygon_rest_to_native.values())
 
 
+class _AvailableSymbolsCache:
+    """Process-local cache for the cross-exchange native-symbol union.
+
+    A class-attribute holder dodges the lint warning against module-level
+    ``global`` rebinding while keeping invalidation O(1). One instance is
+    created at import; mutation flows through the class rather than the
+    bare ``global`` statement.
+
+    Attributes:
+        frozen: Cached :class:`frozenset` for O(1) membership lookups —
+            populated on first :func:`get_available_symbols_set` call
+            and on every invalidation that follows. ``None`` while cold.
+        sorted_list: Cached sorted ``list[str]`` mirror returned by
+            :func:`get_available_symbols`. ``None`` while cold.
+    """
+
+    frozen: frozenset[str] | None = None
+    sorted_list: list[str] | None = None
+
+
+def _rebuild_available_symbols_cache() -> frozenset[str]:
+    """Recompute the union of native symbols across all exchanges.
+
+    Hot-path callers (publish-time topic validation) hit this once on
+    cold start and once after each
+    :meth:`SymbolMapperService.trigger_cache_invalidation` call, instead
+    of paying the 5-exchange union + sort every tick.
+
+    Returns:
+        Frozen set of every native symbol active on at least one
+        configured exchange. Mirrored on
+        :class:`_AvailableSymbolsCache`.
+    """
+    union: set[str] = set()
+    union.update(get_available_kraken_symbols())
+    union.update(get_available_kraken_futures_symbols())
+    union.update(get_available_kraken_equities_symbols())
+    union.update(get_available_walutomat_symbols())
+    union.update(get_available_polygon_symbols())
+    frozen = frozenset(union)
+    _AvailableSymbolsCache.frozen = frozen
+    _AvailableSymbolsCache.sorted_list = sorted(union)
+    return frozen
+
+
+def get_available_symbols_set() -> frozenset[str]:
+    """Return the cached frozenset of every native symbol.
+
+    Use this from any hot path that needs membership lookups (publish-
+    time topic validation runs once per tick at peak rates of several
+    thousand per second). Cache is populated lazily on first call and
+    invalidated when :meth:`SymbolMapperService.trigger_cache_invalidation`
+    fires after a symbol alias upsert.
+
+    Returns:
+        Frozen set of all active native symbols, or an empty frozenset
+        if the mapper cache is uninitialised.
+    """
+    if _AvailableSymbolsCache.frozen is None:
+        return _rebuild_available_symbols_cache()
+    return _AvailableSymbolsCache.frozen
+
+
+def invalidate_available_symbols_cache() -> None:
+    """Drop the cached symbol set so the next caller rebuilds it.
+
+    Called by :meth:`SymbolMapperService.trigger_cache_invalidation` so
+    a freshly-loaded mapper sees the latest symbol universe at the next
+    validation. Tests that mutate the mapper between assertions also
+    use this directly.
+    """
+    _AvailableSymbolsCache.frozen = None
+    _AvailableSymbolsCache.sorted_list = None
+
+
+register_invalidation_callback(invalidate_available_symbols_cache)
+
+
 def get_available_symbols() -> list[str]:
     """Get all available native symbols across all exchanges.
 
     Combines symbols from Kraken, Kraken Futures, Kraken Equities, Walutomat, and Polygon.
 
+    The result is cached after the first call and only rebuilt when
+    :func:`invalidate_available_symbols_cache` is invoked (typically
+    by :meth:`SymbolMapperService.trigger_cache_invalidation`).
+
     Returns:
         Sorted list of unique native symbols from all exchanges.
     """
-    all_symbols: set[str] = set()
-    all_symbols.update(get_available_kraken_symbols())
-    all_symbols.update(get_available_kraken_futures_symbols())
-    all_symbols.update(get_available_kraken_equities_symbols())
-    all_symbols.update(get_available_walutomat_symbols())
-    all_symbols.update(get_available_polygon_symbols())
-    return sorted(all_symbols)
+    if _AvailableSymbolsCache.sorted_list is None:
+        _rebuild_available_symbols_cache()
+    cached = _AvailableSymbolsCache.sorted_list or []
+    return list(cached)
 
 
 def get_available_exchanges() -> list[OrderExchange]:

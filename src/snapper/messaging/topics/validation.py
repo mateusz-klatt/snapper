@@ -62,7 +62,7 @@ from snapper.core.ids import is_uuid7
 from snapper.core.types import MarketDataTypeEnum
 from snapper.core.types import OrderCommandEnum
 from snapper.infrastructure.symbols.functions import get_available_exchanges
-from snapper.infrastructure.symbols.functions import get_available_symbols
+from snapper.infrastructure.symbols.functions import get_available_symbols_set
 from snapper.infrastructure.symbols.functions import get_market_data_exchanges
 from snapper.infrastructure.symbols.functions import get_market_subscribe_exchanges
 from snapper.messaging.schemas.data import AlertType
@@ -999,6 +999,12 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
 def _validate_instrument(instrument: str) -> tuple[bool, str]:
     """Validate instrument symbol exists in database.
 
+    Reads the cached frozenset from
+    :func:`snapper.infrastructure.symbols.functions.get_available_symbols_set`
+    so the publish-time hot path (called once per tick at peak rates of
+    several thousand per second) does an O(1) ``in`` check instead of
+    rebuilding the 5-exchange union and doing an O(N) list scan.
+
     Args:
         instrument: Instrument symbol (e.g., "BTC-USD").
 
@@ -1007,8 +1013,7 @@ def _validate_instrument(instrument: str) -> tuple[bool, str]:
     """
     if not instrument:
         return False, "Instrument cannot be empty"
-    all_instruments = get_available_symbols()
-    if instrument not in all_instruments:
+    if instrument not in get_available_symbols_set():
         return (
             False,
             f"Unknown instrument '{instrument}'. Must be in database instruments table.",

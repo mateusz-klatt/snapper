@@ -20,6 +20,7 @@ Example:
     "BTC-USD"
 """
 
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from typing import NamedTuple
@@ -112,6 +113,25 @@ _SHORTCUT_REVERSE: tuple[tuple[str, str, str], ...] = (
     (ExchangeEnum.WALUTOMAT, AliasChannelEnum.REST, "walutomat_rest_to_native"),
     (ExchangeEnum.POLYGON, AliasChannelEnum.REST, "polygon_rest_to_native"),
 )
+
+
+_invalidation_callbacks: list[Callable[[], None]] = []
+
+
+def register_invalidation_callback(callback: Callable[[], None]) -> None:
+    """Register a callback to fire on every ``trigger_cache_invalidation``.
+
+    Used by downstream module-level caches (most importantly the
+    cross-exchange ``get_available_symbols_set()`` frozenset hit by
+    publish-time topic validation) to stay in sync when the mapper
+    reloads its alias cache. Registering twice is idempotent — duplicate
+    callbacks are skipped so reload paths in tests do not re-add.
+
+    Args:
+        callback: Zero-arg function to invoke after every mapper reload.
+    """
+    if callback not in _invalidation_callbacks:
+        _invalidation_callbacks.append(callback)
 
 
 class SymbolMapperService:
@@ -446,13 +466,20 @@ class SymbolMapperService:
         """Invalidate and reload the symbol alias cache.
 
         Marks the cache as stale and triggers a fresh load from the database.
-        Useful after symbol alias updates in the database.
+        Useful after symbol alias updates in the database. Also fires every
+        registered downstream invalidation callback (see
+        :func:`register_invalidation_callback`) so module-level caches that
+        depend on the mapper's symbol universe stay in sync — notably the
+        ``get_available_symbols_set()`` frozenset that publish-time topic
+        validation hits per tick.
 
         Args:
             fail_fast: If True, re-raise exceptions on reload failure.
         """
         self._cache_loaded = False
         self.load_cache_if_needed(fail_fast=fail_fast)
+        for callback in _invalidation_callbacks:
+            callback()
 
     @classmethod
     def get_instance(cls) -> SymbolMapperService:
