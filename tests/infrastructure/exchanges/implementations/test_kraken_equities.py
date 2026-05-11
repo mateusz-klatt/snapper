@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+from loguru import logger
 
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
@@ -71,6 +72,29 @@ class TestEnqueueOrDropOldest:
         _enqueue_or_drop_oldest(queue, "new", "test")
         assert queue.qsize() == 1
         assert queue.get_nowait() == "new"
+
+    def test_drop_log_is_rate_limited(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Per-drop log spam is collapsed to one summary per interval.
+
+        Given: A bounded queue at capacity 1 and a freshly-reset counter,
+        When: 50 drop-oldest events fire within the same interval,
+        Then: At most one warning summary line is emitted.
+        """
+        from snapper.infrastructure.exchanges.implementations import kraken_equities as ke
+
+        ke._drop_counters.clear()
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+        queue.put_nowait("seed")
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            for i in range(50):
+                _enqueue_or_drop_oldest(queue, f"item-{i}", "equities-tick")
+        finally:
+            logger.remove(sink_id)
+        ke._drop_counters.clear()
+
+        summaries = [rec for rec in caplog.records if "equities-tick queue full" in rec.message]
+        assert len(summaries) <= 1
 
 
 class TestConnect:

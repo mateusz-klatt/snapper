@@ -29,6 +29,7 @@ import inspect
 import time
 from collections.abc import AsyncIterator
 from collections.abc import Callable
+from time import monotonic
 from typing import Any
 from typing import Final
 from typing import Literal
@@ -81,6 +82,9 @@ _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 _WS_CLIENT_CONNECTED_MSG = "WebSocket client should be connected"
 _QUEUE_MAX_SIZE = 10_000
 
+_DROP_LOG_INTERVAL_S = 1.0
+_drop_counters: dict[str, list[float]] = {}
+
 
 def _enqueue_or_drop_oldest(queue: asyncio.Queue[Any], item: Any, label: str) -> None:
     """Put item on queue, dropping the oldest if full.
@@ -92,6 +96,12 @@ def _enqueue_or_drop_oldest(queue: asyncio.Queue[Any], item: Any, label: str) ->
     Drop-oldest is the safer default for market-data feeds: a slow
     consumer must never grow RSS without bound.
 
+    Logs are rate-limited to one summary line per ``_DROP_LOG_INTERVAL_S``
+    seconds per ``label`` — the previous per-drop ``logger.warning`` cost
+    ~29 us each, which at sustained drop rates of hundreds per second
+    became its own non-trivial fraction of the publisher hot path
+    (Codex 2026-05-11 post-HV2-H5 review).
+
     Args:
         queue: Bounded asyncio queue.
         item: Item to enqueue.
@@ -100,7 +110,16 @@ def _enqueue_or_drop_oldest(queue: asyncio.Queue[Any], item: Any, label: str) ->
     try:
         queue.put_nowait(item)
     except asyncio.QueueFull:
-        logger.warning(f"{label} queue full, dropping oldest message")
+        counters = _drop_counters.setdefault(label, [0.0, 0.0])
+        counters[0] += 1
+        now = monotonic()
+        if now - counters[1] >= _DROP_LOG_INTERVAL_S:
+            logger.warning(
+                f"{label} queue full, dropped {int(counters[0])} messages "
+                f"in last {now - counters[1]:.1f}s (drop-oldest backpressure)"
+            )
+            counters[0] = 0.0
+            counters[1] = now
         queue.get_nowait()
         queue.put_nowait(item)
 

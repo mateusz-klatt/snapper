@@ -32,6 +32,7 @@ Limitations:
 
 import asyncio
 from collections.abc import AsyncIterator
+from time import monotonic
 from typing import Any
 
 import httpx
@@ -107,8 +108,17 @@ def _timeframe_to_interval(timeframe: str) -> int:
         ) from exc
 
 
+_DROP_LOG_INTERVAL_S = 1.0
+_drop_counters: dict[str, list[float]] = {}
+
+
 def _enqueue_or_drop_oldest(queue: asyncio.Queue[Any], item: Any, label: str) -> None:
     """Put item on queue, dropping the oldest if full.
+
+    Logs are rate-limited to one summary line per
+    ``_DROP_LOG_INTERVAL_S`` seconds per ``label`` so a sustained
+    drop-oldest burst does not amplify log I/O on the publisher hot
+    path.
 
     Args:
         queue: Bounded asyncio queue.
@@ -118,7 +128,16 @@ def _enqueue_or_drop_oldest(queue: asyncio.Queue[Any], item: Any, label: str) ->
     try:
         queue.put_nowait(item)
     except asyncio.QueueFull:
-        logger.warning(f"{label} queue full, dropping oldest message")
+        counters = _drop_counters.setdefault(label, [0.0, 0.0])
+        counters[0] += 1
+        now = monotonic()
+        if now - counters[1] >= _DROP_LOG_INTERVAL_S:
+            logger.warning(
+                f"{label} queue full, dropped {int(counters[0])} messages "
+                f"in last {now - counters[1]:.1f}s (drop-oldest backpressure)"
+            )
+            counters[0] = 0.0
+            counters[1] = now
         queue.get_nowait()
         queue.put_nowait(item)
 

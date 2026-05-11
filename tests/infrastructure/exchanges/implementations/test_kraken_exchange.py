@@ -18,6 +18,7 @@ from unittest.mock import patch
 import ccxt
 import pytest
 from ccxt.base.errors import NetworkError
+from loguru import logger
 from pydantic import ValidationError
 from pytest import MonkeyPatch
 
@@ -5281,6 +5282,61 @@ class TestEnqueueOrDropOldest:
         _enqueue_or_drop_oldest(queue, "new", "test")
         assert queue.qsize() == 1
         assert queue.get_nowait() == "new"
+
+    def test_drop_log_is_rate_limited_to_one_per_interval(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Sustained drops emit a single summary line per interval, not per drop.
+
+        Given: A bounded queue at capacity 1 and a freshly-reset counter,
+        When: 100 drop-oldest events fire within the same interval,
+        Then: At most one warning line lands in the captured log (per-tick
+            spam is eliminated; the line carries the count summary).
+        """
+        from snapper.infrastructure.exchanges.implementations import kraken as kr
+
+        kr._drop_counters.clear()
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+        queue.put_nowait("seed")
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            for i in range(100):
+                _enqueue_or_drop_oldest(queue, f"item-{i}", "kraken-spot-tick")
+        finally:
+            logger.remove(sink_id)
+        kr._drop_counters.clear()
+
+        summaries = [
+            rec
+            for rec in caplog.records
+            if rec.levelname == "WARNING" and "kraken-spot-tick queue full" in rec.message
+        ]
+        assert len(summaries) <= 1
+        if summaries:
+            assert "drop-oldest backpressure" in summaries[0].message
+
+    def test_drop_log_emits_summary_after_interval(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A second summary line lands once ``_DROP_LOG_INTERVAL_S`` has elapsed.
+
+        Given: A counter pre-loaded to a "long ago" last-logged timestamp,
+        When: A single drop event fires,
+        Then: A warning is emitted (proves the interval gate eventually
+            re-opens, not just suppresses everything after the first).
+        """
+        from snapper.infrastructure.exchanges.implementations import kraken as kr
+
+        kr._drop_counters["kraken-spot-tick"] = [0.0, 0.0]
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+        queue.put_nowait("seed")
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            _enqueue_or_drop_oldest(queue, "later", "kraken-spot-tick")
+        finally:
+            logger.remove(sink_id)
+        kr._drop_counters.clear()
+
+        summaries = [rec for rec in caplog.records if "queue full, dropped" in rec.message]
+        assert len(summaries) == 1
 
 
 class TestKrakenSpotQueuesAreBounded:

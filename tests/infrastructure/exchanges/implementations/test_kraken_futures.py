@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from loguru import logger
 
 import snapper.infrastructure.exchanges.implementations.kraken_futures as mod
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -198,6 +199,29 @@ class TestEnqueueOrDropOldest:
         _enqueue_or_drop_oldest(queue, "new", "test")
         assert queue.qsize() == 1
         assert queue.get_nowait() == "new"
+
+    def test_drop_log_is_rate_limited(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Per-drop log spam is collapsed to one summary per interval.
+
+        Given: A bounded queue at capacity 1 and a freshly-reset counter,
+        When: 50 drop-oldest events fire within the same interval,
+        Then: At most one warning summary line is emitted.
+        """
+        from snapper.infrastructure.exchanges.implementations import kraken_futures as kf
+
+        kf._drop_counters.clear()
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+        queue.put_nowait("seed")
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            for i in range(50):
+                _enqueue_or_drop_oldest(queue, f"item-{i}", "futures-tick")
+        finally:
+            logger.remove(sink_id)
+        kf._drop_counters.clear()
+
+        summaries = [rec for rec in caplog.records if "futures-tick queue full" in rec.message]
+        assert len(summaries) <= 1
 
 
 class TestConnect:
