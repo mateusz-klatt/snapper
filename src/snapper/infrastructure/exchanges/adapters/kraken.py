@@ -19,6 +19,7 @@ entire batch.
 """
 
 from datetime import datetime
+from time import monotonic
 from typing import Any
 from typing import cast
 
@@ -73,11 +74,22 @@ def parse_kraken_ticker(data: dict[str, Any]) -> TickerUpdate:
     )
 
 
+_UNPARSEABLE_LOG_INTERVAL_S = 300.0
+_unparseable_log_state: dict[str, float] = {}
+
+
 def parse_kraken_ticker_list(data: list[dict[str, Any]]) -> list[TickerUpdate]:
     """Parse a list of Kraken ticker messages.
 
     Skips individual items that fail to parse (e.g. unmapped symbols)
     so that one bad item does not discard the entire batch.
+
+    Logs are rate-limited per-symbol to one warning every
+    ``_UNPARSEABLE_LOG_INTERVAL_S`` seconds — the prior per-occurrence
+    warning emitted thousands of identical lines per minute when Kraken
+    streamed perpetual-suffixed symbols (e.g. ``BTC/USD:BTNL``) that are
+    not in the alias table. Operators still see the first occurrence;
+    the spam stops dominating the log.
 
     Args:
         data: List of raw ticker data dictionaries.
@@ -91,7 +103,11 @@ def parse_kraken_ticker_list(data: list[dict[str, Any]]) -> list[TickerUpdate]:
             results.append(parse_kraken_ticker(item))
         except ValueError as exc:
             symbol = item.get("symbol", "?") if isinstance(item, dict) else "?"
-            logger.warning(f"Skipping unparseable ticker (symbol={symbol}): {exc}")
+            now = monotonic()
+            last = _unparseable_log_state.get(symbol, 0.0)
+            if now - last >= _UNPARSEABLE_LOG_INTERVAL_S:
+                logger.warning(f"Skipping unparseable ticker (symbol={symbol}): {exc}")
+                _unparseable_log_state[symbol] = now
     return results
 
 

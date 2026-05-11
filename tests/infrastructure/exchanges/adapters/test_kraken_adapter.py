@@ -5,6 +5,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from loguru import logger
 from pydantic import ValidationError
 
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_candle
@@ -143,6 +144,47 @@ def test_parse_kraken_ticker_list_skips_bad_item(mock_symbol_mapper: Any) -> Non
     result = parse_kraken_ticker_list(raw_data)
     assert len(result) == 1
     assert result[0].symbol == "BTC-USD"
+
+
+def test_parse_kraken_ticker_list_rate_limits_unparseable_warnings(
+    mock_symbol_mapper: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Repeated unparseable symbols log at most once per interval each.
+
+    Given: 50 batches each containing the same two unmapped symbols
+        (``BTC/USD:BTNL``, ``ETH/USD:BTNL``) — the Kraken perpetual
+        suffix that floods logs in production,
+    When: parse_kraken_ticker_list is called 50 times in tight loop,
+    Then: Exactly one warning lands per unique symbol (the
+        ``_UNPARSEABLE_LOG_INTERVAL_S`` window holds open for the whole
+        burst). The pre-fix behaviour emitted 100 warnings — one per
+        every parse failure.
+    """
+    from snapper.infrastructure.exchanges.adapters import kraken as kr
+
+    kr._unparseable_log_state.clear()
+
+    def _mapper(symbol: str) -> str:
+        if ":BTNL" in symbol:
+            raise ValueError(f"Unknown Kraken WebSocket v2 symbol: {symbol}")
+        return symbol.replace("/", "-")
+
+    mock_symbol_mapper.side_effect = _mapper
+    raw_data: list[dict[str, Any]] = [
+        {"symbol": "BTC/USD:BTNL", "bid": 1.0, "ask": 2.0, "last": 1.5},
+        {"symbol": "ETH/USD:BTNL", "bid": 1.0, "ask": 2.0, "last": 1.5},
+    ]
+    sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+    try:
+        for _ in range(50):
+            parse_kraken_ticker_list(raw_data)
+    finally:
+        logger.remove(sink_id)
+    kr._unparseable_log_state.clear()
+    warnings = [rec for rec in caplog.records if "Skipping unparseable ticker" in rec.message]
+    assert len(warnings) == 2
+    symbols = {w.message.split("symbol=")[1].split(")")[0] for w in warnings}
+    assert symbols == {"BTC/USD:BTNL", "ETH/USD:BTNL"}
 
 
 def test_parse_kraken_ticker_missing_symbol() -> None:

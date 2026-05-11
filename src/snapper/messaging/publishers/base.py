@@ -901,7 +901,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             logger.debug(f"Published {message.type} for {topic}")
             return message
         except Exception as e:
-            logger.error(f"Error publishing message: {e}")
+            if topic in self._unknown_symbols_logged:
+                logger.debug(f"Error publishing message (already-logged topic '{topic}'): {e}")
+            else:
+                logger.error(f"Error publishing message: {e}")
+                self._unknown_symbols_logged.add(topic)
             return None
 
     async def _heartbeat_loop(self) -> None:

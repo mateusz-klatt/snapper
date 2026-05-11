@@ -361,6 +361,58 @@ async def test_publish_message_errors_are_logged(caplog: pytest.LogCaptureFixtur
 
 
 @pytest.mark.asyncio
+async def test_publish_message_dedupes_repeated_topic_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Repeated publish errors for the same topic log ERROR once, then DEBUG.
+
+    Given: A publisher whose send always raises for the same topic
+        (mirrors the production ``market.kraken.BRK.B.ticks`` flood —
+        symbols with dots fail topic validation on every tick),
+    When: ``_publish_message`` is invoked 20 times for that topic,
+    Then: Exactly one ERROR is emitted; the remaining 19 attempts
+        downgrade to DEBUG so operators see the first failure but the
+        log file does not get drowned in identical errors.
+    """
+    pub: Any = DummyPublisher(symbols=["BRK.B"])
+    failing = AsyncMock()
+    failing.send.side_effect = RuntimeError(
+        "Invalid topic 'market.kraken.BRK.B.ticks': Unknown instrument 'BRK'"
+    )
+    pub.msg_publisher = failing
+    pub.running = True
+    msg = CandleData(
+        session_id="",
+        sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        instrument="BRK.B",
+        volume=1.0,
+        timeframe="1m",
+        open=1.0,
+        high=1.0,
+        low=1.0,
+        close=1.0,
+        exchange="kraken",
+        open_at=datetime.now(UTC),
+    )
+    sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        for _ in range(20):
+            await pub._publish_message("market.kraken.BRK.B.ticks", msg)
+    finally:
+        logger.remove(sink_id)
+    errors = [rec for rec in caplog.records if rec.levelname == "ERROR"]
+    debugs = [
+        rec
+        for rec in caplog.records
+        if rec.levelname == "DEBUG" and "already-logged topic" in rec.message
+    ]
+    assert len(errors) == 1
+    assert len(debugs) == 19
+
+
+@pytest.mark.asyncio
 async def test_publish_heartbeat_when_running() -> None:
     """Test heartbeat published when running.
 
