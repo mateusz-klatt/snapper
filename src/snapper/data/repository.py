@@ -1233,6 +1233,29 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_related_instruments_for_symbol(
+        self,
+        exchange: str,
+        native_symbol: str,
+        as_of: datetime,
+    ) -> tuple[UnderlyingAssetRow | None, list[InstrumentRelatedRow]]:
+        """Resolve the underlying + every sibling instrument for a UI-selected symbol.
+
+        Powers ``GET /api/instruments/{exchange}/{native_symbol}/related``.
+        Returns ``(None, [])`` when the symbol is unknown, the instrument
+        is not provisioned, or no underlying mapping exists (orphan).
+
+        Args:
+            exchange: Exchange identifier the symbol is requested for.
+            native_symbol: Native symbol string (e.g. ``BTC-USD``).
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Tuple of (UnderlyingAssetRow|None, list[InstrumentRelatedRow]).
+        """
+        ...
+
+    @abstractmethod
     async def get_underlying_for_instrument(
         self,
         instrument_public_id: str,

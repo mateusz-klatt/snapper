@@ -1013,6 +1013,126 @@ class InstrumentDetailData(StrictDataSchema[Literal["instrument_detail"]]):
     expiry_at: datetime | None
 
 
+class RelatedInstrumentData(StrictDataSchema[Literal["related_instrument"]]):
+    """One instrument sharing an underlying with the UI-selected symbol.
+
+    Provenance is minted by the API handler (the source row is a
+    projection across Symbol + Instrument + InstrumentUnderlyingMapping,
+    not a single bitemporal table). ``is_selected`` is True for exactly
+    the row that matches the input ``(exchange, native_symbol)`` so the
+    frontend can render the chip with the ``aria-current`` highlight
+    without re-deriving identity.
+
+    Attributes:
+        instrument_public_id: Public ID of the sibling instrument.
+        native_symbol: Symbol as known on the exchange.
+        exchange: Exchange identifier.
+        asset_type: Asset type of the symbol.
+        relationship_type: How the instrument relates to the underlying.
+        contract_family: Futures product root (nullable).
+        is_selected: True if this row matches the input
+            ``(exchange, native_symbol)`` exactly; the frontend uses
+            this flag to render the selected-chip border + aria-current.
+    """
+
+    type: Literal["related_instrument"] = "related_instrument"
+    instrument_public_id: str
+    native_symbol: str
+    exchange: str
+    asset_type: str
+    relationship_type: str
+    contract_family: str | None
+    is_selected: bool
+
+
+class RelatedInstrumentsSelected(StrictBody):
+    """Echo of the request ``(exchange, native_symbol)`` for the UI hook.
+
+    Returned verbatim on every response so the frontend hook can match
+    the response against the current selection without re-deriving from
+    the query key.
+
+    Attributes:
+        exchange: Exchange identifier passed in the URL path.
+        native_symbol: Symbol passed in the URL path.
+    """
+
+    exchange: str
+    native_symbol: str
+
+
+class RelatedInstrumentsUnderlying(StrictBody):
+    """Slim underlying summary for the related-instruments row context.
+
+    Carries only the fields the MarketData related-row needs (ticker
+    + display name + class) — the full ``UnderlyingAssetData`` adds an
+    ``instrument_count`` that callers of the related endpoint don't use.
+
+    Attributes:
+        public_id: Public ID of the UnderlyingAsset row.
+        ticker: Short code (e.g. 'SPX', 'GOLD').
+        name: Canonical name (e.g. 'S&P 500').
+        asset_class: Asset type category.
+        sector: Optional sector classification.
+    """
+
+    public_id: str
+    ticker: str
+    name: str
+    asset_class: str
+    sector: str | None
+
+
+class RelatedInstrumentsGroup(StrictBody):
+    """One relationship-type-keyed group of related instruments.
+
+    The endpoint partitions related rows by ``relationship_type`` and
+    returns one group per non-empty bucket in a fixed order
+    (``exact`` -> ``derivative`` -> ``proxy``). ``label`` is the
+    UI-facing string (e.g. ``Same underlying``, ``Derivatives``,
+    ``Proxies``) the frontend renders verbatim.
+
+    Attributes:
+        relationship_type: Group discriminator (``exact`` / ``derivative``
+            / ``proxy``).
+        label: UI-facing group title.
+        items: Sorted list of related instruments in this group. Sort
+            order matches the route handler's per-group rules
+            (perpetuals before dated futures, selected/same-exchange
+            first in exact/proxy groups).
+    """
+
+    relationship_type: str
+    label: str
+    items: list[RelatedInstrumentData]
+
+
+class RelatedInstrumentsPayloadData(StrictBody):
+    """Payload of ``GET /api/instruments/{exchange}/{native_symbol}/related``.
+
+    Returned in three orthogonal shapes:
+
+    - **Mapped, instruments present**: ``underlying`` populated,
+      ``groups`` non-empty.
+    - **Orphan** (symbol exists but no underlying mapping): ``underlying``
+      is ``None``, ``groups`` is empty. The frontend renders the
+      "no related instruments configured" placeholder so operators see
+      mapping gaps explicitly.
+    - **Unknown symbol**: handler returns 404 (never this payload).
+
+    Attributes:
+        selected: Echo of the requested ``(exchange, native_symbol)``.
+        underlying: Slim underlying asset summary, or ``None`` for orphans.
+        groups: Relationship-type-keyed groups, ordered EXACT -> DERIVATIVE
+            -> PROXY. Empty groups are omitted from the response so an
+            underlying with only derivatives renders one group, not three.
+    """
+
+    selected: RelatedInstrumentsSelected
+    underlying: RelatedInstrumentsUnderlying | None
+    groups: list[RelatedInstrumentsGroup]
+
+
 class FrontMonthData(StrictDataSchema[Literal["front_month"]]):
     """Front-month futures contract for an underlying.
 

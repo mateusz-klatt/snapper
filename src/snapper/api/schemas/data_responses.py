@@ -19,6 +19,7 @@ from snapper.messaging.schemas.data import InstrumentCapabilityData
 from snapper.messaging.schemas.data import InstrumentDetailData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import PositionData
+from snapper.messaging.schemas.data import RelatedInstrumentsPayloadData
 from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.data import UnderlyingAssetData
 from snapper.messaging.schemas.data import UnderlyingInstrumentData
@@ -194,6 +195,26 @@ class FrontMonthResponse(
     """
 
     type: Literal["front_month"] = "front_month"
+
+
+class RelatedInstrumentsResponse(
+    PayloadResponse[Literal["related_instruments"], RelatedInstrumentsPayloadData],
+):
+    """Related-instruments row response for the MarketData header.
+
+    Wraps the ``GET /api/instruments/{exchange}/{native_symbol}/related``
+    payload (selected echo + underlying summary + relationship-grouped
+    siblings) so the MarketData page can render the chip row below its
+    dropdown without an extra round-trip for underlying resolution.
+
+    Attributes:
+        type: Payload type discriminator.
+        payload: Selected echo + nullable underlying + grouped sibling
+            list. ``underlying`` is ``None`` and ``groups`` is empty for
+            orphan symbols (symbol exists but has no underlying mapping).
+    """
+
+    type: Literal["related_instruments"] = "related_instruments"
 
 
 class ContractListResponse(

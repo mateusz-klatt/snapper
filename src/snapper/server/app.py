@@ -79,6 +79,7 @@ from snapper.api.schemas.data_responses import InstrumentDetailListResponse
 from snapper.api.schemas.data_responses import InstrumentListResponse
 from snapper.api.schemas.data_responses import OrderListResponse
 from snapper.api.schemas.data_responses import PositionListResponse
+from snapper.api.schemas.data_responses import RelatedInstrumentsResponse
 from snapper.api.schemas.data_responses import SignalListResponse
 from snapper.api.schemas.data_responses import UnderlyingAssetListResponse
 from snapper.api.schemas.data_responses import UnderlyingInstrumentListResponse
@@ -157,6 +158,7 @@ from snapper.data.repository import dispose_repositories
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import ContinuousCandleRow
 from snapper.data.repository_types import InstrumentContractRow
+from snapper.data.repository_types import InstrumentRelatedRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import UnderlyingAssetRow
 from snapper.infrastructure.rest.tracker import get_rest_call_tracker
@@ -180,6 +182,11 @@ from snapper.messaging.schemas.data import InstrumentCapabilityData
 from snapper.messaging.schemas.data import InstrumentDetailData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import PositionData
+from snapper.messaging.schemas.data import RelatedInstrumentData
+from snapper.messaging.schemas.data import RelatedInstrumentsGroup
+from snapper.messaging.schemas.data import RelatedInstrumentsPayloadData
+from snapper.messaging.schemas.data import RelatedInstrumentsSelected
+from snapper.messaging.schemas.data import RelatedInstrumentsUnderlying
 from snapper.messaging.schemas.data import RollPointDetail
 from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.data import UnderlyingAssetData
@@ -1995,6 +2002,149 @@ async def _get_underlying_instruments(
         ) from exc
 
 
+_RELATED_GROUP_ORDER: tuple[RelationshipTypeEnum, ...] = (
+    RelationshipTypeEnum.EXACT,
+    RelationshipTypeEnum.DERIVATIVE,
+    RelationshipTypeEnum.PROXY,
+)
+
+
+_RELATED_GROUP_LABELS: dict[RelationshipTypeEnum, str] = {
+    RelationshipTypeEnum.EXACT: "Same underlying",
+    RelationshipTypeEnum.DERIVATIVE: "Derivatives",
+    RelationshipTypeEnum.PROXY: "Proxies",
+}
+
+
+def _build_related_instrument_items(
+    rows: list[InstrumentRelatedRow],
+    tracker: SequenceTracker,
+    session_id: str,
+) -> list[RelatedInstrumentData]:
+    """Project related-row dicts into API payload items with fresh provenance."""
+    return [
+        RelatedInstrumentData(
+            public_id=str(uuid7()),
+            session_id=session_id,
+            sequence_id=tracker.next_sequence(_REST_DATA_STREAM),
+            timestamp=dt.datetime.now(dt.UTC),
+            instrument_public_id=row["instrument_public_id"],
+            native_symbol=row["native_symbol"],
+            exchange=row["exchange"],
+            asset_type=row["asset_type"],
+            relationship_type=row["relationship_type"],
+            contract_family=row["contract_family"],
+            is_selected=row["is_selected"],
+        )
+        for row in rows
+    ]
+
+
+def _group_related_items(
+    items: list[RelatedInstrumentData],
+    *,
+    selected_exchange: str,
+) -> list[RelatedInstrumentsGroup]:
+    """Partition items by ``relationship_type`` and sort per group rules.
+
+    Ordering rules per the related-row design:
+
+    - Groups appear in fixed order EXACT -> DERIVATIVE -> PROXY; empty
+      groups are omitted so an underlying with only derivatives renders
+      one group, not three.
+    - Within DERIVATIVE: ``contract_family`` first (perpetuals + dated
+      futures grouped per product root), then ``native_symbol``.
+    - Within EXACT and PROXY: selected chip first, then siblings on the
+      same exchange as the selection, then alphabetic by
+      ``(exchange, native_symbol)`` for deterministic tests.
+    """
+    by_rel: dict[str, list[RelatedInstrumentData]] = {}
+    for item in items:
+        by_rel.setdefault(item.relationship_type, []).append(item)
+    groups: list[RelatedInstrumentsGroup] = []
+    for rel in _RELATED_GROUP_ORDER:
+        bucket = by_rel.get(rel.value, [])
+        if not bucket:
+            continue
+        if rel is RelationshipTypeEnum.DERIVATIVE:
+            bucket.sort(key=lambda r: (r.contract_family or "", r.native_symbol))
+        else:
+            bucket.sort(
+                key=lambda r: (
+                    not r.is_selected,
+                    r.exchange != selected_exchange,
+                    r.exchange,
+                    r.native_symbol,
+                )
+            )
+        groups.append(
+            RelatedInstrumentsGroup(
+                relationship_type=rel.value,
+                label=_RELATED_GROUP_LABELS[rel],
+                items=bucket,
+            )
+        )
+    return groups
+
+
+async def _get_related_instruments(
+    request: Request,
+    exchange: str,
+    native_symbol: str,
+    _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+    as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+) -> RelatedInstrumentsResponse:
+    """Return the related-instruments row payload for a UI-selected symbol.
+
+    Mapped symbols return ``underlying`` populated + grouped ``items``;
+    orphan symbols (mapping gap or unknown symbol) return ``underlying =
+    None`` + ``groups = []`` so the frontend can render a single placeholder
+    line ("No related instruments configured") that surfaces YAML coverage
+    gaps to operators instead of hiding them.
+    """
+    try:
+        now = _resolve_underlying_query_time(as_of)
+        underlying_row, related_rows = await repo.get_related_instruments_for_symbol(
+            exchange, native_symbol, now
+        )
+        tracker, session_id, sequence_id, timestamp, public_id = _get_rest_data_response_metadata(
+            request
+        )
+        items = _build_related_instrument_items(related_rows, tracker, session_id)
+        groups = _group_related_items(items, selected_exchange=exchange)
+        underlying = (
+            None
+            if underlying_row is None
+            else RelatedInstrumentsUnderlying(
+                public_id=underlying_row["public_id"],
+                ticker=underlying_row["ticker"],
+                name=underlying_row["name"],
+                asset_class=underlying_row["asset_class"],
+                sector=underlying_row["sector"],
+            )
+        )
+        payload = RelatedInstrumentsPayloadData(
+            selected=RelatedInstrumentsSelected(
+                exchange=exchange,
+                native_symbol=native_symbol,
+            ),
+            underlying=underlying,
+            groups=groups,
+        )
+        return RelatedInstrumentsResponse(
+            public_id=public_id,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            timestamp=timestamp,
+            payload=payload,
+        )
+    except Exception as exc:
+        logger.error(f"Failed to fetch related instruments for {exchange}/{native_symbol}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to fetch related instruments") from exc
+
+
 async def _get_front_month(
     request: Request,
     ticker: str,
@@ -2234,6 +2384,12 @@ def _create_underlying_router() -> APIRouter:
             404: {"description": _UNDERLYING_NOT_FOUND_DESCRIPTION},
             500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION},
         },
+    )
+    router.add_api_route(
+        "/instruments/{exchange}/{native_symbol}/related",
+        _get_related_instruments,
+        methods=["GET"],
+        responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}},
     )
     return router
 
