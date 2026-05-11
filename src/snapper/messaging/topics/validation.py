@@ -267,58 +267,54 @@ def _validate_market_data_type(
     return True, ""
 
 
-def _validate_standard_market_topic(segments: list[str]) -> tuple[bool, str]:
-    """Validate a non-paper market topic.
-
-    Expected format segments: [market, exchange, instrument, data_type, ?timeframe]
+def _validate_standard_market_topic(
+    exchange: str, instrument: str, data_type: str, timeframe: str | None
+) -> tuple[bool, str]:
+    """Validate a non-paper market topic from already-parsed components.
 
     Args:
-        segments: Split topic segments (4 or 5 elements).
+        exchange: Exchange segment.
+        instrument: Instrument segment (may contain dots — e.g. BRK.B).
+        data_type: Data-type segment (ticks/trades/candles).
+        timeframe: Optional candle timeframe segment.
 
     Returns:
         Tuple of (is_valid, error_message).
     """
-    if len(segments) not in (4, 5):
-        return False, _MARKET_TOPIC_FMT
-    exchange = segments[1]
-    instrument = segments[2]
-    data_type = segments[3]
-    timeframe = segments[4] if len(segments) == 5 else None
     valid_inst, err_inst = _validate_instrument(instrument)
     if not valid_inst:
         return False, err_inst
     valid_exch, err_exch = _validate_market_source(exchange)
     if not valid_exch:
         return False, err_exch
-    return _validate_market_data_type(data_type, len(segments), timeframe, exchange, instrument)
+    segment_count = 5 if timeframe else 4
+    return _validate_market_data_type(data_type, segment_count, timeframe, exchange, instrument)
 
 
-def _validate_paper_market_topic(segments: list[str]) -> tuple[bool, str]:
-    """Validate a paper market topic.
-
-    Expected format segments: [market, paper, source_exchange, instrument, data_type, ?timeframe]
+def _validate_paper_market_topic(
+    source_exchange: str, instrument: str, data_type: str, timeframe: str | None
+) -> tuple[bool, str]:
+    """Validate a paper market topic from already-parsed components.
 
     Args:
-        segments: Split topic segments (5 or 6 elements).
+        source_exchange: Source-exchange segment carried after ``paper``.
+        instrument: Instrument segment (may contain dots).
+        data_type: Data-type segment (ticks/trades/candles).
+        timeframe: Optional candle timeframe segment.
 
     Returns:
         Tuple of (is_valid, error_message).
     """
-    if len(segments) not in (5, 6):
-        return False, _MARKET_TOPIC_FMT
-    source_exchange = segments[2]
-    instrument = segments[3]
-    data_type = segments[4]
-    timeframe = segments[5] if len(segments) == 6 else None
     valid_inst, err_inst = _validate_instrument(instrument)
     if not valid_inst:
         return False, err_inst
     valid_exch, err_exch = _validate_replay_source(source_exchange)
     if not valid_exch:
         return False, err_exch
+    segment_count = 6 if timeframe else 5
     return _validate_market_data_type(
         data_type,
-        len(segments),
+        segment_count,
         timeframe,
         source_exchange,
         instrument,
@@ -326,26 +322,59 @@ def _validate_paper_market_topic(segments: list[str]) -> tuple[bool, str]:
 
 
 def _validate_market_topic(topic: str) -> tuple[bool, str]:
-    """Validate market data topic structure.
+    """Validate market data topic structure with right-anchored parsing.
 
-    Expected format: market.{exchange}.{instrument}.{type}[.{timeframe}]
-    Paper format: market.paper.{source_exchange}.{instrument}.{type}[.{timeframe}]
+    Expected format: ``market.{exchange}.{instrument}.{type}[.{timeframe}]``
+    Paper format: ``market.paper.{source_exchange}.{instrument}.{type}[.{timeframe}]``
+
+    The instrument segment may contain dots (e.g. ``BRK.B`` for
+    Berkshire Hathaway Class B). The validator anchors on the
+    well-known prefix (``market`` / exchange / optional paper source)
+    and suffix (data_type / optional candles timeframe) and treats
+    every middle segment as part of the instrument. Without this, a
+    naive left-anchored split would mis-parse ``market.kraken.BRK.B.ticks``
+    as ``instrument=BRK`` + ``data_type=B`` and reject the topic even
+    though the underlying symbol is valid.
 
     Args:
-        topic: Topic string starting with "market.".
+        topic: Topic string starting with ``"market."``.
 
     Returns:
         Tuple of (is_valid, error_message).
     """
-    segments = topic.split(".")
-    if topic.endswith(".") or len(segments) not in (4, 5, 6):
+    if topic.endswith("."):
         return False, _MARKET_TOPIC_FMT
-    category = segments[0]
-    if category != "market":
-        return False, f"Expected 'market' category, got '{category}'"
-    if segments[1] != "paper":
-        return _validate_standard_market_topic(segments)
-    return _validate_paper_market_topic(segments)
+    segments = topic.split(".")
+    if len(segments) < 4 or segments[0] != "market":
+        return False, _MARKET_TOPIC_FMT
+    candidate_timeframe = segments[-1]
+    timeframe: str | None = None
+    if _is_valid_timeframe(candidate_timeframe):
+        timeframe = candidate_timeframe
+        data_type = segments[-2]
+        body = segments[1:-2]
+    else:
+        data_type = segments[-1]
+        body = segments[1:-1]
+    if not body:
+        return False, _MARKET_TOPIC_FMT
+    if body[0] == "paper":
+        if len(body) < 3:
+            return False, _MARKET_TOPIC_FMT
+        return _validate_paper_market_topic(
+            source_exchange=body[1],
+            instrument=".".join(body[2:]),
+            data_type=data_type,
+            timeframe=timeframe,
+        )
+    if len(body) < 2:
+        return False, _MARKET_TOPIC_FMT
+    return _validate_standard_market_topic(
+        exchange=body[0],
+        instrument=".".join(body[1:]),
+        data_type=data_type,
+        timeframe=timeframe,
+    )
 
 
 def _validate_orders_topic_base(

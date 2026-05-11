@@ -8,6 +8,7 @@ import pytest
 from loguru import logger
 from pydantic import ValidationError
 
+from snapper.infrastructure.exchanges.adapters import kraken as kr
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_candle
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_candle_list
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_execution
@@ -160,8 +161,6 @@ def test_parse_kraken_ticker_list_rate_limits_unparseable_warnings(
         burst). The pre-fix behaviour emitted 100 warnings — one per
         every parse failure.
     """
-    from snapper.infrastructure.exchanges.adapters import kraken as kr
-
     kr._unparseable_log_state.clear()
 
     def _mapper(symbol: str) -> str:

@@ -537,6 +537,50 @@ class TestParseMarketTopic:
         assert parse_market_topic("market.kraken.BTC-USD.ticks.1m") is None
         assert parse_market_topic("market.kraken.BTC-USD.unknown") is None
         assert parse_market_topic("signals.kraken.BTC-USD.live") is None
+
+    def test_parse_dotted_instrument_ticks(self) -> None:
+        """Right-anchored parser recovers dotted instruments (``BRK.B``).
+
+        A left-anchored split would mis-parse
+        ``market.kraken.BRK.B.ticks`` as ``instrument=BRK`` +
+        ``data_type=B``. The right-anchored parser anchors on the
+        trailing ``ticks`` data-type and reassembles the middle
+        segments back into ``BRK.B``.
+        """
+        parsed = parse_market_topic("market.kraken.BRK.B.ticks")
+        assert parsed is not None
+        assert parsed.exchange == "kraken"
+        assert parsed.instrument == "BRK.B"
+        assert parsed.data_type == "ticks"
+        assert parsed.timeframe is None
+
+    def test_parse_dotted_instrument_candles_with_timeframe(self) -> None:
+        """Dotted instruments + candles + timeframe round-trip correctly.
+
+        Right-anchored peel order: timeframe first (``1m``), then
+        data_type (``candles``), then the middle is the instrument
+        with all its embedded dots preserved.
+        """
+        parsed = parse_market_topic("market.kraken.BRK.B.candles.1m")
+        assert parsed is not None
+        assert parsed.exchange == "kraken"
+        assert parsed.instrument == "BRK.B"
+        assert parsed.data_type == "candles"
+        assert parsed.timeframe == "1m"
+
+    def test_parse_paper_dotted_instrument(self) -> None:
+        """Paper-replay topics with dotted instruments also parse correctly.
+
+        Body becomes ``[paper, source, BRK, B]`` after timeframe and
+        data_type peel from the right; ``source_exchange`` is the body's
+        second element and the instrument reassembles from body[2:].
+        """
+        parsed = parse_market_topic("market.paper.kraken.BRK.B.ticks")
+        assert parsed is not None
+        assert parsed.exchange == "paper"
+        assert parsed.source_exchange == "kraken"
+        assert parsed.instrument == "BRK.B"
+        assert parsed.data_type == "ticks"
         assert parse_market_topic("market..BTC-USD.ticks") is None
         assert parse_market_topic("market.kraken.BTC-USD.ticks.extra.part") is None
 

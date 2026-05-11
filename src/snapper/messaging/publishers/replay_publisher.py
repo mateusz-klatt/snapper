@@ -46,6 +46,7 @@ from snapper.application.backtest.drain import BacktestDrainTimeoutError
 from snapper.application.backtest.drain import BacktestReadinessTimeoutError
 from snapper.application.backtest.drain import DrainCoordinator
 from snapper.data.repository import Repository
+from snapper.messaging.topics.builders import parse_market_topic
 
 WARMUP_PUBLIC_ID: Final[str] = "00000000-0000-7000-8000-000000000000"
 WARMUP_READY_TIMEOUT_S: Final[float] = 1.0
@@ -110,12 +111,18 @@ class ReplayPublisher:
         mixin's ``_listen_loop`` can detect and ACK it without buffering
         or counting it as a real candle. Topic structure
         (``market.{exchange}.{instrument}.candles.{timeframe}``) is parsed
-        back to populate the schema so the payload validates.
+        via the shared :func:`parse_market_topic` helper, which is
+        right-anchored so instruments containing dots (``BRK.B``)
+        recover correctly.
         """
-        parts = topic.split(".")
-        exchange = parts[1]
-        instrument = parts[2]
-        timeframe = parts[4]
+        parsed = parse_market_topic(topic)
+        if parsed is None:
+            raise ValueError(f"Cannot parse warmup market topic: {topic}")
+        if parsed.timeframe is None:
+            raise ValueError(f"Warmup topic missing timeframe: {topic}")
+        exchange = parsed.exchange
+        instrument = parsed.instrument
+        timeframe = parsed.timeframe
         anchor = datetime.now(UTC)
         return (
             "{"

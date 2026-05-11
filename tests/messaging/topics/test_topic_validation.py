@@ -461,6 +461,8 @@ def patch_symbol_data(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         lambda: frozenset(
             {
                 "AAPL",
+                "BRK.A",
+                "BRK.B",
                 "BTC-EUR",
                 "BTC-PLN",
                 "BTC-USD",
@@ -555,13 +557,15 @@ def test_validate_candle_timeframe_accepts_valid_timeframe() -> None:
 def test_validate_topic_market_non_paper_with_six_segments_rejected() -> None:
     """Test non-paper market topic with six segments is rejected.
 
-    Given: A non-paper market topic with an extra segment,
+    Given: A non-paper market topic with an extra trailing segment,
     When: Validated,
-    Then: Validation fails with market format error.
+    Then: Validation fails because the right-anchored parser cannot
+        peel a valid timeframe off the right and the reassembled middle
+        segments are not a known instrument.
     """
     ok, msg = validate_topic("market.kraken.BTC-USD.candles.1m.extra")
     assert ok is False
-    assert "Market topic must have" in msg
+    assert "Unknown instrument" in msg or "Market topic must have" in msg
 
 
 def test_validate_topic_legacy_paper_without_source_rejected() -> None:
@@ -645,11 +649,14 @@ def test_validate_topic_market_invalid_timeframe_and_exchange() -> None:
 
     Given: A market topic with invalid exchange/timeframe,
     When: Validated,
-    Then: Validation fails.
+    Then: Validation fails. With the right-anchored parser an invalid
+        timeframe like ``99x`` does not peel as a timeframe segment, so
+        the instrument reassembles as ``BTC-USD.candles`` — which the
+        instrument lookup then rejects.
     """
     ok, msg = validate_topic("market.binance.BTC-USD.candles.99x")
     assert ok is False
-    assert "Unknown market feed exchange" in msg
+    assert "Unknown instrument" in msg or "Unknown market feed exchange" in msg
 
 
 def test_validate_topic_market_missing_timeframe() -> None:
@@ -818,6 +825,44 @@ def test_is_valid_timeframe_variants() -> None:
 class TestMarketTopicValidation:
     """Tests for market topic validation including data types and timeframes."""
 
+    def test_valid_dotted_instrument_market_topic(self) -> None:
+        """Real symbols with dots (``BRK.B``) pass right-anchored validation.
+
+        Given: A ticks topic for Berkshire Hathaway Class B (``BRK.B``),
+            whose native symbol literally contains a dot,
+        When: validate_topic is called,
+        Then: It succeeds. A left-anchored split would mis-parse the
+            topic as ``instrument=BRK`` + ``data_type=B``; the
+            right-anchored validator correctly recovers
+            ``instrument=BRK.B`` + ``data_type=ticks``.
+        """
+        valid, _err = validate_topic("market.kraken.BRK.B.ticks")
+        assert valid, _err
+
+    def test_valid_dotted_instrument_candles_topic(self) -> None:
+        """Dot-containing instruments also validate for candles+timeframe.
+
+        Given: A candles topic for ``BRK.B`` with a valid timeframe,
+        When: validate_topic is called,
+        Then: It succeeds and the timeframe peels off correctly while
+            the dotted instrument reassembles intact.
+        """
+        valid, _err = validate_topic("market.kraken.BRK.B.candles.1m")
+        assert valid, _err
+
+    def test_paper_dotted_instrument_topic(self) -> None:
+        """Paper replay topics support dotted instruments via the same logic.
+
+        Given: A paper replay candles topic for ``BRK.B``,
+        When: validate_topic is called,
+        Then: It succeeds. The right-anchored parser strips
+            ``paper`` / source_exchange from the body's left and
+            timeframe from the right, reassembling the middle as the
+            dotted instrument.
+        """
+        valid, _err = validate_topic("market.paper.kraken.BRK.B.candles.1m")
+        assert valid, _err
+
     def test_valid_full_market_topic(self) -> None:
         """Test valid full market topic.
 
@@ -922,13 +967,16 @@ class TestMarketTopicValidation:
     def test_candles_with_invalid_timeframe_rejected(self) -> None:
         """Test candles with invalid timeframe rejected.
 
-        Given: A candles topic with invalid timeframe,
+        Given: A candles topic with an invalid timeframe segment,
         When: Validated,
-        Then: Validation fails with timeframe error.
+        Then: Validation fails. The right-anchored parser does not peel
+            ``invalid`` as a timeframe, so the validator processes the
+            topic as if no timeframe were present, and the reassembled
+            instrument ``BTC-USD.candles`` fails the instrument lookup.
         """
         valid, _err = validate_topic("market.kraken.BTC-USD.candles.invalid")
         assert not valid
-        assert "timeframe" in _err.lower()
+        assert "Unknown instrument" in _err or "timeframe" in _err.lower()
 
     def test_candles_with_valid_timeframes(self) -> None:
         """Test candles with valid timeframes.
@@ -1461,35 +1509,41 @@ class TestTimeframeValidation:
     def test_invalid_timeframe_no_unit(self) -> None:
         """Verify timeframe without unit is rejected.
 
-        Given: A candles topic with timeframe missing unit,
+        Given: A candles topic with a malformed trailing segment ``5``,
         When: Validated,
-        Then: Validation fails with timeframe error.
+        Then: Validation fails. The right-anchored parser does not peel
+            unit-less digits as a timeframe; the segment then falls
+            through to instrument-lookup which rejects it.
         """
         valid, _err = validate_topic("market.kraken.BTC-USD.candles.5")
         assert not valid
-        assert "timeframe" in _err.lower()
+        assert "Unknown instrument" in _err or "timeframe" in _err.lower()
 
     def test_invalid_timeframe_wrong_order(self) -> None:
         """Verify timeframe with wrong order is rejected.
 
-        Given: A candles topic with reversed timeframe format,
+        Given: A candles topic with a reversed timeframe format ``m5``,
         When: Validated,
-        Then: Validation fails with timeframe error.
+        Then: Validation fails. ``m5`` is not a valid timeframe so the
+            right-anchored parser cannot peel it; instrument lookup
+            then rejects the reassembled ``BTC-USD.candles`` segment.
         """
         valid, _err = validate_topic("market.kraken.BTC-USD.candles.m5")
         assert not valid
-        assert "timeframe" in _err.lower()
+        assert "Unknown instrument" in _err or "timeframe" in _err.lower()
 
     def test_invalid_timeframe_bad_unit(self) -> None:
         """Verify timeframe with invalid unit is rejected.
 
-        Given: A candles topic with unknown time unit,
+        Given: A candles topic with an unknown time unit ``5x``,
         When: Validated,
-        Then: Validation fails with timeframe error.
+        Then: Validation fails. ``5x`` is not in the timeframe unit
+            set (s/m/h/d/w/M) so the right-anchored parser cannot peel
+            it; instrument lookup then rejects ``BTC-USD.candles``.
         """
         valid, _err = validate_topic("market.kraken.BTC-USD.candles.5x")
         assert not valid
-        assert "timeframe" in _err.lower()
+        assert "Unknown instrument" in _err or "timeframe" in _err.lower()
 
     def test_invalid_timeframe_non_numeric(self) -> None:
         """Verify timeframe with non-numeric value is rejected.
@@ -1622,11 +1676,15 @@ class TestMarketTopicInvalidTimeframe:
 
         Given: A candles topic with malformed timeframe,
         When: Validated,
-        Then: Validation fails with timeframe error.
+        Then: Validation fails. After the right-anchored parser change,
+            an unrecognised trailing segment is not peeled as a
+            timeframe — instead the validator treats the topic as
+            having no timeframe and the reassembled instrument
+            (``BTC-USD.candles``) fails the instrument lookup.
         """
         valid, _err = validate_topic("market.kraken.BTC-USD.candles.invalid")
         assert not valid
-        assert "timeframe" in _err.lower()
+        assert "Unknown instrument" in _err or "timeframe" in _err.lower()
 
     def test_candles_with_partial_timeframe(self) -> None:
         """Verify candles topic with partial timeframe is rejected.
@@ -2988,13 +3046,15 @@ class TestFieldValidators:
     def test_validate_candles_topic_invalid_timeframe(self) -> None:
         """Verify candles topic with invalid timeframe is rejected.
 
-        Given: A candles topic with invalid timeframe,
+        Given: A candles topic with a malformed trailing segment,
         When: Validated,
-        Then: Validation fails with timeframe error.
+        Then: Validation fails. The right-anchored parser does not peel
+            arbitrary words as a timeframe, so the topic falls through
+            to instrument-lookup which rejects it.
         """
         valid, _err = validate_topic("market.kraken.BTC-USD.candles.invalid")
         assert not valid
-        assert "timeframe" in _err.lower()
+        assert "Unknown instrument" in _err or "timeframe" in _err.lower()
 
     def test_validate_ticks_topic_extra_segments(self) -> None:
         """Verify ticks topic with extra segments is rejected.
@@ -3557,13 +3617,17 @@ def test_validate_market_topic_rejects_timeframe_for_trades() -> None:
 def test_validate_market_topic_invalid_timeframe() -> None:
     """Verify invalid timeframe is rejected.
 
-    Given a market candles topic with an invalid timeframe,
+    Given a market candles topic whose trailing segment is not a valid
+        timeframe (``99x``),
     When validate_topic is called,
-    Then it returns False with invalid timeframe error.
+    Then it returns False. The right-anchored parser does not peel
+        ``99x`` as a timeframe, so the topic is interpreted as
+        ``instrument='BTC-USD.candles', data_type='99x'`` which fails
+        the instrument lookup.
     """
     is_valid, message = validation.validate_topic("market.kraken.BTC-USD.candles.99x")
     assert is_valid is False
-    assert "Invalid timeframe" in message
+    assert "Unknown instrument" in message or "Invalid timeframe" in message
 
 
 def test_validate_orders_requires_subcategory() -> None:

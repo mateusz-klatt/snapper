@@ -426,8 +426,19 @@ def parse_market_topic(topic: str) -> ParsedMarketTopic | None:
     """Parse a market topic into its components.
 
     Supports two market topic variants:
-    - Live: market.{exchange}.{instrument}.{type}[.{timeframe}]
-    - Paper replay: market.paper.{source_exchange}.{instrument}.{type}[.{timeframe}]
+    - Live: ``market.{exchange}.{instrument}.{type}[.{timeframe}]``
+    - Paper replay:
+      ``market.paper.{source_exchange}.{instrument}.{type}[.{timeframe}]``
+
+    Right-anchored parsing: ``{instrument}`` may contain dots (e.g.
+    ``BRK.B`` for Berkshire Hathaway Class B). The parser anchors on
+    the well-known prefix and suffix segments (``market`` / exchange /
+    optional paper source / data_type / optional candles timeframe)
+    and reassembles every leftover middle segment as the instrument.
+    A left-anchored ``str.split('.')`` indexer would mis-parse
+    ``market.kraken.BRK.B.ticks`` into ``instrument=BRK`` +
+    ``data_type=B``; the right-anchored variant correctly recovers
+    ``instrument=BRK.B`` + ``data_type=ticks``.
 
     Args:
         topic: Full topic string to parse.
@@ -438,27 +449,60 @@ def parse_market_topic(topic: str) -> ParsedMarketTopic | None:
     parts = topic.split(".")
     if len(parts) < 4 or parts[0] != "market":
         return None
-    if parts[1] != ExchangeEnum.PAPER:
-        if len(parts) not in (4, 5):
-            return None
-        timeframe = parts[4] if len(parts) == 5 else None
-        return _build_market_topic_result(
-            exchange=parts[1],
-            instrument=parts[2],
-            data_type=parts[3],
-            timeframe=timeframe,
-            source_exchange=None,
-        )
-    if len(parts) not in (5, 6):
+    candidate_timeframe = parts[-1]
+    timeframe: str | None = None
+    if _is_valid_market_timeframe(candidate_timeframe):
+        timeframe = candidate_timeframe
+        data_type = parts[-2]
+        body = parts[1:-2]
+    else:
+        data_type = parts[-1]
+        body = parts[1:-1]
+    if data_type not in _MARKET_DATA_TYPES:
         return None
-    timeframe = parts[5] if len(parts) == 6 else None
+    if not body:
+        return None
+    if body[0] == ExchangeEnum.PAPER:
+        if len(body) < 3:
+            return None
+        return _build_market_topic_result(
+            exchange=ExchangeEnum.PAPER,
+            instrument=".".join(body[2:]),
+            data_type=data_type,
+            timeframe=timeframe,
+            source_exchange=body[1],
+        )
+    if len(body) < 2:
+        return None
     return _build_market_topic_result(
-        exchange=ExchangeEnum.PAPER,
-        instrument=parts[3],
-        data_type=parts[4],
+        exchange=body[0],
+        instrument=".".join(body[1:]),
+        data_type=data_type,
         timeframe=timeframe,
-        source_exchange=parts[2],
+        source_exchange=None,
     )
+
+
+def _is_valid_market_timeframe(token: str) -> bool:
+    """Return True when ``token`` matches the candles-timeframe pattern.
+
+    Candles topics carry a trailing timeframe segment such as ``1m`` or
+    ``4h``; ticks/trades topics never do. The right-anchored parser
+    uses this gate to decide whether to peel a timeframe segment off
+    the right before reassembling the instrument from the middle
+    tokens.
+
+    Args:
+        token: Topic segment to test.
+
+    Returns:
+        True if the token is a valid candles timeframe.
+    """
+    if not token or len(token) < 2:
+        return False
+    if not token[:-1].isdigit():
+        return False
+    return token[-1] in {"s", "m", "h", "d", "w", "M"}
 
 
 def parse_order_command_topic(topic: str) -> ParsedOrderTopic | None:
