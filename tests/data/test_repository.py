@@ -6824,6 +6824,91 @@ async def test_get_latest_plan_checkpoint_none(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_latest_checkpoints_for_plans_returns_dict_keyed_by_pid(
+    tmp_path: Path,
+) -> None:
+    """Bulk lookup returns latest checkpoint per plan in one round-trip.
+
+    Given: Two plans each with two checkpoints,
+    When: get_latest_checkpoints_for_plans is called with both plan public_ids,
+    Then: Returned dict maps each plan_public_id to its LATEST checkpoint,
+        unknown public_ids are absent (not mapped to None), and the
+        SCD2 close-on-insert invariant is honored so the older
+        checkpoint row no longer surfaces.
+    """
+    db_path = tmp_path / "plans_cp_bulk.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    base_time = datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC)
+    plan_pids: list[str] = []
+    for idx in range(2):
+        _id, pid = await r.insert_execution_plan(
+            {
+                "plan_type": "manual_once",
+                "created_by_user_id": "user-bulk",
+                "created_via": "ui",
+                "instrument_public_id": f"inst-bulk-{idx}",
+                "exchange": "kraken",
+                "mode": "live",
+                "shard_key": f"kraken:BULK-{idx}:live",
+                "wallet_public_id": "wallet-bulk",
+                "total_quantity": 1.0,
+                "side": "buy",
+                "params": {},
+                "status": "active",
+                "created_at": base_time,
+                "session_id": "s1",
+                "sequence_id": idx + 1,
+                "timestamp": base_time,
+            }
+        )
+        plan_pids.append(pid)
+        t1 = base_time + timedelta(seconds=1)
+        t2 = base_time + timedelta(seconds=2)
+        await r.insert_execution_plan_checkpoint(
+            plan_public_id=pid,
+            state={"version": 1},
+            last_venue_event_id=10 + idx,
+            checkpoint_at=t1,
+            session_id="s1",
+            sequence_id=100 + idx,
+            bus_time=t1,
+        )
+        await r.insert_execution_plan_checkpoint(
+            plan_public_id=pid,
+            state={"version": 2},
+            last_venue_event_id=20 + idx,
+            checkpoint_at=t2,
+            session_id="s1",
+            sequence_id=200 + idx,
+            bus_time=t2,
+        )
+    result = await r.get_latest_checkpoints_for_plans(
+        [plan_pids[0], plan_pids[1], "nonexistent-plan"]
+    )
+    assert set(result) == {plan_pids[0], plan_pids[1]}
+    assert result[plan_pids[0]]["state"]["version"] == 2
+    assert result[plan_pids[0]]["last_venue_event_id"] == 20
+    assert result[plan_pids[1]]["state"]["version"] == 2
+    assert result[plan_pids[1]]["last_venue_event_id"] == 21
+
+
+@pytest.mark.asyncio
+async def test_get_latest_checkpoints_for_plans_empty_input(tmp_path: Path) -> None:
+    """Empty input list returns empty dict without opening session.
+
+    Given: An empty list,
+    When: get_latest_checkpoints_for_plans is called,
+    Then: Returns empty dict — no DB round-trip.
+    """
+    db_path = tmp_path / "plans_cp_bulk_empty.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    result = await r.get_latest_checkpoints_for_plans([])
+    assert result == {}
+
+
+@pytest.mark.asyncio
 async def test_get_execution_plan_not_found(tmp_path: Path) -> None:
     """Given no matching plan, When querying by public_id, Then None returned."""
     db_path = tmp_path / "plans_notfound2.db"

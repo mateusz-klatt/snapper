@@ -189,7 +189,7 @@ class TestPlanExecutorService:
         mock_repo.get_active_execution_plans = AsyncMock(
             return_value=[_make_plan_row("plan-1", "manual_once")]
         )
-        mock_repo.get_latest_plan_checkpoint = AsyncMock(return_value=None)
+        mock_repo.get_latest_checkpoints_for_plans = AsyncMock(return_value={})
         mock_repo_fn.return_value = mock_repo
         service = PlanExecutorService()
         await service._recover_plans()
@@ -221,7 +221,7 @@ class TestPlanExecutorService:
                 )
             ]
         )
-        mock_repo.get_latest_plan_checkpoint = AsyncMock(return_value=None)
+        mock_repo.get_latest_checkpoints_for_plans = AsyncMock(return_value={})
         mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-stranded")
         mock_repo.has_pending_cancel_command = AsyncMock(return_value=False)
         mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-77")
@@ -258,7 +258,7 @@ class TestPlanExecutorService:
                 )
             ]
         )
-        mock_repo.get_latest_plan_checkpoint = AsyncMock(return_value=None)
+        mock_repo.get_latest_checkpoints_for_plans = AsyncMock(return_value={})
         mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd"))
         mock_repo_fn.return_value = mock_repo
         service = PlanExecutorService()
@@ -567,17 +567,19 @@ class TestPlanExecutorService:
         """Recovery restores evaluator state from checkpoint."""
         mock_repo = AsyncMock()
         mock_repo.get_active_execution_plans = AsyncMock(return_value=[_make_plan_row()])
-        mock_repo.get_latest_plan_checkpoint = AsyncMock(
+        mock_repo.get_latest_checkpoints_for_plans = AsyncMock(
             return_value={
-                "public_id": "cp-1",
-                "plan_public_id": "plan-1",
-                "state": {"restored": True},
-                "last_venue_event_id": 42,
-                "last_tick_timestamp": None,
-                "checkpoint_at": datetime(2026, 4, 10, tzinfo=UTC),
-                "timestamp": datetime(2026, 4, 10, tzinfo=UTC),
-                "session_id": "s1",
-                "sequence_id": 1,
+                "plan-1": {
+                    "public_id": "cp-1",
+                    "plan_public_id": "plan-1",
+                    "state": {"restored": True},
+                    "last_venue_event_id": 42,
+                    "last_tick_timestamp": None,
+                    "checkpoint_at": datetime(2026, 4, 10, tzinfo=UTC),
+                    "timestamp": datetime(2026, 4, 10, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                }
             }
         )
         mock_repo_fn.return_value = mock_repo
@@ -3620,7 +3622,7 @@ class TestStrandedCancelEdgeCases:
                 )
             ]
         )
-        mock_repo.get_latest_plan_checkpoint = AsyncMock(return_value=None)
+        mock_repo.get_latest_checkpoints_for_plans = AsyncMock(return_value={})
         mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd"))
         mock_repo_fn.return_value = mock_repo
         service = PlanExecutorService()
@@ -3648,7 +3650,7 @@ class TestStrandedCancelMultiChild:
                 )
             ]
         )
-        mock_repo.get_latest_plan_checkpoint = AsyncMock(return_value=None)
+        mock_repo.get_latest_checkpoints_for_plans = AsyncMock(return_value={})
         mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-multi")
         mock_repo.has_pending_cancel_command = AsyncMock(return_value=False)
         mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)

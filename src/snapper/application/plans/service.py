@@ -241,8 +241,22 @@ class PlanExecutorService(RegisterableProcess):
         command. This closes the gap where a cancel route crashed
         between the plan transition and the command insert, leaving the
         plan stranded in ``cancel_requested`` forever.
+
+        Bulk-loads all latest plan checkpoints in one round-trip per
+        ``_PLAN_CHECKPOINT_LOOKUP_CHUNK_SIZE`` plans via
+        :py:meth:`~snapper.data.repository.SQLAlchemyRepository.get_latest_checkpoints_for_plans`
+        — replaces the per-plan
+        :py:meth:`~snapper.data.repository.SQLAlchemyRepository.get_latest_plan_checkpoint`
+        N+1 that previously dominated startup latency for operators
+        with 100+ active plans.
         """
         rows = await self.repository.get_active_execution_plans()
+        recoverable_pids = [
+            row["public_id"] for row in rows if row["plan_type"] in _EVALUATOR_REGISTRY
+        ]
+        checkpoints_by_pid = await self.repository.get_latest_checkpoints_for_plans(
+            recoverable_pids
+        )
         for row in rows:
             plan_type = row["plan_type"]
             evaluator_cls = _EVALUATOR_REGISTRY.get(plan_type)
@@ -254,7 +268,7 @@ class PlanExecutorService(RegisterableProcess):
                 )
                 continue
             evaluator = evaluator_cls()
-            checkpoint = await self.repository.get_latest_plan_checkpoint(row["public_id"])
+            checkpoint = checkpoints_by_pid.get(row["public_id"])
             if checkpoint is not None:
                 evaluator.restore_from_checkpoint(row, checkpoint["state"])
                 self._watermarks[row["public_id"]] = checkpoint["last_venue_event_id"]

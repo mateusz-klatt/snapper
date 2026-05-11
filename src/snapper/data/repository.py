@@ -367,6 +367,7 @@ _CANDLE_LOOKUP_CHUNK_SIZE = 300
 _SnapshotNaturalKey = str
 _SNAPSHOT_LOOKUP_CHUNK_SIZE = 500
 _OUTBOX_BULK_LOOKUP_CHUNK_SIZE = 200
+_PLAN_CHECKPOINT_LOOKUP_CHUNK_SIZE = 200
 ScopeExpansionKey = tuple[str, str | None, str | None]
 
 
@@ -1768,6 +1769,28 @@ class Repository(ABC):
 
         Returns:
             Checkpoint row or None if no checkpoint exists.
+        """
+        ...
+
+    @abstractmethod
+    async def get_latest_checkpoints_for_plans(
+        self,
+        plan_public_ids: list[str],
+    ) -> dict[str, ExecutionPlanCheckpointRow]:
+        """Return the most recent active checkpoint per plan, keyed by plan public_id.
+
+        Bulk variant of :meth:`get_latest_plan_checkpoint` for the
+        :py:class:`~snapper.application.plans.service.PlanExecutorService`
+        startup recovery path (closes the per-plan N+1 round-trip on
+        ``_recover_plans``). Plans without an active checkpoint are
+        absent from the returned dict.
+
+        Args:
+            plan_public_ids: Plans to query (deduplicated internally).
+
+        Returns:
+            Mapping from plan public_id to its latest active checkpoint
+            row. Missing plans are omitted (not mapped to None).
         """
         ...
 
@@ -8219,17 +8242,64 @@ class SQLAlchemyRepository(Repository):
             row = result.scalars().first()
             if row is None:
                 return None
-            return ExecutionPlanCheckpointRow(
-                public_id=row.public_id,
-                timestamp=row.timestamp,
-                session_id=row.session_id,
-                sequence_id=row.sequence_id,
-                plan_public_id=row.plan_public_id,
-                state=row.state,
-                last_venue_event_id=row.last_venue_event_id,
-                last_tick_timestamp=row.last_tick_timestamp,
-                checkpoint_at=row.checkpoint_at,
-            )
+            return self._checkpoint_row_to_dict(row)
+
+    async def get_latest_checkpoints_for_plans(
+        self,
+        plan_public_ids: list[str],
+    ) -> dict[str, ExecutionPlanCheckpointRow]:
+        """Bulk variant — one round-trip per ``_PLAN_CHECKPOINT_LOOKUP_CHUNK_SIZE``.
+
+        The SCD2 close-on-insert invariant in
+        :py:meth:`insert_execution_plan_checkpoint` guarantees at most
+        one active row per ``plan_public_id`` at ``now``, so a single
+        IN-list lookup is enough. We still sort by
+        ``(plan_public_id, checkpoint_at DESC)`` and keep only the first
+        match per plan as belt-and-braces against an unforeseen
+        invariant break.
+        """
+        if not plan_public_ids:
+            return {}
+        unique_ids = list(dict.fromkeys(plan_public_ids))
+        result_map: dict[str, ExecutionPlanCheckpointRow] = {}
+        async with self.session() as s:
+            now = datetime.now(UTC)
+            for offset in range(0, len(unique_ids), _PLAN_CHECKPOINT_LOOKUP_CHUNK_SIZE):
+                chunk = unique_ids[offset : offset + _PLAN_CHECKPOINT_LOOKUP_CHUNK_SIZE]
+                stmt = (
+                    select(ExecutionPlanCheckpoint)
+                    .where(
+                        ExecutionPlanCheckpoint.plan_public_id.in_(chunk),
+                        *where_active(ExecutionPlanCheckpoint, now),
+                    )
+                    .order_by(
+                        ExecutionPlanCheckpoint.plan_public_id,
+                        ExecutionPlanCheckpoint.checkpoint_at.desc(),
+                    )
+                )
+                result = await s.execute(stmt)
+                for row in result.scalars().all():
+                    if row.plan_public_id in result_map:
+                        continue
+                    result_map[row.plan_public_id] = self._checkpoint_row_to_dict(row)
+        return result_map
+
+    @staticmethod
+    def _checkpoint_row_to_dict(
+        row: ExecutionPlanCheckpoint,
+    ) -> ExecutionPlanCheckpointRow:
+        """Project an ORM checkpoint row to the TypedDict shape callers consume."""
+        return ExecutionPlanCheckpointRow(
+            public_id=row.public_id,
+            timestamp=row.timestamp,
+            session_id=row.session_id,
+            sequence_id=row.sequence_id,
+            plan_public_id=row.plan_public_id,
+            state=row.state,
+            last_venue_event_id=row.last_venue_event_id,
+            last_tick_timestamp=row.last_tick_timestamp,
+            checkpoint_at=row.checkpoint_at,
+        )
 
     async def insert_execution_plan_decision(
         self,
