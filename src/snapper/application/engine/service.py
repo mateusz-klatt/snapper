@@ -160,7 +160,6 @@ class TradingEngineService:
     entry_price: float | None
     instrument_specs: dict[str, InstrumentSpec]
     order_in_flight: bool
-    pending_client_order_id: str | None
     seen_exec_ids: OrderedDict[str, None]
 
     def __init__(
@@ -249,7 +248,13 @@ class TradingEngineService:
 
     @property
     def pending_client_order_id(self) -> str | None:
-        """Client-order-id of the currently in-flight submission, if any."""
+        """Return the client_order_id of the currently in-flight submission.
+
+        Returns:
+            The in-flight client_order_id, or ``None`` when no submission
+            is awaiting a fill (and also when the engine was built via
+            ``__new__`` without running ``__init__``).
+        """
         return getattr(self, "_pending_client_order_id", None)
 
     @pending_client_order_id.setter
@@ -267,6 +272,10 @@ class TradingEngineService:
         ``__init__`` (unit-test fixtures): a missing backing slot or
         missing listener attribute is treated as "no previous value"
         / "no listener" rather than raising.
+
+        Args:
+            value: The new in-flight client_order_id, or ``None`` to
+                clear the pending submission.
         """
         previous = getattr(self, "_pending_client_order_id", None)
         if previous == value:
