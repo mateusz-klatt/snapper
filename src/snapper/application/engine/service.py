@@ -8,6 +8,7 @@ stop-loss logic, fee calculation, and order publication to ZMQ.
 import datetime as dt
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from decimal import Decimal
 from typing import TypedDict
 from uuid import uuid7
@@ -226,7 +227,8 @@ class TradingEngineService:
         self.entry_price: float | None = None
         self.instrument_specs = instrument_specs or {}
         self.order_in_flight = False
-        self.pending_client_order_id: str | None = None
+        self._pending_client_order_id: str | None = None
+        self.pending_coid_listener: Callable[[str | None, str | None], None] | None = None
         self._in_flight_since: float | None = None
         self.seen_exec_ids: OrderedDict[str, None] = OrderedDict()
         self.read_only = False
@@ -244,6 +246,35 @@ class TradingEngineService:
             wallet_public_id=wallet_public_id,
             strategy_tag=strategy_tag,
         )
+
+    @property
+    def pending_client_order_id(self) -> str | None:
+        """Client-order-id of the currently in-flight submission, if any."""
+        return getattr(self, "_pending_client_order_id", None)
+
+    @pending_client_order_id.setter
+    def pending_client_order_id(self, value: str | None) -> None:
+        """Set the in-flight client_order_id and notify any registered listener.
+
+        ``TraderCoordinator`` registers a listener on each engine after
+        construction so the per-frame fill dispatch can resolve
+        coid -> engine via an O(1) index instead of scanning every
+        engine. The listener is invoked only on actual change (set,
+        clear, replace) to keep the index consistent without redundant
+        callbacks during ``order_in_flight`` recovery paths.
+
+        Tolerates engines constructed via ``__new__`` without running
+        ``__init__`` (unit-test fixtures): a missing backing slot or
+        missing listener attribute is treated as "no previous value"
+        / "no listener" rather than raising.
+        """
+        previous = getattr(self, "_pending_client_order_id", None)
+        if previous == value:
+            return
+        self._pending_client_order_id = value
+        listener = getattr(self, "pending_coid_listener", None)
+        if listener is not None:
+            listener(previous, value)
 
     def _build_strategy_insert_row(
         self,

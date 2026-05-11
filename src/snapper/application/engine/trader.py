@@ -16,6 +16,7 @@ import contextlib
 import json
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -174,6 +175,31 @@ class SignalRoutingContext:
     shard_key: str
 
 
+class _EngineRegistry(dict[str, "TradingEngineService"]):
+    """``self.engines`` subclass that auto-indexes engines on insert.
+
+    Wrapping the engines map ensures every ``self.engines[key] = engine``
+    site — including the direct insertions test helpers reach for —
+    fans out into the fill-dispatch lookup indices the
+    :py:class:`TraderCoordinator` maintains for O(1) coid/scope match.
+    The auto-register callback is owned by the coordinator so it sees
+    the full ``self``-bound state when the engine arrives.
+    """
+
+    def __init__(
+        self,
+        register_callback: Callable[[TradingEngineService], None],
+    ) -> None:
+        """Bind the auto-registration callback the trader uses to keep indices fresh."""
+        super().__init__()
+        self._on_register = register_callback
+
+    def __setitem__(self, key: str, value: TradingEngineService) -> None:
+        """Insert and fan out the new engine to the trader's lookup indices."""
+        super().__setitem__(key, value)
+        self._on_register(value)
+
+
 @register_process(
     "trader_coordinator",
     description="Trading coordinator",
@@ -232,7 +258,10 @@ class TraderCoordinator(RegisterableProcess):
         self._injected_settings: AppSettings | None = settings
         self.signal_topics = signal_topics or ["signals."]
         self.repository = get_repository(self.settings.db_url)
-        self.engines: dict[str, TradingEngineService] = {}
+        self._engines_by_pending_coid: dict[str, TradingEngineService] = {}
+        self._engines_by_scope: dict[tuple[str, str, str], TradingEngineService] = {}
+        self._engines_by_scope_legacy: dict[tuple[str, str], TradingEngineService] = {}
+        self.engines: _EngineRegistry = _EngineRegistry(self._register_engine_for_lookup)
         self.zmq_context: zmq.asyncio.Context | None = None
         self.signal_subscriber: ValidatedSubscriber | None = None
         self.last_signal_time: dict[str, float] = {}
@@ -784,6 +813,59 @@ class TraderCoordinator(RegisterableProcess):
         """Register a recovered engine and refresh its liveness timestamp."""
         self.engines[engine_key] = engine
         self.last_signal_time[engine_key] = time.time()
+
+    def _register_engine_for_lookup(self, engine: TradingEngineService) -> None:
+        """Index an engine for O(1) fill dispatch.
+
+        Adds the engine to:
+        * ``_engines_by_scope`` keyed by
+          ``(exchange, instrument, wallet_public_id)`` when the engine
+          carries a wallet_public_id;
+        * ``_engines_by_scope_legacy`` keyed by ``(exchange, instrument)``
+          unconditionally so wallet-less fills still resolve.
+
+        Registers ``_on_engine_pending_coid_change`` as the engine's
+        ``pending_coid_listener`` so subsequent property assignments
+        on ``engine.pending_client_order_id`` keep
+        ``_engines_by_pending_coid`` consistent without scanning all
+        engines on every fill.
+
+        Defensive against partial-stub engines used in unit tests
+        (e.g. StubEngine without ``exchange``/``wallet_public_id``): a
+        missing attribute simply skips the corresponding scope index
+        entry; the engine still wires into ``self.engines`` and the
+        coid listener if those attributes exist.
+        """
+        exchange = getattr(engine, "exchange", None)
+        instrument = getattr(engine, "instrument", None)
+        wallet_public_id = getattr(engine, "wallet_public_id", "")
+        if exchange is not None and instrument is not None:
+            scope_legacy_key = (exchange, instrument)
+            self._engines_by_scope_legacy.setdefault(scope_legacy_key, engine)
+            if wallet_public_id:
+                scope_key = (exchange, instrument, wallet_public_id)
+                self._engines_by_scope.setdefault(scope_key, engine)
+        try:
+            engine.pending_coid_listener = lambda old, new: self._on_engine_pending_coid_change(
+                engine, old, new
+            )
+        except AttributeError:
+            return
+        current_pending = getattr(engine, "pending_client_order_id", None)
+        if current_pending is not None:
+            self._engines_by_pending_coid.setdefault(current_pending, engine)
+
+    def _on_engine_pending_coid_change(
+        self,
+        engine: TradingEngineService,
+        old: str | None,
+        new: str | None,
+    ) -> None:
+        """Listener invoked by ``TradingEngineService.pending_client_order_id`` setter."""
+        if old is not None and self._engines_by_pending_coid.get(old) is engine:
+            del self._engines_by_pending_coid[old]
+        if new is not None:
+            self._engines_by_pending_coid[new] = engine
 
     def _restore_engine_from_shard(
         self,
@@ -1722,25 +1804,54 @@ class TraderCoordinator(RegisterableProcess):
         self,
         client_order_id: str,
     ) -> TradingEngineService | None:
-        """Find the engine owning the in-flight client_order_id."""
+        """Find the engine owning the in-flight client_order_id.
+
+        O(1) lookup against an index maintained by
+        :py:meth:`_on_engine_pending_coid_change` (registered as the
+        engine's ``pending_coid_listener`` at creation/recovery time).
+        Falls back to a linear scan only when ``self.engines`` is no
+        longer the auto-indexing :py:class:`_EngineRegistry` instance
+        (test fixtures that replace the dict wholesale).
+        """
+        if isinstance(self.engines, _EngineRegistry):
+            return self._engines_by_pending_coid.get(client_order_id)
         for engine in self.engines.values():
-            if engine.pending_client_order_id == client_order_id:
+            if getattr(engine, "pending_client_order_id", None) == client_order_id:
                 return engine
         return None
 
     def _find_engine_by_fill_scope(self, fill: ExecutionData) -> TradingEngineService | None:
-        """Match a fill by wallet-aware or legacy instrument scope."""
+        """Match a fill by wallet-aware or legacy instrument scope.
+
+        O(1) lookup against scope indices populated when an engine is
+        registered via :py:meth:`_register_engine_for_lookup`. The
+        wallet-aware path requires a non-empty ``wallet_public_id`` on
+        both the fill and the engine — when the fill is wallet-scoped
+        no fallback to the legacy (exchange, instrument) lookup runs,
+        matching the prior linear-scan semantics. Falls back to a
+        linear scan only when ``self.engines`` is no longer the
+        auto-indexing :py:class:`_EngineRegistry` instance.
+        """
+        if isinstance(self.engines, _EngineRegistry):
+            if fill.wallet_public_id:
+                return self._engines_by_scope.get(
+                    (fill.exchange, fill.instrument, fill.wallet_public_id)
+                )
+            return self._engines_by_scope_legacy.get((fill.exchange, fill.instrument))
         if fill.wallet_public_id:
             for engine in self.engines.values():
                 if (
-                    engine.instrument == fill.instrument
-                    and engine.exchange == fill.exchange
-                    and engine.wallet_public_id == fill.wallet_public_id
+                    getattr(engine, "instrument", None) == fill.instrument
+                    and getattr(engine, "exchange", None) == fill.exchange
+                    and getattr(engine, "wallet_public_id", None) == fill.wallet_public_id
                 ):
                     return engine
             return None
         for engine in self.engines.values():
-            if engine.instrument == fill.instrument and engine.exchange == fill.exchange:
+            if (
+                getattr(engine, "instrument", None) == fill.instrument
+                and getattr(engine, "exchange", None) == fill.exchange
+            ):
                 return engine
         return None
 

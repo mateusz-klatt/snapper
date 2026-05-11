@@ -166,3 +166,61 @@ class TestFindEngineForFill:
         coord.engines = {"ETH-USD": engine}
         fill = _make_fill(instrument="BTC-USD", client_order_id="unknown")
         assert coord._find_engine_for_fill(fill) is None
+
+
+class TestFindEngineForFillIndexed:
+    """Exercise the production O(1) lookup indices on the auto-indexing engines registry.
+
+    These complement :py:class:`TestFindEngineForFill` (which uses
+    direct ``coord.engines = {...}`` dict replacement to verify the
+    fallback path still routes correctly) by inserting engines through
+    the auto-indexing :py:class:`~snapper.application.engine.trader._EngineRegistry`
+    that production code uses. A regression that drops the indices
+    would silently fall through to the legacy O(n_engines) scan, so
+    these tests pin the index contract directly.
+    """
+
+    def test_coid_index_resolves_pending_coid_after_assignment(self) -> None:
+        """Setting pending_client_order_id auto-indexes the engine in the registry.
+
+        Given: An engine inserted through the registry,
+        When: ``engine.pending_client_order_id = coid`` is assigned,
+        Then: ``coord._engines_by_pending_coid[coid] is engine`` — the
+        property setter fires the registered listener on every change.
+        """
+        coord = _make_coordinator()
+        engine = _make_engine()
+        coord.engines["BTC-USD@kraken-paper"] = engine
+        engine.pending_client_order_id = "cid-new"
+        assert coord._engines_by_pending_coid.get("cid-new") is engine
+        engine.pending_client_order_id = None
+        assert "cid-new" not in coord._engines_by_pending_coid
+
+    def test_scope_index_keyed_by_wallet_tuple(self) -> None:
+        """Engine with wallet_public_id is keyed in the wallet-scoped index.
+
+        Given: An engine registered with a non-empty wallet_public_id,
+        When: A fill for the same (exchange, instrument, wallet) arrives,
+        Then: ``_find_engine_by_fill_scope`` returns it via O(1) lookup
+        without scanning ``self.engines``.
+        """
+        coord = _make_coordinator()
+        engine = _make_engine(wallet_public_id=WALLET_A)
+        coord.engines["BTC-USD@kraken-WA"] = engine
+        assert coord._engines_by_scope.get(("kraken", "BTC-USD", WALLET_A)) is engine
+        fill = _make_fill(client_order_id="unknown", wallet_public_id=WALLET_A)
+        assert coord._find_engine_by_fill_scope(fill) is engine
+
+    def test_legacy_scope_index_keyed_by_exchange_instrument(self) -> None:
+        """Engine without wallet_public_id surfaces via legacy index.
+
+        Given: An engine registered without wallet_public_id,
+        When: A wallet-less fill matches (exchange, instrument),
+        Then: legacy index returns the engine in O(1).
+        """
+        coord = _make_coordinator()
+        engine = _make_engine(wallet_public_id="")
+        coord.engines["BTC-USD@kraken-legacy"] = engine
+        assert coord._engines_by_scope_legacy.get(("kraken", "BTC-USD")) is engine
+        fill = _make_fill(client_order_id="unknown", wallet_public_id="")
+        assert coord._find_engine_by_fill_scope(fill) is engine
