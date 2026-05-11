@@ -228,7 +228,7 @@ class PolygonExchangeClient(ExchangeClientBase):
             try:
                 await self._wait_for_rate_limit()
                 self._record_rest_call()
-                response = request_func()
+                response = await asyncio.to_thread(request_func)
                 return response
             except Exception as e:
                 error_str = str(e)

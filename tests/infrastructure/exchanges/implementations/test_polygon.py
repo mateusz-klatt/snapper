@@ -3,6 +3,7 @@
 import asyncio
 import csv
 import os
+import threading
 import time
 from datetime import UTC
 from datetime import date
@@ -315,6 +316,33 @@ class TestPolygonRetryLogic:
         """
         with pytest.raises(RuntimeError):
             await polygon_client._make_request_with_retry(lambda: None, max_retries=0)
+
+    @pytest.mark.asyncio
+    async def test_request_runs_in_worker_thread_not_event_loop(
+        self, polygon_client: PolygonExchangeClient
+    ) -> None:
+        """Verify request_func runs via asyncio.to_thread to avoid blocking the event loop.
+
+        Given: A request_func that performs blocking work (time.sleep inside SDK pagination),
+        When: _make_request_with_retry invokes it,
+        Then: asyncio.to_thread is used so the blocking work runs on a worker thread.
+        """
+        main_loop = asyncio.get_running_loop()
+        main_thread_id = threading.get_ident()
+        executor_thread_id: list[int | None] = []
+
+        def blocking_request() -> str:
+            executor_thread_id.append(threading.get_ident())
+            return "ok"
+
+        polygon_client._wait_for_rate_limit = AsyncMock()
+        result = await polygon_client._make_request_with_retry(blocking_request, max_retries=1)
+        assert result == "ok"
+        assert executor_thread_id[0] is not None
+        assert (
+            executor_thread_id[0] != main_thread_id
+        ), "request_func must run on a worker thread, not the asyncio event loop thread"
+        assert main_loop.is_running(), "event loop must still be running after the call"
 
 
 class TestPolygonAggregatesPagination:
