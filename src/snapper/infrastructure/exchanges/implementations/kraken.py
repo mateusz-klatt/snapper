@@ -80,6 +80,32 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 _WS_CLIENT_CONNECTED_MSG = "WebSocket client should be connected"
+_QUEUE_MAX_SIZE = 10_000
+
+
+def _enqueue_or_drop_oldest(queue: asyncio.Queue[Any], item: Any, label: str) -> None:
+    """Put item on queue, dropping the oldest if full.
+
+    Matches the bounded-queue pattern already used by
+    :py:mod:`~snapper.infrastructure.exchanges.implementations.kraken_futures`
+    and
+    :py:mod:`~snapper.infrastructure.exchanges.implementations.kraken_equities`.
+    Drop-oldest is the safer default for market-data feeds: a slow
+    consumer must never grow RSS without bound.
+
+    Args:
+        queue: Bounded asyncio queue.
+        item: Item to enqueue.
+        label: Human-readable label for the warning log.
+    """
+    try:
+        queue.put_nowait(item)
+    except asyncio.QueueFull:
+        logger.warning(f"{label} queue full, dropping oldest message")
+        queue.get_nowait()
+        queue.put_nowait(item)
+
+
 _CCXT_STATUS_MAP: Final[dict[str, ExchangeOrderStatusEnum]] = {
     "open": ExchangeOrderStatusEnum.OPEN,
     "closed": ExchangeOrderStatusEnum.CLOSED,
@@ -154,12 +180,18 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._ws_client: SpotWSClient | None = None
         self._ws_connected = False
         self._trade_client: Trade | None = None
-        self._tick_queue: asyncio.Queue[TickerUpdate] = asyncio.Queue()
+        self._tick_queue: asyncio.Queue[TickerUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
         self._candle_queues: dict[int, asyncio.Queue[CandleUpdate]] = {}
-        self._trade_queue: asyncio.Queue[TradeUpdate] = asyncio.Queue()
-        self._execution_queue: asyncio.Queue[ExecutionUpdate] = asyncio.Queue()
-        self._raw_instrument_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self._instrument_queue: asyncio.Queue[InstrumentPairDescriptor] = asyncio.Queue()
+        self._trade_queue: asyncio.Queue[TradeUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+        self._execution_queue: asyncio.Queue[ExecutionUpdate] = asyncio.Queue(
+            maxsize=_QUEUE_MAX_SIZE
+        )
+        self._raw_instrument_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
+            maxsize=_QUEUE_MAX_SIZE
+        )
+        self._instrument_queue: asyncio.Queue[InstrumentPairDescriptor] = asyncio.Queue(
+            maxsize=_QUEUE_MAX_SIZE
+        )
         self._circuit_failures = 0
         self._circuit_open_until = 0.0
         self._max_failures = 5
@@ -734,7 +766,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             }
             interval = interval_map.get(timeframe, 1)
             if interval not in self._candle_queues:
-                self._candle_queues[interval] = asyncio.Queue()
+                self._candle_queues[interval] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
             async with self._ws_client as ws:
                 subscribe_params = KrakenOhlcSubscribeParamsSchema(
                     symbol=ws_symbols, interval=interval
@@ -1087,10 +1119,12 @@ class KrakenExchangeClient(ExchangeClientBase):
             candle_list = parse_kraken_candle_list(data) if isinstance(data, list) else []
             for candle_data in candle_list:
                 if candle_data.interval in self._candle_queues:
-                    await self._candle_queues[candle_data.interval].put(candle_data)
+                    _enqueue_or_drop_oldest(
+                        self._candle_queues[candle_data.interval], candle_data, "candle"
+                    )
                 else:
                     for queue in self._candle_queues.values():
-                        await queue.put(candle_data)
+                        _enqueue_or_drop_oldest(queue, candle_data, "candle")
         except ValueError as e:
             logger.warning(f"Failed to parse candle data: {e}")
 
@@ -1104,7 +1138,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             return
         ticker_list = parse_kraken_ticker_list(data)
         for ticker_data in ticker_list:
-            await self._tick_queue.put(ticker_data)
+            _enqueue_or_drop_oldest(self._tick_queue, ticker_data, "tick")
 
     async def _handle_trade_data(self, data: Any) -> None:
         """Parse and enqueue trade data.
@@ -1115,7 +1149,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         try:
             trade_list = parse_kraken_trade_list(data)
             for trade_data in trade_list:
-                await self._trade_queue.put(trade_data)
+                _enqueue_or_drop_oldest(self._trade_queue, trade_data, "trade")
         except ValueError as e:
             logger.warning(f"Failed to parse trade data: {e}")
 
@@ -1128,7 +1162,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         try:
             execution_list = parse_kraken_execution_list(data)
             for execution_data in execution_list:
-                await self._execution_queue.put(execution_data)
+                _enqueue_or_drop_oldest(self._execution_queue, execution_data, "execution")
         except ValueError as e:
             logger.warning(f"Failed to parse execution data: {e}")
 
@@ -1159,13 +1193,17 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         try:
             validated = KrakenInstrumentPairSchema.model_validate(pair_dict)
-            await self._raw_instrument_queue.put(validated.model_dump(by_alias=True))
+            _enqueue_or_drop_oldest(
+                self._raw_instrument_queue,
+                validated.model_dump(by_alias=True),
+                "raw_instrument",
+            )
         except ValidationError as e:
             logger.warning(f"Invalid instrument data, skipping: {e}")
             return
         try:
             instrument_pair = parse_kraken_instrument(pair_dict)
-            await self._instrument_queue.put(instrument_pair)
+            _enqueue_or_drop_oldest(self._instrument_queue, instrument_pair, "instrument")
         except ValueError as e:
             logger.debug(f"Skipping instrument parse (raw available): {e}")
 

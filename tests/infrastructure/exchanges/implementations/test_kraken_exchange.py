@@ -32,6 +32,7 @@ from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
+from snapper.infrastructure.exchanges.implementations.kraken import _enqueue_or_drop_oldest
 
 
 class _DummyWs:
@@ -2127,15 +2128,8 @@ class TestOnMessageDataRouting:
 
     @pytest.fixture
     def kraken_client(self) -> KrakenExchangeClient:
-        """Provide test client instance."""
-        client = KrakenExchangeClient(api_key="k", api_secret="s", sandbox=False)
-        client._tick_queue = MagicMock()
-        client._tick_queue.put = AsyncMock()
-        client._trade_queue = MagicMock()
-        client._trade_queue.put = AsyncMock()
-        client._execution_queue = MagicMock()
-        client._execution_queue.put = AsyncMock()
-        return client
+        """Provide test client instance with real bounded queues."""
+        return KrakenExchangeClient(api_key="k", api_secret="s", sandbox=False)
 
     @pytest.mark.asyncio
     async def test_on_message_routes_ticker_list(self, kraken_client: KrakenExchangeClient) -> None:
@@ -2145,8 +2139,7 @@ class TestOnMessageDataRouting:
             return_value=[MagicMock()],
         ):
             await kraken_client._on_message({"channel": "ticker", "data": [{}]})
-        tick_put = cast(AsyncMock, kraken_client._tick_queue.put)
-        tick_put.assert_awaited()
+        assert kraken_client._tick_queue.qsize() == 1
 
     @pytest.mark.asyncio
     async def test_on_message_routes_trade_list(self, kraken_client: KrakenExchangeClient) -> None:
@@ -2156,8 +2149,7 @@ class TestOnMessageDataRouting:
             return_value=[MagicMock()],
         ):
             await kraken_client._on_message({"channel": "trade", "data": [{}]})
-        trade_put = cast(AsyncMock, kraken_client._trade_queue.put)
-        trade_put.assert_awaited()
+        assert kraken_client._trade_queue.qsize() == 1
 
     @pytest.mark.asyncio
     async def test_on_message_routes_execution_list(
@@ -2169,8 +2161,7 @@ class TestOnMessageDataRouting:
             return_value=[MagicMock()],
         ):
             await kraken_client._on_message({"channel": "executions", "data": [{}]})
-        exec_put = cast(AsyncMock, kraken_client._execution_queue.put)
-        exec_put.assert_awaited()
+        assert kraken_client._execution_queue.qsize() == 1
 
 
 class TestRetryMaxRetriesExceeded:
@@ -3571,14 +3562,12 @@ class TestKrakenAdditionalCoverage:
             ],
         }
         mock_queue_1m = MagicMock()
-        mock_queue_1m.put = AsyncMock()
         mock_queue_5m = MagicMock()
-        mock_queue_5m.put = AsyncMock()
         with patch.object(kraken_client, "_candle_queues", {1: mock_queue_1m, 5: mock_queue_5m}):
             await kraken_client._on_message(message)
-            mock_queue_1m.put.assert_called_once()
-            mock_queue_5m.put.assert_not_called()
-            candle_data = mock_queue_1m.put.call_args[0][0]
+            mock_queue_1m.put_nowait.assert_called_once()
+            mock_queue_5m.put_nowait.assert_not_called()
+            candle_data = mock_queue_1m.put_nowait.call_args[0][0]
             assert isinstance(candle_data, CandleUpdate)
             assert candle_data.symbol == "BTC-USD"
             assert candle_data.open == pytest.approx(50000.0)
@@ -3605,13 +3594,11 @@ class TestKrakenAdditionalCoverage:
             ],
         }
         mock_queue_1 = MagicMock()
-        mock_queue_1.put = AsyncMock()
         mock_queue_2 = MagicMock()
-        mock_queue_2.put = AsyncMock()
         with patch.object(kraken_client, "_candle_queues", {1: mock_queue_1, 5: mock_queue_2}):
             await kraken_client._on_message(message)
-            mock_queue_1.put.assert_called_once()
-            mock_queue_2.put.assert_called_once()
+            mock_queue_1.put_nowait.assert_called_once()
+            mock_queue_2.put_nowait.assert_called_once()
 
     async def test_on_message_ticker_update(self, kraken_client: KrakenExchangeClient) -> None:
         """Verify on message ticker update."""
@@ -3637,8 +3624,8 @@ class TestKrakenAdditionalCoverage:
         }
         with patch.object(kraken_client, "_tick_queue") as mock_queue:
             await kraken_client._on_message(message)
-            mock_queue.put.assert_called_once()
-            ticker_data = mock_queue.put.call_args[0][0]
+            mock_queue.put_nowait.assert_called_once()
+            ticker_data = mock_queue.put_nowait.call_args[0][0]
             assert isinstance(ticker_data, TickerUpdate)
             assert ticker_data.symbol == "BTC-USD"
 
@@ -3661,8 +3648,8 @@ class TestKrakenAdditionalCoverage:
         }
         with patch.object(kraken_client, "_trade_queue") as mock_queue:
             await kraken_client._on_message(trade_message)
-            mock_queue.put.assert_called_once()
-            trade_data = mock_queue.put.call_args[0][0]
+            mock_queue.put_nowait.assert_called_once()
+            trade_data = mock_queue.put_nowait.call_args[0][0]
             assert isinstance(trade_data, TradeUpdate)
             assert trade_data.symbol == "BTC-USD"
 
@@ -3687,8 +3674,8 @@ class TestKrakenAdditionalCoverage:
         }
         with patch.object(kraken_client, "_execution_queue") as mock_queue:
             await kraken_client._on_message(execution_message)
-            mock_queue.put.assert_called_once()
-            execution_data = mock_queue.put.call_args[0][0]
+            mock_queue.put_nowait.assert_called_once()
+            execution_data = mock_queue.put_nowait.call_args[0][0]
             assert isinstance(execution_data, ExecutionUpdate)
             assert execution_data.order_id == "ORDER123"
 
@@ -5265,6 +5252,60 @@ class TestKrakenLiveFixtures:
         assert create_snap.amount == fetch_snap.amount
         assert create_snap.side == fetch_snap.side
         assert create_snap.type == fetch_snap.type
+
+
+class TestEnqueueOrDropOldest:
+    """Tests for the ``_enqueue_or_drop_oldest`` bounded-queue helper."""
+
+    def test_enqueue_when_space_available(self) -> None:
+        """Enqueue item normally when queue has capacity.
+
+        Given: Queue with maxsize=2 and one existing item,
+        When: _enqueue_or_drop_oldest is called with a new item,
+        Then: New item is added, queue has two items total.
+        """
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=2)
+        queue.put_nowait("first")
+        _enqueue_or_drop_oldest(queue, "second", "test")
+        assert queue.qsize() == 2
+
+    def test_drops_oldest_when_full(self) -> None:
+        """Drop oldest item and enqueue newest when queue is full.
+
+        Given: Queue with maxsize=1 already containing 'old',
+        When: _enqueue_or_drop_oldest is called with 'new',
+        Then: Queue contains only 'new'.
+        """
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+        queue.put_nowait("old")
+        _enqueue_or_drop_oldest(queue, "new", "test")
+        assert queue.qsize() == 1
+        assert queue.get_nowait() == "new"
+
+
+class TestKrakenSpotQueuesAreBounded:
+    """Pin the bounded-queue invariant for the Kraken spot client.
+
+    A regression that drops ``maxsize`` would let a slow downstream
+    consumer grow the per-queue backlog without bound — exactly the
+    risk HV2-H4 closed.
+    """
+
+    def test_default_queues_have_finite_maxsize(self) -> None:
+        """Every WS-facing queue carries a finite (non-zero) maxsize.
+
+        Given: A fresh KrakenExchangeClient,
+        When: queue maxsize is read,
+        Then: every WS-facing queue carries a finite (non-zero) maxsize.
+        ``asyncio.Queue`` defaults ``maxsize=0`` for unbounded — the
+        assertion ``maxsize > 0`` is the regression gate.
+        """
+        client = KrakenExchangeClient(api_key="k", api_secret="s", sandbox=False)
+        assert client._tick_queue.maxsize > 0
+        assert client._trade_queue.maxsize > 0
+        assert client._execution_queue.maxsize > 0
+        assert client._raw_instrument_queue.maxsize > 0
+        assert client._instrument_queue.maxsize > 0
 
 
 class TestInvokeFuncOffloadsSyncCalls:
