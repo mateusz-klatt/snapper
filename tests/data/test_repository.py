@@ -83,7 +83,7 @@ class _DummyAsyncSession:
     def begin_nested(self) -> _DummyAsyncSavepoint:
         return _DummyAsyncSavepoint(self)
 
-    async def execute(self, stmt: Any) -> Any:
+    async def execute(self, stmt: Any, params: Any | None = None) -> Any:
         self.calls += 1
         if self.fail_on and self.calls == self.fail_on:
             raise IntegrityError("stmt", {}, Exception("fail"))
@@ -3699,15 +3699,22 @@ async def test_get_setting_categories_returns_sorted(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_upsert_ticks_appends_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify upsert_ticks inserts all rows as append-only.
+    """Verify upsert_ticks inserts all rows as append-only via Core bulk insert.
 
     Given: A repository session,
-    When: upsert_ticks is called with two rows,
-    Then: Both rows are added and count returned.
+    When: upsert_ticks is called with two rows and no session arg,
+    Then: A single ``session.execute`` call carries the parameter list,
+        the transaction commits, and missing ``public_id`` values are
+        auto-filled.
     """
-    added_objects: list[Any] = []
+    executed: list[Any] = []
     session = _DummyAsyncSession()
-    session.add_all = lambda objs: added_objects.extend(objs)
+
+    async def capture(stmt: Any, params: Any | None = None) -> Any:
+        executed.append((stmt, params))
+        return SimpleNamespace(rowcount=1)
+
+    session.execute = capture
     repo = _make_repo(lambda: _session_factory(session))
     ts = datetime(2024, 6, 1, tzinfo=UTC)
     rows: list[dict[str, Any]] = [
@@ -3735,9 +3742,48 @@ async def test_upsert_ticks_appends_rows(monkeypatch: pytest.MonkeyPatch) -> Non
     ]
     result = await repo.upsert_ticks(rows)
     assert result == 2
-    assert len(added_objects) == 2
+    assert len(executed) == 1
+    assert executed[0][1] == rows
     assert session.commit_called is True
     assert "public_id" in rows[1]
+
+
+@pytest.mark.asyncio
+async def test_upsert_ticks_with_caller_session_skips_internal_commit() -> None:
+    """When a caller passes its own session, ``upsert_ticks`` defers the commit.
+
+    Given: A caller-owned session passed explicitly,
+    When: upsert_ticks is called,
+    Then: The session is used for ``execute`` but ``commit`` is NOT
+        called inside the repository — the caller owns the transaction
+        boundary (publisher writer task's hot path).
+    """
+    executed: list[Any] = []
+    session = _DummyAsyncSession()
+
+    async def capture(stmt: Any, params: Any | None = None) -> Any:
+        executed.append((stmt, params))
+        return SimpleNamespace(rowcount=1)
+
+    session.execute = capture
+    repo = _make_repo(lambda: _session_factory(_DummyAsyncSession()))
+    rows: list[dict[str, Any]] = [
+        {
+            "instrument_public_id": "inst-pub-1",
+            "timestamp": datetime(2024, 6, 1, tzinfo=UTC),
+            "bid": 100.0,
+            "ask": 101.0,
+            "last": 100.5,
+            "volume": 5.0,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "public_id": "tick-pub-1",
+        },
+    ]
+    result = await repo.upsert_ticks(rows, session=cast(AsyncSession, session))
+    assert result == 1
+    assert len(executed) == 1
+    assert session.commit_called is False
 
 
 @pytest.mark.asyncio

@@ -3752,3 +3752,47 @@ async def test_tick_writer_drop_log_uses_persistence_backlog_label(
     assert len(summaries) == 1
     assert "persistence backlog" in summaries[0].message
     assert "ZMQ subscribers" in summaries[0].message
+
+
+@pytest.mark.asyncio
+async def test_tick_writer_reuses_persistent_session_for_every_flush() -> None:
+    """Writer task acquires one session at start and reuses it per flush.
+
+    Given: A repository whose ``session()`` context manager yields a
+        single tracked session and an ``upsert_ticks`` mock that
+        records every call,
+    When: The writer drains 8 rows across 2 flushes,
+    Then: ``repository.session`` is entered exactly once, every
+        ``upsert_ticks`` call carries that same session via the
+        ``session`` kwarg, and the session is committed per flush
+        instead of opening a fresh connection each time.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._tick_batch_max_rows = 4
+    pub._batch_max_age_s = 0.05
+    held_session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+    session_enters = 0
+
+    class _SessionCtx:
+        async def __aenter__(self) -> Any:
+            nonlocal session_enters
+            session_enters += 1
+            return held_session
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+    pub.repository = SimpleNamespace(
+        session=lambda: _SessionCtx(),
+        upsert_ticks=AsyncMock(return_value=4),
+    )
+    for i in range(8):
+        await pub._tick_write_queue.put(_dummy_tick_row(i))
+    pub.running = False
+    await asyncio.wait_for(pub._tick_writer_loop(), timeout=2.0)
+    assert session_enters == 1
+    upsert_calls = pub.repository.upsert_ticks.await_args_list
+    assert len(upsert_calls) >= 2
+    for call in upsert_calls:
+        assert call.kwargs["session"] is held_session
+    assert held_session.commit.await_count >= 2

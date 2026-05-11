@@ -693,8 +693,33 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def upsert_ticks(self, rows: list[TickUpsertRow]) -> int:
-        """Insert ticks. Return inserted count."""
+    async def upsert_ticks(
+        self, rows: list[TickUpsertRow], session: AsyncSession | None = None
+    ) -> int:
+        """Insert ticks via append-only bulk INSERT.
+
+        Append-only path with no conflict semantics (ticks are unique by
+        ``public_id`` UUID7). Uses SQLAlchemy Core ``insert(Tick).values``
+        directly to bypass ORM identity-map and per-row object
+        construction overhead — material at publisher throughputs above
+        ~500 ticks/sec.
+
+        When ``session`` is provided the caller is expected to manage the
+        transaction (commit / rollback). When ``session`` is ``None`` a
+        fresh session is opened, the insert is committed, and the
+        session is closed before returning. Publisher writer tasks pass
+        a long-lived session to amortise the per-flush connection-acquire
+        cost; standalone callers (tests, bulk imports) pass ``None``.
+
+        Args:
+            rows: Tick rows to insert. ``public_id`` is auto-filled when
+                missing.
+            session: Optional caller-managed session. When ``None``, the
+                repository opens its own session and commits.
+
+        Returns:
+            Number of rows inserted.
+        """
         ...
 
     @abstractmethod
@@ -4490,15 +4515,44 @@ class SQLAlchemyRepository(Repository):
             return 0
         return await self._upsert_batch(Trade, rows, ["instrument_public_id", "trade_id"])
 
-    async def upsert_ticks(self, rows: list[TickUpsertRow]) -> int:
-        """Insert ticks as append-only (no dedup key)."""
+    async def upsert_ticks(
+        self, rows: list[TickUpsertRow], session: AsyncSession | None = None
+    ) -> int:
+        """Insert ticks via append-only Core bulk INSERT.
+
+        Replaces the prior ORM ``s.add_all([Tick(**r) for r in rows])``
+        path. Append-only ticks do not need the identity-map, dirty
+        tracking, or per-row constructor work that the ORM provides;
+        ``insert(Tick).values(rows)`` emits a single SQL statement with
+        all rows inline and is materially cheaper at publisher rates
+        (Codex 2026-05-11 post-HV2-H7 review).
+
+        When ``session`` is provided the caller owns the transaction —
+        no commit fires inside this method. Publisher writer tasks
+        rely on this to amortise per-flush connection-acquire cost
+        across many batches. When ``session`` is ``None`` (tests,
+        bulk imports) a fresh session is opened, the insert commits,
+        and the session closes before returning.
+
+        Args:
+            rows: Tick rows to insert. ``public_id`` is auto-filled
+                when missing.
+            session: Optional caller-managed session. When ``None``,
+                a fresh session opens and commits inline.
+
+        Returns:
+            Number of rows inserted.
+        """
         if not rows:
             return 0
         for r in rows:
             if "public_id" not in r:
                 r["public_id"] = str(uuid7())
+        if session is not None:
+            await session.execute(insert(Tick), list(rows))
+            return len(rows)
         async with self.session() as s:
-            s.add_all([Tick(**r) for r in rows])
+            await s.execute(insert(Tick), list(rows))
             await s.commit()
             return len(rows)
 

@@ -9,6 +9,7 @@ import contextlib
 import math
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import AsyncIterator
 from collections.abc import Callable
 from collections.abc import Coroutine
 from datetime import UTC
@@ -23,6 +24,7 @@ import zmq
 import zmq.asyncio
 from loguru import logger
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import SettingsService
@@ -175,6 +177,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         )
         self._tick_consumer_task: asyncio.Task[None] | None = None
         self._tick_writer_task: asyncio.Task[None] | None = None
+        self._tick_writer_session: AsyncSession | None = None
 
     @abstractmethod
     def _create_exchange_client(self) -> T:
@@ -672,31 +675,67 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         batch: list[TickUpsertRow] = []
         batch_start: float | None = None
         ev_loop = asyncio.get_event_loop()
-        while self.running or not self._tick_write_queue.empty() or batch:
-            if not self.running and self._tick_write_queue.empty() and batch:
-                await self._flush_tick_writer_batch(batch)
-                batch_start = None
-                continue
-            timeout = self._batch_age_remaining(batch_start, ev_loop)
-            if timeout <= 0.0:
-                await self._flush_tick_writer_batch(batch)
-                batch_start = None
-                continue
+        async with self._open_tick_writer_session() as writer_session:
+            self._tick_writer_session = writer_session
             try:
-                row = await asyncio.wait_for(
-                    self._tick_write_queue.get(),
-                    timeout=min(timeout, _TICK_WRITER_SHUTDOWN_POLL_S),
-                )
-            except TimeoutError:
-                if batch_start is None or self._batch_age_remaining(batch_start, ev_loop) <= 0.0:
-                    await self._flush_tick_writer_batch(batch)
-                    batch_start = None
-                continue
-            batch.append(row)
-            batch_start = self._track_batch_start(batch_start, ev_loop)
-            if len(batch) >= self._tick_batch_max_rows:
-                await self._flush_tick_writer_batch(batch)
-                batch_start = None
+                while self.running or not self._tick_write_queue.empty() or batch:
+                    if not self.running and self._tick_write_queue.empty() and batch:
+                        await self._flush_tick_writer_batch(batch)
+                        batch_start = None
+                        continue
+                    timeout = self._batch_age_remaining(batch_start, ev_loop)
+                    if timeout <= 0.0:
+                        await self._flush_tick_writer_batch(batch)
+                        batch_start = None
+                        continue
+                    try:
+                        row = await asyncio.wait_for(
+                            self._tick_write_queue.get(),
+                            timeout=min(timeout, _TICK_WRITER_SHUTDOWN_POLL_S),
+                        )
+                    except TimeoutError:
+                        if (
+                            batch_start is None
+                            or self._batch_age_remaining(batch_start, ev_loop) <= 0.0
+                        ):
+                            await self._flush_tick_writer_batch(batch)
+                            batch_start = None
+                        continue
+                    batch.append(row)
+                    batch_start = self._track_batch_start(batch_start, ev_loop)
+                    if len(batch) >= self._tick_batch_max_rows:
+                        await self._flush_tick_writer_batch(batch)
+                        batch_start = None
+            finally:
+                self._tick_writer_session = None
+
+    @contextlib.asynccontextmanager
+    async def _open_tick_writer_session(self) -> AsyncIterator[AsyncSession | None]:
+        """Open the writer task's long-lived database session.
+
+        When the publisher has a real repository attached (production
+        path), yields an ``AsyncSession`` opened from
+        ``self.repository.session()`` that the writer reuses across every
+        flush. Holding one session for the writer's lifetime amortises
+        the SQLite per-flush connection-acquire cost — under ``NullPool``
+        a fresh session opens a new connection every time, which
+        dominated the publisher's CPU once Core bulk insert eliminated
+        the ORM overhead (Codex 2026-05-11 post-HV2-H7 review).
+
+        When the repository is absent (tests / partial setup) yields
+        ``None``; ``_flush_tick_batch`` then falls back to the no-session
+        ``repository.upsert_ticks(batch)`` path, which is still correct
+        but commits per flush instead of per writer-lifetime.
+
+        Yields:
+            ``AsyncSession`` bound to the repository's writer connection,
+            or ``None`` when no repository is available.
+        """
+        if self.repository is None:
+            yield None
+            return
+        async with self.repository.session() as session:
+            yield session
 
     async def _flush_tick_writer_batch(self, batch: list[TickUpsertRow]) -> None:
         """Flush the writer batch and balance the queue's ``task_done`` debt.
@@ -1036,6 +1075,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     async def _flush_tick_batch(self, batch: list[TickUpsertRow]) -> None:
         """Flush tick batch to DB (append-only, no conflict possible).
 
+        Uses the writer task's long-lived session when present so the
+        per-flush cost is just BEGIN/INSERT/COMMIT on a held connection
+        instead of opening a new one through ``NullPool`` every time.
+        Falls back to the repository's own-session path when called
+        outside the writer loop (tests, ad-hoc flushes).
+
         Args:
             batch: List of tick rows to persist.
         """
@@ -1043,11 +1088,20 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return
         assert self.repository is not None, _REPO_NOT_INIT_MSG
         try:
-            await self.repository.upsert_ticks(batch)
+            writer_session = self._tick_writer_session
+            if writer_session is not None:
+                await self.repository.upsert_ticks(batch, session=writer_session)
+                await writer_session.commit()
+            else:
+                await self.repository.upsert_ticks(batch)
             self._flush_errors["tick"] = 0
         except Exception as e:
             self._flush_errors["tick"] += 1
             logger.error(f"Tick batch flush failed ({len(batch)} rows): {e}")
+            writer_session = self._tick_writer_session
+            if writer_session is not None:
+                with contextlib.suppress(Exception):
+                    await writer_session.rollback()
 
     async def _flush_trade_batch(self, batch: list[TradeUpsertRow]) -> None:
         """Flush trade batch to DB (ON CONFLICT DO NOTHING).
