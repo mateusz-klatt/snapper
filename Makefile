@@ -557,9 +557,14 @@ docker-run:
 
 docker-run-static:
 	$(DOCKER_RUN) update-kraken-symbols --force
+	$(DOCKER_RUN) update-kraken-futures-symbols --force
+	$(DOCKER_RUN) update-kraken-equities-symbols --force
 	$(DOCKER_RUN) update-walutomat-symbols --force
 	$(DOCKER_RUN) update-polygon-symbols --force || true
+	$(DOCKER_RUN) update-underlyings
 	$(DOCKER_RUN) update-kraken-market-snapshot
+	$(DOCKER_RUN) update-kraken-futures-market-snapshot
+	$(DOCKER_RUN) update-kraken-equities-market-snapshot
 	$(DOCKER_RUN) update-walutomat-market-snapshot
 
 docker-polygon-aggregates:
