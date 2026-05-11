@@ -218,6 +218,41 @@ class TestNotificationDeviceRepo:
         assert inserted is False
 
     @pytest.mark.asyncio
+    async def test_list_active_notification_devices_for_users_bulk(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Bulk variant returns dict[user_public_id, list[device]]; missing users → empty list.
+
+        Given: One active device for user-bulk-1, one for user-bulk-2, none for user-bulk-3,
+        When: list_active_notification_devices_for_users([user-1, user-2, user-3]) is called,
+        Then: Returned dict has all three keys; user-1 and user-2 carry their device,
+            user-3 maps to an empty list.
+        """
+        await _seed_user_and_device(
+            repo, user_public_id="user-bulk-1", device_token="tok-bulk-1", sequence_id=10
+        )
+        await _seed_user_and_device(
+            repo, user_public_id="user-bulk-2", device_token="tok-bulk-2", sequence_id=20
+        )
+        result = await repo.list_active_notification_devices_for_users(
+            ["user-bulk-1", "user-bulk-2", "user-bulk-3"]
+        )
+        assert set(result) == {"user-bulk-1", "user-bulk-2", "user-bulk-3"}
+        assert len(result["user-bulk-1"]) == 1
+        assert result["user-bulk-1"][0]["device_token"] == "tok-bulk-1"
+        assert len(result["user-bulk-2"]) == 1
+        assert result["user-bulk-2"][0]["device_token"] == "tok-bulk-2"
+        assert result["user-bulk-3"] == []
+
+    @pytest.mark.asyncio
+    async def test_list_active_notification_devices_for_users_empty(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Empty input returns empty dict without a round-trip."""
+        result = await repo.list_active_notification_devices_for_users([])
+        assert result == {}
+
+    @pytest.mark.asyncio
     async def test_list_device_alert_prefs_excludes_tombstoned_device(
         self, repo: SQLAlchemyRepository
     ) -> None:
@@ -503,6 +538,54 @@ class TestAlertEventRepo:
         assert row["public_id"] == public_id
         assert row["known_to"] == KNOWN_TO_MAX
         assert row["is_safety_critical"] is False
+
+    @pytest.mark.asyncio
+    async def test_get_alert_events_by_public_ids_bulk_lookup(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Bulk variant returns dict keyed by public_id; missing IDs are absent.
+
+        Given: Two active alert_events,
+        When: get_alert_events_by_public_ids is called with both IDs plus a missing one,
+        Then: Returned dict carries both hits keyed by public_id; the
+            missing ID is absent (NOT mapped to None).
+        """
+        pid_a = await repo.insert_alert_event(
+            AlertEventInsertRow(
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(),
+                user_public_id="user-bulk-a",
+                alert_type="order_fill_full",
+                priority="high",
+                title="A",
+                body="body A",
+            )
+        )
+        pid_b = await repo.insert_alert_event(
+            AlertEventInsertRow(
+                session_id="s1",
+                sequence_id=2,
+                timestamp=_ts(),
+                user_public_id="user-bulk-b",
+                alert_type="order_fill_full",
+                priority="high",
+                title="B",
+                body="body B",
+            )
+        )
+        result = await repo.get_alert_events_by_public_ids([pid_a, pid_b, "nope"])
+        assert set(result) == {pid_a, pid_b}
+        assert result[pid_a]["title"] == "A"
+        assert result[pid_b]["title"] == "B"
+
+    @pytest.mark.asyncio
+    async def test_get_alert_events_by_public_ids_empty_returns_empty_dict(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Empty input returns empty dict without a round-trip."""
+        result = await repo.get_alert_events_by_public_ids([])
+        assert result == {}
 
     @pytest.mark.asyncio
     async def test_list_recent_alerts_composite_cursor_pagination(

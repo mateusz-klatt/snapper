@@ -555,6 +555,11 @@ class NotifySidecar(RegisterableProcess):
         attempted rows first, then longest-waiting retries). Each
         row gets one fresh attempt; a second-or-later failure stays
         inside the retry loop's normal scheduling.
+
+        Bulk-prefetches the alert_event + device-list for every row in
+        the batch with two ``IN (...)`` SELECTs — replaces the per-row
+        N+1 fetches that previously dominated drain/retry latency at
+        large backlogs.
         """
         queued = await self._repo.list_queued_deliveries_all()
         queued.sort(
@@ -563,21 +568,69 @@ class NotifySidecar(RegisterableProcess):
                 r["created_at"],
             )
         )
+        events_cache, devices_cache = await self._prefetch_caches_for_rows(queued)
         for row in queued:
-            await self._attempt_on_queued_row(row, now)
+            await self._attempt_on_queued_row(
+                row,
+                now,
+                events_cache=events_cache,
+                devices_cache=devices_cache,
+            )
 
-    async def _attempt_on_queued_row(self, row: AlertDeliveryRow, now: datetime) -> None:
-        """Load the source alert_event + device for one queued row and send."""
-        event = await self._repo.get_alert_event_by_public_id(row["alert_event_public_id"])
+    async def _prefetch_caches_for_rows(
+        self, rows: list[AlertDeliveryRow]
+    ) -> tuple[dict[str, AlertEventRow], dict[str, list[NotificationDeviceRow]]]:
+        """Bulk-load the alert_event + device-list maps for a delivery batch.
+
+        Returns one ``{event_public_id: AlertEventRow}`` and one
+        ``{user_public_id: list[NotificationDeviceRow]}`` cache,
+        deduplicating IDs so the underlying SELECTs touch each row
+        at most once even when many deliveries share an alert_event
+        or user.
+        """
+        if not rows:
+            return {}, {}
+        event_pids = [row["alert_event_public_id"] for row in rows]
+        user_pids = [row["user_public_id"] for row in rows]
+        events_cache = await self._repo.get_alert_events_by_public_ids(event_pids)
+        devices_cache = await self._repo.list_active_notification_devices_for_users(user_pids)
+        return events_cache, devices_cache
+
+    async def _attempt_on_queued_row(
+        self,
+        row: AlertDeliveryRow,
+        now: datetime,
+        *,
+        events_cache: dict[str, AlertEventRow] | None = None,
+        devices_cache: dict[str, list[NotificationDeviceRow]] | None = None,
+    ) -> None:
+        """Load the source alert_event + device for one queued row and send.
+
+        ``events_cache`` and ``devices_cache`` are optional pre-loaded
+        bulk results produced by :meth:`_prefetch_caches_for_rows`. When
+        a cache miss falls through (e.g. row referenced outside any
+        prefetched batch), the per-row repository fetch is reused —
+        keeping the path correct for cancellation-event handlers that
+        process a single delivery without a surrounding batch.
+        """
+        event_pid = row["alert_event_public_id"]
+        if events_cache is not None and event_pid in events_cache:
+            event: AlertEventRow | None = events_cache[event_pid]
+        else:
+            event = await self._repo.get_alert_event_by_public_id(event_pid)
         if event is None:
             logger.warning(
                 "sidecar: delivery={pid} references missing alert_event {evt} — marking failed",
                 pid=row["public_id"],
-                evt=row["alert_event_public_id"],
+                evt=event_pid,
             )
             await self._mark_failed(row["public_id"], "alert_event missing", now)
             return
-        devices = await self._repo.list_active_notification_devices_for_user(row["user_public_id"])
+        user_pid = row["user_public_id"]
+        if devices_cache is not None and user_pid in devices_cache:
+            devices = devices_cache[user_pid]
+        else:
+            devices = await self._repo.list_active_notification_devices_for_user(user_pid)
         device = next((d for d in devices if d["public_id"] == row["device_public_id"]), None)
         if device is None:
             logger.info(
@@ -635,8 +688,14 @@ class NotifySidecar(RegisterableProcess):
                 return
             now = datetime.now(UTC)
             rows = await self._repo.list_deliveries_ready_for_retry(now)
+            events_cache, devices_cache = await self._prefetch_caches_for_rows(rows)
             for row in rows:
-                await self._attempt_on_queued_row(row, now)
+                await self._attempt_on_queued_row(
+                    row,
+                    now,
+                    events_cache=events_cache,
+                    devices_cache=devices_cache,
+                )
 
 
 def _priority_to_apns(priority: str) -> int:

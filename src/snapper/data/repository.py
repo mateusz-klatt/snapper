@@ -2953,6 +2953,19 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def list_active_notification_devices_for_users(
+        self, user_public_ids: list[str]
+    ) -> dict[str, list[NotificationDeviceRow]]:
+        """Bulk active-device lookup keyed by user_public_id.
+
+        Bulk variant of :meth:`list_active_notification_devices_for_user`
+        for the notify sidecar's drain/retry hot path — replaces the
+        per-row round-trip with one ``WHERE user_public_id IN (...)``
+        SELECT. Missing user_public_ids map to empty lists.
+        """
+        ...
+
+    @abstractmethod
     async def deactivate_notification_device_scd2(
         self,
         public_id: str,
@@ -3096,6 +3109,18 @@ class Repository(ABC):
     @abstractmethod
     async def get_alert_event_by_public_id(self, public_id: str) -> AlertEventRow | None:
         """Active alert_event by public_id; None when missing or SCD2-closed."""
+        ...
+
+    @abstractmethod
+    async def get_alert_events_by_public_ids(
+        self, public_ids: list[str]
+    ) -> dict[str, AlertEventRow]:
+        """Bulk active-alert-event lookup keyed by public_id.
+
+        Bulk variant of :meth:`get_alert_event_by_public_id` for the
+        notify sidecar's drain/retry hot path. Missing public_ids are
+        absent from the returned dict (not mapped to None).
+        """
         ...
 
     @abstractmethod
@@ -9810,6 +9835,36 @@ class SQLAlchemyRepository(Repository):
             )
             return [self._notification_device_row_from(row) for row in result.scalars().all()]
 
+    async def list_active_notification_devices_for_users(
+        self, user_public_ids: list[str]
+    ) -> dict[str, list[NotificationDeviceRow]]:
+        """Bulk active-device lookup keyed by user_public_id.
+
+        Replaces the per-row :meth:`list_active_notification_devices_for_user`
+        round-trip on the notify sidecar drain/retry hot path. One
+        ``WHERE user_public_id IN (...)`` SELECT returns every active
+        device for the batch; rows are grouped in Python by
+        ``user_public_id`` preserving the per-user newest-first ordering
+        the original method guarantees.
+        """
+        if not user_public_ids:
+            return {}
+        unique_ids = list(dict.fromkeys(user_public_ids))
+        async with self.session() as s:
+            result = await s.execute(
+                select(NotificationDevice)
+                .where(
+                    NotificationDevice.user_public_id.in_(unique_ids),
+                    NotificationDevice.known_to == KNOWN_TO_MAX,
+                    NotificationDevice.token_status == "active",
+                )
+                .order_by(NotificationDevice.registered_at.desc())
+            )
+            grouped: dict[str, list[NotificationDeviceRow]] = {pid: [] for pid in unique_ids}
+            for row in result.scalars().all():
+                grouped[row.user_public_id].append(self._notification_device_row_from(row))
+        return grouped
+
     async def deactivate_notification_device_scd2(
         self,
         public_id: str,
@@ -10303,6 +10358,31 @@ class SQLAlchemyRepository(Repository):
             if event_row is None:
                 return None
             return self._alert_event_row_from(event_row)
+
+    async def get_alert_events_by_public_ids(
+        self, public_ids: list[str]
+    ) -> dict[str, AlertEventRow]:
+        """Bulk active-alert-event lookup keyed by public_id.
+
+        Replaces the per-row :meth:`get_alert_event_by_public_id`
+        round-trip on the notify sidecar drain/retry hot path. One
+        ``WHERE public_id IN (...)`` SELECT returns every active event
+        for the batch; missing public_ids are absent from the returned
+        dict (not mapped to None).
+        """
+        if not public_ids:
+            return {}
+        unique_ids = list(dict.fromkeys(public_ids))
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertEvent).where(
+                    AlertEvent.public_id.in_(unique_ids),
+                    AlertEvent.known_to == KNOWN_TO_MAX,
+                )
+            )
+            return {
+                row.public_id: self._alert_event_row_from(row) for row in result.scalars().all()
+            }
 
     async def list_alert_events_with_dedup_key(
         self,
