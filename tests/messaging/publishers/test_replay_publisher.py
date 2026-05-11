@@ -398,3 +398,42 @@ class TestReplayPublisher:
                 ctx.term()
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
+
+
+class TestBuildWarmupCandleErrorPaths:
+    """Unit tests for ``ReplayPublisher._build_warmup_candle`` validation guards."""
+
+    @staticmethod
+    def _make_publisher() -> ReplayPublisher:
+        """Construct a minimal ReplayPublisher for unit-level helper tests."""
+        return ReplayPublisher(
+            local_xsub="inproc://test",
+            repository=AsyncMock(),
+            config=_make_config(),
+            snapshot_as_of=NOW,
+            drain=DrainCoordinator(),
+            subscriber_ready=asyncio.Event(),
+        )
+
+    def test_unparseable_topic_raises_value_error(self) -> None:
+        """An unparseable market topic raises ``ValueError`` with the topic.
+
+        Covers the ``parsed is None`` guard — ``parse_market_topic``
+        returns ``None`` for malformed topics, and the warmup builder
+        cannot proceed without a parsed exchange/instrument.
+        """
+        publisher = self._make_publisher()
+        with pytest.raises(ValueError, match=r"Cannot parse warmup market topic: invalid"):
+            publisher._build_warmup_candle("invalid")
+
+    def test_topic_without_timeframe_raises_value_error(self) -> None:
+        """A parseable but timeframe-less topic raises ``ValueError``.
+
+        Covers the ``parsed.timeframe is None`` guard — ticks topics
+        parse successfully but have no timeframe, which a warmup
+        candle payload requires.
+        """
+        publisher = self._make_publisher()
+        topic = "market.kraken.BTC-USD.ticks"
+        with pytest.raises(ValueError, match=r"Warmup topic missing timeframe: " + topic):
+            publisher._build_warmup_candle(topic)

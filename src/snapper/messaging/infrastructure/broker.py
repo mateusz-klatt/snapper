@@ -222,7 +222,7 @@ class ZmqBrokerProcess(RegisterableProcess):
         real port. Returns the configured endpoint unchanged for non-tcp
         transports or when the socket stub does not support the query.
         """
-        needs_resolution = configured.endswith(":0") or configured.endswith(":*")
+        needs_resolution = configured.endswith((":0", ":*"))
         if not needs_resolution:
             return configured
         getsockopt = getattr(socket, "getsockopt", None)

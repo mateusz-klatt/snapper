@@ -120,7 +120,7 @@ class StrategyHealthMonitor:
                     if self.strategy.msg_publisher:
                         await self.strategy.msg_publisher.send(hb_topic, hb_msg)
                 except Exception as e:
-                    logger.error(f"Strategy {self.strategy.name}: Heartbeat error: {e}")
+                    logger.exception(f"Strategy {self.strategy.name}: Heartbeat error: {e}")
         except asyncio.CancelledError:
             logger.info(f"Strategy {self.strategy.name}: Heartbeat loop cancelled")
             raise

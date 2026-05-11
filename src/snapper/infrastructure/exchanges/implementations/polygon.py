@@ -403,7 +403,7 @@ class PolygonExchangeClient(ExchangeClientBase):
         Raises:
             ValueError: If symbol doesn't have required prefix.
         """
-        if not (symbol.startswith("C:") or symbol.startswith("X:") or symbol.startswith("I:")):
+        if not symbol.startswith(("C:", "X:", "I:")):
             raise ValueError(
                 f"Symbol must start with 'C:' (FX), 'X:' (Crypto), or 'I:' (Indices). Got: {symbol}"
             )

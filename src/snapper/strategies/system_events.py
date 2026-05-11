@@ -51,7 +51,7 @@ class SystemMessageRouter:
                     f"Strategy {self.strategy.name}: Setting {envelope.key} updated via ZMQ event"
                 )
         except (ValueError, TypeError, KeyError, RuntimeError) as e:
-            logger.error(f"Strategy {self.strategy.name}: Error handling settings update: {e}")
+            logger.exception(f"Strategy {self.strategy.name}: Error handling settings update: {e}")
 
     def handle_system_heartbeat(self, topic_str: str, payload_str: str) -> None:
         """Handle feed heartbeat system message.

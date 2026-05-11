@@ -268,7 +268,7 @@ class ZmqWebSocketBridgeService:
             )
             await websocket.send_text(error_response.model_dump_json())
         except Exception as e:
-            logger.error(f"Failed to send error to client: {e}")
+            logger.exception(f"Failed to send error to client: {e}")
         await self._record_bridge_control(
             "zmq_subscribe",
             "error",
@@ -399,7 +399,7 @@ class ZmqWebSocketBridgeService:
             self.subscriber_tasks[topic] = task
             logger.info(f"ZMQ subscription started for {topic} on {topic_config.endpoint}")
         except Exception as e:
-            logger.error(f"Failed to start ZMQ subscription for {topic}: {e}")
+            logger.exception(f"Failed to start ZMQ subscription for {topic}: {e}")
         await asyncio.sleep(0)
 
     async def _stop_zmq_subscription(self, topic: str) -> None:
@@ -501,10 +501,10 @@ class ZmqWebSocketBridgeService:
                 message_parts = await socket.recv_multipart()
                 await self._process_zmq_message(topic, message_parts)
             except zmq.ZMQError as e:
-                logger.error(f"ZMQ error in subscription loop for {topic}: {e}")
+                logger.exception(f"ZMQ error in subscription loop for {topic}: {e}")
                 await asyncio.sleep(1)
             except Exception as e:
-                logger.error(f"Unexpected error in subscription loop for {topic}: {e}")
+                logger.exception(f"Unexpected error in subscription loop for {topic}: {e}")
                 if topic in self.topic_metrics:
                     self.topic_metrics[topic].error_count += 1
                 await asyncio.sleep(1)
@@ -523,7 +523,7 @@ class ZmqWebSocketBridgeService:
             logger.info(f"ZMQ subscription loop cancelled for {topic}")
             raise
         except Exception as e:
-            logger.error(f"Fatal error in subscription loop for {topic}: {e}")
+            logger.exception(f"Fatal error in subscription loop for {topic}: {e}")
 
     def _is_trade_topic(self, topic: str) -> bool:
         """Check if a topic is trade-related (orders.commands/orders.events).
@@ -933,7 +933,7 @@ class ZmqWebSocketBridgeService:
             self.subscriber_tasks[topic] = task
             logger.info(f"Started ZMQ subscriber for topic: {topic}")
         except Exception as e:
-            logger.error(f"Failed to start ZMQ subscriber for {topic}: {e}")
+            logger.exception(f"Failed to start ZMQ subscriber for {topic}: {e}")
         await asyncio.sleep(0)
 
     async def stop_zmq_subscriber(self, topic: str) -> None:
@@ -972,12 +972,12 @@ class ZmqWebSocketBridgeService:
                 try:
                     await self._process_zmq_message(topic, parts)
                 except Exception as e:
-                    logger.error(f"Error processing ZMQ message for {topic}: {e}")
+                    logger.exception(f"Error processing ZMQ message for {topic}: {e}")
         except asyncio.CancelledError:
             logger.info(f"ZMQ message handler for {topic} cancelled")
             raise
         except Exception as e:
-            logger.error(f"ZMQ message handler for {topic} failed: {e}")
+            logger.exception(f"ZMQ message handler for {topic} failed: {e}")
 
     async def subscribe_websocket(
         self, websocket: WebSocket, topic: str, throttle_ms: int = 100

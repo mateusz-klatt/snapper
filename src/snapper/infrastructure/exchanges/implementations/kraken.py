@@ -469,7 +469,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             extra_params: dict[str, Any] = {}
             if request.client_order_id:
                 extra_params["cl_ord_id"] = str(request.client_order_id)
-            if kraken_rest_symbol.endswith("x/USD") or kraken_rest_symbol.endswith("x/EUR"):
+            if kraken_rest_symbol.endswith(("x/USD", "x/EUR")):
                 extra_params["asset_class"] = "tokenized_asset"
             result = await asyncio.to_thread(
                 trade_client.create_order,

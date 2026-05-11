@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
+from time import monotonic
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
@@ -3848,3 +3849,159 @@ async def test_tick_writer_reuses_persistent_session_for_every_flush() -> None:
     for call in upsert_calls:
         assert call.kwargs["session"] is held_session
     assert held_session.commit.await_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_tick_writer_drop_log_rate_limited(caplog: pytest.LogCaptureFixture) -> None:
+    """A second overflow within the log-interval window suppresses the warning.
+
+    Given: A drop-counter entry whose last log timestamp is ``now`` (so the
+        rate-limit window has not yet elapsed),
+    When: ``_enqueue_or_drop_oldest_tick_write`` runs another eviction,
+    Then: ``counters[0]`` increments but no new ``tick-writer queue full``
+        warning is emitted (covers the rate-limit branch where the log
+        line is skipped and the helper drops straight into eviction).
+    """
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+    await queue.put(_dummy_tick_row(0))
+    _tick_writer_drop_counters.clear()
+    _tick_writer_drop_counters["kraken"] = [3.0, monotonic()]
+    sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+    try:
+        _enqueue_or_drop_oldest_tick_write(queue, _dummy_tick_row(1), "kraken")
+    finally:
+        logger.remove(sink_id)
+    assert not any("tick-writer queue full" in rec.message for rec in caplog.records)
+    assert _tick_writer_drop_counters["kraken"][0] == 4.0
+    _tick_writer_drop_counters.clear()
+
+
+@pytest.mark.asyncio
+async def test_flush_tick_writer_batch_empty_is_noop() -> None:
+    """``_flush_tick_writer_batch`` short-circuits on an empty batch.
+
+    Given: A publisher with no rows queued for flush,
+    When: ``_flush_tick_writer_batch([])`` is invoked,
+    Then: No flush call reaches the repository and ``task_done`` is not
+        called (it would over-balance the queue otherwise).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
+    flush_mock = AsyncMock()
+    pub._flush_tick_batch = flush_mock
+    await pub._flush_tick_writer_batch([])
+    flush_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_returns_when_queue_not_initialized() -> None:
+    """``stop()`` is safe when the writer queue was never created.
+
+    Given: A running publisher whose ``_tick_write_queue`` is ``None``
+        (the publisher's async loops were never entered),
+    When: ``stop()`` is called,
+    Then: The queue-join branch is skipped (covers the ``queue is None``
+        False branch on the join guard) and ``stop()`` completes
+        without raising.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._tick_write_queue = None
+    pub.running = True
+    await pub.stop()
+    assert pub.running is False
+
+
+@pytest.mark.asyncio
+async def test_flush_tick_batch_rolls_back_writer_session_on_error() -> None:
+    """A flush failure with a held writer session triggers a rollback.
+
+    Given: A publisher whose ``_tick_writer_session`` is set and whose
+        repository's ``upsert_ticks`` raises,
+    When: ``_flush_tick_batch`` runs and catches the exception,
+    Then: ``rollback`` is awaited on the held session (covers the
+        ``writer_session is not None`` branch in the error handler).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    held_session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+    pub._tick_writer_session = held_session
+    pub.repository = SimpleNamespace(
+        upsert_ticks=AsyncMock(side_effect=RuntimeError("simulated DB failure"))
+    )
+    await pub._flush_tick_batch([_dummy_tick_row(0)])
+    held_session.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_tick_writer_loop_top_age_flush_branch() -> None:
+    """A non-empty batch whose age has expired flushes at the iteration top.
+
+    Given: A patched ``_batch_age_remaining`` that returns 0 when
+        ``batch_start`` is set, so the very next iteration after picking
+        up a row sees the batch as already aged,
+    When: One tick row is enqueued and the writer loop is run,
+    Then: ``_flush_tick_batch`` is invoked from the top-of-loop
+        age-expired branch (lines covering the ``timeout <= 0.0``
+        flush), not from the wait-for TimeoutError branch.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._batch_max_age_s = 0.01
+    pub._tick_batch_max_rows = 1000
+    pub.running = True
+    flushed: list[dict[str, Any]] = []
+
+    async def capture_flush(batch: list[dict[str, Any]]) -> None:
+        flushed.extend(batch)
+
+    pub._flush_tick_batch = capture_flush
+
+    def patched_age(batch_start: float | None, _loop: asyncio.AbstractEventLoop) -> float:
+        return 0.0 if batch_start is not None else 0.01
+
+    pub._batch_age_remaining = patched_age
+    await pub._tick_write_queue.put(_dummy_tick_row(0))
+
+    async def stop_soon() -> None:
+        await asyncio.sleep(0.05)
+        pub.running = False
+
+    stop_task = asyncio.create_task(stop_soon())
+    try:
+        await asyncio.wait_for(pub._tick_writer_loop(), timeout=2.0)
+    finally:
+        await stop_task
+    assert len(flushed) == 1
+
+
+@pytest.mark.asyncio
+async def test_tick_writer_loop_get_timeout_flushes_aged_batch() -> None:
+    """``wait_for(get())`` TimeoutError flushes an aged batch.
+
+    Given: A publisher with a tiny ``_batch_max_age_s`` and one row
+        already consumed into the writer's batch,
+    When: The queue stays empty so ``wait_for`` times out and the
+        batch has aged past its budget,
+    Then: The TimeoutError branch flushes the aged batch (covers the
+        post-wait-for age-check flush path).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._batch_max_age_s = 0.01
+    pub._tick_batch_max_rows = 1000
+    pub.running = True
+    flushed: list[dict[str, Any]] = []
+
+    async def capture_flush(batch: list[dict[str, Any]]) -> None:
+        flushed.extend(batch)
+
+    pub._flush_tick_batch = capture_flush
+    await pub._tick_write_queue.put(_dummy_tick_row(0))
+
+    async def stop_soon() -> None:
+        await asyncio.sleep(0.1)
+        pub.running = False
+
+    stop_task = asyncio.create_task(stop_soon())
+    try:
+        await asyncio.wait_for(pub._tick_writer_loop(), timeout=2.0)
+    finally:
+        await stop_task
+    assert len(flushed) == 1

@@ -156,7 +156,7 @@ class WebSocketConnectionManager:
         try:
             await websocket.send_text(message)
         except Exception as e:
-            logger.error(f"Failed to send personal message: {e}")
+            logger.exception(f"Failed to send personal message: {e}")
             await self.disconnect(websocket)
 
     async def broadcast(self, message: BaseModel) -> None:
@@ -173,7 +173,7 @@ class WebSocketConnectionManager:
             try:
                 await connection.send_text(message_str)
             except Exception as e:
-                logger.error(f"Failed to broadcast to client: {e}")
+                logger.exception(f"Failed to broadcast to client: {e}")
                 disconnected.append(connection)
         for connection in disconnected:
             await self.disconnect(connection)
@@ -194,7 +194,7 @@ class WebSocketConnectionManager:
             try:
                 await websocket.send_text(message_str)
             except Exception as e:
-                logger.error(f"Failed to send to topic {topic} subscriber: {e}")
+                logger.exception(f"Failed to send to topic {topic} subscriber: {e}")
                 disconnected.append(websocket)
         for connection in disconnected:
             await self.disconnect(connection)
@@ -206,7 +206,7 @@ class WebSocketConnectionManager:
             try:
                 await websocket.close()
             except Exception as e:
-                logger.error(f"Error closing websocket: {e}")
+                logger.exception(f"Error closing websocket: {e}")
         self.active_connections.clear()
         self.client_subscriptions.clear()
         self.topic_subscribers.clear()
@@ -224,7 +224,7 @@ class WebSocketConnectionManager:
         try:
             await websocket.send_text(response.model_dump_json())
         except Exception as exc:
-            logger.error(f"Failed to send response: {exc}")
+            logger.exception(f"Failed to send response: {exc}")
             await self.disconnect(websocket)
 
     async def send_error(self, websocket: WebSocket, error_message: str) -> None:

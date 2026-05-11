@@ -1419,6 +1419,44 @@ class TestAvailableSymbolsSetCache:
             assert m_polygon.call_count == 1
         invalidate_available_symbols_cache()
 
+    def test_sorted_list_is_cached_across_calls(self) -> None:
+        """The sorted-list variant ``get_available_symbols`` also hits the cache.
+
+        Given: A warm cache after one ``get_available_symbols`` call,
+        When: ``get_available_symbols`` is called again,
+        Then: The per-exchange getters are NOT re-invoked and the cached
+            list is returned (covers the ``sorted_list is None`` False
+            branch).
+        """
+        invalidate_available_symbols_cache()
+        with (
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_symbols",
+                return_value=["BTC-USD"],
+            ) as m_kraken,
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_futures_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_equities_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_walutomat_symbols",
+                return_value=[],
+            ),
+            patch(
+                "snapper.infrastructure.symbols.functions.get_available_polygon_symbols",
+                return_value=[],
+            ),
+        ):
+            first = get_available_symbols()
+            second = get_available_symbols()
+            assert first == second == ["BTC-USD"]
+            assert m_kraken.call_count == 1
+        invalidate_available_symbols_cache()
+
     def test_invalidate_forces_rebuild(self) -> None:
         """invalidate_available_symbols_cache restores cold-start semantics.
 

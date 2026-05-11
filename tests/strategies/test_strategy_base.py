@@ -3066,7 +3066,7 @@ class TestHeartbeatLoop:
             return None
 
         with (
-            patch("snapper.strategies.health.logger.error") as mock_error,
+            patch("snapper.strategies.health.logger.exception") as mock_error,
             patch("snapper.strategies.health.asyncio.sleep", new=fake_sleep),
             patch("snapper.strategies.health.time.time", return_value=120.0),
         ):
@@ -3494,7 +3494,7 @@ class TestListenLoopSystemMessages:
         )
         with (
             patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service,
-            patch("snapper.strategies.system_events.logger.error") as mock_error,
+            patch("snapper.strategies.system_events.logger.exception") as mock_error,
         ):
             mock_instance = MagicMock()
             mock_instance._parse_value.side_effect = RuntimeError("parse failed")

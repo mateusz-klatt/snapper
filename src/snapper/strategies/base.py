@@ -487,7 +487,7 @@ class BaseStrategy(ABC):
             logger.info(f"Strategy {self.name}: Listen loop cancelled")
             raise
         except Exception as e:
-            logger.error(f"Strategy {self.name}: Error in listen loop: {e}", exc_info=True)
+            logger.exception(f"Strategy {self.name}: Error in listen loop: {e}")
             self._running = False
 
     async def _handle_candle_data(self, instrument: str, payload: str) -> StrategySignal | None:

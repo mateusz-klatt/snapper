@@ -165,7 +165,9 @@ async def test_subscription_loop_fatal_error_path(bridge: ZmqWebSocketBridgeServ
         patch("snapper.interface.websocket.bridge.logger") as mock_logger,
     ):
         await bridge._zmq_subscription_loop(topic, fake_socket)
-    mock_logger.error.assert_any_call(f"Fatal error in subscription loop for {topic}: sleep fail")
+    mock_logger.exception.assert_any_call(
+        f"Fatal error in subscription loop for {topic}: sleep fail"
+    )
 
 
 def _make_candle_json() -> str:
@@ -1647,7 +1649,7 @@ class TestZMQSubscriptionLoop:
             pytest.raises(asyncio.CancelledError),
         ):
             await bridge._zmq_subscription_loop(topic, mock_socket)
-        error_calls = list(mock_logger.error.call_args_list)
+        error_calls = list(mock_logger.exception.call_args_list)
         assert any("ZMQ error in subscription loop" in str(call) for call in error_calls)
         mock_sleep.assert_called_with(1)
         assert bridge.topic_metrics[topic].received_count == 1
@@ -1740,7 +1742,7 @@ class TestZMQSubscriptionLoop:
         bridge.context.socket.side_effect = Exception("Socket creation failed")
         with patch("snapper.interface.websocket.bridge.logger") as mock_logger:
             await bridge._start_zmq_subscription(topic)
-        error_calls = list(mock_logger.error.call_args_list)
+        error_calls = list(mock_logger.exception.call_args_list)
         assert any("Failed to start ZMQ subscription" in str(call) for call in error_calls)
         assert topic not in bridge.subscriber_tasks
         assert topic not in bridge.zmq_subscribers

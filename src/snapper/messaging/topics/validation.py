@@ -252,12 +252,6 @@ def _validate_market_data_type(
                 f"Candles topic must include timeframe: "
                 f"market.{exchange_name}.{instrument_name}.candles.<timeframe>",
             )
-        if not _is_valid_timeframe(timeframe):
-            return (
-                False,
-                f"Invalid timeframe '{timeframe}'. Must match pattern like: "
-                "1m, 5m, 15m, 1h, 4h, 1d",
-            )
         return True, ""
     if segment_count > 0 and timeframe is not None:
         return (
@@ -356,8 +350,6 @@ def _validate_market_topic(topic: str) -> tuple[bool, str]:
     else:
         data_type = segments[-1]
         body = segments[1:-1]
-    if not body:
-        return False, _MARKET_TOPIC_FMT
     if body[0] == "paper":
         if len(body) < 3:
             return False, _MARKET_TOPIC_FMT

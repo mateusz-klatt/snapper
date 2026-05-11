@@ -593,6 +593,26 @@ class TestParseMarketTopic:
         assert parsed.data_type == "candles"
         assert parsed.timeframe == "1m"
 
+    def test_parse_candles_without_instrument_returns_none(self) -> None:
+        """Right-anchored parse rejects candles topics with no instrument.
+
+        ``market.kraken.candles.1m`` peels the trailing timeframe ``1m``
+        and data_type ``candles`` from the right, leaving ``body=['kraken']``
+        — too short to supply both exchange and instrument. Hits the
+        ``len(body) < 2`` guard in ``parse_market_topic``.
+        """
+        assert parse_market_topic("market.kraken.candles.1m") is None
+
+    def test_parse_single_char_trailing_segment_returns_none(self) -> None:
+        """Topics whose trailing segment is a single char fail timeframe gate.
+
+        ``_is_valid_market_timeframe`` requires at least two characters
+        (digits + unit), so a trailing single-char segment like ``s``
+        bypasses the timeframe peel; the resulting ``data_type=s``
+        then fails the ``_MARKET_DATA_TYPES`` membership check.
+        """
+        assert parse_market_topic("market.kraken.BTC-USD.ticks.s") is None
+
 
 class TestParseOrderEventTopic:
     """Tests for parse_order_event_topic parser function."""

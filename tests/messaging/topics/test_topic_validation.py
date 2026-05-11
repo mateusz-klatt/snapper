@@ -2276,6 +2276,21 @@ class TestMarketTopicPrefixRejection:
         assert not valid
         assert "segment" in _err.lower()
 
+    def test_market_topic_candles_without_instrument(self) -> None:
+        """Verify candles topic missing instrument segment is rejected.
+
+        Given: A candles-shaped topic where the right-anchored parser
+            peels the trailing timeframe ``1m`` and data_type ``candles``,
+            leaving only the exchange in the body,
+        When: Validated,
+        Then: Validation fails on the body-too-short guard
+            (``len(body) < 2``), returning the standard
+            ``_MARKET_TOPIC_FMT`` segment-count error.
+        """
+        valid, _err = _validate_market_topic("market.kraken.candles.1m")
+        assert not valid
+        assert "segments" in _err.lower()
+
 
 class TestMarketTopicInstrumentValidation:
     """Tests for market topic instrument validation."""

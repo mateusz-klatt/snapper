@@ -404,10 +404,13 @@ def _build_market_topic_result(
     timeframe: str | None,
     source_exchange: str | None,
 ) -> ParsedMarketTopic | None:
-    """Validate parsed market topic fields and build dataclass result."""
+    """Validate parsed market topic fields and build dataclass result.
+
+    ``parse_market_topic`` already validates ``data_type`` membership
+    in ``_MARKET_DATA_TYPES`` before calling this helper, so we only
+    re-check the empty-string / candles-timeframe invariants here.
+    """
     if not exchange or not instrument or not data_type:
-        return None
-    if data_type not in _MARKET_DATA_TYPES:
         return None
     if data_type == MarketDataTypeEnum.CANDLES and not timeframe:
         return None
@@ -459,8 +462,6 @@ def parse_market_topic(topic: str) -> ParsedMarketTopic | None:
         data_type = parts[-1]
         body = parts[1:-1]
     if data_type not in _MARKET_DATA_TYPES:
-        return None
-    if not body:
         return None
     if body[0] == ExchangeEnum.PAPER:
         if len(body) < 3:

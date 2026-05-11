@@ -563,7 +563,7 @@ class TestHandleZmqMessagesCoverage:
         mock_socket.recv_multipart = AsyncMock(side_effect=RuntimeError("Socket error"))
         with patch("snapper.interface.websocket.bridge.logger") as mock_logger:
             await bridge._handle_zmq_messages(topic, mock_socket, config)
-            mock_logger.error.assert_called()
+            mock_logger.exception.assert_called()
 
     @pytest.mark.asyncio
     async def test_handle_zmq_messages_inner_exception(self) -> None:
@@ -587,7 +587,7 @@ class TestHandleZmqMessagesCoverage:
                 await bridge._handle_zmq_messages(topic, mock_socket, config)
             assert any(
                 "Error processing ZMQ message" in str(call)
-                for call in mock_logger.error.call_args_list
+                for call in mock_logger.exception.call_args_list
             )
 
 
