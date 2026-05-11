@@ -165,6 +165,7 @@ from snapper.data.repository_types import InstrumentContractRow
 from snapper.data.repository_types import InstrumentDetailRow
 from snapper.data.repository_types import InstrumentFrontMonthRow
 from snapper.data.repository_types import InstrumentOrderCapabilityRow
+from snapper.data.repository_types import InstrumentRelatedRow
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import MarketSnapshotRow
@@ -7339,6 +7340,95 @@ class SQLAlchemyRepository(Repository):
                 sequence_id=r.sequence_id,
                 instrument_count=0,
             )
+
+    async def get_related_instruments_for_symbol(
+        self,
+        exchange: str,
+        native_symbol: str,
+        as_of: datetime,
+    ) -> tuple[UnderlyingAssetRow | None, list[InstrumentRelatedRow]]:
+        """Resolve the underlying + every sibling instrument for a UI-selected symbol.
+
+        Returns a ``(underlying, related_rows)`` tuple powering the
+        ``GET /api/instruments/{exchange}/{native_symbol}/related``
+        endpoint and the MarketData "related instruments" UI row.
+
+        Resolution steps (all SCD2-active at ``as_of``):
+
+        1. ``Symbol`` lookup by ``(native_symbol, exchange)``.
+        2. ``Instrument`` lookup by ``Symbol.public_id``.
+        3. ``InstrumentUnderlyingMapping`` for the resolved instrument
+           returns the parent underlying.
+        4. ``get_instruments_by_underlying`` returns every sibling
+           (including the input row itself, with ``is_selected=True``).
+
+        Returns ``(None, [])`` when any step misses — symbol unknown,
+        instrument not provisioned, or no underlying mapping (orphan).
+        The route handler distinguishes "unknown symbol" (404) from
+        "orphan" (200 + empty groups) using a second lookup.
+        """
+        async with self.session() as s:
+            symbol_row = (
+                (
+                    await s.execute(
+                        select(Symbol.public_id)
+                        .join(
+                            SymbolAlias,
+                            and_(
+                                SymbolAlias.symbol_public_id == Symbol.public_id,
+                                SymbolAlias.exchange == exchange,
+                                *where_active(SymbolAlias, as_of),
+                            ),
+                        )
+                        .where(
+                            Symbol.native_symbol == native_symbol,
+                            *where_active(Symbol, as_of),
+                        )
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if symbol_row is None:
+                return None, []
+            inst_row = (
+                (
+                    await s.execute(
+                        select(Instrument.public_id)
+                        .where(
+                            Instrument.symbol_public_id == symbol_row,
+                            Instrument.exchange == exchange,
+                            *where_active(Instrument, as_of),
+                        )
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if inst_row is None:
+                return None, []
+        underlying = await self.get_underlying_for_instrument(inst_row, as_of)
+        if underlying is None:
+            return None, []
+        siblings = await self.get_instruments_by_underlying(underlying["public_id"], as_of)
+        related: list[InstrumentRelatedRow] = []
+        for sib in siblings:
+            related.append(
+                InstrumentRelatedRow(
+                    instrument_public_id=sib["instrument_public_id"],
+                    native_symbol=sib["native_symbol"],
+                    exchange=sib["exchange"],
+                    relationship_type=sib["relationship_type"],
+                    contract_family=sib["contract_family"],
+                    asset_type=sib["asset_type"],
+                    is_selected=(
+                        sib["instrument_public_id"] == inst_row and sib["exchange"] == exchange
+                    ),
+                )
+            )
+        return underlying, related
 
     async def upsert_underlying_asset(
         self,

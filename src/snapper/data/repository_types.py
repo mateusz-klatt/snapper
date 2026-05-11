@@ -679,6 +679,24 @@ class InstrumentUnderlyingRow(TypedDict):
     sequence_id: int
 
 
+class InstrumentRelatedRow(TypedDict):
+    """Row dict returned by Repository.get_related_instruments_for_symbol.
+
+    One instrument that shares an underlying with a UI-selected symbol.
+    The ``is_selected`` flag is True for exactly the row that matches the
+    (exchange, native_symbol) input so the frontend can render the chip
+    with the ``aria-current`` highlight without re-deriving identity.
+    """
+
+    instrument_public_id: str
+    native_symbol: str
+    exchange: str
+    relationship_type: str
+    contract_family: str | None
+    asset_type: str
+    is_selected: bool
+
+
 class CheckpointUpsertRow(TypedDict):
     """Upsert params for upsert_checkpoint.
 
