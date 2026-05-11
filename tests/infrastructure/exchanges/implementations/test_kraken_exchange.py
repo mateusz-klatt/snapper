@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import threading
 import time
 from collections.abc import Coroutine
 from dataclasses import asdict
@@ -5264,3 +5265,62 @@ class TestKrakenLiveFixtures:
         assert create_snap.amount == fetch_snap.amount
         assert create_snap.side == fetch_snap.side
         assert create_snap.type == fetch_snap.type
+
+
+class TestInvokeFuncOffloadsSyncCalls:
+    """Pin the event-loop-unblock contract for ``_invoke_func``.
+
+    The CCXT sync API and the native Kraken Trade REST SDK are
+    blocking. Routing them through ``asyncio.to_thread`` means a slow
+    Kraken REST round-trip cannot stall the executor coroutine.
+    These tests fail loudly if a regression reintroduces a direct
+    sync call on the event-loop thread.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sync_callable_runs_on_worker_thread(self) -> None:
+        """Sync callables go through asyncio.to_thread → worker pool.
+
+        Given: A KrakenExchangeClient and a sync callable that records
+        the OS thread id it executes on,
+        When: ``_invoke_func(callable)`` is awaited,
+        Then: The callable's thread id differs from the event-loop
+        thread id, proving the call did not block the loop.
+        """
+        client = KrakenExchangeClient()
+        main_loop = asyncio.get_running_loop()
+        main_thread_id = threading.get_ident()
+        executor_thread_id: list[int | None] = []
+
+        def sync_call() -> str:
+            executor_thread_id.append(threading.get_ident())
+            return "ok"
+
+        result = await client._invoke_func(sync_call)
+        assert result == "ok"
+        assert executor_thread_id[0] is not None
+        assert executor_thread_id[0] != main_thread_id, (
+            "sync callables must run on a worker thread (asyncio.to_thread),"
+            " not the asyncio event loop thread"
+        )
+        assert main_loop.is_running(), "event loop must still be running after the call"
+
+    @pytest.mark.asyncio
+    async def test_async_callable_awaited_directly(self) -> None:
+        """Async callables are awaited inline (no thread hop).
+
+        Given: A coroutine function,
+        When: ``_invoke_func(coro_func)`` is awaited,
+        Then: It runs on the event loop thread (no to_thread dispatch).
+        """
+        client = KrakenExchangeClient()
+        main_thread_id = threading.get_ident()
+        async_thread_id: list[int | None] = []
+
+        async def async_call() -> str:
+            async_thread_id.append(threading.get_ident())
+            return "ok"
+
+        result = await client._invoke_func(async_call)
+        assert result == "ok"
+        assert async_thread_id[0] == main_thread_id

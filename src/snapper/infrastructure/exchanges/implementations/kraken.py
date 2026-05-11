@@ -421,7 +421,8 @@ class KrakenExchangeClient(ExchangeClientBase):
                 extra_params["cl_ord_id"] = str(request.client_order_id)
             if kraken_rest_symbol.endswith("x/USD") or kraken_rest_symbol.endswith("x/EUR"):
                 extra_params["asset_class"] = "tokenized_asset"
-            result = trade_client.create_order(
+            result = await asyncio.to_thread(
+                trade_client.create_order,
                 **kraken_params,
                 extra_params=extra_params or None,
             )
@@ -469,7 +470,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.info(f"Symbol {symbol} not supported by CCXT, using native Kraken API fallback")
             try:
                 trade_client = self._get_trade_client()
-                trade_client.cancel_order(txid=order_id)
+                await asyncio.to_thread(trade_client.cancel_order, txid=order_id)
                 return ExchangeOrderSnapshot(
                     id=order_id,
                     client_order_id=None,
@@ -1232,6 +1233,12 @@ class KrakenExchangeClient(ExchangeClientBase):
     async def _invoke_func(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Invoke a function, awaiting if it is a coroutine.
 
+        Synchronous callables (CCXT REST helpers, native Kraken Trade
+        REST SDK) are dispatched via ``asyncio.to_thread`` so a slow
+        Kraken REST round-trip (2–5s under network jitter has been
+        observed) no longer blocks the executor event loop. Async
+        callables are awaited directly.
+
         Args:
             func: Function to call.
             *args: Positional arguments.
@@ -1242,7 +1249,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         if inspect.iscoroutinefunction(func):
             return await func(*args, **kwargs)
-        return func(*args, **kwargs)
+        return await asyncio.to_thread(func, *args, **kwargs)
 
     @staticmethod
     async def _handle_rate_limit(attempt: int, max_retries: int, base_delay: float) -> int:
