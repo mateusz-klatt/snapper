@@ -363,6 +363,8 @@ _TRADE_COMMAND_TERMINAL_STATUSES: tuple[str, ...] = (
 )
 _CandleNaturalKey = tuple[str, str, datetime]
 _CANDLE_LOOKUP_CHUNK_SIZE = 300
+_SnapshotNaturalKey = str
+_SNAPSHOT_LOOKUP_CHUNK_SIZE = 500
 ScopeExpansionKey = tuple[str, str | None, str | None]
 
 
@@ -4793,6 +4795,14 @@ class SQLAlchemyRepository(Repository):
 
         One active row per instrument_public_id.  Closes the existing
         active snapshot and inserts a new version with the same public_id.
+
+        Bulk-loads existing SCD2 versions for the incoming batch in chunks
+        of ``_SNAPSHOT_LOOKUP_CHUNK_SIZE`` instruments — replaces the legacy
+        per-row SELECT/UPDATE/INSERT N+1 path on the publisher hot loop.
+        Rows that share an instrument_public_id within the same incoming
+        batch fall back to the sequential close+insert flow because earlier
+        rows in the same call may create the version a later row needs to
+        close.
         """
         if not rows:
             return 0
@@ -4802,35 +4812,129 @@ class SQLAlchemyRepository(Repository):
             if "known_to" not in r:
                 r["known_to"] = KNOWN_TO_MAX
         async with self.session() as s:
-            count = 0
-            for r in rows:
-                bus_time = r["timestamp"]
-                existing = (
-                    (
-                        await s.execute(
-                            select(MarketSnapshot)
-                            .where(
-                                MarketSnapshot.instrument_public_id == r["instrument_public_id"],
-                                MarketSnapshot.timestamp <= bus_time,
-                                MarketSnapshot.known_to > bus_time,
-                            )
-                            .with_for_update()
-                        )
-                    )
-                    .scalars()
-                    .first()
-                )
-                if existing:
-                    await s.execute(
-                        update(MarketSnapshot)
-                        .where(MarketSnapshot.id == existing.id)
-                        .values(known_to=bus_time)
-                    )
-                    r["public_id"] = existing.public_id
-                s.add(MarketSnapshot(**r))
+            unique_rows, sequential_rows = self._split_snapshot_rows_by_duplicate_key(rows)
+            existing_by_key = await self._load_existing_snapshots_for_rows(s, unique_rows)
+            count = await self._upsert_unique_snapshot_rows(s, unique_rows, existing_by_key)
+            for r in sequential_rows:
+                await self._upsert_snapshot_row(s, r)
                 count += 1
             await s.commit()
         return count
+
+    @staticmethod
+    def _snapshot_natural_key(row: MarketSnapshotUpsertRow) -> _SnapshotNaturalKey:
+        """Return the SCD2 natural key for a market-snapshot upsert row."""
+        return row["instrument_public_id"]
+
+    @classmethod
+    def _split_snapshot_rows_by_duplicate_key(
+        cls,
+        rows: list[MarketSnapshotUpsertRow],
+    ) -> tuple[list[MarketSnapshotUpsertRow], list[MarketSnapshotUpsertRow]]:
+        """Separate rows safe for batch lookup from duplicate-key rows.
+
+        Rows sharing a natural key in the same incoming batch must keep
+        the sequential close+insert flow because earlier rows can create
+        the version that later rows need to close.
+        """
+        seen: set[_SnapshotNaturalKey] = set()
+        duplicate_keys: set[_SnapshotNaturalKey] = set()
+        for row in rows:
+            key = cls._snapshot_natural_key(row)
+            if key in seen:
+                duplicate_keys.add(key)
+            seen.add(key)
+        if not duplicate_keys:
+            return rows, []
+        unique_rows = [row for row in rows if cls._snapshot_natural_key(row) not in duplicate_keys]
+        sequential_rows = [row for row in rows if cls._snapshot_natural_key(row) in duplicate_keys]
+        return unique_rows, sequential_rows
+
+    @classmethod
+    async def _load_existing_snapshots_for_rows(
+        cls,
+        session: AsyncSession,
+        rows: list[MarketSnapshotUpsertRow],
+    ) -> dict[_SnapshotNaturalKey, MarketSnapshot]:
+        """Load existing SCD2 snapshot versions for unique-key rows in one query."""
+        if not rows:
+            return {}
+        row_by_key = {cls._snapshot_natural_key(row): row for row in rows}
+        keys = list(row_by_key)
+        existing_by_key: dict[_SnapshotNaturalKey, MarketSnapshot] = {}
+        for offset in range(0, len(keys), _SNAPSHOT_LOOKUP_CHUNK_SIZE):
+            key_chunk = keys[offset : offset + _SNAPSHOT_LOOKUP_CHUNK_SIZE]
+            row_chunk = [row_by_key[key] for key in key_chunk]
+            min_timestamp = min(row["timestamp"] for row in row_chunk)
+            max_timestamp = max(row["timestamp"] for row in row_chunk)
+            result = await session.execute(
+                select(MarketSnapshot)
+                .where(
+                    MarketSnapshot.instrument_public_id.in_(key_chunk),
+                    MarketSnapshot.timestamp <= max_timestamp,
+                    MarketSnapshot.known_to > min_timestamp,
+                )
+                .with_for_update()
+            )
+            for snap in result.scalars().all():
+                key = snap.instrument_public_id
+                row = row_by_key[key]
+                bus_time = row["timestamp"]
+                if snap.timestamp <= bus_time and snap.known_to > bus_time:
+                    existing_by_key[key] = snap
+        return existing_by_key
+
+    @classmethod
+    async def _upsert_unique_snapshot_rows(
+        cls,
+        session: AsyncSession,
+        rows: list[MarketSnapshotUpsertRow],
+        existing_by_key: dict[_SnapshotNaturalKey, MarketSnapshot],
+    ) -> int:
+        """Close matched snapshot rows and stage inserts for unique-key rows."""
+        for row in rows:
+            existing = existing_by_key.get(cls._snapshot_natural_key(row))
+            if existing is not None:
+                await session.execute(
+                    update(MarketSnapshot)
+                    .where(MarketSnapshot.id == existing.id)
+                    .values(known_to=row["timestamp"])
+                )
+                row["public_id"] = existing.public_id
+            session.add(MarketSnapshot(**row))
+        return len(rows)
+
+    @classmethod
+    async def _upsert_snapshot_row(
+        cls,
+        session: AsyncSession,
+        row: MarketSnapshotUpsertRow,
+    ) -> None:
+        """Run the sequential SCD2 close+insert path for one snapshot row."""
+        bus_time = row["timestamp"]
+        existing = (
+            (
+                await session.execute(
+                    select(MarketSnapshot)
+                    .where(
+                        MarketSnapshot.instrument_public_id == row["instrument_public_id"],
+                        MarketSnapshot.timestamp <= bus_time,
+                        MarketSnapshot.known_to > bus_time,
+                    )
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if existing:
+            await session.execute(
+                update(MarketSnapshot)
+                .where(MarketSnapshot.id == existing.id)
+                .values(known_to=bus_time)
+            )
+            row["public_id"] = existing.public_id
+        session.add(MarketSnapshot(**row))
 
     async def get_exchanges(self, as_of: datetime) -> list[str]:
         """Return distinct exchange names from active symbol aliases."""

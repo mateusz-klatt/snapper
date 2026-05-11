@@ -312,7 +312,7 @@ async def test_upsert_market_snapshots_mid_batch_failure_rolls_back_all(
     original_public_ids = {row.instrument_public_id: row.public_id for row in seeded_rows}
     original_bids = {row.instrument_public_id: row.bid for row in seeded_rows}
 
-    wrapped, get_n = _fail_on_nth_execute(target=4)
+    wrapped, get_n = _fail_on_nth_execute(target=3)
     monkeypatch.setattr(AsyncSession, "execute", wrapped)
 
     batch_ts = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
@@ -328,7 +328,7 @@ async def test_upsert_market_snapshots_mid_batch_failure_rolls_back_all(
     ]
     with pytest.raises(RuntimeError, match="injected mid-batch fault"):
         await repo.upsert_market_snapshots(batch)
-    assert get_n() == 4
+    assert get_n() == 3
 
     monkeypatch.undo()
 

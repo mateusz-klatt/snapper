@@ -648,14 +648,14 @@ async def test_upsert_market_snapshots_empty_returns_zero() -> None:
 async def test_upsert_market_snapshots_inserts_new_row() -> None:
     """Insert new market snapshot when no existing active row.
 
-    Given: Session returning no existing row,
+    Given: Session returning no existing row from bulk lookup,
     When: upsert_market_snapshots is called,
     Then: New row is added and count is 1.
     """
     added_objects: list[Any] = []
 
     async def _execute(stmt: Any) -> Any:
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
 
     session = _DummyAsyncSession()
     session.execute = _execute
@@ -683,11 +683,18 @@ async def test_upsert_market_snapshots_inserts_new_row() -> None:
 async def test_upsert_market_snapshots_closes_and_replaces() -> None:
     """Close existing active snapshot and insert new version.
 
-    Given: Session returning an existing active row,
+    Given: Bulk lookup returns an existing active row for the same instrument,
     When: upsert_market_snapshots is called,
     Then: Existing row is closed (UPDATE executed), public_id is preserved, new row added.
     """
-    existing = SimpleNamespace(id=42, public_id="existing-uuid")
+    ts = datetime(2024, 6, 1, tzinfo=UTC)
+    existing = SimpleNamespace(
+        id=42,
+        public_id="existing-uuid",
+        instrument_public_id="inst-abc",
+        timestamp=ts - timedelta(seconds=1),
+        known_to=KNOWN_TO_MAX,
+    )
     call_count = 0
     added_objects: list[Any] = []
 
@@ -695,14 +702,13 @@ async def test_upsert_market_snapshots_closes_and_replaces() -> None:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: existing))
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [existing]))
         return SimpleNamespace(rowcount=1)
 
     session = _DummyAsyncSession()
     session.execute = _execute
     session.add = lambda obj: added_objects.append(obj)
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
-    ts = datetime(2024, 6, 1, tzinfo=UTC)
     rows = [
         {
             "instrument_public_id": "inst-abc",
@@ -731,7 +737,7 @@ async def test_upsert_market_snapshots_generates_defaults() -> None:
     added_objects: list[Any] = []
 
     async def _execute(stmt: Any) -> Any:
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
 
     session = _DummyAsyncSession()
     session.execute = _execute
@@ -767,7 +773,7 @@ async def test_upsert_market_snapshots_preserves_supplied_keys() -> None:
     added_objects: list[Any] = []
 
     async def _execute(stmt: Any) -> Any:
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
 
     session = _DummyAsyncSession()
     session.execute = _execute
