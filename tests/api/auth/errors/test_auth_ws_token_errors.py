@@ -88,6 +88,22 @@ def test_generate_ws_token() -> None:
     assert result.payload.jti
 
 
+def test_generate_ws_token_backdates_iat() -> None:
+    """Verify generated tokens tolerate immediate verification clock skew.
+
+    Given: A WsTokenService with a fixed current time,
+    When: generate is called,
+    Then: The iat claim is one second before the issuance boundary.
+    """
+    service = WsTokenService()
+    mock_settings_service = Mock(spec=SettingsService)
+    service.set_settings_service(mock_settings_service)
+    issued_at = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    with patch.object(service, "_now", return_value=issued_at):
+        result = service.generate(user_id="test_user", session_id="test_session")
+    assert result.payload.iat == int(issued_at.timestamp()) - 1
+
+
 def test_verify_valid_token() -> None:
     """Verify valid token is accepted.
 

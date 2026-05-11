@@ -132,11 +132,12 @@ class WsTokenService:
         now = self._now()
         ttl_seconds = self.settings.ws_token_ttl_seconds
         expires_at = now + timedelta(seconds=ttl_seconds)
+        issued_at = int(now.timestamp()) - 1
         payload = WsTokenPayload(
             purpose=WS_TOKEN_PURPOSE,
             sub=user_id,
             sid_hash=compute_sid_hash(session_id),
-            iat=int(now.timestamp()),
+            iat=issued_at,
             exp=int(expires_at.timestamp()),
             jti=uuid.uuid4().hex,
         )

@@ -157,6 +157,7 @@ class ProcessSpawnerService:
             ProcessInstanceInfo with all fields populated.
         """
         now = datetime.now(UTC)
+        monotonic_now = time.monotonic()
         info = ProcessInstanceInfo(
             name=name,
             pid=process.pid,
@@ -169,6 +170,8 @@ class ProcessSpawnerService:
             process=process,
             spawner=self,
             last_heartbeat=now,
+            started_monotonic=monotonic_now,
+            last_heartbeat_monotonic=monotonic_now,
         )
         if exit_code is not None:
             info.exit_code = exit_code
@@ -350,8 +353,8 @@ class ProcessSpawnerService:
             True if process exited within timeout, False otherwise.
         """
         process = info.process
-        t0 = time.time()
-        while time.time() - t0 < timeout:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
             if process.poll() is not None:
                 info.exit_code = process.returncode
                 logger.info(
@@ -422,21 +425,30 @@ class ProcessSpawnerService:
             )
         info = self.processes[name]
         is_alive = info.process.poll() is None
+        now = datetime.now(UTC)
+        now_monotonic = time.monotonic()
+        uptime_seconds = (
+            now_monotonic - info.started_monotonic
+            if info.started_monotonic is not None
+            else max(0.0, (now - info.started_at).total_seconds())
+        )
         snapshot = SpawnerStatusSnapshot(
             name=name,
             running=is_alive,
             pid=info.pid,
             started_at=info.started_at.isoformat(),
-            uptime_seconds=(datetime.now(UTC) - info.started_at).total_seconds(),
+            uptime_seconds=uptime_seconds,
         )
         if not is_alive:
             snapshot.exit_code = info.process.returncode
-            snapshot.stopped_at = datetime.now(UTC).isoformat()
+            snapshot.stopped_at = now.isoformat()
         if info.last_heartbeat:
             snapshot.last_heartbeat = info.last_heartbeat.isoformat()
             snapshot.heartbeat_age_seconds = (
-                datetime.now(UTC) - info.last_heartbeat
-            ).total_seconds()
+                now_monotonic - info.last_heartbeat_monotonic
+                if info.last_heartbeat_monotonic is not None
+                else max(0.0, (now - info.last_heartbeat).total_seconds())
+            )
         return snapshot
 
     def cleanup(self, name: str) -> None:

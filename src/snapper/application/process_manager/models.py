@@ -103,6 +103,8 @@ class ProcessInstanceInfo(RegisterableProcess):
         spawner: Reference to ProcessSpawnerService for cleanup.
         exit_code: Exit code if process has terminated.
         last_heartbeat: Last known heartbeat timestamp.
+        started_monotonic: Monotonic process start timestamp for durations.
+        last_heartbeat_monotonic: Monotonic heartbeat timestamp for durations.
     """
 
     name: str
@@ -113,6 +115,8 @@ class ProcessInstanceInfo(RegisterableProcess):
     spawner: Any = None
     exit_code: int | None = None
     last_heartbeat: datetime | None = None
+    started_monotonic: float | None = None
+    last_heartbeat_monotonic: float | None = None
     _stopped: bool = field(default=False, repr=False)
 
     async def start(self) -> None:

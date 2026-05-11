@@ -90,6 +90,7 @@ def _decision_audit_event(
 
 async def _seed_eligible_setup(repo: SQLAlchemyRepository, *, as_of: datetime) -> dict[str, str]:
     """Seed user + role + membership + grant + live delegate for create_review."""
+    temporal_as_of = as_of - timedelta(minutes=1)
     user_public_id = str(uuid7())
     operator_public_id = str(uuid7())
     wallet_public_id = str(uuid7())
@@ -101,8 +102,8 @@ async def _seed_eligible_setup(repo: SQLAlchemyRepository, *, as_of: datetime) -
                 base="BTC",
                 quote="USD",
                 asset_type="crypto",
-                created_at=as_of,
-                timestamp=as_of,
+                created_at=temporal_as_of,
+                timestamp=temporal_as_of,
                 session_id="seed",
                 sequence_id=1,
             )
@@ -114,7 +115,7 @@ async def _seed_eligible_setup(repo: SQLAlchemyRepository, *, as_of: datetime) -
                 symbol_public_id=symbol.public_id,
                 exchange="kraken",
                 requires_ai_review=True,
-                timestamp=as_of,
+                timestamp=temporal_as_of,
                 session_id="seed",
                 sequence_id=2,
             )
@@ -127,7 +128,7 @@ async def _seed_eligible_setup(repo: SQLAlchemyRepository, *, as_of: datetime) -
                 asset_class="crypto",
                 sector=None,
                 description=None,
-                timestamp=as_of,
+                timestamp=temporal_as_of,
                 session_id="seed",
                 sequence_id=3,
             )
@@ -140,7 +141,7 @@ async def _seed_eligible_setup(repo: SQLAlchemyRepository, *, as_of: datetime) -
                 underlying_public_id=underlying_public_id,
                 relationship_type="exact",
                 contract_family=None,
-                timestamp=as_of,
+                timestamp=temporal_as_of,
                 session_id="seed",
                 sequence_id=4,
             )
@@ -153,8 +154,8 @@ async def _seed_eligible_setup(repo: SQLAlchemyRepository, *, as_of: datetime) -
                 password_hash=_FIXTURE_HASH,
                 role="ai_delegate",
                 is_active=True,
-                created_at=as_of,
-                timestamp=as_of,
+                created_at=temporal_as_of,
+                timestamp=temporal_as_of,
                 session_id="seed",
                 sequence_id=99,
             )
@@ -164,7 +165,7 @@ async def _seed_eligible_setup(repo: SQLAlchemyRepository, *, as_of: datetime) -
                 user_public_id=user_public_id,
                 operator_public_id=operator_public_id,
                 is_primary=True,
-                timestamp=as_of,
+                timestamp=temporal_as_of,
                 session_id="seed",
                 sequence_id=10,
             )
@@ -176,16 +177,16 @@ async def _seed_eligible_setup(repo: SQLAlchemyRepository, *, as_of: datetime) -
                 granted_by_user_public_id=user_public_id,
                 scope_kind="instrument",
                 instrument_public_id=instrument.public_id,
-                timestamp=as_of,
+                timestamp=temporal_as_of,
                 session_id="seed",
                 sequence_id=20,
             )
         )
         await s.commit()
     delegate_public_id = str(uuid7())
-    heartbeat_at = _now() + timedelta(minutes=10)
+    heartbeat_at = as_of + timedelta(minutes=10)
     await repo.insert_ai_delegate(
-        public_id=delegate_public_id, user_public_id=user_public_id, as_of=as_of
+        public_id=delegate_public_id, user_public_id=user_public_id, as_of=temporal_as_of
     )
     await repo.update_delegate_last_seen(delegate_public_id, heartbeat_at)
     return {
