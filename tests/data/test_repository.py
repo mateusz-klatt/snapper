@@ -36,6 +36,7 @@ from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
 from snapper.data import repository as repo_module
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import ExecutionPlanCheckpoint
 from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Position
@@ -3952,6 +3953,329 @@ async def test_get_ticks_respects_limit_and_iter_ticks_streams_all(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_iter_ticks_returns_empty_when_instrument_missing(tmp_path: Path) -> None:
+    """``iter_ticks`` short-circuits when ``_resolve_active_instrument`` returns None.
+
+    Given: A repo with no symbols / instruments,
+    When: ``iter_ticks`` is called for an unknown instrument,
+    Then: Generator yields zero rows (covers the ``inst is None``
+        early return on the streaming path).
+    """
+    db_path = tmp_path / "iter_ticks_empty.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    rows: list[TickRow] = []
+    async for row in r.iter_ticks(
+        "UNKNOWN-PAIR",
+        base,
+        base + timedelta(seconds=30),
+        exchange="kraken",
+        as_of=base + timedelta(minutes=1),
+    ):
+        rows.append(row)
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_iter_trades_returns_empty_when_instrument_missing(tmp_path: Path) -> None:
+    """``iter_trades`` short-circuits when ``_resolve_active_instrument`` returns None."""
+    db_path = tmp_path / "iter_trades_empty.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    rows: list[TradeRow] = []
+    async for row in r.iter_trades(
+        "UNKNOWN-PAIR",
+        base,
+        base + timedelta(seconds=30),
+        exchange="kraken",
+        as_of=base + timedelta(minutes=1),
+    ):
+        rows.append(row)
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_upsert_market_snapshots_duplicate_key_in_batch_uses_sequential_path(
+    tmp_path: Path,
+) -> None:
+    """Rows sharing ``instrument_public_id`` in one batch fall back to per-row SCD2.
+
+    Given: Two upsert rows for the same instrument_public_id in the
+        same call (duplicate-key case the bulk path cannot handle —
+        the second row needs to close the version inserted by the
+        first),
+    When: ``upsert_market_snapshots`` is called,
+    Then: Both rows commit successfully via the sequential
+        ``_upsert_snapshot_row`` fallback, and the active SCD2 row at
+        the later bus_time carries the second insert's bid.
+    """
+    db_path = tmp_path / "snapshot_dup_key.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    ts1 = base + timedelta(seconds=1)
+    ts2 = base + timedelta(seconds=2)
+    inst_pid = "01975a8b-3c7d-7000-8000-feedfeedfeed"
+    inserted = await r.upsert_market_snapshots(
+        [
+            {
+                "instrument_public_id": inst_pid,
+                "bid": 100.0,
+                "ask": 101.0,
+                "last_price": 100.5,
+                "timestamp": ts1,
+                "session_id": "s1",
+                "sequence_id": 1,
+            },
+            {
+                "instrument_public_id": inst_pid,
+                "bid": 110.0,
+                "ask": 111.0,
+                "last_price": 110.5,
+                "timestamp": ts2,
+                "session_id": "s1",
+                "sequence_id": 2,
+            },
+        ]
+    )
+    assert inserted == 2
+    snapshots = await r.get_market_snapshots(
+        instrument_public_ids=[inst_pid],
+        start=base,
+        end=ts2 + timedelta(seconds=10),
+        as_of=ts2 + timedelta(seconds=10),
+    )
+    actives = [s for s in snapshots if s["ts"] == ts2]
+    assert len(actives) == 1
+    assert actives[0]["bid"] == pytest.approx(110.0)
+
+
+@pytest.mark.asyncio
+async def test_get_related_instruments_for_symbol_returns_siblings(
+    tmp_path: Path,
+) -> None:
+    """Mapped instrument resolves to its underlying + every sibling instrument.
+
+    Given: A BTC-USD instrument on kraken + a BTC-USD-PERP instrument
+        on kraken_futures, both mapped to the BTC underlying asset
+        (one exact, one derivative),
+    When: ``get_related_instruments_for_symbol("kraken", "BTC-USD",
+        as_of)`` is called,
+    Then: Returns the BTC underlying + a list of two
+        InstrumentRelatedRow rows; the BTC-USD on kraken row carries
+        ``is_selected=True``, the BTC-USD-PERP row carries
+        ``is_selected=False``.
+    """
+    r, _sym_pid, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    ua_pid, _ = await r.upsert_underlying_asset(
+        ticker="BTC",
+        name="Bitcoin",
+        asset_class="crypto",
+        session_id="seed",
+        sequence_id=1,
+        timestamp=now,
+    )
+    await r.upsert_instrument_underlying_mapping(
+        instrument_public_id=inst_pid,
+        underlying_public_id=ua_pid,
+        relationship_type="exact",
+        session_id="seed",
+        sequence_id=2,
+        timestamp=now,
+        contract_family=None,
+    )
+    async with r.session() as s:
+        perp_sym = Symbol(
+            native_symbol="BTC-USD-PERP",
+            base="BTC",
+            quote="USD",
+            asset_type="crypto",
+            created_at=now,
+            timestamp=now,
+            session_id="s1",
+            sequence_id=10,
+        )
+        s.add(perp_sym)
+        await s.commit()
+        await s.refresh(perp_sym)
+        perp_alias = SymbolAlias(
+            symbol_public_id=perp_sym.public_id,
+            exchange="kraken_futures",
+            exchange_symbol="PF_XBTUSD",
+            channel="ws",
+            created_at=now,
+            timestamp=now,
+            session_id="s1",
+            sequence_id=11,
+        )
+        s.add(perp_alias)
+        await s.commit()
+    _, perp_inst_pid = await r.ensure_instrument(
+        symbol_public_id=perp_sym.public_id,
+        exchange="kraken_futures",
+        session_id="s1",
+        sequence_id=12,
+        timestamp=now,
+    )
+    await r.upsert_instrument_underlying_mapping(
+        instrument_public_id=perp_inst_pid,
+        underlying_public_id=ua_pid,
+        relationship_type="derivative",
+        session_id="seed",
+        sequence_id=13,
+        timestamp=now,
+        contract_family=None,
+    )
+    underlying, related = await r.get_related_instruments_for_symbol(
+        "kraken", "BTC-USD", as_of=now + timedelta(seconds=1)
+    )
+    assert underlying is not None
+    assert underlying["ticker"] == "BTC"
+    assert len(related) == 2
+    selected = [row for row in related if row["is_selected"]]
+    assert len(selected) == 1
+    assert selected[0]["native_symbol"] == "BTC-USD"
+    assert selected[0]["exchange"] == "kraken"
+    perp = [row for row in related if row["native_symbol"] == "BTC-USD-PERP"]
+    assert len(perp) == 1
+    assert perp[0]["is_selected"] is False
+    assert perp[0]["relationship_type"] == "derivative"
+
+
+@pytest.mark.asyncio
+async def test_get_related_instruments_for_symbol_unknown_symbol(
+    tmp_path: Path,
+) -> None:
+    """Unknown ``(exchange, native_symbol)`` returns ``(None, [])`` (404 case)."""
+    db_path = tmp_path / "related_unknown.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    underlying, related = await r.get_related_instruments_for_symbol(
+        "kraken", "NOPE-USD", as_of=datetime(2024, 1, 1, tzinfo=UTC)
+    )
+    assert underlying is None
+    assert related == []
+
+
+@pytest.mark.asyncio
+async def test_get_related_instruments_for_symbol_unprovisioned_instrument(
+    tmp_path: Path,
+) -> None:
+    """Symbol+alias exist but no matching ``Instrument`` row → ``(None, [])``."""
+    db_path = tmp_path / "related_no_inst.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    async with r.session() as s:
+        sym = Symbol(
+            native_symbol="BTC-USD",
+            base="BTC",
+            quote="USD",
+            asset_type="crypto",
+            created_at=now,
+            timestamp=now,
+            session_id="s1",
+            sequence_id=1,
+        )
+        s.add(sym)
+        await s.commit()
+        await s.refresh(sym)
+        alias = SymbolAlias(
+            symbol_public_id=sym.public_id,
+            exchange="kraken",
+            exchange_symbol="XXBTZUSD",
+            channel="ws",
+            created_at=now,
+            timestamp=now,
+            session_id="s1",
+            sequence_id=2,
+        )
+        s.add(alias)
+        await s.commit()
+    underlying, related = await r.get_related_instruments_for_symbol(
+        "kraken", "BTC-USD", as_of=now + timedelta(seconds=1)
+    )
+    assert underlying is None
+    assert related == []
+
+
+@pytest.mark.asyncio
+async def test_get_related_instruments_for_symbol_orphan_no_underlying(
+    tmp_path: Path,
+) -> None:
+    """Instrument exists but no underlying mapping → orphan, returns ``(None, [])``."""
+    r, _sym_pid, _inst_pid = await _seed_full_repo(tmp_path)
+    underlying, related = await r.get_related_instruments_for_symbol(
+        "kraken", "BTC-USD", as_of=datetime(2024, 1, 1, tzinfo=UTC) + timedelta(seconds=1)
+    )
+    assert underlying is None
+    assert related == []
+
+
+@pytest.mark.asyncio
+async def test_get_latest_checkpoints_for_plans_dedups_active_rows(
+    tmp_path: Path,
+) -> None:
+    """Defensive dedup: when same plan yields multiple actives, the first (latest by ORDER BY) wins.
+
+    Given: A plan with two checkpoints both active at ``as_of`` —
+        the SCD2 close-on-insert invariant in
+        ``insert_execution_plan_checkpoint`` normally prevents this,
+        but a future regression could break it,
+    When: ``get_latest_checkpoints_for_plans`` is called,
+    Then: The result maps the plan to the row with the LATEST
+        ``checkpoint_at`` — the ``if row.plan_public_id in
+        result_map: continue`` belt-and-braces branch keeps the
+        first-seen (most recent) entry.
+    """
+    db_path = tmp_path / "plans_cp_dedup.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    base_time = datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC)
+    _id, pid = await r.insert_execution_plan(
+        {
+            "plan_type": "manual_once",
+            "created_by_user_id": "user-dedup",
+            "created_via": "ui",
+            "instrument_public_id": "inst-dedup",
+            "exchange": "kraken",
+            "mode": "live",
+            "shard_key": "kraken:DEDUP:live",
+            "wallet_public_id": "wallet-dedup",
+            "total_quantity": 1.0,
+            "side": "buy",
+            "params": {},
+            "status": "active",
+            "created_at": base_time,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": base_time,
+        }
+    )
+    async with r.session() as s:
+        for idx in range(2):
+            s.add(
+                ExecutionPlanCheckpoint(
+                    plan_public_id=pid,
+                    state={"version": idx + 1},
+                    last_venue_event_id=10 + idx,
+                    last_tick_timestamp=None,
+                    checkpoint_at=base_time + timedelta(seconds=idx + 1),
+                    timestamp=base_time + timedelta(seconds=idx + 1),
+                    session_id="s1",
+                    sequence_id=100 + idx,
+                )
+            )
+        await s.commit()
+    result = await r.get_latest_checkpoints_for_plans([pid])
+    assert pid in result
+    assert result[pid]["state"]["version"] == 2
+
+
+@pytest.mark.asyncio
 async def test_get_trades_respects_limit_and_iter_trades_streams_all(
     tmp_path: Path,
 ) -> None:
@@ -4664,6 +4988,149 @@ async def test_bulk_dispatch_trade_commands_skips_missing_public_id(tmp_path: Pa
     assert len(active) == 1
     assert active[0]["status"] == "dispatched"
     assert active[0]["public_id"] == real_pid
+
+
+@pytest.mark.asyncio
+async def test_bulk_dispatch_trade_commands_skips_row_outside_per_spec_bus_time(
+    tmp_path: Path,
+) -> None:
+    """Per-row SCD2 guard rejects rows whose timestamp is beyond their spec's bus_time.
+
+    Given: Two persisted trade commands at ``now`` and a mixed batch of
+        dispatch specs — one with ``bus_time < now`` (would create a
+        backwards-in-time SCD2 transition) and one with ``bus_time > now``,
+    When: ``bulk_dispatch_trade_commands`` runs,
+    Then: The bulk SELECT's aggregate ``min/max`` bounds catch both active
+        rows, but the per-row guard at the iteration site skips the row
+        whose ``existing.timestamp`` exceeds its own spec's ``bus_time``
+        (covering the False branch of the per-row check); only the
+        well-ordered spec applies and ``applied == 1``.
+    """
+    db_path = tmp_path / "cmd_bulk_dispatch_per_row.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    inserted_pids: list[str] = []
+    for idx in range(2):
+        _, pid = await r.insert_trade_command(
+            {
+                "command_type": "submit",
+                "shard_key": "kraken.BTC-USD.live",
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "mode": "live",
+                "strategy_id": "engine-per-row",
+                "client_order_id": f"cid-per-row-{idx}",
+                "venue_client_id": f"vcid-per-row-{idx}",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 0.5,
+                "price": None,
+                "status": "created",
+                "created_at": now,
+                "correlation_id": f"corr-per-row-{idx}",
+                "session_id": "s1",
+                "sequence_id": 10 + idx,
+                "timestamp": now,
+            }
+        )
+        inserted_pids.append(pid)
+    t_pre = now - timedelta(seconds=1)
+    t_post = now + timedelta(seconds=1)
+    applied = await r.bulk_dispatch_trade_commands(
+        [
+            {
+                "public_id": inserted_pids[0],
+                "bus_time": t_pre,
+                "session_id": "s1",
+                "sequence_id": 100,
+                "dispatched_at": t_pre,
+                "attempt_count": 1,
+            },
+            {
+                "public_id": inserted_pids[1],
+                "bus_time": t_post,
+                "session_id": "s1",
+                "sequence_id": 101,
+                "dispatched_at": t_post,
+                "attempt_count": 1,
+            },
+        ]
+    )
+    assert applied == 1
+    active = await r.get_active_commands_for_shard("kraken.BTC-USD.live", t_post)
+    statuses = {row["public_id"]: row["status"] for row in active}
+    assert statuses[inserted_pids[0]] == "created"
+    assert statuses[inserted_pids[1]] == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_load_existing_snapshots_skips_row_outside_per_spec_bus_time(
+    tmp_path: Path,
+) -> None:
+    """``_load_existing_snapshots_for_rows`` SCD2 per-row guard skips stale rows.
+
+    Given: A pre-existing active snapshot at ``t_mid`` for ``inst_X`` and a
+        mixed upsert batch — one row for ``inst_X`` at ``t_small`` (stale,
+        before ``t_mid``) and one row for ``inst_Y`` at ``t_large``
+        (after ``t_mid``),
+    When: ``_load_existing_snapshots_for_rows`` runs against the active
+        session, the SELECT's aggregate ``[min(t_small), max(t_large)]``
+        bounds catch the existing ``inst_X`` row,
+    Then: The per-row check ``snap.timestamp <= bus_time`` is False for
+        the ``inst_X`` spec (``t_mid > t_small``), covering the False
+        branch at the per-row guard, and the returned mapping omits
+        ``inst_X`` — the bulk path therefore never attempts an SCD2 close
+        for the stale spec.
+    """
+    db_path = tmp_path / "snapshot_per_row_guard.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    t_mid = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    inst_x = "01975a8b-3c7d-7000-8000-000000000001"
+    inst_y = "01975a8b-3c7d-7000-8000-000000000002"
+    seeded = await r.upsert_market_snapshots(
+        [
+            {
+                "instrument_public_id": inst_x,
+                "bid": 100.0,
+                "ask": 101.0,
+                "last_price": 100.5,
+                "timestamp": t_mid,
+                "session_id": "s0",
+                "sequence_id": 1,
+            }
+        ]
+    )
+    assert seeded == 1
+    t_small = t_mid - timedelta(seconds=5)
+    t_large = t_mid + timedelta(seconds=5)
+    async with r.session() as session:
+        existing = await type(r)._load_existing_snapshots_for_rows(
+            session,
+            [
+                {
+                    "instrument_public_id": inst_x,
+                    "bid": 200.0,
+                    "ask": 201.0,
+                    "last_price": 200.5,
+                    "timestamp": t_small,
+                    "session_id": "s1",
+                    "sequence_id": 2,
+                },
+                {
+                    "instrument_public_id": inst_y,
+                    "bid": 300.0,
+                    "ask": 301.0,
+                    "last_price": 300.5,
+                    "timestamp": t_large,
+                    "session_id": "s1",
+                    "sequence_id": 3,
+                },
+            ],
+        )
+    assert inst_x not in existing
+    assert inst_y not in existing
 
 
 @pytest.mark.asyncio

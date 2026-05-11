@@ -820,6 +820,43 @@ class TestLoadDelivery:
         assert result is None
 
 
+class TestAttemptOnQueuedRowNoCache:
+    """``_attempt_on_queued_row`` falls back to per-row repo lookups when caches are absent."""
+
+    @pytest.mark.asyncio
+    async def test_per_row_device_lookup_when_devices_cache_missing(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Calling without a ``devices_cache`` triggers the per-user fallback fetch.
+
+        Given: A queued delivery for a registered user/device and an event
+            cache that hits but no devices_cache passed,
+        When: ``_attempt_on_queued_row`` is invoked directly (the
+            cancellation handler path that processes a single delivery
+            without a surrounding batch),
+        Then: The per-user
+            ``list_active_notification_devices_for_user`` fallback runs
+            and APNs is invoked exactly once.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, apns = _make_sidecar(repo)
+        row = await sidecar._load_delivery(delivery_pid)
+        assert row is not None
+
+        await sidecar._attempt_on_queued_row(row, _ts(5))
+
+        apns.send.assert_awaited_once()
+
+
 class TestRetryLoopLifecycle:
     """``_process_retry_queue_loop`` obeys the stop event."""
 

@@ -845,12 +845,9 @@ class TraderCoordinator(RegisterableProcess):
             if wallet_public_id:
                 scope_key = (exchange, instrument, wallet_public_id)
                 self._engines_by_scope.setdefault(scope_key, engine)
-        try:
-            engine.pending_coid_listener = lambda old, new: self._on_engine_pending_coid_change(
-                engine, old, new
-            )
-        except AttributeError:
-            return
+        engine.pending_coid_listener = lambda old, new: self._on_engine_pending_coid_change(
+            engine, old, new
+        )
         current_pending = getattr(engine, "pending_client_order_id", None)
         if current_pending is not None:
             self._engines_by_pending_coid.setdefault(current_pending, engine)

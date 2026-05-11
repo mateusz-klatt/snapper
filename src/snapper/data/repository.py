@@ -6487,9 +6487,7 @@ class SQLAlchemyRepository(Repository):
                     .with_for_update()
                 )
                 for existing in result.scalars().all():
-                    spec = spec_by_pid.get(existing.public_id)
-                    if spec is None:
-                        continue
+                    spec = spec_by_pid[existing.public_id]
                     bus_time = spec["bus_time"]
                     if not (existing.timestamp <= bus_time and existing.known_to > bus_time):
                         continue
