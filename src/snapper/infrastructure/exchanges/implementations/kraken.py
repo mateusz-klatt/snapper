@@ -28,7 +28,6 @@ import asyncio
 import inspect
 import time
 from collections.abc import AsyncIterator
-from collections.abc import Awaitable
 from collections.abc import Callable
 from typing import Any
 from typing import Final
@@ -1097,7 +1096,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         channel = message_dict["channel"]
         data = message_dict["data"]
-        data_handlers: dict[str, Callable[[Any], Awaitable[None]]] = {
+        data_handlers: dict[str, Callable[[Any], None]] = {
             "ohlc": self._handle_ohlc_data,
             "ticker": self._handle_ticker_data,
             "trade": self._handle_trade_data,
@@ -1105,11 +1104,11 @@ class KrakenExchangeClient(ExchangeClientBase):
         }
         handler = data_handlers.get(channel)
         if handler:
-            await handler(data)
+            handler(data)
         elif channel == "instrument":
             await self._handle_instrument_data(message_dict)
 
-    async def _handle_ohlc_data(self, data: Any) -> None:
+    def _handle_ohlc_data(self, data: Any) -> None:
         """Parse and enqueue OHLC candle data.
 
         Args:
@@ -1128,7 +1127,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         except ValueError as e:
             logger.warning(f"Failed to parse candle data: {e}")
 
-    async def _handle_ticker_data(self, data: Any) -> None:
+    def _handle_ticker_data(self, data: Any) -> None:
         """Parse and enqueue ticker data.
 
         Args:
@@ -1140,7 +1139,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         for ticker_data in ticker_list:
             _enqueue_or_drop_oldest(self._tick_queue, ticker_data, "tick")
 
-    async def _handle_trade_data(self, data: Any) -> None:
+    def _handle_trade_data(self, data: Any) -> None:
         """Parse and enqueue trade data.
 
         Args:
@@ -1153,7 +1152,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         except ValueError as e:
             logger.warning(f"Failed to parse trade data: {e}")
 
-    async def _handle_executions_data(self, data: Any) -> None:
+    def _handle_executions_data(self, data: Any) -> None:
         """Parse and enqueue execution data.
 
         Args:
@@ -1192,7 +1191,9 @@ class KrakenExchangeClient(ExchangeClientBase):
             pair_dict: Raw instrument pair dictionary from WebSocket.
         """
         try:
-            validated = KrakenInstrumentPairSchema.model_validate(pair_dict)
+            validated = await asyncio.to_thread(
+                KrakenInstrumentPairSchema.model_validate, pair_dict
+            )
             _enqueue_or_drop_oldest(
                 self._raw_instrument_queue,
                 validated.model_dump(by_alias=True),
@@ -1202,7 +1203,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.warning(f"Invalid instrument data, skipping: {e}")
             return
         try:
-            instrument_pair = parse_kraken_instrument(pair_dict)
+            instrument_pair = await asyncio.to_thread(parse_kraken_instrument, pair_dict)
             _enqueue_or_drop_oldest(self._instrument_queue, instrument_pair, "instrument")
         except ValueError as e:
             logger.debug(f"Skipping instrument parse (raw available): {e}")

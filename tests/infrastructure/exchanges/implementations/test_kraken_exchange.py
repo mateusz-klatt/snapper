@@ -3120,7 +3120,7 @@ async def test_handle_ticker_data_skips_dict() -> None:
     """
     client = KrakenExchangeClient("key", "secret")
     client._tick_queue = asyncio.Queue()
-    await client._handle_ticker_data({"symbol": "BTC/USD", "bid": 50000.0})
+    client._handle_ticker_data({"symbol": "BTC/USD", "bid": 50000.0})
     assert client._tick_queue.empty()
 
 
