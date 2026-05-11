@@ -675,6 +675,37 @@ class TestAlertDeliveryRepo:
     """SCD2 behaviour of the seven delivery methods."""
 
     @pytest.mark.asyncio
+    async def test_get_delivery_by_public_id_returns_active_row(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Indexed lookup returns the active SCD2 version of one delivery row.
+
+        Given: One queued delivery inserted via insert_alert_delivery,
+        When: get_delivery_by_public_id is called with its public_id,
+        Then: It returns the row in O(1) (no scan), with known_to == KNOWN_TO_MAX.
+        Missing public_ids return None.
+        """
+        public_id = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-direct",
+                device_public_id="dev-direct",
+                user_public_id="user-direct",
+                status="queued",
+                created_at=_ts(),
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+        hit = await repo.get_delivery_by_public_id(public_id)
+        assert hit is not None
+        assert hit["public_id"] == public_id
+        assert hit["status"] == "queued"
+        assert hit["known_to"] == KNOWN_TO_MAX
+        miss = await repo.get_delivery_by_public_id("nonexistent-pid")
+        assert miss is None
+
+    @pytest.mark.asyncio
     async def test_insert_and_list_queued_deliveries(self, repo: SQLAlchemyRepository) -> None:
         """SCD2 insert creates an active queued row."""
         public_id = await repo.insert_alert_delivery(

@@ -3168,6 +3168,16 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_delivery_by_public_id(self, public_id: str) -> AlertDeliveryRow | None:
+        """Return the active SCD2 version of one delivery by public_id, or None.
+
+        Indexed lookup used by the notify sidecar's hot retry path —
+        avoids the per-row linear scan over
+        :meth:`list_queued_deliveries_all`.
+        """
+        ...
+
+    @abstractmethod
     async def list_deliveries_ready_for_retry(self, now: datetime) -> list[AlertDeliveryRow]:
         """Active queued deliveries with ``next_attempt_at`` NULL or <= ``now``."""
         ...
@@ -10383,6 +10393,26 @@ class SQLAlchemyRepository(Repository):
                 .order_by(AlertDelivery.created_at.asc())
             )
             return [self._alert_delivery_row_from(r) for r in result.scalars().all()]
+
+    async def get_delivery_by_public_id(self, public_id: str) -> AlertDeliveryRow | None:
+        """Return the active SCD2 version of one delivery by public_id, or None.
+
+        Indexed lookup replacing the per-row linear scan over
+        :meth:`list_queued_deliveries_all` that the notify sidecar used
+        on its hot retry path. Only the active SCD2 version is
+        returned (``known_to == KNOWN_TO_MAX``).
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertDelivery).where(
+                    AlertDelivery.public_id == public_id,
+                    AlertDelivery.known_to == KNOWN_TO_MAX,
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            return self._alert_delivery_row_from(row)
 
     async def list_deliveries_ready_for_retry(self, now: datetime) -> list[AlertDeliveryRow]:
         """Active queued rows with ``next_attempt_at`` NULL or <= ``now``."""

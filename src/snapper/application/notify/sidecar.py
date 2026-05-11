@@ -540,14 +540,13 @@ class NotifySidecar(RegisterableProcess):
     async def _load_delivery(self, delivery_public_id: str) -> AlertDeliveryRow | None:
         """Load an active delivery row by public_id, None when closed / unknown.
 
-        Queued scan is the cheap path — callers only use this for the
-        attempt-count read (``_bump_attempt``) and the device-id
-        lookup after an unregistered response.
+        Indexed lookup via
+        :meth:`~snapper.data.repository.SQLAlchemyRepository.get_delivery_by_public_id`
+        — replaces the legacy linear scan over
+        :meth:`list_queued_deliveries_all` that paid O(n_queued) per
+        retry attempt on the sidecar hot path.
         """
-        for row in await self._repo.list_queued_deliveries_all():
-            if row["public_id"] == delivery_public_id:
-                return row
-        return None
+        return await self._repo.get_delivery_by_public_id(delivery_public_id)
 
     async def _drain_outbox(self, now: datetime) -> None:
         """Process every ``status='queued'`` row on startup (crash recovery).
