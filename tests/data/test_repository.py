@@ -44,6 +44,8 @@ from snapper.data.models import Setting
 from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
+from snapper.data.models import Tick
+from snapper.data.models import Trade
 from snapper.data.models import VenueFeeSchedule
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import InstrumentSpecInput
@@ -58,6 +60,8 @@ from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import FundingRateInsertRow
 from snapper.data.repository_types import OrderInsertRow
+from snapper.data.repository_types import TickRow
+from snapper.data.repository_types import TradeRow
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 
 
@@ -3892,6 +3896,105 @@ async def test_get_trades_returns_executed_at(
     assert result[0]["executed_at"] == event_time
     assert result[0]["trade_id"] == "exch-123"
     assert result[0]["price"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_get_ticks_respects_limit_and_iter_ticks_streams_all(tmp_path: Path) -> None:
+    """Verify ``limit`` caps ``get_ticks`` while ``iter_ticks`` streams the full range.
+
+    Given: A repository with 25 ticks for an instrument across one minute,
+    When: ``get_ticks(..., limit=10)`` materialises the result,
+    Then: Exactly 10 ticks come back ordered by timestamp ASC; the
+        companion ``iter_ticks(...)`` async generator yields all 25
+        ticks without materialising the list — proving the bounded
+        list path and the unbounded stream path coexist correctly.
+    """
+    r, _sym_pid, inst_pid = await _seed_full_repo(tmp_path)
+    base = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    async with r.session() as s:
+        for i in range(25):
+            s.add(
+                Tick(
+                    instrument_public_id=inst_pid,
+                    bid=100.0 + i,
+                    ask=101.0 + i,
+                    last=100.5 + i,
+                    volume=1.0,
+                    timestamp=base + timedelta(seconds=i),
+                    session_id="s1",
+                    sequence_id=100 + i,
+                )
+            )
+        await s.commit()
+    capped = await r.get_ticks(
+        "BTC-USD",
+        base,
+        base + timedelta(seconds=30),
+        exchange="kraken",
+        as_of=base + timedelta(minutes=1),
+        limit=10,
+    )
+    assert len(capped) == 10
+    assert capped[0]["timestamp"] == base
+    assert capped[-1]["timestamp"] == base + timedelta(seconds=9)
+    streamed: list[TickRow] = []
+    async for row in r.iter_ticks(
+        "BTC-USD",
+        base,
+        base + timedelta(seconds=30),
+        exchange="kraken",
+        as_of=base + timedelta(minutes=1),
+    ):
+        streamed.append(row)
+    assert len(streamed) == 25
+    assert streamed[0]["timestamp"] == base
+    assert streamed[-1]["timestamp"] == base + timedelta(seconds=24)
+
+
+@pytest.mark.asyncio
+async def test_get_trades_respects_limit_and_iter_trades_streams_all(
+    tmp_path: Path,
+) -> None:
+    """Verify ``limit`` caps ``get_trades`` while ``iter_trades`` streams the full range."""
+    r, _sym_pid, inst_pid = await _seed_full_repo(tmp_path)
+    base = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    async with r.session() as s:
+        for i in range(25):
+            s.add(
+                Trade(
+                    instrument_public_id=inst_pid,
+                    price=100.0 + i,
+                    size=1.0,
+                    side="buy",
+                    trade_id=f"trade-{i}",
+                    executed_at=base + timedelta(seconds=i),
+                    timestamp=base + timedelta(seconds=i),
+                    session_id="s1",
+                    sequence_id=200 + i,
+                )
+            )
+        await s.commit()
+    capped = await r.get_trades(
+        "BTC-USD",
+        base,
+        base + timedelta(seconds=30),
+        exchange="kraken",
+        as_of=base + timedelta(minutes=1),
+        limit=10,
+    )
+    assert len(capped) == 10
+    streamed: list[TradeRow] = []
+    async for row in r.iter_trades(
+        "BTC-USD",
+        base,
+        base + timedelta(seconds=30),
+        exchange="kraken",
+        as_of=base + timedelta(minutes=1),
+    ):
+        streamed.append(row)
+    assert len(streamed) == 25
+    assert streamed[0]["executed_at"] == base
+    assert streamed[-1]["executed_at"] == base + timedelta(seconds=24)
 
 
 @pytest.mark.asyncio

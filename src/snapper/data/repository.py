@@ -368,6 +368,8 @@ _SnapshotNaturalKey = str
 _SNAPSHOT_LOOKUP_CHUNK_SIZE = 500
 _OUTBOX_BULK_LOOKUP_CHUNK_SIZE = 200
 _PLAN_CHECKPOINT_LOOKUP_CHUNK_SIZE = 200
+DEFAULT_HIGH_CARDINALITY_LIMIT = 100_000
+_HIGH_CARDINALITY_STREAM_CHUNK_SIZE = 5_000
 ScopeExpansionKey = tuple[str, str | None, str | None]
 
 
@@ -775,8 +777,17 @@ class Repository(ABC):
         end: datetime,
         exchange: AllExchange,
         as_of: datetime,
+        limit: int = DEFAULT_HIGH_CARDINALITY_LIMIT,
     ) -> list[TickRow]:
-        """Retrieve ticks for instrument in time range."""
+        """Retrieve ticks for instrument in time range.
+
+        ``limit`` caps the materialized result to bound RAM on the
+        highest-cardinality table in the schema. The default
+        :data:`DEFAULT_HIGH_CARDINALITY_LIMIT` is large enough for
+        typical UI windows but small enough to prevent multi-day
+        replays from OOMing the engine. Callers that genuinely need
+        full ranges should iterate via :meth:`iter_ticks`.
+        """
         ...
 
     @abstractmethod
@@ -787,8 +798,13 @@ class Repository(ABC):
         end: datetime,
         exchange: AllExchange,
         as_of: datetime,
+        limit: int = DEFAULT_HIGH_CARDINALITY_LIMIT,
     ) -> list[TradeRow]:
-        """Retrieve trades for instrument in time range."""
+        """Retrieve trades for instrument in time range.
+
+        Same bounded-list contract as :meth:`get_ticks`. For
+        large-window replays prefer :meth:`iter_trades`.
+        """
         ...
 
     @abstractmethod
@@ -4673,8 +4689,9 @@ class SQLAlchemyRepository(Repository):
         end: datetime,
         exchange: AllExchange,
         as_of: datetime,
+        limit: int = DEFAULT_HIGH_CARDINALITY_LIMIT,
     ) -> list[TickRow]:
-        """Retrieve ticks for instrument within time range."""
+        """Retrieve ticks for instrument within time range, capped at ``limit``."""
         async with self.session() as s:
             inst = await self._resolve_active_instrument(s, instrument, exchange, as_of)
             if inst is None:
@@ -4698,6 +4715,7 @@ class SQLAlchemyRepository(Repository):
                     Tick.known_to > as_of,
                 )
                 .order_by(Tick.timestamp.asc())
+                .limit(limit)
             )
             rows = q.all()
             return [
@@ -4714,6 +4732,61 @@ class SQLAlchemyRepository(Repository):
                 for r in rows
             ]
 
+    async def iter_ticks(
+        self,
+        instrument: str,
+        start: datetime,
+        end: datetime,
+        exchange: AllExchange,
+        as_of: datetime,
+    ) -> AsyncIterator[TickRow]:
+        """Stream ticks for instrument in time range without materialising the full result.
+
+        Use this for multi-day replays / backtests where
+        :meth:`get_ticks` would OOM. Yields rows in
+        ``Tick.timestamp ASC`` order; the SQLAlchemy ``stream`` cursor
+        yields ``_HIGH_CARDINALITY_STREAM_CHUNK_SIZE`` rows per
+        round-trip so the per-row Python overhead amortises while RSS
+        stays flat.
+        """
+        async with self.session() as s:
+            inst = await self._resolve_active_instrument(s, instrument, exchange, as_of)
+            if inst is None:
+                return
+            stmt = (
+                select(
+                    Tick.timestamp,
+                    Tick.bid,
+                    Tick.ask,
+                    Tick.last,
+                    Tick.volume,
+                    Tick.public_id,
+                    Tick.session_id,
+                    Tick.sequence_id,
+                )
+                .where(
+                    Tick.instrument_public_id == inst.public_id,
+                    Tick.timestamp >= start,
+                    Tick.timestamp <= end,
+                    Tick.timestamp <= as_of,
+                    Tick.known_to > as_of,
+                )
+                .order_by(Tick.timestamp.asc())
+                .execution_options(yield_per=_HIGH_CARDINALITY_STREAM_CHUNK_SIZE)
+            )
+            stream = await s.stream(stmt)
+            async for r in stream:
+                yield {
+                    "timestamp": r.timestamp,
+                    "bid": r.bid,
+                    "ask": r.ask,
+                    "last": r.last,
+                    "volume": r.volume,
+                    "public_id": r.public_id,
+                    "session_id": r.session_id,
+                    "sequence_id": r.sequence_id,
+                }
+
     async def get_trades(
         self,
         instrument: str,
@@ -4721,8 +4794,9 @@ class SQLAlchemyRepository(Repository):
         end: datetime,
         exchange: AllExchange,
         as_of: datetime,
+        limit: int = DEFAULT_HIGH_CARDINALITY_LIMIT,
     ) -> list[TradeRow]:
-        """Retrieve trades for instrument within time range.
+        """Retrieve trades for instrument within time range, capped at ``limit``.
 
         Uses coalesce(executed_at, timestamp) for range filtering and ordering
         so that trades are selected by exchange event time when available,
@@ -4750,6 +4824,7 @@ class SQLAlchemyRepository(Repository):
                     Trade.known_to > as_of,
                 )
                 .order_by(event_time.asc())
+                .limit(limit)
             )
             rows = q.all()
             return [
@@ -4763,6 +4838,55 @@ class SQLAlchemyRepository(Repository):
                 }
                 for r in rows
             ]
+
+    async def iter_trades(
+        self,
+        instrument: str,
+        start: datetime,
+        end: datetime,
+        exchange: AllExchange,
+        as_of: datetime,
+    ) -> AsyncIterator[TradeRow]:
+        """Stream trades for instrument in time range without materialising the full result.
+
+        Companion to :meth:`iter_ticks` for the equally-high-cardinality
+        Trade table. Yields rows in event-time ASC order using the same
+        coalesce(executed_at, timestamp) ordering as :meth:`get_trades`.
+        """
+        async with self.session() as s:
+            inst = await self._resolve_active_instrument(s, instrument, exchange, as_of)
+            if inst is None:
+                return
+            event_time = func.coalesce(Trade.executed_at, Trade.timestamp)
+            stmt = (
+                select(
+                    Trade.timestamp,
+                    Trade.executed_at,
+                    Trade.price,
+                    Trade.size,
+                    Trade.side,
+                    Trade.trade_id,
+                )
+                .where(
+                    Trade.instrument_public_id == inst.public_id,
+                    event_time >= start,
+                    event_time <= end,
+                    Trade.timestamp <= as_of,
+                    Trade.known_to > as_of,
+                )
+                .order_by(event_time.asc())
+                .execution_options(yield_per=_HIGH_CARDINALITY_STREAM_CHUNK_SIZE)
+            )
+            stream = await s.stream(stmt)
+            async for r in stream:
+                yield {
+                    "timestamp": r.timestamp,
+                    "executed_at": r.executed_at,
+                    "price": r.price,
+                    "size": r.size,
+                    "side": r.side,
+                    "trade_id": r.trade_id,
+                }
 
     async def get_market_snapshots(
         self,
