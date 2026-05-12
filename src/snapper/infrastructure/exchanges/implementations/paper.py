@@ -28,6 +28,7 @@ The paper client is ideal for:
 
 import asyncio
 import contextlib
+import heapq
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -39,6 +40,7 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import select
 
+from snapper.core.types import AllExchange
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.data.models import Instrument
@@ -540,6 +542,12 @@ class PaperExchangeClient(ExchangeClientBase):
     async def _subscribe_ticker_impl(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
         """Implement historical ticker streaming for paper trading.
 
+        Streams snapshots via :meth:`Repository.iter_market_snapshots`
+        (H8 — paper backtest streaming) so multi-day windows keep RSS
+        flat. The legacy materialising path
+        (:meth:`Repository.get_market_snapshots`) is reserved for
+        bounded UI / one-shot lookups.
+
         Args:
             symbols: List of trading pairs to replay.
 
@@ -567,10 +575,9 @@ class PaperExchangeClient(ExchangeClientBase):
         inst_pids = await self._resolve_instrument_public_ids(symbols, exchange_name)
         if not inst_pids:
             return
-        snapshots = await self.repository.get_market_snapshots(
+        async for snap in self.repository.iter_market_snapshots(
             inst_pids, start_dt, end_dt, as_of=datetime.now(UTC)
-        )
-        for snap in snapshots:
+        ):
             yield self._snapshot_to_ticker(snap)
 
     @staticmethod
@@ -723,11 +730,19 @@ class PaperExchangeClient(ExchangeClientBase):
     async def _subscribe_trades_impl(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
         """Implement historical trades replay for paper trading.
 
+        Streams per-symbol via :meth:`Repository.iter_trades` and
+        merges the resulting time-ordered streams with a k-way async
+        heap merge (H7 — paper backtest streaming). The legacy
+        materialising path (``get_trades`` + in-memory sort across
+        every symbol) was OOM-prone on multi-day, multi-symbol
+        replays; this version keeps RSS bounded by the number of
+        symbols (one ``TradeUpdate`` in flight per stream).
+
         Args:
             symbols: List of trading pairs.
 
         Yields:
-            TradeUpdate from historical data.
+            TradeUpdate from historical data in event-time ASC order.
 
         Raises:
             RuntimeError: If repository not configured or not connected.
@@ -747,30 +762,89 @@ class PaperExchangeClient(ExchangeClientBase):
         logger.info(
             f"Replaying trades for {symbols} from {start_dt} to {end_dt} from {exchange_name}"
         )
-        replay_trades: list[TradeUpdate] = []
-        for symbol in symbols:
-            trades = await self.repository.get_trades(
-                symbol,
-                start_dt,
-                end_dt,
-                exchange=exchange_name,
-                as_of=datetime.now(UTC),
-            )
-            for trade_dict in trades:
-                replay_trades.append(
-                    TradeUpdate(
-                        symbol=symbol,
-                        side=trade_dict["side"],
-                        quantity=trade_dict["size"],
-                        price=trade_dict["price"],
-                        ord_type="unknown",
-                        trade_id=trade_dict.get("trade_id"),
-                        timestamp=trade_dict.get("executed_at") or trade_dict["timestamp"],
-                    )
-                )
-        replay_trades.sort(key=lambda trade: trade.timestamp)
-        for trade in replay_trades:
+        as_of = datetime.now(UTC)
+        per_symbol_streams = [
+            self._iter_trades_for_symbol(symbol, start_dt, end_dt, exchange_name, as_of)
+            for symbol in symbols
+        ]
+        async for trade in self._heap_merge_trade_streams(per_symbol_streams):
             yield trade
+
+    async def _iter_trades_for_symbol(
+        self,
+        symbol: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        exchange_name: AllExchange,
+        as_of: datetime,
+    ) -> AsyncIterator[TradeUpdate]:
+        """Stream historical trades for one symbol as ``TradeUpdate`` objects.
+
+        Per-stream helper for :meth:`_subscribe_trades_impl`. Yields
+        in event-time ASC order (whatever :meth:`iter_trades`
+        guarantees) so the k-way heap merge can rely on the same
+        ordering across all input streams.
+
+        Args:
+            symbol: Trading pair (Snapper-native form).
+            start_dt: Replay window start.
+            end_dt: Replay window end.
+            exchange_name: Source exchange to query.
+            as_of: SCD2 ``known_to`` cutoff.
+
+        Yields:
+            ``TradeUpdate`` rows in time order.
+        """
+        assert self.repository is not None
+        async for trade_dict in self.repository.iter_trades(
+            symbol, start_dt, end_dt, exchange=exchange_name, as_of=as_of
+        ):
+            yield TradeUpdate(
+                symbol=symbol,
+                side=trade_dict["side"],
+                quantity=trade_dict["size"],
+                price=trade_dict["price"],
+                ord_type="unknown",
+                trade_id=trade_dict.get("trade_id"),
+                timestamp=trade_dict.get("executed_at") or trade_dict["timestamp"],
+            )
+
+    @staticmethod
+    async def _heap_merge_trade_streams(
+        streams: list[AsyncIterator[TradeUpdate]],
+    ) -> AsyncIterator[TradeUpdate]:
+        """K-way async heap merge of time-ordered ``TradeUpdate`` streams.
+
+        Mirrors the pattern in
+        :mod:`snapper.application.backtest.candle_stream.merge_sorted_streams`
+        but narrowed to :class:`TradeUpdate` rows keyed by
+        ``timestamp``. Each input stream must yield in event-time
+        ASC order; the merge yields all rows globally in the same
+        order. The stream insertion index participates in the heap
+        key as a deterministic tie-breaker on equal timestamps.
+
+        Args:
+            streams: Sorted async iterators of ``TradeUpdate``.
+
+        Yields:
+            ``TradeUpdate`` rows in global ascending timestamp order.
+        """
+        heap: list[tuple[datetime, int, TradeUpdate]] = []
+        for idx, stream in enumerate(streams):
+            try:
+                event = await anext(stream)
+            except StopAsyncIteration:
+                continue
+            heap.append((event.timestamp, idx, event))
+        heapq.heapify(heap)
+        while heap:
+            _, idx, event = heapq.heappop(heap)
+            yield event
+            try:
+                next_event = await anext(streams[idx])
+            except StopAsyncIteration:
+                continue
+            heapq.heappush(heap, (next_event.timestamp, idx, next_event))
 
     def get_supported_pairs(self) -> list[str]:
         """Get list of supported trading pairs for paper trading.

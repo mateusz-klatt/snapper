@@ -834,6 +834,25 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    def iter_trades(
+        self,
+        instrument: str,
+        start: datetime,
+        end: datetime,
+        exchange: AllExchange,
+        as_of: datetime,
+    ) -> AsyncIterator[TradeRow]:
+        """Stream trades in time order without materialising the full result.
+
+        Companion to :meth:`get_trades` for high-cardinality
+        replays (paper backtest, multi-day windows). Implementations
+        yield rows in ``event_time ASC`` order using the same
+        ``coalesce(executed_at, timestamp)`` ordering as
+        :meth:`get_trades`.
+        """
+        ...
+
+    @abstractmethod
     async def get_market_snapshots(
         self,
         instrument_public_ids: list[str],
@@ -842,6 +861,22 @@ class Repository(ABC):
         as_of: datetime,
     ) -> list[MarketSnapshotRow]:
         """Retrieve active market snapshots for instruments in time range."""
+        ...
+
+    @abstractmethod
+    def iter_market_snapshots(
+        self,
+        instrument_public_ids: list[str],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> AsyncIterator[MarketSnapshotRow]:
+        """Stream market snapshots in time order without materialising.
+
+        Companion to :meth:`get_market_snapshots` for paper-mode
+        backtest replays over long windows. Implementations yield
+        rows in ``timestamp ASC`` order.
+        """
         ...
 
     @abstractmethod
@@ -4999,6 +5034,76 @@ class SQLAlchemyRepository(Repository):
                     "size": r.size,
                     "side": r.side,
                     "trade_id": r.trade_id,
+                }
+
+    async def iter_market_snapshots(
+        self,
+        instrument_public_ids: list[str],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> AsyncIterator[MarketSnapshotRow]:
+        """Stream market snapshots in time order without materialising the full result.
+
+        Companion to :meth:`iter_ticks` and :meth:`iter_trades` for
+        the snapshot table. Paper-mode ticker replays over long
+        windows used to materialise the entire range via
+        :meth:`get_market_snapshots`; that bounded-list contract
+        remains for UI / one-shot lookups while large-window replays
+        prefer this streaming variant. ``yield_per`` chunks rows from
+        the database so RSS stays flat across multi-day windows.
+
+        Args:
+            instrument_public_ids: Instruments to include.
+            start: Lower bound (inclusive, event time).
+            end: Upper bound (inclusive, event time).
+            as_of: SCD2 ``known_to`` cutoff (bitemporal read).
+
+        Yields:
+            Snapshot rows in ``timestamp ASC`` order. Empty input
+            list short-circuits without opening a session.
+        """
+        if not instrument_public_ids:
+            return
+        async with self.session() as s:
+            stmt = (
+                select(
+                    MarketSnapshot.timestamp,
+                    MarketSnapshot.instrument_public_id,
+                    MarketSnapshot.bid,
+                    MarketSnapshot.bid_volume,
+                    MarketSnapshot.ask,
+                    MarketSnapshot.ask_volume,
+                    MarketSnapshot.last_price,
+                    MarketSnapshot.volume_24h,
+                    MarketSnapshot.vwap_24h,
+                    MarketSnapshot.low_24h,
+                    MarketSnapshot.high_24h,
+                )
+                .where(
+                    MarketSnapshot.instrument_public_id.in_(instrument_public_ids),
+                    MarketSnapshot.timestamp >= start,
+                    MarketSnapshot.timestamp <= end,
+                    MarketSnapshot.timestamp <= as_of,
+                    MarketSnapshot.known_to > as_of,
+                )
+                .order_by(MarketSnapshot.timestamp.asc())
+                .execution_options(yield_per=_HIGH_CARDINALITY_STREAM_CHUNK_SIZE)
+            )
+            stream = await s.stream(stmt)
+            async for r in stream:
+                yield {
+                    "ts": r.timestamp,
+                    "instrument_public_id": r.instrument_public_id,
+                    "bid": r.bid,
+                    "bid_volume": r.bid_volume,
+                    "ask": r.ask,
+                    "ask_volume": r.ask_volume,
+                    "last": r.last_price,
+                    "volume": r.volume_24h,
+                    "vwap": r.vwap_24h,
+                    "low": r.low_24h,
+                    "high": r.high_24h,
                 }
 
     async def get_market_snapshots(

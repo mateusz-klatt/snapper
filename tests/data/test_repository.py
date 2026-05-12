@@ -60,6 +60,7 @@ from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import FundingRateInsertRow
+from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import OrderInsertRow
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TradeRow
@@ -1365,6 +1366,18 @@ class DummyRepository(Repository):
         """Get trades - returns empty list."""
         return []
 
+    async def iter_trades(
+        self,
+        instrument: str,
+        start: datetime,
+        end: datetime,
+        exchange: str,
+        as_of: datetime,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream trades - yields nothing (empty stub)."""
+        for row in self._empty_stub_iter():
+            yield row
+
     async def get_market_snapshots(
         self,
         instrument_public_ids: list[str],
@@ -1373,6 +1386,22 @@ class DummyRepository(Repository):
         as_of: datetime,
     ) -> list[dict[str, Any]]:
         """Get market snapshots - returns empty list."""
+        return []
+
+    async def iter_market_snapshots(
+        self,
+        instrument_public_ids: list[str],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream market snapshots - yields nothing (empty stub)."""
+        for row in self._empty_stub_iter():
+            yield row
+
+    @staticmethod
+    def _empty_stub_iter() -> list[dict[str, Any]]:
+        """Return an empty iterable so the streaming stubs are real generators."""
         return []
 
     async def upsert_market_snapshots(self, rows: list[dict[str, Any]]) -> int:
@@ -2548,6 +2577,17 @@ class _MinimalRepository(Repository):
     ) -> list[dict[str, Any]]:
         return []
 
+    async def iter_trades(
+        self,
+        instrument: str,
+        start: datetime,
+        end: datetime,
+        exchange: str,
+        as_of: datetime,
+    ) -> AsyncIterator[dict[str, Any]]:
+        for row in self._empty_stub_iter():
+            yield row
+
     async def get_market_snapshots(
         self,
         instrument_public_ids: list[str],
@@ -2555,6 +2595,21 @@ class _MinimalRepository(Repository):
         end: datetime,
         as_of: datetime,
     ) -> list[dict[str, Any]]:
+        return []
+
+    async def iter_market_snapshots(
+        self,
+        instrument_public_ids: list[str],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> AsyncIterator[dict[str, Any]]:
+        for row in self._empty_stub_iter():
+            yield row
+
+    @staticmethod
+    def _empty_stub_iter() -> list[dict[str, Any]]:
+        """Return an empty iterable so the streaming stubs are real generators."""
         return []
 
     async def upsert_market_snapshots(self, rows: list[dict[str, Any]]) -> int:
@@ -4017,6 +4072,76 @@ async def test_iter_ticks_returns_empty_when_instrument_missing(tmp_path: Path) 
         base,
         base + timedelta(seconds=30),
         exchange="kraken",
+        as_of=base + timedelta(minutes=1),
+    ):
+        rows.append(row)
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_iter_market_snapshots_streams_in_timestamp_order(tmp_path: Path) -> None:
+    """``iter_market_snapshots`` yields all rows in timestamp ASC without materialising.
+
+    Given: A repository with 12 snapshots across two instruments,
+    When: ``iter_market_snapshots`` is awaited for both instruments,
+    Then: All 12 rows arrive in ascending ``timestamp`` order via the
+        streaming path (covers the H8 paper-replay companion to
+        :meth:`iter_ticks` / :meth:`iter_trades`).
+    """
+    r, _sym_pid, inst_pid = await _seed_full_repo(tmp_path)
+    base = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    sentinel_known_to = base + timedelta(hours=1)
+    async with r.session() as s:
+        for i in range(12):
+            s.add(
+                MarketSnapshot(
+                    instrument_public_id=inst_pid,
+                    bid=100.0 + i,
+                    bid_volume=1.0,
+                    ask=101.0 + i,
+                    ask_volume=1.0,
+                    last_price=100.5 + i,
+                    volume_24h=10.0,
+                    vwap_24h=100.0,
+                    low_24h=99.0,
+                    high_24h=102.0,
+                    timestamp=base + timedelta(seconds=i),
+                    known_to=sentinel_known_to,
+                    session_id="s1",
+                    sequence_id=200 + i,
+                )
+            )
+        await s.commit()
+    streamed: list[MarketSnapshotRow] = []
+    async for row in r.iter_market_snapshots(
+        [inst_pid],
+        base,
+        base + timedelta(seconds=20),
+        as_of=base + timedelta(minutes=1),
+    ):
+        streamed.append(row)
+    assert len(streamed) == 12
+    assert streamed[0]["ts"] == base
+    assert streamed[-1]["ts"] == base + timedelta(seconds=11)
+    assert streamed[0]["instrument_public_id"] == inst_pid
+
+
+@pytest.mark.asyncio
+async def test_iter_market_snapshots_empty_instrument_list_short_circuits() -> None:
+    """``iter_market_snapshots`` yields nothing for an empty instrument list.
+
+    Given: A fresh repository instance,
+    When: ``iter_market_snapshots`` is called with ``[]``,
+    Then: The generator returns without opening a database session
+        (covers the ``if not instrument_public_ids`` guard).
+    """
+    r = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    rows: list[MarketSnapshotRow] = []
+    async for row in r.iter_market_snapshots(
+        [],
+        base,
+        base + timedelta(seconds=10),
         as_of=base + timedelta(minutes=1),
     ):
         rows.append(row)

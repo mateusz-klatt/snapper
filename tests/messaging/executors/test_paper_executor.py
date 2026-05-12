@@ -2,6 +2,7 @@
 
 import math
 import time
+from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
 from types import SimpleNamespace
@@ -68,6 +69,17 @@ async def fake_get_market_snapshots(
     ]
 
 
+async def fake_iter_market_snapshots(
+    instrument_public_ids: list[str],
+    start_dt: datetime,
+    end_dt: datetime,
+    as_of: datetime | None = None,
+) -> AsyncIterator[dict]:
+    """Async-generator companion mirroring :meth:`fake_get_market_snapshots`."""
+    for snap in await fake_get_market_snapshots(instrument_public_ids, start_dt, end_dt, as_of):
+        yield snap
+
+
 async def fake_resolve_instrument_public_ids(symbols: list[str], exchange: str) -> list[str]:
     """Return fake instrument_public_ids for testing."""
     return [f"inst-{s.lower()}" for s in symbols]
@@ -113,6 +125,18 @@ async def fake_get_trades(
             "timestamp": datetime.now(tz=UTC),
         }
     ]
+
+
+async def fake_iter_trades(
+    symbol: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    exchange: str,
+    as_of: datetime | None = None,
+) -> AsyncIterator[dict]:
+    """Async-generator companion mirroring :meth:`fake_get_trades`."""
+    for trade in await fake_get_trades(symbol, start_dt, end_dt, exchange, as_of):
+        yield trade
 
 
 class TestPaperOrderClientCoverage:
@@ -483,7 +507,10 @@ class TestPaperMarketDataMethods:
         When: get_ticker is called,
         Then: Ticker with bid, ask, last prices is returned.
         """
-        mock_repo = SimpleNamespace(get_market_snapshots=fake_get_market_snapshots)
+        mock_repo = SimpleNamespace(
+            get_market_snapshots=fake_get_market_snapshots,
+            iter_market_snapshots=fake_iter_market_snapshots,
+        )
         client = PaperExchangeClient(repository=mock_repo, source_exchange="kraken")
         client._resolve_instrument_public_ids = fake_resolve_instrument_public_ids
         client.set_tracker(SequenceTracker())
@@ -551,7 +578,10 @@ class TestPaperMarketDataMethods:
         When: subscribe_ticker is called,
         Then: Ticker updates are yielded from repository.
         """
-        mock_repo = SimpleNamespace(get_market_snapshots=fake_get_market_snapshots)
+        mock_repo = SimpleNamespace(
+            get_market_snapshots=fake_get_market_snapshots,
+            iter_market_snapshots=fake_iter_market_snapshots,
+        )
         start_ts = time.time() - 3600
         end_ts = time.time()
         client = PaperExchangeClient(
@@ -576,7 +606,10 @@ class TestPaperMarketDataMethods:
         When: subscribe_ticker is called,
         Then: ValueError is raised.
         """
-        mock_repo = SimpleNamespace(get_market_snapshots=fake_get_market_snapshots)
+        mock_repo = SimpleNamespace(
+            get_market_snapshots=fake_get_market_snapshots,
+            iter_market_snapshots=fake_iter_market_snapshots,
+        )
         client = PaperExchangeClient(repository=mock_repo, source_exchange="kraken")
         client.set_tracker(SequenceTracker())
         await client.connect()
@@ -593,7 +626,10 @@ class TestPaperMarketDataMethods:
         When: subscribe_ticker is called,
         Then: ValueError is raised.
         """
-        mock_repo = SimpleNamespace(get_market_snapshots=fake_get_market_snapshots)
+        mock_repo = SimpleNamespace(
+            get_market_snapshots=fake_get_market_snapshots,
+            iter_market_snapshots=fake_iter_market_snapshots,
+        )
         client = PaperExchangeClient(
             repository=mock_repo,
             start_time=time.time() - 3600,
@@ -639,7 +675,10 @@ class TestPaperMarketDataMethods:
         When: subscribe_trades is called,
         Then: Trade updates are yielded from repository.
         """
-        mock_repo = SimpleNamespace(get_trades=fake_get_trades)
+        mock_repo = SimpleNamespace(
+            get_trades=fake_get_trades,
+            iter_trades=fake_iter_trades,
+        )
         start_ts = time.time() - 3600
         end_ts = time.time()
         client = PaperExchangeClient(
@@ -757,7 +796,14 @@ class TestPaperMarketDataMethods:
                             "price": 2.0,
                             "trade_id": 2,
                             "timestamp": base.replace(minute=2),
-                        }
+                        },
+                        {
+                            "side": "buy",
+                            "size": 1.0,
+                            "price": 2.5,
+                            "trade_id": 4,
+                            "timestamp": base.replace(minute=4),
+                        },
                     ]
                 if symbol == "ETH-USD":
                     return [
@@ -767,9 +813,27 @@ class TestPaperMarketDataMethods:
                             "price": 1.0,
                             "trade_id": 1,
                             "timestamp": base.replace(minute=1),
-                        }
+                        },
+                        {
+                            "side": "sell",
+                            "size": 1.0,
+                            "price": 1.5,
+                            "trade_id": 3,
+                            "timestamp": base.replace(minute=3),
+                        },
                     ]
                 return []
+
+            async def iter_trades(
+                self,
+                symbol: str,
+                start_dt: datetime,
+                end_dt: datetime,
+                exchange: str,
+                as_of: datetime | None = None,
+            ) -> AsyncIterator[dict]:
+                for trade in await self.get_trades(symbol, start_dt, end_dt, exchange, as_of):
+                    yield trade
 
         start_ts = datetime(2024, 1, 1, tzinfo=UTC).timestamp()
         end_ts = datetime(2024, 1, 1, 0, 10, tzinfo=UTC).timestamp()
@@ -788,6 +852,8 @@ class TestPaperMarketDataMethods:
         assert trades == [
             ("ETH-USD", datetime(2024, 1, 1, 0, 1, tzinfo=UTC)),
             ("BTC-USD", datetime(2024, 1, 1, 0, 2, tzinfo=UTC)),
+            ("ETH-USD", datetime(2024, 1, 1, 0, 3, tzinfo=UTC)),
+            ("BTC-USD", datetime(2024, 1, 1, 0, 4, tzinfo=UTC)),
         ]
 
     @pytest.mark.asyncio

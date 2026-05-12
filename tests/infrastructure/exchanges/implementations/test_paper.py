@@ -1,6 +1,7 @@
 """Tests for paper trading exchange client."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -713,11 +714,23 @@ class _ReplayRepo:
     async def get_market_snapshots(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         return self.snapshots
 
+    async def iter_market_snapshots(
+        self, *args: Any, **kwargs: Any
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Async-generator companion mirroring the production streaming path."""
+        for snap in self.snapshots:
+            yield snap
+
     async def get_candles(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         return self.candles
 
     async def get_trades(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         return self.trades
+
+    async def iter_trades(self, *args: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        """Async-generator companion mirroring the production streaming path."""
+        for trade in self.trades:
+            yield trade
 
 
 @pytest.mark.asyncio
@@ -1279,6 +1292,12 @@ async def test_subscribe_trades_with_empty_result_for_symbol() -> None:
                     }
                 ]
             return []
+
+        async def iter_trades(
+            self, symbol: str, *args: Any, **kwargs: Any
+        ) -> AsyncIterator[dict[str, Any]]:
+            for trade in await self.get_trades(symbol, *args, **kwargs):
+                yield trade
 
     client = PaperExchangeClient(
         repository=cast(Repository, _EmptyTradesRepo()), source_exchange="kraken"
