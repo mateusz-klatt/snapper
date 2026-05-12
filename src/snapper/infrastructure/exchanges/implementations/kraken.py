@@ -84,6 +84,8 @@ _WS_CLIENT_CONNECTED_MSG = "WebSocket client should be connected"
 _QUEUE_MAX_SIZE = 10_000
 _TRADE_SUBSCRIBE_CHUNK_SIZE = 100
 _TRADE_SUBSCRIBE_CHUNK_DELAY_S = 0.1
+_CANDLE_SUBSCRIBE_CHUNK_SIZE = 100
+_CANDLE_SUBSCRIBE_CHUNK_DELAY_S = 0.1
 
 _DROP_LOG_INTERVAL_S = 1.0
 _drop_counters: dict[str, list[float]] = {}
@@ -835,10 +837,15 @@ class KrakenExchangeClient(ExchangeClientBase):
             await self._ensure_ws_connected()
             assert self._ws_client is not None, _WS_CLIENT_CONNECTED_MSG
             if symbols == ["*"]:
-                ws_symbols = ["*"]
+                native_syms = get_available_kraken_symbols()
+                logger.info(
+                    f"Subscribing to {timeframe} candles: wildcard expansion -> "
+                    f"{len(native_syms)} native symbols (Kraken Spot ohlc channel does "
+                    f"not accept '*')"
+                )
             else:
-                ws_symbols = [native_to_kraken_websocket(symbol) for symbol in symbols]
-            logger.info(f"Subscribing to {timeframe} candles: {symbols} -> {ws_symbols}")
+                native_syms = symbols
+            ws_symbols = [native_to_kraken_websocket(symbol) for symbol in native_syms]
             interval_map = {
                 "1m": 1,
                 "5m": 5,
@@ -851,11 +858,21 @@ class KrakenExchangeClient(ExchangeClientBase):
             interval = interval_map.get(timeframe, 1)
             if interval not in self._candle_queues:
                 self._candle_queues[interval] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+            logger.info(
+                f"Subscribing to {timeframe} candles: {len(ws_symbols)} symbols in "
+                f"{(len(ws_symbols) + _CANDLE_SUBSCRIBE_CHUNK_SIZE - 1) // _CANDLE_SUBSCRIBE_CHUNK_SIZE} "
+                f"chunks of <={_CANDLE_SUBSCRIBE_CHUNK_SIZE}"
+            )
             async with self._ws_client as ws:
-                subscribe_params = KrakenOhlcSubscribeParamsSchema(
-                    symbol=ws_symbols, interval=interval
-                )
-                await ws.subscribe(params=subscribe_params.as_params(), req_id=req_id)
+                for i in range(0, len(ws_symbols), _CANDLE_SUBSCRIBE_CHUNK_SIZE):
+                    chunk = ws_symbols[i : i + _CANDLE_SUBSCRIBE_CHUNK_SIZE]
+                    subscribe_params = KrakenOhlcSubscribeParamsSchema(
+                        symbol=chunk, interval=interval
+                    )
+                    chunk_req_id = req_id if i == 0 else None
+                    await ws.subscribe(params=subscribe_params.as_params(), req_id=chunk_req_id)
+                    if i + _CANDLE_SUBSCRIBE_CHUNK_SIZE < len(ws_symbols):
+                        await asyncio.sleep(_CANDLE_SUBSCRIBE_CHUNK_DELAY_S)
                 while not hasattr(ws, "exception_occur") or not ws.exception_occur:
                     try:
                         message = await asyncio.wait_for(

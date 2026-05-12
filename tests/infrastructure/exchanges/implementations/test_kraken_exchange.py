@@ -903,6 +903,62 @@ class TestKrakenExchangeClient:
             mock_ensure_ws.assert_called_once()
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_subscribe_candles_wildcard_expands_and_chunks(
+        self, mock_ws_class: MagicMock, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Wildcard ``["*"]`` on the ohlc channel expands client-side and chunks.
+
+        Given: ``symbols=["*"]`` and a catalog of 250 native symbols,
+        When: ``subscribe_candles`` runs,
+        Then: ``get_available_kraken_symbols`` is consulted and three
+            subscribe calls are issued (100 + 100 + 50 ws symbols each)
+            with an inter-chunk sleep between them — Kraken Spot WS v2's
+            ohlc channel rejects the literal ``"*"`` exactly like the
+            trade channel does (live-confirmed 2026-05-12:
+            ``"Currency pair not in ISO 4217-A3 format *"``).
+        """
+        mock_ws_client = AsyncMock()
+        mock_ws_class.return_value = mock_ws_client
+        mock_ws_client.__aenter__ = AsyncMock(return_value=mock_ws_client)
+        mock_ws_client.__aexit__ = AsyncMock(return_value=None)
+        mock_ws_client.exception_occur = False
+        catalog = [f"SYM{i:03d}-USD" for i in range(250)]
+        sleep_calls: list[float] = []
+
+        async def _spy_sleep(delay: float) -> None:
+            sleep_calls.append(delay)
+            mock_ws_client.exception_occur = True
+
+        with (
+            patch.object(kraken_client, "_ensure_ws_connected", new_callable=AsyncMock),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.get_available_kraken_symbols",
+                return_value=catalog,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_websocket",
+                side_effect=lambda s: s.replace("-", "/"),
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                new=_spy_sleep,
+            ),
+        ):
+            kraken_client._ws_client = mock_ws_client
+            async for _ in kraken_client.subscribe_candles(["*"], "1m", req_id=7777):
+                break
+
+        assert mock_ws_client.subscribe.await_count == 3
+        chunk_sizes = [
+            len(call.kwargs["params"]["symbol"])
+            for call in mock_ws_client.subscribe.await_args_list
+        ]
+        assert chunk_sizes == [100, 100, 50]
+        assert sleep_calls == [0.1, 0.1]
+        req_ids = [call.kwargs.get("req_id") for call in mock_ws_client.subscribe.await_args_list]
+        assert req_ids == [7777, None, None]
+
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
     async def test_subscribe_trades(
         self, mock_ws_class: MagicMock, kraken_client: KrakenExchangeClient
     ) -> None:
