@@ -2226,42 +2226,20 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session.add.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_get_candles_symbol_not_found(
+    async def test_get_candles_symbol_or_instrument_not_found(
         self, mock_postgres_repo: SQLAlchemyRepository
     ) -> None:
         """Verify get_candles returns empty list when Symbol→Instrument JOIN is empty.
 
         Given: No active Symbol→Instrument pair for the requested native_symbol,
+            OR an active Symbol with no matching Instrument on the exchange,
         When: get_candles is called,
-        Then: Returns empty list without querying the candles table
-            (the HV2-M5 JOIN collapses Symbol + Instrument resolution
-            into a single SELECT that returns no rows).
-        """
-        mock_session = AsyncMock()
-        mock_inst_result = Mock()
-        mock_inst_scalars = Mock()
-        mock_inst_scalars.first.return_value = None
-        mock_inst_result.scalars.return_value = mock_inst_scalars
-        mock_session.execute.return_value = mock_inst_result
-        with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
-            mock_session_ctx.return_value.__aenter__.return_value = mock_session
-            mock_session_ctx.return_value.__aexit__.return_value = None
-            start = datetime(2024, 1, 1, tzinfo=UTC)
-            end = datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
-            result = await mock_postgres_repo.get_candles(
-                "NONEXISTENT", "1m", start, end, exchange="kraken", as_of=start
-            )
-            assert result == []
-
-    @pytest.mark.asyncio
-    async def test_get_candles_instrument_not_found(
-        self, mock_postgres_repo: SQLAlchemyRepository
-    ) -> None:
-        """Verify get_candles returns empty list for unknown instrument.
-
-        Given: Symbol exists in DB but JOIN finds no matching Instrument,
-        When: get_candles is called,
-        Then: Returns empty list.
+        Then: Returns empty list without querying the candles table.
+            The HV2-M5 JOIN collapses Symbol + Instrument resolution into a
+            single SELECT, so both legacy "symbol not found" and
+            "instrument not found" branches now map to the same JOIN-miss
+            (callers never distinguished between them — they both returned
+            []), and one test asserts the unified observable behavior.
         """
         mock_session = AsyncMock()
         mock_inst_result = Mock()
