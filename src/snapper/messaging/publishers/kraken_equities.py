@@ -26,6 +26,7 @@ from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.kraken_equities import (
     KrakenEquitiesExchangeClient,
 )
+from snapper.infrastructure.symbols.functions import get_available_kraken_equities_symbols
 from snapper.infrastructure.symbols.functions import native_to_kraken_equities_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
 
@@ -92,12 +93,26 @@ class KrakenEquitiesMarketDataPublisher(
         Converts symbols to Kraken Equities WS format to validate them.
         Invalid symbols are logged and skipped.
 
+        Wildcard handling: ``["*"]`` expands client-side to every
+        native Kraken Equities symbol currently loaded by the symbol
+        mapper. The Kraken Equities WS has no server-side wildcard
+        token, so expansion happens here and the underlying SDK
+        subscribes per-product.
+
         Args:
-            symbols: Input symbols in native format.
+            symbols: Input symbols in native format, or ``["*"]`` for
+                subscribe-all.
 
         Returns:
             Valid symbols that can be streamed from Kraken Equities.
         """
+        if symbols == ["*"]:
+            expanded = get_available_kraken_equities_symbols()
+            logger.info(
+                f"KrakenEquitiesMarketDataPublisher: wildcard expansion -> "
+                f"{len(expanded)} equities symbols"
+            )
+            return expanded
         native_symbols: list[str] = []
         seen_symbols: set[str] = set()
         for symbol in symbols:

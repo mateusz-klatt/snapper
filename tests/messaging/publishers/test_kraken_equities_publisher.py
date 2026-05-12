@@ -77,6 +77,26 @@ class TestKrakenEquitiesMarketDataPublisher:
         assert len(valid) == 2
         assert valid == ["CLM6-NYMEX", "GCQ6-COMEX"]
 
+    def test_validate_symbols_wildcard_expands_to_catalog(self) -> None:
+        """Verify ``["*"]`` expands to the full catalog of equities symbols.
+
+        Given: Publisher and ``symbols=["*"]`` request,
+        When: _validate_symbols is called,
+        Then: The full list returned by
+            ``get_available_kraken_equities_symbols`` is returned verbatim.
+            Mirrors the spot/futures wildcard pattern — Kraken
+            Equities WS has no server-side wildcard, so expansion
+            happens client-side.
+        """
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=[])
+        catalog = ["CLM6-NYMEX", "GCQ6-COMEX", "ESZ6-CME"]
+        with patch(
+            "snapper.messaging.publishers.kraken_equities.get_available_kraken_equities_symbols",
+            return_value=catalog,
+        ):
+            valid = publisher._validate_symbols(["*"])
+        assert valid == catalog
+
     def test_get_max_symbols_per_connection_returns_zero(self) -> None:
         """Verify Kraken Equities WS has no documented symbol limit.
 

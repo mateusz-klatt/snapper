@@ -412,21 +412,57 @@ class TestOnWsMessage:
 
     @pytest.mark.asyncio
     async def test_trade_message_routed_to_queue(self, client: KrakenFuturesExchangeClient) -> None:
-        """Route trade WS message to trade_queue.
+        """Route a live ``feed=trade`` WS message (single-trade-per-envelope) to trade_queue.
 
-        Given: WS message with feed=trade and nested trades,
+        Given: WS message with ``feed=trade`` and trade fields directly on
+            the envelope (no ``trades`` array — this is the live shape),
         When: _on_ws_message is called,
         Then: Parsed TradeUpdate is placed in _trade_queue.
+            The pre-2026-05-12 handler looked for ``message["trades"]``
+            and silently dropped every live trade because the live envelope
+            has no such array — the fix normalizes the live ``trade`` feed
+            via ``[message]``.
         """
         msg = {
             "feed": "trade",
             "product_id": "PI_XBTUSD",
-            "trades": [{"time": 1640995200000, "qty": 10.0, "price": 66621.0, "side": "buy"}],
+            "time": 1640995200000,
+            "qty": 10.0,
+            "price": 66621.0,
+            "side": "buy",
         }
         await client._on_ws_message(msg)
         assert not client._trade_queue.empty()
         update = client._trade_queue.get_nowait()
         assert update.symbol == "BTC-USD-PERP"
+
+    @pytest.mark.asyncio
+    async def test_trade_snapshot_routed_to_queue(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Route a ``feed=trade_snapshot`` WS message (array form) to trade_queue.
+
+        Given: WS message with ``feed=trade_snapshot`` and ``trades: [...]``
+            (the initial-state batch shape),
+        When: _on_ws_message is called,
+        Then: Each entry in ``trades`` is parsed and enqueued separately.
+            Confirms the dual-format branch handles both the live single
+            envelope (``feed=trade``) and the batched snapshot envelope.
+        """
+        msg = {
+            "feed": "trade_snapshot",
+            "product_id": "PI_XBTUSD",
+            "trades": [
+                {"time": 1640995200000, "qty": 10.0, "price": 66621.0, "side": "buy"},
+                {"time": 1640995201000, "qty": 5.0, "price": 66622.0, "side": "sell"},
+            ],
+        }
+        await client._on_ws_message(msg)
+        assert client._trade_queue.qsize() == 2
+        first = client._trade_queue.get_nowait()
+        second = client._trade_queue.get_nowait()
+        assert first.symbol == "BTC-USD-PERP"
+        assert second.symbol == "BTC-USD-PERP"
 
     @pytest.mark.asyncio
     async def test_heartbeat_ignored(self, client: KrakenFuturesExchangeClient) -> None:
@@ -2267,6 +2303,50 @@ class TestSubscribeImplGuardPaths:
         ):
             async for _ in client._subscribe_trades_impl(["BTC-USD-PERP"]):
                 pass
+
+    @pytest.mark.asyncio
+    async def test_subscribe_in_chunks_guard_ws_none(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """_subscribe_in_chunks raises when ws_client is not initialised.
+
+        Given: client._ws_client = None,
+        When: _subscribe_in_chunks is awaited directly,
+        Then: RuntimeError is raised before any subscribe call.
+        """
+        client._ws_client = None
+        with pytest.raises(RuntimeError, match="WebSocket client not connected"):
+            await client._subscribe_in_chunks("ticker", ["PF_XBTUSD"])
+
+    @pytest.mark.asyncio
+    async def test_subscribe_in_chunks_batches_and_sleeps(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Multi-chunk subscribe issues batched calls with inter-chunk sleeps.
+
+        Given: 125 ws_symbols (> 2 * _SUBSCRIBE_CHUNK_SIZE),
+        When: _subscribe_in_chunks runs,
+        Then: subscribe is called 3 times (50 + 50 + 25 products) and
+            asyncio.sleep is awaited between chunks (not after the last).
+        """
+        mock_ws = AsyncMock()
+        client._ws_client = mock_ws
+        ws_symbols = [f"PF_SYM{i:03d}USD" for i in range(125)]
+        sleep_calls: list[float] = []
+
+        async def _spy_sleep(delay: float) -> None:
+            sleep_calls.append(delay)
+
+        with patch("asyncio.sleep", new=_spy_sleep):
+            await client._subscribe_in_chunks("ticker", ws_symbols)
+
+        assert mock_ws.subscribe.await_count == 3
+        chunk_sizes = [
+            len(call.kwargs.get("products", call.args[1] if len(call.args) > 1 else []))
+            for call in mock_ws.subscribe.await_args_list
+        ]
+        assert chunk_sizes == [50, 50, 25]
+        assert len(sleep_calls) == 2
 
     @pytest.mark.asyncio
     async def test_subscribe_executions_guard_ws_none(

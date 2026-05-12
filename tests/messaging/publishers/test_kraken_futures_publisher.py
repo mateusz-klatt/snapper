@@ -75,6 +75,25 @@ class TestKrakenFuturesMarketDataPublisher:
         assert len(valid) == 2
         assert valid == ["BTC-USD-PERP", "ETH-USD-PERP"]
 
+    def test_validate_symbols_wildcard_expands_to_catalog(self) -> None:
+        """Verify ``["*"]`` expands to the full catalog of futures symbols.
+
+        Given: Publisher and ``symbols=["*"]`` request,
+        When: _validate_symbols is called,
+        Then: The full list returned by
+            ``get_available_kraken_futures_symbols`` is returned verbatim,
+            without per-symbol validation (Kraken Futures has no
+            server-side wildcard, so expansion happens here).
+        """
+        publisher = KrakenFuturesMarketDataPublisher(symbols=[])
+        catalog = ["BTC-USD-PERP", "ETH-USD-PERP", "SOL-USD-PERP"]
+        with patch(
+            "snapper.messaging.publishers.kraken_futures.get_available_kraken_futures_symbols",
+            return_value=catalog,
+        ):
+            valid = publisher._validate_symbols(["*"])
+        assert valid == catalog
+
     def test_get_max_symbols_per_connection_returns_zero(self) -> None:
         """Verify Kraken Futures WS has no documented symbol limit.
 

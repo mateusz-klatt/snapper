@@ -66,6 +66,8 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for authenticated operations"
 _QUEUE_DRAIN_TIMEOUT = 0.1
 _QUEUE_MAX_SIZE = 10000
+_SUBSCRIBE_CHUNK_SIZE = 50
+_SUBSCRIBE_CHUNK_DELAY_S = 0.1
 
 _TIMEFRAME_SECONDS: dict[str, int] = {
     "1m": 60,
@@ -311,6 +313,20 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         This is the callback passed to FuturesWSClient. It parses the
         feed type and dispatches to tick_queue or trade_queue.
 
+        Kraken Futures emits two different shapes on the trade channel:
+
+        - ``feed == "trade"``: a SINGLE trade per message. The trade
+          fields (uid, side, type, seq, time, qty, price) live directly
+          on the top-level message alongside ``product_id``.
+        - ``feed == "trade_snapshot"``: an initial-state batch carrying
+          ``trades: [...]`` with up to ~100 historical fills wrapped in
+          a single envelope keyed by ``product_id``.
+
+        The legacy handler only iterated ``message.get("trades", [])``
+        which silently dropped every live ``feed=trade`` update (the
+        single-trade envelope has no ``trades`` array). This branch
+        normalizes both shapes through the same parse path.
+
         Args:
             message: Raw WebSocket message dictionary.
         """
@@ -329,9 +345,10 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 _enqueue_or_drop_oldest(self._tick_queue, tick, "Tick")
             except (ValueError, KeyError) as exc:
                 logger.debug(f"Skipping unparseable ticker WS message: {exc}")
-        elif feed == "trade":
+        elif feed in ("trade", "trade_snapshot"):
             product_id = message.get("product_id", "")
-            for raw_trade in message.get("trades", []):
+            raw_trades = message.get("trades", []) if feed == "trade_snapshot" else [message]
+            for raw_trade in raw_trades:
                 try:
                     trade = parse_kraken_futures_trade({**raw_trade, "product_id": product_id})
                     _enqueue_or_drop_oldest(self._trade_queue, trade, "Trade")
@@ -965,11 +982,38 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         return self._subscribe_ticks_impl(symbols)
 
+    async def _subscribe_in_chunks(self, feed: str, ws_symbols: list[str]) -> None:
+        """Subscribe to a Kraken Futures feed in bounded product chunks.
+
+        Sending all ~330 perpetuals + dated contracts in a single
+        ``subscribe`` call has been observed to silently fail: the
+        SDK awaits the call (no exception), the server returns
+        ``event: subscribed`` for the first batch only, and zero
+        ticker / trade frames arrive afterwards. The exact threshold
+        is implementation-defined (frame size, internal queue limits,
+        or rate-limit), but empirically 3 products = OK and 330 =
+        silent. Chunk at ``_SUBSCRIBE_CHUNK_SIZE`` with a small
+        delay so each batch is acknowledged before the next.
+
+        Args:
+            feed: Kraken Futures feed name (``ticker`` or ``trade``).
+            ws_symbols: WS-format product IDs (e.g. ``PF_XBTUSD``).
+        """
+        if self._ws_client is None:
+            raise RuntimeError("WebSocket client not connected")
+        for i in range(0, len(ws_symbols), _SUBSCRIBE_CHUNK_SIZE):
+            chunk = ws_symbols[i : i + _SUBSCRIBE_CHUNK_SIZE]
+            await self._ws_client.subscribe(feed=feed, products=chunk)
+            if i + _SUBSCRIBE_CHUNK_SIZE < len(ws_symbols):
+                await asyncio.sleep(_SUBSCRIBE_CHUNK_DELAY_S)
+
     async def _subscribe_ticks_impl(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
         """Implement ticker subscription via callback-to-queue bridge.
 
         Converts native symbols (e.g., ``BTC-USD-PERP``) to Kraken Futures
-        product IDs (e.g., ``PF_XBTUSD``) before subscribing.
+        product IDs (e.g., ``PF_XBTUSD``) before subscribing. Subscriptions
+        are batched in :data:`_SUBSCRIBE_CHUNK_SIZE`-product chunks (HV-debug
+        2026-05-12: a single 330-product subscribe call silently failed).
 
         Args:
             symbols: Native symbols to subscribe.
@@ -984,8 +1028,12 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         if self._ws_client is None:
             raise RuntimeError("WebSocket client not connected")
         ws_symbols = [native_to_kraken_futures_ws(s) for s in symbols]
-        await self._ws_client.subscribe(feed="ticker", products=ws_symbols)
-        logger.info(f"Subscribed to Kraken Futures tickers: {symbols} -> {ws_symbols}")
+        await self._subscribe_in_chunks("ticker", ws_symbols)
+        logger.info(
+            f"Subscribed to Kraken Futures tickers: {len(symbols)} symbols "
+            f"in {(len(ws_symbols) + _SUBSCRIBE_CHUNK_SIZE - 1) // _SUBSCRIBE_CHUNK_SIZE} "
+            f"chunks of <={_SUBSCRIBE_CHUNK_SIZE}"
+        )
         try:
             while True:
                 if self._ws_client and getattr(self._ws_client, "exception_occur", False):
@@ -1104,8 +1152,12 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         if self._ws_client is None:
             raise RuntimeError("WebSocket client not connected")
         ws_symbols = [native_to_kraken_futures_ws(s) for s in symbols]
-        await self._ws_client.subscribe(feed="trade", products=ws_symbols)
-        logger.info(f"Subscribed to Kraken Futures trades: {symbols} -> {ws_symbols}")
+        await self._subscribe_in_chunks("trade", ws_symbols)
+        logger.info(
+            f"Subscribed to Kraken Futures trades: {len(symbols)} symbols "
+            f"in {(len(ws_symbols) + _SUBSCRIBE_CHUNK_SIZE - 1) // _SUBSCRIBE_CHUNK_SIZE} "
+            f"chunks of <={_SUBSCRIBE_CHUNK_SIZE}"
+        )
         try:
             while True:
                 if self._ws_client and getattr(self._ws_client, "exception_occur", False):

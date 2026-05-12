@@ -29,6 +29,7 @@ from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
+from snapper.infrastructure.symbols.functions import get_available_kraken_futures_symbols
 from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
 
@@ -96,12 +97,27 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
         Converts symbols to Kraken Futures WS format to validate them.
         Invalid symbols are logged and skipped.
 
+        Wildcard handling: when the caller passes ``["*"]``, the
+        method expands to every native Kraken Futures symbol currently
+        loaded by the symbol mapper. Kraken Futures' WS has no
+        server-side wildcard token (unlike Kraken spot), so expansion
+        happens client-side and the resulting list is then chunk-
+        subscribed by :meth:`KrakenFuturesExchangeClient._subscribe_in_chunks`.
+
         Args:
-            symbols: Input symbols in native format.
+            symbols: Input symbols in native format, or ``["*"]`` to
+                subscribe to every available futures symbol.
 
         Returns:
             Valid symbols that can be streamed from Kraken Futures.
         """
+        if symbols == ["*"]:
+            expanded = get_available_kraken_futures_symbols()
+            logger.info(
+                f"KrakenFuturesMarketDataPublisher: wildcard expansion -> "
+                f"{len(expanded)} futures symbols"
+            )
+            return expanded
         native_symbols: list[str] = []
         seen_symbols: set[str] = set()
         for symbol in symbols:
