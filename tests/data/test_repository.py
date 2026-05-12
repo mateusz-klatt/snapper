@@ -4599,6 +4599,125 @@ async def test_get_plan_public_id_for_client_order_id_missing(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_get_plan_public_ids_for_client_order_ids_batched(tmp_path: Path) -> None:
+    """Batched resolver returns one row per known child id (HV2-M16).
+
+    Given: three plan-linked create commands plus one unrelated id,
+    When: get_plan_public_ids_for_client_order_ids is called with all four,
+    Then: the returned dict has exactly the three resolved entries; the
+        unknown id is absent.
+    """
+    db_path = tmp_path / "plan_cid_batch.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    for seq, (cid, plan_pid) in enumerate(
+        [
+            ("cid-a", "plan-A"),
+            ("cid-b", "plan-B"),
+            ("cid-c", "plan-C"),
+        ],
+        start=1,
+    ):
+        await r.insert_trade_command(
+            {
+                "command_type": "create",
+                "shard_key": "kraken.BTC-USD.live",
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "mode": "live",
+                "strategy_id": "manual",
+                "client_order_id": cid,
+                "venue_client_id": f"vcid-{cid}",
+                "side": "buy",
+                "order_type": "limit",
+                "quantity": 0.5,
+                "price": 50000.0,
+                "status": "created",
+                "created_at": now,
+                "correlation_id": f"corr-{cid}",
+                "session_id": "s1",
+                "sequence_id": seq,
+                "timestamp": now,
+                "plan_public_id": plan_pid,
+                "wallet_public_id": "wallet-1",
+            }
+        )
+    result = await r.get_plan_public_ids_for_client_order_ids(
+        ["cid-a", "cid-b", "cid-c", "cid-missing"], as_of=now
+    )
+    assert result == {"cid-a": "plan-A", "cid-b": "plan-B", "cid-c": "plan-C"}
+
+
+@pytest.mark.asyncio
+async def test_get_plan_public_ids_for_client_order_ids_empty_shortcircuits(
+    tmp_path: Path,
+) -> None:
+    """Empty input returns empty dict without a DB round-trip."""
+    db_path = tmp_path / "plan_cid_batch_empty.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    result = await r.get_plan_public_ids_for_client_order_ids([], as_of=datetime.now(UTC))
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_get_plan_public_ids_for_client_order_ids_picks_latest_on_duplicate_cid(
+    tmp_path: Path,
+) -> None:
+    """When a client_order_id appears on multiple plan-linked create rows, the most recent wins.
+
+    Given: two plan-linked ``create`` commands sharing one client_order_id
+        (an unusual but possible bitemporal history — e.g. retry that
+        re-stamped the same logical id),
+    When: ``get_plan_public_ids_for_client_order_ids`` batches the lookup,
+    Then: only the later row's ``plan_public_id`` is returned. The
+        duplicate-cid ``continue`` branch in the resolver is exercised
+        by the older row.
+    """
+    db_path = tmp_path / "plan_cid_batch_dup.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    earlier = datetime(2026, 5, 12, 10, 0, 0, tzinfo=UTC)
+    later = earlier + timedelta(seconds=30)
+    for seq, (ts, plan_pid) in enumerate(
+        [
+            (earlier, "plan-OLD"),
+            (later, "plan-NEW"),
+        ],
+        start=1,
+    ):
+        await r.insert_trade_command(
+            {
+                "command_type": "create",
+                "shard_key": "kraken.BTC-USD.live",
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "mode": "live",
+                "strategy_id": "manual",
+                "client_order_id": "cid-dup",
+                "venue_client_id": f"vcid-{seq}",
+                "side": "buy",
+                "order_type": "limit",
+                "quantity": 0.5,
+                "price": 50000.0,
+                "status": "created",
+                "created_at": ts,
+                "correlation_id": f"corr-{seq}",
+                "session_id": "s1",
+                "sequence_id": seq,
+                "timestamp": ts,
+                "plan_public_id": plan_pid,
+                "wallet_public_id": "wallet-1",
+            }
+        )
+    result = await r.get_plan_public_ids_for_client_order_ids(
+        ["cid-dup"], as_of=later + timedelta(seconds=1)
+    )
+    assert result == {"cid-dup": "plan-NEW"}
+
+
+@pytest.mark.asyncio
 async def test_get_exchange_order_id_for_client_order_id_returns_value(
     tmp_path: Path,
 ) -> None:

@@ -222,7 +222,9 @@ class TestPlanExecutorService:
             ]
         )
         mock_repo.get_latest_checkpoints_for_plans = AsyncMock(return_value={})
-        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-stranded")
+        mock_repo.get_plan_public_ids_for_client_order_ids = AsyncMock(
+            return_value={"cid-strand": "plan-stranded"}
+        )
         mock_repo.has_pending_cancel_command = AsyncMock(return_value=False)
         mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-77")
         mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-77"))
@@ -273,7 +275,7 @@ class TestPlanExecutorService:
     ) -> None:
         """Lookup failures while re-emitting cancels are logged, not raised."""
         mock_repo = AsyncMock()
-        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(side_effect=Exception("DB"))
+        mock_repo.get_plan_public_ids_for_client_order_ids = AsyncMock(side_effect=Exception("DB"))
         mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd"))
         mock_repo_fn.return_value = mock_repo
         service = PlanExecutorService()
@@ -294,7 +296,9 @@ class TestPlanExecutorService:
     ) -> None:
         """Venue-id lookup failure falls back to None exchange_order_id."""
         mock_repo = AsyncMock()
-        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-x")
+        mock_repo.get_plan_public_ids_for_client_order_ids = AsyncMock(
+            return_value={"cid-1": "plan-x"}
+        )
         mock_repo.has_pending_cancel_command = AsyncMock(return_value=False)
         mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(side_effect=Exception("DB"))
         mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd"))
@@ -318,7 +322,9 @@ class TestPlanExecutorService:
     ) -> None:
         """A failing re-emit insert is logged and does not crash recovery."""
         mock_repo = AsyncMock()
-        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-y")
+        mock_repo.get_plan_public_ids_for_client_order_ids = AsyncMock(
+            return_value={"cid-1": "plan-y"}
+        )
         mock_repo.has_pending_cancel_command = AsyncMock(return_value=False)
         mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-9")
         mock_repo.insert_trade_command = AsyncMock(side_effect=Exception("DB"))
@@ -340,7 +346,7 @@ class TestPlanExecutorService:
     ) -> None:
         """If the plan_public_id lookup returns None, no cancel is emitted."""
         mock_repo = AsyncMock()
-        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value=None)
+        mock_repo.get_plan_public_ids_for_client_order_ids = AsyncMock(return_value={})
         mock_repo.insert_trade_command = AsyncMock()
         mock_repo_fn.return_value = mock_repo
         service = PlanExecutorService()
@@ -365,7 +371,9 @@ class TestPlanExecutorService:
         id does not cause a cancel to be emitted for the wrong plan.
         """
         mock_repo = AsyncMock()
-        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-OTHER")
+        mock_repo.get_plan_public_ids_for_client_order_ids = AsyncMock(
+            return_value={"cid-1": "plan-OTHER"}
+        )
         mock_repo.insert_trade_command = AsyncMock()
         mock_repo_fn.return_value = mock_repo
         service = PlanExecutorService()
@@ -392,7 +400,9 @@ class TestPlanExecutorService:
         guard.
         """
         mock_repo = AsyncMock()
-        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-dedup")
+        mock_repo.get_plan_public_ids_for_client_order_ids = AsyncMock(
+            return_value={"cid-1": "plan-dedup"}
+        )
         mock_repo.has_pending_cancel_command = AsyncMock(return_value=True)
         mock_repo.insert_trade_command = AsyncMock()
         mock_repo_fn.return_value = mock_repo
@@ -415,7 +425,9 @@ class TestPlanExecutorService:
     ) -> None:
         """A failing dedup lookup does not crash recovery and skips emission."""
         mock_repo = AsyncMock()
-        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-err")
+        mock_repo.get_plan_public_ids_for_client_order_ids = AsyncMock(
+            return_value={"cid-1": "plan-err"}
+        )
         mock_repo.has_pending_cancel_command = AsyncMock(side_effect=Exception("DB"))
         mock_repo.insert_trade_command = AsyncMock()
         mock_repo_fn.return_value = mock_repo
@@ -3651,7 +3663,9 @@ class TestStrandedCancelMultiChild:
             ]
         )
         mock_repo.get_latest_checkpoints_for_plans = AsyncMock(return_value={})
-        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-multi")
+        mock_repo.get_plan_public_ids_for_client_order_ids = AsyncMock(
+            return_value={"cid-a": "plan-multi", "cid-b": "plan-multi"}
+        )
         mock_repo.has_pending_cancel_command = AsyncMock(return_value=False)
         mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
         mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd"))

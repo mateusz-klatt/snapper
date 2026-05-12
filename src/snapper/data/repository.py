@@ -2289,6 +2289,28 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_plan_public_ids_for_client_order_ids(
+        self,
+        client_order_ids: list[str],
+        as_of: datetime,
+    ) -> dict[str, str]:
+        """Resolve many client_order_id -> plan_public_id in one query.
+
+        Batched variant of :meth:`get_plan_public_id_for_client_order_id`
+        used by plan recovery (HV2-M16) when ``_reemit_stranded_cancel``
+        sweeps every child of a recovered plan. Per-id RTTs in the
+        legacy loop scale linearly with child count (10-100 RTTs for
+        wide grid plans on startup); the batched ``IN`` query keeps
+        recovery cost flat.
+
+        Returns:
+            Mapping ``client_order_id -> plan_public_id`` for ids that
+            resolved to a plan-linked ``create`` command. Unresolved
+            ids are simply absent from the returned dict.
+        """
+        ...
+
+    @abstractmethod
     async def get_exchange_order_id_for_client_order_id(
         self,
         client_order_id: str,
@@ -6509,6 +6531,43 @@ class SQLAlchemyRepository(Repository):
             if row is None:
                 return None
             return cast(str | None, row[0])
+
+    async def get_plan_public_ids_for_client_order_ids(
+        self,
+        client_order_ids: list[str],
+        as_of: datetime,
+    ) -> dict[str, str]:
+        """Batched child->parent plan resolver (HV2-M16).
+
+        Returns at most one ``plan_public_id`` per ``client_order_id``
+        (the most recent active ``create`` row by ``created_at`` desc /
+        ``id`` desc), matching the single-row helper's tie-break
+        semantics so the batched caller can rely on equivalent results.
+        """
+        if not client_order_ids:
+            return {}
+        async with self.session() as s:
+            result = await s.execute(
+                select(
+                    TradeCommand.client_order_id,
+                    TradeCommand.plan_public_id,
+                    TradeCommand.created_at,
+                    TradeCommand.id,
+                )
+                .where(
+                    TradeCommand.client_order_id.in_(client_order_ids),
+                    TradeCommand.plan_public_id.is_not(None),
+                    TradeCommand.command_type == "create",
+                    *where_active(TradeCommand, as_of),
+                )
+                .order_by(TradeCommand.created_at.desc(), TradeCommand.id.desc())
+            )
+            resolved: dict[str, str] = {}
+            for cid, plan_pid, _created_at, _row_id in result.all():
+                if cid in resolved:
+                    continue
+                resolved[cid] = cast(str, plan_pid)
+            return resolved
 
     async def get_exchange_order_id_for_client_order_id(
         self,

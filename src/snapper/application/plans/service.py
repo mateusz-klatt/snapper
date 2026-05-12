@@ -300,6 +300,13 @@ class PlanExecutorService(RegisterableProcess):
 
         Args:
             plan: Recovered plan row in ``cancel_requested`` status.
+
+        Performance (HV2-M16): The child->parent plan lookup is now
+        batched via :meth:`Repository.get_plan_public_ids_for_client_order_ids`
+        once per plan instead of one round-trip per child id. Wide
+        plans (10-100 children) used to issue that many sequential
+        SELECTs on startup; the batched ``IN`` query keeps recovery
+        cost flat regardless of child count.
         """
         params = plan.get("params") or {}
         native_instrument = params.get("native_instrument")
@@ -308,9 +315,22 @@ class PlanExecutorService(RegisterableProcess):
         child_order_ids = self._extract_child_ids(params)
         if not child_order_ids:
             return
+        now = datetime.now(UTC)
+        try:
+            linked_plan_map = await self.repository.get_plan_public_ids_for_client_order_ids(
+                child_order_ids, as_of=now
+            )
+        except Exception as exc:
+            logger.error(
+                "Stranded cancel batched plan lookup failed for {}: {}",
+                plan["public_id"],
+                exc,
+            )
+            return
         for child_client_order_id in child_order_ids:
+            linked_plan_id = linked_plan_map.get(child_client_order_id)
             await self._reemit_single_stranded_cancel(
-                plan, child_client_order_id, native_instrument
+                plan, child_client_order_id, native_instrument, linked_plan_id, now
             )
 
     def _extract_child_ids(self, params: dict[str, Any]) -> list[str]:
@@ -388,6 +408,8 @@ class PlanExecutorService(RegisterableProcess):
         plan: ExecutionPlanRow,
         child_client_order_id: str,
         native_instrument: str,
+        linked_plan_id: str | None,
+        now: datetime,
     ) -> None:
         """Re-emit a cancel command for a single child order.
 
@@ -395,17 +417,14 @@ class PlanExecutorService(RegisterableProcess):
             plan: Recovered plan row in cancel_requested status.
             child_client_order_id: Child order to cancel.
             native_instrument: Native exchange symbol for the cancel command.
+            linked_plan_id: Pre-resolved plan public id for this child
+                from the batched lookup (HV2-M16), or ``None`` when the
+                child does not link to any plan-stamped create command.
+            now: Bus timestamp shared with the parent batch so all
+                children in one recovery sweep see the same temporal
+                point.
         """
         params = plan.get("params") or {}
-        now = datetime.now(UTC)
-        try:
-            linked_plan_id = await self.repository.get_plan_public_id_for_client_order_id(
-                child_client_order_id,
-                as_of=now,
-            )
-        except Exception as exc:
-            logger.error("Stranded cancel lookup failed for {}: {}", plan["public_id"], exc)
-            return
         if linked_plan_id is None or linked_plan_id != plan["public_id"]:
             logger.warning(
                 "PlanExecutorService: stranded cancel skipped for plan {} "
