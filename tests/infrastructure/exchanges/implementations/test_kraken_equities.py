@@ -3,6 +3,9 @@
 import asyncio
 import contextlib
 from collections.abc import Generator
+from datetime import UTC as _UTC
+from datetime import datetime as _dt
+from datetime import timedelta as _td
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -11,6 +14,7 @@ import httpx
 import pytest
 from loguru import logger
 
+from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
@@ -607,13 +611,6 @@ class TestNotImplementedMethods:
             does the same thing without breaking the
             ``replace().timestamp()`` chain inside the builder.
         """
-        from datetime import UTC as _UTC
-        from datetime import datetime as _dt
-        from datetime import timedelta as _td
-
-        from snapper.infrastructure.exchanges.contracts import CandleUpdate
-        from snapper.infrastructure.exchanges.contracts import TradeUpdate
-
         past_minute = (_dt.now(_UTC) - _td(minutes=5)).replace(second=0, microsecond=0)
         trade = TradeUpdate(
             symbol="MNQM6-CME",

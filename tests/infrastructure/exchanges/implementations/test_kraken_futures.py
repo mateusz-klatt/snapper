@@ -1,9 +1,14 @@
 """Tests for Kraken Futures exchange client."""
 
 import asyncio
+import contextlib as _ctx
 from collections.abc import Generator
 from datetime import UTC
+from datetime import UTC as _UTC
 from datetime import datetime
+from datetime import datetime as _dt
+from datetime import timedelta
+from datetime import timedelta as _td
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -503,10 +508,6 @@ class TestOnWsMessage:
             with the current bus-time minute regardless of message-level
             timestamps, so ``active_buckets() == 1`` here.)
         """
-        from datetime import UTC
-        from datetime import datetime
-        from datetime import timedelta
-
         assert client._candle_builder.active_buckets() == 0
         msg = {
             "feed": "trade_snapshot",
@@ -1032,7 +1033,6 @@ class TestSubscribeCandles:
         Then: The same task object remains the client's aggregator
             handle (the ``is None or .done()`` guard short-circuits).
         """
-        import contextlib as _ctx
 
         async def never_returns() -> None:
             while True:
@@ -1092,12 +1092,6 @@ class TestSubscribeCandles:
             would break the ``.replace().timestamp()`` chain inside
             the builder.
         """
-        from datetime import UTC as _UTC
-        from datetime import datetime as _dt
-        from datetime import timedelta as _td
-
-        from snapper.infrastructure.exchanges.contracts import TradeUpdate
-
         past_minute = (_dt.now(_UTC) - _td(minutes=5)).replace(second=0, microsecond=0)
         trade = TradeUpdate(
             symbol="BTC-USD-PERP",
