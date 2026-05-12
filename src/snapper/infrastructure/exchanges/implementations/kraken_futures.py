@@ -308,9 +308,11 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             for raw_trade in raw_trades:
                 try:
                     trade = parse_kraken_futures_trade({**raw_trade, "product_id": product_id})
-                    _enqueue_or_drop_oldest(self._trade_queue, trade, "Trade")
                 except (ValueError, KeyError) as exc:
                     logger.debug(f"Skipping unparseable trade WS message: {exc}")
+                    continue
+                _enqueue_or_drop_oldest(self._trade_queue, trade, "Trade")
+                self._candle_builder.update(trade)
 
     async def _on_execution_message(self, message: dict[str, Any]) -> None:
         """Route private WS fill messages to the execution queue.

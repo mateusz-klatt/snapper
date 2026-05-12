@@ -259,6 +259,39 @@ class TestOnWsMessage:
         assert update.symbol == "CLM6-NYMEX"
 
     @pytest.mark.asyncio
+    async def test_trade_message_also_folds_into_candle_builder(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Every parsed trade is also routed into ``_candle_builder``.
+
+        Given: A trade WS message arrives via the equities channel,
+        When: ``_on_ws_message`` is called,
+        Then: ``_candle_builder.active_buckets()`` becomes 1 —
+            confirming the trade-handler path wires the builder, not
+            just the trade queue. Regression guard analogous to the
+            Kraken Futures test for the same property; without it,
+            the live candle stream would silently stay empty.
+        """
+        assert client._candle_builder.active_buckets() == 0
+        msg = {
+            "channel": "trade",
+            "type": "snapshot",
+            "data": [
+                {
+                    "symbol": "CLM6.NYMEX",
+                    "side": "buy",
+                    "price": 90.12,
+                    "qty": 1,
+                    "timestamp": "2026-04-01T17:40:36.368Z",
+                    "sequence": 95579,
+                    "index": 7623847138430121307,
+                }
+            ],
+        }
+        await client._on_ws_message(msg)
+        assert client._candle_builder.active_buckets() == 1
+
+    @pytest.mark.asyncio
     async def test_heartbeat_ignored(self, client: KrakenEquitiesExchangeClient) -> None:
         """Ignore heartbeat messages.
 

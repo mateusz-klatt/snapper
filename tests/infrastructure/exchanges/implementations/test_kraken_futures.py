@@ -462,6 +462,67 @@ class TestOnWsMessage:
         assert second.symbol == "BTC-USD-PERP"
 
     @pytest.mark.asyncio
+    async def test_trade_message_also_folds_into_candle_builder(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Every parsed live trade is also routed into ``_candle_builder``.
+
+        Given: A live ``feed=trade`` WS message,
+        When: ``_on_ws_message`` is called,
+        Then: ``_candle_builder.active_buckets()`` becomes >= 1 — proving
+            the trade-handler path wires the builder, not just the
+            trade queue. Regression guard for the 2026-05-12 Copilot
+            review finding where ``builder.update`` was missing on the
+            Kraken Futures hot path (Kraken Equities had it; Futures
+            was an accidental omission).
+        """
+        assert client._candle_builder.active_buckets() == 0
+        msg = {
+            "feed": "trade",
+            "product_id": "PI_XBTUSD",
+            "time": 1640995200000,
+            "qty": 7.0,
+            "price": 66600.0,
+            "side": "buy",
+        }
+        await client._on_ws_message(msg)
+        assert client._candle_builder.active_buckets() == 1
+
+    @pytest.mark.asyncio
+    async def test_trade_snapshot_also_folds_each_into_candle_builder(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Every trade in a ``trade_snapshot`` batch folds into the builder.
+
+        Given: A batch ``feed=trade_snapshot`` envelope with two trades,
+        When: ``_on_ws_message`` is called,
+        Then: The candle bucket for the current minute holds 2 trades
+            in its ``trades`` counter — confirming each batch entry is
+            individually folded, not just the first. (The two trades
+            land in the same bucket because the adapter stamps both
+            with the current bus-time minute regardless of message-level
+            timestamps, so ``active_buckets() == 1`` here.)
+        """
+        from datetime import UTC
+        from datetime import datetime
+        from datetime import timedelta
+
+        assert client._candle_builder.active_buckets() == 0
+        msg = {
+            "feed": "trade_snapshot",
+            "product_id": "PI_XBTUSD",
+            "trades": [
+                {"time": 1640995200000, "qty": 1.0, "price": 66600.0, "side": "buy"},
+                {"time": 1640995320000, "qty": 1.0, "price": 66601.0, "side": "buy"},
+            ],
+        }
+        await client._on_ws_message(msg)
+        assert client._candle_builder.active_buckets() == 1
+        candles = client._candle_builder.pop_completed(datetime.now(UTC) + timedelta(minutes=2))
+        assert len(candles) == 1
+        assert candles[0].trades == 2
+
+    @pytest.mark.asyncio
     async def test_heartbeat_ignored(self, client: KrakenFuturesExchangeClient) -> None:
         """Ignore heartbeat messages.
 
