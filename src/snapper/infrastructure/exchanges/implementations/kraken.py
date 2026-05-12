@@ -74,6 +74,7 @@ from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerSubscrib
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSubscribeParamsSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSubscriptionAckSchema
 from snapper.infrastructure.symbols.functions import ccxt_to_native
+from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
 from snapper.infrastructure.symbols.functions import native_to_ccxt
 from snapper.infrastructure.symbols.functions import native_to_kraken_rest
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
@@ -81,6 +82,8 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 _WS_CLIENT_CONNECTED_MSG = "WebSocket client should be connected"
 _QUEUE_MAX_SIZE = 10_000
+_TRADE_SUBSCRIBE_CHUNK_SIZE = 100
+_TRADE_SUBSCRIBE_CHUNK_DELAY_S = 0.1
 
 _DROP_LOG_INTERVAL_S = 1.0
 _drop_counters: dict[str, list[float]] = {}
@@ -890,9 +893,24 @@ class KrakenExchangeClient(ExchangeClientBase):
     ) -> AsyncIterator[TradeUpdate]:
         """Implement WebSocket trades subscription.
 
+        Kraken Spot WS v2 caveat (live-validated 2026-05-12): the
+        ``trade`` channel does NOT accept the ``["*"]`` wildcard
+        accepted by the ``ticker`` channel. Sending ``["*"]`` results
+        in a synchronous subscribe-ack with
+        ``success: false`` and
+        ``error: "Currency pair not in ISO 4217-A3 format *"``, and no
+        trade frames ever arrive. The ticker wildcard path is left
+        untouched because it works server-side; the trade path expands
+        ``["*"]`` to the full Kraken-spot native-symbol catalog via
+        :func:`get_available_kraken_symbols` and chunks the subscribe
+        at :data:`_TRADE_SUBSCRIBE_CHUNK_SIZE` to keep individual
+        frames within the WS server's accepted size envelope.
+
         Args:
-            symbols: List of symbols or ['*'] for all.
-            req_id: Optional request ID.
+            symbols: List of native symbols or ``["*"]`` for all
+                Kraken-spot symbols loaded by the mapper.
+            req_id: Optional request ID (passed to the first chunk
+                only; subsequent chunks use the same WS connection).
 
         Yields:
             TradeUpdate for each trade execution.
@@ -904,13 +922,27 @@ class KrakenExchangeClient(ExchangeClientBase):
             await self._ensure_ws_connected()
             assert self._ws_client is not None, _WS_CLIENT_CONNECTED_MSG
             if symbols == ["*"]:
-                ws_symbols = ["*"]
+                native_syms = get_available_kraken_symbols()
+                logger.info(
+                    f"Subscribing to trades: wildcard expansion -> {len(native_syms)} native symbols "
+                    f"(Kraken Spot trade channel does not accept '*')"
+                )
             else:
-                ws_symbols = [native_to_kraken_websocket(symbol) for symbol in symbols]
-            logger.info(f"Subscribing to trades: {symbols} -> {ws_symbols}")
+                native_syms = symbols
+            ws_symbols = [native_to_kraken_websocket(symbol) for symbol in native_syms]
+            logger.info(
+                f"Subscribing to trades: {len(ws_symbols)} symbols in "
+                f"{(len(ws_symbols) + _TRADE_SUBSCRIBE_CHUNK_SIZE - 1) // _TRADE_SUBSCRIBE_CHUNK_SIZE} "
+                f"chunks of <={_TRADE_SUBSCRIBE_CHUNK_SIZE}"
+            )
             async with self._ws_client as ws:
-                trade_params = KrakenTradeSubscribeParamsSchema(symbol=ws_symbols).as_params()
-                await ws.subscribe(params=trade_params, req_id=req_id)
+                for i in range(0, len(ws_symbols), _TRADE_SUBSCRIBE_CHUNK_SIZE):
+                    chunk = ws_symbols[i : i + _TRADE_SUBSCRIBE_CHUNK_SIZE]
+                    trade_params = KrakenTradeSubscribeParamsSchema(symbol=chunk).as_params()
+                    chunk_req_id = req_id if i == 0 else None
+                    await ws.subscribe(params=trade_params, req_id=chunk_req_id)
+                    if i + _TRADE_SUBSCRIBE_CHUNK_SIZE < len(ws_symbols):
+                        await asyncio.sleep(_TRADE_SUBSCRIBE_CHUNK_DELAY_S)
                 while not hasattr(ws, "exception_occur") or not ws.exception_occur:
                     try:
                         message = await asyncio.wait_for(self._trade_queue.get(), timeout=0.1)
