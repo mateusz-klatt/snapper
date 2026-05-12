@@ -23,9 +23,13 @@ from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.messaging.publishers.base import MarketDataPublisherService
+from snapper.messaging.publishers.base import _candle_writer_drop_counters
 from snapper.messaging.publishers.base import _cleanup_pending_future
+from snapper.messaging.publishers.base import _enqueue_or_drop_oldest_candle_write
 from snapper.messaging.publishers.base import _enqueue_or_drop_oldest_tick_write
+from snapper.messaging.publishers.base import _enqueue_or_drop_oldest_trade_write
 from snapper.messaging.publishers.base import _tick_writer_drop_counters
+from snapper.messaging.publishers.base import _trade_writer_drop_counters
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import HeartbeatData
@@ -170,7 +174,7 @@ async def test_start_warns_on_symbol_limit(monkeypatch: pytest.MonkeyPatch) -> N
     dummy_client = cast(Any, DummyClient())
     dummy_client.connect = AsyncMock()
     pub._create_exchange_client = lambda: dummy_client
-    pub.settings.timeframes = []
+    pub.settings.timeframes = ["1m"]
     pub.settings.zmq_heartbeat_interval_ms = 0
     pub.settings.write_buffer_candle_max_rows = 100
     pub.settings.write_buffer_tick_max_rows = 500
@@ -181,7 +185,9 @@ async def test_start_warns_on_symbol_limit(monkeypatch: pytest.MonkeyPatch) -> N
     pub._tick_loop = AsyncMock()
     pub._tick_writer_loop = AsyncMock()
     pub._trade_loop = AsyncMock()
+    pub._trade_writer_loop = AsyncMock()
     pub._candle_loop = AsyncMock()
+    pub._candle_writer_loop = AsyncMock()
     await pub.start()
     await pub.stop()
 
@@ -650,7 +656,9 @@ async def test_start_handles_cancelled_tasks(monkeypatch: pytest.MonkeyPatch) ->
     pub._tick_loop = noop
     pub._tick_writer_loop = noop
     pub._trade_loop = noop
+    pub._trade_writer_loop = noop
     pub._candle_loop = noop
+    pub._candle_writer_loop = noop
     loop = asyncio.get_running_loop()
     monkeypatch.setattr(asyncio, "create_task", lambda coro: loop.create_task(coro))
 
@@ -987,11 +995,14 @@ async def test_stop_skips_missing_resources() -> None:
 
 @pytest.mark.asyncio
 async def test_candle_loop_processes_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify candle loop publishes message and flushes batch on exit.
+    """Verify candle loop publishes message and hands the row off to the writer queue.
 
     Given: A running publisher with candle data,
     When: Candle arrives and stream ends,
-    Then: Message published, batch flushed in finally block.
+    Then: ZMQ publish happens, instrument is resolved, and the row
+    lands on ``_candle_write_queue`` — DB persistence now lives in
+    ``_candle_writer_loop`` so the consumer does not call
+    ``upsert_candles`` directly.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -1021,7 +1032,8 @@ async def test_candle_loop_processes_message(monkeypatch: pytest.MonkeyPatch) ->
     await pub._candle_loop(["BTC-USD"], "1m")
     pub.msg_publisher.send.assert_awaited_once()
     pub._ensure_instrument.assert_awaited()
-    pub.repository.upsert_candles.assert_awaited_once()
+    pub.repository.upsert_candles.assert_not_awaited()
+    assert pub._candle_write_queue.qsize() == 1
     assert pub._last_data_timestamps["BTC-USD"] > 0
 
 
@@ -1286,7 +1298,9 @@ async def test_start_skips_trade_loop_when_unsupported(monkeypatch: pytest.Monke
     pub._tick_loop = AsyncMock()
     pub._tick_writer_loop = AsyncMock()
     pub._trade_loop = AsyncMock()
+    pub._trade_writer_loop = AsyncMock()
     pub._candle_loop = AsyncMock()
+    pub._candle_writer_loop = AsyncMock()
     await pub.start()
     pub._trade_loop.assert_not_awaited()
     await pub.stop()
@@ -1599,9 +1613,11 @@ class TestFeedPublisherCoverage:
                 return_value=mock_context,
             ),
             patch.object(publisher, "_candle_loop", new=AsyncMock()),
+            patch.object(publisher, "_candle_writer_loop", new=AsyncMock()),
             patch.object(publisher, "_tick_loop", new=AsyncMock()),
             patch.object(publisher, "_tick_writer_loop", new=AsyncMock()),
             patch.object(publisher, "_trade_loop", new=AsyncMock()),
+            patch.object(publisher, "_trade_writer_loop", new=AsyncMock()),
             patch.object(publisher, "_create_exchange_client", return_value=mock_exchange_client),
         ):
             start_task = asyncio.create_task(publisher.start())
@@ -1836,11 +1852,13 @@ class TestFeedPublisherCoverage:
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
     async def test_candle_loop_processes_messages(self, mock_get_settings: MagicMock) -> None:
-        """Verify candle loop processes candle messages.
+        """Verify candle loop processes candle messages and enqueues rows.
 
         Given: A running publisher with mock exchange client,
         When: _candle_loop processes candles,
-        Then: Messages are published and batch flushed to DB.
+        Then: Messages are published to ZMQ and rows land on
+        ``_candle_write_queue`` (DB persistence now lives in
+        ``_candle_writer_loop``, not ``_candle_loop``).
         """
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
@@ -1892,7 +1910,8 @@ class TestFeedPublisherCoverage:
         )
         await publisher_any._candle_loop(["BTC-USD"], "1m")
         assert publish_mock.await_count == 2
-        publisher_any.repository.upsert_candles.assert_awaited_once()
+        publisher_any.repository.upsert_candles.assert_not_awaited()
+        assert publisher_any._candle_write_queue.qsize() == 2
         assert "BTC-USD" in publisher_any._last_data_timestamps
 
     @pytest.mark.asyncio
@@ -1992,11 +2011,13 @@ class TestFeedPublisherCoverage:
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
     async def test_trade_loop_processes_trade_messages(self, mock_get_settings: MagicMock) -> None:
-        """Verify trade loop processes trade messages.
+        """Verify trade loop processes trade messages and enqueues rows.
 
         Given: A running publisher with mock exchange client,
         When: _trade_loop processes trades,
-        Then: Trade messages are published and batch flushed.
+        Then: Trade messages are published to ZMQ and rows land on
+        ``_trade_write_queue`` (DB persistence now lives in
+        ``_trade_writer_loop``, not ``_trade_loop``).
         """
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
@@ -2040,7 +2061,8 @@ class TestFeedPublisherCoverage:
         await publisher_any._trade_loop(["BTC-USD"])
         assert publish_mock.await_count == 2
         assert "BTC-USD" in publisher_any._last_data_timestamps
-        publisher_any.repository.upsert_trades.assert_awaited_once()
+        publisher_any.repository.upsert_trades.assert_not_awaited()
+        assert publisher_any._trade_write_queue.qsize() == 2
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2364,7 +2386,8 @@ class TestFeedPublisherCandleLoop:
         assert eth_msg.type == "candle"
         assert eth_msg.instrument == "ETH-USD"
         assert eth_msg.close == pytest.approx(3000.0)
-        publisher_any.repository.upsert_candles.assert_awaited_once()
+        publisher_any.repository.upsert_candles.assert_not_awaited()
+        assert publisher_any._candle_write_queue.qsize() == 2
         assert "BTC-USD" in publisher_any._last_data_timestamps
         assert "ETH-USD" in publisher_any._last_data_timestamps
 
@@ -2949,12 +2972,16 @@ async def test_tick_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.asyncio
-async def test_trade_loop_publishes_and_saves_to_db(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify trade loop publishes to ZMQ and flushes batch to DB.
+async def test_trade_loop_publishes_and_enqueues_for_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify trade loop publishes to ZMQ and enqueues rows for the writer task.
 
     Given: A running publisher with trade data,
     When: Trade arrives and stream ends,
-    Then: Message is published and batch flushed on exit.
+    Then: Message is published to ZMQ and the row lands on
+    ``_trade_write_queue`` — DB persistence now lives in
+    ``_trade_writer_loop`` (HV2-H7 pattern applied to trades).
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -2972,12 +2999,15 @@ async def test_trade_loop_publishes_and_saves_to_db(monkeypatch: pytest.MonkeyPa
             trade_id="12345",
             timestamp=datetime.now(UTC),
         )
+        await asyncio.sleep(0.05)
         pub.running = False
 
+    pub._batch_max_age_s = 0.01
     pub._exchange_client.subscribe_trades = lambda symbols: gen()
     await pub._trade_loop(["BTC-USD"])
     pub.msg_publisher.send.assert_awaited()
-    pub.repository.upsert_trades.assert_awaited_once()
+    pub.repository.upsert_trades.assert_not_awaited()
+    assert pub._trade_write_queue.qsize() == 1
 
 
 def test_cleanup_pending_future_done_with_result() -> None:
@@ -3037,92 +3067,14 @@ def test_cleanup_pending_future_done_with_cancelled_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_candle_loop_age_trigger_flush() -> None:
-    """Verify candle loop flushes batch on age timeout.
-
-    Given: A publisher with a candle in the batch and no new data arriving,
-    When: The age timer expires,
-    Then: The batch is flushed.
-    """
-    pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    pub.running = True
-    pub.msg_publisher = AsyncMock()
-    pub.repository = SimpleNamespace(upsert_candles=AsyncMock())
-    pub._exchange_client = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
-    pub._batch_max_age_s = 0.01
-    flush_count = 0
-
-    async def gen() -> AsyncIterator[Any]:
-        yield SimpleNamespace(
-            symbol="BTC-USD",
-            open=1.0,
-            high=2.0,
-            low=0.5,
-            close=1.5,
-            vwap=1.2,
-            volume=10.0,
-            trades=5,
-            interval_begin=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
-        )
-        nonlocal flush_count
-        await asyncio.sleep(0.05)
-        flush_count = pub.repository.upsert_candles.await_count
-        pub.running = False
-
-    pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    await pub._candle_loop(["BTC-USD"], "1m")
-    assert flush_count >= 1
-
-
-@pytest.mark.asyncio
-async def test_candle_loop_batch_size_threshold_flush() -> None:
-    """Verify candle loop flushes when batch reaches max size.
-
-    Given: A publisher with _candle_batch_max_rows=2,
-    When: Two candles arrive,
-    Then: The batch is flushed mid-loop before stream ends.
-    """
-    pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    pub.running = True
-    pub.msg_publisher = AsyncMock()
-    pub.repository = SimpleNamespace(upsert_candles=AsyncMock())
-    pub._exchange_client = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
-    pub._candle_batch_max_rows = 2
-    flush_after_two = 0
-
-    async def gen() -> AsyncIterator[Any]:
-        nonlocal flush_after_two
-        for i in range(3):
-            yield SimpleNamespace(
-                symbol="BTC-USD",
-                open=1.0,
-                high=2.0,
-                low=0.5,
-                close=1.5,
-                vwap=1.2,
-                volume=10.0,
-                trades=5,
-                interval_begin=datetime(2026, 1, 1, 0, i, tzinfo=UTC),
-            )
-            if i == 1:
-                await asyncio.sleep(0)
-                flush_after_two = pub.repository.upsert_candles.await_count
-        pub.running = False
-
-    pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    await pub._candle_loop(["BTC-USD"], "1m")
-    assert flush_after_two >= 1
-
-
-@pytest.mark.asyncio
-async def test_candle_loop_cancelled_error_during_publish() -> None:
-    """Verify candle loop flushes and re-raises CancelledError during publish.
+async def test_candle_loop_cancelled_error_propagates_without_flush() -> None:
+    """Verify candle loop re-raises CancelledError without persisting the in-flight row.
 
     Given: A publisher whose _publish_message raises CancelledError,
     When: _candle_loop processes a candle,
-    Then: The row is appended, flushed in finally, and CancelledError propagates.
+    Then: CancelledError propagates and the consumer does not call
+    ``upsert_candles`` (DB persistence is the writer task's
+    responsibility now, not the consumer's).
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -3152,7 +3104,7 @@ async def test_candle_loop_cancelled_error_during_publish() -> None:
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
     with pytest.raises(asyncio.CancelledError):
         await pub._candle_loop(["BTC-USD"], "1m")
-    pub.repository.upsert_candles.assert_awaited_once()
+    pub.repository.upsert_candles.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3319,80 +3271,6 @@ async def test_tick_loop_cancelled_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_trade_loop_age_trigger_flush() -> None:
-    """Verify trade loop flushes batch on age timeout.
-
-    Given: A publisher with a trade in the batch and no new data arriving,
-    When: The age timer expires,
-    Then: The batch is flushed.
-    """
-    pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    pub.running = True
-    pub.msg_publisher = AsyncMock()
-    pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
-    pub._exchange_client = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
-    pub._batch_max_age_s = 0.01
-    flush_count = 0
-
-    async def gen() -> AsyncIterator[Any]:
-        yield SimpleNamespace(
-            symbol="BTC-USD",
-            price=100.0,
-            quantity=1.0,
-            side="buy",
-            trade_id="12345",
-            timestamp=datetime.now(UTC),
-        )
-        nonlocal flush_count
-        await asyncio.sleep(0.05)
-        flush_count = pub.repository.upsert_trades.await_count
-        pub.running = False
-
-    pub._exchange_client.subscribe_trades = lambda symbols: gen()
-    await pub._trade_loop(["BTC-USD"])
-    assert flush_count >= 1
-
-
-@pytest.mark.asyncio
-async def test_trade_loop_batch_size_threshold_flush() -> None:
-    """Verify trade loop flushes when batch reaches max size.
-
-    Given: A publisher with _trade_batch_max_rows=2,
-    When: Two trades arrive,
-    Then: The batch is flushed mid-loop.
-    """
-    pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    pub.running = True
-    pub.msg_publisher = AsyncMock()
-    pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
-    pub._exchange_client = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
-    pub._trade_batch_max_rows = 2
-    flush_after_two = 0
-
-    async def gen() -> AsyncIterator[Any]:
-        nonlocal flush_after_two
-        for i in range(3):
-            yield SimpleNamespace(
-                symbol="BTC-USD",
-                price=100.0 + i,
-                quantity=1.0,
-                side="buy",
-                trade_id=f"t-{i}",
-                timestamp=datetime.now(UTC),
-            )
-            if i == 1:
-                await asyncio.sleep(0)
-                flush_after_two = pub.repository.upsert_trades.await_count
-        pub.running = False
-
-    pub._exchange_client.subscribe_trades = lambda symbols: gen()
-    await pub._trade_loop(["BTC-USD"])
-    assert flush_after_two >= 1
-
-
-@pytest.mark.asyncio
 async def test_trade_loop_skips_db_when_instrument_is_none() -> None:
     """Verify trade loop skips DB write when instrument resolution returns None.
 
@@ -3425,12 +3303,16 @@ async def test_trade_loop_skips_db_when_instrument_is_none() -> None:
 
 
 @pytest.mark.asyncio
-async def test_trade_loop_cancelled_error() -> None:
-    """Verify trade loop flushes and re-raises CancelledError.
+async def test_trade_loop_cancelled_error_propagates_without_flush() -> None:
+    """Verify trade loop re-raises CancelledError without persisting the in-flight row.
 
     Given: A publisher whose publish raises CancelledError on second trade,
     When: _trade_loop is running,
-    Then: Pending batch is flushed in finally and CancelledError propagates.
+    Then: CancelledError propagates and the consumer does not call
+    ``upsert_trades`` (DB persistence is the writer task's
+    responsibility now, not the consumer's). The first trade's row
+    sits on ``_trade_write_queue`` for the writer to drain on its
+    own shutdown path.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -3471,7 +3353,8 @@ async def test_trade_loop_cancelled_error() -> None:
     pub._exchange_client.subscribe_trades = lambda symbols: gen()
     with pytest.raises(asyncio.CancelledError):
         await pub._trade_loop(["BTC-USD"])
-    pub.repository.upsert_trades.assert_awaited_once()
+    pub.repository.upsert_trades.assert_not_awaited()
+    assert pub._trade_write_queue.qsize() >= 1
 
 
 @pytest.mark.asyncio
@@ -4005,3 +3888,703 @@ async def test_tick_writer_loop_get_timeout_flushes_aged_batch() -> None:
     finally:
         await stop_task
     assert len(flushed) == 1
+
+
+def _dummy_candle_row(idx: int) -> dict[str, Any]:
+    """Build a placeholder candle row for writer-queue tests."""
+    return {
+        "instrument_public_id": f"inst-{idx:04d}",
+        "session_id": "test",
+        "sequence_id": idx,
+        "timestamp": datetime(2026, 4, 21, tzinfo=UTC),
+        "timeframe": "1m",
+        "open_at": datetime(2026, 4, 21, tzinfo=UTC),
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.5,
+        "vwap": 100.2,
+        "volume": 1.0,
+        "trades": 1,
+    }
+
+
+def _dummy_trade_row(idx: int) -> dict[str, Any]:
+    """Build a placeholder trade row for writer-queue tests."""
+    return {
+        "instrument_public_id": f"inst-{idx:04d}",
+        "session_id": "test",
+        "sequence_id": idx,
+        "timestamp": datetime(2026, 4, 21, tzinfo=UTC),
+        "executed_at": datetime(2026, 4, 21, tzinfo=UTC),
+        "price": 100.0,
+        "volume": 1.0,
+        "side": "buy",
+        "trade_id": str(idx),
+    }
+
+
+@pytest.mark.asyncio
+async def test_candle_writer_loop_drains_queue_on_shutdown() -> None:
+    """Candle writer loop keeps running while items remain in the queue.
+
+    Given: 5 candle rows queued and ``running=False``,
+    When: ``_candle_writer_loop`` is awaited,
+    Then: All five rows reach ``_flush_candle_batch`` and the queue
+        is empty before the loop returns.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_batch_max_rows = 2
+    pub._batch_max_age_s = 0.05
+    flushed_rows: list[dict[str, Any]] = []
+
+    async def capture_flush(batch: list[dict[str, Any]]) -> None:
+        flushed_rows.extend(batch)
+
+    pub._flush_candle_batch = capture_flush
+    for i in range(5):
+        await pub._candle_write_queue.put(_dummy_candle_row(i))
+    pub.running = False
+    await asyncio.wait_for(pub._candle_writer_loop(), timeout=2.0)
+    assert len(flushed_rows) == 5
+    assert pub._candle_write_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_candle_writer_loop_size_trigger_flushes_at_max_rows() -> None:
+    """Size trigger fires when batch reaches ``_candle_batch_max_rows``.
+
+    Given: Batch cap of 3 and 7 candle rows queued,
+    When: The writer loop runs to completion,
+    Then: ``_flush_candle_batch`` is invoked at least twice and the
+        cumulative row count across calls is seven.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_batch_max_rows = 3
+    pub._batch_max_age_s = 0.05
+    flush_calls = 0
+    flushed_rows: list[dict[str, Any]] = []
+
+    async def counting_flush(batch: list[dict[str, Any]]) -> None:
+        nonlocal flush_calls
+        flush_calls += 1
+        flushed_rows.extend(batch)
+
+    pub._flush_candle_batch = counting_flush
+    for i in range(7):
+        await pub._candle_write_queue.put(_dummy_candle_row(i))
+    pub.running = False
+    await asyncio.wait_for(pub._candle_writer_loop(), timeout=2.0)
+    assert flush_calls >= 2
+    assert len(flushed_rows) == 7
+
+
+@pytest.mark.asyncio
+async def test_candle_writer_loop_balances_task_done_against_put() -> None:
+    """Every successful candle ``put`` reaches a matching ``task_done``.
+
+    Given: 12 candle rows queued and the writer drains them,
+    When: ``await self._candle_write_queue.join()`` runs after the
+        writer returns,
+    Then: ``join()`` returns promptly because no outstanding
+        ``task_done`` debt remains; the queue is empty.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_batch_max_rows = 1000
+    pub._batch_max_age_s = 0.05
+
+    async def noop_flush(batch: list[dict[str, Any]]) -> None:
+        return None
+
+    pub._flush_candle_batch = noop_flush
+    for i in range(12):
+        await pub._candle_write_queue.put(_dummy_candle_row(i))
+    pub.running = False
+    await asyncio.wait_for(pub._candle_writer_loop(), timeout=2.0)
+    await asyncio.wait_for(pub._candle_write_queue.join(), timeout=0.5)
+    assert pub._candle_write_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_candle_writer_queue_drop_oldest_balances_task_done() -> None:
+    """Candle drop-oldest helper calls ``task_done`` for every evicted row.
+
+    Given: A bounded candle queue at capacity (size 3),
+    When: A new candle row is enqueued via the writer helper
+        (which evicts the oldest entry),
+    Then: ``join()`` reaches a balanced state once the remaining
+        three rows are consumed — the evicted row's
+        ``task_done`` is accounted for inside the helper.
+    """
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=3)
+    for i in range(3):
+        await queue.put(_dummy_candle_row(i))
+    _candle_writer_drop_counters.clear()
+    _enqueue_or_drop_oldest_candle_write(queue, _dummy_candle_row(99), "test-label")
+    assert queue.qsize() == 3
+    while not queue.empty():
+        queue.get_nowait()
+        queue.task_done()
+    await asyncio.wait_for(queue.join(), timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_candle_writer_drop_log_uses_persistence_backlog_label(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Candle writer drop log identifies persistence backlog explicitly.
+
+    Given: A full candle writer queue (size 1) and a forced overflow,
+    When: The drop summary is emitted,
+    Then: The log message names the candle-writer queue + the
+        persistence-backlog phrasing so operators do not confuse it
+        with an upstream WS feed drop.
+    """
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+    await queue.put(_dummy_candle_row(0))
+    _candle_writer_drop_counters.clear()
+    sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+    try:
+        _enqueue_or_drop_oldest_candle_write(queue, _dummy_candle_row(1), "kraken")
+    finally:
+        logger.remove(sink_id)
+    _candle_writer_drop_counters.clear()
+    summaries = [rec for rec in caplog.records if "candle-writer queue full" in rec.message]
+    assert len(summaries) == 1
+    assert "persistence backlog" in summaries[0].message
+    assert "candles delivered to ZMQ subscribers" in summaries[0].message
+
+
+@pytest.mark.asyncio
+async def test_candle_writer_uses_repository_session() -> None:
+    """``_open_candle_writer_session`` yields the repository's session.
+
+    Given: A publisher with a repository whose ``session()`` context
+        manager yields a tracked session object,
+    When: ``_open_candle_writer_session`` is entered,
+    Then: The yielded value is exactly that session (the writer
+        will reuse it across every candle flush).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    held_session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+
+    class _SessionCtx:
+        async def __aenter__(self) -> Any:
+            return held_session
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+    pub.repository = SimpleNamespace(session=lambda: _SessionCtx())
+    seen: list[Any] = []
+    async with pub._open_candle_writer_session() as session:
+        seen.append(session)
+    assert seen == [held_session]
+
+
+@pytest.mark.asyncio
+async def test_candle_writer_yields_none_without_repository() -> None:
+    """``_open_candle_writer_session`` yields ``None`` without a repository.
+
+    Given: A publisher whose ``repository`` is ``None`` (test path),
+    When: ``_open_candle_writer_session`` is entered,
+    Then: The yielded value is ``None`` so flush helpers fall back
+        to the no-session path.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = None
+    async with pub._open_candle_writer_session() as session:
+        assert session is None
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_loop_drains_queue_on_shutdown() -> None:
+    """Trade writer loop keeps running while items remain in the queue.
+
+    Given: 5 trade rows queued and ``running=False``,
+    When: ``_trade_writer_loop`` is awaited,
+    Then: All five rows reach ``_flush_trade_batch`` and the queue
+        is empty before the loop returns.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._trade_batch_max_rows = 2
+    pub._batch_max_age_s = 0.05
+    flushed_rows: list[dict[str, Any]] = []
+
+    async def capture_flush(batch: list[dict[str, Any]]) -> None:
+        flushed_rows.extend(batch)
+
+    pub._flush_trade_batch = capture_flush
+    for i in range(5):
+        await pub._trade_write_queue.put(_dummy_trade_row(i))
+    pub.running = False
+    await asyncio.wait_for(pub._trade_writer_loop(), timeout=2.0)
+    assert len(flushed_rows) == 5
+    assert pub._trade_write_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_loop_size_trigger_flushes_at_max_rows() -> None:
+    """Size trigger fires when batch reaches ``_trade_batch_max_rows``.
+
+    Given: Batch cap of 3 and 7 trade rows queued,
+    When: The writer loop runs to completion,
+    Then: ``_flush_trade_batch`` is invoked at least twice and the
+        cumulative row count across calls is seven.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._trade_batch_max_rows = 3
+    pub._batch_max_age_s = 0.05
+    flush_calls = 0
+    flushed_rows: list[dict[str, Any]] = []
+
+    async def counting_flush(batch: list[dict[str, Any]]) -> None:
+        nonlocal flush_calls
+        flush_calls += 1
+        flushed_rows.extend(batch)
+
+    pub._flush_trade_batch = counting_flush
+    for i in range(7):
+        await pub._trade_write_queue.put(_dummy_trade_row(i))
+    pub.running = False
+    await asyncio.wait_for(pub._trade_writer_loop(), timeout=2.0)
+    assert flush_calls >= 2
+    assert len(flushed_rows) == 7
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_loop_balances_task_done_against_put() -> None:
+    """Every successful trade ``put`` reaches a matching ``task_done``.
+
+    Given: 12 trade rows queued and the writer drains them,
+    When: ``await self._trade_write_queue.join()`` runs after the
+        writer returns,
+    Then: ``join()`` returns promptly because no outstanding
+        ``task_done`` debt remains; the queue is empty.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._trade_batch_max_rows = 1000
+    pub._batch_max_age_s = 0.05
+
+    async def noop_flush(batch: list[dict[str, Any]]) -> None:
+        return None
+
+    pub._flush_trade_batch = noop_flush
+    for i in range(12):
+        await pub._trade_write_queue.put(_dummy_trade_row(i))
+    pub.running = False
+    await asyncio.wait_for(pub._trade_writer_loop(), timeout=2.0)
+    await asyncio.wait_for(pub._trade_write_queue.join(), timeout=0.5)
+    assert pub._trade_write_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_queue_drop_oldest_balances_task_done() -> None:
+    """Trade drop-oldest helper calls ``task_done`` for every evicted row.
+
+    Given: A bounded trade queue at capacity (size 3),
+    When: A new trade row is enqueued via the writer helper
+        (which evicts the oldest entry),
+    Then: ``join()`` reaches a balanced state once the remaining
+        three rows are consumed — the evicted row's
+        ``task_done`` is accounted for inside the helper.
+    """
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=3)
+    for i in range(3):
+        await queue.put(_dummy_trade_row(i))
+    _trade_writer_drop_counters.clear()
+    _enqueue_or_drop_oldest_trade_write(queue, _dummy_trade_row(99), "test-label")
+    assert queue.qsize() == 3
+    while not queue.empty():
+        queue.get_nowait()
+        queue.task_done()
+    await asyncio.wait_for(queue.join(), timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_drop_log_uses_persistence_backlog_label(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Trade writer drop log identifies persistence backlog explicitly.
+
+    Given: A full trade writer queue (size 1) and a forced overflow,
+    When: The drop summary is emitted,
+    Then: The log message names the trade-writer queue + the
+        persistence-backlog phrasing so operators do not confuse it
+        with an upstream WS feed drop.
+    """
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+    await queue.put(_dummy_trade_row(0))
+    _trade_writer_drop_counters.clear()
+    sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+    try:
+        _enqueue_or_drop_oldest_trade_write(queue, _dummy_trade_row(1), "kraken")
+    finally:
+        logger.remove(sink_id)
+    _trade_writer_drop_counters.clear()
+    summaries = [rec for rec in caplog.records if "trade-writer queue full" in rec.message]
+    assert len(summaries) == 1
+    assert "persistence backlog" in summaries[0].message
+    assert "trades delivered to ZMQ subscribers" in summaries[0].message
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_uses_repository_session() -> None:
+    """``_open_trade_writer_session`` yields the repository's session.
+
+    Given: A publisher with a repository whose ``session()`` context
+        manager yields a tracked session object,
+    When: ``_open_trade_writer_session`` is entered,
+    Then: The yielded value is exactly that session (the writer
+        will reuse it across every trade flush).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    held_session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+
+    class _SessionCtx:
+        async def __aenter__(self) -> Any:
+            return held_session
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+    pub.repository = SimpleNamespace(session=lambda: _SessionCtx())
+    seen: list[Any] = []
+    async with pub._open_trade_writer_session() as session:
+        seen.append(session)
+    assert seen == [held_session]
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_yields_none_without_repository() -> None:
+    """``_open_trade_writer_session`` yields ``None`` without a repository.
+
+    Given: A publisher whose ``repository`` is ``None`` (test path),
+    When: ``_open_trade_writer_session`` is entered,
+    Then: The yielded value is ``None`` so flush helpers fall back
+        to the no-session path.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = None
+    async with pub._open_trade_writer_session() as session:
+        assert session is None
+
+
+@pytest.mark.asyncio
+async def test_flush_candle_writer_batch_empty_is_noop() -> None:
+    """Empty-batch fast path returns without touching the queue.
+
+    Given: An empty in-flight batch and a pristine writer queue,
+    When: ``_flush_candle_writer_batch([])`` is awaited,
+    Then: No flush is invoked and no ``task_done`` is balanced
+        (covers the early-return guard in the writer's flush
+        helper).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    flush_mock = AsyncMock()
+    pub._flush_candle_batch = flush_mock
+    await pub._flush_candle_writer_batch([])
+    flush_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_flush_trade_writer_batch_empty_is_noop() -> None:
+    """Empty-batch fast path returns without touching the queue.
+
+    Given: An empty in-flight batch and a pristine writer queue,
+    When: ``_flush_trade_writer_batch([])`` is awaited,
+    Then: No flush is invoked and no ``task_done`` is balanced
+        (covers the early-return guard in the writer's flush
+        helper).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    flush_mock = AsyncMock()
+    pub._flush_trade_batch = flush_mock
+    await pub._flush_trade_writer_batch([])
+    flush_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_candle_writer_loop_age_trigger_flushes_in_flight_batch() -> None:
+    """Age-trigger branch flushes a partially full batch when its age elapses.
+
+    Given: A writer with ``_batch_max_age_s=0.02``, ``batch_max_rows=1000``,
+        one row queued, and a producer task that stops the writer 200ms
+        later (well after the age window expires),
+    When: The writer loop runs,
+    Then: The first row is flushed via the age-trigger branch before
+        shutdown drain, exercising the ``timeout <= 0`` / TimeoutError
+        flush paths inside the loop body.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_batch_max_rows = 1000
+    pub._batch_max_age_s = 0.02
+    pub.running = True
+    flushed: list[dict[str, Any]] = []
+
+    async def capture_flush(batch: list[dict[str, Any]]) -> None:
+        flushed.extend(batch)
+
+    pub._flush_candle_batch = capture_flush
+    await pub._candle_write_queue.put(_dummy_candle_row(1))
+
+    async def stop_after_age() -> None:
+        await asyncio.sleep(0.2)
+        pub.running = False
+
+    stop_task = asyncio.create_task(stop_after_age())
+    try:
+        await asyncio.wait_for(pub._candle_writer_loop(), timeout=2.0)
+    finally:
+        await stop_task
+    assert len(flushed) == 1
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_loop_age_trigger_flushes_in_flight_batch() -> None:
+    """Age-trigger branch flushes a partially full batch when its age elapses.
+
+    Given: A writer with ``_batch_max_age_s=0.02``, ``batch_max_rows=1000``,
+        one row queued, and a producer task that stops the writer 200ms
+        later (well after the age window expires),
+    When: The writer loop runs,
+    Then: The first row is flushed via the age-trigger branch before
+        shutdown drain, exercising the ``timeout <= 0`` / TimeoutError
+        flush paths inside the loop body.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._trade_batch_max_rows = 1000
+    pub._batch_max_age_s = 0.02
+    pub.running = True
+    flushed: list[dict[str, Any]] = []
+
+    async def capture_flush(batch: list[dict[str, Any]]) -> None:
+        flushed.extend(batch)
+
+    pub._flush_trade_batch = capture_flush
+    await pub._trade_write_queue.put(_dummy_trade_row(1))
+
+    async def stop_after_age() -> None:
+        await asyncio.sleep(0.2)
+        pub.running = False
+
+    stop_task = asyncio.create_task(stop_after_age())
+    try:
+        await asyncio.wait_for(pub._trade_writer_loop(), timeout=2.0)
+    finally:
+        await stop_task
+    assert len(flushed) == 1
+
+
+@pytest.mark.asyncio
+async def test_candle_writer_loop_top_age_flush_branch() -> None:
+    """Top-of-loop age-flush branch fires when batch_start is set and aged out.
+
+    Given: A patched ``_batch_age_remaining`` that returns 0 once
+        ``batch_start`` is set, so the very next iteration after
+        picking up a candle row sees the batch as already aged,
+    When: One candle row is enqueued and the writer loop is run,
+    Then: ``_flush_candle_batch`` is invoked from the top-of-loop
+        age-expired branch (covers the ``timeout <= 0.0`` line),
+        not from the wait-for TimeoutError branch.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._batch_max_age_s = 0.01
+    pub._candle_batch_max_rows = 1000
+    pub.running = True
+    flushed: list[dict[str, Any]] = []
+
+    async def capture_flush(batch: list[dict[str, Any]]) -> None:
+        flushed.extend(batch)
+
+    pub._flush_candle_batch = capture_flush
+
+    def patched_age(batch_start: float | None, _loop: asyncio.AbstractEventLoop) -> float:
+        return 0.0 if batch_start is not None else 0.01
+
+    pub._batch_age_remaining = patched_age
+    await pub._candle_write_queue.put(_dummy_candle_row(0))
+
+    async def stop_soon() -> None:
+        await asyncio.sleep(0.05)
+        pub.running = False
+
+    stop_task = asyncio.create_task(stop_soon())
+    try:
+        await asyncio.wait_for(pub._candle_writer_loop(), timeout=2.0)
+    finally:
+        await stop_task
+    assert len(flushed) == 1
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_loop_top_age_flush_branch() -> None:
+    """Top-of-loop age-flush branch fires when batch_start is set and aged out.
+
+    Given: A patched ``_batch_age_remaining`` that returns 0 once
+        ``batch_start`` is set, so the very next iteration after
+        picking up a trade row sees the batch as already aged,
+    When: One trade row is enqueued and the writer loop is run,
+    Then: ``_flush_trade_batch`` is invoked from the top-of-loop
+        age-expired branch (covers the ``timeout <= 0.0`` line),
+        not from the wait-for TimeoutError branch.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._batch_max_age_s = 0.01
+    pub._trade_batch_max_rows = 1000
+    pub.running = True
+    flushed: list[dict[str, Any]] = []
+
+    async def capture_flush(batch: list[dict[str, Any]]) -> None:
+        flushed.extend(batch)
+
+    pub._flush_trade_batch = capture_flush
+
+    def patched_age(batch_start: float | None, _loop: asyncio.AbstractEventLoop) -> float:
+        return 0.0 if batch_start is not None else 0.01
+
+    pub._batch_age_remaining = patched_age
+    await pub._trade_write_queue.put(_dummy_trade_row(0))
+
+    async def stop_soon() -> None:
+        await asyncio.sleep(0.05)
+        pub.running = False
+
+    stop_task = asyncio.create_task(stop_soon())
+    try:
+        await asyncio.wait_for(pub._trade_writer_loop(), timeout=2.0)
+    finally:
+        await stop_task
+    assert len(flushed) == 1
+
+
+@pytest.mark.asyncio
+async def test_candle_writer_drop_log_rate_limit_skips_repeat_summaries() -> None:
+    """The candle drop helper rate-limits its summary log per interval.
+
+    Given: A full candle writer queue and two consecutive overflow
+        attempts within the rate-limit window,
+    When: Both overflow calls run back-to-back,
+    Then: Only the first call emits a summary log; the second hits
+        the rate-limited skip path (covers the False side of the
+        ``now - last_log >= INTERVAL`` branch).
+    """
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+    await queue.put(_dummy_candle_row(0))
+    _candle_writer_drop_counters.clear()
+    _enqueue_or_drop_oldest_candle_write(queue, _dummy_candle_row(1), "kraken")
+    _enqueue_or_drop_oldest_candle_write(queue, _dummy_candle_row(2), "kraken")
+    counters = _candle_writer_drop_counters["kraken"]
+    assert counters[0] >= 1
+    _candle_writer_drop_counters.clear()
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_drop_log_rate_limit_skips_repeat_summaries() -> None:
+    """The trade drop helper rate-limits its summary log per interval.
+
+    Given: A full trade writer queue and two consecutive overflow
+        attempts within the rate-limit window,
+    When: Both overflow calls run back-to-back,
+    Then: Only the first call emits a summary log; the second hits
+        the rate-limited skip path (covers the False side of the
+        ``now - last_log >= INTERVAL`` branch).
+    """
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+    await queue.put(_dummy_trade_row(0))
+    _trade_writer_drop_counters.clear()
+    _enqueue_or_drop_oldest_trade_write(queue, _dummy_trade_row(1), "kraken")
+    _enqueue_or_drop_oldest_trade_write(queue, _dummy_trade_row(2), "kraken")
+    counters = _trade_writer_drop_counters["kraken"]
+    assert counters[0] >= 1
+    _trade_writer_drop_counters.clear()
+
+
+@pytest.mark.asyncio
+async def test_candle_writer_loop_timeout_without_age_does_not_flush() -> None:
+    """TimeoutError on get() leaves a still-fresh batch untouched.
+
+    Given: A writer with a long ``_batch_max_age_s`` and a single row
+        already absorbed into the batch,
+    When: The queue stays empty briefly, the shutdown poll fires a
+        TimeoutError, and the batch age has NOT yet expired,
+    Then: The TimeoutError branch leaves the batch in place (covers
+        the False side of the ``batch_start is None or aged-out``
+        check); shutdown drain flushes it afterward.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._batch_max_age_s = 60.0
+    pub._candle_batch_max_rows = 1000
+    pub.running = True
+    flushed: list[dict[str, Any]] = []
+
+    async def capture_flush(batch: list[dict[str, Any]]) -> None:
+        flushed.extend(batch)
+
+    pub._flush_candle_batch = capture_flush
+    await pub._candle_write_queue.put(_dummy_candle_row(0))
+
+    async def stop_soon() -> None:
+        await asyncio.sleep(0.6)
+        pub.running = False
+
+    stop_task = asyncio.create_task(stop_soon())
+    try:
+        await asyncio.wait_for(pub._candle_writer_loop(), timeout=2.5)
+    finally:
+        await stop_task
+    assert len(flushed) == 1
+
+
+@pytest.mark.asyncio
+async def test_trade_writer_loop_timeout_without_age_does_not_flush() -> None:
+    """TimeoutError on get() leaves a still-fresh batch untouched.
+
+    Given: A writer with a long ``_batch_max_age_s`` and a single row
+        already absorbed into the batch,
+    When: The queue stays empty briefly, the shutdown poll fires a
+        TimeoutError, and the batch age has NOT yet expired,
+    Then: The TimeoutError branch leaves the batch in place (covers
+        the False side of the ``batch_start is None or aged-out``
+        check); shutdown drain flushes it afterward.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._batch_max_age_s = 60.0
+    pub._trade_batch_max_rows = 1000
+    pub.running = True
+    flushed: list[dict[str, Any]] = []
+
+    async def capture_flush(batch: list[dict[str, Any]]) -> None:
+        flushed.extend(batch)
+
+    pub._flush_trade_batch = capture_flush
+    await pub._trade_write_queue.put(_dummy_trade_row(0))
+
+    async def stop_soon() -> None:
+        await asyncio.sleep(0.6)
+        pub.running = False
+
+    stop_task = asyncio.create_task(stop_soon())
+    try:
+        await asyncio.wait_for(pub._trade_writer_loop(), timeout=2.5)
+    finally:
+        await stop_task
+    assert len(flushed) == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_handles_none_candle_and_trade_queues(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``stop()`` tolerates ``None`` writer queues without raising.
+
+    Given: A publisher partially initialised so that
+        ``_candle_write_queue`` and ``_trade_write_queue`` are
+        ``None`` (defensive guard for stop-during-init failure),
+    When: ``stop()`` is awaited,
+    Then: The ``queue is not None`` branches are skipped and stop
+        completes without ``AttributeError``.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._candle_write_queue = None
+    pub._trade_write_queue = None
+    await pub.stop()

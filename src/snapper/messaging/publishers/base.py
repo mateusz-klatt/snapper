@@ -10,8 +10,6 @@ import math
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import AsyncIterator
-from collections.abc import Callable
-from collections.abc import Coroutine
 from datetime import UTC
 from datetime import datetime
 from time import monotonic
@@ -73,6 +71,16 @@ _TICK_WRITER_DROP_LOG_INTERVAL_S = 1.0
 _TICK_WRITER_SHUTDOWN_POLL_S = 0.5
 _tick_writer_drop_counters: dict[str, list[float]] = {}
 
+_CANDLE_WRITE_QUEUE_MAX = 5_000
+_CANDLE_WRITER_DROP_LOG_INTERVAL_S = 1.0
+_CANDLE_WRITER_SHUTDOWN_POLL_S = 0.5
+_candle_writer_drop_counters: dict[str, list[float]] = {}
+
+_TRADE_WRITE_QUEUE_MAX = 5_000
+_TRADE_WRITER_DROP_LOG_INTERVAL_S = 1.0
+_TRADE_WRITER_SHUTDOWN_POLL_S = 0.5
+_trade_writer_drop_counters: dict[str, list[float]] = {}
+
 
 def _enqueue_or_drop_oldest_tick_write(
     queue: asyncio.Queue[TickUpsertRow], row: TickUpsertRow, label: str
@@ -107,6 +115,76 @@ def _enqueue_or_drop_oldest_tick_write(
                 f"{label}:tick-writer queue full, dropped {int(counters[0])} rows "
                 f"in last {now - counters[1]:.1f}s "
                 f"(persistence backlog — ticks delivered to ZMQ subscribers but not persisted)"
+            )
+            counters[0] = 0.0
+            counters[1] = now
+        evicted = queue.get_nowait()
+        queue.task_done()
+        del evicted
+        queue.put_nowait(row)
+
+
+def _enqueue_or_drop_oldest_candle_write(
+    queue: asyncio.Queue[CandleUpsertRow], row: CandleUpsertRow, label: str
+) -> None:
+    """Put a candle row on the writer queue, dropping the oldest if full.
+
+    Mirrors :func:`_enqueue_or_drop_oldest_tick_write`; see that
+    docstring for the rationale. The drop log carries a
+    ``candle-writer`` label so operators can distinguish it from
+    upstream WS-queue drops and from tick-writer drops.
+
+    Args:
+        queue: Bounded writer queue.
+        row: Candle row to enqueue for persistence.
+        label: Human-readable label (typically the exchange name).
+    """
+    try:
+        queue.put_nowait(row)
+    except asyncio.QueueFull:
+        counters = _candle_writer_drop_counters.setdefault(label, [0.0, 0.0])
+        counters[0] += 1
+        now = monotonic()
+        if now - counters[1] >= _CANDLE_WRITER_DROP_LOG_INTERVAL_S:
+            logger.warning(
+                f"{label}:candle-writer queue full, dropped {int(counters[0])} rows "
+                f"in last {now - counters[1]:.1f}s "
+                f"(persistence backlog — candles delivered to ZMQ subscribers but not persisted)"
+            )
+            counters[0] = 0.0
+            counters[1] = now
+        evicted = queue.get_nowait()
+        queue.task_done()
+        del evicted
+        queue.put_nowait(row)
+
+
+def _enqueue_or_drop_oldest_trade_write(
+    queue: asyncio.Queue[TradeUpsertRow], row: TradeUpsertRow, label: str
+) -> None:
+    """Put a trade row on the writer queue, dropping the oldest if full.
+
+    Mirrors :func:`_enqueue_or_drop_oldest_tick_write`; see that
+    docstring for the rationale. The drop log carries a
+    ``trade-writer`` label so operators can distinguish it from
+    upstream WS-queue drops and from tick/candle-writer drops.
+
+    Args:
+        queue: Bounded writer queue.
+        row: Trade row to enqueue for persistence.
+        label: Human-readable label (typically the exchange name).
+    """
+    try:
+        queue.put_nowait(row)
+    except asyncio.QueueFull:
+        counters = _trade_writer_drop_counters.setdefault(label, [0.0, 0.0])
+        counters[0] += 1
+        now = monotonic()
+        if now - counters[1] >= _TRADE_WRITER_DROP_LOG_INTERVAL_S:
+            logger.warning(
+                f"{label}:trade-writer queue full, dropped {int(counters[0])} rows "
+                f"in last {now - counters[1]:.1f}s "
+                f"(persistence backlog — trades delivered to ZMQ subscribers but not persisted)"
             )
             counters[0] = 0.0
             counters[1] = now
@@ -178,6 +256,18 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._tick_consumer_task: asyncio.Task[None] | None = None
         self._tick_writer_task: asyncio.Task[None] | None = None
         self._tick_writer_session: AsyncSession | None = None
+        self._candle_write_queue: asyncio.Queue[CandleUpsertRow] = asyncio.Queue(
+            maxsize=_CANDLE_WRITE_QUEUE_MAX
+        )
+        self._candle_consumer_tasks: list[asyncio.Task[None]] = []
+        self._candle_writer_task: asyncio.Task[None] | None = None
+        self._candle_writer_session: AsyncSession | None = None
+        self._trade_write_queue: asyncio.Queue[TradeUpsertRow] = asyncio.Queue(
+            maxsize=_TRADE_WRITE_QUEUE_MAX
+        )
+        self._trade_consumer_task: asyncio.Task[None] | None = None
+        self._trade_writer_task: asyncio.Task[None] | None = None
+        self._trade_writer_session: AsyncSession | None = None
 
     @abstractmethod
     def _create_exchange_client(self) -> T:
@@ -279,16 +369,22 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         tasks.append(asyncio.create_task(self._symbol_aliases_loop()))
         symbols_to_subscribe = self.symbols[:max_symbols] if max_symbols > 0 else self.symbols
         timeframes = self.settings.timeframes
-        tasks.extend(
+        self._candle_consumer_tasks = [
             asyncio.create_task(self._candle_loop(symbols_to_subscribe, timeframe))
             for timeframe in timeframes
-        )
+        ]
+        tasks.extend(self._candle_consumer_tasks)
+        self._candle_writer_task = asyncio.create_task(self._candle_writer_loop())
+        tasks.append(self._candle_writer_task)
         self._tick_consumer_task = asyncio.create_task(self._tick_loop(symbols_to_subscribe))
         tasks.append(self._tick_consumer_task)
         self._tick_writer_task = asyncio.create_task(self._tick_writer_loop())
         tasks.append(self._tick_writer_task)
         if self._supports_public_trades():
-            tasks.append(asyncio.create_task(self._trade_loop(symbols_to_subscribe)))
+            self._trade_consumer_task = asyncio.create_task(self._trade_loop(symbols_to_subscribe))
+            tasks.append(self._trade_consumer_task)
+            self._trade_writer_task = asyncio.create_task(self._trade_writer_loop())
+            tasks.append(self._trade_writer_task)
         else:
             logger.info(f"{process_name}: Trade loop disabled (exchange has no public trade feed)")
         try:
@@ -321,8 +417,13 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         publisher (e.g. start failure during setup) still gets a chance
         to drain.
         """
-        has_pending_writer = self._tick_writer_task is not None or (
-            self._tick_write_queue is not None and not self._tick_write_queue.empty()
+        has_pending_writer = (
+            self._tick_writer_task is not None
+            or (self._tick_write_queue is not None and not self._tick_write_queue.empty())
+            or self._candle_writer_task is not None
+            or (self._candle_write_queue is not None and not self._candle_write_queue.empty())
+            or self._trade_writer_task is not None
+            or (self._trade_write_queue is not None and not self._trade_write_queue.empty())
         )
         if not self.running and not has_pending_writer:
             return
@@ -338,6 +439,29 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._tick_writer_task
             self._tick_writer_task = None
+        if self._candle_consumer_tasks:
+            for candle_consumer_task in self._candle_consumer_tasks:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await candle_consumer_task
+            self._candle_consumer_tasks = []
+        if self._candle_write_queue is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._candle_write_queue.join()
+        if self._candle_writer_task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._candle_writer_task
+            self._candle_writer_task = None
+        if self._trade_consumer_task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._trade_consumer_task
+            self._trade_consumer_task = None
+        if self._trade_write_queue is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._trade_write_queue.join()
+        if self._trade_writer_task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._trade_writer_task
+            self._trade_writer_task = None
         if self._exchange_client:
             await self._exchange_client.disconnect()
             self._exchange_client = None
@@ -490,29 +614,20 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return ev_loop.time()
         return batch_start
 
-    @staticmethod
-    async def _flush_on_age(
-        batch: list[Any],
-        flush_fn: Callable[[list[Any]], Coroutine[Any, Any, None]],
-    ) -> None:
-        """Flush batch if non-empty (age-trigger path).
-
-        Clears the batch in-place after flushing.
-
-        Args:
-            batch: Accumulated rows to flush.
-            flush_fn: Async function that persists the batch.
-        """
-        if batch:
-            await flush_fn(batch)
-            batch.clear()
-
     async def _candle_loop(self, symbols: list[str], timeframe: str) -> None:
-        """Subscribe to candle data, publish to ZMQ, and batch DB writes.
+        """Subscribe to candle data, publish to ZMQ, and hand off DB rows to the writer.
 
-        Uses the candle ID cache to ensure the same public_id is used on ZMQ
-        and in the database for a given (instrument, timeframe, open_at) window.
-        DB writes are micro-batched: flushed on size or age threshold.
+        Ingest-only mirror of :meth:`_tick_loop` (HV2-H7 pattern):
+        drains the exchange WS iterator, publishes to ZMQ via
+        :meth:`_process_candle`, and enqueues the resulting row on
+        :attr:`_candle_write_queue` for the dedicated writer task.
+        Never awaits ``_flush_candle_batch`` — that responsibility
+        lives entirely in :meth:`_candle_writer_loop` so SQLite
+        commit latency cannot block the WS-queue consumer.
+
+        Uses the candle ID cache to ensure the same public_id is
+        used on ZMQ and in the database for a given (instrument,
+        timeframe, open_at) window.
 
         Args:
             symbols: List of symbols to subscribe to for candle data.
@@ -522,65 +637,146 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
         exchange = self._get_data_exchange()
-        batch: list[CandleUpsertRow] = []
-        batch_start: float | None = None
-        ev_loop = asyncio.get_event_loop()
+        exchange_label = self._get_exchange_name()
         iterator = self._exchange_client.subscribe_candles(symbols, timeframe).__aiter__()
         next_fut: asyncio.Future[CandleUpdate | object] | None = None
         try:
             while self.running:
                 next_fut = next_fut or asyncio.ensure_future(anext(iterator, _STREAM_END))
-                done, _ = await asyncio.wait(
-                    {next_fut}, timeout=self._batch_age_remaining(batch_start, ev_loop)
-                )
+                done, _ = await asyncio.wait({next_fut}, timeout=self._batch_max_age_s)
                 if not done:
-                    await self._flush_on_age(batch, self._flush_candle_batch)
-                    batch_start = None
                     continue
                 next_fut = None
                 candle = done.pop().result()
                 if candle is _STREAM_END:
                     break
-                if await self._process_candle(
-                    cast(CandleUpdate, candle), exchange, timeframe, batch
-                ):
-                    batch_start = self._track_batch_start(batch_start, ev_loop)
-                if len(batch) >= self._candle_batch_max_rows:
-                    await self._flush_candle_batch(batch)
-                    batch.clear()
-                    batch_start = None
+                row = await self._process_candle(cast(CandleUpdate, candle), exchange, timeframe)
+                if row is not None:
+                    _enqueue_or_drop_oldest_candle_write(
+                        self._candle_write_queue, row, exchange_label
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"Candle loop error for {symbols}: {e}")
         finally:
             _cleanup_pending_future(next_fut)
-            if batch:
-                await self._flush_candle_batch(batch)
+
+    async def _candle_writer_loop(self) -> None:
+        """Drain :attr:`_candle_write_queue` and flush candles to the database.
+
+        Mirror of :meth:`_tick_writer_loop` — see that docstring for the
+        drain / ``task_done`` / ``timeout <= 0`` invariants. Candle
+        volume is ~10-50× lower than ticks (one row per
+        ``timeframe`` window per instrument), so the queue cap is
+        ``_CANDLE_WRITE_QUEUE_MAX``.
+        """
+        batch: list[CandleUpsertRow] = []
+        batch_start: float | None = None
+        ev_loop = asyncio.get_event_loop()
+        async with self._open_candle_writer_session() as writer_session:
+            self._candle_writer_session = writer_session
+            try:
+                while self.running or not self._candle_write_queue.empty() or batch:
+                    if not self.running and self._candle_write_queue.empty() and batch:
+                        await self._flush_candle_writer_batch(batch)
+                        batch_start = None
+                        continue
+                    timeout = self._batch_age_remaining(batch_start, ev_loop)
+                    if timeout <= 0.0:
+                        await self._flush_candle_writer_batch(batch)
+                        batch_start = None
+                        continue
+                    try:
+                        row = await asyncio.wait_for(
+                            self._candle_write_queue.get(),
+                            timeout=min(timeout, _CANDLE_WRITER_SHUTDOWN_POLL_S),
+                        )
+                    except TimeoutError:
+                        if (
+                            batch_start is None
+                            or self._batch_age_remaining(batch_start, ev_loop) <= 0.0
+                        ):
+                            await self._flush_candle_writer_batch(batch)
+                            batch_start = None
+                        continue
+                    batch.append(row)
+                    batch_start = self._track_batch_start(batch_start, ev_loop)
+                    if len(batch) >= self._candle_batch_max_rows:
+                        await self._flush_candle_writer_batch(batch)
+                        batch_start = None
+            finally:
+                self._candle_writer_session = None
+
+    @contextlib.asynccontextmanager
+    async def _open_candle_writer_session(self) -> AsyncIterator[AsyncSession | None]:
+        """Open the candle writer task's long-lived database session.
+
+        Mirror of :meth:`_open_tick_writer_session`. When the
+        publisher has a real repository attached, yields a single
+        ``AsyncSession`` reused across every candle flush so the
+        per-flush connection-acquire cost amortises over the writer
+        task's lifetime.
+
+        Yields:
+            ``AsyncSession`` bound to the repository's writer
+            connection, or ``None`` when no repository is available.
+        """
+        if self.repository is None:
+            yield None
+            return
+        async with self.repository.session() as session:
+            yield session
+
+    async def _flush_candle_writer_batch(self, batch: list[CandleUpsertRow]) -> None:
+        """Flush the candle writer batch and balance the queue ``task_done`` debt.
+
+        Mirror of :meth:`_flush_tick_writer_batch`. Captures
+        ``flushed_count`` before awaiting the flush so a future
+        mutation of ``batch`` during ``_flush_candle_batch`` cannot
+        desync the ``task_done`` count.
+
+        Args:
+            batch: In-flight write batch. Cleared in place on a
+                successful flush; left empty otherwise.
+        """
+        if not batch:
+            return
+        flushed_count = len(batch)
+        await self._flush_candle_batch(batch)
+        for _ in range(flushed_count):
+            self._candle_write_queue.task_done()
+        batch.clear()
 
     async def _process_candle(
         self,
         candle: CandleUpdate,
         exchange: MarketDataExchange,
         timeframe: str,
-        batch: list[CandleUpsertRow],
-    ) -> bool:
-        """Build candle message, append DB row to batch, and publish to ZMQ.
+    ) -> CandleUpsertRow | None:
+        """Build candle message, publish to ZMQ, and return a DB row.
 
-        The row is appended before publish so it is always persisted even
-        if the publish is cancelled.  Returns True when a row was appended,
-        False when instrument resolution fails (unknown symbol).
+        Publish-after-row: the row is computed first so that an
+        instrument-resolution failure cannot waste a ZMQ publish on
+        a candle that won't be persisted. Returns ``None`` when
+        instrument resolution fails (unknown symbol) — ZMQ is then
+        skipped too because no callers (frontend / strategy / backtest)
+        can correlate an unknown-instrument candle to a Snapper
+        Symbol downstream.
 
         Args:
             candle: Raw candle update from exchange client.
             exchange: Exchange name for message provenance.
             timeframe: Candle timeframe interval.
-            batch: Mutable batch list; a row is appended in-place.
+
+        Returns:
+            ``CandleUpsertRow`` ready for the writer queue, or
+            ``None`` when the instrument could not be resolved.
         """
         native_symbol = candle.symbol
         instrument_public_id = await self._ensure_instrument(native_symbol)
         if instrument_public_id is None:
-            return False
+            return None
         public_id = self._resolve_candle_public_id(
             instrument_public_id, timeframe, candle.interval_begin
         )
@@ -605,10 +801,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             vwap=candle.vwap,
             trades=candle.trades,
         )
-        batch.append(self._build_candle_row(candle_msg, instrument_public_id))
+        row = self._build_candle_row(candle_msg, instrument_public_id)
         await self._publish_message(topic, candle_msg)
         self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
-        return True
+        return row
 
     async def _tick_loop(self, symbols: list[str]) -> None:
         """Subscribe to tick data, publish to ZMQ, and hand off DB rows to the writer.
@@ -799,10 +995,15 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         return self._build_tick_row(tick_msg, instrument_public_id)
 
     async def _trade_loop(self, symbols: list[str]) -> None:
-        """Subscribe to trade data, publish to ZMQ, and batch DB writes.
+        """Subscribe to trade data, publish to ZMQ, and hand off DB rows to the writer.
 
-        Publish-first: ZMQ publish happens before instrument resolution,
-        so missing instruments skip DB but not ZMQ delivery.
+        Ingest-only mirror of :meth:`_tick_loop` (HV2-H7 pattern):
+        drains the exchange WS iterator, publishes to ZMQ via
+        :meth:`_process_trade`, and enqueues the resulting row on
+        :attr:`_trade_write_queue` for the dedicated writer task.
+        Never awaits ``_flush_trade_batch`` — that responsibility
+        lives entirely in :meth:`_trade_writer_loop` so SQLite
+        commit latency cannot block the WS-queue consumer.
 
         Args:
             symbols: List of symbols to subscribe to for trade data.
@@ -811,20 +1012,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
         exchange = self._get_data_exchange()
-        batch: list[TradeUpsertRow] = []
-        batch_start: float | None = None
-        ev_loop = asyncio.get_event_loop()
+        exchange_label = self._get_exchange_name()
         iterator = self._exchange_client.subscribe_trades(symbols).__aiter__()
         next_fut: asyncio.Future[TradeUpdate | object] | None = None
         try:
             while self.running:
                 next_fut = next_fut or asyncio.ensure_future(anext(iterator, _STREAM_END))
-                done, _ = await asyncio.wait(
-                    {next_fut}, timeout=self._batch_age_remaining(batch_start, ev_loop)
-                )
+                done, _ = await asyncio.wait({next_fut}, timeout=self._batch_max_age_s)
                 if not done:
-                    await self._flush_on_age(batch, self._flush_trade_batch)
-                    batch_start = None
                     continue
                 next_fut = None
                 trade = done.pop().result()
@@ -832,20 +1027,101 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     break
                 row = await self._process_trade(cast(TradeUpdate, trade), exchange)
                 if row is not None:
-                    batch.append(row)
-                    batch_start = self._track_batch_start(batch_start, ev_loop)
-                if len(batch) >= self._trade_batch_max_rows:
-                    await self._flush_trade_batch(batch)
-                    batch.clear()
-                    batch_start = None
+                    _enqueue_or_drop_oldest_trade_write(
+                        self._trade_write_queue, row, exchange_label
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"Trade loop error for {symbols}: {e}")
         finally:
             _cleanup_pending_future(next_fut)
-            if batch:
-                await self._flush_trade_batch(batch)
+
+    async def _trade_writer_loop(self) -> None:
+        """Drain :attr:`_trade_write_queue` and flush trades to the database.
+
+        Mirror of :meth:`_tick_writer_loop` — see that docstring for the
+        drain / ``task_done`` / ``timeout <= 0`` invariants. Trade
+        volume is ~10-50× lower than ticks (one row per executed
+        trade reported by the exchange), so the queue cap is
+        ``_TRADE_WRITE_QUEUE_MAX``.
+        """
+        batch: list[TradeUpsertRow] = []
+        batch_start: float | None = None
+        ev_loop = asyncio.get_event_loop()
+        async with self._open_trade_writer_session() as writer_session:
+            self._trade_writer_session = writer_session
+            try:
+                while self.running or not self._trade_write_queue.empty() or batch:
+                    if not self.running and self._trade_write_queue.empty() and batch:
+                        await self._flush_trade_writer_batch(batch)
+                        batch_start = None
+                        continue
+                    timeout = self._batch_age_remaining(batch_start, ev_loop)
+                    if timeout <= 0.0:
+                        await self._flush_trade_writer_batch(batch)
+                        batch_start = None
+                        continue
+                    try:
+                        row = await asyncio.wait_for(
+                            self._trade_write_queue.get(),
+                            timeout=min(timeout, _TRADE_WRITER_SHUTDOWN_POLL_S),
+                        )
+                    except TimeoutError:
+                        if (
+                            batch_start is None
+                            or self._batch_age_remaining(batch_start, ev_loop) <= 0.0
+                        ):
+                            await self._flush_trade_writer_batch(batch)
+                            batch_start = None
+                        continue
+                    batch.append(row)
+                    batch_start = self._track_batch_start(batch_start, ev_loop)
+                    if len(batch) >= self._trade_batch_max_rows:
+                        await self._flush_trade_writer_batch(batch)
+                        batch_start = None
+            finally:
+                self._trade_writer_session = None
+
+    @contextlib.asynccontextmanager
+    async def _open_trade_writer_session(self) -> AsyncIterator[AsyncSession | None]:
+        """Open the trade writer task's long-lived database session.
+
+        Mirror of :meth:`_open_tick_writer_session`. When the
+        publisher has a real repository attached, yields a single
+        ``AsyncSession`` reused across every trade flush so the
+        per-flush connection-acquire cost amortises over the writer
+        task's lifetime.
+
+        Yields:
+            ``AsyncSession`` bound to the repository's writer
+            connection, or ``None`` when no repository is available.
+        """
+        if self.repository is None:
+            yield None
+            return
+        async with self.repository.session() as session:
+            yield session
+
+    async def _flush_trade_writer_batch(self, batch: list[TradeUpsertRow]) -> None:
+        """Flush the trade writer batch and balance the queue ``task_done`` debt.
+
+        Mirror of :meth:`_flush_tick_writer_batch`. Captures
+        ``flushed_count`` before awaiting the flush so a future
+        mutation of ``batch`` during ``_flush_trade_batch`` cannot
+        desync the ``task_done`` count.
+
+        Args:
+            batch: In-flight write batch. Cleared in place on a
+                successful flush; left empty otherwise.
+        """
+        if not batch:
+            return
+        flushed_count = len(batch)
+        await self._flush_trade_batch(batch)
+        for _ in range(flushed_count):
+            self._trade_write_queue.task_done()
+        batch.clear()
 
     async def _process_trade(
         self, trade: TradeUpdate, exchange: MarketDataExchange
