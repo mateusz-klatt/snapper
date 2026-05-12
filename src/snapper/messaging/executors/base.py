@@ -1240,7 +1240,19 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 logger.error(f"[{exchange_name}] Error in execution handler: {e}")
 
     def _cleanup_expired_orphans(self) -> None:
-        """Remove orphaned executions that exceeded TTL."""
+        """Remove orphaned executions that exceeded TTL.
+
+        Called from two sites (HV2-M13):
+
+        - The scheduled 60s cleanup task — handles steady-state cases
+          where no new orphans arrive to trigger lazy eviction.
+        - The inline insert path in :meth:`_resolve_execution_order` —
+          drops stale entries BEFORE adding a new one so the dict
+          stays bounded by the 5s TTL window rather than the 60s
+          cleanup-task period. Without this lazy eviction a sustained
+          stream of unmapped executions plus a hung cleanup task would
+          let ``orphaned_executions`` grow unbounded.
+        """
         now = time.monotonic()
         expired_keys = [
             key
@@ -1298,6 +1310,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return None
         client_order_id = self.client_by_exchange.get(exchange_order_id)
         if client_order_id is None:
+            self._cleanup_expired_orphans()
             already_buffered = exchange_order_id in self.orphaned_executions
             self.orphaned_executions[exchange_order_id] = (execution, time.monotonic())
             if not already_buffered:

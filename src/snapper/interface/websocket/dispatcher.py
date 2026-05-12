@@ -262,6 +262,7 @@ async def _handle_one_message(
     ws_token_service: WsTokenService,
     raw_message: str,
     client_gap_detector: WsClientGapDetector,
+    dispatch_table: dict[type, Callable[[Any], Awaitable[None]]],
     db_url: str | None = None,
 ) -> bool:
     """Process a single incoming WebSocket message.
@@ -274,6 +275,7 @@ async def _handle_one_message(
         ws_token_service: Service for verifying ws_tokens.
         raw_message: Raw JSON string received from the client.
         client_gap_detector: Per-connection gap detector for client provenance.
+        dispatch_table: Pre-built handler dispatch table (one per connection).
         db_url: Optional database URL for control recording.
 
     Returns:
@@ -305,7 +307,7 @@ async def _handle_one_message(
             raw_payload=raw_message,
         )
         return success
-    await _dispatch_single_message(websocket, parsed, manager, user)
+    await _dispatch_single_message(parsed, dispatch_table)
     if isinstance(parsed, WSPingRequest):
         await _record_ws_telemetry(
             db_url,
@@ -337,6 +339,10 @@ async def dispatch_messages(
     Receives messages, validates them, and routes to appropriate handlers.
     Handles re-authentication, subscriptions, and pings.
 
+    The dispatch table is built once per connection (not per message) to
+    avoid repeated ``get_settings()``/``get_repository()`` calls and
+    closure allocations in the hot path (HV2-M1 micro-optimization).
+
     Args:
         websocket: The authenticated WebSocket connection.
         manager: WebSocket connection manager.
@@ -346,6 +352,7 @@ async def dispatch_messages(
         db_url: Optional database URL for control recording.
     """
     client_gap_detector = WsClientGapDetector()
+    dispatch_table = _build_dispatch_table(websocket, manager, user)
     try:
         while True:
             raw_message = await websocket.receive_text()
@@ -357,6 +364,7 @@ async def dispatch_messages(
                 ws_token_service,
                 raw_message,
                 client_gap_detector,
+                dispatch_table,
                 db_url,
             )
             if not should_continue:
@@ -410,20 +418,15 @@ def _build_dispatch_table(
 
 
 async def _dispatch_single_message(
-    websocket: WebSocket,
     message: WSClientMessage,
-    manager: WebSocketConnectionManager,
-    user: AuthPrincipal,
+    dispatch_table: dict[type, Callable[[Any], Awaitable[None]]],
 ) -> None:
     """Route a validated message to its handler.
 
     Args:
-        websocket: The authenticated WebSocket connection.
         message: Validated client message.
-        manager: WebSocket connection manager.
-        user: Authenticated user profile.
+        dispatch_table: Pre-built handler dispatch table (one per connection).
     """
-    dispatch_table = _build_dispatch_table(websocket, manager, user)
     handler = dispatch_table.get(type(message))
     assert handler is not None, f"Unhandled message type: {type(message).__name__}"
     await handler(message)

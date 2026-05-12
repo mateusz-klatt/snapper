@@ -2229,16 +2229,20 @@ class TestSQLAlchemyRepositoryDialects:
     async def test_get_candles_symbol_not_found(
         self, mock_postgres_repo: SQLAlchemyRepository
     ) -> None:
-        """Verify get_candles returns empty list when Symbol row is missing.
+        """Verify get_candles returns empty list when Symbol→Instrument JOIN is empty.
 
-        Given: No active Symbol row for the requested native_symbol,
+        Given: No active Symbol→Instrument pair for the requested native_symbol,
         When: get_candles is called,
-        Then: Returns empty list without querying Instrument.
+        Then: Returns empty list without querying the candles table
+            (the HV2-M5 JOIN collapses Symbol + Instrument resolution
+            into a single SELECT that returns no rows).
         """
         mock_session = AsyncMock()
-        mock_sym_result = Mock()
-        mock_sym_result.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value = mock_sym_result
+        mock_inst_result = Mock()
+        mock_inst_scalars = Mock()
+        mock_inst_scalars.first.return_value = None
+        mock_inst_result.scalars.return_value = mock_inst_scalars
+        mock_session.execute.return_value = mock_inst_result
         with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
@@ -2255,18 +2259,16 @@ class TestSQLAlchemyRepositoryDialects:
     ) -> None:
         """Verify get_candles returns empty list for unknown instrument.
 
-        Given: Symbol exists but no matching Instrument,
+        Given: Symbol exists in DB but JOIN finds no matching Instrument,
         When: get_candles is called,
         Then: Returns empty list.
         """
         mock_session = AsyncMock()
-        mock_sym_result = Mock()
-        mock_sym_result.scalar_one_or_none.return_value = "sym-pub-1"
         mock_inst_result = Mock()
         mock_inst_scalars = Mock()
         mock_inst_scalars.first.return_value = None
         mock_inst_result.scalars.return_value = mock_inst_scalars
-        mock_session.execute.side_effect = [mock_sym_result, mock_inst_result]
+        mock_session.execute.return_value = mock_inst_result
         with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
@@ -2281,13 +2283,11 @@ class TestSQLAlchemyRepositoryDialects:
     async def test_get_candles_success(self, mock_postgres_repo: SQLAlchemyRepository) -> None:
         """Verify get_candles returns candle data as dictionaries.
 
-        Given: Instrument with candles,
+        Given: Instrument with candles (JOIN returns one match),
         When: get_candles is called,
         Then: Returns list of candle dicts.
         """
         mock_session = AsyncMock()
-        mock_sym_result = Mock()
-        mock_sym_result.scalar_one_or_none.return_value = "sym-pub-1"
         mock_inst_result = Mock()
         mock_instrument = Mock()
         mock_instrument.id = 1
@@ -2310,7 +2310,7 @@ class TestSQLAlchemyRepositoryDialects:
         mock_row.session_id = "sess-1"
         mock_row.sequence_id = 1
         mock_candles_result.all.return_value = [mock_row]
-        mock_session.execute.side_effect = [mock_sym_result, mock_inst_result, mock_candles_result]
+        mock_session.execute.side_effect = [mock_inst_result, mock_candles_result]
         with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
@@ -2402,10 +2402,10 @@ async def test_get_trades_returns_empty_when_instrument_missing(
     """Verify get_trades returns empty list when instrument is not found."""
     with patch("snapper.data.repository.create_async_engine"):
         repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
-    mock_sym_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+    mock_inst_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
 
     async def _execute(*_: object, **__: object) -> SimpleNamespace:
-        return mock_sym_result
+        return mock_inst_result
 
     mock_session = AsyncMock()
     mock_session.execute.side_effect = _execute
@@ -2435,15 +2435,9 @@ async def test_get_trades_with_exchange_filter(
     """Verify get_trades filters by exchange when provided."""
     with patch("snapper.data.repository.create_async_engine"):
         repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
-    mock_sym_result = SimpleNamespace(scalar_one_or_none=lambda: "sym-pub-1")
     mock_inst_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
-    call_count = 0
 
     async def _execute(*_: object, **__: object) -> SimpleNamespace:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return mock_sym_result
         return mock_inst_result
 
     mock_session = AsyncMock()
@@ -3858,10 +3852,10 @@ async def test_get_ticks_returns_empty_when_instrument_missing(
     """Verify get_ticks returns empty list when instrument is not found."""
     with patch("snapper.data.repository.create_async_engine"):
         repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
-    mock_sym_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+    mock_inst_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
 
     async def _execute(*_: object, **__: object) -> SimpleNamespace:
-        return mock_sym_result
+        return mock_inst_result
 
     mock_session = AsyncMock()
     mock_session.execute.side_effect = _execute
@@ -3893,7 +3887,6 @@ async def test_get_ticks_returns_rows_when_instrument_found(
         repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     ts = datetime(2024, 6, 1, tzinfo=UTC)
     mock_inst = SimpleNamespace(public_id="inst-pub-1")
-    mock_sym_result = SimpleNamespace(scalar_one_or_none=lambda: "sym-pub-1")
     mock_inst_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: mock_inst))
     tick_row = SimpleNamespace(
         timestamp=ts,
@@ -3912,8 +3905,6 @@ async def test_get_ticks_returns_rows_when_instrument_found(
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            return mock_sym_result
-        if call_count == 2:
             return mock_inst_result
         return mock_query_result
 
@@ -3953,7 +3944,6 @@ async def test_get_trades_returns_executed_at(
     bus_time = datetime(2024, 6, 1, 0, 0, 1, tzinfo=UTC)
     event_time = datetime(2024, 6, 1, 0, 0, 0, tzinfo=UTC)
     mock_inst = SimpleNamespace(public_id="inst-pub-1")
-    mock_sym_result = SimpleNamespace(scalar_one_or_none=lambda: "sym-pub-1")
     mock_inst_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: mock_inst))
     trade_row = SimpleNamespace(
         timestamp=bus_time,
@@ -3970,8 +3960,6 @@ async def test_get_trades_returns_executed_at(
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            return mock_sym_result
-        if call_count == 2:
             return mock_inst_result
         return mock_query_result
 

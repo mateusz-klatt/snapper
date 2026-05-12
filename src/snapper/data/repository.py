@@ -4736,6 +4736,14 @@ class SQLAlchemyRepository(Repository):
     ) -> Instrument | None:
         """Resolve active Instrument from native symbol and exchange.
 
+        Collapses the legacy Symbol→Instrument lookup waterfall into
+        a single joined query (HV2-M5). Every market-data read API
+        (``get_candles`` / ``get_ticks`` / ``get_trades`` /
+        :meth:`iter_ticks` / :meth:`iter_trades`) hit this method
+        twice: one SELECT to look up the Symbol's ``public_id``,
+        then another to fetch the matching active Instrument row.
+        The JOIN below resolves both in one round-trip.
+
         Args:
             session: Active database session.
             native_symbol: Canonical symbol string (e.g. 'BTC-USD').
@@ -4746,16 +4754,14 @@ class SQLAlchemyRepository(Repository):
             Active Instrument or None if symbol/instrument not found.
         """
         s_ts, s_kt = where_active(Symbol, as_of)
-        sym_q = await session.execute(
-            select(Symbol.public_id).where(Symbol.native_symbol == native_symbol, s_ts, s_kt)
-        )
-        symbol_pid = sym_q.scalar_one_or_none()
-        if symbol_pid is None:
-            return None
         i_ts, i_kt = where_active(Instrument, as_of)
         q_inst = await session.execute(
-            select(Instrument).where(
-                Instrument.symbol_public_id == symbol_pid,
+            select(Instrument)
+            .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
+            .where(
+                Symbol.native_symbol == native_symbol,
+                s_ts,
+                s_kt,
                 Instrument.exchange == exchange,
                 i_ts,
                 i_kt,
