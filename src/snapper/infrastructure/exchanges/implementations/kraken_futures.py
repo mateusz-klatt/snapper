@@ -20,6 +20,7 @@ established pattern).
 """
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
@@ -36,6 +37,8 @@ from loguru import logger
 
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
+from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
+from snapper.infrastructure.exchanges._trade_candle_builder import enqueue_or_drop_oldest_candle
 from snapper.infrastructure.exchanges.adapters.kraken_futures import _ORDER_TYPE_MAP
 from snapper.infrastructure.exchanges.adapters.kraken_futures import _SIDE_MAP
 from snapper.infrastructure.exchanges.adapters.kraken_futures import _STATUS_MAP
@@ -60,7 +63,6 @@ from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
-from snapper.infrastructure.symbols.functions import native_to_ccxt
 from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for authenticated operations"
@@ -96,54 +98,6 @@ def _timeframe_to_seconds(timeframe: str) -> int:
     except KeyError as exc:
         supported = ", ".join(sorted(_TIMEFRAME_SECONDS))
         raise ValueError(f"Unsupported timeframe: {timeframe}. Supported: {supported}") from exc
-
-
-def _build_ccxt_symbol_map(symbols: list[str]) -> dict[str, str]:
-    """Map native symbols to CCXT aliases, skipping unsupported entries."""
-    ccxt_map: dict[str, str] = {}
-    for symbol in symbols:
-        try:
-            ccxt_map[symbol] = native_to_ccxt(symbol)
-        except ValueError:
-            logger.warning(f"No CCXT alias for {symbol}, skipping candle polling")
-    return ccxt_map
-
-
-def _build_candle_update(
-    native_symbol: str,
-    candle: OhlcvSnapshot,
-    interval_seconds: int,
-) -> CandleUpdate:
-    """Convert a polled OHLCV candle into a CandleUpdate."""
-    return CandleUpdate(
-        symbol=native_symbol,
-        open=candle.open,
-        high=candle.high,
-        low=candle.low,
-        close=candle.close,
-        vwap=0.0,
-        trades=0,
-        volume=candle.volume,
-        interval_begin=datetime.fromtimestamp(candle.timestamp, tz=UTC),
-        interval=interval_seconds,
-    )
-
-
-def _collect_candle_updates(
-    native_symbol: str,
-    candles: list[OhlcvSnapshot],
-    interval_seconds: int,
-    last_seen: dict[str, float],
-) -> list[CandleUpdate]:
-    """Build yielded candle updates and advance last-seen timestamps."""
-    updates: list[CandleUpdate] = []
-    last_seen_timestamp = last_seen.get(native_symbol, 0)
-    for candle in candles:
-        if candle.timestamp >= last_seen_timestamp:
-            last_seen[native_symbol] = candle.timestamp
-            last_seen_timestamp = candle.timestamp
-            updates.append(_build_candle_update(native_symbol, candle, interval_seconds))
-    return updates
 
 
 _DROP_LOG_INTERVAL_S = 1.0
@@ -257,6 +211,9 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         self._private_ws_client: FuturesWSClient | None = None
         self._tick_queue: asyncio.Queue[TickerUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
         self._trade_queue: asyncio.Queue[TradeUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+        self._candle_queue: asyncio.Queue[CandleUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+        self._candle_builder = TradeCandleBuilder(interval_seconds=60)
+        self._candle_aggregator_task: asyncio.Task[None] | None = None
         self._execution_queue: asyncio.Queue[ExecutionUpdate] = asyncio.Queue(
             maxsize=_QUEUE_MAX_SIZE
         )
@@ -1059,68 +1016,93 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         symbols: list[str],
         timeframe: str = "1m",
     ) -> AsyncIterator[CandleUpdate]:
-        """Subscribe to candle updates via REST polling.
+        """Subscribe to 1-minute candles synthesized from the live trade stream.
 
-        Kraken Futures has no WebSocket candle feed. This method polls
-        ``get_ohlcv()`` at regular intervals and yields new candles as
-        they appear. Deduplicates by tracking the latest ``open_at``
-        timestamp per symbol.
+        Kraken Futures has no WebSocket candle channel. The previous
+        implementation polled the REST ``/derivatives/api/v4/charts/`` /
+        CCXT ``fetch_ohlcv`` endpoint per symbol per minute, which on
+        the 330-product live wildcard meant hundreds of REST calls per
+        minute against the venue and was a real IP-ban risk over a
+        multi-hour session. This implementation folds every trade
+        delivered via the WS ``trade`` / ``trade_snapshot`` channels
+        into a per-symbol-per-minute accumulator (see
+        :class:`snapper.infrastructure.exchanges._trade_candle_builder.TradeCandleBuilder`)
+        and emits the candle once the minute closes. Symbols with no
+        trades in a minute simply have no candle row for that minute.
 
         Args:
-            symbols: Native symbols (e.g., ``BTC-USD-PERP``).
-            timeframe: Candle interval (e.g., ``1m``, ``1h``).
+            symbols: Native symbols (e.g. ``BTC-USD-PERP``). Currently
+                informational only — the builder emits a candle for
+                every symbol whose trades it has actually seen.
+            timeframe: Candle interval. Only ``"1m"`` is supported;
+                anything else raises ``ValueError`` (use
+                :meth:`get_ohlcv` for historical / multi-interval
+                queries via the existing backfill paths).
 
         Returns:
-            AsyncIterator yielding CandleUpdate for each new candle.
-        """
-        return self._poll_candles(symbols, timeframe)
+            AsyncIterator yielding ``CandleUpdate`` for each completed
+            1-minute bucket.
 
-    async def _poll_candles(
+        Raises:
+            ValueError: When ``timeframe`` is not ``"1m"``.
+        """
+        return self._subscribe_candles_impl(symbols, timeframe)
+
+    async def _subscribe_candles_impl(
         self,
         symbols: list[str],
         timeframe: str,
     ) -> AsyncIterator[CandleUpdate]:
-        """Poll OHLCV data and yield CandleUpdate items.
+        """Implement candle streaming by yielding from :attr:`_candle_queue`.
 
-        Converts native symbols to CCXT format via the symbol mapper.
-        Skips symbols that have no CCXT alias (e.g., dated futures).
+        Starts the background :meth:`_candle_aggregator` task on first
+        call. Cancels it cleanly on iterator close so a publisher
+        shutdown does not leak the task.
 
         Args:
-            symbols: Native symbols to poll.
-            timeframe: Candle interval string.
+            symbols: Native symbols (informational — see ``subscribe_candles``).
+            timeframe: Candle interval. Must be ``"1m"``.
 
         Yields:
-            CandleUpdate for each new candle detected.
+            ``CandleUpdate`` for each completed 1-minute bucket.
+
+        Raises:
+            ValueError: When ``timeframe`` is not ``"1m"``.
         """
-        last_seen: dict[str, float] = {}
-        poll_interval = 60.0
-        interval_seconds = _timeframe_to_seconds(timeframe)
-        ccxt_map = _build_ccxt_symbol_map(symbols)
-        if not ccxt_map:
-            logger.warning("No symbols with CCXT aliases for candle polling")
-            return
-        while True:
-            for native_sym, ccxt_sym in ccxt_map.items():
+        if timeframe != "1m":
+            raise ValueError(
+                f"Kraken Futures only supports 1m candles (synthesized from trades). "
+                f"Got {timeframe!r}; use get_ohlcv() for other intervals."
+            )
+        if self._candle_aggregator_task is None or self._candle_aggregator_task.done():
+            self._candle_aggregator_task = asyncio.create_task(self._candle_aggregator())
+        try:
+            while True:
                 try:
-                    since_ts = last_seen.get(native_sym)
-                    since_ms = int(since_ts * 1000) if since_ts else None
-                    candles = await self.get_ohlcv(
-                        symbol=ccxt_sym,
-                        timeframe=timeframe,
-                        since=since_ms,
-                        limit=5,
+                    candle = await asyncio.wait_for(
+                        self._candle_queue.get(), timeout=_QUEUE_DRAIN_TIMEOUT
                     )
-                    updates = _collect_candle_updates(
-                        native_sym,
-                        candles,
-                        interval_seconds,
-                        last_seen,
-                    )
-                    for update in updates:
-                        yield update
-                except Exception:
-                    logger.exception(f"Failed to poll candles for {native_sym}")
-            await asyncio.sleep(poll_interval)
+                    yield candle
+                except TimeoutError:
+                    await asyncio.sleep(0.01)
+        finally:
+            task = self._candle_aggregator_task
+            if task and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    async def _candle_aggregator(self) -> None:
+        """Emit completed 1-minute candles roughly once per second.
+
+        Wakes every second, asks :attr:`_candle_builder` for any
+        bucket whose minute has finished, and routes each into
+        :attr:`_candle_queue`.
+        """
+        while True:
+            await asyncio.sleep(1.0)
+            for candle in self._candle_builder.pop_completed(datetime.now(UTC)):
+                enqueue_or_drop_oldest_candle(self._candle_queue, candle, "Candle")
 
     def subscribe_trades(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
         """Subscribe to real-time trade updates via WebSocket.

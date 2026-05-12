@@ -138,15 +138,22 @@ class KrakenEquitiesMarketDataPublisher(
         return 0
 
     async def _candle_loop(self, symbols: list[str], timeframe: str) -> None:
-        """No-op candle loop.
+        """Drive the trade-synthesized candle stream into the base loop.
 
-        Kraken Equities candle data should be fetched via REST if needed.
+        Kraken Equities has no WebSocket OHLC channel; the exchange
+        client builds 1-minute candles client-side from the live
+        trade stream (see
+        :class:`snapper.infrastructure.exchanges._trade_candle_builder.TradeCandleBuilder`).
+        REST polling per FCM contract per minute would mean hundreds
+        of iapi calls and meaningful IP-ban risk; trade-based
+        synthesis uses data the publisher already receives via WS
+        and adds zero outbound REST traffic.
 
         Args:
-            symbols: Contract symbols (unused).
-            timeframe: Candle interval (unused).
+            symbols: Native dash-separated symbols
+                (e.g. ``CLM6-NYMEX``, ``MNQM6-CME``). Informational
+                only — the builder emits candles for whichever
+                symbols actually saw trades.
+            timeframe: Snapper-style candle interval. Must be ``1m``.
         """
-        logger.info(
-            f"KrakenEquitiesMarketDataPublisher: Candle loop disabled "
-            f"(no WS candle feed for kraken_equities, timeframe={timeframe})"
-        )
+        await super()._candle_loop(symbols, timeframe)

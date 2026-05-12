@@ -31,7 +31,10 @@ Limitations:
 """
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
+from datetime import UTC
+from datetime import datetime
 from time import monotonic
 from typing import Any
 
@@ -41,6 +44,8 @@ from loguru import logger
 
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
+from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
+from snapper.infrastructure.exchanges._trade_candle_builder import enqueue_or_drop_oldest_candle
 from snapper.infrastructure.exchanges.adapters.kraken_equities import (
     parse_kraken_equities_instrument,
 )
@@ -168,6 +173,9 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         self._ws_client: SpotWSClient | None = None
         self._tick_queue: asyncio.Queue[TickerUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
         self._trade_queue: asyncio.Queue[TradeUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+        self._candle_queue: asyncio.Queue[CandleUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+        self._candle_builder = TradeCandleBuilder(interval_seconds=60)
+        self._candle_aggregator_task: asyncio.Task[None] | None = None
 
     async def connect(self) -> None:
         """Establish connection (no-op until WS subscription).
@@ -240,13 +248,25 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                 logger.debug(f"Skipping unparseable equities ticker: {exc}")
 
     def _handle_trade_message(self, message: dict[str, Any]) -> None:
-        """Parse and enqueue equities trade updates."""
+        """Parse, enqueue, and fold equities trade updates into the candle builder.
+
+        Each parsed :class:`TradeUpdate` is both placed on the trade
+        queue (for downstream consumers that want raw fills) AND fed
+        into :attr:`_candle_builder` so the once-per-second
+        :meth:`_candle_aggregator` can emit completed 1-minute candles
+        synthesized from the trade stream. This replaces the previous
+        no-op candle path: Kraken Equities has no WS OHLC channel and
+        REST polling 100+ FCM contracts every minute risks rate-limit
+        / IP-ban on the iapi endpoint.
+        """
         for item in message.get("data", []):
             try:
                 trade = parse_kraken_equities_trade(item)
-                _enqueue_or_drop_oldest(self._trade_queue, trade, "Trade")
             except (ValueError, KeyError) as exc:
                 logger.debug(f"Skipping unparseable equities trade: {exc}")
+                continue
+            _enqueue_or_drop_oldest(self._trade_queue, trade, "Trade")
+            self._candle_builder.update(trade)
 
     async def _ensure_ws_connected(self) -> None:
         """Connect the SpotWSClient if not already connected."""
@@ -510,19 +530,92 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         symbols: list[str],
         timeframe: str = "1m",
     ) -> AsyncIterator[CandleUpdate]:
-        """Subscribe to candle updates (not available for Kraken Equities).
+        """Subscribe to 1-minute candles synthesized from the live trade stream.
+
+        Kraken Equities has no WebSocket OHLC channel. Rather than
+        polling the iapi ``ticker/history`` REST endpoint per symbol
+        per minute (which would mean hundreds of REST calls per minute
+        across the FCM contract universe and risks rate-limit / IP-ban),
+        this client folds every parsed trade into a per-symbol-per-
+        minute accumulator and emits the candle once the minute is
+        complete. Symbols with no trades in a minute simply have no
+        candle row for that minute.
 
         Args:
-            symbols: Contract symbols (unused).
-            timeframe: Candle interval (unused).
+            symbols: Native dash-separated symbols (e.g. ``MNQM6-CME``).
+                Currently informational only — the builder emits a
+                candle for every symbol that actually saw trades.
+            timeframe: Candle interval. Only ``"1m"`` is supported;
+                anything else raises ``ValueError``.
 
         Returns:
-            Never returns; always raises.
+            AsyncIterator yielding ``CandleUpdate`` for each completed
+            1-minute bucket.
 
         Raises:
-            NotImplementedError: Always.
+            ValueError: When ``timeframe`` is not ``"1m"``.
         """
-        raise NotImplementedError("Kraken Equities candle subscription not implemented")
+        return self._subscribe_candles_impl(symbols, timeframe)
+
+    async def _subscribe_candles_impl(
+        self,
+        symbols: list[str],
+        timeframe: str,
+    ) -> AsyncIterator[CandleUpdate]:
+        """Implement candle streaming by yielding from :attr:`_candle_queue`.
+
+        Starts the background :meth:`_candle_aggregator` task on first
+        call. Cancels it cleanly on iterator close so a publisher
+        shutdown does not leak the task.
+
+        Args:
+            symbols: Native dash-separated symbols (informational; the
+                builder emits whatever trades it has actually seen).
+            timeframe: Candle interval. Must be ``"1m"``.
+
+        Yields:
+            ``CandleUpdate`` for each completed 1-minute bucket.
+
+        Raises:
+            ValueError: When ``timeframe`` is not ``"1m"``.
+        """
+        if timeframe != "1m":
+            raise ValueError(
+                f"Kraken Equities only supports 1m candles (synthesized from trades). "
+                f"Got {timeframe!r}; use get_ohlcv() for other intervals."
+            )
+        if self._candle_aggregator_task is None or self._candle_aggregator_task.done():
+            self._candle_aggregator_task = asyncio.create_task(self._candle_aggregator())
+        try:
+            while True:
+                try:
+                    candle = await asyncio.wait_for(
+                        self._candle_queue.get(), timeout=_QUEUE_DRAIN_TIMEOUT
+                    )
+                    yield candle
+                except TimeoutError:
+                    await asyncio.sleep(0.01)
+        finally:
+            task = self._candle_aggregator_task
+            if task and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    async def _candle_aggregator(self) -> None:
+        """Emit completed 1-minute candles roughly once per second.
+
+        Wakes every second, asks :attr:`_candle_builder` for any
+        bucket whose minute has finished, and routes each into
+        :attr:`_candle_queue`. The 1 s tick is intentionally tight
+        relative to the 60 s bucket width: it bounds the delay
+        between a minute closing and its candle reaching the queue to
+        at most one second.
+        """
+        while True:
+            await asyncio.sleep(1.0)
+            for candle in self._candle_builder.pop_completed(datetime.now(UTC)):
+                enqueue_or_drop_oldest_candle(self._candle_queue, candle, "Candle")
 
     def subscribe_trades(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
         """Subscribe to real-time trade updates via WebSocket.

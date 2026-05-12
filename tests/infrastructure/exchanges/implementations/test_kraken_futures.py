@@ -20,7 +20,6 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
-from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
@@ -29,8 +28,6 @@ from snapper.infrastructure.exchanges.implementations import kraken_futures as k
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
-from snapper.infrastructure.exchanges.implementations.kraken_futures import _build_ccxt_symbol_map
-from snapper.infrastructure.exchanges.implementations.kraken_futures import _collect_candle_updates
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _enqueue_or_drop_oldest
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _timeframe_to_seconds
 
@@ -947,278 +944,129 @@ class TestStubMethods:
 
 
 class TestSubscribeCandles:
-    """Tests for REST-based candle polling via subscribe_candles."""
+    """Tests for trade-synthesized candle streaming via subscribe_candles."""
 
     @pytest.mark.asyncio
-    async def test_yields_candle_update(self, client: KrakenFuturesExchangeClient) -> None:
-        """subscribe_candles yields CandleUpdate from get_ohlcv polling.
+    async def test_non_1m_raises_value_error(self, client: KrakenFuturesExchangeClient) -> None:
+        """subscribe_candles rejects any timeframe other than 1m.
 
-        Given: Client with mocked get_ohlcv returning one candle,
-        When: subscribe_candles is iterated once,
-        Then: Yields a CandleUpdate with correct fields.
+        Given: An ``"1h"`` request,
+        When: subscribe_candles is iterated,
+        Then: A ``ValueError`` surfaces on the first ``__anext__``
+            pointing the caller at ``get_ohlcv`` for historical
+            backfill (still REST-based and intentionally so).
         """
-        candle = OhlcvSnapshot(
-            timestamp=1700000000.0,
-            open=50000.0,
-            high=51000.0,
-            low=49000.0,
-            close=50500.0,
-            volume=100.0,
-        )
-        call_count = 0
+        iterator = client.subscribe_candles(["BTC-USD-PERP"], "1h")
+        with pytest.raises(ValueError, match="only supports 1m"):
+            await iterator.__anext__()
 
-        async def mock_ohlcv(
-            symbol: str,
-            timeframe: str = "1h",
-            since: int | None = None,
-            limit: int | None = None,
-        ) -> list[OhlcvSnapshot]:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return [candle]
-            return []
+    @pytest.mark.asyncio
+    async def test_reuses_running_aggregator_task(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A second subscribe_candles call does not spawn a duplicate aggregator.
 
-        client.get_ohlcv = mock_ohlcv
+        Given: A pre-existing aggregator task that is still running,
+        When: subscribe_candles is iterated and immediately closed,
+        Then: The same task object remains the client's aggregator
+            handle (the ``is None or .done()`` guard short-circuits).
+        """
+        import contextlib as _ctx
+
+        async def never_returns() -> None:
+            while True:
+                await asyncio.sleep(60)
+
+        client._candle_aggregator_task = asyncio.create_task(never_returns())
+        original_task = client._candle_aggregator_task
+        try:
+            iterator = client.subscribe_candles(["BTC-USD-PERP"], "1m")
+            with _ctx.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(iterator.__anext__(), timeout=0.05)
+            assert client._candle_aggregator_task is original_task
+        finally:
+            original_task.cancel()
+            with _ctx.suppress(asyncio.CancelledError):
+                await original_task
+
+    @pytest.mark.asyncio
+    async def test_timeout_loops_until_candle_arrives(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """The yield loop survives queue-empty timeouts without spinning out.
+
+        Given: The candle queue is empty and the aggregator never
+            emits anything,
+        When: subscribe_candles is awaited with a tight outer timeout,
+        Then: The inner ``asyncio.wait_for`` raises ``TimeoutError``,
+            the ``await asyncio.sleep(0.01)`` branch executes, and the
+            outer ``wait_for`` is what finally bails.
+        """
+        real_sleep = asyncio.sleep
+
+        async def fast_sleep(_: float) -> None:
+            await real_sleep(0)
+
         with patch(
-            "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_ccxt",
-            return_value="BTC/USD:USD",
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.asyncio.sleep",
+            new=fast_sleep,
         ):
-            iterator = client.subscribe_candles(["BTC-USD-PERP"], "1h")
-            result = await iterator.__anext__()
+            iterator = client.subscribe_candles(["BTC-USD-PERP"], "1m")
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+
+    @pytest.mark.asyncio
+    async def test_emits_candle_built_from_trade_stream(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """subscribe_candles emits a candle once the minute closes.
+
+        Given: A trade with a past timestamp is folded into the
+            builder (its minute is therefore strictly before the
+            aggregator's ``now``),
+        When: subscribe_candles is iterated with ``asyncio.sleep``
+            collapsed so the aggregator ticks immediately,
+        Then: A ``CandleUpdate`` carrying the trade's OHLCV is
+            yielded. We avoid mocking ``datetime.now`` because that
+            would break the ``.replace().timestamp()`` chain inside
+            the builder.
+        """
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
+        from snapper.infrastructure.exchanges.contracts import TradeUpdate
+
+        past_minute = (_dt.now(_UTC) - _td(minutes=5)).replace(second=0, microsecond=0)
+        trade = TradeUpdate(
+            symbol="BTC-USD-PERP",
+            side="buy",
+            quantity=0.5,
+            price=50000.0,
+            ord_type="fill",
+            timestamp=past_minute,
+            trade_id="t1",
+        )
+        client._candle_builder.update(trade)
+
+        real_sleep = asyncio.sleep
+
+        async def fast_sleep(_: float) -> None:
+            await real_sleep(0)
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.asyncio.sleep",
+            new=fast_sleep,
+        ):
+            iterator = client.subscribe_candles(["BTC-USD-PERP"], "1m")
+            result = await asyncio.wait_for(iterator.__anext__(), timeout=2.0)
         assert isinstance(result, CandleUpdate)
         assert result.symbol == "BTC-USD-PERP"
         assert result.open == pytest.approx(50000.0)
-        assert result.interval == 3600
-
-    @pytest.mark.asyncio
-    async def test_deduplicates_by_timestamp(self, client: KrakenFuturesExchangeClient) -> None:
-        """subscribe_candles skips candles with timestamps already seen.
-
-        Given: get_ohlcv returns a new candle followed by a stale one,
-        When: subscribe_candles is iterated,
-        Then: Only the newer candle is yielded (stale one skipped).
-        """
-        new_candle = OhlcvSnapshot(
-            timestamp=1700003600.0,
-            open=50000.0,
-            high=51000.0,
-            low=49000.0,
-            close=50500.0,
-            volume=100.0,
-        )
-        stale_candle = OhlcvSnapshot(
-            timestamp=1700000000.0,
-            open=49000.0,
-            high=50000.0,
-            low=48000.0,
-            close=49500.0,
-            volume=80.0,
-        )
-
-        async def mock_ohlcv(
-            symbol: str,
-            timeframe: str = "1h",
-            since: int | None = None,
-            limit: int | None = None,
-        ) -> list[OhlcvSnapshot]:
-            return [new_candle, stale_candle]
-
-        client.get_ohlcv = mock_ohlcv
-        results: list[CandleUpdate] = []
-        with (
-            patch(
-                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_ccxt",
-                return_value="BTC/USD:USD",
-            ),
-            patch(
-                "snapper.infrastructure.exchanges.implementations.kraken_futures.asyncio.sleep",
-                side_effect=asyncio.CancelledError,
-            ),
-        ):
-            iterator = client.subscribe_candles(["BTC-USD-PERP"], "1h")
-            try:
-                async for update in iterator:
-                    results.append(update)
-            except asyncio.CancelledError:
-                pass
-        assert len(results) == 1
-        assert results[0].open == pytest.approx(50000.0)
-
-    @pytest.mark.asyncio
-    async def test_re_yields_updated_candle_same_timestamp(
-        self, client: KrakenFuturesExchangeClient
-    ) -> None:
-        """subscribe_candles re-yields candle when OHLCV changes for same open_at.
-
-        Given: get_ohlcv returns candle with same timestamp but updated close,
-        When: subscribe_candles is iterated,
-        Then: Both versions are yielded (allows SCD2 revision downstream).
-        """
-        v1 = OhlcvSnapshot(
-            timestamp=1700000000.0,
-            open=50000.0,
-            high=51000.0,
-            low=49000.0,
-            close=50500.0,
-            volume=100.0,
-        )
-        v2 = OhlcvSnapshot(
-            timestamp=1700000000.0,
-            open=50000.0,
-            high=52000.0,
-            low=49000.0,
-            close=51500.0,
-            volume=150.0,
-        )
-        call_count = 0
-
-        async def mock_ohlcv(
-            symbol: str,
-            timeframe: str = "1h",
-            since: int | None = None,
-            limit: int | None = None,
-        ) -> list[OhlcvSnapshot]:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return [v1]
-            if call_count == 2:
-                return [v2]
-            return []
-
-        client.get_ohlcv = mock_ohlcv
-        results: list[CandleUpdate] = []
-        with (
-            patch(
-                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_ccxt",
-                return_value="BTC/USD:USD",
-            ),
-            patch(
-                "snapper.infrastructure.exchanges.implementations.kraken_futures.asyncio.sleep",
-                side_effect=[None, asyncio.CancelledError],
-            ),
-        ):
-            iterator = client.subscribe_candles(["BTC-USD-PERP"], "1h")
-            try:
-                async for update in iterator:
-                    results.append(update)
-            except asyncio.CancelledError:
-                pass
-        assert len(results) == 2
-        assert results[0].close == pytest.approx(50500.0)
-        assert results[1].close == pytest.approx(51500.0)
-
-    @pytest.mark.asyncio
-    async def test_skips_symbols_without_ccxt_alias(
-        self, client: KrakenFuturesExchangeClient
-    ) -> None:
-        """subscribe_candles skips symbols that have no CCXT mapping.
-
-        Given: native_to_ccxt raises ValueError for a symbol,
-        When: subscribe_candles is called,
-        Then: Returns without yielding.
-        """
-        with patch(
-            "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_ccxt",
-            side_effect=ValueError("unknown"),
-        ):
-            iterator = client.subscribe_candles(["UNKNOWN-SYM"], "1h")
-            results = [c async for c in iterator]
-        assert results == []
-
-    @pytest.mark.asyncio
-    async def test_handles_api_error(self, client: KrakenFuturesExchangeClient) -> None:
-        """subscribe_candles logs exception and continues on API error.
-
-        Given: get_ohlcv raises on first call,
-        When: subscribe_candles iterates,
-        Then: Does not crash, continues polling loop.
-        """
-        call_count = 0
-
-        async def mock_ohlcv(
-            symbol: str,
-            timeframe: str = "1h",
-            since: int | None = None,
-            limit: int | None = None,
-        ) -> list[OhlcvSnapshot]:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise RuntimeError("API error")
-            return []
-
-        client.get_ohlcv = mock_ohlcv
-        with (
-            patch(
-                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_ccxt",
-                return_value="BTC/USD:USD",
-            ),
-            patch(
-                "snapper.infrastructure.exchanges.implementations.kraken_futures.asyncio.sleep",
-                side_effect=asyncio.CancelledError,
-            ),
-        ):
-            iterator = client.subscribe_candles(["BTC-USD-PERP"], "1h")
-            results: list[CandleUpdate] = []
-            try:
-                async for update in iterator:
-                    results.append(update)
-            except asyncio.CancelledError:
-                pass
-        assert results == []
-        assert call_count == 1
-
-
-class TestCandlePollingHelpers:
-    """Tests for candle polling helper functions."""
-
-    def test_build_ccxt_symbol_map_skips_unsupported(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Supported symbols are mapped while unsupported ones are skipped."""
-
-        def mock_native_to_ccxt(symbol: str) -> str:
-            if symbol == "BTC-USD-PERP":
-                return "BTC/USD:USD"
-            raise ValueError("unknown symbol")
-
-        monkeypatch.setattr(mod, "native_to_ccxt", mock_native_to_ccxt)
-
-        result = _build_ccxt_symbol_map(["BTC-USD-PERP", "UNKNOWN-SYM"])
-
-        assert result == {"BTC-USD-PERP": "BTC/USD:USD"}
-
-    def test_collect_candle_updates_keeps_same_timestamp_revision(self) -> None:
-        """Same-timestamp revisions are emitted while older candles are skipped."""
-        last_seen = {"BTC-USD-PERP": 1700000000.0}
-        candles = [
-            OhlcvSnapshot(
-                timestamp=1700000000.0,
-                open=50000.0,
-                high=52000.0,
-                low=49000.0,
-                close=51500.0,
-                volume=150.0,
-            ),
-            OhlcvSnapshot(
-                timestamp=1699996400.0,
-                open=49000.0,
-                high=50000.0,
-                low=48000.0,
-                close=49500.0,
-                volume=80.0,
-            ),
-        ]
-
-        updates = _collect_candle_updates("BTC-USD-PERP", candles, 3600, last_seen)
-
-        assert len(updates) == 1
-        assert updates[0].symbol == "BTC-USD-PERP"
-        assert updates[0].close == pytest.approx(51500.0)
-        assert last_seen["BTC-USD-PERP"] == pytest.approx(1700000000.0)
+        assert result.close == pytest.approx(50000.0)
+        assert result.volume == pytest.approx(0.5)
+        assert result.trades == 1
+        assert result.interval == 60
 
 
 class TestTimeframeToSeconds:

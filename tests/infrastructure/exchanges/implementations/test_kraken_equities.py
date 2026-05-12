@@ -1,6 +1,7 @@
 """Tests for Kraken Equities exchange client."""
 
 import asyncio
+import contextlib
 from collections.abc import Generator
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -488,15 +489,127 @@ class TestNotImplementedMethods:
         with pytest.raises(NotImplementedError, match="WebSocket ticker"):
             await client.get_ticker("CLM6-NYMEX")
 
-    def test_subscribe_candles_raises(self, client: KrakenEquitiesExchangeClient) -> None:
-        """subscribe_candles raises NotImplementedError.
+    @pytest.mark.asyncio
+    async def test_subscribe_candles_reuses_running_aggregator_task(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """A second subscribe_candles call does not spawn a duplicate aggregator.
 
-        Given: Market-data-only client,
-        When: subscribe_candles is called,
-        Then: Raises NotImplementedError.
+        Given: A pre-existing aggregator task that is still running,
+        When: subscribe_candles is iterated and immediately closed,
+        Then: The same task object remains the client's aggregator
+            handle (the ``is None or .done()`` guard short-circuits).
         """
-        with pytest.raises(NotImplementedError, match="candle subscription not implemented"):
-            client.subscribe_candles(["CLM6-NYMEX"])
+
+        async def never_returns() -> None:
+            while True:
+                await asyncio.sleep(60)
+
+        client._candle_aggregator_task = asyncio.create_task(never_returns())
+        original_task = client._candle_aggregator_task
+        try:
+            iterator = client.subscribe_candles(["MNQM6-CME"], "1m")
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(iterator.__anext__(), timeout=0.05)
+            assert client._candle_aggregator_task is original_task
+        finally:
+            original_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await original_task
+
+    @pytest.mark.asyncio
+    async def test_subscribe_candles_timeout_loops_until_candle_arrives(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """The yield loop survives queue-empty timeouts without spinning out.
+
+        Given: The candle queue is empty and the aggregator never
+            emits anything,
+        When: subscribe_candles is awaited with a tight outer timeout,
+        Then: The inner ``asyncio.wait_for`` raises ``TimeoutError``,
+            the ``await asyncio.sleep(0.01)`` branch executes, and
+            the outer ``wait_for`` is the one that finally bails — proving
+            the empty-queue branch is reachable.
+        """
+        real_sleep = asyncio.sleep
+
+        async def fast_sleep(_: float) -> None:
+            await real_sleep(0)
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.asyncio.sleep",
+            new=fast_sleep,
+        ):
+            iterator = client.subscribe_candles(["MNQM6-CME"], "1m")
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+
+    @pytest.mark.asyncio
+    async def test_subscribe_candles_rejects_non_1m(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """subscribe_candles only accepts the 1m timeframe.
+
+        Given: A ``"5m"`` request,
+        When: subscribe_candles is iterated,
+        Then: A ``ValueError`` surfaces with a hint to ``get_ohlcv``.
+        """
+        iterator = client.subscribe_candles(["MNQM6-CME"], "5m")
+        with pytest.raises(ValueError, match="only supports 1m"):
+            await iterator.__anext__()
+
+    @pytest.mark.asyncio
+    async def test_subscribe_candles_emits_built_from_trades(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """subscribe_candles emits a candle once its minute closes.
+
+        Given: A trade with a timestamp deep in the past is folded
+            into the builder (its minute is therefore strictly before
+            the aggregator's ``now``),
+        When: subscribe_candles is iterated and the aggregator's
+            ``asyncio.sleep`` is collapsed so it tick-runs immediately,
+        Then: A ``CandleUpdate`` carrying the trade's OHLCV is yielded.
+            ``datetime.now()`` is not mocked — the past-trade timestamp
+            does the same thing without breaking the
+            ``replace().timestamp()`` chain inside the builder.
+        """
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
+        from snapper.infrastructure.exchanges.contracts import CandleUpdate
+        from snapper.infrastructure.exchanges.contracts import TradeUpdate
+
+        past_minute = (_dt.now(_UTC) - _td(minutes=5)).replace(second=0, microsecond=0)
+        trade = TradeUpdate(
+            symbol="MNQM6-CME",
+            side="buy",
+            quantity=2.0,
+            price=22500.0,
+            ord_type="fill",
+            timestamp=past_minute,
+            trade_id="t1",
+        )
+        client._candle_builder.update(trade)
+
+        real_sleep = asyncio.sleep
+
+        async def fast_sleep(_: float) -> None:
+            await real_sleep(0)
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.asyncio.sleep",
+            new=fast_sleep,
+        ):
+            iterator = client.subscribe_candles(["MNQM6-CME"], "1m")
+            result = await asyncio.wait_for(iterator.__anext__(), timeout=2.0)
+        assert isinstance(result, CandleUpdate)
+        assert result.symbol == "MNQM6-CME"
+        assert result.open == pytest.approx(22500.0)
+        assert result.volume == pytest.approx(2.0)
+        assert result.trades == 1
+        assert result.interval == 60
 
     def test_subscribe_executions_raises(self, client: KrakenEquitiesExchangeClient) -> None:
         """subscribe_executions raises NotImplementedError.
