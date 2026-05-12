@@ -1101,18 +1101,22 @@ class TraderCoordinator(RegisterableProcess):
             await self._recover_active_order_row(db_order, execution_fill_sizes)
 
     async def _load_active_orders_for_recovery(self, now: datetime) -> list[OrderRow]:
-        """Load active orders across all supported exchanges."""
-        active_orders: list[OrderRow] = []
-        for exchange_str in get_args(OrderExchange):
-            try:
-                orders = await self.repository.get_active_orders_for_recovery(
-                    exchange=exchange_str,
-                    as_of=now,
-                )
-                active_orders.extend(orders)
-            except Exception as e:
-                logger.error(f"ZMQTrader: Failed to query active orders for {exchange_str}: {e}")
-        return active_orders
+        """Load active orders across all supported exchanges.
+
+        Issues a single ``get_active_orders_for_recovery`` call with
+        ``exchange=None``; the repository then returns rows for every
+        exchange in one round-trip (HV2-M3). The legacy implementation
+        looped over each :class:`OrderExchange` value and paid one
+        request per exchange.
+        """
+        try:
+            return await self.repository.get_active_orders_for_recovery(
+                exchange=None,
+                as_of=now,
+            )
+        except Exception as e:
+            logger.error(f"ZMQTrader: Failed to query active orders: {e}")
+            return []
 
     def _build_execution_fill_sizes(self, executions: list[ExecutionRow]) -> dict[str, float]:
         """Sum replayed execution sizes by ``client_order_id``."""
@@ -1334,15 +1338,35 @@ class TraderCoordinator(RegisterableProcess):
         skipped; a later live fill via
         :meth:`_sync_position_cycle_on_fill` will retry the resolution.
         """
+        if not self.engines:
+            return
+        now = datetime.now(UTC)
+        eligible_shards = [
+            engine._shard_key for engine in self.engines.values() if engine.wallet_public_id
+        ]
+        open_cycles: dict[str, PositionCycleRow] = (
+            await self.repository.get_open_position_cycles_for_shards(eligible_shards, as_of=now)
+            if eligible_shards
+            else {}
+        )
         for engine_key, engine in self.engines.items():
-            await self._reconcile_position_cycle_for_engine(engine_key, engine)
+            existing = open_cycles.get(engine._shard_key)
+            await self._reconcile_position_cycle_for_engine(engine_key, engine, existing, now)
 
     async def _reconcile_position_cycle_for_engine(
         self,
         engine_key: str,
         engine: TradingEngineService,
+        existing: PositionCycleRow | None,
+        now: datetime,
     ) -> None:
-        """Reconcile the persisted cycle row for one recovered engine."""
+        """Reconcile the persisted cycle row for one recovered engine.
+
+        ``existing`` and ``now`` are supplied by the parent
+        :meth:`_reconcile_position_cycles` so the entire engine-set
+        shares one batched ``get_open_position_cycles_for_shards``
+        result (HV2-M4) and one bus timestamp.
+        """
         if not engine.wallet_public_id:
             logger.warning(
                 "ZMQTrader: position_cycle reconcile skipped "
@@ -1352,9 +1376,7 @@ class TraderCoordinator(RegisterableProcess):
             )
             return
         shard_key = engine._shard_key
-        now = datetime.now(UTC)
         position_qty = engine.position_qty
-        existing = await self.repository.get_open_position_cycle(shard_key, as_of=now)
         shard = self.trade_service._get_or_create_shard(shard_key)
         if abs(position_qty) < 1e-12:
             await self._reconcile_flat_position_cycle(

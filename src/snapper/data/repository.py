@@ -1127,18 +1127,23 @@ class Repository(ABC):
     @abstractmethod
     async def get_active_orders_for_recovery(
         self,
-        exchange: str,
+        exchange: str | None,
         as_of: datetime,
         wallet_public_id: str = "",
     ) -> list[OrderRow]:
         """Retrieve non-terminal orders for startup recovery.
 
         Returns orders with active status (open, pending, pending_new,
-        new, partially_filled) for a given exchange. Used exclusively
-        by executor and trader recovery, not by API endpoints.
+        new, partially_filled) for a given exchange (or all exchanges
+        when ``exchange`` is ``None``). Used exclusively by executor and
+        trader recovery, not by API endpoints.
 
         Args:
-            exchange: Exchange name to filter by.
+            exchange: Exchange name to filter by, or ``None`` to skip
+                the exchange filter and return orders across every
+                exchange in a single query. ZMQ trader recovery uses
+                ``None`` to collapse the legacy per-exchange waterfall
+                (HV2-M3) into one round-trip.
             as_of: Point-in-time for temporal query.
             wallet_public_id: Multi-tenant filter. When
                 non-empty, only orders matching ``Order.wallet_public_id
@@ -2402,6 +2407,31 @@ class Repository(ABC):
 
         Returns:
             Cycle row or None if the shard currently has no open cycle.
+        """
+        ...
+
+    @abstractmethod
+    async def get_open_position_cycles_for_shards(
+        self,
+        shard_keys: list[str],
+        as_of: datetime,
+    ) -> dict[str, PositionCycleRow]:
+        """Return open cycles for many shards in a single query.
+
+        Used by ZMQ trader recovery (HV2-M4) to collapse a
+        per-engine ``get_open_position_cycle`` waterfall into one
+        round-trip. Shards with no active open cycle are simply
+        absent from the returned dict.
+
+        Args:
+            shard_keys: Shard keys to look up. May be empty (the
+                caller should short-circuit but the repo handles it
+                by returning ``{}``).
+            as_of: Bus time for the temporal query.
+
+        Returns:
+            Mapping ``shard_key -> PositionCycleRow`` for shards that
+            currently hold an open cycle.
         """
         ...
 
@@ -5869,7 +5899,7 @@ class SQLAlchemyRepository(Repository):
 
     async def get_active_orders_for_recovery(
         self,
-        exchange: str,
+        exchange: str | None,
         as_of: datetime,
         wallet_public_id: str = "",
     ) -> list[OrderRow]:
@@ -5893,11 +5923,12 @@ class SQLAlchemyRepository(Repository):
                 )
                 .where(
                     *where_active(Order, as_of),
-                    Instrument.exchange == exchange,
                     Order.status.in_(self._ACTIVE_ORDER_STATUSES),
                 )
                 .order_by(Order.created_at)
             )
+            if exchange is not None:
+                query = query.where(Instrument.exchange == exchange)
             if wallet_public_id:
                 query = query.where(Order.wallet_public_id == wallet_public_id)
             result = await s.execute(query)
@@ -9002,6 +9033,25 @@ class SQLAlchemyRepository(Repository):
             if row is None:
                 return None
             return self._position_cycle_row_to_dict(row)
+
+    async def get_open_position_cycles_for_shards(
+        self,
+        shard_keys: list[str],
+        as_of: datetime,
+    ) -> dict[str, PositionCycleRow]:
+        """Batch-fetch open position cycles for many shards (HV2-M4)."""
+        if not shard_keys:
+            return {}
+        async with self.session() as s:
+            stmt = select(PositionCycle).where(
+                PositionCycle.shard_key.in_(shard_keys),
+                PositionCycle.status == "open",
+                *where_active(PositionCycle, as_of),
+            )
+            result = await s.execute(stmt)
+            return {
+                row.shard_key: self._position_cycle_row_to_dict(row) for row in result.scalars()
+            }
 
     async def get_position_cycle_by_public_id(
         self,

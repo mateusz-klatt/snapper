@@ -3333,6 +3333,9 @@ async def test_get_active_orders_for_recovery_filters_by_wallet(tmp_path: Path) 
     legacy = await r.get_active_orders_for_recovery(exchange="kraken", as_of=now)
     assert len(legacy) == 2
     assert {row["client_order_id"] for row in legacy} == {"c-wallet-a", "c-wallet-b"}
+    every_exchange = await r.get_active_orders_for_recovery(exchange=None, as_of=now)
+    assert len(every_exchange) == 2
+    assert {row["client_order_id"] for row in every_exchange} == {"c-wallet-a", "c-wallet-b"}
 
 
 @pytest.mark.asyncio
@@ -7735,6 +7738,55 @@ async def test_get_open_position_cycle_not_found(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     result = await r.get_open_position_cycle("nonexistent.shard", as_of=now)
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_open_position_cycles_for_shards_empty_shortcircuits(tmp_path: Path) -> None:
+    """Given empty shard_keys list, When batched lookup runs, Then empty dict returned."""
+    db_path = tmp_path / "pc_batch_empty.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    result = await r.get_open_position_cycles_for_shards([], as_of=now)
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_get_open_position_cycles_for_shards_batches_lookups(tmp_path: Path) -> None:
+    """Given open cycles for multiple shards, When batched lookup runs, Then map keyed by shard returned.
+
+    HV2-M4: trader reconcile uses this method to collapse a per-engine
+    waterfall into one round-trip. Verifies the returned dict is keyed
+    by ``shard_key`` and only contains shards with an active open cycle.
+    """
+    db_path = tmp_path / "pc_batch.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    shard_a = "kraken.BTC-USD.live.w0000000000aa"
+    shard_b = "kraken.ETH-USD.live.w0000000000bb"
+    shard_no_cycle = "kraken.SOL-USD.live.w0000000000cc"
+    _, pid_a = await r.insert_position_cycle(
+        _make_cycle_row(shard_key=shard_a, direction="long", opened_at=now, timestamp=now)
+    )
+    _, pid_b = await r.insert_position_cycle(
+        _make_cycle_row(
+            shard_key=shard_b,
+            direction="short",
+            opened_at=now,
+            timestamp=now,
+            session_id="s2",
+            sequence_id=2,
+        )
+    )
+    result = await r.get_open_position_cycles_for_shards(
+        [shard_a, shard_b, shard_no_cycle], as_of=now + timedelta(seconds=1)
+    )
+    assert set(result.keys()) == {shard_a, shard_b}
+    assert result[shard_a]["public_id"] == pid_a
+    assert result[shard_a]["direction"] == "long"
+    assert result[shard_b]["public_id"] == pid_b
+    assert result[shard_b]["direction"] == "short"
 
 
 @pytest.mark.asyncio

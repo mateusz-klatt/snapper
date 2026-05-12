@@ -2584,7 +2584,7 @@ async def test_reconcile_no_engines_is_noop() -> None:
     repo = AsyncMock()
     coord = _make_reconcile_coord(repo)
     await coord._reconcile_position_cycles()
-    repo.get_open_position_cycle.assert_not_called()
+    repo.get_open_position_cycles_for_shards.assert_not_called()
     repo.insert_position_cycle.assert_not_called()
 
 
@@ -2594,16 +2594,17 @@ async def test_reconcile_flat_engine_without_stale_row_is_noop() -> None:
 
     Given: an engine with position_qty=0 and no open cycle row for the shard,
     When: _reconcile_position_cycles runs,
-    Then: get_open_position_cycle is queried but no close or insert is issued.
+    Then: get_open_position_cycles_for_shards is queried (batched) and no
+        close or insert is issued.
     """
     repo = AsyncMock()
-    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
     coord = _make_reconcile_coord(repo)
     engine = _make_cycle_engine()
     engine.position_qty = 0.0
     coord.engines["BTC-USD@kraken-live"] = engine
     await coord._reconcile_position_cycles()
-    repo.get_open_position_cycle.assert_called_once()
+    repo.get_open_position_cycles_for_shards.assert_called_once()
     repo.close_position_cycle.assert_not_called()
     repo.insert_position_cycle.assert_not_called()
 
@@ -2621,8 +2622,14 @@ async def test_reconcile_flat_engine_with_stale_row_closes_cycle() -> None:
     Then: close_position_cycle closes the stale cycle and the shard cache stays empty.
     """
     repo = AsyncMock()
-    repo.get_open_position_cycle = AsyncMock(
-        return_value={"public_id": "cycle-stale", "direction": "long", "max_qty": 2.0}
+    repo.get_open_position_cycles_for_shards = AsyncMock(
+        return_value={
+            "kraken.BTC-USD.live.w0000000000aa": {
+                "public_id": "cycle-stale",
+                "direction": "long",
+                "max_qty": 2.0,
+            }
+        }
     )
     repo.close_position_cycle = AsyncMock(return_value=3)
     coord = _make_reconcile_coord(repo)
@@ -2643,7 +2650,9 @@ async def test_reconcile_degraded_identity_engine_is_skipped() -> None:
 
     Given: an engine whose wallet_public_id is empty (degraded recovery state),
     When: _reconcile_position_cycles runs,
-    Then: no repository methods are called for that engine.
+    Then: no repository methods are called for that engine. The batched
+        ``get_open_position_cycles_for_shards`` is short-circuited because
+        the eligible-shard list is empty (HV2-M4 guard).
     """
     repo = AsyncMock()
     coord = _make_reconcile_coord(repo)
@@ -2651,7 +2660,7 @@ async def test_reconcile_degraded_identity_engine_is_skipped() -> None:
     engine.position_qty = 1.5
     coord.engines["BTC-USD@kraken-live"] = engine
     await coord._reconcile_position_cycles()
-    repo.get_open_position_cycle.assert_not_called()
+    repo.get_open_position_cycles_for_shards.assert_not_called()
     repo.insert_position_cycle.assert_not_called()
 
 
@@ -2664,8 +2673,14 @@ async def test_reconcile_existing_cycle_matching_direction_hydrates_cache() -> N
     Then: shard cache is hydrated and no insert/update/flip is issued.
     """
     repo = AsyncMock()
-    repo.get_open_position_cycle = AsyncMock(
-        return_value={"public_id": "cycle-existing", "direction": "long", "max_qty": 2.5}
+    repo.get_open_position_cycles_for_shards = AsyncMock(
+        return_value={
+            "kraken.BTC-USD.live.w0000000000aa": {
+                "public_id": "cycle-existing",
+                "direction": "long",
+                "max_qty": 2.5,
+            }
+        }
     )
     coord = _make_reconcile_coord(repo)
     engine = _make_cycle_engine()
@@ -2693,8 +2708,14 @@ async def test_reconcile_existing_cycle_understated_max_qty_bumps_peak() -> None
     Then: update_position_cycle_max_qty is called with new_max_qty=3.0 and cache reflects it.
     """
     repo = AsyncMock()
-    repo.get_open_position_cycle = AsyncMock(
-        return_value={"public_id": "cycle-old", "direction": "long", "max_qty": 1.5}
+    repo.get_open_position_cycles_for_shards = AsyncMock(
+        return_value={
+            "kraken.BTC-USD.live.w0000000000aa": {
+                "public_id": "cycle-old",
+                "direction": "long",
+                "max_qty": 1.5,
+            }
+        }
     )
     repo.update_position_cycle_max_qty = AsyncMock(return_value=7)
     coord = _make_reconcile_coord(repo)
@@ -2724,8 +2745,14 @@ async def test_reconcile_direction_mismatch_flips_cycle() -> None:
     Then: flip_position_cycle is called and the cache mirrors the new short cycle.
     """
     repo = AsyncMock()
-    repo.get_open_position_cycle = AsyncMock(
-        return_value={"public_id": "cycle-long", "direction": "long", "max_qty": 2.0}
+    repo.get_open_position_cycles_for_shards = AsyncMock(
+        return_value={
+            "kraken.BTC-USD.live.w0000000000aa": {
+                "public_id": "cycle-long",
+                "direction": "long",
+                "max_qty": 2.0,
+            }
+        }
     )
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
     repo.flip_position_cycle = AsyncMock(return_value=(8, "cycle-new-short"))
@@ -2759,8 +2786,14 @@ async def test_reconcile_direction_mismatch_unresolved_instrument_degrades_to_cl
     Then: flip_position_cycle is skipped, close_position_cycle closes the stale cycle, cache cleared.
     """
     repo = AsyncMock()
-    repo.get_open_position_cycle = AsyncMock(
-        return_value={"public_id": "cycle-long", "direction": "long", "max_qty": 2.0}
+    repo.get_open_position_cycles_for_shards = AsyncMock(
+        return_value={
+            "kraken.BTC-USD.live.w0000000000aa": {
+                "public_id": "cycle-long",
+                "direction": "long",
+                "max_qty": 2.0,
+            }
+        }
     )
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
     repo.close_position_cycle = AsyncMock(return_value=8)
@@ -2787,7 +2820,7 @@ async def test_reconcile_non_flat_missing_cycle_bootstraps() -> None:
         and the shard cache is hydrated from the new public_id.
     """
     repo = AsyncMock()
-    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
     repo.insert_position_cycle = AsyncMock(return_value=(5, "cycle-bootstrap"))
     coord = _make_reconcile_coord(repo)
@@ -2817,7 +2850,7 @@ async def test_reconcile_short_position_bootstraps_short_direction() -> None:
     Then: the inserted row carries direction='short' and max_qty=2.0.
     """
     repo = AsyncMock()
-    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
     repo.insert_position_cycle = AsyncMock(return_value=(5, "cycle-short"))
     coord = _make_reconcile_coord(repo)
@@ -2839,7 +2872,7 @@ async def test_reconcile_bootstrap_uses_checkpoint_opened_at_if_available() -> N
     Then: the inserted row's opened_at carries the checkpoint timestamp.
     """
     repo = AsyncMock()
-    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
     repo.insert_position_cycle = AsyncMock(return_value=(5, "cycle-new"))
     coord = _make_reconcile_coord(repo)
@@ -2863,7 +2896,7 @@ async def test_reconcile_bootstrap_fallback_opened_at_when_no_checkpoint() -> No
     Then: the inserted row's opened_at lies between the test's before/after timestamps.
     """
     repo = AsyncMock()
-    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
     repo.insert_position_cycle = AsyncMock(return_value=(5, "cycle-new"))
     coord = _make_reconcile_coord(repo)
@@ -2886,7 +2919,7 @@ async def test_reconcile_unresolved_instrument_skips_bootstrap() -> None:
     Then: insert_position_cycle is not called and the shard cache stays empty.
     """
     repo = AsyncMock()
-    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
     coord = _make_reconcile_coord(repo)
     engine = _make_cycle_engine()
@@ -2914,12 +2947,14 @@ async def test_reconcile_mixed_engines_processes_each_independently() -> None:
         the existing engine's cache is hydrated to the DB row, and degraded/flat are skipped.
     """
     repo = AsyncMock()
-    repo.get_open_position_cycle = AsyncMock(
-        side_effect=[
-            None,
-            {"public_id": "cycle-existing", "direction": "long", "max_qty": 2.0},
-            None,
-        ]
+    repo.get_open_position_cycles_for_shards = AsyncMock(
+        return_value={
+            "kraken.BTC-USD.live.wcc": {
+                "public_id": "cycle-existing",
+                "direction": "long",
+                "max_qty": 2.0,
+            }
+        }
     )
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
     repo.insert_position_cycle = AsyncMock(return_value=(5, "cycle-new"))

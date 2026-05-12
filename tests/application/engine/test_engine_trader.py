@@ -3017,6 +3017,7 @@ class TestRecovery:
         mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
         mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         mock_repo.get_open_position_cycle = AsyncMock(return_value=None)
+        mock_repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         coord.repository = mock_repo
         await coord._recover_engine_state()
@@ -3111,6 +3112,7 @@ class TestRecovery:
         mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
         mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         mock_repo.get_open_position_cycle = AsyncMock(return_value=None)
+        mock_repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         coord.repository = mock_repo
         await coord._recover_engine_state()
@@ -3180,6 +3182,7 @@ class TestRecovery:
         mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
         mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         mock_repo.get_open_position_cycle = AsyncMock(return_value=None)
+        mock_repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         coord.repository = mock_repo
         await coord._recover_engine_state()
@@ -3239,6 +3242,7 @@ class TestRecovery:
         )
         mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         mock_repo.get_open_position_cycle = AsyncMock(return_value=None)
+        mock_repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         coord.repository = mock_repo
         await coord._recover_engine_state()
@@ -3326,6 +3330,7 @@ class TestRecovery:
         )
         mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         mock_repo.get_open_position_cycle = AsyncMock(return_value=None)
+        mock_repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         coord.repository = mock_repo
         sink: list[str] = []
@@ -3422,6 +3427,7 @@ class TestRecovery:
         )
         mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         mock_repo.get_open_position_cycle = AsyncMock(return_value=None)
+        mock_repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         coord.repository = mock_repo
         await coord._recover_engine_state()
@@ -3495,6 +3501,7 @@ class TestRecovery:
         )
         mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         mock_repo.get_open_position_cycle = AsyncMock(return_value=None)
+        mock_repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         coord.repository = mock_repo
         before = time.monotonic()
@@ -3564,6 +3571,7 @@ class TestRecovery:
         )
         mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         mock_repo.get_open_position_cycle = AsyncMock(return_value=None)
+        mock_repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         coord.repository = mock_repo
         await coord._recover_engine_state()
@@ -3615,6 +3623,7 @@ class TestRecovery:
         )
         mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         mock_repo.get_open_position_cycle = AsyncMock(return_value=None)
+        mock_repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         coord.repository = mock_repo
         await coord._recover_engine_state()
@@ -3746,6 +3755,7 @@ class TestRecovery:
         mock_repo.get_active_orders_for_recovery = AsyncMock(side_effect=RuntimeError("DB error"))
         mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         mock_repo.get_open_position_cycle = AsyncMock(return_value=None)
+        mock_repo.get_open_position_cycles_for_shards = AsyncMock(return_value={})
         mock_repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         coord.repository = mock_repo
         await coord._recover_engine_state()
