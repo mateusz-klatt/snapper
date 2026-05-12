@@ -480,6 +480,11 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             Dict mapping native symbol (``BTC-USD-BTNL``) to its
             record dict suitable for ``_update_database``.
         """
+        logger.info(
+            "BTNL discovery: starting {:.0f}s wildcard ticker capture "
+            "(updater will appear idle while subscribed)",
+            _BTNL_DISCOVERY_WINDOW_SECONDS,
+        )
         client = self._create_exchange_client()
         captured = await client.collect_raw_ticker_symbols(_BTNL_DISCOVERY_WINDOW_SECONDS)
         discoveries: dict[str, KrakenSymbolRecord] = {}

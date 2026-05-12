@@ -5496,6 +5496,51 @@ class TestRawTickerCapture:
         client._handle_ticker_data({"symbol": "BTC/USD:BTNL"})
         assert capture == {}
 
+    def test_handle_ticker_data_skips_parse_pipeline_when_capture_active(
+        self,
+    ) -> None:
+        """Verify parse_kraken_ticker_list is NOT invoked during capture.
+
+        Given: A capture dict is set on the client,
+        When: ``_handle_ticker_data`` runs with a valid frame list,
+        Then: The parse pipeline is skipped (no warnings for stale
+        mapper, no wasted enqueue on ``_tick_queue``). The capture is
+        the only side effect during discovery.
+        """
+        client = KrakenExchangeClient()
+        capture: dict[str, dict[str, Any]] = {}
+        client._raw_ticker_capture = capture
+        frames = [{"symbol": "GAS/EUR", "last": 1.5}]
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_ticker_list",
+        ) as mock_parse:
+            client._handle_ticker_data(frames)
+            mock_parse.assert_not_called()
+        assert capture == {"GAS/EUR": {"symbol": "GAS/EUR", "last": 1.5}}
+        assert client._tick_queue.qsize() == 0
+
+    def test_handle_ticker_data_runs_parse_pipeline_when_no_capture(self) -> None:
+        """Verify parse_kraken_ticker_list IS invoked when capture is inactive.
+
+        Given: A client with ``_raw_ticker_capture`` set to ``None``
+        (the production publisher path),
+        When: ``_handle_ticker_data`` runs,
+        Then: The parse pipeline runs and successful parses land on
+        ``_tick_queue`` exactly as before the discovery sidecar was
+        added.
+        """
+        client = KrakenExchangeClient()
+        assert client._raw_ticker_capture is None
+        sentinel = MagicMock()
+        frames = [{"symbol": "BTC/USD", "last": 100000.0}]
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_ticker_list",
+            return_value=[sentinel],
+        ) as mock_parse:
+            client._handle_ticker_data(frames)
+            mock_parse.assert_called_once_with(frames)
+        assert client._tick_queue.qsize() == 1
+
     @pytest.mark.asyncio
     @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
     async def test_collect_raw_ticker_symbols_returns_capture_after_sleep(
@@ -5536,10 +5581,45 @@ class TestRawTickerCapture:
             ),
         ):
             client._ws_client = mock_ws_client
-            captured = await client.collect_raw_ticker_symbols(window_seconds=0.0)
+            captured = await client.collect_raw_ticker_symbols(window_seconds=0.5)
         assert set(captured.keys()) == {"BTC/USD:BTNL", "ETH/USD:BTNL"}
         mock_ws_client.subscribe.assert_called_once()
         assert client._raw_ticker_capture is None
+
+    @pytest.mark.asyncio
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_collect_raw_ticker_symbols_emits_periodic_progress_log(
+        self,
+        mock_ws_class: MagicMock,
+    ) -> None:
+        """Verify the periodic progress log fires inside the discovery loop.
+
+        Given: A ``window_seconds`` larger than ``progress_interval``
+        (15s), so the loop iterates more than once,
+        When: ``collect_raw_ticker_symbols`` is awaited,
+        Then: A "X symbols seen so far" progress message is emitted
+        from at least one non-final iteration (so operators see the
+        updater is still alive during the long discovery window).
+        """
+        client = KrakenExchangeClient(api_key="k", api_secret="s", sandbox=False)
+        mock_ws_client = AsyncMock()
+        mock_ws_class.return_value = mock_ws_client
+        mock_ws_client.__aenter__ = AsyncMock(return_value=mock_ws_client)
+        mock_ws_client.__aexit__ = AsyncMock(return_value=None)
+        with (
+            patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            patch("snapper.infrastructure.exchanges.implementations.kraken.logger") as mock_logger,
+        ):
+            client._ws_client = mock_ws_client
+            await client.collect_raw_ticker_symbols(window_seconds=20.0)
+        info_calls = [str(call) for call in mock_logger.info.call_args_list]
+        assert any(
+            "symbols seen so far" in c for c in info_calls
+        ), f"expected periodic progress log, got: {info_calls}"
 
     @pytest.mark.asyncio
     @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")

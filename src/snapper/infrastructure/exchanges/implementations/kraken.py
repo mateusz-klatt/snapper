@@ -753,13 +753,30 @@ class KrakenExchangeClient(ExchangeClientBase):
         capture: dict[str, dict[str, Any]] = {}
         previous_capture = self._raw_ticker_capture
         self._raw_ticker_capture = capture
+        progress_interval = 15.0
         try:
             await self._ensure_ws_connected()
             assert self._ws_client is not None, _WS_CLIENT_CONNECTED_MSG
             async with self._ws_client as ws:
                 params = KrakenTickerSubscribeParamsSchema(symbol=["*"]).as_params()
                 await ws.subscribe(params=params)
-                await asyncio.sleep(window_seconds)
+                logger.info(
+                    "Raw ticker capture: subscribed to wildcard, holding {:.0f}s "
+                    "to observe low-frequency symbols",
+                    window_seconds,
+                )
+                elapsed = 0.0
+                while elapsed < window_seconds:
+                    step = min(progress_interval, window_seconds - elapsed)
+                    await asyncio.sleep(step)
+                    elapsed += step
+                    if elapsed < window_seconds:
+                        logger.info(
+                            "Raw ticker capture: {} symbols seen so far ({:.0f}/{:.0f}s)",
+                            len(capture),
+                            elapsed,
+                            window_seconds,
+                        )
         finally:
             self._raw_ticker_capture = previous_capture
         logger.info(
@@ -1196,13 +1213,27 @@ class KrakenExchangeClient(ExchangeClientBase):
         """Parse and enqueue ticker data.
 
         When ``_raw_ticker_capture`` is set (by
-        :meth:`collect_raw_ticker_symbols`), the raw symbol of every
-        frame in the batch is recorded into that dict before the parse
-        step runs. The parse pipeline still drops frames whose symbol
-        is not mapped via ``kraken_websocket_to_native``; the capture
-        path exists so that the symbol updater can discover such
-        symbols (e.g. ``BTC/USD:BTNL`` Bitnomial perpetuals) and
-        register the missing aliases.
+        :meth:`collect_raw_ticker_symbols`), every wire symbol in the
+        batch is recorded into the capture dict and the parse pipeline
+        is SKIPPED. Skipping parse during capture avoids two side
+        effects that are inappropriate when the client is being driven
+        by the symbol updater (the only intended caller of
+        ``collect_raw_ticker_symbols``):
+
+        * The mapper is intentionally stale during the discovery
+          window — ``_update_database`` has not yet committed the
+          freshly discovered aliases — so ``parse_kraken_ticker_list``
+          would warn ``Unknown Kraken WebSocket v2 symbol`` for every
+          new pair Kraken added since the last refresh, even though
+          those pairs are about to be registered in the same updater
+          run. Skipping parse keeps those harmless first-sight
+          warnings out of the logs.
+        * No publisher consumes ``_tick_queue`` during a
+          symbol-updater process, so enqueueing parsed frames is
+          wasted work that competes with the discovery throughput.
+
+        Outside discovery (the production publisher path), capture is
+        ``None`` and the parse pipeline runs as before.
 
         Args:
             data: Raw ticker data from WebSocket.
@@ -1217,6 +1248,7 @@ class KrakenExchangeClient(ExchangeClientBase):
                 wire_symbol = frame.get("symbol")
                 if isinstance(wire_symbol, str) and wire_symbol not in capture:
                     capture[wire_symbol] = frame
+            return
         ticker_list = parse_kraken_ticker_list(data)
         for ticker_data in ticker_list:
             _enqueue_or_drop_oldest(self._tick_queue, ticker_data, "tick")
