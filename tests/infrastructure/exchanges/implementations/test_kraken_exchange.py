@@ -986,7 +986,7 @@ class TestKrakenExchangeClient:
             ),
         ):
             kraken_client._ws_client = mock_ws_client
-            async for _ in kraken_client.subscribe_trades(["*"]):
+            async for _ in kraken_client.subscribe_trades(["*"], req_id=4242):
                 break
 
         assert mock_ws_client.subscribe.await_count == 3
@@ -995,6 +995,9 @@ class TestKrakenExchangeClient:
             for call in mock_ws_client.subscribe.await_args_list
         ]
         assert chunk_sizes == [100, 100, 50]
+        assert sleep_calls == [0.1, 0.1]
+        req_ids = [call.kwargs.get("req_id") for call in mock_ws_client.subscribe.await_args_list]
+        assert req_ids == [4242, None, None]
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
     async def test_subscribe_executions(
