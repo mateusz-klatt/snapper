@@ -307,6 +307,11 @@ class PlanExecutorService(RegisterableProcess):
         plans (10-100 children) used to issue that many sequential
         SELECTs on startup; the batched ``IN`` query keeps recovery
         cost flat regardless of child count.
+
+        Degradation: when the batched lookup raises (transient DB
+        error), the legacy per-child behavior is preserved — every
+        child falls back to its own single-row lookup so one bad
+        batch does not skip the entire plan's recovery.
         """
         params = plan.get("params") or {}
         native_instrument = params.get("native_instrument")
@@ -316,22 +321,63 @@ class PlanExecutorService(RegisterableProcess):
         if not child_order_ids:
             return
         now = datetime.now(UTC)
-        try:
-            linked_plan_map = await self.repository.get_plan_public_ids_for_client_order_ids(
-                child_order_ids, as_of=now
-            )
-        except Exception as exc:
-            logger.error(
-                "Stranded cancel batched plan lookup failed for {}: {}",
-                plan["public_id"],
-                exc,
-            )
-            return
+        linked_plan_map = await self._resolve_child_plan_links(plan, child_order_ids, now)
         for child_client_order_id in child_order_ids:
             linked_plan_id = linked_plan_map.get(child_client_order_id)
             await self._reemit_single_stranded_cancel(
                 plan, child_client_order_id, native_instrument, linked_plan_id, now
             )
+
+    async def _resolve_child_plan_links(
+        self,
+        plan: ExecutionPlanRow,
+        child_order_ids: list[str],
+        now: datetime,
+    ) -> dict[str, str | None]:
+        """Resolve each child client_order_id to its linked plan public id.
+
+        Prefers a single batched repository call (HV2-M16). If the
+        batched call fails, falls back to per-child single-row
+        lookups so one transient DB error does not skip the whole
+        plan's recovery — matching the legacy per-child fail-soft
+        contract.
+        """
+        try:
+            batched = await self.repository.get_plan_public_ids_for_client_order_ids(
+                child_order_ids, as_of=now
+            )
+        except Exception as exc:
+            logger.warning(
+                "Stranded cancel batched plan lookup failed for {} ({}); "
+                "falling back to per-child lookups",
+                plan["public_id"],
+                exc,
+            )
+            return await self._resolve_child_plan_links_individually(plan, child_order_ids, now)
+        return {cid: batched.get(cid) for cid in child_order_ids}
+
+    async def _resolve_child_plan_links_individually(
+        self,
+        plan: ExecutionPlanRow,
+        child_order_ids: list[str],
+        now: datetime,
+    ) -> dict[str, str | None]:
+        """Per-child single-row plan lookup fallback for batch failures."""
+        result: dict[str, str | None] = {}
+        for cid in child_order_ids:
+            try:
+                result[cid] = await self.repository.get_plan_public_id_for_client_order_id(
+                    cid, as_of=now
+                )
+            except Exception as exc:
+                logger.error(
+                    "Stranded cancel per-child plan lookup failed for {} child {}: {}",
+                    plan["public_id"],
+                    cid,
+                    exc,
+                )
+                result[cid] = None
+        return result
 
     def _extract_child_ids(self, params: dict[str, Any]) -> list[str]:
         """Extract all child client order IDs from plan params.

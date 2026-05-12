@@ -273,9 +273,15 @@ class TestPlanExecutorService:
     async def test_reemit_stranded_cancel_swallows_lookup_failure(
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock
     ) -> None:
-        """Lookup failures while re-emitting cancels are logged, not raised."""
+        """Per-child lookup failures while re-emitting cancels are logged, not raised.
+
+        Even if the batched + per-child fallback both fail, recovery
+        must not raise. ``linked_plan_id`` resolves to ``None`` for each
+        child, so the plan-id mismatch guard skips emission cleanly.
+        """
         mock_repo = AsyncMock()
         mock_repo.get_plan_public_ids_for_client_order_ids = AsyncMock(side_effect=Exception("DB"))
+        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(side_effect=Exception("DB"))
         mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd"))
         mock_repo_fn.return_value = mock_repo
         service = PlanExecutorService()
@@ -287,6 +293,44 @@ class TestPlanExecutorService:
         )
         await service._reemit_stranded_cancel(plan)
         mock_repo.insert_trade_command.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_reemit_stranded_cancel_falls_back_to_per_child_lookup_on_batch_failure(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """A transient batch lookup failure must NOT skip every child of the plan.
+
+        When the batched ``get_plan_public_ids_for_client_order_ids``
+        raises, ``_reemit_stranded_cancel`` falls back to per-child
+        ``get_plan_public_id_for_client_order_id`` calls so a single
+        transient DB error during recovery only impacts the one child
+        whose individual lookup also fails — not the entire plan.
+        Mirrors the pre-HV2-M16 per-child fail-soft contract.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.get_plan_public_ids_for_client_order_ids = AsyncMock(
+            side_effect=Exception("transient DB hiccup")
+        )
+        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-fb")
+        mock_repo.has_pending_cancel_command = AsyncMock(return_value=False)
+        mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-1")
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-fb"))
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(
+            public_id="plan-fb",
+            status="cancel_requested",
+            native_instrument="BTC-USD",
+            venue_order_type="limit",
+        )
+        params = _cast(dict[str, object], plan["params"])
+        params["child_client_order_ids"] = ["cid-fb-a", "cid-fb-b"]
+        del params["child_client_order_id"]
+        await service._reemit_stranded_cancel(plan)
+        assert mock_repo.get_plan_public_id_for_client_order_id.await_count == 2
+        assert mock_repo.insert_trade_command.await_count == 2
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
