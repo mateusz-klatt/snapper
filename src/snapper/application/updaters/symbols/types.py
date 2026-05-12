@@ -45,10 +45,14 @@ class KrakenSymbolRecord(_KrakenSymbolRequired, total=False):
     produce None from _extract_tokenized_pair().
     margin is "true"/"false" string — present only for REST pairs
     where CCXT market data exposes leverage_buy/leverage_sell.
+    is_btnl is the "true" marker for Kraken Bitnomial perpetual
+    discoveries (BTC/USD:BTNL etc.) routed through the BTNL persist
+    path with ``can_trade=False`` and an instrument_kind override.
     """
 
     asset_class: str
     ws_only: str
+    is_btnl: str
     margin: str
     kraken_websocket_symbol: str
     kraken_rest_symbol: str

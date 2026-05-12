@@ -38,6 +38,14 @@ _SPOT_ROLLOVER_RATE_LONG = 0.00025
 _SPOT_ROLLOVER_RATE_SHORT = 0.00010
 SPOT_ROLLOVER_RATES_EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
+_BTNL_WIRE_SUFFIX = ":BTNL"
+_BTNL_NATIVE_SUFFIX = "-BTNL"
+_BTNL_CAPABILITY_REASON = (
+    "Kraken WS relay of Bitnomial spot venue (CFTC-regulated US DCM) — market data "
+    "only; direct Bitnomial order route not integrated"
+)
+_BTNL_DISCOVERY_WINDOW_SECONDS = 90.0
+
 
 @register_process(
     "kraken_symbol_updater",
@@ -414,6 +422,88 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
 
     _FIAT_CURRENCIES: set[str] = {"USD", "EUR", "GBP", "JPY", "CAD", "AUD", "CHF"}
 
+    @staticmethod
+    def _parse_btnl_wire_symbol(wire: str) -> tuple[str, str] | None:
+        """Parse a Kraken-relayed Bitnomial spot wire symbol into (base, quote).
+
+        Accepts strings of the form ``<BASE>/<QUOTE>:BTNL`` (the wire
+        form Kraken emits on the WS ticker stream as a relay of
+        Bitnomial's spot venue — ``BTNL`` is a registered Bitnomial
+        trademark, confirmed against the public Bitnomial product
+        catalog where ``BTCUSD``, ``ETHUSD``, ``LTCUSD``, ``SUIUSD``,
+        ``ZECUSD``, ``AAVEUSD``, and ``PAXGUSD`` are all spot
+        products). Returns ``None`` for any input that does not
+        match — the conservative allow-list keeps unknown
+        product-type suffixes on the warning-rate-limit path
+        instead of silently registering them.
+
+        Args:
+            wire: Raw symbol string from a Kraken WS ticker frame.
+
+        Returns:
+            Tuple of ``(base, quote)`` both upper-cased, or ``None``
+            if the symbol does not match the ``<BASE>/<QUOTE>:BTNL``
+            shape.
+        """
+        if not wire.endswith(_BTNL_WIRE_SUFFIX):
+            return None
+        stem = wire[: -len(_BTNL_WIRE_SUFFIX)]
+        if "/" not in stem:
+            return None
+        base, _, quote = stem.partition("/")
+        if not base or not quote:
+            return None
+        return base.upper(), quote.upper()
+
+    async def discover_btnl_symbols(self) -> dict[str, KrakenSymbolRecord]:
+        """Discover Bitnomial spot symbols relayed via Kraken's WS feed.
+
+        Subscribes to the live wildcard ticker stream for
+        ``_BTNL_DISCOVERY_WINDOW_SECONDS`` seconds via
+        :meth:`KrakenExchangeClient.collect_raw_ticker_symbols` and
+        collects every distinct symbol whose wire form ends with
+        ``:BTNL`` (a registered Bitnomial trademark). The Bitnomial
+        product catalog enumerates these as SPOT products with their
+        own venue order books, distinct from Kraken's primary spot
+        market — Phase 0 measurement confirmed persistent non-zero
+        offsets vs Kraken spot prices, consistent with two separate
+        spot venues for the same underlying asset.
+
+        BTNL ticker updates run 5-100× less frequently than Kraken's
+        primary spot stream, so the discovery window must be sized
+        long enough to observe each pair at least once. Conservative
+        allow-list: only ``:BTNL`` suffix; any other colon-suffix is
+        ignored so future product types do not land on this persist
+        path by accident.
+
+        Returns:
+            Dict mapping native symbol (``BTC-USD-BTNL``) to its
+            record dict suitable for ``_update_database``.
+        """
+        client = self._create_exchange_client()
+        captured = await client.collect_raw_ticker_symbols(_BTNL_DISCOVERY_WINDOW_SECONDS)
+        discoveries: dict[str, KrakenSymbolRecord] = {}
+        for wire_symbol in captured:
+            parsed = self._parse_btnl_wire_symbol(wire_symbol)
+            if parsed is None:
+                continue
+            base, quote = parsed
+            native = f"{base}-{quote}{_BTNL_NATIVE_SUFFIX}"
+            discoveries[native] = KrakenSymbolRecord(
+                native_symbol=native,
+                base_currency=base,
+                quote_currency=quote,
+                asset_class="crypto",
+                is_btnl="true",
+                kraken_websocket_symbol=wire_symbol,
+            )
+        logger.info(
+            "BTNL discovery: {} native symbols from {} captured frames",
+            len(discoveries),
+            len(captured),
+        )
+        return discoveries
+
     def _resolve_tokenized_asset(
         self, kraken_rest_symbol: str, base: str, quote: str
     ) -> tuple[str, str, str, str] | None:
@@ -608,15 +698,20 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             return {}, False
 
     async def _fetch_symbols(self, client: KrakenExchangeClient) -> list[dict[str, Any]]:
-        """Fetch and verify symbols from Kraken.
+        """Fetch and verify symbols from Kraken, then run BTNL discovery.
 
-        Builds verified mappings and converts to list format.
+        Builds verified mappings from REST + WS instrument feed,
+        then runs a best-effort wildcard ticker snapshot to discover
+        Kraken Bitnomial perpetual (``:BTNL``) symbols that the
+        REST/CCXT/instrument paths don't expose. BTNL discovery
+        failure is non-fatal — the rest of the update proceeds.
 
         Args:
             client: Kraken exchange client (unused, mappings built internally).
 
         Returns:
-            List of symbol data dicts.
+            List of symbol data dicts including any discovered BTNL
+            records flagged with ``is_btnl="true"``.
 
         Raises:
             RuntimeError: If WebSocket verification fails or no mappings.
@@ -626,7 +721,20 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             raise RuntimeError("WebSocket verification failed - aborting update")
         if not mappings:
             raise RuntimeError("No mappings generated - aborting update")
-        logger.info(f"Fetched and verified {len(mappings)} Kraken symbols")
+        btnl_count = 0
+        try:
+            btnl_discoveries = await self.discover_btnl_symbols()
+        except Exception as btnl_exc:
+            logger.warning(
+                "BTNL discovery failed (non-fatal, continuing without BTNL pairs): {}",
+                btnl_exc,
+            )
+            btnl_discoveries = {}
+        for native, btnl_mapping in btnl_discoveries.items():
+            if native not in mappings:
+                mappings[native] = cast(dict[str, str], btnl_mapping)
+                btnl_count += 1
+        logger.info(f"Fetched and verified {len(mappings)} Kraken symbols ({btnl_count} BTNL)")
         return list(mappings.values())
 
     def _persist_ws_only_symbol(
@@ -670,6 +778,88 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             False,
             "kraken_updater",
             "WS-only, not in REST markets",
+            now,
+            session_id=sid,
+            sequence_id=self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
+        )
+        instrument_public_id = self._ensure_instrument_identity(
+            session,
+            symbol_public_id,
+            ExchangeEnum.KRAKEN,
+            now,
+            session_id=sid,
+            sequence_id=self._tracker.next_sequence("instruments"),
+        )
+        self._revise_instrument_spec(
+            session,
+            instrument_public_id,
+            now,
+            session_id=sid,
+            sequence_id=self._tracker.next_sequence("specs"),
+            instrument_kind="spot",
+            funding_type=None,
+            funding_frequency_hours=None,
+            rollover_rate_long=None,
+            rollover_rate_short=None,
+        )
+        self._deactivate_spot_rollover_rates(session, instrument_public_id, now)
+        return created, updated
+
+    def _persist_btnl_symbol(
+        self, session: Any, symbol_data: KrakenSymbolRecord, symbol_public_id: str, now: datetime
+    ) -> tuple[int, int]:
+        """Persist a Kraken WS relay of a Bitnomial spot symbol.
+
+        Routes a BTNL discovery through one WS alias (``BTC/USD:BTNL``
+        wire form), a market-data-only capability with
+        ``can_trade=False`` and the BTNL gate reason, and an
+        InstrumentSpec carrying ``instrument_kind="spot"`` plus
+        explicit funding-field clears (no spot-margin rollover, no
+        perpetual funding accrual — Bitnomial's catalog confirms BTNL
+        symbols on Kraken WS correspond to its SPOT venue products,
+        not perpetuals; their only perpetual ``PBUCZ50`` uses a
+        different ``base_symbol`` of ``BUC`` and would surface as a
+        separate native symbol if ever streamed). Any stale
+        spot-margin rollover rows attached to this instrument are
+        deactivated for safety.
+
+        Args:
+            session: SQLAlchemy session.
+            symbol_data: Symbol data dict with ``is_btnl == "true"``.
+            symbol_public_id: Public ID of the symbol.
+            now: Current UTC timestamp.
+
+        Returns:
+            Tuple of ``(created_count, updated_count)`` for the WS
+            alias upsert.
+        """
+        created = 0
+        updated = 0
+        sid = self._tracker.session_id
+        ws_symbol = symbol_data.get("kraken_websocket_symbol", "")
+        if ws_symbol:
+            result = self._upsert_alias(
+                session,
+                symbol_public_id,
+                ExchangeEnum.KRAKEN,
+                AliasChannelEnum.WS,
+                ws_symbol,
+                now,
+                session_id=sid,
+                sequence_id=self._tracker.next_sequence("aliases"),
+            )
+            if result == "created":
+                created += 1
+            elif result == "updated":
+                updated += 1
+        self._upsert_capability(
+            session,
+            symbol_public_id,
+            ExchangeEnum.KRAKEN,
+            True,
+            False,
+            "kraken_updater",
+            _BTNL_CAPABILITY_REASON,
             now,
             session_id=sid,
             sequence_id=self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
@@ -885,6 +1075,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         created_count = 0
         updated_count = 0
         ws_only_count = 0
+        btnl_count = 0
         try:
             with self.repository.get_session() as session:
                 processed_symbol_public_ids: set[str] = set()
@@ -907,8 +1098,14 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                         sequence_id=self._tracker.next_sequence("symbols"),
                     )
                     processed_symbol_public_ids.add(symbol_public_id)
+                    is_btnl = symbol_data.get("is_btnl") == "true"
                     is_ws_only = symbol_data.get("ws_only") == "true"
-                    if is_ws_only:
+                    if is_btnl:
+                        c, u = self._persist_btnl_symbol(
+                            session, symbol_data, symbol_public_id, now
+                        )
+                        btnl_count += 1
+                    elif is_ws_only:
                         c, u = self._persist_ws_only_symbol(
                             session, symbol_data, symbol_public_id, now
                         )
@@ -932,7 +1129,8 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 logger.info(
                     f"Kraken update complete: {created_count} created, "
                     f"{updated_count} updated, {ws_only_count} WS-only, "
-                    f"{deactivated} deactivated (total: {len(symbols)})"
+                    f"{btnl_count} BTNL, {deactivated} deactivated "
+                    f"(total: {len(symbols)})"
                 )
         except Exception as e:
             logger.error(f"Error updating database: {e}")

@@ -210,6 +210,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._instrument_queue: asyncio.Queue[InstrumentPairDescriptor] = asyncio.Queue(
             maxsize=_QUEUE_MAX_SIZE
         )
+        self._raw_ticker_capture: dict[str, dict[str, Any]] | None = None
         self._circuit_failures = 0
         self._circuit_open_until = 0.0
         self._max_failures = 5
@@ -723,6 +724,51 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.error(f"WebSocket tick subscription error: {e}")
             raise
 
+    async def collect_raw_ticker_symbols(self, window_seconds: float) -> dict[str, dict[str, Any]]:
+        """Capture raw ticker frames for symbol-updater discovery.
+
+        Subscribes to the wildcard ticker channel ``["*"]`` and records
+        the first raw frame seen for each distinct exchange symbol over
+        a fixed wall-clock window. The capture runs alongside the
+        normal parse pipeline; ``_handle_ticker_data`` records the raw
+        symbol BEFORE ``parse_kraken_ticker_list`` filters out frames
+        whose ``symbol`` is not mapped to a native form. This is the
+        only way to discover product-type listings such as
+        ``BTC/USD:BTNL`` (Kraken Bitnomial perpetuals) that are absent
+        from REST ``get_asset_pairs`` and CCXT markets.
+
+        Args:
+            window_seconds: Wall-clock duration to keep the subscription
+                open. Sized 60-120s in the symbol updater because BTNL
+                ticker updates are 5-100x less frequent than spot
+                updates, so shorter windows miss several pairs.
+
+        Returns:
+            Dict mapping the raw exchange symbol string to the first
+            ticker frame dict observed for that symbol.
+
+        Raises:
+            Exception: If the WebSocket subscription itself fails.
+        """
+        capture: dict[str, dict[str, Any]] = {}
+        previous_capture = self._raw_ticker_capture
+        self._raw_ticker_capture = capture
+        try:
+            await self._ensure_ws_connected()
+            assert self._ws_client is not None, _WS_CLIENT_CONNECTED_MSG
+            async with self._ws_client as ws:
+                params = KrakenTickerSubscribeParamsSchema(symbol=["*"]).as_params()
+                await ws.subscribe(params=params)
+                await asyncio.sleep(window_seconds)
+        finally:
+            self._raw_ticker_capture = previous_capture
+        logger.info(
+            "Raw ticker capture complete: {} distinct symbols in {:.0f}s",
+            len(capture),
+            window_seconds,
+        )
+        return capture
+
     def subscribe_candles(
         self,
         symbols: list[str],
@@ -1149,11 +1195,28 @@ class KrakenExchangeClient(ExchangeClientBase):
     def _handle_ticker_data(self, data: Any) -> None:
         """Parse and enqueue ticker data.
 
+        When ``_raw_ticker_capture`` is set (by
+        :meth:`collect_raw_ticker_symbols`), the raw symbol of every
+        frame in the batch is recorded into that dict before the parse
+        step runs. The parse pipeline still drops frames whose symbol
+        is not mapped via ``kraken_websocket_to_native``; the capture
+        path exists so that the symbol updater can discover such
+        symbols (e.g. ``BTC/USD:BTNL`` Bitnomial perpetuals) and
+        register the missing aliases.
+
         Args:
             data: Raw ticker data from WebSocket.
         """
         if not isinstance(data, list):
             return
+        capture = self._raw_ticker_capture
+        if capture is not None:
+            for frame in data:
+                if not isinstance(frame, dict):
+                    continue
+                wire_symbol = frame.get("symbol")
+                if isinstance(wire_symbol, str) and wire_symbol not in capture:
+                    capture[wire_symbol] = frame
         ticker_list = parse_kraken_ticker_list(data)
         for ticker_data in ticker_list:
             _enqueue_or_drop_oldest(self._tick_queue, ticker_data, "tick")

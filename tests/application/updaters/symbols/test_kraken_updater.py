@@ -21,6 +21,7 @@ from sqlalchemy.orm import sessionmaker
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.application.updaters.symbols.kraken import SPOT_ROLLOVER_RATES_EPOCH
 from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
+from snapper.application.updaters.symbols.types import KrakenSymbolRecord
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import KNOWN_TO_MAX
@@ -279,7 +280,10 @@ class TestKrakenSymbolUpdater:
             },
         }
         mock_client = AsyncMock()
-        with patch.object(updater, "build_verified_mappings", return_value=(mock_mappings, True)):
+        with (
+            patch.object(updater, "build_verified_mappings", return_value=(mock_mappings, True)),
+            patch.object(updater, "discover_btnl_symbols", return_value={}),
+        ):
             result = await updater._fetch_symbols(mock_client)
         assert len(result) == 1
         assert isinstance(result[0], dict)
@@ -472,6 +476,7 @@ async def test_fetch_symbols_success(monkeypatch: pytest.MonkeyPatch) -> None:
         "build_verified_mappings",
         AsyncMock(return_value=({"BTC-USD": fake_mapping}, True)),
     )
+    monkeypatch.setattr(svc, "discover_btnl_symbols", AsyncMock(return_value={}))
     symbols = await svc._fetch_symbols(None)
     assert symbols[0]["kraken_rest_symbol"] == "XXBTZUSD"
 
@@ -1437,8 +1442,12 @@ class TestKrakenFetchSymbols:
             "base_currency": "BTC",
             "quote_currency": "USD",
         }
-        with patch.object(updater, "build_verified_mappings", new_callable=AsyncMock) as mock_build:
+        with (
+            patch.object(updater, "build_verified_mappings", new_callable=AsyncMock) as mock_build,
+            patch.object(updater, "discover_btnl_symbols", new_callable=AsyncMock) as mock_btnl,
+        ):
             mock_build.return_value = ({"BTC-USD": mock_mapping}, True)
+            mock_btnl.return_value = {}
             mock_client = MagicMock()
             symbols = await updater._fetch_symbols(mock_client)
             assert len(symbols) == 1
@@ -3638,3 +3647,440 @@ class TestKrakenMarginToNonMarginTransition:
                 session.query(FundingRate).filter(FundingRate.known_to == KNOWN_TO_MAX).all()
             )
             assert len(active_rates) == 0
+
+
+class TestKrakenBtnlDiscovery:
+    """Tests for Bitnomial spot venue (``:BTNL``) discovery + persist.
+
+    Phase 1 of ``proprietary/plans/plan_2026_05_11_kraken_btnl_routing.md``:
+    discovers symbols via a wildcard ticker snapshot, registers them as
+    native ``<BASE>-<QUOTE>-BTNL`` with ``can_trade=False`` and
+    ``instrument_kind="spot"`` (Bitnomial publishes these as SPOT
+    products in its CFTC-regulated product catalog; ``BTNL`` is its
+    registered trademark).
+    """
+
+    @pytest.fixture
+    def updater(self) -> KrakenSymbolUpdaterService:
+        """Create updater instance bound to mock settings."""
+        with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
+            return KrakenSymbolUpdaterService()
+
+    @pytest.fixture
+    def db_session_factory(self) -> Generator[sessionmaker]:
+        """Create in-memory SQLite session factory with schema."""
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        try:
+            yield sessionmaker(bind=engine)
+        finally:
+            engine.dispose()
+
+    def test_parse_btnl_wire_symbol_happy(self, updater: KrakenSymbolUpdaterService) -> None:
+        """Verify the parser returns (base, quote) for well-formed :BTNL.
+
+        Given: A canonical wire symbol ``BTC/USD:BTNL``,
+        When: ``_parse_btnl_wire_symbol`` runs,
+        Then: ``("BTC", "USD")`` is returned.
+        """
+        assert updater._parse_btnl_wire_symbol("BTC/USD:BTNL") == ("BTC", "USD")
+        assert updater._parse_btnl_wire_symbol("paxg/usd:BTNL") == ("PAXG", "USD")
+
+    def test_parse_btnl_wire_symbol_rejects_inputs(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify rejected shapes return None (conservative allow-list).
+
+        Given: Symbols that do not match ``<BASE>/<QUOTE>:BTNL``,
+        When: ``_parse_btnl_wire_symbol`` runs,
+        Then: ``None`` is returned and the caller falls back to the
+        warning-rate-limit path.
+        """
+        assert updater._parse_btnl_wire_symbol("BTC/USD") is None
+        assert updater._parse_btnl_wire_symbol("BTC-USD:BTNL") is None
+        assert updater._parse_btnl_wire_symbol("/USD:BTNL") is None
+        assert updater._parse_btnl_wire_symbol("BTC/:BTNL") is None
+        assert updater._parse_btnl_wire_symbol(":BTNL") is None
+        assert updater._parse_btnl_wire_symbol("BTC/USD:OTHER") is None
+
+    @pytest.mark.asyncio
+    async def test_discover_btnl_symbols_parses_captured_frames(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify discover_btnl_symbols filters and remaps captured ticker frames.
+
+        Given: A mocked client returning a mix of BTNL and non-BTNL wire symbols,
+        When: ``discover_btnl_symbols`` runs,
+        Then: Only ``:BTNL`` entries are returned as ``<BASE>-<QUOTE>-BTNL``
+        records carrying ``is_btnl="true"`` and the original wire form.
+        """
+        mock_client = AsyncMock()
+        mock_client.collect_raw_ticker_symbols = AsyncMock(
+            return_value={
+                "BTC/USD:BTNL": {"symbol": "BTC/USD:BTNL", "last": 100000.0},
+                "ETH/USD:BTNL": {"symbol": "ETH/USD:BTNL", "last": 3500.0},
+                "BTC/USD": {"symbol": "BTC/USD", "last": 100001.0},
+                "SOMETHING/ELSE:OTHER": {"symbol": "SOMETHING/ELSE:OTHER"},
+            }
+        )
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
+            discoveries = await updater.discover_btnl_symbols()
+        assert set(discoveries.keys()) == {"BTC-USD-BTNL", "ETH-USD-BTNL"}
+        btc = discoveries["BTC-USD-BTNL"]
+        assert btc["base_currency"] == "BTC"
+        assert btc["quote_currency"] == "USD"
+        assert btc["is_btnl"] == "true"
+        assert btc["kraken_websocket_symbol"] == "BTC/USD:BTNL"
+        assert btc["asset_class"] == "crypto"
+
+    @pytest.mark.asyncio
+    async def test_update_database_persists_btnl_with_market_data_only_capability(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify BTNL records produce alias + market-data-only capability + spot spec.
+
+        Given: An empty SQLite DB,
+        When: ``_update_database`` runs with a BTNL record,
+        Then: One WS alias is created, capability has
+        ``can_market_data=True / can_trade=False`` with the Bitnomial
+        spot venue reason, and the InstrumentSpec carries
+        ``instrument_kind="spot"`` with funding fields cleared.
+        """
+
+        class Repo:
+            """Repository stub returning real SQLite sessions."""
+
+            def get_session(self) -> Session:
+                """Return a new session."""
+                return cast(Session, db_session_factory())
+
+        updater.repository = Repo()
+        records: list[dict[str, Any]] = [
+            {
+                "native_symbol": "BTC-USD-BTNL",
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+                "kraken_websocket_symbol": "BTC/USD:BTNL",
+                "asset_class": "crypto",
+                "is_btnl": "true",
+            }
+        ]
+        await updater._update_database(records)
+        with db_session_factory() as session:
+            symbol = session.query(Symbol).filter(Symbol.native_symbol == "BTC-USD-BTNL").one()
+            assert symbol.base == "BTC"
+            assert symbol.quote == "USD"
+            aliases = (
+                session.query(SymbolAlias)
+                .filter(SymbolAlias.symbol_public_id == symbol.public_id)
+                .all()
+            )
+            assert len(aliases) == 1
+            assert aliases[0].channel == "ws"
+            assert aliases[0].exchange_symbol == "BTC/USD:BTNL"
+            cap = (
+                session.query(SymbolExchangeCapability)
+                .filter(SymbolExchangeCapability.symbol_public_id == symbol.public_id)
+                .one()
+            )
+            assert cap.can_market_data is True
+            assert cap.can_trade is False
+            assert cap.source == "kraken_updater"
+            assert cap.reason is not None
+            assert "Bitnomial spot venue" in cap.reason
+            assert "CFTC-regulated US DCM" in cap.reason
+            spec = (
+                session.query(InstrumentSpec).filter(InstrumentSpec.known_to == KNOWN_TO_MAX).one()
+            )
+            assert spec.instrument_kind == "spot"
+            assert spec.funding_type is None
+            assert spec.rollover_rate_long is None
+            assert spec.rollover_rate_short is None
+
+    @pytest.mark.asyncio
+    async def test_update_database_btnl_persist_is_idempotent(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify re-running the updater leaves a single active row per BTNL natural key.
+
+        Given: An empty SQLite DB,
+        When: ``_update_database`` runs twice with the same BTNL record,
+        Then: Only one active Symbol / SymbolAlias / Capability / Instrument
+        / InstrumentSpec row remains (SCD2 close-on-insert is a no-op when
+        nothing changes).
+        """
+
+        class Repo:
+            """Repository stub returning real SQLite sessions."""
+
+            def get_session(self) -> Session:
+                """Return a new session."""
+                return cast(Session, db_session_factory())
+
+        updater.repository = Repo()
+        records: list[dict[str, Any]] = [
+            {
+                "native_symbol": "ETH-USD-BTNL",
+                "base_currency": "ETH",
+                "quote_currency": "USD",
+                "kraken_websocket_symbol": "ETH/USD:BTNL",
+                "asset_class": "crypto",
+                "is_btnl": "true",
+            }
+        ]
+        await updater._update_database(records)
+        await updater._update_database(records)
+        with db_session_factory() as session:
+            symbol_rows = (
+                session.query(Symbol)
+                .filter(Symbol.native_symbol == "ETH-USD-BTNL", Symbol.known_to == KNOWN_TO_MAX)
+                .all()
+            )
+            assert len(symbol_rows) == 1
+            active_caps = (
+                session.query(SymbolExchangeCapability)
+                .filter(
+                    SymbolExchangeCapability.symbol_public_id == symbol_rows[0].public_id,
+                    SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
+                )
+                .all()
+            )
+            assert len(active_caps) == 1
+            assert active_caps[0].can_trade is False
+
+    @pytest.mark.asyncio
+    async def test_fetch_symbols_merges_btnl_discoveries(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify _fetch_symbols overlays BTNL discoveries onto the REST/WS mappings.
+
+        Given: REST mappings yielding ``BTC-USD`` and BTNL discovery
+        yielding ``BTC-USD-BTNL``,
+        When: ``_fetch_symbols`` runs,
+        Then: Both native symbols are present in the result and the
+        BTNL record carries ``is_btnl="true"``.
+        """
+        rest_mappings: dict[str, dict[str, str]] = {
+            "BTC-USD": {
+                "native_symbol": "BTC-USD",
+                "kraken_websocket_symbol": "BTC/USD",
+                "kraken_rest_symbol": "XXBTZUSD",
+                "ccxt_symbol": "BTC-USD",
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+            }
+        }
+        btnl_record: KrakenSymbolRecord = {
+            "native_symbol": "BTC-USD-BTNL",
+            "base_currency": "BTC",
+            "quote_currency": "USD",
+            "kraken_websocket_symbol": "BTC/USD:BTNL",
+            "asset_class": "crypto",
+            "is_btnl": "true",
+        }
+        with (
+            patch.object(updater, "build_verified_mappings", return_value=(rest_mappings, True)),
+            patch.object(
+                updater, "discover_btnl_symbols", return_value={"BTC-USD-BTNL": btnl_record}
+            ),
+        ):
+            result = await updater._fetch_symbols(AsyncMock())
+        natives = {r["native_symbol"] for r in result}
+        assert natives == {"BTC-USD", "BTC-USD-BTNL"}
+        btnl_row = next(r for r in result if r["native_symbol"] == "BTC-USD-BTNL")
+        assert btnl_row["is_btnl"] == "true"
+        assert btnl_row["kraken_websocket_symbol"] == "BTC/USD:BTNL"
+
+    @pytest.mark.asyncio
+    async def test_fetch_symbols_skips_btnl_native_already_in_mappings(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify BTNL discoveries do not overwrite a native already present.
+
+        Given: REST mappings already include ``BTC-USD-BTNL`` (hypothetical
+        collision) and BTNL discovery returns the same native,
+        When: ``_fetch_symbols`` runs,
+        Then: The REST mapping wins (no overwrite), exercising the
+        collision branch in the merge loop.
+        """
+        rest_mappings: dict[str, dict[str, str]] = {
+            "BTC-USD-BTNL": {
+                "native_symbol": "BTC-USD-BTNL",
+                "kraken_websocket_symbol": "REST-FORM",
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+            }
+        }
+        btnl_record: KrakenSymbolRecord = {
+            "native_symbol": "BTC-USD-BTNL",
+            "base_currency": "BTC",
+            "quote_currency": "USD",
+            "kraken_websocket_symbol": "BTC/USD:BTNL",
+            "asset_class": "crypto",
+            "is_btnl": "true",
+        }
+        with (
+            patch.object(updater, "build_verified_mappings", return_value=(rest_mappings, True)),
+            patch.object(
+                updater, "discover_btnl_symbols", return_value={"BTC-USD-BTNL": btnl_record}
+            ),
+        ):
+            result = await updater._fetch_symbols(AsyncMock())
+        assert len(result) == 1
+        assert result[0]["kraken_websocket_symbol"] == "REST-FORM"
+
+    @pytest.mark.asyncio
+    async def test_persist_btnl_symbol_skips_alias_when_ws_symbol_empty(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify _persist_btnl_symbol tolerates a missing kraken_websocket_symbol.
+
+        Given: A BTNL record with an empty ``kraken_websocket_symbol``
+        (defensive guard against malformed discoveries),
+        When: ``_persist_btnl_symbol`` runs,
+        Then: No SymbolAlias is created and the BTNL capability still
+        lands with ``can_trade=False``.
+        """
+        now = datetime(2026, 5, 12, tzinfo=UTC)
+        with db_session_factory() as session:
+            session.add(
+                Symbol(
+                    native_symbol="NOWS-USD-BTNL",
+                    base="NOWS",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=now,
+                    timestamp=now,
+                    session_id="t",
+                    sequence_id=1,
+                )
+            )
+            session.commit()
+            sym_row = session.query(Symbol).filter_by(native_symbol="NOWS-USD-BTNL").one()
+            created, updated = updater._persist_btnl_symbol(
+                session,
+                {
+                    "native_symbol": "NOWS-USD-BTNL",
+                    "base_currency": "NOWS",
+                    "quote_currency": "USD",
+                    "kraken_websocket_symbol": "",
+                    "is_btnl": "true",
+                },
+                sym_row.public_id,
+                now,
+            )
+            session.commit()
+        assert created == 0
+        assert updated == 0
+        with db_session_factory() as session:
+            aliases = (
+                session.query(SymbolAlias)
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .filter(Symbol.native_symbol == "NOWS-USD-BTNL")
+                .all()
+            )
+            assert aliases == []
+            cap = (
+                session.query(SymbolExchangeCapability)
+                .join(Symbol, Symbol.public_id == SymbolExchangeCapability.symbol_public_id)
+                .filter(Symbol.native_symbol == "NOWS-USD-BTNL")
+                .one()
+            )
+            assert cap.can_trade is False
+
+    @pytest.mark.asyncio
+    async def test_persist_btnl_symbol_reports_updated_when_ws_symbol_changes(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify the alias UPDATE branch is exercised when the wire form mutates.
+
+        Given: A pre-existing BTNL ws alias under a different wire form,
+        When: ``_persist_btnl_symbol`` runs with the new wire form,
+        Then: ``_upsert_alias`` returns ``updated`` and the counter
+        increments by one (exercises the ``elif result == "updated"``
+        branch of the BTNL persist path).
+        """
+        first_now = datetime(2026, 5, 12, 8, 0, tzinfo=UTC)
+        with db_session_factory() as session:
+            session.add(
+                Symbol(
+                    native_symbol="BTC-USD-BTNL",
+                    base="BTC",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=first_now,
+                    timestamp=first_now,
+                    session_id="t",
+                    sequence_id=1,
+                )
+            )
+            session.commit()
+            sym_row = session.query(Symbol).filter_by(native_symbol="BTC-USD-BTNL").one()
+            updater._persist_btnl_symbol(
+                session,
+                {
+                    "native_symbol": "BTC-USD-BTNL",
+                    "base_currency": "BTC",
+                    "quote_currency": "USD",
+                    "kraken_websocket_symbol": "OLDWIRE",
+                    "is_btnl": "true",
+                },
+                sym_row.public_id,
+                first_now,
+            )
+            session.commit()
+        second_now = datetime(2026, 5, 12, 9, 0, tzinfo=UTC)
+        with db_session_factory() as session:
+            sym_row = session.query(Symbol).filter_by(native_symbol="BTC-USD-BTNL").one()
+            created, updated = updater._persist_btnl_symbol(
+                session,
+                {
+                    "native_symbol": "BTC-USD-BTNL",
+                    "base_currency": "BTC",
+                    "quote_currency": "USD",
+                    "kraken_websocket_symbol": "BTC/USD:BTNL",
+                    "is_btnl": "true",
+                },
+                sym_row.public_id,
+                second_now,
+            )
+            session.commit()
+        assert created == 0
+        assert updated == 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_symbols_btnl_failure_is_non_fatal(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify BTNL discovery failure does not abort the symbol update.
+
+        Given: REST mappings + a BTNL discovery that raises,
+        When: ``_fetch_symbols`` runs,
+        Then: The REST mappings still flow through; BTNL is dropped
+        from the result with a non-fatal warning.
+        """
+        rest_mappings: dict[str, dict[str, str]] = {
+            "BTC-USD": {
+                "native_symbol": "BTC-USD",
+                "kraken_websocket_symbol": "BTC/USD",
+                "kraken_rest_symbol": "XXBTZUSD",
+                "ccxt_symbol": "BTC-USD",
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+            }
+        }
+        with (
+            patch.object(updater, "build_verified_mappings", return_value=(rest_mappings, True)),
+            patch.object(updater, "discover_btnl_symbols", side_effect=RuntimeError("ws down")),
+        ):
+            result = await updater._fetch_symbols(AsyncMock())
+        natives = {r["native_symbol"] for r in result}
+        assert natives == {"BTC-USD"}

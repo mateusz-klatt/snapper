@@ -5418,3 +5418,154 @@ class TestInvokeFuncOffloadsSyncCalls:
         result = await client._invoke_func(async_call)
         assert result == "ok"
         assert async_thread_id[0] == main_thread_id
+
+
+class TestRawTickerCapture:
+    """Tests for the discovery-mode raw ticker capture path.
+
+    The capture sidecar exists so that the Kraken symbol updater can
+    discover product-type listings (e.g. ``BTC/USD:BTNL`` Bitnomial
+    perpetuals) that don't yet have aliases in the mapper; the regular
+    parse pipeline silently drops their frames. See
+    ``proprietary/plans/plan_2026_05_11_kraken_btnl_routing.md``
+    Phase 1.
+    """
+
+    def test_handle_ticker_data_captures_raw_symbols_when_capture_active(
+        self,
+    ) -> None:
+        """Verify _handle_ticker_data records raw frames into the capture dict.
+
+        Given: A client with ``_raw_ticker_capture`` set to a dict,
+        When: ``_handle_ticker_data`` runs with a batch of frames,
+        Then: Each distinct wire symbol is recorded as a key mapping
+        to the first observed frame.
+        """
+        client = KrakenExchangeClient()
+        capture: dict[str, dict[str, Any]] = {}
+        client._raw_ticker_capture = capture
+        frames = [
+            {"symbol": "BTC/USD:BTNL", "last": 100000.0},
+            {"symbol": "ETH/USD", "last": 3500.0},
+            {"symbol": "BTC/USD:BTNL", "last": 100001.0},
+        ]
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_ticker_list",
+            return_value=[],
+        ):
+            client._handle_ticker_data(frames)
+        assert set(capture.keys()) == {"BTC/USD:BTNL", "ETH/USD"}
+        assert capture["BTC/USD:BTNL"]["last"] == pytest.approx(100000.0)
+
+    def test_handle_ticker_data_skips_non_dict_and_non_string_symbols(
+        self,
+    ) -> None:
+        """Verify capture mode tolerates malformed frames without raising.
+
+        Given: A capture dict and frames with malformed entries,
+        When: ``_handle_ticker_data`` runs,
+        Then: Only well-formed entries land in the capture; no error
+        propagates.
+        """
+        client = KrakenExchangeClient()
+        capture: dict[str, dict[str, Any]] = {}
+        client._raw_ticker_capture = capture
+        frames = [
+            "not-a-dict",
+            {"symbol": None},
+            {"symbol": "BTC/USD:BTNL"},
+            {"no_symbol_key": "x"},
+        ]
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_ticker_list",
+            return_value=[],
+        ):
+            client._handle_ticker_data(frames)
+        assert set(capture.keys()) == {"BTC/USD:BTNL"}
+
+    def test_handle_ticker_data_returns_early_for_non_list_payload(self) -> None:
+        """Verify a non-list payload is ignored even with capture active.
+
+        Given: A capture dict and a non-list payload,
+        When: ``_handle_ticker_data`` runs,
+        Then: Capture stays empty (no entries added).
+        """
+        client = KrakenExchangeClient()
+        capture: dict[str, dict[str, Any]] = {}
+        client._raw_ticker_capture = capture
+        client._handle_ticker_data({"symbol": "BTC/USD:BTNL"})
+        assert capture == {}
+
+    @pytest.mark.asyncio
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_collect_raw_ticker_symbols_returns_capture_after_sleep(
+        self,
+        mock_ws_class: MagicMock,
+    ) -> None:
+        """Verify collect_raw_ticker_symbols subscribes and returns the capture.
+
+        Given: A mocked WS client and ``asyncio.sleep`` patched to a noop,
+        When: ``collect_raw_ticker_symbols`` is awaited,
+        Then: The wildcard ticker subscription is issued and the capture
+        dict (populated by the handler during the window) is returned.
+        """
+        client = KrakenExchangeClient(api_key="k", api_secret="s", sandbox=False)
+        mock_ws_client = AsyncMock()
+        mock_ws_class.return_value = mock_ws_client
+        mock_ws_client.__aenter__ = AsyncMock(return_value=mock_ws_client)
+        mock_ws_client.__aexit__ = AsyncMock(return_value=None)
+
+        async def fake_sleep(_duration: float) -> None:
+            assert client._raw_ticker_capture is not None
+            client._handle_ticker_data(
+                [
+                    {"symbol": "BTC/USD:BTNL"},
+                    {"symbol": "ETH/USD:BTNL"},
+                ]
+            )
+
+        with (
+            patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                side_effect=fake_sleep,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.parse_kraken_ticker_list",
+                return_value=[],
+            ),
+        ):
+            client._ws_client = mock_ws_client
+            captured = await client.collect_raw_ticker_symbols(window_seconds=0.0)
+        assert set(captured.keys()) == {"BTC/USD:BTNL", "ETH/USD:BTNL"}
+        mock_ws_client.subscribe.assert_called_once()
+        assert client._raw_ticker_capture is None
+
+    @pytest.mark.asyncio
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_collect_raw_ticker_symbols_restores_previous_capture_on_error(
+        self,
+        mock_ws_class: MagicMock,
+    ) -> None:
+        """Verify _raw_ticker_capture is restored even when the WS raises.
+
+        Given: A pre-existing outer capture dict + a WS subscribe that throws,
+        When: ``collect_raw_ticker_symbols`` is awaited,
+        Then: The original outer capture dict is restored after the call
+        unwinds (no nested-capture leak).
+        """
+        client = KrakenExchangeClient(api_key="k", api_secret="s", sandbox=False)
+        outer_capture: dict[str, dict[str, Any]] = {"outer": {"symbol": "outer"}}
+        client._raw_ticker_capture = outer_capture
+        mock_ws_client = AsyncMock()
+        mock_ws_class.return_value = mock_ws_client
+        mock_ws_client.__aenter__ = AsyncMock(return_value=mock_ws_client)
+        mock_ws_client.__aexit__ = AsyncMock(return_value=None)
+        mock_ws_client.subscribe = AsyncMock(side_effect=RuntimeError("boom"))
+        with (
+            patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            client._ws_client = mock_ws_client
+            await client.collect_raw_ticker_symbols(window_seconds=0.0)
+        assert client._raw_ticker_capture is outer_capture

@@ -20,6 +20,11 @@ underlyings:
     match_type: exact
     pattern: BTC-USD-PERP-INV
     relationship_type: derivative
+  - exchange: kraken
+    match_type: exact
+    pattern: BTC-USD-BTNL
+    relationship_type: proxy
+    instrument_type: spot
   - exchange: kraken_futures
     match_type: regex
     pattern: ^BTC-USD-\d{6}$
@@ -109,6 +114,11 @@ underlyings:
     match_type: exact
     pattern: ETH-USD-PERP
     relationship_type: derivative
+  - exchange: kraken
+    match_type: exact
+    pattern: ETH-USD-BTNL
+    relationship_type: proxy
+    instrument_type: spot
   - exchange: kraken_futures
     match_type: regex
     pattern: ^ETH-USD-\d{6}$
@@ -456,6 +466,11 @@ underlyings:
     match_type: exact
     pattern: LTC-USD-PERP
     relationship_type: derivative
+  - exchange: kraken
+    match_type: exact
+    pattern: LTC-USD-BTNL
+    relationship_type: proxy
+    instrument_type: spot
   - exchange: polygon
     match_type: exact
     pattern: LTC-AUD
@@ -655,6 +670,11 @@ underlyings:
     match_type: exact
     pattern: AAVE-USD-PERP
     relationship_type: derivative
+  - exchange: kraken
+    match_type: exact
+    pattern: AAVE-USD-BTNL
+    relationship_type: proxy
+    instrument_type: spot
   - exchange: polygon
     match_type: exact
     pattern: AAVE-USD
@@ -931,6 +951,11 @@ underlyings:
     match_type: exact
     pattern: ZEC-USD-PERP
     relationship_type: derivative
+  - exchange: kraken
+    match_type: exact
+    pattern: ZEC-USD-BTNL
+    relationship_type: proxy
+    instrument_type: spot
   - exchange: polygon
     match_type: exact
     pattern: ZEC-USD
@@ -1036,6 +1061,11 @@ underlyings:
     match_type: exact
     pattern: SUI-USD-PERP
     relationship_type: derivative
+  - exchange: kraken
+    match_type: exact
+    pattern: SUI-USD-BTNL
+    relationship_type: proxy
+    instrument_type: spot
   - exchange: polygon
     match_type: exact
     pattern: SUI-USD
@@ -1239,6 +1269,11 @@ underlyings:
     match_type: exact
     pattern: PAXG-USD-PERP
     relationship_type: derivative
+  - exchange: kraken
+    match_type: exact
+    pattern: PAXG-USD-BTNL
+    relationship_type: proxy
+    instrument_type: spot
   - exchange: kraken_equities
     match_type: regex
     pattern: ^GC[FGHJKMNQUVXZ]\d{1,2}-COMEX$
