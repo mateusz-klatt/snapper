@@ -69,7 +69,11 @@ class ZmqWebSocketBridgeService:
 
     Attributes:
         connection_manager: WebSocket connection manager reference.
-        topic_subscriptions: Mapping of topic to list of subscriptions.
+        topic_subscriptions: Mapping of topic to {websocket: subscription}
+            dict. Dict-of-dict shape (vs the earlier list-of-subscription)
+            gives O(1) membership checks, O(1) unsubscribe, and O(1)
+            client-state lookup during fan-out — critical on hot WS
+            topics (1000+ msg/sec) and disconnect storms.
         client_subscriptions: Mapping of WebSocket to subscribed topics.
         zmq_subscribers: Mapping of topic to ZMQ socket.
         subscriber_tasks: Mapping of topic to subscription loop task.
@@ -100,7 +104,7 @@ class ZmqWebSocketBridgeService:
             connection_manager: WebSocket connection manager instance.
         """
         self.connection_manager = connection_manager
-        self.topic_subscriptions: dict[str, list[TopicSubscriptionModel]] = {}
+        self.topic_subscriptions: dict[str, dict[WebSocket, TopicSubscriptionModel]] = {}
         self.client_subscriptions: dict[WebSocket, set[str]] = {}
         self.zmq_subscribers: dict[str, zmq.asyncio.Socket] = {}
         self.subscriber_tasks: dict[str, asyncio.Task[None]] = {}
@@ -226,14 +230,12 @@ class ZmqWebSocketBridgeService:
         """Track subscription state and return whether it is the first subscriber."""
         client_topics = self._ensure_client_topics(websocket)
         client_topics.add(topic)
-        subscriptions = self.topic_subscriptions.setdefault(topic, [])
+        subscriptions = self.topic_subscriptions.setdefault(topic, {})
         metrics = self.topic_metrics.setdefault(topic, TopicMetricsModel())
-        subscriptions.append(
-            TopicSubscriptionModel(
-                websocket=websocket,
-                throttle_ms=throttle_ms,
-                client_id=client_id,
-            )
+        subscriptions[websocket] = TopicSubscriptionModel(
+            websocket=websocket,
+            throttle_ms=throttle_ms,
+            client_id=client_id,
         )
         metrics.active_subscribers = len(subscriptions)
         return len(subscriptions) == 1
@@ -248,7 +250,7 @@ class ZmqWebSocketBridgeService:
 
     def _websocket_has_topic_subscription(self, websocket: WebSocket, topic: str) -> bool:
         """Return whether a WebSocket is already subscribed to a topic."""
-        return any(sub.websocket == websocket for sub in self.topic_subscriptions.get(topic, []))
+        return websocket in self.topic_subscriptions.get(topic, {})
 
     async def _reject_unknown_websocket_topic(self, websocket: WebSocket, topic: str) -> bool:
         """Send invalid-topic feedback and record control-plane telemetry."""
@@ -332,9 +334,7 @@ class ZmqWebSocketBridgeService:
         for topic in topics:
             self.client_subscriptions[websocket].discard(topic)
             if topic in self.topic_subscriptions:
-                self.topic_subscriptions[topic] = [
-                    sub for sub in self.topic_subscriptions[topic] if sub.websocket != websocket
-                ]
+                self.topic_subscriptions[topic].pop(websocket, None)
                 if topic in self.topic_metrics:
                     self.topic_metrics[topic].active_subscribers = len(
                         self.topic_subscriptions[topic]
@@ -716,7 +716,8 @@ class ZmqWebSocketBridgeService:
         current_time = time.time()
         max_pending = self._get_max_pending(topic)
         is_trade = self._is_trade_topic(topic)
-        for subscription in self.topic_subscriptions[topic][:]:
+        snapshot = tuple(self.topic_subscriptions[topic].values())
+        for subscription in snapshot:
             await self._dispatch_to_subscription(
                 subscription=subscription,
                 topic=topic,
@@ -1014,28 +1015,23 @@ class ZmqWebSocketBridgeService:
         """
         if topic not in self.topic_subscriptions:
             return False
-        to_remove = None
-        for sub in self.topic_subscriptions[topic]:
-            if sub.websocket == websocket:
-                to_remove = sub
-                break
-        if to_remove:
-            self.topic_subscriptions[topic].remove(to_remove)
-            logger.info(f"WebSocket unsubscribed from topic: {topic}")
-            if topic in self.topic_metrics:
-                self.topic_metrics[topic].active_subscribers = max(
-                    0, self.topic_metrics[topic].active_subscribers - 1
-                )
-            if websocket in self.client_subscriptions:
-                self.client_subscriptions[websocket].discard(topic)
-                if not self.client_subscriptions[websocket]:
-                    del self.client_subscriptions[websocket]
-            if not self.topic_subscriptions[topic]:
-                await self.stop_zmq_subscriber(topic)
-                del self.topic_subscriptions[topic]
-                logger.info(f"Stopped ZMQ subscriber for topic {topic} (no more clients)")
-            return True
-        return False
+        removed = self.topic_subscriptions[topic].pop(websocket, None)
+        if removed is None:
+            return False
+        logger.info(f"WebSocket unsubscribed from topic: {topic}")
+        if topic in self.topic_metrics:
+            self.topic_metrics[topic].active_subscribers = max(
+                0, self.topic_metrics[topic].active_subscribers - 1
+            )
+        if websocket in self.client_subscriptions:
+            self.client_subscriptions[websocket].discard(topic)
+            if not self.client_subscriptions[websocket]:
+                del self.client_subscriptions[websocket]
+        if not self.topic_subscriptions[topic]:
+            await self.stop_zmq_subscriber(topic)
+            del self.topic_subscriptions[topic]
+            logger.info(f"Stopped ZMQ subscriber for topic {topic} (no more clients)")
+        return True
 
     async def unsubscribe_websocket_all(self, websocket: WebSocket) -> int:
         """Unsubscribe a WebSocket from all topics.
@@ -1046,12 +1042,11 @@ class ZmqWebSocketBridgeService:
         Returns:
             Number of topics unsubscribed from.
         """
-        topics_to_unsubscribe: list[str] = []
-        for topic, subscriptions in self.topic_subscriptions.items():
-            for sub in subscriptions:
-                if sub.websocket == websocket:
-                    topics_to_unsubscribe.append(topic)
-                    break
+        topics_to_unsubscribe: list[str] = [
+            topic
+            for topic, subscriptions in self.topic_subscriptions.items()
+            if websocket in subscriptions
+        ]
         for topic in topics_to_unsubscribe:
             await self.unsubscribe_websocket(websocket, topic)
         if topics_to_unsubscribe:

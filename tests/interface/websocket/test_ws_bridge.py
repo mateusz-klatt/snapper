@@ -93,7 +93,7 @@ async def test_unsubscribe_skips_metrics_when_missing(
     topic = "market."
     websocket = MagicMock()
     bridge.client_subscriptions[websocket] = {topic}
-    bridge.topic_subscriptions[topic] = [TopicSubscriptionModel(websocket=websocket)]
+    bridge.topic_subscriptions[topic] = {websocket: TopicSubscriptionModel(websocket=websocket)}
     with patch.object(bridge, "_stop_zmq_subscription", new_callable=AsyncMock) as stop_mock:
         await bridge.unsubscribe_client(websocket, [topic])
     stop_mock.assert_awaited_once_with(topic)
@@ -222,7 +222,7 @@ async def test_forward_to_clients_trade_backpressure(
         client_id="trade",
         pending_count=MAX_PENDING_MESSAGES_TRADE,
     )
-    bridge.topic_subscriptions[topic] = [subscription]
+    bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
     bridge.topic_metrics[topic] = TopicMetricsModel()
     with patch.object(bridge, "disconnect_client", new_callable=AsyncMock) as disconnect_mock:
         await bridge._forward_to_clients(topic, topic, _make_order_json())
@@ -249,7 +249,7 @@ async def test_forward_to_clients_trade_backpressure_without_metrics(
         client_id="trade-nometrics",
         pending_count=MAX_PENDING_MESSAGES_TRADE,
     )
-    bridge.topic_subscriptions[topic] = [subscription]
+    bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
     with patch.object(bridge, "disconnect_client", new_callable=AsyncMock) as disconnect_mock:
         await bridge._forward_to_clients(topic, topic, _make_order_json())
     disconnect_mock.assert_awaited_once()
@@ -276,7 +276,7 @@ async def test_forward_to_clients_market_backpressure(
         client_id="market",
         pending_count=MAX_PENDING_MESSAGES_MARKET,
     )
-    bridge.topic_subscriptions[topic] = [subscription]
+    bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
     bridge.topic_metrics[topic] = TopicMetricsModel()
     await bridge._forward_to_clients(topic, topic, _make_candle_json())
     assert bridge.topic_metrics[topic].dropped_count == 1
@@ -303,7 +303,7 @@ async def test_forward_to_clients_timeout_disconnects(
         last_sent=0.0,
         client_id="slow",
     )
-    bridge.topic_subscriptions[topic] = [subscription]
+    bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
     bridge.topic_metrics[topic] = TopicMetricsModel()
     with patch.object(bridge, "disconnect_client", new_callable=AsyncMock) as disconnect_mock:
         await bridge._forward_to_clients(topic, topic, _make_candle_json())
@@ -331,7 +331,7 @@ async def test_forward_to_clients_timeout_without_metrics(
         last_sent=0.0,
         client_id="slow-nometrics",
     )
-    bridge.topic_subscriptions[topic] = [subscription]
+    bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
     with patch.object(bridge, "disconnect_client", new_callable=AsyncMock) as disconnect_mock:
         await bridge._forward_to_clients(topic, topic, _make_candle_json())
     disconnect_mock.assert_awaited_once_with(websocket)
@@ -358,7 +358,7 @@ async def test_forward_to_clients_throttled_increments_metrics(
         last_sent=now,
         client_id="throttled",
     )
-    bridge.topic_subscriptions[topic] = [subscription]
+    bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
     bridge.topic_metrics[topic] = TopicMetricsModel()
     with patch("snapper.interface.websocket.bridge.time.time", return_value=now):
         await bridge._forward_to_clients(topic, f"{topic}BTCUSD", _make_candle_json())
@@ -386,7 +386,7 @@ async def test_forward_to_clients_throttled_without_metrics(
         last_sent=now,
         client_id="throttled-nometrics",
     )
-    bridge.topic_subscriptions[topic] = [subscription]
+    bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
     with patch("snapper.interface.websocket.bridge.time.time", return_value=now):
         await bridge._forward_to_clients(topic, f"{topic}BTCUSD", _make_candle_json())
     websocket.send_text.assert_not_awaited()
@@ -411,7 +411,7 @@ async def test_forward_to_clients_trade_sends_when_no_backpressure(
         client_id="trade-ok",
         pending_count=0,
     )
-    bridge.topic_subscriptions[topic] = [subscription]
+    bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
     bridge.topic_metrics[topic] = TopicMetricsModel()
     await bridge._forward_to_clients(topic, topic, _make_order_json())
     websocket.send_text.assert_awaited_once()
@@ -536,7 +536,7 @@ async def test_forward_to_clients_send_error_disconnects(
         last_sent=0.0,
         client_id="err",
     )
-    bridge.topic_subscriptions[topic] = [subscription]
+    bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
     bridge.topic_metrics[topic] = TopicMetricsModel()
     with patch.object(bridge, "disconnect_client", new_callable=AsyncMock) as disconnect_mock:
         await bridge._forward_to_clients(topic, topic, _make_candle_json())
@@ -584,7 +584,7 @@ async def test_forward_to_clients_throttled_skip(
         last_sent=123.0,
         client_id="ws-throttle",
     )
-    bridge.topic_subscriptions[topic] = [subscription]
+    bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
     bridge.topic_metrics[topic] = TopicMetricsModel(active_subscribers=1)
     with patch("snapper.interface.websocket.bridge.time.time", return_value=123.0):
         await bridge._forward_to_clients(topic, topic, _make_candle_json())
@@ -647,7 +647,7 @@ async def test_forward_to_clients_timeout_disconnects_inline(
         last_sent=0.0,
         client_id="ws1",
     )
-    bridge.topic_subscriptions[topic] = [subscription]
+    bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
     bridge.topic_metrics[topic] = TopicMetricsModel(active_subscribers=1)
     with patch.object(bridge, "disconnect_client", new_callable=AsyncMock) as disconnect_mock:
         await bridge._forward_to_clients(topic, topic, _make_candle_json())
@@ -774,7 +774,7 @@ class TestZMQBridgeRemainingCoverage:
             throttle_ms=1000,
             last_sent=1000.0,
         )
-        bridge.topic_subscriptions[topic] = [subscription]
+        bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
         with patch("time.time", return_value=1000.5):
             mock_websocket.send_text = AsyncMock()
             test_data_str = json.dumps(
@@ -808,7 +808,7 @@ class TestZMQBridgeRemainingCoverage:
         subscription = TopicSubscriptionModel(
             websocket=mock_websocket, throttle_ms=100, last_sent=0.0
         )
-        bridge.topic_subscriptions[topic] = [subscription]
+        bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
         mock_websocket.send_text = AsyncMock()
         test_data_str = json.dumps(
             {
@@ -841,7 +841,7 @@ class TestZMQBridgeRemainingCoverage:
         subscription = TopicSubscriptionModel(
             websocket=mock_websocket, throttle_ms=100, last_sent=0.0
         )
-        bridge.topic_subscriptions[topic] = [subscription]
+        bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
         mock_websocket.send_text = AsyncMock(side_effect=Exception("Send failed"))
         bridge.disconnect_client = AsyncMock()
         test_data_str = json.dumps(
@@ -875,7 +875,7 @@ class TestZMQBridgeRemainingCoverage:
         subscription = TopicSubscriptionModel(
             websocket=mock_websocket, throttle_ms=100, last_sent=0.0, client_id="slow_client"
         )
-        bridge.topic_subscriptions[topic] = [subscription]
+        bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
         bridge.topic_metrics[topic] = TopicMetricsModel()
         mock_websocket.send_text = AsyncMock(side_effect=TimeoutError())
         bridge.disconnect_client = AsyncMock()
@@ -949,7 +949,7 @@ class TestSubscribeWebsocket:
         assert result is True
         assert topic in bridge.topic_subscriptions
         assert len(bridge.topic_subscriptions[topic]) == 1
-        assert bridge.topic_subscriptions[topic][0].websocket == mock_websocket
+        assert mock_websocket in bridge.topic_subscriptions[topic]
         assert mock_websocket in bridge.client_subscriptions
         assert topic in bridge.client_subscriptions[mock_websocket]
         assert topic in bridge.topic_metrics
@@ -1025,7 +1025,7 @@ class TestSubscribeWebsocket:
                 mock_websocket, topic, throttle_ms=custom_throttle
             )
         assert result is True
-        assert bridge.topic_subscriptions[topic][0].throttle_ms == custom_throttle
+        assert bridge.topic_subscriptions[topic][mock_websocket].throttle_ms == custom_throttle
 
     @pytest.mark.asyncio
     async def test_subscribe_websocket_multiple_clients(
@@ -1210,7 +1210,7 @@ class TestUnsubscribeWebsocket:
         result = await bridge.unsubscribe_websocket(ws1, topic)
         assert result is True
         assert len(bridge.topic_subscriptions[topic]) == 1
-        assert bridge.topic_subscriptions[topic][0].websocket == ws2
+        assert ws2 in bridge.topic_subscriptions[topic]
 
 
 class TestUnsubscribeWebsocketAll:
@@ -1309,7 +1309,7 @@ class TestUnsubscribeWebsocketAll:
             count = await bridge.unsubscribe_websocket_all(ws1)
         assert count == 1
         assert len(bridge.topic_subscriptions[topic]) == 1
-        assert bridge.topic_subscriptions[topic][0].websocket == ws2
+        assert ws2 in bridge.topic_subscriptions[topic]
 
 
 class TestGetSubscriptionStats:
@@ -1850,7 +1850,7 @@ class TestZMQSubscriptionLoops:
         subscription = TopicSubscriptionModel(
             websocket=mock_websocket, throttle_ms=100, last_sent=0.0, client_id="test_client"
         )
-        zmq_bridge.topic_subscriptions[topic] = [subscription]
+        zmq_bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
         zmq_bridge.topic_metrics[topic] = TopicMetricsModel()
         test_payload = {
             "instrument": "BTC-USD",
@@ -1884,7 +1884,7 @@ class TestZMQSubscriptionLoops:
             last_sent=current_time,
             client_id="test_client",
         )
-        zmq_bridge.topic_subscriptions[topic] = [subscription]
+        zmq_bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
         with patch("time.time", return_value=current_time):
             test_payload = {
                 "instrument": "BTC-USD",
@@ -2157,7 +2157,7 @@ class TestZMQBridgeIntegration:
         await zmq_bridge.subscribe_client(mock_websocket, [topic])
         mock_websocket.send_text.side_effect = Exception("Connection closed")
         subscription = TopicSubscriptionModel(websocket=mock_websocket, throttle_ms=100)
-        zmq_bridge.topic_subscriptions[topic] = [subscription]
+        zmq_bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
         valid_candle_payload = json.dumps(
             {
                 "type": "candle",
@@ -2363,7 +2363,10 @@ class TestZMQForwardToClients:
             last_sent=current_time - 1.0,
             client_id="client2",
         )
-        bridge.topic_subscriptions[topic] = [subscription1, subscription2]
+        bridge.topic_subscriptions[topic] = {
+            subscription1.websocket: subscription1,
+            subscription2.websocket: subscription2,
+        }
         bridge.topic_metrics[topic] = MagicMock()
         bridge.topic_metrics[topic].throttled_count = 0
         bridge.topic_metrics[topic].forwarded_count = 0
@@ -2397,7 +2400,7 @@ class TestZMQForwardToClients:
             last_sent=0,
             client_id="client1",
         )
-        bridge.topic_subscriptions[topic] = [subscription]
+        bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
         bridge.topic_metrics[topic] = MagicMock()
         bridge.topic_metrics[topic].throttled_count = 0
         bridge.topic_metrics[topic].forwarded_count = 0
@@ -2429,7 +2432,7 @@ class TestZMQForwardToClients:
             last_sent=0,
             client_id="client1",
         )
-        bridge.topic_subscriptions[topic] = [subscription]
+        bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
         await bridge._forward_to_clients(topic, received_topic, payload_json)
         mock_ws.send_text.assert_called_once()
         sent_message = mock_ws.send_text.call_args[0][0]
@@ -2462,7 +2465,7 @@ class TestZMQForwardToClients:
                 websocket=mock_ws3, throttle_ms=0, last_sent=0, client_id="client3"
             ),
         ]
-        bridge.topic_subscriptions[topic] = subscriptions
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub for sub in subscriptions}
         bridge.topic_metrics[topic] = MagicMock()
         bridge.topic_metrics[topic].throttled_count = 0
         bridge.topic_metrics[topic].forwarded_count = 0
@@ -2541,7 +2544,7 @@ class TestZMQWebSocketBridgeCore:
         for topic in topics:
             assert topic in zmq_bridge.topic_subscriptions
             assert len(zmq_bridge.topic_subscriptions[topic]) == 1
-            assert zmq_bridge.topic_subscriptions[topic][0].websocket == mock_websocket
+            assert mock_websocket in zmq_bridge.topic_subscriptions[topic]
         for topic in topics:
             assert topic in zmq_bridge.topic_metrics
             assert zmq_bridge.topic_metrics[topic].active_subscribers == 1
@@ -2740,7 +2743,7 @@ class TestZMQBridgeAdditionalCoverage:
             await zmq_bridge.subscribe_client(mock_websocket, [topic])
         assert topic in zmq_bridge.topic_subscriptions
         assert len(zmq_bridge.topic_subscriptions[topic]) == 1
-        assert zmq_bridge.topic_subscriptions[topic][0].websocket == mock_websocket
+        assert mock_websocket in zmq_bridge.topic_subscriptions[topic]
         assert mock_websocket in zmq_bridge.client_subscriptions
         assert topic in zmq_bridge.client_subscriptions[mock_websocket]
         mock_start.assert_called_once_with(topic)
@@ -2865,10 +2868,10 @@ class TestZMQBridgeAdditionalCoverage:
         message_str = '{"type":"tick","instrument":"BTC-USD","exchange":"kraken","timestamp":"2024-01-01T00:00:00+00:00"}'
         mock_ws1 = AsyncMock(spec=WebSocket)
         mock_ws2 = AsyncMock(spec=WebSocket)
-        zmq_bridge.topic_subscriptions[topic] = [
-            TopicSubscriptionModel(websocket=mock_ws1),
-            TopicSubscriptionModel(websocket=mock_ws2),
-        ]
+        zmq_bridge.topic_subscriptions[topic] = {
+            mock_ws1: TopicSubscriptionModel(websocket=mock_ws1),
+            mock_ws2: TopicSubscriptionModel(websocket=mock_ws2),
+        }
         await zmq_bridge._forward_to_clients(topic, zmq_topic, message_str)
         for ws in [mock_ws1, mock_ws2]:
             ws.send_text.assert_called_once_with(message_str)
@@ -2890,7 +2893,7 @@ class TestZMQBridgeAdditionalCoverage:
         mock_websocket = AsyncMock(spec=WebSocket)
         subscription = TopicSubscriptionModel(websocket=mock_websocket, throttle_ms=throttle_ms)
         subscription.last_sent = time.time()
-        zmq_bridge.topic_subscriptions[topic] = [subscription]
+        zmq_bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
         await zmq_bridge._forward_to_clients(topic, zmq_topic, message_str)
         mock_websocket.send_text.assert_not_called()
 
@@ -2910,7 +2913,7 @@ class TestZMQBridgeAdditionalCoverage:
         throttle_ms = 100
         mock_websocket = AsyncMock(spec=WebSocket)
         subscription = TopicSubscriptionModel(websocket=mock_websocket, throttle_ms=throttle_ms)
-        zmq_bridge.topic_subscriptions[topic] = [subscription]
+        zmq_bridge.topic_subscriptions[topic] = {subscription.websocket: subscription}
         mock_websocket.send_text.side_effect = Exception("Send failed")
         zmq_bridge.disconnect_client = AsyncMock()
         await zmq_bridge._forward_to_clients(topic, zmq_topic, message_str)
@@ -2924,14 +2927,16 @@ class TestZMQBridgeAdditionalCoverage:
 
         Given: A client subscribed to a topic,
         When: Subscribing again or unsubscribing from unknown topic,
-        Then: Operations complete without errors.
+        Then: Operations complete without errors and the dict-of-dict
+        subscription model deduplicates by websocket (same client
+        cannot be registered twice on the same topic).
         """
         mock_websocket = AsyncMock(spec=WebSocket)
         topic = "signals.kraken.BTC-USD.live"
         await zmq_bridge.subscribe_client(mock_websocket, [topic])
         initial_count = len(zmq_bridge.topic_subscriptions[topic])
         await zmq_bridge.subscribe_client(mock_websocket, [topic])
-        assert len(zmq_bridge.topic_subscriptions[topic]) == initial_count + 1
+        assert len(zmq_bridge.topic_subscriptions[topic]) == initial_count
         assert len(zmq_bridge.client_subscriptions[mock_websocket]) == 1
         await zmq_bridge.unsubscribe_client(mock_websocket, ["strategy.signals"])
         assert topic in zmq_bridge.topic_subscriptions
@@ -3001,13 +3006,13 @@ class TestZmqWsBridgeE2ESmoke:
         mock_ws = AsyncMock()
         mock_ws.send_text = AsyncMock()
         topic = "orders.events."
-        bridge_with_context.topic_subscriptions[topic] = [
-            TopicSubscriptionModel(
+        bridge_with_context.topic_subscriptions[topic] = {
+            mock_ws: TopicSubscriptionModel(
                 websocket=mock_ws,
                 throttle_ms=0,
                 client_id="test-client",
             )
-        ]
+        }
         bridge_with_context.topic_metrics[topic] = MagicMock()
         bridge_with_context.topic_metrics[topic].forwarded_count = 0
         fill = ExecutionData(
@@ -3052,13 +3057,13 @@ class TestZmqWsBridgeE2ESmoke:
         mock_ws = AsyncMock()
         mock_ws.send_text = AsyncMock()
         topic = "orders.events."
-        bridge_with_context.topic_subscriptions[topic] = [
-            TopicSubscriptionModel(
+        bridge_with_context.topic_subscriptions[topic] = {
+            mock_ws: TopicSubscriptionModel(
                 websocket=mock_ws,
                 throttle_ms=0,
                 client_id="test-client",
             )
-        ]
+        }
         bridge_with_context.topic_metrics[topic] = MagicMock()
         bridge_with_context.topic_metrics[topic].forwarded_count = 0
         order = OrderData(
@@ -3163,7 +3168,7 @@ class TestBackpressure:
             client_id="slow-client",
             pending_count=MAX_PENDING_MESSAGES_TRADE,
         )
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel()
         raw_json = '{"type": "order_request", "public_id": "123"}'
         await bridge._forward_to_clients(topic, "orders.commands.kraken.BTC-USD.submit", raw_json)
@@ -3187,7 +3192,7 @@ class TestBackpressure:
             client_id="slow-client",
             pending_count=MAX_PENDING_MESSAGES_MARKET,
         )
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel()
         raw_json = '{"type": "candle", "instrument": "BTC-USD"}'
         await bridge._forward_to_clients(topic, "market.BTC-USD.1m", raw_json)
@@ -3413,9 +3418,9 @@ class TestBridgeControlRecording:
         mock_ws = MagicMock()
         mock_ws.close = AsyncMock()
         recording_bridge.client_subscriptions[mock_ws] = {"market."}
-        recording_bridge.topic_subscriptions["market."] = [
-            TopicSubscriptionModel(websocket=mock_ws, throttle_ms=100)
-        ]
+        recording_bridge.topic_subscriptions["market."] = {
+            mock_ws: TopicSubscriptionModel(websocket=mock_ws, throttle_ms=100)
+        }
 
         mock_session = AsyncMock(add=MagicMock())
         mock_ctx = AsyncMock()
@@ -3464,7 +3469,7 @@ class TestOrdersEventsFailClosedParsing:
         topic = "orders.events."
         mock_ws = AsyncMock()
         sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, client_id="viewer-1")
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel()
         return mock_ws, topic
 
@@ -3529,7 +3534,7 @@ class TestOrdersEventsFailClosedParsing:
         topic = "orders.events."
         mock_ws = AsyncMock()
         sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, client_id="viewer-1")
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         await bridge._forward_to_clients(
             topic, "orders.events.kraken.BTC-USD.executed", "{not-json"
         )
@@ -3565,10 +3570,10 @@ class TestOrdersEventsTwoPrincipalLeakGuard:
         topic = "orders.events."
         ws_a = AsyncMock()
         ws_b = AsyncMock()
-        bridge.topic_subscriptions[topic] = [
-            TopicSubscriptionModel(websocket=ws_a, throttle_ms=0, client_id="viewer-A"),
-            TopicSubscriptionModel(websocket=ws_b, throttle_ms=0, client_id="viewer-B"),
-        ]
+        bridge.topic_subscriptions[topic] = {
+            ws_a: TopicSubscriptionModel(websocket=ws_a, throttle_ms=0, client_id="viewer-A"),
+            ws_b: TopicSubscriptionModel(websocket=ws_b, throttle_ms=0, client_id="viewer-B"),
+        }
         bridge.topic_metrics[topic] = TopicMetricsModel()
 
         principal_a = AuthPrincipal(
@@ -3630,10 +3635,14 @@ class TestOrdersEventsTwoPrincipalLeakGuard:
         topic = "orders.events."
         ws_primary = AsyncMock()
         ws_secondary = AsyncMock()
-        bridge.topic_subscriptions[topic] = [
-            TopicSubscriptionModel(websocket=ws_primary, throttle_ms=0, client_id="viewer-1"),
-            TopicSubscriptionModel(websocket=ws_secondary, throttle_ms=0, client_id="viewer-2"),
-        ]
+        bridge.topic_subscriptions[topic] = {
+            ws_primary: TopicSubscriptionModel(
+                websocket=ws_primary, throttle_ms=0, client_id="viewer-1"
+            ),
+            ws_secondary: TopicSubscriptionModel(
+                websocket=ws_secondary, throttle_ms=0, client_id="viewer-2"
+            ),
+        }
         bridge.topic_metrics[topic] = TopicMetricsModel()
 
         principal_primary = AuthPrincipal(

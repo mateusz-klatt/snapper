@@ -62,7 +62,7 @@ async def test_unsubscribe_client_updates_metrics_and_stops_subscription() -> No
     """
     bridge = ZmqWebSocketBridgeService(connection_manager=None)
     ws: Any = DummyWebSocket()
-    bridge.topic_subscriptions["topic1"] = [TopicSubscriptionModel(websocket=ws, throttle_ms=0)]
+    bridge.topic_subscriptions["topic1"] = {ws: TopicSubscriptionModel(websocket=ws, throttle_ms=0)}
     bridge.client_subscriptions[ws] = {"topic1"}
     bridge.topic_metrics["topic1"] = TopicMetricsModel(active_subscribers=1)
     bridge._stop_zmq_subscription = AsyncMock()
@@ -83,7 +83,7 @@ async def test_forward_to_clients_raw_passthrough() -> None:
     """
     bridge = ZmqWebSocketBridgeService(connection_manager=None)
     ws: Any = DummyWebSocket()
-    bridge.topic_subscriptions["foo"] = [TopicSubscriptionModel(websocket=ws, throttle_ms=0)]
+    bridge.topic_subscriptions["foo"] = {ws: TopicSubscriptionModel(websocket=ws, throttle_ms=0)}
     bridge.topic_metrics["foo"] = TopicMetricsModel()
     raw_json = '{"foo": "bar"}'
     await bridge._forward_to_clients("foo", "foo", raw_json)
@@ -103,7 +103,7 @@ async def test_forward_to_clients_backpressure_trade_disconnects_client() -> Non
     topic = "orders.commands.kraken."
     sub = TopicSubscriptionModel(websocket=ws, throttle_ms=0, client_id="c1")
     sub.pending_count = bridge._get_max_pending(topic)
-    bridge.topic_subscriptions[topic] = [sub]
+    bridge.topic_subscriptions[topic] = {sub.websocket: sub}
     bridge.topic_metrics[topic] = TopicMetricsModel()
     bridge.disconnect_client = AsyncMock()
     order_payload = json.dumps(
@@ -138,7 +138,7 @@ async def test_forward_to_clients_timeout_disconnects(monkeypatch: pytest.Monkey
     ws.send_text = AsyncMock(side_effect=asyncio.TimeoutError)
     topic = "market.data"
     sub = TopicSubscriptionModel(websocket=ws, throttle_ms=0, client_id="c2")
-    bridge.topic_subscriptions[topic] = [sub]
+    bridge.topic_subscriptions[topic] = {sub.websocket: sub}
     bridge.topic_metrics[topic] = TopicMetricsModel()
     bridge.disconnect_client = AsyncMock()
     candle_payload = {
@@ -263,7 +263,7 @@ class TestBridgeMissingBranches:
         topic = "market.ticks.btc"
         sub = TopicSubscriptionModel(websocket=ws, throttle_ms=0, client_id="c1")
         sub.pending_count = 100
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel()
         tick_payload = {
             "instrument": "BTC-USD",
@@ -294,7 +294,7 @@ class TestBridgeMissingBranches:
         ws.send_text = slow_send
         topic = "market.ticks.eth"
         sub = TopicSubscriptionModel(websocket=ws, throttle_ms=0, client_id="c2")
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel()
         bridge.disconnect_client = AsyncMock()
         tick_payload = {
@@ -373,7 +373,7 @@ class TestBridgeMissingBranches:
         ws.send_text.side_effect = TimeoutError()
         topic = "market.ticks"
         sub = TopicSubscriptionModel(websocket=ws, throttle_ms=0, client_id="c3")
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel()
         tick_data_str = json.dumps(
             {
@@ -401,7 +401,7 @@ class TestBridgeMissingBranches:
         ws.send_text.side_effect = Exception("Connection closed")
         topic = "market.ticks"
         sub = TopicSubscriptionModel(websocket=ws, throttle_ms=0, client_id="c4")
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel(active_subscribers=1)
         bridge.disconnect_client = AsyncMock()
         tick_data_str = json.dumps(
@@ -429,7 +429,7 @@ class TestBridgeMissingBranches:
         ws: Any = DummyWebSocket()
         topic = "market.ticks"
         sub = TopicSubscriptionModel(websocket=ws, throttle_ms=0, client_id="c5")
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.client_subscriptions[ws] = {topic}
         bridge.topic_metrics[topic] = TopicMetricsModel(active_subscribers=1)
         bridge.stop_zmq_subscriber = AsyncMock()
@@ -449,7 +449,7 @@ class TestBridgeMissingBranches:
         ws: Any = DummyWebSocket()
         topic = "market.candles"
         sub = TopicSubscriptionModel(websocket=ws, throttle_ms=0, client_id="c6")
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.client_subscriptions[ws] = {topic}
         bridge.topic_metrics[topic] = TopicMetricsModel(active_subscribers=1)
         bridge.stop_zmq_subscriber = AsyncMock()
@@ -607,7 +607,7 @@ class TestForwardToClientsTimeoutCoverage:
         mock_ws = AsyncMock()
         mock_ws.send_text = AsyncMock(side_effect=TimeoutError())
         sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, client_id="slow-client")
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel()
         bridge.client_subscriptions[mock_ws] = {topic}
         bridge.disconnect_client = AsyncMock()
@@ -628,7 +628,7 @@ class TestForwardToClientsTimeoutCoverage:
         mock_ws = AsyncMock()
         mock_ws.send_text = AsyncMock(side_effect=TimeoutError())
         sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, client_id="slow-client")
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.client_subscriptions[mock_ws] = {topic}
         bridge.disconnect_client = AsyncMock()
         await bridge._forward_to_clients(topic, topic, '{"type":"candle"}')
@@ -650,7 +650,7 @@ class TestForwardToClientsTimeoutCoverage:
         mock_ws2.send_text = AsyncMock(side_effect=TimeoutError())
         sub1 = TopicSubscriptionModel(websocket=mock_ws1, throttle_ms=0, client_id="c1")
         sub2 = TopicSubscriptionModel(websocket=mock_ws2, throttle_ms=0, client_id="c2")
-        bridge.topic_subscriptions[topic] = [sub1, sub2]
+        bridge.topic_subscriptions[topic] = {sub1.websocket: sub1, sub2.websocket: sub2}
         bridge.topic_metrics[topic] = TopicMetricsModel(active_subscribers=2)
         bridge.client_subscriptions[mock_ws1] = {topic}
         bridge.client_subscriptions[mock_ws2] = {topic}
@@ -696,10 +696,14 @@ class TestUnsubscribeWebsocketAllCoverage:
         ws_other1: Any = DummyWebSocket()
         ws_other2: Any = DummyWebSocket()
         topic1 = "market.candles"
-        bridge.topic_subscriptions[topic1] = [
-            TopicSubscriptionModel(websocket=ws_other1, throttle_ms=0, client_id="other1"),
-            TopicSubscriptionModel(websocket=ws_other2, throttle_ms=0, client_id="other2"),
-        ]
+        bridge.topic_subscriptions[topic1] = {
+            ws_other1: TopicSubscriptionModel(
+                websocket=ws_other1, throttle_ms=0, client_id="other1"
+            ),
+            ws_other2: TopicSubscriptionModel(
+                websocket=ws_other2, throttle_ms=0, client_id="other2"
+            ),
+        }
         bridge.topic_metrics[topic1] = TopicMetricsModel(active_subscribers=2)
         bridge.client_subscriptions[ws_other1] = {topic1}
         bridge.client_subscriptions[ws_other2] = {topic1}
@@ -720,11 +724,17 @@ class TestUnsubscribeWebsocketAllCoverage:
         ws_other1: Any = DummyWebSocket()
         ws_other2: Any = DummyWebSocket()
         topic = "market.candles"
-        bridge.topic_subscriptions[topic] = [
-            TopicSubscriptionModel(websocket=ws_other1, throttle_ms=0, client_id="other1"),
-            TopicSubscriptionModel(websocket=ws_other2, throttle_ms=0, client_id="other2"),
-            TopicSubscriptionModel(websocket=ws_target, throttle_ms=0, client_id="target"),
-        ]
+        bridge.topic_subscriptions[topic] = {
+            ws_other1: TopicSubscriptionModel(
+                websocket=ws_other1, throttle_ms=0, client_id="other1"
+            ),
+            ws_other2: TopicSubscriptionModel(
+                websocket=ws_other2, throttle_ms=0, client_id="other2"
+            ),
+            ws_target: TopicSubscriptionModel(
+                websocket=ws_target, throttle_ms=0, client_id="target"
+            ),
+        }
         bridge.client_subscriptions[ws_target] = {topic}
         bridge.client_subscriptions[ws_other1] = {topic}
         bridge.client_subscriptions[ws_other2] = {topic}
@@ -733,7 +743,7 @@ class TestUnsubscribeWebsocketAllCoverage:
         count = await bridge.unsubscribe_websocket_all(ws_target)
         assert count == 1
         assert len(bridge.topic_subscriptions[topic]) == 2
-        client_ids = [s.client_id for s in bridge.topic_subscriptions[topic]]
+        client_ids = [s.client_id for s in bridge.topic_subscriptions[topic].values()]
         assert "other1" in client_ids
         assert "other2" in client_ids
 
@@ -749,8 +759,12 @@ class TestUnsubscribeWebsocketAllCoverage:
         ws: Any = DummyWebSocket()
         topic1 = "market.candles"
         topic2 = "market.ticks"
-        bridge.topic_subscriptions[topic1] = [TopicSubscriptionModel(websocket=ws, throttle_ms=0)]
-        bridge.topic_subscriptions[topic2] = [TopicSubscriptionModel(websocket=ws, throttle_ms=0)]
+        bridge.topic_subscriptions[topic1] = {
+            ws: TopicSubscriptionModel(websocket=ws, throttle_ms=0)
+        }
+        bridge.topic_subscriptions[topic2] = {
+            ws: TopicSubscriptionModel(websocket=ws, throttle_ms=0)
+        }
         bridge.client_subscriptions[ws] = {topic1, topic2}
         bridge.topic_metrics[topic1] = TopicMetricsModel()
         bridge.topic_metrics[topic2] = TopicMetricsModel()
@@ -776,7 +790,7 @@ class TestUnsubscribeWebsocketStopsZmqCoverage:
         ws: Any = DummyWebSocket()
         topic = "market.candles"
         sub = TopicSubscriptionModel(websocket=ws, throttle_ms=0, client_id="last-client")
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.client_subscriptions[ws] = {topic}
         bridge.topic_metrics[topic] = TopicMetricsModel(active_subscribers=1)
         bridge.stop_zmq_subscriber = AsyncMock()
@@ -796,7 +810,7 @@ class TestUnsubscribeWebsocketStopsZmqCoverage:
         ws: Any = DummyWebSocket()
         topic = "market.candles"
         sub = TopicSubscriptionModel(websocket=ws, throttle_ms=0, client_id="orphan")
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel(active_subscribers=1)
         bridge.stop_zmq_subscriber = AsyncMock()
         result = await bridge.unsubscribe_websocket(ws, topic)
@@ -895,7 +909,9 @@ class TestUnsubscribeClientStopZmqSubscription:
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         ws: Any = MockWebSocket()
         topic = "market.candles"
-        bridge.topic_subscriptions[topic] = [TopicSubscriptionModel(websocket=ws, throttle_ms=0)]
+        bridge.topic_subscriptions[topic] = {
+            ws: TopicSubscriptionModel(websocket=ws, throttle_ms=0)
+        }
         bridge.client_subscriptions[ws] = {topic}
         bridge.topic_metrics[topic] = TopicMetricsModel(active_subscribers=1)
         bridge._stop_zmq_subscription = AsyncMock()
@@ -915,8 +931,12 @@ class TestUnsubscribeClientStopZmqSubscription:
         ws: Any = MockWebSocket()
         topic1 = "market.candles"
         topic2 = "orders"
-        bridge.topic_subscriptions[topic1] = [TopicSubscriptionModel(websocket=ws, throttle_ms=0)]
-        bridge.topic_subscriptions[topic2] = [TopicSubscriptionModel(websocket=ws, throttle_ms=0)]
+        bridge.topic_subscriptions[topic1] = {
+            ws: TopicSubscriptionModel(websocket=ws, throttle_ms=0)
+        }
+        bridge.topic_subscriptions[topic2] = {
+            ws: TopicSubscriptionModel(websocket=ws, throttle_ms=0)
+        }
         bridge.client_subscriptions[ws] = {topic1, topic2}
         bridge.topic_metrics[topic1] = TopicMetricsModel(active_subscribers=1)
         bridge.topic_metrics[topic2] = TopicMetricsModel(active_subscribers=1)
@@ -1012,9 +1032,9 @@ class TestForwardToClientsCore:
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         topic = "market.candles"
         mock_ws = AsyncMock()
-        bridge.topic_subscriptions[topic] = [
-            TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, last_sent=0.0)
-        ]
+        bridge.topic_subscriptions[topic] = {
+            mock_ws: TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, last_sent=0.0)
+        }
         bridge.topic_metrics[topic] = TopicMetricsModel()
         message_str = '{"type": "candle", "instrument": "BTC-USD"}'
         await bridge._forward_to_clients(topic, topic, message_str)
@@ -1032,9 +1052,9 @@ class TestForwardToClientsCore:
         topic = "market.candles"
         mock_ws = AsyncMock()
         now = time.time()
-        bridge.topic_subscriptions[topic] = [
-            TopicSubscriptionModel(websocket=mock_ws, throttle_ms=1000, last_sent=now)
-        ]
+        bridge.topic_subscriptions[topic] = {
+            mock_ws: TopicSubscriptionModel(websocket=mock_ws, throttle_ms=1000, last_sent=now)
+        }
         bridge.topic_metrics[topic] = TopicMetricsModel()
         message_str = '{"type": "candle"}'
         await bridge._forward_to_clients(topic, topic, message_str)
@@ -1054,7 +1074,7 @@ class TestCleanup:
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         topic = "test.topic"
-        bridge.topic_subscriptions[topic] = []
+        bridge.topic_subscriptions[topic] = {}
         bridge.topic_metrics[topic] = TopicMetricsModel()
         task = asyncio.create_task(asyncio.sleep(10))
         bridge.subscriber_tasks[topic] = task
@@ -1081,7 +1101,7 @@ class TestRemoveSubscription:
         topic = "test.topic"
         mock_ws = MagicMock()
         sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0)
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel(active_subscribers=1)
         bridge.client_subscriptions[mock_ws] = {topic}
         await bridge.remove_subscription(mock_ws, [topic])
@@ -1105,7 +1125,7 @@ class TestRemoveClient:
         topic = "test.topic"
         mock_ws = MagicMock()
         sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0)
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.client_subscriptions[mock_ws] = {topic}
         await bridge.remove_client(mock_ws)
         assert len(bridge.topic_subscriptions.get(topic, [])) == 0
@@ -1167,12 +1187,12 @@ class TestUnsubscribeWebsocketAllBranchCoverage:
         bridge._stop_zmq_subscription = AsyncMock()
         topic1 = "market."
         topic2 = "orders"
-        bridge.topic_subscriptions[topic1] = [
-            TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0)
-        ]
-        bridge.topic_subscriptions[topic2] = [
-            TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0)
-        ]
+        bridge.topic_subscriptions[topic1] = {
+            mock_ws: TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0)
+        }
+        bridge.topic_subscriptions[topic2] = {
+            mock_ws: TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0)
+        }
         bridge.client_subscriptions[mock_ws] = {topic1, topic2}
         bridge.topic_metrics[topic1] = TopicMetricsModel()
         bridge.topic_metrics[topic2] = TopicMetricsModel()
@@ -1201,7 +1221,7 @@ class TestForwardToClientsBackpressure:
             throttle_ms=0,
             pending_count=MAX_PENDING_MESSAGES_TRADE,
         )
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel()
         message_str = '{"type": "order_request", "public_id": "123"}'
         await bridge._forward_to_clients(topic, topic, message_str)
@@ -1228,7 +1248,7 @@ class TestForwardToClientsThrottling:
             throttle_ms=1000,
             last_sent=now,
         )
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel()
         message_str = '{"type": "candle"}'
         await bridge._forward_to_clients(topic, topic, message_str)
@@ -1253,7 +1273,7 @@ class TestForwardToClientsExceptionHandling:
         mock_ws = AsyncMock()
         mock_ws.send_text.side_effect = Exception("Send failed")
         sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, last_sent=0.0)
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel()
         message_str = '{"type": "candle"}'
         await bridge._forward_to_clients(topic, topic, message_str)
@@ -1275,7 +1295,7 @@ class TestForwardToClientsBranchCoverage:
         topic = "market.candles"
         mock_ws = AsyncMock()
         sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, last_sent=0.0)
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel()
         message_str = '{"type": "candle"}'
         await bridge._forward_to_clients(topic, topic, message_str)
@@ -1295,7 +1315,7 @@ class TestForwardToClientsBranchCoverage:
         mock_ws = AsyncMock()
         mock_ws.send_text.side_effect = TimeoutError()
         sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, last_sent=0.0)
-        bridge.topic_subscriptions[topic] = [sub]
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
         bridge.topic_metrics[topic] = TopicMetricsModel()
         message_str = '{"type": "candle"}'
         await bridge._forward_to_clients(topic, topic, message_str)
@@ -1552,11 +1572,11 @@ class TestForwardToClientsRoutingMismatch:
         Then: Message is dropped and invalid_messages counter increments.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
-        ws = DummyWebSocket()
+        ws: Any = DummyWebSocket()
         topic = "market."
-        bridge.topic_subscriptions[topic] = [
-            TopicSubscriptionModel(websocket=ws, throttle_ms=0),
-        ]
+        bridge.topic_subscriptions[topic] = {
+            ws: TopicSubscriptionModel(websocket=ws, throttle_ms=0),
+        }
         bridge.topic_metrics[topic] = TopicMetricsModel()
         await bridge._forward_to_clients(topic, "signals.paper.FOO", '{"type":"candle"}')
         ws.send_text.assert_not_called()
@@ -1571,11 +1591,11 @@ class TestForwardToClientsRoutingMismatch:
         Then: Message is dropped without error.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
-        ws = DummyWebSocket()
+        ws: Any = DummyWebSocket()
         topic = "market."
-        bridge.topic_subscriptions[topic] = [
-            TopicSubscriptionModel(websocket=ws, throttle_ms=0),
-        ]
+        bridge.topic_subscriptions[topic] = {
+            ws: TopicSubscriptionModel(websocket=ws, throttle_ms=0),
+        }
         await bridge._forward_to_clients(topic, "signals.paper.FOO", '{"type":"candle"}')
         ws.send_text.assert_not_called()
 
@@ -1588,11 +1608,11 @@ class TestForwardToClientsRoutingMismatch:
         Then: Message is dropped and invalid_messages counter increments.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
-        ws = DummyWebSocket()
+        ws: Any = DummyWebSocket()
         topic = "market.kraken.BTC-USD.ticks"
-        bridge.topic_subscriptions[topic] = [
-            TopicSubscriptionModel(websocket=ws, throttle_ms=0),
-        ]
+        bridge.topic_subscriptions[topic] = {
+            ws: TopicSubscriptionModel(websocket=ws, throttle_ms=0),
+        }
         bridge.topic_metrics[topic] = TopicMetricsModel()
         await bridge._forward_to_clients(topic, "market.kraken.ETH-USD.ticks", '{"type":"tick"}')
         ws.send_text.assert_not_called()
@@ -1607,11 +1627,11 @@ class TestForwardToClientsRoutingMismatch:
         Then: Message is dropped without error.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
-        ws = DummyWebSocket()
+        ws: Any = DummyWebSocket()
         topic = "market.kraken.BTC-USD.ticks"
-        bridge.topic_subscriptions[topic] = [
-            TopicSubscriptionModel(websocket=ws, throttle_ms=0),
-        ]
+        bridge.topic_subscriptions[topic] = {
+            ws: TopicSubscriptionModel(websocket=ws, throttle_ms=0),
+        }
         await bridge._forward_to_clients(topic, "market.kraken.ETH-USD.ticks", '{"type":"tick"}')
         ws.send_text.assert_not_called()
 
@@ -1677,9 +1697,9 @@ class TestAiReviewScopeFilterWiring:
         """Build a bridge with one subscription on the ai_reviews family."""
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         ws: Any = DummyWebSocket()
-        bridge.topic_subscriptions["ai_reviews."] = [
-            TopicSubscriptionModel(websocket=ws, throttle_ms=0)
-        ]
+        bridge.topic_subscriptions["ai_reviews."] = {
+            ws: TopicSubscriptionModel(websocket=ws, throttle_ms=0)
+        }
         bridge.topic_metrics["ai_reviews."] = TopicMetricsModel()
         return bridge, ws
 
