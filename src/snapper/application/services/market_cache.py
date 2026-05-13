@@ -102,6 +102,41 @@ class CandleSnap:
     volume: float
 
 
+@dataclass(frozen=True, slots=True)
+class PairStats:
+    """Computed Pearson + Engle-Granger cointegration for a pair of legs.
+
+    Populated by :class:`snapper.application.services.market_stats.MarketStatsWorker`
+    on its 60 s (Pearson) and 300 s (cointegration) cadences. Routes
+    serialize this directly into the stats response envelope.
+
+    Attributes:
+        pearson_r: Pearson correlation coefficient on the latest
+            aligned-close sample (``None`` until first compute).
+        pearson_n: Sample count contributing to ``pearson_r``.
+        coint_t: Engle-Granger ``coint_t`` statistic (``None`` until
+            the cointegration cadence has produced a value).
+        coint_pvalue: Engle-Granger asymptotic p-value (``None`` until
+            first compute).
+        coint_critical_values: Critical-value triple (1%, 5%, 10%)
+            from ``statsmodels.tsa.stattools.coint``.
+        computed_at: UTC timestamp of the most recent successful
+            compute (whichever cadence ran last).
+        sample_count: Sample size of the most recent compute.
+        is_warm: ``True`` once a sample exceeds the per-cadence
+            threshold (≥ 30 for Pearson, ≥ 60 for cointegration).
+    """
+
+    pearson_r: float | None = None
+    pearson_n: int = 0
+    coint_t: float | None = None
+    coint_pvalue: float | None = None
+    coint_critical_values: tuple[float, float, float] | None = None
+    computed_at: datetime | None = None
+    sample_count: int = 0
+    is_warm: bool = False
+
+
 def _snap_from_candle_data(candle: CandleData) -> CandleSnap:
     """Project a :class:`CandleData` ZMQ frame to a :class:`CandleSnap`."""
     return CandleSnap(
@@ -164,6 +199,7 @@ class MarketCacheService:
         self._candles: dict[tuple[AllExchange, str], deque[CandleSnap]] = {}
         self._current: dict[tuple[AllExchange, str], CandleSnap] = {}
         self._last_seen_at: dict[tuple[AllExchange, str], float] = {}
+        self._stats: dict[tuple[str, str], PairStats] = {}
         self._zmq_context: zmq.asyncio.Context | None = None
         self._subscriber: ValidatedSubscriber | None = None
         self._ingest_task: asyncio.Task[None] | None = None
@@ -272,6 +308,35 @@ class MarketCacheService:
         """Return the count of distinct ``(exchange, symbol)`` keys in the cache."""
         async with self._lock:
             return len(self._candles)
+
+    async def get_pair_stats(self, left_key: str, right_key: str) -> PairStats | None:
+        """Return the computed stats for ``(left_key, right_key)`` or ``None``.
+
+        Pair keys are the canonical ``"{exchange}:{native_symbol}"``
+        form produced by :class:`MarketStatsWorker`. Routes call this
+        accessor and surface a placeholder envelope if the worker has
+        not yet produced a value for a configured pair.
+
+        Args:
+            left_key: Canonical pair key for the left leg.
+            right_key: Canonical pair key for the right leg.
+
+        Returns:
+            The most recent :class:`PairStats` snapshot, or ``None``
+            when the pair is not (yet) in the stats map.
+        """
+        async with self._lock:
+            return self._stats.get((left_key, right_key))
+
+    async def set_pair_stats(self, left_key: str, right_key: str, stats: PairStats) -> None:
+        """Atomic write of a :class:`PairStats` entry by canonical pair key."""
+        async with self._lock:
+            self._stats[(left_key, right_key)] = stats
+
+    async def pair_stats_keys(self) -> list[tuple[str, str]]:
+        """Return a snapshot of all stat pair keys for diagnostic routes."""
+        async with self._lock:
+            return list(self._stats.keys())
 
     async def _prewarm(self) -> None:
         """Backfill the cache from the DB for every persisted instrument.

@@ -327,6 +327,13 @@ class TestLifespan:
                     stop=AsyncMock(),
                 ),
             ),
+            patch(
+                "snapper.server.app.MarketStatsWorker",
+                return_value=MagicMock(
+                    start=AsyncMock(),
+                    stop=AsyncMock(),
+                ),
+            ),
             patch("snapper.server.app.get_repository"),
             patch(
                 "snapper.server.app.get_ws_auth_manager",
@@ -1310,6 +1317,13 @@ class TestLifespan:
             ),
             patch(
                 "snapper.server.app.MarketCacheService",
+                return_value=MagicMock(
+                    start=AsyncMock(),
+                    stop=AsyncMock(),
+                ),
+            ),
+            patch(
+                "snapper.server.app.MarketStatsWorker",
                 return_value=MagicMock(
                     start=AsyncMock(),
                     stop=AsyncMock(),

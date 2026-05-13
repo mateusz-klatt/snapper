@@ -120,6 +120,7 @@ from snapper.application.retention.scheduler import RetentionScheduler
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.services.market_cache import MarketCacheService
 from snapper.application.services.market_persist_policy import MarketPersistPolicy
+from snapper.application.services.market_stats import MarketStatsWorker
 from snapper.application.services.settings import SettingsService
 from snapper.application.services.settings import get_settings_service
 from snapper.application.system_metrics.snapshotter import SystemMetricsSnapshotter
@@ -633,6 +634,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.db_stats_snapshotter = None
     app.state.market_persist_policy = None
     app.state.market_cache = None
+    app.state.market_stats_worker = None
     try:
         settings_service = await _initialize_settings_service(settings)
         settings = get_settings_with_service(settings_service)
@@ -699,6 +701,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await market_cache.start(settings.zmq_broker_xpub)
         app.state.market_cache = market_cache
         logger.info("MarketCacheService initialized and ingesting market.* candle frames")
+        market_stats_worker = MarketStatsWorker(
+            cache=market_cache,
+            settings_service=settings_service,
+        )
+        await market_stats_worker.start(settings.zmq_broker_xpub)
+        app.state.market_stats_worker = market_stats_worker
+        logger.info("MarketStatsWorker started (Pearson 60s + cointegration 300s)")
         discover_processes()
         process_factory = ProcessLauncherService(settings)
         process_factory.set_market_persist_policy(market_persist_policy)
@@ -743,6 +752,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _shutdown_zmq_bridge(app)
         if process_factory is not None:
             await process_factory.stop_all_processes()
+        market_stats_worker_for_shutdown = getattr(app.state, "market_stats_worker", None)
+        if market_stats_worker_for_shutdown is not None:
+            await market_stats_worker_for_shutdown.stop()
         market_cache_for_shutdown = getattr(app.state, "market_cache", None)
         if market_cache_for_shutdown is not None:
             await market_cache_for_shutdown.stop()
