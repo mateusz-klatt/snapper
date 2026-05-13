@@ -971,6 +971,36 @@ def _zod_string_type(prop: dict[str, Any]) -> str:
     return result
 
 
+def _zod_array_or_tuple_type(prop: dict[str, Any], definitions: dict[str, Any]) -> str:
+    """Resolve Zod type for a JSON Schema array property.
+
+    A fixed-length tuple emitted by Pydantic for ``tuple[T1, T2, ...]``
+    carries a ``prefixItems`` list describing each positional type. Map
+    that to ``z.tuple([...])`` so runtime validation enforces the
+    length + per-position type instead of degrading to
+    ``z.array(z.unknown())``.
+
+    A variable-length array (no ``prefixItems``) keeps the historical
+    ``z.array(item_type)`` emission, with ``item_type`` derived from
+    the ``items`` schema.
+
+    Args:
+        prop: Property schema with type ``array``.
+        definitions: Schema definitions for reference resolution.
+
+    Returns:
+        Zod type string, either ``z.tuple([...])`` or
+        ``z.array(...)``.
+    """
+    prefix_items = prop.get("prefixItems")
+    if isinstance(prefix_items, list) and prefix_items:
+        positional = [json_type_to_zod(item, True, definitions) for item in prefix_items]
+        return f"z.tuple([{', '.join(positional)}])"
+    items = prop.get("items", {})
+    item_type = json_type_to_zod(items, True, definitions)
+    return f"z.array({item_type})"
+
+
 def _zod_object_type(prop: dict[str, Any], definitions: dict[str, Any]) -> str:
     """Resolve Zod type for a JSON Schema object property.
 
@@ -1021,9 +1051,7 @@ def json_type_to_zod(prop: dict[str, Any], required: bool, definitions: dict[str
     if prop_type == "string":
         return _zod_string_type(prop)
     if prop_type == "array":
-        items = prop.get("items", {})
-        item_type = json_type_to_zod(items, True, definitions)
-        return f"z.array({item_type})"
+        return _zod_array_or_tuple_type(prop, definitions)
     if prop_type == "object":
         return _zod_object_type(prop, definitions)
     return "z.unknown()"
