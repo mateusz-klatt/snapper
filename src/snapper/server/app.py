@@ -1039,7 +1039,10 @@ def _create_candles_signals_router() -> APIRouter:
     @router.get(
         "/candles",
         response_model=None,
-        responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}},
+        responses={
+            200: {"model": CandleListResponse},
+            500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION},
+        },
     )
     async def get_candles(
         request: Request,
@@ -2447,7 +2450,10 @@ def _create_capabilities_router() -> APIRouter:
     @router.get(
         "/instrument-capabilities",
         response_model=None,
-        responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}},
+        responses={
+            200: {"model": InstrumentCapabilityListResponse},
+            500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION},
+        },
     )
     async def get_instrument_capabilities(
         request: Request,
@@ -2506,7 +2512,10 @@ def _create_capabilities_router() -> APIRouter:
     @router.get(
         "/venue-fee-schedules",
         response_model=None,
-        responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}},
+        responses={
+            200: {"model": VenueFeeScheduleListResponse},
+            500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION},
+        },
     )
     async def get_venue_fee_schedules(
         request: Request,

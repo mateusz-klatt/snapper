@@ -279,7 +279,7 @@ class BacktestResultInline(StrictBody):
     max_drawdown_duration_seconds: float | None = None
     exposure_ratio: float | None = None
     turnover_ratio: float | None = None
-    extra_metrics: JsonObject = Field(default_factory=dict)
+    extra_metrics: JsonObject = Field(default={})
 
 
 class BacktestEquityPointInline(StrictBody):
@@ -393,7 +393,7 @@ class BacktestResultData(StrictDataSchema[Literal["backtest_result"]]):
     max_drawdown_duration_seconds: float | None = None
     exposure_ratio: float | None = None
     turnover_ratio: float | None = None
-    extra_metrics: dict[str, Any] = Field(default_factory=dict)
+    extra_metrics: dict[str, Any] = Field(default={})
 
 
 class BacktestCompareBody(StrictBody):
@@ -569,7 +569,7 @@ class BacktestSignalData(StrictDataSchema[Literal["backtest_signal"]]):
     signal_type: str
     instrument: str
     price: float
-    indicators: dict[str, Any] = Field(default_factory=dict)
+    indicators: dict[str, Any] = Field(default={})
 
 
 class BacktestSignalListResponse(
@@ -593,7 +593,7 @@ class BacktestEventData(StrictDataSchema[Literal["backtest_event"]]):
     type: Literal["backtest_event"] = "backtest_event"
     run_public_id: str
     event_type: str
-    detail: dict[str, Any] = Field(default_factory=dict)
+    detail: dict[str, Any] = Field(default={})
 
 
 class BacktestEventListResponse(

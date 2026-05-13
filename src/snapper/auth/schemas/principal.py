@@ -71,7 +71,7 @@ class AuthPrincipal(StrictBody):
     email: str | None = None
     is_active: bool = True
     user_public_id: str = ""
-    operator_public_ids: list[str] = Field(default_factory=list)
+    operator_public_ids: list[str] = Field(default=[])
     primary_operator_public_id: str = ""
     active_wallet_public_id: str | None = None
     delegate_public_id: str | None = None

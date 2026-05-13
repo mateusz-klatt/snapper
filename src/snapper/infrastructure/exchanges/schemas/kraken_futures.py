@@ -90,7 +90,7 @@ class KrakenFuturesInstrumentSchema(ExchangeResponse):
     mtf: bool | None = None
     category: str | None = None
     tradfi: bool = False
-    tags: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default=[])
 
 
 class KrakenFuturesTickerSchema(ExchangeResponse):
@@ -185,7 +185,7 @@ class KrakenFuturesTradeEventSchema(ExchangeResponse):
 
     feed: Literal["trade"]
     product_id: str
-    trades: list[KrakenFuturesTradeSchema] = Field(default_factory=list)
+    trades: list[KrakenFuturesTradeSchema] = Field(default=[])
 
 
 class KrakenFuturesTickerEventSchema(ExchangeResponse):

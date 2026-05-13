@@ -48,7 +48,7 @@ class TokenClaims(StrictBody):
     jti: str
     sid: str
     user_public_id: str = ""
-    operator_public_ids: list[str] = Field(default_factory=list)
+    operator_public_ids: list[str] = Field(default=[])
     primary_operator_public_id: str = ""
     active_wallet_public_id: str | None = None
 

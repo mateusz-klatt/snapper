@@ -5,10 +5,9 @@ execution plans. Brackets attach to open position cycles and fire a
 single reduce_only market close when a price threshold is breached.
 """
 
-from datetime import UTC
-from datetime import datetime
 from typing import Annotated
 from typing import cast
+from uuid import uuid7
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -18,6 +17,7 @@ from fastapi import status
 
 from snapper.api.schemas.brackets import BracketCancelCommand
 from snapper.api.schemas.brackets import BracketCreateCommand
+from snapper.api.schemas.data_responses import ExecutionPlanDecisionListResponse
 from snapper.api.schemas.orders import ExecutionPlanResponse
 from snapper.application.plans.bracket import BracketEvaluator
 from snapper.application.plans.service import PlanExecutorService
@@ -34,6 +34,7 @@ from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
 from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import PositionCycleRow
 from snapper.data.repository_types import PositionRow
+from snapper.messaging.schemas.data import ExecutionPlanDecisionData
 from snapper.server._capability_guard import require_tradable
 from snapper.server._plan_route_helpers import PlanRouteContext
 from snapper.server._plan_route_helpers import build_cancel_plan_state
@@ -534,7 +535,7 @@ async def list_bracket_decisions(
     importance: str | None = None,
     limit: int = 100,
     offset: int = 0,
-) -> dict[str, object]:
+) -> ExecutionPlanDecisionListResponse:
     """List decision audit rows for an execution plan.
 
     Args:
@@ -547,14 +548,14 @@ async def list_bracket_decisions(
         offset: Number of rows to skip.
 
     Returns:
-        Dict with decisions list and count.
+        Typed Pydantic envelope wrapping the decision audit rows.
 
     Raises:
         HTTPException: 404 if plan not found, 403 if wallet not accessible.
     """
-    now = datetime.now(UTC)
+    route_context = build_plan_route_context(request, _REST_STREAM)
 
-    plan = await repo.get_execution_plan(plan_public_id, as_of=now)
+    plan = await repo.get_execution_plan(plan_public_id, as_of=route_context.now)
     if plan is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -570,13 +571,18 @@ async def list_bracket_decisions(
 
     decisions = await repo.list_execution_plan_decisions(
         plan_public_id=plan_public_id,
-        as_of=now,
+        as_of=route_context.now,
         importance=importance,
         limit=limit,
         offset=offset,
     )
 
-    return {
-        "decisions": decisions,
-        "count": len(decisions),
-    }
+    items = [ExecutionPlanDecisionData(**row) for row in decisions]
+    return ExecutionPlanDecisionListResponse(
+        public_id=str(uuid7()),
+        timestamp=route_context.bus_time,
+        session_id=route_context.session_id,
+        sequence_id=route_context.tracker.next_sequence(route_context.stream),
+        payload=items,
+        count=len(items),
+    )
