@@ -80,6 +80,9 @@ _SYSTEM_SETTINGS_TOPIC = "system.settings"
 _LISTEN_RECV_BACKOFF_S = 0.1
 """Backoff after a transient ``recv_multipart`` failure."""
 
+_ZERO_VARIANCE_ABS_TOL = 1e-12
+"""Absolute tolerance for treating a close series as constant."""
+
 _KNOWN_EXCHANGES: frozenset[str] = frozenset(
     {
         ExchangeEnum.PAPER,
@@ -245,7 +248,9 @@ def _safe_pearson(left: np.ndarray, right: np.ndarray) -> float | None:
     """
     if left.size < 2:
         return None
-    if float(np.std(left)) == 0.0 or float(np.std(right)) == 0.0:
+    if math.isclose(float(np.std(left)), 0.0, abs_tol=_ZERO_VARIANCE_ABS_TOL) or math.isclose(
+        float(np.std(right)), 0.0, abs_tol=_ZERO_VARIANCE_ABS_TOL
+    ):
         return None
     matrix = np.corrcoef(left, right)
     value = float(matrix[0, 1])

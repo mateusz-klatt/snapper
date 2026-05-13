@@ -62,6 +62,7 @@ from snapper.server.dependencies import get_repository_dependency
 router = APIRouter(prefix="/market/cache", tags=["market-cache"])
 
 _REST_STREAM = "rest.market_cache"
+_MARKET_CACHE_NOT_INITIALIZED_DETAIL = "Market cache not initialized"
 
 _DERIVED_AGGREGATION_MAP: dict[str, int] = {
     "5m": 5,
@@ -298,14 +299,14 @@ async def get_cached_candles(
         if cache is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Market cache not initialized",
+                detail=_MARKET_CACHE_NOT_INITIALIZED_DETAIL,
             )
         payload = await _read_one_minute_payload(cache, exchange_value, native_symbol, limit)
     elif timeframe_value in _DERIVED_AGGREGATION_MAP:
         if cache is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Market cache not initialized",
+                detail=_MARKET_CACHE_NOT_INITIALIZED_DETAIL,
             )
         payload = await _read_derived_payload(
             cache, exchange_value, native_symbol, timeframe_value, limit
@@ -389,7 +390,7 @@ async def get_cache_health(
     if cache is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Market cache not initialized",
+            detail=_MARKET_CACHE_NOT_INITIALIZED_DETAIL,
         )
     instruments_cached = await cache.instruments_cached()
     pair_keys = await cache.pair_stats_keys()
