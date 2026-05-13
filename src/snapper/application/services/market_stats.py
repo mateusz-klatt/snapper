@@ -306,6 +306,11 @@ class MarketStatsWorker:
         Idempotent + restart-safe via :attr:`_listener_lock`. Empty
         ``zmq_broker_xpub`` skips the settings listener (test mode);
         the cadence tasks still run against the seed config.
+
+        Args:
+            zmq_broker_xpub: Address of the broker's XPUB endpoint
+                for the ``system.settings`` listener. Empty string
+                skips the listener entirely.
         """
         async with self._listener_lock:
             if self._pearson_task is not None and not self._pearson_task.done():
@@ -577,5 +582,10 @@ class MarketStatsWorker:
         return topic, payload
 
     def configured_pairs(self) -> list[PairSpec]:
-        """Diagnostic snapshot of the live pair set for route responses."""
+        """Diagnostic snapshot of the live pair set for route responses.
+
+        Returns:
+            Shallow copy of :attr:`_pairs` so callers can iterate
+            without holding the worker lock.
+        """
         return list(self._pairs)

@@ -499,6 +499,10 @@ class MarketCacheService:
         Production code never calls this; the ingest loop owns frames
         in flight. Tests use this entry point to verify the dedup
         state machine without spinning up a real broker.
+
+        Args:
+            candle: Decoded :class:`CandleData` to feed through the
+                :meth:`_dispatch_candle` state machine.
         """
         if candle.timeframe != _TARGET_TIMEFRAME:
             return
@@ -506,7 +510,12 @@ class MarketCacheService:
 
     @property
     def last_seen_for_test(self) -> dict[tuple[AllExchange, str], float]:
-        """Test-only view of ``_last_seen_at`` (the loop-time stamps)."""
+        """Test-only view of ``_last_seen_at`` (the loop-time stamps).
+
+        Returns:
+            Shallow copy of the internal map so tests can inspect
+            without risk of mutating live state.
+        """
         return dict(self._last_seen_at)
 
     def force_stale_for_test(self, key: tuple[AllExchange, str], age_s: float) -> None:
@@ -514,15 +523,28 @@ class MarketCacheService:
 
         Used by the prune loop test to simulate the 6-hour stale window
         without actually waiting.
+
+        Args:
+            key: ``(exchange, native_symbol)`` cache key to back-date.
+            age_s: Number of seconds in the past to set the
+                ``_last_seen_at`` stamp.
         """
         self._last_seen_at[key] = asyncio.get_event_loop().time() - age_s
 
     def staleness_window_seconds(self) -> int:
-        """Return the configured stale-after window for diagnostics."""
+        """Return the configured stale-after window for diagnostics.
+
+        Returns:
+            Configured :data:`_STALE_AFTER_S` value in seconds.
+        """
         return _STALE_AFTER_S
 
     def cache_capacity_per_instrument(self) -> int:
-        """Return the per-instrument deque cap for diagnostics."""
+        """Return the per-instrument deque cap for diagnostics.
+
+        Returns:
+            Configured :data:`_CACHE_CANDLE_LIMIT` value.
+        """
         return _CACHE_CANDLE_LIMIT
 
 
