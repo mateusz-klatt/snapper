@@ -1083,7 +1083,10 @@ def generate_zod_object_schema(schema: dict[str, Any], definitions: dict[str, An
 
 
 def generate_zod_schema_definition(
-    name: str, schema: dict[str, Any], definitions: dict[str, Any]
+    name: str,
+    schema: dict[str, Any],
+    definitions: dict[str, Any],
+    exported: bool = True,
 ) -> str:
     """Generate Zod schema definition from JSON Schema.
 
@@ -1091,26 +1094,35 @@ def generate_zod_schema_definition(
         name: Name of the schema to generate.
         schema: JSON Schema definition.
         definitions: Schema definitions for reference resolution.
+        exported: When ``True``, emit ``export const {Name}Schema = ...``;
+            when ``False``, emit ``const _{Name}RawSchema = ...`` so a
+            downstream wrapper can re-cast the schema's inferred type
+            before re-exporting under the original name. The REST API
+            generator uses ``exported=False`` to align Zod's inferred
+            output with openapi-typescript's exact-optional emission;
+            the WebSocket generator keeps the default ``exported=True``.
 
     Returns:
-        Zod schema definition as an export statement.
+        Zod schema definition statement.
     """
+    decl_name = f"{name}Schema" if exported else f"_{name}RawSchema"
+    decl_prefix = "export const " if exported else "const "
     if name in _RECURSIVE_JSON_TYPES:
         if name == "JsonObject":
-            return f"export const {name}Schema = z.record(z.string(), z.any())"
-        return f"export const {name}Schema = z.unknown()"
+            return f"{decl_prefix}{decl_name} = z.record(z.string(), z.any())"
+        return f"{decl_prefix}{decl_name} = z.unknown()"
     if schema.get("type") == "string" and "enum" in schema:
         enum_values = ", ".join(f"'{v}'" for v in schema["enum"])
-        return f"export const {name}Schema = z.enum([{enum_values}])"
+        return f"{decl_prefix}{decl_name} = z.enum([{enum_values}])"
     if schema.get("type") == "object":
         zod_schema = generate_zod_object_schema(schema, definitions)
-        return f"export const {name}Schema = {zod_schema}"
+        return f"{decl_prefix}{decl_name} = {zod_schema}"
     if schema.get("type") == "array":
         items = schema.get("items", {})
         item_type = json_type_to_zod(items, True, definitions)
-        return f"export const {name}Schema = z.array({item_type})"
+        return f"{decl_prefix}{decl_name} = z.array({item_type})"
     zod_type = json_type_to_zod(schema, True, definitions)
-    return f"export const {name}Schema = {zod_type}"
+    return f"{decl_prefix}{decl_name} = {zod_type}"
 
 
 def _build_schema_deps(
@@ -1223,19 +1235,37 @@ def generate_zod_api(project_root: Path) -> None:
         "/**",
         " * Generated Zod schemas for REST API validation.",
         " * DO NOT EDIT - regenerate with: make ui-gen-api-zod",
+        " *",
+        " * Each `NameSchema` export is cast to",
+        " * `z.ZodType<Components['schemas'][Name]>` so the inferred output type",
+        " * matches openapi-typescript's exact-optional emission (key-level `?:`",
+        " * for nullable / default-None fields). Without the cast Zod's `.optional()`",
+        " * would infer `T | undefined` at the value level and clash with the",
+        " * OpenAPI-derived contract used everywhere else in the SPA under",
+        " * `tsconfig.json` `exactOptionalPropertyTypes: true`.",
+        " *",
+        " * Each `Name` type export is sourced from `api.generated.ts` so the",
+        " * SPA-facing type is exactly the openapi-typescript emission.",
         " */",
         "",
         "import { z } from 'zod'",
         "",
+        "import type { Components } from '../../types/api.generated'",
+        "",
     ]
     for name in sorted_names:
         schema = schemas[name]
-        definition = generate_zod_schema_definition(name, schema, schemas)
-        lines.append(definition)
+        raw_definition = generate_zod_schema_definition(name, schema, schemas, exported=False)
+        lines.append(raw_definition)
+        lines.append("")
+        lines.append(
+            f"export const {name}Schema = _{name}RawSchema as unknown as "
+            f"z.ZodType<Components['schemas']['{name}']>"
+        )
         lines.append("")
     lines.append("// Type exports")
     for name in sorted_names:
-        lines.append(f"export type {name} = z.infer<typeof {name}Schema>")
+        lines.append(f"export type {name} = Components['schemas']['{name}']")
     content = "\n".join(lines) + "\n"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(content)

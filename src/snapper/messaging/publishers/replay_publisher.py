@@ -34,6 +34,7 @@ import asyncio
 from datetime import UTC
 from datetime import datetime
 from typing import Final
+from typing import cast
 
 import zmq
 import zmq.asyncio
@@ -45,7 +46,9 @@ from snapper.application.backtest.direct_engine import iter_sorted_candle_chunks
 from snapper.application.backtest.drain import BacktestDrainTimeoutError
 from snapper.application.backtest.drain import BacktestReadinessTimeoutError
 from snapper.application.backtest.drain import DrainCoordinator
+from snapper.core.types import MarketDataExchange
 from snapper.data.repository import Repository
+from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.topics.builders import parse_market_topic
 
 WARMUP_PUBLIC_ID: Final[str] = "00000000-0000-7000-8000-000000000000"
@@ -120,25 +123,23 @@ class ReplayPublisher:
             raise ValueError(f"Cannot parse warmup market topic: {topic}")
         if parsed.timeframe is None:
             raise ValueError(f"Warmup topic missing timeframe: {topic}")
-        exchange = parsed.exchange
-        instrument = parsed.instrument
-        timeframe = parsed.timeframe
         anchor = datetime.now(UTC)
-        return (
-            "{"
-            f'"type":"candle",'
-            f'"public_id":"{WARMUP_PUBLIC_ID}",'
-            f'"timestamp":"{anchor.isoformat()}",'
-            f'"session_id":"backtest-warmup",'
-            f'"sequence_id":0,'
-            f'"instrument":"{instrument}",'
-            f'"exchange":"{exchange}",'
-            f'"timeframe":"{timeframe}",'
-            f'"open_at":"{anchor.isoformat()}",'
-            f'"open":0.0,"high":0.0,"low":0.0,"close":0.0,"volume":0.0,'
-            f'"vwap":null,"trades":null'
-            "}"
-        ).encode()
+        warmup = CandleData(
+            public_id=WARMUP_PUBLIC_ID,
+            timestamp=anchor,
+            session_id="backtest-warmup",
+            sequence_id=0,
+            instrument=parsed.instrument,
+            exchange=cast(MarketDataExchange, parsed.exchange),
+            timeframe=parsed.timeframe,
+            open_at=anchor,
+            open=0.0,
+            high=0.0,
+            low=0.0,
+            close=0.0,
+            volume=0.0,
+        )
+        return warmup.model_dump_json().encode()
 
     async def _handshake(self, socket: zmq.asyncio.Socket) -> None:
         """Run the per-topic echo-ack handshake.

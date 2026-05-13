@@ -813,7 +813,26 @@ class TestListDecisions:
         """Given plan with decisions, Then decisions returned."""
         repo = AsyncMock()
         repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
-        repo.list_execution_plan_decisions = AsyncMock(return_value=[{"decision_type": "created"}])
+        repo.list_execution_plan_decisions = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "dec-1",
+                    "timestamp": _ts(),
+                    "session_id": "sess-1",
+                    "sequence_id": 0,
+                    "plan_public_id": "ts-1",
+                    "decision_type": "created",
+                    "decided_at": _ts(),
+                    "trigger_type": "api",
+                    "evidence": {},
+                    "emitted_command_public_id": None,
+                    "new_status": None,
+                    "reason": "test",
+                    "decision_importance": "action",
+                    "source_surface": "api",
+                },
+            ],
+        )
         client = _create_client(repo)
         response = client.get("/api/trailing-stops/ts-1/decisions")
         assert response.status_code == 200

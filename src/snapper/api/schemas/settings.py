@@ -210,7 +210,7 @@ class PushBetaUsersBody(StrictBody):
     """
 
     enabled: bool
-    user_public_ids: list[str] = Field(default_factory=list)
+    user_public_ids: list[str] = Field(default=[])
 
 
 class UpdatePushBetaUsersCommand(

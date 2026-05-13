@@ -55,6 +55,6 @@ class UserProfile(StrictDataSchema[Literal["user_profile"]]):
     role: UserRole
     is_active: bool = True
     created_at: datetime
-    operator_public_ids: list[str] = Field(default_factory=list)
+    operator_public_ids: list[str] = Field(default=[])
     primary_operator_public_id: str | None = None
     active_wallet_public_id: str | None = None

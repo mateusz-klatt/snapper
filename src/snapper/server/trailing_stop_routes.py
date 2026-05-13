@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Annotated
 from typing import Literal
 from typing import cast
+from uuid import uuid7
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -18,8 +19,10 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
 
+from snapper.api.schemas.base import MessageResponse
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.api.schemas.data_responses import ExecutionPlanDecisionListResponse
 from snapper.api.schemas.orders import ExecutionPlanResponse
 from snapper.api.schemas.trailing_stops import TrailingStopCancelCommand
 from snapper.api.schemas.trailing_stops import TrailingStopCreateCommand
@@ -39,6 +42,7 @@ from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import PositionCycleRow
 from snapper.data.repository_types import PositionRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import ExecutionPlanDecisionData
 from snapper.server._capability_guard import require_tradable
 from snapper.server._plan_route_helpers import PlanRouteContext
 from snapper.server._plan_route_helpers import build_cancel_plan_state
@@ -558,7 +562,7 @@ async def list_trailing_stop_decisions(
     importance: str | None = None,
     limit: int = 100,
     offset: int = 0,
-) -> dict[str, object]:
+) -> ExecutionPlanDecisionListResponse:
     """List decision audit rows for a trailing stop plan.
 
     Args:
@@ -571,14 +575,14 @@ async def list_trailing_stop_decisions(
         offset: Number of rows to skip.
 
     Returns:
-        Dict with decisions list and count.
+        Typed Pydantic envelope wrapping the decision audit rows.
 
     Raises:
         HTTPException: 404 if plan not found, 403 if wallet not accessible.
     """
-    now = datetime.now(UTC)
+    route_context = build_plan_route_context(request, _REST_STREAM)
 
-    plan = await repo.get_execution_plan(plan_public_id, as_of=now)
+    plan = await repo.get_execution_plan(plan_public_id, as_of=route_context.now)
     if plan is None or plan["plan_type"] != "trailing_stop":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -594,12 +598,20 @@ async def list_trailing_stop_decisions(
 
     decisions = await repo.list_execution_plan_decisions(
         plan_public_id=plan_public_id,
-        as_of=now,
+        as_of=route_context.now,
         importance=importance,
         limit=limit,
         offset=offset,
     )
-    return {"decisions": decisions, "count": len(decisions)}
+    items = [ExecutionPlanDecisionData(**row) for row in decisions]
+    return ExecutionPlanDecisionListResponse(
+        public_id=str(uuid7()),
+        timestamp=route_context.bus_time,
+        session_id=route_context.session_id,
+        sequence_id=route_context.tracker.next_sequence(route_context.stream),
+        payload=items,
+        count=len(items),
+    )
 
 
 @router.get("/by-cycle/{cycle_public_id}")
@@ -611,7 +623,7 @@ async def get_trailing_stop_by_cycle(
         Depends(require_permission(Permission.READ_ORDERS)),
     ],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
-) -> TrailingStopStateResponse | dict[str, object]:
+) -> TrailingStopStateResponse | MessageResponse:
     """Get live trailing stop state for a position cycle.
 
     Returns the active trailing stop's live evaluator state (peak_price,
@@ -683,4 +695,10 @@ async def get_trailing_stop_by_cycle(
                 payload=state_data,
             )
 
-    return {"type": "message", "payload": "none"}
+    return MessageResponse(
+        public_id=str(uuid7()),
+        timestamp=ts,
+        session_id=tracker.session_id,
+        sequence_id=tracker.next_sequence(_REST_STREAM),
+        payload="none",
+    )

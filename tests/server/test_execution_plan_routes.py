@@ -805,12 +805,19 @@ class TestListDecisions:
             return_value=[
                 {
                     "public_id": "dec-1",
+                    "timestamp": _ts(),
+                    "session_id": "sess-1",
+                    "sequence_id": 0,
+                    "plan_public_id": "bracket-1",
                     "decision_type": "bracket_created",
                     "decided_at": _ts(),
                     "trigger_type": "api",
                     "evidence": {},
+                    "emitted_command_public_id": None,
+                    "new_status": None,
                     "reason": "test",
                     "decision_importance": "action",
+                    "source_surface": "api",
                 }
             ]
         )

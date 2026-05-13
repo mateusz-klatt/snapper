@@ -1551,6 +1551,15 @@ class TestJsonTypeToZod:
         result = json_type_to_zod(prop, True, {})
         assert result == "z.array(z.string())"
 
+    def test_handles_array_with_prefix_items(self) -> None:
+        """Handles JSON Schema ``prefixItems`` as a fixed-length tuple."""
+        prop = {
+            "type": "array",
+            "prefixItems": [{"type": "string"}, {"type": "integer"}],
+        }
+        result = json_type_to_zod(prop, True, {})
+        assert result == "z.tuple([z.string(), z.number().int()])"
+
     def test_handles_object_with_properties(self) -> None:
         """Handles object with properties."""
         prop = {"type": "object", "properties": {"id": {"type": "integer"}}}

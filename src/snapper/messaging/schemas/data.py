@@ -1620,6 +1620,50 @@ class AlertEventData(StrictDataSchema[Literal["alert_event"]]):
     source_topic: str | None = None
 
 
+class ExecutionPlanDecisionData(StrictDataSchema[Literal["execution_plan_decision"]]):
+    """Read projection for ``GET /execution-plans/{id}/decisions`` rows.
+
+    Mirrors the columns of ``execution_plan_decisions`` exactly, including
+    full provenance (``public_id`` / ``timestamp`` / ``session_id`` /
+    ``sequence_id`` are populated directly from the row). The REST list
+    endpoint wraps a sequence of these items in
+    :class:`ExecutionPlanDecisionListResponse`.
+
+    Attributes:
+        type: Payload discriminator (always ``execution_plan_decision``).
+        plan_public_id: Parent plan UUID7.
+        decision_type: Free-form discriminator
+            (``"evaluator"`` / ``"lifecycle"`` / similar).
+        decided_at: Bus-time the decision was logged.
+        trigger_type: Free-form trigger discriminator
+            (``"tick"`` / ``"clock"`` / ``"execution"`` / ...).
+        evidence: Inputs the decision was based on. Free-form JSON to
+            keep the schema stable as evaluator logic evolves.
+        emitted_command_public_id: Command UUID7 the decision dispatched
+            (``None`` for routine / noop decisions).
+        new_status: Plan status the decision transitioned to
+            (``None`` when the decision did not move the plan).
+        reason: Free-form diagnostic string. Well-known values include
+            ``"sl_hit"`` / ``"tp_hit"`` / ``"trailing_stop_hit"``.
+        decision_importance: ``"action"`` / ``"transition"`` /
+            ``"routine"`` — drives UI grouping and filters.
+        source_surface: Origin of the decision (``"api"`` /
+            ``"evaluator"`` / ``"sidecar"``).
+    """
+
+    type: Literal["execution_plan_decision"] = "execution_plan_decision"
+    plan_public_id: str
+    decision_type: str
+    decided_at: datetime
+    trigger_type: str
+    evidence: JsonObject = Field(default={})
+    emitted_command_public_id: str | None = None
+    new_status: str | None = None
+    reason: str
+    decision_importance: str
+    source_surface: str
+
+
 class ExecutionPlanDecisionEventData(StrictDataSchema[Literal["execution_plan_decision_event"]]):
     """Published on ``plans.decisions.{plan_public_id}`` right after insert.
 

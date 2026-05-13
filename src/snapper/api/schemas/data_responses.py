@@ -14,6 +14,7 @@ from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import ContinuousCandleData
 from snapper.messaging.schemas.data import ContractData
 from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import ExecutionPlanDecisionData
 from snapper.messaging.schemas.data import FrontMonthData
 from snapper.messaging.schemas.data import InstrumentCapabilityData
 from snapper.messaging.schemas.data import InstrumentDetailData
@@ -229,6 +230,23 @@ class ContractListResponse(
     """
 
     type: Literal["contract_list"] = "contract_list"
+
+
+class ExecutionPlanDecisionListResponse(
+    PayloadListResponse[Literal["execution_plan_decision_list"], ExecutionPlanDecisionData],
+):
+    """Execution-plan decision-audit list response wrapper.
+
+    Returned by ``GET /api/execution-plans/{id}/decisions`` and
+    ``GET /api/trailing-stops/{id}/decisions``.
+
+    Attributes:
+        type: Payload item type discriminator.
+        payload: List of decision rows, newest-first.
+        count: Total number of decisions in the response.
+    """
+
+    type: Literal["execution_plan_decision_list"] = "execution_plan_decision_list"
 
 
 class InstrumentCapabilityListResponse(
