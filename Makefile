@@ -472,8 +472,8 @@ ui-gen-api-zod:
 ui-gen-entities:
 	$(info Generating entity types...)
 	$(GENSCRIPT) --entities
-	$(PRETTIER) src/types/entities.ts
-	$(info Generated frontend/src/types/entities.ts)
+	$(PRETTIER) src/types/entities.generated.ts
+	$(info Generated frontend/src/types/entities.generated.ts)
 
 ui-gen-permissions:
 	$(info Generating permissions types...)
