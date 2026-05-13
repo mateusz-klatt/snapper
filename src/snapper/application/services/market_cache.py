@@ -305,7 +305,11 @@ class MarketCacheService:
             return list(cached)[-limit:]
 
     async def instruments_cached(self) -> int:
-        """Return the count of distinct ``(exchange, symbol)`` keys in the cache."""
+        """Return the count of distinct ``(exchange, symbol)`` keys in the cache.
+
+        Returns:
+            Number of instruments with at least one closed bar on the deque.
+        """
         async with self._lock:
             return len(self._candles)
 
@@ -329,12 +333,23 @@ class MarketCacheService:
             return self._stats.get((left_key, right_key))
 
     async def set_pair_stats(self, left_key: str, right_key: str, stats: PairStats) -> None:
-        """Atomic write of a :class:`PairStats` entry by canonical pair key."""
+        """Atomic write of a :class:`PairStats` entry by canonical pair key.
+
+        Args:
+            left_key: Canonical pair key for the left leg.
+            right_key: Canonical pair key for the right leg.
+            stats: Updated :class:`PairStats` snapshot to install.
+        """
         async with self._lock:
             self._stats[(left_key, right_key)] = stats
 
     async def pair_stats_keys(self) -> list[tuple[str, str]]:
-        """Return a snapshot of all stat pair keys for diagnostic routes."""
+        """Return a snapshot of all stat pair keys for diagnostic routes.
+
+        Returns:
+            Shallow copy of the ``_stats`` dict keys so callers can
+            iterate without holding the cache lock.
+        """
         async with self._lock:
             return list(self._stats.keys())
 
