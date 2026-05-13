@@ -4607,13 +4607,23 @@ async def test_set_persist_policy_round_trip() -> None:
 
 
 def test_should_persist_row_returns_true_without_policy() -> None:
-    """No injected policy degrades to "persist everything" for legacy paths."""
+    """No injected policy degrades to "persist everything" for legacy paths.
+
+    Given: A publisher with no persist policy installed,
+    When: ``_should_persist_row`` is called for any row,
+    Then: It returns ``True`` so legacy paths persist every row.
+    """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     assert pub._should_persist_row("ticks", "kraken", "BTC-USD") is True
 
 
 def test_should_persist_row_consults_policy_when_present() -> None:
-    """The policy verdict gates the row + a skip increments the rate-limited counter."""
+    """The policy verdict gates the row + a skip increments the rate-limited counter.
+
+    Given: A publisher with a policy whose should_persist verdict toggles.
+    When: _should_persist_row is called.
+    Then: The verdict mirrors the policy and skips increment the counter on False.
+    """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     policy = MagicMock()
     policy.should_persist.return_value = False
@@ -4626,7 +4636,12 @@ def test_should_persist_row_consults_policy_when_present() -> None:
 def test_record_persist_skip_does_not_log_within_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Within the rate-limit window the counter just increments."""
+    """Within the rate-limit window the counter just increments.
+
+    Given: Two skip increments inside the rate-limit window.
+    When: _record_persist_skip is called twice with the clock frozen.
+    Then: The counter increments but does not log or reset.
+    """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     times = iter([100.0, 100.0])
     monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: next(times))
@@ -4638,7 +4653,12 @@ def test_record_persist_skip_does_not_log_within_window(
 
 
 def test_record_persist_skip_logs_after_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Once the rate-limit window elapses the counter logs + resets."""
+    """Once the rate-limit window elapses the counter logs + resets.
+
+    Given: Two skip increments straddling the rate-limit window.
+    When: _record_persist_skip is called with the clock advanced past the window.
+    Then: The counter logs and resets the last-log timestamp.
+    """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     times = iter([100.0, 200.0])
     monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: next(times))
@@ -4649,20 +4669,35 @@ def test_record_persist_skip_logs_after_window(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_verify_persist_policy_safety_rail_no_policy_short_circuits() -> None:
-    """No policy means no rail check (legacy startup compat)."""
+    """No policy means no rail check (legacy startup compat).
+
+    Given: A wildcard publisher with no injected policy.
+    When: _verify_persist_policy_safety_rail runs.
+    Then: No exception is raised (legacy / test paths stay green).
+    """
     pub: Any = DummyPublisher(symbols=["*"])
     pub._verify_persist_policy_safety_rail("pub:test")
 
 
 def test_verify_persist_policy_safety_rail_non_wildcard_short_circuits() -> None:
-    """Non-wildcard symbols never trip the rail."""
+    """Non-wildcard symbols never trip the rail.
+
+    Given: A publisher with concrete (non-wildcard) symbols.
+    When: _verify_persist_policy_safety_rail runs against any policy.
+    Then: The rail short-circuits without inspecting the policy.
+    """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub._persist_policy = MagicMock()
     pub._verify_persist_policy_safety_rail("pub:test")
 
 
 def test_verify_persist_policy_safety_rail_explicit_mode_passes() -> None:
-    """Explicit mode skips the empty-scope check on that data_type."""
+    """Explicit mode skips the empty-scope check on that data_type.
+
+    Given: A wildcard publisher whose policy reports explicit mode.
+    When: _verify_persist_policy_safety_rail runs.
+    Then: The explicit mode bypasses the empty-scope check.
+    """
     pub: Any = DummyPublisher(symbols=["*"])
     policy = MagicMock()
     policy.mode_for.return_value = "explicit"
@@ -4671,7 +4706,12 @@ def test_verify_persist_policy_safety_rail_explicit_mode_passes() -> None:
 
 
 def test_verify_persist_policy_safety_rail_extra_satisfies() -> None:
-    """A non-empty ``market_persist_extra`` overlay satisfies the rail."""
+    """A non-empty ``market_persist_extra`` overlay satisfies the rail.
+
+    Given: Auto mode + empty scope set but a non-empty market_persist_extra overlay.
+    When: _verify_persist_policy_safety_rail runs.
+    Then: The overlay satisfies the rail and no exception is raised.
+    """
     pub: Any = DummyPublisher(symbols=["*"])
     policy = MagicMock()
     policy.mode_for.return_value = "auto"
@@ -4682,7 +4722,12 @@ def test_verify_persist_policy_safety_rail_extra_satisfies() -> None:
 
 
 def test_verify_persist_policy_safety_rail_fires_on_all_empty() -> None:
-    """Wildcard + auto + empty scope + empty extra raises RuntimeError."""
+    """Wildcard + auto + empty scope + empty extra raises RuntimeError.
+
+    Given: Wildcard + auto mode + empty scope set + empty extra overlay.
+    When: _verify_persist_policy_safety_rail runs.
+    Then: RuntimeError is raised pointing the operator at the four ways out.
+    """
     pub: Any = DummyPublisher(symbols=["*"])
     policy = MagicMock()
     policy.mode_for.return_value = "auto"
