@@ -66,6 +66,7 @@ from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
 from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for authenticated operations"
+_PUBLIC_WS_NOT_CONNECTED_MSG = "WebSocket client not connected"
 _QUEUE_DRAIN_TIMEOUT = 0.1
 _QUEUE_MAX_SIZE = 10000
 _SUBSCRIBE_CHUNK_SIZE = 50
@@ -959,7 +960,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             ws_symbols: WS-format product IDs (e.g. ``PF_XBTUSD``).
         """
         if self._ws_client is None:
-            raise RuntimeError("WebSocket client not connected")
+            raise RuntimeError(_PUBLIC_WS_NOT_CONNECTED_MSG)
         for i in range(0, len(ws_symbols), _SUBSCRIBE_CHUNK_SIZE):
             chunk = ws_symbols[i : i + _SUBSCRIBE_CHUNK_SIZE]
             await self._ws_client.subscribe(feed=feed, products=chunk)
@@ -985,7 +986,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         await self._ensure_ws_connected()
         if self._ws_client is None:
-            raise RuntimeError("WebSocket client not connected")
+            raise RuntimeError(_PUBLIC_WS_NOT_CONNECTED_MSG)
         ws_symbols = [native_to_kraken_futures_ws(s) for s in symbols]
         await self._subscribe_in_chunks("ticker", ws_symbols)
         logger.info(
@@ -1134,7 +1135,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         await self._ensure_ws_connected()
         if self._ws_client is None:
-            raise RuntimeError("WebSocket client not connected")
+            raise RuntimeError(_PUBLIC_WS_NOT_CONNECTED_MSG)
         ws_symbols = [native_to_kraken_futures_ws(s) for s in symbols]
         await self._subscribe_in_chunks("trade", ws_symbols)
         logger.info(

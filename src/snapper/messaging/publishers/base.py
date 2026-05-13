@@ -81,6 +81,10 @@ _TRADE_WRITER_DROP_LOG_INTERVAL_S = 1.0
 _TRADE_WRITER_SHUTDOWN_POLL_S = 0.5
 _trade_writer_drop_counters: dict[str, list[float]] = {}
 
+_WriterQueue = (
+    asyncio.Queue[TickUpsertRow] | asyncio.Queue[CandleUpsertRow] | asyncio.Queue[TradeUpsertRow]
+)
+
 
 def _enqueue_or_drop_oldest_tick_write(
     queue: asyncio.Queue[TickUpsertRow], row: TickUpsertRow, label: str
@@ -417,51 +421,75 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         publisher (e.g. start failure during setup) still gets a chance
         to drain.
         """
-        has_pending_writer = (
-            self._tick_writer_task is not None
-            or (self._tick_write_queue is not None and not self._tick_write_queue.empty())
-            or self._candle_writer_task is not None
-            or (self._candle_write_queue is not None and not self._candle_write_queue.empty())
-            or self._trade_writer_task is not None
-            or (self._trade_write_queue is not None and not self._trade_write_queue.empty())
-        )
-        if not self.running and not has_pending_writer:
+        if not self.running and not self._has_pending_writer_shutdown():
             return
         self.running = False
-        if self._tick_consumer_task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._tick_consumer_task
-            self._tick_consumer_task = None
-        if self._tick_write_queue is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._tick_write_queue.join()
-        if self._tick_writer_task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._tick_writer_task
-            self._tick_writer_task = None
-        if self._candle_consumer_tasks:
-            for candle_consumer_task in self._candle_consumer_tasks:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await candle_consumer_task
-            self._candle_consumer_tasks = []
-        if self._candle_write_queue is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._candle_write_queue.join()
-        if self._candle_writer_task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._candle_writer_task
-            self._candle_writer_task = None
-        if self._trade_consumer_task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._trade_consumer_task
-            self._trade_consumer_task = None
-        if self._trade_write_queue is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._trade_write_queue.join()
-        if self._trade_writer_task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._trade_writer_task
-            self._trade_writer_task = None
+        await self._stop_tick_pipeline()
+        await self._stop_candle_pipeline()
+        await self._stop_trade_pipeline()
+        await self._close_runtime_resources()
+        exchange_name = self._get_exchange_name()
+        logger.info(f"{exchange_name}_feed_publisher: Stopped")
+
+    def _has_pending_writer_shutdown(self) -> bool:
+        """Return whether stop should drain a partially initialised writer."""
+        return (
+            self._writer_shutdown_pending(self._tick_writer_task, self._tick_write_queue)
+            or self._writer_shutdown_pending(self._candle_writer_task, self._candle_write_queue)
+            or self._writer_shutdown_pending(self._trade_writer_task, self._trade_write_queue)
+        )
+
+    def _writer_shutdown_pending(
+        self, task: asyncio.Task[None] | None, queue: _WriterQueue | None
+    ) -> bool:
+        """Return whether a writer task or queued rows remain during shutdown."""
+        return task is not None or (queue is not None and not queue.empty())
+
+    async def _await_shutdown_task(self, task: asyncio.Task[None] | None) -> None:
+        """Await a shutdown task while preserving best-effort stop semantics."""
+        if task is None:
+            return
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    async def _await_shutdown_tasks(self, tasks: list[asyncio.Task[None]]) -> None:
+        """Await shutdown tasks in start order."""
+        for task in tasks:
+            await self._await_shutdown_task(task)
+
+    async def _join_shutdown_queue(self, queue: _WriterQueue | None) -> None:
+        """Wait until a writer queue has matched every put with task_done."""
+        if queue is None:
+            return
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await queue.join()
+
+    async def _stop_tick_pipeline(self) -> None:
+        """Stop and drain the tick consumer and writer pipeline."""
+        await self._await_shutdown_task(self._tick_consumer_task)
+        self._tick_consumer_task = None
+        await self._join_shutdown_queue(self._tick_write_queue)
+        await self._await_shutdown_task(self._tick_writer_task)
+        self._tick_writer_task = None
+
+    async def _stop_candle_pipeline(self) -> None:
+        """Stop and drain candle consumers and the candle writer pipeline."""
+        await self._await_shutdown_tasks(self._candle_consumer_tasks)
+        self._candle_consumer_tasks = []
+        await self._join_shutdown_queue(self._candle_write_queue)
+        await self._await_shutdown_task(self._candle_writer_task)
+        self._candle_writer_task = None
+
+    async def _stop_trade_pipeline(self) -> None:
+        """Stop and drain the trade consumer and writer pipeline."""
+        await self._await_shutdown_task(self._trade_consumer_task)
+        self._trade_consumer_task = None
+        await self._join_shutdown_queue(self._trade_write_queue)
+        await self._await_shutdown_task(self._trade_writer_task)
+        self._trade_writer_task = None
+
+    async def _close_runtime_resources(self) -> None:
+        """Disconnect exchange and release ZMQ resources."""
         if self._exchange_client:
             await self._exchange_client.disconnect()
             self._exchange_client = None
@@ -473,8 +501,6 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             self.subscriber.close()
         if self.context:
             self.context.term()
-        exchange_name = self._get_exchange_name()
-        logger.info(f"{exchange_name}_feed_publisher: Stopped")
 
     def _supports_public_trades(self) -> bool:
         """Return whether this exchange provides a public trade feed.
