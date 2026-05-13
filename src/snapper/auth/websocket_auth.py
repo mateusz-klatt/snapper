@@ -34,6 +34,8 @@ from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import DelegateOfflineData
+from snapper.messaging.schemas.data import ScopeGrantedData
+from snapper.messaging.schemas.data import ScopeHandedOverData
 from snapper.messaging.schemas.data import ScopeRevokedData
 from snapper.messaging.schemas.data import UserDeactivatedData
 
@@ -41,6 +43,8 @@ _KILL_SWITCH_CLOSE_CODE = 4003
 _KILL_SWITCH_REASON_FALLBACK = "account_deactivated"
 _ADMIN_USER_DEACTIVATED_TOPIC = "admin.user_deactivated"
 _ADMIN_SCOPE_REVOKED_TOPIC = "admin.scope_revoked"
+_ADMIN_SCOPE_GRANTED_TOPIC = "admin.scope_granted"
+_ADMIN_SCOPE_HANDED_OVER_TOPIC = "admin.scope_handed_over"
 _ADMIN_LISTEN_RECV_BACKOFF_S = 0.1
 _KILL_SWITCH_REASON_MAX_BYTES = 123
 _SCOPE_REVOKED_ERROR_PREFIX = "topic_outside_scope"
@@ -701,12 +705,16 @@ class WebSocketAuthManager:
             self._admin_subscriber = ValidatedSubscriber(raw_sub_socket)
             self._admin_subscriber.subscribe(_ADMIN_USER_DEACTIVATED_TOPIC)
             self._admin_subscriber.subscribe(_ADMIN_SCOPE_REVOKED_TOPIC)
+            self._admin_subscriber.subscribe(_ADMIN_SCOPE_GRANTED_TOPIC)
+            self._admin_subscriber.subscribe(_ADMIN_SCOPE_HANDED_OVER_TOPIC)
             self._admin_running = True
             self._admin_listen_task = asyncio.create_task(self._admin_listen_loop())
             logger.info(
-                "WebSocketAuthManager: admin-bus listener subscribed to {} + {} on {}",
+                "WebSocketAuthManager: admin-bus listener subscribed to {} + {} + {} + {} on {}",
                 _ADMIN_USER_DEACTIVATED_TOPIC,
                 _ADMIN_SCOPE_REVOKED_TOPIC,
+                _ADMIN_SCOPE_GRANTED_TOPIC,
+                _ADMIN_SCOPE_HANDED_OVER_TOPIC,
                 zmq_broker_xpub,
             )
 
@@ -814,6 +822,10 @@ class WebSocketAuthManager:
                 await self._handle_user_deactivated(UserDeactivatedData.from_json(payload))
             elif topic == _ADMIN_SCOPE_REVOKED_TOPIC:
                 await self._handle_scope_revoked(ScopeRevokedData.from_json(payload))
+            elif topic == _ADMIN_SCOPE_GRANTED_TOPIC:
+                await self._handle_scope_granted(ScopeGrantedData.from_json(payload))
+            elif topic == _ADMIN_SCOPE_HANDED_OVER_TOPIC:
+                await self._handle_scope_handed_over(ScopeHandedOverData.from_json(payload))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -890,12 +902,137 @@ class WebSocketAuthManager:
     ) -> None:
         """Walk this WS's subscriptions and drop any now-out-of-scope wallet topics.
 
-        Recomputes allowed pairs once per connection; a per-topic
-        membership check then decides which subscriptions survive.
-        Errors during ``unsubscribe_client`` or bridge removal are
-        logged + swallowed so a single bad subscription cannot block
-        the rest of the fanout. A concise summary log entry captures
-        the affected topic count for ops.
+        Thin wrapper around :meth:`_drop_unscoped_subscriptions` that
+        preserves the original ``ScopeRevokedData``-typed signature so
+        existing tests stay valid. Delegates the actual revalidation
+        loop to the shared helper used by all three scope-event
+        handlers (revoked / granted / handed_over).
+        """
+        await self._drop_unscoped_subscriptions(
+            ws=ws,
+            principal=principal,
+            repository=repository,
+            event_identifier=event.grant_public_id,
+            log_prefix="scope_revoked",
+            now=now,
+        )
+
+    async def _handle_scope_granted(self, data: ScopeGrantedData) -> None:
+        """Defensive WS subscription revalidation after an admin scope insert.
+
+        A new grant can only WIDEN the allowed-pair set, so no
+        subscriptions should be dropped. The revalidation runs anyway
+        as a consistency safety-net: if a prior event was lost or
+        delivered out of order, this handler reconciles the WS state
+        against the post-insert DB snapshot. The primary consumer of
+        ``admin.scope_granted`` is :class:`MarketPersistPolicy`; this
+        WS-side handler exists to keep the admin-bus subscription
+        invariant symmetric across the three event types.
+
+        Args:
+            data: Decoded ``admin.scope_granted`` payload.
+        """
+        await self._revalidate_delegates_for_operators(
+            affected_operators={data.operator_public_id},
+            event_identifier=data.grant_public_id,
+            log_prefix="scope_granted",
+        )
+
+    async def _handle_scope_handed_over(self, data: ScopeHandedOverData) -> None:
+        """WS subscription revalidation after an admin scope handover.
+
+        A handover is logically revoke-from-source + grant-to-dest in
+        one transaction, so both operators' delegates need
+        revalidation: source-side may need to drop the handed-over
+        pair; dest-side widens (no drops in practice but revalidate
+        defensively, matching :meth:`_handle_scope_granted`).
+
+        Args:
+            data: Decoded ``admin.scope_handed_over`` payload.
+        """
+        await self._revalidate_delegates_for_operators(
+            affected_operators={
+                data.from_operator_public_id,
+                data.to_operator_public_id,
+            },
+            event_identifier=data.grant_public_id,
+            log_prefix="scope_handed_over",
+        )
+
+    async def _revalidate_delegates_for_operators(
+        self,
+        *,
+        affected_operators: set[str],
+        event_identifier: str,
+        log_prefix: str,
+    ) -> None:
+        """Walk AI_DELEGATE connections whose operator set overlaps ``affected_operators``.
+
+        Mirrors :meth:`_handle_scope_revoked` but accepts a set of
+        operators so granted (single operator) and handed_over (two
+        operators) events can share the same fanout machinery. Missing
+        wiring is logged and the handler no-ops (matches the
+        revoked-path early-return contract).
+
+        Args:
+            affected_operators: Operator public IDs whose delegates
+                must revalidate. Empty set short-circuits (defensive;
+                empty would be a bug in the publisher).
+            event_identifier: Grant public ID — emitted in the
+                fanout summary log for ops correlation.
+            log_prefix: Event-type tag (``scope_granted`` /
+                ``scope_handed_over``) — controls the log line shape.
+        """
+        if (
+            self.connection_manager is None
+            or self.zmq_bridge is None
+            or self.repository_factory is None
+        ):
+            logger.warning(
+                "WebSocketAuthManager: admin.{} received without wiring "
+                "(grant_public_id={}, affected_operators={}); skipping fanout",
+                log_prefix,
+                event_identifier,
+                sorted(affected_operators),
+            )
+            return
+        repository = self.repository_factory()
+        now = datetime.now(UTC)
+        snapshot = tuple(self.authenticated_connections.items())
+        for ws, principal in snapshot:
+            if principal.role != UserRole.AI_DELEGATE:
+                continue
+            if not any(op in affected_operators for op in principal.operator_public_ids):
+                continue
+            await self._drop_unscoped_subscriptions(
+                ws=ws,
+                principal=principal,
+                repository=repository,
+                event_identifier=event_identifier,
+                log_prefix=log_prefix,
+                now=now,
+            )
+
+    async def _drop_unscoped_subscriptions(
+        self,
+        *,
+        ws: WebSocket,
+        principal: AuthPrincipal,
+        repository: Repository,
+        event_identifier: str,
+        log_prefix: str,
+        now: datetime,
+    ) -> None:
+        """Recompute allowed pairs and unsubscribe any topics no longer covered.
+
+        Generic version of the original revoke-only revalidation loop:
+        re-queries allowed pairs once per connection, then a per-topic
+        membership check decides which subscriptions survive. Errors
+        during ``unsubscribe_client`` or bridge removal are logged +
+        swallowed so a single bad subscription cannot block the rest
+        of the fanout. The ``event_identifier`` + ``log_prefix`` ride
+        the summary log line so all three event types share the same
+        ops query surface.
         """
         connection_manager = cast(Any, self.connection_manager)
         zmq_bridge = cast(Any, self.zmq_bridge)
@@ -926,12 +1063,12 @@ class WebSocketAuthManager:
             with contextlib.suppress(Exception):
                 await zmq_bridge.remove_subscription(ws, [topic])
         logger.info(
-            "scope_revoked fanout: ws_peer={} affected_topics={} user_public_id={} "
-            "grant_public_id={}",
+            "{} fanout: ws_peer={} affected_topics={} user_public_id={} grant_public_id={}",
+            log_prefix,
             getattr(ws, "client", None),
             len(affected),
             principal.user_public_id,
-            event.grant_public_id,
+            event_identifier,
         )
 
     async def close_user_connections(self, user_public_id: str, reason: str) -> int:

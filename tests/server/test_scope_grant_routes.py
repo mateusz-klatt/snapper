@@ -249,22 +249,22 @@ class TestCreateScopeGrant:
             as ``granted_by_user_public_id`` (not anything from the
             client payload) and the response wraps the new row.
         """
-        mock_repo = AsyncMock()
+        mock_service = AsyncMock()
         returned_row = _grant_row("grant-new", "op-1", "wallet-42", "underlying")
-        mock_repo.create_scope_grant = AsyncMock(return_value=returned_row)
+        mock_service.create_grant = AsyncMock(return_value=returned_row)
 
         result = await create_scope_grant(
             request=_make_request(),
             _principal=_admin_principal(),
             _csrf=None,
             command=_make_create_command(),
-            repo=mock_repo,
+            scope_grant_service=mock_service,
         )
 
         assert result.payload.operator_public_id == "op-1"
         assert result.payload.scope_kind == "underlying"
-        mock_repo.create_scope_grant.assert_awaited_once()
-        call_kwargs = mock_repo.create_scope_grant.await_args.args[0]
+        mock_service.create_grant.assert_awaited_once()
+        call_kwargs = mock_service.create_grant.await_args.args[0]
         assert call_kwargs["granted_by_user_public_id"] == "00000000-0000-7000-8000-000000000099"
 
     @pytest.mark.asyncio
@@ -277,7 +277,7 @@ class TestCreateScopeGrant:
         Then: HTTPException 400 is raised and the repository is
             never consulted.
         """
-        mock_repo = AsyncMock()
+        mock_service = AsyncMock()
         command = _make_create_command(
             scope_kind="underlying",
             underlying_public_id=None,
@@ -289,16 +289,16 @@ class TestCreateScopeGrant:
                 _principal=_admin_principal(),
                 _csrf=None,
                 command=command,
-                repo=mock_repo,
+                scope_grant_service=mock_service,
             )
 
         assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
-        mock_repo.create_scope_grant.assert_not_called()
+        mock_service.create_grant.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_xor_mismatch_both_ids_rejected(self) -> None:
         """Providing BOTH underlying and instrument IDs also fails pre-validation."""
-        mock_repo = AsyncMock()
+        mock_service = AsyncMock()
         command = _make_create_command(
             scope_kind="instrument",
             underlying_public_id="00000000-0000-7000-8000-0000000000aa",
@@ -311,11 +311,11 @@ class TestCreateScopeGrant:
                 _principal=_admin_principal(),
                 _csrf=None,
                 command=command,
-                repo=mock_repo,
+                scope_grant_service=mock_service,
             )
 
         assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
-        mock_repo.create_scope_grant.assert_not_called()
+        mock_service.create_grant.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_overlap_conflict_bubbles_up_as_409(self) -> None:
@@ -325,8 +325,8 @@ class TestCreateScopeGrant:
         When: ``create_scope_grant`` is called,
         Then: HTTPException 409 is raised with the conflict detail.
         """
-        mock_repo = AsyncMock()
-        mock_repo.create_scope_grant = AsyncMock(
+        mock_service = AsyncMock()
+        mock_service.create_grant = AsyncMock(
             side_effect=ScopeGrantConflictError(
                 wallet_public_id="wallet-42",
                 conflicting_grant_public_id="grant-existing",
@@ -341,7 +341,7 @@ class TestCreateScopeGrant:
                 _principal=_admin_principal(),
                 _csrf=None,
                 command=_make_create_command(),
-                repo=mock_repo,
+                scope_grant_service=mock_service,
             )
 
         assert excinfo.value.status_code == status.HTTP_409_CONFLICT
@@ -349,8 +349,8 @@ class TestCreateScopeGrant:
     @pytest.mark.asyncio
     async def test_validation_error_maps_to_400(self) -> None:
         """Repository ``ScopeGrantValidationError`` maps to HTTP 400."""
-        mock_repo = AsyncMock()
-        mock_repo.create_scope_grant = AsyncMock(
+        mock_service = AsyncMock()
+        mock_service.create_grant = AsyncMock(
             side_effect=ScopeGrantValidationError("bad scope_kind")
         )
 
@@ -360,7 +360,7 @@ class TestCreateScopeGrant:
                 _principal=_admin_principal(),
                 _csrf=None,
                 command=_make_create_command(),
-                repo=mock_repo,
+                scope_grant_service=mock_service,
             )
 
         assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
@@ -368,8 +368,8 @@ class TestCreateScopeGrant:
     @pytest.mark.asyncio
     async def test_not_found_error_maps_to_404(self) -> None:
         """Repository ``ScopeGrantNotFoundError`` maps to HTTP 404."""
-        mock_repo = AsyncMock()
-        mock_repo.create_scope_grant = AsyncMock(
+        mock_service = AsyncMock()
+        mock_service.create_grant = AsyncMock(
             side_effect=ScopeGrantNotFoundError("operator not found")
         )
 
@@ -379,7 +379,7 @@ class TestCreateScopeGrant:
                 _principal=_admin_principal(),
                 _csrf=None,
                 command=_make_create_command(),
-                repo=mock_repo,
+                scope_grant_service=mock_service,
             )
 
         assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND
@@ -414,31 +414,31 @@ class TestHandoverScopeGrant:
             repository received the principal's ``user_public_id`` as
             ``granted_by_user_public_id``.
         """
-        mock_repo = AsyncMock()
+        mock_service = AsyncMock()
         closed_row = _grant_row("grant-old", "op-1", "wallet-42", "underlying")
         new_row = _grant_row("grant-new", "op-2", "wallet-42", "underlying")
-        mock_repo.handover_grant = AsyncMock(return_value=(closed_row, new_row))
+        mock_service.handover = AsyncMock(return_value=(closed_row, new_row))
 
         result = await handover_scope_grant(
             request=_make_request(),
             _principal=_admin_principal(),
             _csrf=None,
             command=_make_handover_command(),
-            repo=mock_repo,
+            scope_grant_service=mock_service,
         )
 
         assert result.payload.closed_grant.operator_public_id == "op-1"
         assert result.payload.new_grant.operator_public_id == "op-2"
-        mock_repo.handover_grant.assert_awaited_once()
-        call_kwargs = mock_repo.handover_grant.await_args.kwargs
-        assert call_kwargs["granted_by_user_public_id"] == "00000000-0000-7000-8000-000000000099"
+        mock_service.handover.assert_awaited_once()
+        call_kwargs = mock_service.handover.await_args.kwargs
+        assert call_kwargs["handover_by_user_public_id"] == "00000000-0000-7000-8000-000000000099"
         assert call_kwargs["reason"] == "vacation cover"
 
     @pytest.mark.asyncio
     async def test_missing_source_grant_maps_to_404(self) -> None:
         """A missing source grant surfaces as HTTP 404."""
-        mock_repo = AsyncMock()
-        mock_repo.handover_grant = AsyncMock(
+        mock_service = AsyncMock()
+        mock_service.handover = AsyncMock(
             side_effect=ScopeGrantNotFoundError("source grant not found")
         )
 
@@ -448,7 +448,7 @@ class TestHandoverScopeGrant:
                 _principal=_admin_principal(),
                 _csrf=None,
                 command=_make_handover_command(),
-                repo=mock_repo,
+                scope_grant_service=mock_service,
             )
 
         assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND
@@ -456,8 +456,8 @@ class TestHandoverScopeGrant:
     @pytest.mark.asyncio
     async def test_self_handover_validation_maps_to_400(self) -> None:
         """Self-handover (source operator == target operator) fails with 400."""
-        mock_repo = AsyncMock()
-        mock_repo.handover_grant = AsyncMock(
+        mock_service = AsyncMock()
+        mock_service.handover = AsyncMock(
             side_effect=ScopeGrantValidationError("self-handover rejected")
         )
 
@@ -467,7 +467,7 @@ class TestHandoverScopeGrant:
                 _principal=_admin_principal(),
                 _csrf=None,
                 command=_make_handover_command(),
-                repo=mock_repo,
+                scope_grant_service=mock_service,
             )
 
         assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
@@ -475,8 +475,8 @@ class TestHandoverScopeGrant:
     @pytest.mark.asyncio
     async def test_cross_scope_conflict_maps_to_409(self) -> None:
         """Overlap against the destination operator's grants fails with 409."""
-        mock_repo = AsyncMock()
-        mock_repo.handover_grant = AsyncMock(
+        mock_service = AsyncMock()
+        mock_service.handover = AsyncMock(
             side_effect=ScopeGrantConflictError(
                 wallet_public_id="wallet-42",
                 conflicting_grant_public_id="grant-other",
@@ -491,7 +491,7 @@ class TestHandoverScopeGrant:
                 _principal=_admin_principal(),
                 _csrf=None,
                 command=_make_handover_command(),
-                repo=mock_repo,
+                scope_grant_service=mock_service,
             )
 
         assert excinfo.value.status_code == status.HTTP_409_CONFLICT

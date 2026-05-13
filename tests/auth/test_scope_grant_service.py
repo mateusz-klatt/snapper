@@ -1,15 +1,17 @@
-"""Tests for  ``ScopeGrantService.revoke_grant`` orchestration.
+"""Tests for ``ScopeGrantService`` orchestration across all three events.
 
-The DB-state mutations (SCD2 close + advisory lock) are integration-
-tested in ``tests/data/test_scope_grants.py::TestRevokeScopeGrant``.
-These tests focus on the service contract: ordering (repository first,
+The DB-state mutations (SCD2 close + insert + advisory lock) are
+integration-tested in ``tests/data/test_scope_grants.py``. These
+tests focus on the service contract: ordering (repository first,
 publish second), single-publisher invariant, payload schema, graceful
-degradation on missing/failing publisher, and statelessness.
+degradation on missing/failing publisher, and statelessness for
+create_grant / handover / revoke_grant.
 """
 
 from collections.abc import Generator
 from datetime import UTC
 from datetime import datetime
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -18,17 +20,19 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
 from snapper.data.repository import ScopeGrantNotFoundError
+from snapper.data.repository_types import CreateScopeGrantRequest
 from snapper.data.repository_types import ScopeGrantRow
-from snapper.messaging.schemas.data import ScopeRevokedData
+from snapper.messaging.schemas.data import ScopeGrantedData
+from snapper.messaging.schemas.data import ScopeHandedOverData
 
 
 class _RecordingPublisher:
     """Stub MessagePublisher capturing every (topic, payload) pair."""
 
     def __init__(self) -> None:
-        self.sent: list[tuple[str, ScopeRevokedData]] = []
+        self.sent: list[tuple[str, Any]] = []
 
-    async def send(self, stream_key: str, data: ScopeRevokedData) -> None:
+    async def send(self, stream_key: str, data: Any) -> None:
         """Record the (topic, payload) pair for assertion."""
         self.sent.append((stream_key, data))
 
@@ -36,7 +40,7 @@ class _RecordingPublisher:
 class _RaisingPublisher(_RecordingPublisher):
     """Publisher whose `send` raises after recording the call."""
 
-    async def send(self, stream_key: str, data: ScopeRevokedData) -> None:
+    async def send(self, stream_key: str, data: Any) -> None:
         """Record the call then raise to simulate a broker hiccup."""
         await super().send(stream_key, data)
         raise RuntimeError("broker unreachable")
@@ -243,6 +247,225 @@ class TestRevokeGrantOrchestration:
         assert payload.instrument_public_id == "inst-btcusd"
 
 
+def _make_insert_request(
+    *,
+    granted_by_user_public_id: str = "user-admin",
+    scope_kind: str = "underlying",
+    underlying_public_id: str | None = "under-btc",
+    instrument_public_id: str | None = None,
+    note: str | None = "seed-note",
+) -> CreateScopeGrantRequest:
+    """Build a ``CreateScopeGrantRequest`` for create_grant tests."""
+    return CreateScopeGrantRequest(
+        operator_public_id="op-1",
+        wallet_public_id="wal-1",
+        granted_by_user_public_id=granted_by_user_public_id,
+        scope_kind=scope_kind,
+        underlying_public_id=underlying_public_id,
+        instrument_public_id=instrument_public_id,
+        note=note,
+        session_id="sess-rest",
+        sequence_id=1,
+        timestamp=datetime.now(UTC),
+    )
+
+
+class TestCreateGrantOrchestration:
+    """Tests for ``ScopeGrantService.create_grant`` happy path + publisher."""
+
+    @pytest.mark.asyncio
+    async def test_create_grant_publishes_after_commit(self) -> None:
+        """Publisher is called exactly once with admin.scope_granted topic.
+
+        The repository creates the new row; the service then emits the
+        wake-up event carrying grant identity + creator metadata.
+        """
+        service = ScopeGrantService()
+        granted_at = datetime.now(UTC)
+        created = _make_row()
+        service.repository = AsyncMock()
+        service.repository.create_scope_grant = AsyncMock(return_value=created)
+        publisher = _RecordingPublisher()
+        service.set_msg_publisher(publisher)
+        insert = _make_insert_request()
+
+        returned = await service.create_grant(insert, now=granted_at)
+        assert returned is created
+        assert len(publisher.sent) == 1
+        topic, payload = publisher.sent[0]
+        assert topic == "admin.scope_granted"
+        assert isinstance(payload, ScopeGrantedData)
+        assert payload.grant_public_id == "grant-1"
+        assert payload.operator_public_id == "op-1"
+        assert payload.wallet_public_id == "wal-1"
+        assert payload.scope_kind == "underlying"
+        assert payload.underlying_public_id == "under-btc"
+        assert payload.granted_at == granted_at
+        assert payload.granted_by_user_public_id == "user-admin"
+        assert payload.reason == "seed-note"
+
+    @pytest.mark.asyncio
+    async def test_create_grant_without_publisher_still_inserts(self) -> None:
+        """Missing publisher logs warning but does not raise or roll back."""
+        service = ScopeGrantService()
+        created = _make_row()
+        service.repository = AsyncMock()
+        service.repository.create_scope_grant = AsyncMock(return_value=created)
+        service.set_msg_publisher(None)
+        insert = _make_insert_request()
+
+        returned = await service.create_grant(insert, now=datetime.now(UTC))
+        assert returned is created
+        service.repository.create_scope_grant.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_create_grant_publisher_failure_does_not_rollback(self) -> None:
+        """Broker hiccup is swallowed; the insert stays final."""
+        service = ScopeGrantService()
+        created = _make_row()
+        service.repository = AsyncMock()
+        service.repository.create_scope_grant = AsyncMock(return_value=created)
+        publisher = _RaisingPublisher()
+        service.set_msg_publisher(publisher)
+        insert = _make_insert_request()
+
+        returned = await service.create_grant(insert, now=datetime.now(UTC))
+        assert returned is created
+        assert len(publisher.sent) == 1
+
+    @pytest.mark.asyncio
+    async def test_create_grant_invalid_scope_kind_from_repo_raises(self) -> None:
+        """A bogus scope_kind from the repo surfaces as ValueError; no publish."""
+        service = ScopeGrantService()
+        created = _make_row(scope_kind="weird")
+        service.repository = AsyncMock()
+        service.repository.create_scope_grant = AsyncMock(return_value=created)
+        publisher = _RecordingPublisher()
+        service.set_msg_publisher(publisher)
+        insert = _make_insert_request()
+
+        with pytest.raises(ValueError, match="invalid scope_kind"):
+            await service.create_grant(insert, now=datetime.now(UTC))
+        assert publisher.sent == []
+
+
+class TestHandoverOrchestration:
+    """Tests for ``ScopeGrantService.handover`` happy path + publisher."""
+
+    @pytest.mark.asyncio
+    async def test_handover_publishes_after_commit(self) -> None:
+        """Publisher is called once with admin.scope_handed_over topic.
+
+        Both operator IDs are emitted so audit consumers can identify
+        the from + to parties without a second DB round-trip.
+        """
+        service = ScopeGrantService()
+        handover_at = datetime.now(UTC)
+        closed = _make_row(operator_public_id="op-from")
+        new_row = _make_row(
+            grant_public_id="grant-2",
+            operator_public_id="op-to",
+        )
+        service.repository = AsyncMock()
+        service.repository.handover_grant = AsyncMock(return_value=(closed, new_row))
+        publisher = _RecordingPublisher()
+        service.set_msg_publisher(publisher)
+
+        out_closed, out_new = await service.handover(
+            grant_public_id="grant-1",
+            destination_operator_public_id="op-to",
+            handover_by_user_public_id="user-admin",
+            reason="rebalance",
+            session_id="sess-rest",
+            sequence_id=7,
+            now=handover_at,
+        )
+        assert out_closed is closed
+        assert out_new is new_row
+        assert len(publisher.sent) == 1
+        topic, payload = publisher.sent[0]
+        assert topic == "admin.scope_handed_over"
+        assert isinstance(payload, ScopeHandedOverData)
+        assert payload.grant_public_id == "grant-2"
+        assert payload.from_operator_public_id == "op-from"
+        assert payload.to_operator_public_id == "op-to"
+        assert payload.wallet_public_id == "wal-1"
+        assert payload.scope_kind == "underlying"
+        assert payload.handover_at == handover_at
+        assert payload.handover_by_user_public_id == "user-admin"
+        assert payload.reason == "rebalance"
+
+    @pytest.mark.asyncio
+    async def test_handover_without_publisher_still_completes(self) -> None:
+        """Missing publisher logs warning but transaction stays final."""
+        service = ScopeGrantService()
+        closed = _make_row(operator_public_id="op-from")
+        new_row = _make_row(grant_public_id="grant-2", operator_public_id="op-to")
+        service.repository = AsyncMock()
+        service.repository.handover_grant = AsyncMock(return_value=(closed, new_row))
+        service.set_msg_publisher(None)
+
+        await service.handover(
+            grant_public_id="grant-1",
+            destination_operator_public_id="op-to",
+            handover_by_user_public_id="user-admin",
+            reason=None,
+            session_id="sess",
+            sequence_id=1,
+            now=datetime.now(UTC),
+        )
+        service.repository.handover_grant.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_handover_publisher_failure_does_not_rollback(self) -> None:
+        """Broker hiccup is swallowed; the SCD2 transaction stays final."""
+        service = ScopeGrantService()
+        closed = _make_row(operator_public_id="op-from")
+        new_row = _make_row(grant_public_id="grant-2", operator_public_id="op-to")
+        service.repository = AsyncMock()
+        service.repository.handover_grant = AsyncMock(return_value=(closed, new_row))
+        publisher = _RaisingPublisher()
+        service.set_msg_publisher(publisher)
+
+        await service.handover(
+            grant_public_id="grant-1",
+            destination_operator_public_id="op-to",
+            handover_by_user_public_id="user-admin",
+            reason=None,
+            session_id="sess",
+            sequence_id=1,
+            now=datetime.now(UTC),
+        )
+        assert len(publisher.sent) == 1
+
+    @pytest.mark.asyncio
+    async def test_handover_invalid_scope_kind_from_repo_raises(self) -> None:
+        """Bogus scope_kind on the new row surfaces as ValueError; no publish."""
+        service = ScopeGrantService()
+        closed = _make_row(operator_public_id="op-from")
+        new_row = _make_row(
+            grant_public_id="grant-2",
+            operator_public_id="op-to",
+            scope_kind="weird",
+        )
+        service.repository = AsyncMock()
+        service.repository.handover_grant = AsyncMock(return_value=(closed, new_row))
+        publisher = _RecordingPublisher()
+        service.set_msg_publisher(publisher)
+
+        with pytest.raises(ValueError, match="invalid scope_kind"):
+            await service.handover(
+                grant_public_id="grant-1",
+                destination_operator_public_id="op-to",
+                handover_by_user_public_id="user-admin",
+                reason=None,
+                session_id="sess",
+                sequence_id=1,
+                now=datetime.now(UTC),
+            )
+        assert publisher.sent == []
+
+
 class TestSingleton:
     """Tests for the ``get_scope_grant_service`` factory + singleton semantics."""
 
@@ -250,6 +473,14 @@ class TestSingleton:
         """Two calls to get_instance return the same object."""
         first = ScopeGrantService.get_instance()
         second = ScopeGrantService.get_instance()
+        assert first is second
+
+    def test_get_scope_grant_service_factory_returns_singleton(self) -> None:
+        """The module-level factory delegates to ``ScopeGrantService.get_instance``."""
+        from snapper.auth.scope_grant_service import get_scope_grant_service
+
+        first = get_scope_grant_service()
+        second = get_scope_grant_service()
         assert first is second
 
     def test_clear_instance_resets_singleton(self) -> None:

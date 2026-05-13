@@ -876,6 +876,80 @@ class ScopeRevokedData(StrictDataSchema[Literal["scope_revoked"]]):
     reason: str | None = None
 
 
+class ScopeGrantedData(StrictDataSchema[Literal["scope_granted"]]):
+    """Admin scope-creation event for a wallet-operator scope grant.
+
+    Published by ``ScopeGrantService.create_grant`` as the SOLE publisher
+    of the ``admin.scope_granted`` bus topic. Mirrors the
+    :class:`ScopeRevokedData` wake-up signal contract: the payload
+    carries the full scope identity for audit / log readability, but
+    subscribers ignore the per-row resource ids for state-rebuild
+    logic and re-run ``list_scope_grant_instrument_pairs`` against the
+    post-event DB snapshot.
+
+    Attributes:
+        grant_public_id: Newly-inserted grant identity.
+        operator_public_id: Operator gaining the scope.
+        wallet_public_id: Wallet on which the scope was granted.
+        scope_kind: ``"underlying"`` or ``"instrument"``.
+        underlying_public_id: Populated when ``scope_kind='underlying'``.
+        instrument_public_id: Populated when ``scope_kind='instrument'``.
+        granted_at: UTC timestamp of the grant insert bus-time.
+        granted_by_user_public_id: ADMIN user who created the grant.
+        reason: Optional admin-supplied rationale.
+    """
+
+    type: Literal["scope_granted"] = "scope_granted"
+    grant_public_id: str
+    operator_public_id: str
+    wallet_public_id: str
+    scope_kind: Literal["underlying", "instrument"]
+    underlying_public_id: str | None = None
+    instrument_public_id: str | None = None
+    granted_at: datetime
+    granted_by_user_public_id: str
+    reason: str | None = None
+
+
+class ScopeHandedOverData(StrictDataSchema[Literal["scope_handed_over"]]):
+    """Admin scope-handover event for a wallet-operator scope grant.
+
+    Published by ``ScopeGrantService.handover`` as the SOLE publisher
+    of the ``admin.scope_handed_over`` bus topic. Wake-up signal only
+    (same contract as :class:`ScopeRevokedData`): subscribers re-run
+    ``list_scope_grant_instrument_pairs`` against the post-handover
+    DB snapshot rather than applying the payload as a delta.
+
+    The two operator ids disambiguate the giving (closed grant) and
+    receiving (new grant) parties so audit consumers do not need a
+    second round-trip to identify the cross-operator transfer.
+
+    Attributes:
+        grant_public_id: New (post-handover) grant identity.
+        from_operator_public_id: Operator that lost the scope.
+        to_operator_public_id: Operator that received the scope.
+        wallet_public_id: Wallet on which the scope was handed over.
+        scope_kind: ``"underlying"`` or ``"instrument"``.
+        underlying_public_id: Populated when ``scope_kind='underlying'``.
+        instrument_public_id: Populated when ``scope_kind='instrument'``.
+        handover_at: UTC timestamp of the SCD2 close + new-grant insert.
+        handover_by_user_public_id: ADMIN user who initiated the handover.
+        reason: Optional admin-supplied rationale.
+    """
+
+    type: Literal["scope_handed_over"] = "scope_handed_over"
+    grant_public_id: str
+    from_operator_public_id: str
+    to_operator_public_id: str
+    wallet_public_id: str
+    scope_kind: Literal["underlying", "instrument"]
+    underlying_public_id: str | None = None
+    instrument_public_id: str | None = None
+    handover_at: datetime
+    handover_by_user_public_id: str
+    reason: str | None = None
+
+
 class SymbolAliasUpdateData(StrictDataSchema[Literal["symbol_alias_update"]]):
     """Symbol alias cache invalidation message.
 

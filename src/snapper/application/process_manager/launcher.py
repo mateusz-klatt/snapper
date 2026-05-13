@@ -47,6 +47,7 @@ from snapper.application.process_manager.registry import get_registered_processe
 from snapper.application.process_manager.registry_syncer import ProcessRegistrySyncer
 from snapper.application.process_manager.run_recorder import ProcessRunRecorder
 from snapper.application.process_manager.spawner import ProcessSpawnerService
+from snapper.application.services.market_persist_policy import MarketPersistPolicy
 from snapper.config.settings import AppSettings
 from snapper.core.json_types import JsonObject
 from snapper.core.types import HealthStatus
@@ -131,6 +132,49 @@ class ProcessLauncherService:
         self.expected_terminations: set[str] = set()
         self._run_recorder = ProcessRunRecorder(settings)
         self._registry_syncer = ProcessRegistrySyncer(settings)
+        self._market_persist_policy: MarketPersistPolicy | None = None
+
+    def set_market_persist_policy(self, policy: MarketPersistPolicy | None) -> None:
+        """Inject the :class:`MarketPersistPolicy` for publisher gating.
+
+        Called from the FastAPI lifespan after the policy has been
+        rebuilt + the admin listener has started, but BEFORE
+        :meth:`start_all_processes` so every publisher launched
+        in-process receives the same policy reference. Subprocess
+        publishers reconstruct the policy from settings independently;
+        the launcher-side injection only covers thread / in-process mode
+        per the v1 deployment contract documented in plan v6 step 8.
+
+        Args:
+            policy: Configured policy singleton or ``None`` to clear.
+        """
+        self._market_persist_policy = policy
+
+    def _inject_market_persist_policy(
+        self, process_instance: RegisterableProcess, config_name: str
+    ) -> None:
+        """Wire ``self._market_persist_policy`` into a publisher instance.
+
+        Walks the duck-type contract instead of importing
+        :class:`MarketDataPublisherService` so the launcher does not
+        introduce a circular dependency (``base.py`` already imports
+        the policy module). A publisher exposes ``set_persist_policy``;
+        any other process type silently no-ops.
+
+        Args:
+            process_instance: Just-instantiated process object.
+            config_name: Process name (for log readability).
+        """
+        if self._market_persist_policy is None:
+            return
+        setter = getattr(process_instance, "set_persist_policy", None)
+        if not callable(setter):
+            return
+        setter(self._market_persist_policy)
+        logger.debug(
+            "MarketPersistPolicy injected into {} (in-process)",
+            config_name,
+        )
 
     async def _create_process_run_record(
         self,
@@ -339,6 +383,7 @@ class ProcessLauncherService:
         process_class = self.import_class(config.class_path, config.name)
         validated_params = self._validate_parameters(config)
         process_instance = process_class(**validated_params)
+        self._inject_market_persist_policy(process_instance, config.name)
         method = getattr(process_instance, config.method)
         if inspect.iscoroutinefunction(method):
             await self._start_as_async_task(config, method)

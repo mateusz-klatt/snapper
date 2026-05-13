@@ -156,6 +156,11 @@ async def list_scope_grants(
     )
 
 
+def _scope_grant_service_dependency() -> ScopeGrantService:
+    """FastAPI dependency returning the shared ``ScopeGrantService`` singleton."""
+    return get_scope_grant_service()
+
+
 @router.post("", openapi_extra=openapi_schema(CreateScopeGrantCommand))
 async def create_scope_grant(
     request: Request,
@@ -164,34 +169,35 @@ async def create_scope_grant(
     ],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     command: Annotated[CreateScopeGrantCommand, Depends(json_body(CreateScopeGrantCommand))],
-    repo: Annotated[Repository, Depends(get_repository_dependency)],
+    scope_grant_service: Annotated[ScopeGrantService, Depends(_scope_grant_service_dependency)],
 ) -> ScopeGrantResponse:
-    """Create a new active scope grant.
+    """Create a new active scope grant via :class:`ScopeGrantService`.
 
     The XOR invariant between ``scope_kind`` and
     ``underlying_public_id`` / ``instrument_public_id`` is validated
-    before the repository call so the client gets a 400 with a clear
+    before the service call so the client gets a 400 with a clear
     message rather than opaque DB constraint errors. Overlap
     conflicts (same-scope or cross-scope) bubble up as 409; the
     underlying repository method holds an advisory lock on
     PostgreSQL to prevent races.
 
-    ``granted_by_user_public_id`` is taken from the principal so
-    the client cannot spoof an audit identity.
+    ``granted_by_user_public_id`` is taken from the principal so the
+    client cannot spoof an audit identity. The service publishes
+    ``admin.scope_granted`` after the insert commit so any subscriber
+    (WebSocket-auth manager, market-persist policy) can react live.
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
         _principal: Authenticated caller holding MANAGE_SCOPE_GRANTS.
         command: Create command envelope.
-        repo: Repository dependency.
+        scope_grant_service: Service singleton (single-publisher).
 
     Returns:
         ``ScopeGrantResponse`` wrapping the newly-inserted grant row.
 
     Raises:
         HTTPException: 400 on XOR violation; 409 on overlap; 404 if
-            the target operator / wallet does not exist (bubbles up
-            via ``ScopeGrantNotFoundError`` from the repository).
+            the target operator / wallet does not exist.
     """
     _validate_scope_xor(command)
     tracker: SequenceTracker = request.app.state.rest_tracker
@@ -213,7 +219,7 @@ async def create_scope_grant(
         timestamp=ts,
     )
     try:
-        row = await repo.create_scope_grant(insert_request)
+        row = await scope_grant_service.create_grant(insert_request, now=ts)
     except ScopeGrantConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ScopeGrantValidationError as exc:
@@ -237,9 +243,9 @@ async def handover_scope_grant(
     ],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     command: Annotated[HandoverScopeGrantCommand, Depends(json_body(HandoverScopeGrantCommand))],
-    repo: Annotated[Repository, Depends(get_repository_dependency)],
+    scope_grant_service: Annotated[ScopeGrantService, Depends(_scope_grant_service_dependency)],
 ) -> HandoverScopeGrantResponse:
-    """Atomically transfer an active scope grant to a different operator.
+    """Atomically transfer an active scope grant via :class:`ScopeGrantService`.
 
     Single transaction: SCD2-close the source grant and insert a new
     grant under the destination operator carrying the same
@@ -248,11 +254,14 @@ async def handover_scope_grant(
     destination operator's existing grants raises 409 and the
     transaction is rolled back.
 
+    The service publishes ``admin.scope_handed_over`` after the
+    repo transaction commit so subscribers can refresh derived state.
+
     Args:
         request: FastAPI request (provides REST tracker for provenance).
         _principal: Authenticated caller holding MANAGE_SCOPE_GRANTS.
         command: Handover command envelope.
-        repo: Repository dependency.
+        scope_grant_service: Service singleton (single-publisher).
 
     Returns:
         ``HandoverScopeGrantResponse`` wrapping both the closed
@@ -271,14 +280,14 @@ async def handover_scope_grant(
     pid = str(uuid7())
     body = command.payload
     try:
-        closed, new_row = await repo.handover_grant(
-            from_grant_public_id=body.from_grant_public_id,
-            to_operator_public_id=body.to_operator_public_id,
-            granted_by_user_public_id=_principal.user_public_id,
+        closed, new_row = await scope_grant_service.handover(
+            grant_public_id=body.from_grant_public_id,
+            destination_operator_public_id=body.to_operator_public_id,
+            handover_by_user_public_id=_principal.user_public_id,
             reason=body.reason,
             session_id=sid,
             sequence_id=seq,
-            timestamp=ts,
+            now=ts,
         )
     except ScopeGrantValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -296,11 +305,6 @@ async def handover_scope_grant(
             new_grant=_scope_grant_info(new_row),
         ),
     )
-
-
-def _scope_grant_service_dependency() -> ScopeGrantService:
-    """FastAPI dependency returning the shared ``ScopeGrantService`` singleton."""
-    return get_scope_grant_service()
 
 
 @router.post(

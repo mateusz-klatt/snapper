@@ -1,10 +1,19 @@
-"""ScopeGrantService — SOLE publisher of `admin.scope_revoked`.
+"""ScopeGrantService — SOLE publisher of the three admin scope events.
 
-Mirrors `UserService` publisher shape: the service owns
-`revoke_grant()` which closes the grant via the repository and then
-emits a single `admin.scope_revoked` bus event so `WebSocketAuthManager`
-(the subscriber) can revalidate any AI_DELEGATE subscriptions live
-without waiting for a reconnect.
+Owns create / handover / revoke for ``wallet_operator_scope_grants``
+and emits one bus event per mutation so subscribers
+(``WebSocketAuthManager`` for AI_DELEGATE revalidation,
+``MarketPersistPolicy`` for the persist-set refresh) can react live
+without waiting for a reconnect:
+
+- ``admin.scope_granted`` — published by ``create_grant``.
+- ``admin.scope_handed_over`` — published by ``handover``.
+- ``admin.scope_revoked`` — published by ``revoke_grant``.
+
+All three events are **wake-up signals only** (see ``ScopeRevokedData``
+docstring): subscribers ignore payload identity fields for state
+rebuild and re-run ``list_scope_grant_instrument_pairs`` against the
+post-event DB snapshot.
 
 Stateless singleton: repository reference, tracker ref, optional
 publisher ref. No coordinator-owned mutable state. The publisher
@@ -24,17 +33,22 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings import get_settings
 from snapper.data.repository import get_repository
+from snapper.data.repository_types import CreateScopeGrantRequest
 from snapper.data.repository_types import ScopeGrantRow
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import ScopeGrantedData
+from snapper.messaging.schemas.data import ScopeHandedOverData
 from snapper.messaging.schemas.data import ScopeRevokedData
 from snapper.messaging.topics.builders import admin_topic
 
 _SCOPE_REVOKED_TOPIC = "scope_revoked"
+_SCOPE_GRANTED_TOPIC = "scope_granted"
+_SCOPE_HANDED_OVER_TOPIC = "scope_handed_over"
 
 
 class ScopeGrantService:
-    """Stateless singleton that owns the ``admin.scope_revoked`` publisher."""
+    """Stateless singleton that owns the three admin scope-grant publishers."""
 
     _instance: ScopeGrantService | None = None
     _initialized: bool = False
@@ -122,6 +136,238 @@ class ScopeGrantService:
             reason=reason,
         )
         return closed
+
+    async def create_grant(
+        self,
+        insert_request: CreateScopeGrantRequest,
+        *,
+        now: datetime,
+    ) -> ScopeGrantRow:
+        """Insert a new active scope grant and publish ``admin.scope_granted``.
+
+        Orchestration mirrors :meth:`revoke_grant`:
+
+        1. ``repository.create_scope_grant`` performs the insert under
+           overlap detection (raises ``ScopeGrantConflictError`` on
+           collisions; ``ScopeGrantValidationError`` on XOR mismatch).
+        2. After the insert commits, publish ``admin.scope_granted``
+           carrying the new grant identity + creator metadata.
+
+        Publish failures are logged but do NOT roll back the insert —
+        a transient broker hiccup must never leave the grant in an
+        inconsistent half-created state.
+
+        Args:
+            insert_request: Validated request including REST-tracker
+                provenance (session_id + sequence_id + timestamp).
+            now: Bus-time for the event payload. Distinct from the
+                ``insert_request.timestamp`` (REST provenance) so the
+                event timeline reflects publisher wall-clock.
+
+        Returns:
+            The newly-inserted ``ScopeGrantRow``.
+
+        Raises:
+            ScopeGrantConflictError: Overlap against an existing active
+                grant on the same operator / wallet / scope.
+            ScopeGrantValidationError: XOR mismatch between
+                ``scope_kind`` and the populated resource id.
+            ScopeGrantNotFoundError: Referenced operator / wallet does
+                not exist.
+        """
+        row = await self.repository.create_scope_grant(insert_request)
+        await self._publish_scope_granted(
+            grant_public_id=row["public_id"],
+            operator_public_id=row["operator_public_id"],
+            wallet_public_id=row["wallet_public_id"],
+            scope_kind=row["scope_kind"],
+            underlying_public_id=row["underlying_public_id"],
+            instrument_public_id=row["instrument_public_id"],
+            granted_at=now,
+            granted_by_user_public_id=insert_request["granted_by_user_public_id"],
+            reason=insert_request["note"],
+        )
+        return row
+
+    async def handover(
+        self,
+        *,
+        grant_public_id: str,
+        destination_operator_public_id: str,
+        handover_by_user_public_id: str,
+        reason: str | None,
+        session_id: str,
+        sequence_id: int,
+        now: datetime,
+    ) -> tuple[ScopeGrantRow, ScopeGrantRow]:
+        """Atomically transfer an active scope grant to a different operator.
+
+        Orchestration mirrors :meth:`revoke_grant` but the repository
+        performs a single-transaction SCD2-close + insert under
+        cross-scope overlap detection.
+
+        REST-tracker provenance (``session_id`` / ``sequence_id``) is
+        passed through to the repository so the new grant row carries
+        the originating API call's audit trail. The bus event uses the
+        service's own tracker (handover wake-up signals are a separate
+        provenance stream from the REST DDL).
+
+        Args:
+            grant_public_id: Source grant identity (will be closed).
+            destination_operator_public_id: Operator receiving the scope.
+            handover_by_user_public_id: ADMIN user driving the handover.
+            reason: Optional admin-supplied rationale.
+            session_id: REST-tracker session ID (recorded on new row).
+            sequence_id: REST-tracker sequence number (recorded on new row).
+            now: Bus-time for the SCD2 close + insert + event payload.
+
+        Returns:
+            ``(closed_from_grant, new_grant)`` — both as ``ScopeGrantRow``.
+
+        Raises:
+            ScopeGrantValidationError: Self-handover or other validation.
+            ScopeGrantNotFoundError: Source grant or destination operator
+                does not exist.
+            ScopeGrantConflictError: Cross-scope overlap against the
+                destination operator's existing grants.
+        """
+        closed, new_row = await self.repository.handover_grant(
+            from_grant_public_id=grant_public_id,
+            to_operator_public_id=destination_operator_public_id,
+            granted_by_user_public_id=handover_by_user_public_id,
+            reason=reason,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            timestamp=now,
+        )
+        await self._publish_scope_handed_over(
+            grant_public_id=new_row["public_id"],
+            from_operator_public_id=closed["operator_public_id"],
+            to_operator_public_id=new_row["operator_public_id"],
+            wallet_public_id=new_row["wallet_public_id"],
+            scope_kind=new_row["scope_kind"],
+            underlying_public_id=new_row["underlying_public_id"],
+            instrument_public_id=new_row["instrument_public_id"],
+            handover_at=now,
+            handover_by_user_public_id=handover_by_user_public_id,
+            reason=reason,
+        )
+        return closed, new_row
+
+    async def _publish_scope_granted(
+        self,
+        *,
+        grant_public_id: str,
+        operator_public_id: str,
+        wallet_public_id: str,
+        scope_kind: str,
+        underlying_public_id: str | None,
+        instrument_public_id: str | None,
+        granted_at: datetime,
+        granted_by_user_public_id: str,
+        reason: str | None,
+    ) -> None:
+        """Emit ``admin.scope_granted`` after the repository insert commit.
+
+        Best-effort: a missing publisher logs a warning instead of
+        raising. A send failure degrades to a logged exception so a
+        transient broker hiccup never leaves the grant un-broadcast.
+        Mirrors :meth:`_publish_scope_revoked` exactly.
+        """
+        topic = admin_topic(_SCOPE_GRANTED_TOPIC)
+        if scope_kind not in ("underlying", "instrument"):
+            raise ValueError(
+                f"invalid scope_kind {scope_kind!r} from repository; "
+                "expected 'underlying' or 'instrument'"
+            )
+        narrowed_scope_kind = cast(Literal["underlying", "instrument"], scope_kind)
+        if self._msg_publisher is None:
+            logger.warning(
+                "admin.scope_granted NOT broadcast for grant_public_id={}: "
+                "ScopeGrantService publisher unavailable (multi-instance fanout disabled)",
+                grant_public_id,
+            )
+            return
+        payload = ScopeGrantedData(
+            public_id=str(uuid7()),
+            timestamp=granted_at,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(topic),
+            grant_public_id=grant_public_id,
+            operator_public_id=operator_public_id,
+            wallet_public_id=wallet_public_id,
+            scope_kind=narrowed_scope_kind,
+            underlying_public_id=underlying_public_id,
+            instrument_public_id=instrument_public_id,
+            granted_at=granted_at,
+            granted_by_user_public_id=granted_by_user_public_id,
+            reason=reason,
+        )
+        try:
+            await self._msg_publisher.send(topic, payload)
+        except Exception as exc:
+            logger.exception(
+                "Failed to broadcast admin.scope_granted for grant_public_id={}: {}",
+                grant_public_id,
+                exc,
+            )
+
+    async def _publish_scope_handed_over(
+        self,
+        *,
+        grant_public_id: str,
+        from_operator_public_id: str,
+        to_operator_public_id: str,
+        wallet_public_id: str,
+        scope_kind: str,
+        underlying_public_id: str | None,
+        instrument_public_id: str | None,
+        handover_at: datetime,
+        handover_by_user_public_id: str,
+        reason: str | None,
+    ) -> None:
+        """Emit ``admin.scope_handed_over`` after the repository transaction commit.
+
+        Same failure contract as :meth:`_publish_scope_granted`.
+        """
+        topic = admin_topic(_SCOPE_HANDED_OVER_TOPIC)
+        if scope_kind not in ("underlying", "instrument"):
+            raise ValueError(
+                f"invalid scope_kind {scope_kind!r} from repository; "
+                "expected 'underlying' or 'instrument'"
+            )
+        narrowed_scope_kind = cast(Literal["underlying", "instrument"], scope_kind)
+        if self._msg_publisher is None:
+            logger.warning(
+                "admin.scope_handed_over NOT broadcast for grant_public_id={}: "
+                "ScopeGrantService publisher unavailable (multi-instance fanout disabled)",
+                grant_public_id,
+            )
+            return
+        payload = ScopeHandedOverData(
+            public_id=str(uuid7()),
+            timestamp=handover_at,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(topic),
+            grant_public_id=grant_public_id,
+            from_operator_public_id=from_operator_public_id,
+            to_operator_public_id=to_operator_public_id,
+            wallet_public_id=wallet_public_id,
+            scope_kind=narrowed_scope_kind,
+            underlying_public_id=underlying_public_id,
+            instrument_public_id=instrument_public_id,
+            handover_at=handover_at,
+            handover_by_user_public_id=handover_by_user_public_id,
+            reason=reason,
+        )
+        try:
+            await self._msg_publisher.send(topic, payload)
+        except Exception as exc:
+            logger.exception(
+                "Failed to broadcast admin.scope_handed_over for grant_public_id={}: {}",
+                grant_public_id,
+                exc,
+            )
 
     async def _publish_scope_revoked(
         self,

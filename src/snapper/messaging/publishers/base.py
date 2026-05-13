@@ -25,6 +25,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.process_manager.models import RegisterableProcess
+from snapper.application.services.market_persist_policy import MarketDataType as PersistDataType
+from snapper.application.services.market_persist_policy import MarketPersistPolicy
 from snapper.application.services.settings import SettingsService
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
@@ -80,6 +82,16 @@ _TRADE_WRITE_QUEUE_MAX = 5_000
 _TRADE_WRITER_DROP_LOG_INTERVAL_S = 1.0
 _TRADE_WRITER_SHUTDOWN_POLL_S = 0.5
 _trade_writer_drop_counters: dict[str, list[float]] = {}
+
+_PERSIST_SKIPPED_LOG_INTERVAL_S = 60.0
+"""Cadence for the rate-limited ``persist_skipped_total`` log line.
+
+Drops to disk are an expected condition (every wildcard tick that
+isn't covered by a scope grant or explicit allowlist), so we want a
+rough volume estimate in the logs but not one entry per skip."""
+
+_DATA_TYPES_FOR_RAIL: tuple[PersistDataType, ...] = ("ticks", "trades", "candles")
+"""Data types checked by the publisher-start safety rail."""
 
 _WriterQueue = (
     asyncio.Queue[TickUpsertRow] | asyncio.Queue[CandleUpsertRow] | asyncio.Queue[TradeUpsertRow]
@@ -272,6 +284,119 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._trade_consumer_task: asyncio.Task[None] | None = None
         self._trade_writer_task: asyncio.Task[None] | None = None
         self._trade_writer_session: AsyncSession | None = None
+        self._persist_policy: MarketPersistPolicy | None = None
+        self._persist_skipped_counters: dict[tuple[str, PersistDataType], list[float]] = {}
+
+    def set_persist_policy(self, policy: MarketPersistPolicy | None) -> None:
+        """Inject the :class:`MarketPersistPolicy` for selective DB-write gating.
+
+        Called from the process-launcher path once the FastAPI lifespan
+        has built the singleton policy. A ``None`` policy degrades the
+        publisher to "persist everything" (legacy / test-mode behaviour)
+        so tests + standalone subprocess paths that don't carry a
+        policy reference continue to write every row.
+
+        Args:
+            policy: Configured :class:`MarketPersistPolicy` or ``None``
+                to clear / unset.
+        """
+        self._persist_policy = policy
+
+    def _should_persist_row(
+        self,
+        data_type: PersistDataType,
+        exchange: AllExchange,
+        native_symbol: str,
+    ) -> bool:
+        """Return ``True`` when the row should land on the DB writer queue.
+
+        Wraps :meth:`MarketPersistPolicy.should_persist` with a rate-
+        limited drop counter so operators can monitor how many rows
+        the policy filters out per exchange + data type. Missing
+        policy degrades to "allow all" so legacy paths stay green.
+
+        Args:
+            data_type: ``"ticks"``, ``"trades"``, or ``"candles"``.
+            exchange: Source exchange for the row.
+            native_symbol: Native symbol associated with the row.
+
+        Returns:
+            ``True`` when the row should be persisted; ``False`` when
+            the policy filtered it out (DB write is skipped, ZMQ
+            publish already happened upstream).
+        """
+        policy = self._persist_policy
+        if policy is None:
+            return True
+        if policy.should_persist(exchange, data_type, native_symbol):
+            return True
+        self._record_persist_skip(exchange, data_type)
+        return False
+
+    def _verify_persist_policy_safety_rail(self, process_name: str) -> None:
+        """Refuse to start if wildcard + auto + empty scope + empty extra.
+
+        Hard-fails publisher startup when every condition holds at
+        once for any data type the publisher emits — a misconfig that
+        would silently drop every market-data write while pretending to
+        be operating normally:
+
+        1. ``parameters.symbols`` is the literal wildcard ``["*"]``.
+        2. The policy mode for ``(exchange, data_type)`` is ``"auto"``.
+        3. The wallet-scope-derived set for the exchange is empty.
+        4. The ``market_persist_extra`` overlay for ``(exchange, data_type)``
+           is also empty.
+
+        Each data type is checked independently; the first failure
+        raises ``RuntimeError`` so the operator sees the exact
+        ``(exchange, data_type)`` that needs configuration. The check
+        is skipped when a policy has not been injected (legacy / test
+        / standalone subprocess paths).
+
+        Args:
+            process_name: Process name for the error message.
+
+        Raises:
+            RuntimeError: When the four conditions all hold.
+        """
+        policy = self._persist_policy
+        if policy is None:
+            return
+        if self._input_symbols != ["*"]:
+            return
+        exchange = self._get_exchange_name()
+        scope_set = policy.wallet_scope_pairs_for(exchange)
+        for data_type in _DATA_TYPES_FOR_RAIL:
+            mode = policy.mode_for(exchange, data_type)
+            if mode != "auto":
+                continue
+            extra_set = policy.extra_for(exchange, data_type)
+            if scope_set or extra_set:
+                continue
+            raise RuntimeError(
+                f"Publisher {process_name} configured with wildcard symbols but "
+                f"persist policy resolves to zero instruments for {exchange}/{data_type}. "
+                f"Either narrow parameters.symbols, add a scope grant, set "
+                f"mode=explicit with an exchanges allowlist, or populate "
+                f"market_persist_extra[{data_type}][{exchange}]."
+            )
+
+    def _record_persist_skip(self, exchange: AllExchange, data_type: PersistDataType) -> None:
+        """Increment + rate-limit log the ``persist_skipped_total`` counter."""
+        key = (str(exchange), data_type)
+        counters = self._persist_skipped_counters.setdefault(key, [0.0, 0.0])
+        counters[0] += 1
+        now = monotonic()
+        if now - counters[1] >= _PERSIST_SKIPPED_LOG_INTERVAL_S:
+            logger.info(
+                "persist_skipped_total exchange={} data_type={} count={} window_s={:.1f}",
+                exchange,
+                data_type,
+                int(counters[0]),
+                now - counters[1],
+            )
+            counters[0] = 0.0
+            counters[1] = now
 
     @abstractmethod
     def _create_exchange_client(self) -> T:
@@ -348,6 +473,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 f"{exchange_name} WebSocket limit is {max_symbols} symbols per connection. "
                 f"Consider running multiple instances (first {max_symbols} symbols will be used)."
             )
+        self._verify_persist_policy_safety_rail(process_name)
         self.context = zmq.asyncio.Context()
         raw_pub_socket = self.context.socket(zmq.PUB)
         apply_hwm(raw_pub_socket, sndhwm=HWM_MARKET_DATA)
@@ -677,7 +803,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 if candle is _STREAM_END:
                     break
                 row = await self._process_candle(cast(CandleUpdate, candle), exchange, timeframe)
-                if row is not None:
+                if row is not None and self._should_persist_row(
+                    "candles", exchange, cast(CandleUpdate, candle).symbol
+                ):
                     _enqueue_or_drop_oldest_candle_write(
                         self._candle_write_queue, row, exchange_label
                     )
@@ -863,7 +991,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 if message is _STREAM_END:
                     break
                 row = await self._process_tick(cast(TickerUpdate, message), exchange)
-                if row is not None:
+                if row is not None and self._should_persist_row(
+                    "ticks", exchange, cast(TickerUpdate, message).symbol
+                ):
                     _enqueue_or_drop_oldest_tick_write(self._tick_write_queue, row, exchange_label)
         except asyncio.CancelledError:
             raise
@@ -1052,7 +1182,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 if trade is _STREAM_END:
                     break
                 row = await self._process_trade(cast(TradeUpdate, trade), exchange)
-                if row is not None:
+                if row is not None and self._should_persist_row(
+                    "trades", exchange, cast(TradeUpdate, trade).symbol
+                ):
                     _enqueue_or_drop_oldest_trade_write(
                         self._trade_write_queue, row, exchange_label
                     )

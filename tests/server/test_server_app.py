@@ -313,6 +313,15 @@ class TestLifespan:
             ) as mock_build,
             patch("snapper.server.app._shutdown_user_service_publisher"),
             patch(
+                "snapper.server.app.MarketPersistPolicy",
+                return_value=MagicMock(
+                    initial_rebuild=AsyncMock(),
+                    start_admin_listener=AsyncMock(),
+                    stop=AsyncMock(),
+                ),
+            ),
+            patch("snapper.server.app.get_repository"),
+            patch(
                 "snapper.server.app.get_ws_auth_manager",
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
@@ -780,8 +789,8 @@ class TestLifespan:
         user_publisher = MagicMock()
         mock_caps_enforcer = MagicMock()
         recorded_publisher_calls: list[object] = []
-        mock_caps_enforcer.set_msg_publisher.side_effect = (
-            lambda value: recorded_publisher_calls.append(value)
+        mock_caps_enforcer.set_msg_publisher.side_effect = lambda value: (
+            recorded_publisher_calls.append(value)
         )
 
         def _shutdown_user_pub_passthrough(_app: FastAPI) -> None:
@@ -1284,6 +1293,15 @@ class TestLifespan:
                 return_value=(MagicMock(), MagicMock()),
             ),
             patch("snapper.server.app._shutdown_user_service_publisher"),
+            patch(
+                "snapper.server.app.MarketPersistPolicy",
+                return_value=MagicMock(
+                    initial_rebuild=AsyncMock(),
+                    start_admin_listener=AsyncMock(),
+                    stop=AsyncMock(),
+                ),
+            ),
+            patch("snapper.server.app.get_repository"),
             patch(
                 "snapper.server.app.get_ws_auth_manager",
                 return_value=MagicMock(

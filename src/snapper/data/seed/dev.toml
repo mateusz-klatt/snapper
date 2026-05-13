@@ -22,6 +22,42 @@ value = "http://localhost:3000,http://localhost:8000"
 category = "server"
 description = "Allowed UI origins for WebSocket CORS (comma-separated)"
 
+[[settings]]
+key = "market_persist_ticks"
+value = '{"mode": "auto"}'
+category = "market_persist"
+description = "Tick persistence mode (auto = wallet-scope-derived, explicit = configured allowlist). MarketPersistPolicy"
+
+[[settings]]
+key = "market_persist_trades"
+value = '{"mode": "auto"}'
+category = "market_persist"
+description = "Trade persistence mode (auto = wallet-scope-derived, explicit = configured allowlist). MarketPersistPolicy"
+
+[[settings]]
+key = "market_persist_candles"
+value = '{"mode": "auto"}'
+category = "market_persist"
+description = "Candle persistence mode (auto = wallet-scope-derived, explicit = configured allowlist). MarketPersistPolicy"
+
+[[settings]]
+key = "market_persist_extra"
+value = '{"ticks": {}, "trades": {}, "candles": {}}'
+category = "market_persist"
+description = "Per-data-type per-exchange overlay-INCLUDE allowlist applied on top of mode. MarketPersistPolicy"
+
+[[settings]]
+key = "market_persist_exclude"
+value = '{"ticks": {}, "trades": {}, "candles": {}}'
+category = "market_persist"
+description = "Per-data-type per-exchange overlay-EXCLUDE blocklist subtracted from the resolved set. MarketPersistPolicy"
+
+[[settings]]
+key = "market_stats_pairs"
+value = "[]"
+category = "market_stats"
+description = "Cross-exchange pairs for Pearson + cointegration computation (cap 50, configured at implementation time)"
+
 [[wallets]]
 label = "paper"
 is_paper = true

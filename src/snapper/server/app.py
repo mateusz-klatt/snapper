@@ -118,6 +118,7 @@ from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.retention.scheduler import RetentionScheduler
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
+from snapper.application.services.market_persist_policy import MarketPersistPolicy
 from snapper.application.services.settings import SettingsService
 from snapper.application.services.settings import get_settings_service
 from snapper.application.system_metrics.snapshotter import SystemMetricsSnapshotter
@@ -629,6 +630,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.system_metrics_snapshotter = None
     app.state.retention_scheduler = None
     app.state.db_stats_snapshotter = None
+    app.state.market_persist_policy = None
     try:
         settings_service = await _initialize_settings_service(settings)
         settings = get_settings_with_service(settings_service)
@@ -678,8 +680,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             settings.coordinator_instance_id,
             settings.coordinator_instance_count,
         )
+        market_persist_policy = MarketPersistPolicy(
+            repository=get_repository(settings.db_url),
+            settings_service=settings_service,
+        )
+        await market_persist_policy.initial_rebuild()
+        await market_persist_policy.start_admin_listener(settings.zmq_broker_xpub)
+        app.state.market_persist_policy = market_persist_policy
+        logger.info(
+            "MarketPersistPolicy initialized and listening on admin.scope_* + system.settings"
+        )
         discover_processes()
         process_factory = ProcessLauncherService(settings)
+        process_factory.set_market_persist_policy(market_persist_policy)
         app.state.process_factory = process_factory
         logger.info("Starting application lifespan - checking autostart settings")
         await process_factory.sync_registry_to_database()
@@ -721,6 +734,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _shutdown_zmq_bridge(app)
         if process_factory is not None:
             await process_factory.stop_all_processes()
+        market_persist_policy_for_shutdown = getattr(app.state, "market_persist_policy", None)
+        if market_persist_policy_for_shutdown is not None:
+            await market_persist_policy_for_shutdown.stop()
         manager = getattr(app.state, "manager", None)
         if manager is not None:
             await manager.cleanup()
