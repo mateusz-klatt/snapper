@@ -257,12 +257,28 @@ class TestIntrospection:
         assert policy.extra_for(ExchangeEnum.KRAKEN, "trades") == frozenset()
 
 
-class TestMalformedSettingsFallback:
-    """Malformed settings degrade to defaults with a warning, never crash."""
+class TestMalformedSettingsPreservation:
+    """Strict shape validation: top-level malformed settings preserve prior state.
+
+    Per plan v6 Branch B contract: a top-level shape mismatch on any of
+    the five ``market_persist_*`` settings aborts the refresh and leaves
+    the previously-applied policy state intact. Per-element drops
+    (non-string symbols, unknown exchanges within an otherwise-valid
+    list) stay as best-effort warnings.
+    """
 
     @pytest.mark.asyncio
-    async def test_non_dict_persist_setting_falls_back_to_auto(self) -> None:
-        """``market_persist_ticks`` set to a string falls back to auto mode."""
+    async def test_non_dict_persist_setting_aborts_branch_b_in_initial_rebuild(
+        self,
+    ) -> None:
+        """A malformed persist setting aborts Branch B; Branch A still runs.
+
+        Constructor defaults (mode=auto for every type, empty overlays)
+        remain in place after the aborted Branch B. Branch A then
+        populates the scope-pair set, so the policy still serves a
+        defensible default verdict instead of returning a stale or
+        partially-applied state.
+        """
         settings = {"market_persist_ticks": "not-a-dict"}
         policy, _, _ = _build_policy(
             settings=settings,
@@ -270,15 +286,42 @@ class TestMalformedSettingsFallback:
             pairs={("kraken", "BTC-USD")},
         )
         await policy.initial_rebuild()
-        assert policy.mode_for(ExchangeEnum.KRAKEN, "ticks") == "auto"
         assert policy.should_persist(ExchangeEnum.KRAKEN, "ticks", "BTC-USD") is True
+        assert policy.wallet_scope_pairs_for(ExchangeEnum.KRAKEN) == frozenset({"BTC-USD"})
 
     @pytest.mark.asyncio
-    async def test_invalid_mode_string_falls_back_to_auto(self) -> None:
-        """``{"mode": "ignored"}`` is treated as auto."""
+    async def test_invalid_mode_string_preserves_prior_state(self) -> None:
+        """``{"mode": "ignored"}`` aborts the refresh; prior state preserved."""
         settings = {"market_persist_ticks": {"mode": "ignored"}}
         policy, _, _ = _build_policy(settings=settings)
         await policy.initial_rebuild()
+        assert policy.should_persist(ExchangeEnum.KRAKEN, "ticks", "BTC-USD") is False
+
+    @pytest.mark.asyncio
+    async def test_runtime_settings_event_preserves_state_on_malformed(self) -> None:
+        """Runtime ``system.settings`` with malformed payload leaves policy intact.
+
+        Seeds the policy with valid settings + scope pair, dispatches a
+        settings event after flipping ``market_persist_ticks`` to
+        malformed, and verifies the original persist verdict still holds.
+        """
+        good_settings: dict[str, Any] = {
+            "market_persist_ticks": {"mode": "auto"},
+            "market_persist_trades": {"mode": "auto"},
+            "market_persist_candles": {"mode": "auto"},
+        }
+        policy, _, stub_settings = _build_policy(
+            settings=good_settings,
+            operators=[_operator_row("op-1")],
+            pairs={("kraken", "BTC-USD")},
+        )
+        await policy.initial_rebuild()
+        assert policy.should_persist(ExchangeEnum.KRAKEN, "ticks", "BTC-USD") is True
+
+        stub_settings._values["market_persist_ticks"] = "not-a-dict"
+        await policy._dispatch_topic("system.settings")
+
+        assert policy.should_persist(ExchangeEnum.KRAKEN, "ticks", "BTC-USD") is True
         assert policy.mode_for(ExchangeEnum.KRAKEN, "ticks") == "auto"
 
     @pytest.mark.asyncio
@@ -293,9 +336,23 @@ class TestMalformedSettingsFallback:
         assert policy.wallet_scope_pairs_for(ExchangeEnum.KRAKEN) == frozenset({"BTC-USD"})
 
     @pytest.mark.asyncio
-    async def test_non_dict_overlay_setting_falls_back(self) -> None:
-        """Non-dict overlay turns into an empty per-type map."""
+    async def test_non_dict_overlay_setting_preserves_state(self) -> None:
+        """Non-dict ``market_persist_extra`` aborts the refresh; state preserved."""
         settings = {"market_persist_extra": "not-a-dict"}
+        policy, _, _ = _build_policy(settings=settings)
+        await policy.initial_rebuild()
+        assert policy.extra_for(ExchangeEnum.KRAKEN, "ticks") == frozenset()
+
+    @pytest.mark.asyncio
+    async def test_non_dict_overlay_inner_preserves_state(self) -> None:
+        """Non-dict per-data-type overlay entry aborts the refresh."""
+        settings = {
+            "market_persist_extra": {
+                "ticks": "should-be-dict",
+                "trades": {},
+                "candles": {},
+            },
+        }
         policy, _, _ = _build_policy(settings=settings)
         await policy.initial_rebuild()
         assert policy.extra_for(ExchangeEnum.KRAKEN, "ticks") == frozenset()
@@ -343,22 +400,8 @@ class TestMalformedSettingsFallback:
         assert policy.extra_for(ExchangeEnum.KRAKEN, "ticks") == frozenset()
 
     @pytest.mark.asyncio
-    async def test_overlay_non_dict_inner_falls_back(self) -> None:
-        """``market_persist_extra[data_type]`` not a dict logs + ignores per-type."""
-        settings = {
-            "market_persist_extra": {
-                "ticks": "should-be-dict",
-                "trades": {},
-                "candles": {},
-            },
-        }
-        policy, _, _ = _build_policy(settings=settings)
-        await policy.initial_rebuild()
-        assert policy.extra_for(ExchangeEnum.KRAKEN, "ticks") == frozenset()
-
-    @pytest.mark.asyncio
-    async def test_explicit_mode_non_dict_exchanges_falls_back_to_empty(self) -> None:
-        """Explicit mode with non-dict exchanges silently degrades to empty."""
+    async def test_explicit_mode_non_dict_exchanges_preserves_state(self) -> None:
+        """Explicit mode with non-dict exchanges aborts the refresh."""
         settings = {
             "market_persist_ticks": {"mode": "explicit", "exchanges": "not-a-dict"},
         }

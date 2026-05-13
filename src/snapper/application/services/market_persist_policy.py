@@ -101,7 +101,17 @@ _ADMIN_SCOPE_TOPICS: frozenset[str] = frozenset(
 )
 
 _DEFAULT_MODE: Literal["auto"] = "auto"
-"""Fallback mode when a ``market_persist_*`` setting is missing or malformed."""
+"""Fallback mode when a ``market_persist_*`` setting is missing."""
+
+
+class _MalformedSettingError(ValueError):
+    """Raised by the strict settings parsers on a top-level shape mismatch.
+
+    Caught by :meth:`MarketPersistPolicy._refresh_from_settings` to abort
+    the refresh cycle and preserve the previously-applied policy state
+    so a single bad admin edit cannot wipe an in-flight policy.
+    """
+
 
 _LISTEN_RECV_BACKOFF_S = 0.1
 """Backoff after a transient ``recv_multipart`` failure (matches WS auth pattern)."""
@@ -425,15 +435,16 @@ class MarketPersistPolicy:
         and swallowed so one bad frame cannot stop the listener.
         Payloads are intentionally ignored — these are wake-up signals
         only, mirroring the
-        :class:`ScopeRevokedData` documented contract.
+        :class:`ScopeRevokedData` documented contract. The conditional
+        Branch A run on a settings event is handled INSIDE
+        :meth:`_refresh_from_settings` under the policy lock so the
+        decision cannot race a concurrent settings refresh.
         """
         try:
             if topic in _ADMIN_SCOPE_TOPICS:
                 await self._refresh_from_scope_grants()
             elif topic == _SYSTEM_SETTINGS_TOPIC:
                 await self._refresh_from_settings()
-                if any(self._modes[t] == "auto" for t in _DATA_TYPES):
-                    await self._refresh_from_scope_grants()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -444,48 +455,96 @@ class MarketPersistPolicy:
             )
 
     async def _refresh_from_settings(self) -> None:
-        """Branch B: re-read the five ``market_persist_*`` settings.
+        """Branch B: re-read settings, optionally chain Branch A under one lock.
 
-        Validates shapes; malformed payloads are logged and the
-        previous state is preserved (best-effort, no crash). After the
-        re-read the persist frozensets are rebuilt under the lock so
-        the swap is atomic against concurrent Branch A runs.
+        Strict shape validation: a top-level malformed setting raises
+        :class:`_MalformedSettingError` from the parsers and aborts the
+        whole refresh — previous policy state is left intact so a single
+        bad admin edit cannot wipe an in-flight policy. Per-element
+        drops (non-string symbols, unknown exchanges) stay as warnings.
+
+        When the new mode state contains any ``"auto"`` per-type entry,
+        the conditional Branch A scope-pair refresh runs under the same
+        :attr:`_lock` so dispatch cannot race a concurrent settings
+        change.
         """
+        try:
+            parsed_modes, parsed_explicit, parsed_extra, parsed_exclude = (
+                self._parse_all_settings_strict()
+            )
+        except _MalformedSettingError as exc:
+            logger.warning(
+                "MarketPersistPolicy: settings refresh aborted ({}); "
+                "previous policy state preserved",
+                exc,
+            )
+            return
         async with self._lock:
-            new_modes: dict[MarketDataType, Literal["auto", "explicit"]] = {}
-            new_explicit: dict[MarketDataType, dict[AllExchange, frozenset[str]]] = {}
-            for data_type in _DATA_TYPES:
-                key = _PERSIST_MODE_KEYS[data_type]
-                cfg = self.settings_service.get_setting(key, default={"mode": _DEFAULT_MODE})
-                mode, explicit = self._parse_mode_setting(key, cfg)
-                new_modes[data_type] = mode
-                new_explicit[data_type] = explicit
-            new_extra = self._parse_overlay_setting(
-                _PERSIST_EXTRA_KEY,
-                self.settings_service.get_setting(_PERSIST_EXTRA_KEY, default={}),
-            )
-            new_exclude = self._parse_overlay_setting(
-                _PERSIST_EXCLUDE_KEY,
-                self.settings_service.get_setting(_PERSIST_EXCLUDE_KEY, default={}),
-            )
-            self._modes = new_modes
-            self._explicit_by_type = new_explicit
-            self._extra_by_type = new_extra
-            self._exclude_by_type = new_exclude
+            self._modes = parsed_modes
+            self._explicit_by_type = parsed_explicit
+            self._extra_by_type = parsed_extra
+            self._exclude_by_type = parsed_exclude
+            if any(parsed_modes[t] == "auto" for t in _DATA_TYPES):
+                self._scope_pairs_by_exchange = self._index_pairs_by_exchange(
+                    await self._query_active_scope_pairs()
+                )
             self._rebuild_persist_maps_unlocked()
 
     async def _refresh_from_scope_grants(self) -> None:
-        """Branch A: re-query active operators + scope-grant instrument pairs."""
+        """Branch A: re-query active operators + scope-grant instrument pairs.
+
+        Holds :attr:`_lock` across the DB query so concurrent admin
+        events cannot complete out of order and leave a stale snapshot
+        as the last-write-wins value. The lock is async-aware: other
+        coroutines yield while we await the repository.
+        """
+        async with self._lock:
+            pairs = await self._query_active_scope_pairs()
+            self._scope_pairs_by_exchange = self._index_pairs_by_exchange(pairs)
+            self._rebuild_persist_maps_unlocked()
+
+    async def _query_active_scope_pairs(self) -> set[tuple[str, str]]:
+        """Query active operators + project to scope-grant ``(exchange, symbol)`` pairs."""
         as_of = datetime.now(UTC)
         operators = await self.repository.list_active_operators(as_of=as_of)
         operator_ids = [op["public_id"] for op in operators]
-        if operator_ids:
-            pairs = await self.repository.list_scope_grant_instrument_pairs(operator_ids, as_of)
-        else:
-            pairs = set()
-        async with self._lock:
-            self._scope_pairs_by_exchange = self._index_pairs_by_exchange(pairs)
-            self._rebuild_persist_maps_unlocked()
+        if not operator_ids:
+            return set()
+        return await self.repository.list_scope_grant_instrument_pairs(operator_ids, as_of)
+
+    def _parse_all_settings_strict(
+        self,
+    ) -> tuple[
+        dict[MarketDataType, Literal["auto", "explicit"]],
+        dict[MarketDataType, dict[AllExchange, frozenset[str]]],
+        dict[MarketDataType, dict[AllExchange, frozenset[str]]],
+        dict[MarketDataType, dict[AllExchange, frozenset[str]]],
+    ]:
+        """Parse all five ``market_persist_*`` settings or raise on shape mismatch.
+
+        Raises:
+            _MalformedSettingError: Top-level shape failure on any of
+                the five settings (e.g. non-dict, invalid mode value,
+                non-dict overlay payload). Caller catches at refresh
+                level and preserves previous state.
+        """
+        new_modes: dict[MarketDataType, Literal["auto", "explicit"]] = {}
+        new_explicit: dict[MarketDataType, dict[AllExchange, frozenset[str]]] = {}
+        for data_type in _DATA_TYPES:
+            key = _PERSIST_MODE_KEYS[data_type]
+            cfg = self.settings_service.get_setting(key, default={"mode": _DEFAULT_MODE})
+            mode, explicit = self._parse_mode_setting(key, cfg)
+            new_modes[data_type] = mode
+            new_explicit[data_type] = explicit
+        new_extra = self._parse_overlay_setting(
+            _PERSIST_EXTRA_KEY,
+            self.settings_service.get_setting(_PERSIST_EXTRA_KEY, default={}),
+        )
+        new_exclude = self._parse_overlay_setting(
+            _PERSIST_EXCLUDE_KEY,
+            self.settings_service.get_setting(_PERSIST_EXCLUDE_KEY, default={}),
+        )
+        return new_modes, new_explicit, new_extra, new_exclude
 
     def _rebuild_persist_maps_unlocked(self) -> None:
         """Recompute the three per-type frozenset maps. Caller holds ``_lock``."""
@@ -560,69 +619,60 @@ class MarketPersistPolicy:
     def _parse_mode_setting(
         key: str, cfg: Any
     ) -> tuple[Literal["auto", "explicit"], dict[AllExchange, frozenset[str]]]:
-        """Validate one ``market_persist_{type}`` setting; fall back on malformed shape."""
+        """Validate one ``market_persist_{type}`` setting (strict).
+
+        Raises:
+            _MalformedSettingError: ``cfg`` is not a dict, the ``mode``
+                value is not one of ``"auto"`` / ``"explicit"``, or
+                ``mode="explicit"`` carries a non-dict ``exchanges``
+                payload. Per-element drops (non-string symbols, unknown
+                exchanges) stay as warnings inside
+                :meth:`_parse_exchange_symbol_map`.
+        """
         if not isinstance(cfg, dict):
-            logger.warning(
-                "MarketPersistPolicy: {} is not a dict ({!r}); using default mode={}",
-                key,
-                type(cfg).__name__,
-                _DEFAULT_MODE,
-            )
-            return _DEFAULT_MODE, {}
+            raise _MalformedSettingError(f"{key} is not a dict ({type(cfg).__name__})")
         raw_mode = cfg.get("mode", _DEFAULT_MODE)
         if raw_mode not in ("auto", "explicit"):
-            logger.warning(
-                "MarketPersistPolicy: {} has invalid mode {!r}; using default {}",
-                key,
-                raw_mode,
-                _DEFAULT_MODE,
-            )
-            mode: Literal["auto", "explicit"] = _DEFAULT_MODE
-        else:
-            mode = cast(Literal["auto", "explicit"], raw_mode)
+            raise _MalformedSettingError(f"{key} has invalid mode {raw_mode!r}")
+        mode = cast(Literal["auto", "explicit"], raw_mode)
         explicit: dict[AllExchange, frozenset[str]] = {}
         if mode == "explicit":
             exchanges = cfg.get("exchanges", {})
-            if isinstance(exchanges, dict):
-                explicit = MarketPersistPolicy._parse_exchange_symbol_map(key, exchanges)
-            else:
-                logger.warning(
-                    "MarketPersistPolicy: {}.exchanges is not a dict ({!r}); ignoring",
-                    key,
-                    type(exchanges).__name__,
+            if not isinstance(exchanges, dict):
+                raise _MalformedSettingError(
+                    f"{key}.exchanges is not a dict ({type(exchanges).__name__})"
                 )
+            explicit = MarketPersistPolicy._parse_exchange_symbol_map(key, exchanges)
         return mode, explicit
 
     @staticmethod
     def _parse_overlay_setting(
         key: str, cfg: Any
     ) -> dict[MarketDataType, dict[AllExchange, frozenset[str]]]:
-        """Validate ``market_persist_extra`` / ``market_persist_exclude`` shape."""
+        """Validate ``market_persist_extra`` / ``market_persist_exclude`` shape (strict).
+
+        Raises:
+            _MalformedSettingError: ``cfg`` is not a dict, or any of the
+                three per-data-type entries is not a dict. Per-element
+                drops stay as warnings inside
+                :meth:`_parse_exchange_symbol_map`.
+        """
         result: dict[MarketDataType, dict[AllExchange, frozenset[str]]] = {
             "ticks": {},
             "trades": {},
             "candles": {},
         }
         if not isinstance(cfg, dict):
-            logger.warning(
-                "MarketPersistPolicy: {} is not a dict ({!r}); using empty overlay",
-                key,
-                type(cfg).__name__,
-            )
-            return result
+            raise _MalformedSettingError(f"{key} is not a dict ({type(cfg).__name__})")
         for data_type in _DATA_TYPES:
             per_type = cfg.get(data_type, {})
-            if isinstance(per_type, dict):
-                result[data_type] = MarketPersistPolicy._parse_exchange_symbol_map(
-                    f"{key}.{data_type}", per_type
+            if not isinstance(per_type, dict):
+                raise _MalformedSettingError(
+                    f"{key}.{data_type} is not a dict ({type(per_type).__name__})"
                 )
-            else:
-                logger.warning(
-                    "MarketPersistPolicy: {}.{} is not a dict ({!r}); ignoring",
-                    key,
-                    data_type,
-                    type(per_type).__name__,
-                )
+            result[data_type] = MarketPersistPolicy._parse_exchange_symbol_map(
+                f"{key}.{data_type}", per_type
+            )
         return result
 
     @staticmethod
