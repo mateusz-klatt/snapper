@@ -2019,8 +2019,6 @@ def test_set_market_persist_policy_round_trip(launcher: ProcessLauncherService) 
     When: ``set_market_persist_policy(policy)`` then ``set_market_persist_policy(None)``,
     Then: ``self._market_persist_policy`` mirrors each assignment.
     """
-    from unittest.mock import MagicMock
-
     policy = MagicMock()
     launcher.set_market_persist_policy(policy)
     assert launcher._market_persist_policy is policy
@@ -2037,8 +2035,6 @@ def test_inject_market_persist_policy_calls_setter(launcher: ProcessLauncherServ
     Then: ``process.set_persist_policy`` is called once with the
         configured policy.
     """
-    from unittest.mock import MagicMock
-
     policy = MagicMock()
     launcher.set_market_persist_policy(policy)
     process = MagicMock()
@@ -2055,8 +2051,6 @@ def test_inject_market_persist_policy_skips_without_policy(
     When: ``_inject_market_persist_policy`` runs against a publisher mock,
     Then: ``process.set_persist_policy`` is never called.
     """
-    from unittest.mock import MagicMock
-
     launcher.set_market_persist_policy(None)
     process = MagicMock()
     launcher._inject_market_persist_policy(process, "pub:test")
@@ -2073,8 +2067,6 @@ def test_inject_market_persist_policy_skips_non_publisher(
     When: ``_inject_market_persist_policy`` runs,
     Then: No exception is raised (duck-type guard via getattr).
     """
-    from unittest.mock import MagicMock
-
     launcher.set_market_persist_policy(MagicMock())
     process = MagicMock(spec=[])
     launcher._inject_market_persist_policy(process, "pub:test")

@@ -19,6 +19,7 @@ import pytest
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
+from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.data.repository import ScopeGrantNotFoundError
 from snapper.data.repository_types import CreateScopeGrantRequest
 from snapper.data.repository_types import ScopeGrantRow
@@ -477,8 +478,6 @@ class TestSingleton:
 
     def test_get_scope_grant_service_factory_returns_singleton(self) -> None:
         """The module-level factory delegates to ``ScopeGrantService.get_instance``."""
-        from snapper.auth.scope_grant_service import get_scope_grant_service
-
         first = get_scope_grant_service()
         second = get_scope_grant_service()
         assert first is second
