@@ -23,6 +23,8 @@ import pytest
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.websocket_auth import WebSocketAuthManager
+from snapper.messaging.schemas.data import ScopeGrantedData
+from snapper.messaging.schemas.data import ScopeHandedOverData
 from snapper.messaging.schemas.data import ScopeRevokedData
 
 
@@ -328,3 +330,196 @@ class TestHandleScopeRevoked:
         event = _make_event()
         await manager._admin_dispatch_frame("admin.scope_revoked", event.model_dump_json())
         manager._handle_scope_revoked.assert_awaited_once()
+
+
+def _make_granted_event(
+    *,
+    operator_public_id: str = "op-1",
+) -> ScopeGrantedData:
+    """Build a canonical ``admin.scope_granted`` event payload."""
+    now = datetime.now(UTC)
+    return ScopeGrantedData(
+        public_id="evt-sg-1",
+        timestamp=now,
+        session_id="test-sid",
+        sequence_id=1,
+        grant_public_id="grant-new",
+        operator_public_id=operator_public_id,
+        wallet_public_id="wal-1",
+        scope_kind="instrument",
+        instrument_public_id="inst-BTC-USD",
+        granted_at=now,
+        granted_by_user_public_id="user-admin",
+        reason="onboarding",
+    )
+
+
+def _make_handed_over_event(
+    *,
+    from_operator: str = "op-from",
+    to_operator: str = "op-to",
+) -> ScopeHandedOverData:
+    """Build a canonical ``admin.scope_handed_over`` event payload."""
+    now = datetime.now(UTC)
+    return ScopeHandedOverData(
+        public_id="evt-sh-1",
+        timestamp=now,
+        session_id="test-sid",
+        sequence_id=1,
+        grant_public_id="grant-new",
+        from_operator_public_id=from_operator,
+        to_operator_public_id=to_operator,
+        wallet_public_id="wal-1",
+        scope_kind="instrument",
+        instrument_public_id="inst-BTC-USD",
+        handover_at=now,
+        handover_by_user_public_id="user-admin",
+        reason="rebalance",
+    )
+
+
+class TestHandleScopeGranted:
+    """Tests for ``WebSocketAuthManager._handle_scope_granted``."""
+
+    @pytest.mark.asyncio
+    async def test_missing_wiring_logs_warning_and_noops(self) -> None:
+        """Without ``set_wiring``, the granted handler logs + returns without raising."""
+        manager = _make_manager()
+        await manager._handle_scope_granted(_make_granted_event())
+
+    @pytest.mark.asyncio
+    async def test_revalidates_delegate_subscriptions_for_affected_operator(self) -> None:
+        """A grant event walks the delegate's subscriptions defensively.
+
+        A new grant cannot revoke anything, but the revalidation runs
+        anyway as a safety-net: if a prior event was lost, the WS state
+        reconciles against the post-insert DB snapshot. With allowed_pairs
+        covering BTC-USD, no subscriptions are dropped.
+        """
+        ws = MagicMock()
+        ws.send_text = AsyncMock()
+        principal = _delegate_principal()
+        cm = _mock_connection_manager({ws: {"signals.kraken.BTC-USD.live"}})
+        bridge = _mock_bridge()
+        repo = _repo_with_pairs({("kraken", "BTC-USD")})
+        manager = _make_manager(
+            connection_manager=cm,
+            zmq_bridge=bridge,
+            repository_factory=lambda: repo,
+        )
+        manager.authenticated_connections[ws] = principal
+
+        await manager._handle_scope_granted(_make_granted_event())
+
+        cm.unsubscribe_client.assert_not_called()
+        bridge.remove_subscription.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_admin_dispatch_routes_scope_granted_topic(self) -> None:
+        """The listener's dispatch branch routes ``admin.scope_granted`` cleanly."""
+        manager = _make_manager()
+        manager._handle_scope_granted = AsyncMock()
+        event = _make_granted_event()
+        await manager._admin_dispatch_frame("admin.scope_granted", event.model_dump_json())
+        manager._handle_scope_granted.assert_awaited_once()
+
+
+class TestHandleScopeHandedOver:
+    """Tests for ``WebSocketAuthManager._handle_scope_handed_over``."""
+
+    @pytest.mark.asyncio
+    async def test_missing_wiring_logs_warning_and_noops(self) -> None:
+        """Without ``set_wiring``, the handover handler logs + returns without raising."""
+        manager = _make_manager()
+        await manager._handle_scope_handed_over(_make_handed_over_event())
+
+    @pytest.mark.asyncio
+    async def test_walks_delegates_of_both_operators(self) -> None:
+        """A handover narrows the from-operator delegate's subscriptions.
+
+        Given: from-side delegate subscribed to BTC-USD, dest-side
+            delegate subscribed to ETH-USD, post-handover pair set
+            covers only ETH-USD,
+        When: handler fires,
+        Then: from-side BTC-USD subscription is dropped; to-side ETH-USD
+            stays (pair still covers it).
+        """
+        ws_from = MagicMock()
+        ws_from.send_text = AsyncMock()
+        ws_to = MagicMock()
+        ws_to.send_text = AsyncMock()
+        from_principal = _delegate_principal(user_public_id="user-from", operators=("op-from",))
+        to_principal = _delegate_principal(user_public_id="user-to", operators=("op-to",))
+        cm = _mock_connection_manager(
+            {
+                ws_from: {"signals.kraken.BTC-USD.live"},
+                ws_to: {"signals.kraken.ETH-USD.live"},
+            }
+        )
+        bridge = _mock_bridge()
+        repo = _repo_with_pairs({("kraken", "ETH-USD")})
+        manager = _make_manager(
+            connection_manager=cm,
+            zmq_bridge=bridge,
+            repository_factory=lambda: repo,
+        )
+        manager.authenticated_connections[ws_from] = from_principal
+        manager.authenticated_connections[ws_to] = to_principal
+
+        await manager._handle_scope_handed_over(_make_handed_over_event())
+
+        cm.unsubscribe_client.assert_called_once_with(ws_from, "signals.kraken.BTC-USD.live")
+
+    @pytest.mark.asyncio
+    async def test_admin_dispatch_routes_scope_handed_over_topic(self) -> None:
+        """The listener's dispatch branch routes ``admin.scope_handed_over`` cleanly."""
+        manager = _make_manager()
+        manager._handle_scope_handed_over = AsyncMock()
+        event = _make_handed_over_event()
+        await manager._admin_dispatch_frame("admin.scope_handed_over", event.model_dump_json())
+        manager._handle_scope_handed_over.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_revalidate_helper_skips_unrelated_delegate_operators(self) -> None:
+        """``_revalidate_delegates_for_operators`` skips delegates not overlapping affected ops."""
+        ws = MagicMock()
+        ws.send_text = AsyncMock()
+        principal = _delegate_principal(operators=("op-other",))
+        cm = _mock_connection_manager({ws: {"signals.kraken.BTC-USD.live"}})
+        bridge = _mock_bridge()
+        repo = _repo_with_pairs(set())
+        manager = _make_manager(
+            connection_manager=cm,
+            zmq_bridge=bridge,
+            repository_factory=lambda: repo,
+        )
+        manager.authenticated_connections[ws] = principal
+
+        await manager._handle_scope_handed_over(_make_handed_over_event())
+
+        cm.unsubscribe_client.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_revalidate_helper_skips_non_delegate_connections(self) -> None:
+        """``_revalidate_delegates_for_operators`` walks only AI_DELEGATE roles."""
+        ws_viewer = MagicMock()
+        ws_viewer.send_text = AsyncMock()
+        viewer = AuthPrincipal(
+            username="viewer",
+            role=UserRole.VIEWER,
+            user_public_id="user-viewer",
+            operator_public_ids=["op-from"],
+        )
+        cm = _mock_connection_manager({ws_viewer: {"signals.kraken.BTC-USD.live"}})
+        bridge = _mock_bridge()
+        repo = _repo_with_pairs(set())
+        manager = _make_manager(
+            connection_manager=cm,
+            zmq_bridge=bridge,
+            repository_factory=lambda: repo,
+        )
+        manager.authenticated_connections[ws_viewer] = viewer
+
+        await manager._handle_scope_handed_over(_make_handed_over_event())
+
+        cm.unsubscribe_client.assert_not_called()

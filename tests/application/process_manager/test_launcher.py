@@ -2010,3 +2010,48 @@ def test_resolve_mode_accepts_valid_modes() -> None:
     """
     assert resolve_mode("thread", "test_process") == "thread"
     assert resolve_mode("process", "test_process") == "process"
+
+
+def test_set_market_persist_policy_round_trip(launcher: ProcessLauncherService) -> None:
+    """``set_market_persist_policy`` installs + clears the policy reference."""
+    from unittest.mock import MagicMock
+
+    policy = MagicMock()
+    launcher.set_market_persist_policy(policy)
+    assert launcher._market_persist_policy is policy
+    launcher.set_market_persist_policy(None)
+    assert launcher._market_persist_policy is None
+
+
+def test_inject_market_persist_policy_calls_setter(launcher: ProcessLauncherService) -> None:
+    """Process instance with ``set_persist_policy`` receives the policy."""
+    from unittest.mock import MagicMock
+
+    policy = MagicMock()
+    launcher.set_market_persist_policy(policy)
+    process = MagicMock()
+    launcher._inject_market_persist_policy(process, "pub:test")
+    process.set_persist_policy.assert_called_once_with(policy)
+
+
+def test_inject_market_persist_policy_skips_without_policy(
+    launcher: ProcessLauncherService,
+) -> None:
+    """No policy on the launcher leaves the process untouched."""
+    from unittest.mock import MagicMock
+
+    launcher.set_market_persist_policy(None)
+    process = MagicMock()
+    launcher._inject_market_persist_policy(process, "pub:test")
+    process.set_persist_policy.assert_not_called()
+
+
+def test_inject_market_persist_policy_skips_non_publisher(
+    launcher: ProcessLauncherService,
+) -> None:
+    """Process instances without ``set_persist_policy`` silently no-op."""
+    from unittest.mock import MagicMock
+
+    launcher.set_market_persist_policy(MagicMock())
+    process = MagicMock(spec=[])
+    launcher._inject_market_persist_policy(process, "pub:test")

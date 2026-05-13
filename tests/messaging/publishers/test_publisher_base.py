@@ -4588,3 +4588,106 @@ async def test_stop_handles_none_candle_and_trade_queues(monkeypatch: pytest.Mon
     pub._candle_write_queue = None
     pub._trade_write_queue = None
     await pub.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_persist_policy_round_trip() -> None:
+    """``set_persist_policy`` installs + clears the policy reference.
+
+    Given: A publisher with no policy bound,
+    When: ``set_persist_policy(policy)`` is called then ``set_persist_policy(None)``,
+    Then: ``self._persist_policy`` mirrors each assignment.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    policy = MagicMock()
+    pub.set_persist_policy(policy)
+    assert pub._persist_policy is policy
+    pub.set_persist_policy(None)
+    assert pub._persist_policy is None
+
+
+def test_should_persist_row_returns_true_without_policy() -> None:
+    """No injected policy degrades to "persist everything" for legacy paths."""
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    assert pub._should_persist_row("ticks", "kraken", "BTC-USD") is True
+
+
+def test_should_persist_row_consults_policy_when_present() -> None:
+    """The policy verdict gates the row + a skip increments the rate-limited counter."""
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    policy = MagicMock()
+    policy.should_persist.return_value = False
+    pub._persist_policy = policy
+    assert pub._should_persist_row("ticks", "kraken", "BTC-USD") is False
+    policy.should_persist.return_value = True
+    assert pub._should_persist_row("ticks", "kraken", "BTC-USD") is True
+
+
+def test_record_persist_skip_does_not_log_within_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Within the rate-limit window the counter just increments."""
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    times = iter([100.0, 100.0])
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: next(times))
+    pub._record_persist_skip("kraken", "ticks")
+    key = ("kraken", "ticks")
+    pub._persist_skipped_counters[key][1] = 100.0
+    pub._record_persist_skip("kraken", "ticks")
+    assert pub._persist_skipped_counters[key][0] >= 1.0
+
+
+def test_record_persist_skip_logs_after_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once the rate-limit window elapses the counter logs + resets."""
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    times = iter([100.0, 200.0])
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: next(times))
+    pub._record_persist_skip("kraken", "ticks")
+    pub._record_persist_skip("kraken", "ticks")
+    key = ("kraken", "ticks")
+    assert pub._persist_skipped_counters[key][1] == 200.0
+
+
+def test_verify_persist_policy_safety_rail_no_policy_short_circuits() -> None:
+    """No policy means no rail check (legacy startup compat)."""
+    pub: Any = DummyPublisher(symbols=["*"])
+    pub._verify_persist_policy_safety_rail("pub:test")
+
+
+def test_verify_persist_policy_safety_rail_non_wildcard_short_circuits() -> None:
+    """Non-wildcard symbols never trip the rail."""
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._persist_policy = MagicMock()
+    pub._verify_persist_policy_safety_rail("pub:test")
+
+
+def test_verify_persist_policy_safety_rail_explicit_mode_passes() -> None:
+    """Explicit mode skips the empty-scope check on that data_type."""
+    pub: Any = DummyPublisher(symbols=["*"])
+    policy = MagicMock()
+    policy.mode_for.return_value = "explicit"
+    pub._persist_policy = policy
+    pub._verify_persist_policy_safety_rail("pub:test")
+
+
+def test_verify_persist_policy_safety_rail_extra_satisfies() -> None:
+    """A non-empty ``market_persist_extra`` overlay satisfies the rail."""
+    pub: Any = DummyPublisher(symbols=["*"])
+    policy = MagicMock()
+    policy.mode_for.return_value = "auto"
+    policy.wallet_scope_pairs_for.return_value = frozenset()
+    policy.extra_for.return_value = frozenset({"BTC-USD"})
+    pub._persist_policy = policy
+    pub._verify_persist_policy_safety_rail("pub:test")
+
+
+def test_verify_persist_policy_safety_rail_fires_on_all_empty() -> None:
+    """Wildcard + auto + empty scope + empty extra raises RuntimeError."""
+    pub: Any = DummyPublisher(symbols=["*"])
+    policy = MagicMock()
+    policy.mode_for.return_value = "auto"
+    policy.wallet_scope_pairs_for.return_value = frozenset()
+    policy.extra_for.return_value = frozenset()
+    pub._persist_policy = policy
+    with pytest.raises(RuntimeError, match="wildcard symbols"):
+        pub._verify_persist_policy_safety_rail("pub:test")

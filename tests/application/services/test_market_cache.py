@@ -581,6 +581,36 @@ class TestLifecycle:
             await service.stop()
 
     @pytest.mark.asyncio
+    async def test_pair_stats_round_trip_through_accessors(self) -> None:
+        """``set_pair_stats`` round-trips through ``get_pair_stats``."""
+        from snapper.application.services.market_cache import PairStats
+
+        service, _, _ = _build_service()
+        stats = PairStats(pearson_r=0.5, pearson_n=10, is_warm=True, sample_count=10)
+
+        await service.set_pair_stats("kraken:BTC-USD", "kraken:ETH-USD", stats)
+        result = await service.get_pair_stats("kraken:BTC-USD", "kraken:ETH-USD")
+        assert result is stats
+
+    @pytest.mark.asyncio
+    async def test_get_pair_stats_returns_none_for_unknown_key(self) -> None:
+        """An unknown pair key returns ``None``."""
+        service, _, _ = _build_service()
+        assert await service.get_pair_stats("a", "b") is None
+
+    @pytest.mark.asyncio
+    async def test_pair_stats_keys_returns_snapshot(self) -> None:
+        """``pair_stats_keys`` returns a snapshot of the stat map keys."""
+        from snapper.application.services.market_cache import PairStats
+
+        service, _, _ = _build_service()
+        await service.set_pair_stats("a:1", "a:2", PairStats())
+        await service.set_pair_stats("b:1", "b:2", PairStats())
+
+        keys = await service.pair_stats_keys()
+        assert set(keys) == {("a:1", "a:2"), ("b:1", "b:2")}
+
+    @pytest.mark.asyncio
     async def test_instruments_cached_counts_distinct_keys(self) -> None:
         """``instruments_cached`` returns the count of distinct deque keys."""
         service, _, _ = _build_service()
