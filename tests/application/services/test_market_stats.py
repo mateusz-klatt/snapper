@@ -519,7 +519,7 @@ class TestListenLoop:
         worker = MarketStatsWorker(
             cache=cast(Any, cache), settings_service=cast(Any, _StubSettings({}))
         )
-        worker._reload_config = _reload  # type: ignore[method-assign]
+        worker._reload_config = _reload
         worker._running = True
 
         async def _recv_then_stop() -> tuple[bytes, bytes]:
@@ -545,7 +545,7 @@ class TestListenLoop:
         worker = MarketStatsWorker(
             cache=cast(Any, cache), settings_service=cast(Any, _StubSettings({}))
         )
-        worker._reload_config = _reload  # type: ignore[method-assign]
+        worker._reload_config = _reload
         worker._running = True
 
         async def _recv_then_stop() -> tuple[bytes, bytes]:
@@ -571,7 +571,7 @@ class TestListenLoop:
             worker._running = False
             raise RuntimeError("config exploded")
 
-        worker._reload_config = _boom  # type: ignore[method-assign]
+        worker._reload_config = _boom
         worker._running = True
 
         async def _recv_then_stop() -> tuple[bytes, bytes]:
@@ -739,7 +739,7 @@ class TestCadenceLoops:
         async def _spy() -> None:
             helper_calls["n"] += 1
 
-        worker.run_pearson_once = _spy  # type: ignore[method-assign]
+        worker.run_pearson_once = _spy
         await worker._pearson_loop()
         assert helper_calls["n"] >= 1
 
@@ -766,7 +766,7 @@ class TestCadenceLoops:
         async def _spy() -> None:
             helper_calls["n"] += 1
 
-        worker.run_cointegration_once = _spy  # type: ignore[method-assign]
+        worker.run_cointegration_once = _spy
         await worker._coint_loop()
         assert helper_calls["n"] >= 1
 
