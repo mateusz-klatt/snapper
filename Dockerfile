@@ -1,4 +1,4 @@
-FROM node:25-alpine AS ui-build
+FROM node:26-alpine AS ui-build
 ARG COREPACK_VERSION=0.34.0
 WORKDIR /app
 
