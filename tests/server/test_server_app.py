@@ -23,6 +23,7 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from snapper.application.services.candle_query import CandleQueryRow
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
@@ -35,6 +36,7 @@ from snapper.interface.websocket.models import ConnectionStats
 from snapper.interface.websocket.models import WsStatsSnapshot
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server import process_runner
+from snapper.server.app import _CACHE_CANDLE_SESSION_ID
 from snapper.server.app import _build_strategy_payload
 from snapper.server.app import _build_user_service_publisher
 from snapper.server.app import _clear_runtime_singletons
@@ -47,6 +49,8 @@ from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
 from snapper.server.app import get_settings_dependency
 from snapper.server.app import lifespan
+from snapper.server.app import project_query_row_to_cached_candle
+from snapper.server.app import project_query_row_to_candle_data
 from snapper.server.dependencies import reset_caps_enforcer_singleton
 from snapper.utils.logging import setup_logging
 from tests.server import dummy_processes
@@ -1750,6 +1754,189 @@ class TestCreateApiRouter:
         assert data["payload"] == []
         assert data["count"] == 0
 
+    def test_get_candles_db_returns_same_shape_as_smart_route(self) -> None:
+        """``/api/candles/db`` returns the same envelope shape as ``/api/candles``.
+
+        Given: A valid instrument with one candle row in repository,
+        When: GET /api/candles/db is called,
+        Then: Response is a CandleListResponse with one row, exactly
+              matching the legacy /api/candles contract.
+        """
+        candle_rows = [
+            {
+                "public_id": "candle-uuid-db-1",
+                "timestamp": datetime(2023, 1, 1, 12, 0, tzinfo=dt.UTC),
+                "session_id": "sess-db",
+                "sequence_id": 7,
+                "timeframe": "1h",
+                "open_at": datetime(2023, 1, 1, 12, 0, tzinfo=dt.UTC),
+                "open": 100.0,
+                "high": 110.0,
+                "low": 95.0,
+                "close": 105.0,
+                "volume": 50.0,
+                "vwap": None,
+                "trades": None,
+            }
+        ]
+        repo = MockRepository(session_result=candle_rows)
+        client = create_app_with_overrides(repo)
+        response = client.get(
+            "/api/candles/db?instrument=BTC-USD&exchange=kraken&timeframe=1h&limit=10"
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["type"] == "candle_list"
+        assert data["count"] == 1
+        assert data["payload"][0]["timeframe"] == "1h"
+        assert data["payload"][0]["public_id"] == "candle-uuid-db-1"
+
+    def test_get_candles_db_empty_payload_when_no_rows(self) -> None:
+        """``/api/candles/db`` returns empty payload for unknown instrument.
+
+        Given: No DB rows match the requested instrument,
+        When: GET /api/candles/db is called,
+        Then: Response is 200 with empty payload list.
+        """
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/candles/db?instrument=NOTHING&exchange=kraken&timeframe=1d")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["payload"] == []
+        assert data["count"] == 0
+
+    def test_get_candles_cache_returns_503_when_cache_not_initialized(self) -> None:
+        """``/api/candles/cache`` raises 503 when cache is not wired.
+
+        Given: TestClient setup has no market_cache attached to app.state,
+        When: GET /api/candles/cache is called with a cache-eligible
+              timeframe (1m),
+        Then: Response is 503 SERVICE_UNAVAILABLE.
+        """
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get(
+            "/api/candles/cache?instrument=BTC-USD&exchange=kraken&timeframe=1m&limit=10"
+        )
+        assert response.status_code == 503
+
+    def test_get_candles_cache_falls_back_to_db_for_long_frames(self) -> None:
+        """``/api/candles/cache`` serves 1h frames from DB with ``source='db'``.
+
+        Given: Cache not wired but DB has a 1h row,
+        When: GET /api/candles/cache is called with timeframe=1h,
+        Then: Response is 200 with ``payload.source='db'`` and one candle.
+        """
+        candle_rows = [
+            {
+                "public_id": "candle-uuid-cache-fallback",
+                "timestamp": datetime(2023, 1, 1, 12, 0, tzinfo=dt.UTC),
+                "session_id": "sess-fb",
+                "sequence_id": 1,
+                "timeframe": "1h",
+                "open_at": datetime(2023, 1, 1, 12, 0, tzinfo=dt.UTC),
+                "open": 50.0,
+                "high": 55.0,
+                "low": 45.0,
+                "close": 52.0,
+                "volume": 10.0,
+                "vwap": None,
+                "trades": None,
+            }
+        ]
+        repo = MockRepository(session_result=candle_rows)
+        client = create_app_with_overrides(repo)
+        response = client.get(
+            "/api/candles/cache?instrument=BTC-USD&exchange=kraken&timeframe=1h&limit=10"
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["type"] == "cached_candles"
+        assert data["payload"]["source"] == "db"
+        assert data["payload"]["sample_count"] == 1
+
+    def test_get_candles_cache_rejects_invalid_timeframe(self) -> None:
+        """``/api/candles/cache`` raises 400 for unsupported timeframes.
+
+        Given: A timeframe outside the supported seven,
+        When: GET /api/candles/cache is called,
+        Then: Response is 400 with a descriptive detail.
+        """
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get(
+            "/api/candles/cache?instrument=BTC-USD&exchange=kraken&timeframe=2m&limit=10"
+        )
+        assert response.status_code == 400
+
+    def test_get_candles_rejects_invalid_timeframe(self) -> None:
+        """``/api/candles`` raises 400 for unsupported timeframes.
+
+        Symmetry with ``/api/candles/cache``: unknown frames are
+        rejected at the route boundary rather than passed silently
+        to the repo.
+        """
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get(
+            "/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=2m&limit=10"
+        )
+        assert response.status_code == 400
+
+    def test_get_candles_db_rejects_invalid_timeframe(self) -> None:
+        """``/api/candles/db`` raises 400 for unsupported timeframes."""
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get(
+            "/api/candles/db?instrument=BTC-USD&exchange=kraken&timeframe=2m&limit=10"
+        )
+        assert response.status_code == 400
+
+    def test_get_candles_rejects_zero_limit(self) -> None:
+        """``/api/candles`` enforces ``limit >= 1`` via Query validation."""
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get(
+            "/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1m&limit=0"
+        )
+        assert response.status_code == 422
+
+    def test_get_candles_db_rejects_zero_limit(self) -> None:
+        """``/api/candles/db`` enforces ``limit >= 1`` via Query validation."""
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get(
+            "/api/candles/db?instrument=BTC-USD&exchange=kraken&timeframe=1m&limit=0"
+        )
+        assert response.status_code == 422
+
+    def test_get_candles_returns_500_on_repo_failure(self) -> None:
+        """``/api/candles`` maps repo exceptions to HTTP 500 with a generic detail.
+
+        Given: Repository raises during ``get_candles``,
+        When: GET /api/candles is called,
+        Then: Response is 500 with a redacted error detail (no internal
+              exception leakage).
+        """
+        repo = MockRepository(session_result=[], error=RuntimeError("boom"))
+        client = create_app_with_overrides(repo)
+        response = client.get(
+            "/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1m&limit=10"
+        )
+        assert response.status_code == 500
+        assert "Failed to fetch candle data" in response.text
+
+    def test_get_candles_db_returns_500_on_repo_failure(self) -> None:
+        """``/api/candles/db`` maps repo exceptions to HTTP 500."""
+        repo = MockRepository(session_result=[], error=RuntimeError("boom"))
+        client = create_app_with_overrides(repo)
+        response = client.get(
+            "/api/candles/db?instrument=BTC-USD&exchange=kraken&timeframe=1m&limit=10"
+        )
+        assert response.status_code == 500
+        assert "Failed to fetch candle data" in response.text
+
     def test_get_system_status_success(self) -> None:
         """Test system status returns running processes info.
 
@@ -1796,6 +1983,107 @@ class TestCreateApiRouter:
         assert payload["strategies"][0]["strategy_name"] == "macd_btc_1h"
         assert payload["strategies"][0]["status"] == "running"
         assert payload["strategies"][0]["signals_generated"] == 42
+
+
+class TestCandleProjectionHelpers:
+    """Tests for ``project_query_row_to_candle_data`` + ``project_query_row_to_cached_candle``.
+
+    Verifies that cache-sourced rows (provenance = ``None``) get
+    deterministic synthetic provenance (same logical bar → same
+    ``public_id`` across calls), and that DB-sourced rows (provenance
+    populated) pass their original identity through.
+    """
+
+    def _cache_row(self, open_at_ms: int) -> CandleQueryRow:
+        """Build a cache-sourced query row with ``None`` provenance."""
+        return CandleQueryRow(
+            open_at=datetime.fromtimestamp(open_at_ms / 1000, tz=dt.UTC),
+            timeframe="1m",
+            open=100.0,
+            high=110.0,
+            low=95.0,
+            close=105.0,
+            volume=10.0,
+            vwap=None,
+            trades=None,
+            public_id=None,
+            timestamp=None,
+            session_id=None,
+            sequence_id=None,
+        )
+
+    def _db_row(self, open_at_ms: int) -> CandleQueryRow:
+        """Build a DB-sourced query row with original provenance."""
+        return CandleQueryRow(
+            open_at=datetime.fromtimestamp(open_at_ms / 1000, tz=dt.UTC),
+            timeframe="1h",
+            open=200.0,
+            high=210.0,
+            low=195.0,
+            close=205.0,
+            volume=20.0,
+            vwap=202.5,
+            trades=42,
+            public_id="original-public-id",
+            timestamp=datetime.fromtimestamp(open_at_ms / 1000, tz=dt.UTC),
+            session_id="original-session",
+            sequence_id=99,
+        )
+
+    def test_cache_row_synthetic_provenance_is_deterministic(self) -> None:
+        """Same logical 1m bar → same ``public_id`` across two calls."""
+        row = self._cache_row(60_000)
+        first = project_query_row_to_candle_data(row, instrument="BTC-USD", exchange="kraken")
+        second = project_query_row_to_candle_data(row, instrument="BTC-USD", exchange="kraken")
+        assert first.public_id == second.public_id
+        assert first.sequence_id == 60_000
+        assert second.sequence_id == 60_000
+        assert first.session_id == _CACHE_CANDLE_SESSION_ID
+
+    def test_cache_row_different_open_at_yields_different_public_id(self) -> None:
+        """Bars at different ``open_at_ms`` mint distinct synthetic ids."""
+        a = project_query_row_to_candle_data(
+            self._cache_row(60_000), instrument="BTC-USD", exchange="kraken"
+        )
+        b = project_query_row_to_candle_data(
+            self._cache_row(120_000), instrument="BTC-USD", exchange="kraken"
+        )
+        assert a.public_id != b.public_id
+
+    def test_cache_row_different_instrument_yields_different_public_id(self) -> None:
+        """Same ``open_at_ms`` on a different instrument mints a distinct id."""
+        a = project_query_row_to_candle_data(
+            self._cache_row(60_000), instrument="BTC-USD", exchange="kraken"
+        )
+        b = project_query_row_to_candle_data(
+            self._cache_row(60_000), instrument="ETH-USD", exchange="kraken"
+        )
+        assert a.public_id != b.public_id
+
+    def test_cache_row_timestamp_equals_open_at(self) -> None:
+        """Cache row's ``timestamp`` field tracks the bar's domain open."""
+        row = self._cache_row(180_000)
+        candle = project_query_row_to_candle_data(row, instrument="BTC-USD", exchange="kraken")
+        assert candle.timestamp == row.open_at
+
+    def test_db_row_preserves_original_provenance(self) -> None:
+        """DB-sourced rows pass their original identity unmodified."""
+        row = self._db_row(3_600_000)
+        candle = project_query_row_to_candle_data(row, instrument="BTC-USD", exchange="kraken")
+        assert candle.public_id == "original-public-id"
+        assert candle.session_id == "original-session"
+        assert candle.sequence_id == 99
+        assert candle.vwap == pytest.approx(202.5)
+        assert candle.trades == 42
+
+    def test_cached_candle_projection_drops_provenance(self) -> None:
+        """``CachedCandle`` is provenance-free OHLCV + ``open_at_ms``."""
+        row = self._cache_row(240_000)
+        candle = project_query_row_to_cached_candle(row)
+        assert candle.open_at_ms == 240_000
+        assert candle.timeframe == "1m"
+        assert candle.open == pytest.approx(100.0)
+        assert candle.close == pytest.approx(105.0)
 
 
 class TestWebSocketEndpoints:
@@ -3578,6 +3866,20 @@ class TestCandlesHttpExceptionReraise:
         repo = MockRepository(error=HTTPException(status_code=403, detail="Forbidden"))
         client = create_app_with_overrides(repo)
         response = client.get("/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h")
+        assert response.status_code == 403
+        assert "Forbidden" in response.json()["detail"]
+
+    def test_candles_db_reraises_http_exception(self) -> None:
+        """``/api/candles/db`` propagates HTTPException without swallowing.
+
+        Mirrors :meth:`test_candles_reraises_http_exception` for the
+        explicit DB-only route; the ``except HTTPException: raise``
+        branch preserves dep-layer statuses (403/404/etc.) instead of
+        converting them to a generic 500.
+        """
+        repo = MockRepository(error=HTTPException(status_code=403, detail="Forbidden"))
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/candles/db?instrument=BTC-USD&exchange=kraken&timeframe=1h")
         assert response.status_code == 403
         assert "Forbidden" in response.json()["detail"]
 
