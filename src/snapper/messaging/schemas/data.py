@@ -1710,3 +1710,116 @@ class ExecutionPlanDecisionEventData(StrictDataSchema[Literal["execution_plan_de
     trigger_type: str
     reason: str
     triggered_at: datetime
+
+
+class ProcessSummaryItem(StrictBody):
+    """Per-process status row for ``ProcessSummaryEventData``.
+
+    Mirrors the public-facing ``ProcessStatus`` REST schema fields with
+    the process ``name`` folded in so the frame is self-describing.
+    Emitted as part of full-snapshot replacement events; consumers
+    overwrite their query cache entry wholesale.
+
+    Attributes:
+        name: Configured process name (unique).
+        status: Spawner status (``running`` / ``stopped`` / ``error`` / etc).
+        pid: Process id when running.
+        started_at: ISO-8601 start time when running.
+        command: Command line that was executed.
+        exit_code: Exit code once stopped.
+        error: Last error message if the process failed.
+    """
+
+    name: str
+    status: str
+    pid: int | None = None
+    started_at: str | None = None
+    command: str | None = None
+    exit_code: int | None = None
+    error: str | None = None
+
+
+class ProcessSummaryEventData(StrictDataSchema[Literal["process_summary_event"]]):
+    """Snapshot of every configured process's current status.
+
+    Published on ``processes.events.summary.{instance_id}`` whenever
+    the spawner detects a status transition (start / stop / crash /
+    completion). Carries the FULL snapshot so frontend can replace its
+    React Query cache entry wholesale — no diff reconciliation needed
+    on the consumer.
+
+    Attributes:
+        type: Payload discriminator (always ``process_summary_event``).
+        processes: Chronological list of per-process status rows.
+        snapshot_at: Bus time the snapshot was assembled.
+    """
+
+    type: Literal["process_summary_event"] = "process_summary_event"
+    processes: list[ProcessSummaryItem]
+    snapshot_at: datetime
+
+
+class ProcessConfiguredEventData(StrictDataSchema[Literal["process_configured_event"]]):
+    """Snapshot of currently-configured process names.
+
+    Published on ``processes.events.configured.{instance_id}`` whenever
+    the configured set mutates (process created or removed). Carries
+    just the names; consumers fetch detailed config via REST.
+
+    Attributes:
+        type: Payload discriminator (always ``process_configured_event``).
+        process_names: All configured process names at snapshot time.
+        snapshot_at: Bus time the snapshot was assembled.
+    """
+
+    type: Literal["process_configured_event"] = "process_configured_event"
+    process_names: list[str]
+    snapshot_at: datetime
+
+
+class ProcessRunEventData(StrictDataSchema[Literal["process_run_event"]]):
+    """A single process-run lifecycle transition.
+
+    Published on ``processes.events.runs.{process_name}`` whenever a
+    run record is created or completes. Unlike the summary topic this
+    one is per-run (not a full snapshot) so consumers can append to
+    their run-history view without re-fetching.
+
+    Attributes:
+        type: Payload discriminator (always ``process_run_event``).
+        process_name: Owning process.
+        run_id: Stable identifier for this run.
+        status: ``started`` / ``completed`` / ``failed``.
+        started_at: Bus time the run kicked off.
+        completed_at: Bus time the run finished; ``None`` while
+            still in flight.
+        exit_code: Process exit code when terminated; ``None`` while
+            still in flight.
+    """
+
+    type: Literal["process_run_event"] = "process_run_event"
+    process_name: str
+    run_id: str
+    status: str
+    started_at: datetime
+    completed_at: datetime | None = None
+    exit_code: int | None = None
+
+
+class StrategyListEventData(StrictDataSchema[Literal["strategy_list_event"]]):
+    """Snapshot of all registered strategy class paths.
+
+    Published on ``strategies.events.list.{instance_id}`` whenever the
+    strategy registry mutates (a new class is registered or removed).
+    Frontend uses this to refresh the Strategies dropdown without
+    polling.
+
+    Attributes:
+        type: Payload discriminator (always ``strategy_list_event``).
+        strategy_classes: Canonical class paths in registration order.
+        snapshot_at: Bus time the snapshot was assembled.
+    """
+
+    type: Literal["strategy_list_event"] = "strategy_list_event"
+    strategy_classes: list[str]
+    snapshot_at: datetime

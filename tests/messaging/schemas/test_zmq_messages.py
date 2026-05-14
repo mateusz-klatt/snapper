@@ -947,3 +947,104 @@ class TestExecutionPlanDecisionEventDataSchema:
 
         assert isinstance(parsed, ExecutionPlanDecisionEventData)
         assert parsed.reason == "Cycle 42 closed before command dispatch"
+
+
+class TestProcessAndStrategyEventSchemas:
+    """Round-trip tests for the 2026-05-14 process/strategy event schemas.
+
+    Q3 declarations register the schemas + topics; emit sites land in a
+    follow-up. Verifying ``parse_message`` recognises the type
+    discriminators NOW ensures the bridge will dispatch frames the
+    moment producers start publishing.
+    """
+
+    def test_process_summary_event_roundtrip(self) -> None:
+        """``ProcessSummaryEventData`` survives JSON roundtrip via parse_message."""
+        from snapper.messaging.schemas.data import ProcessSummaryEventData
+        from snapper.messaging.schemas.data import ProcessSummaryItem
+
+        event = ProcessSummaryEventData(
+            session_id="s1",
+            sequence_id=1,
+            public_id="019dbb34-f439-77bd-afa8-ee5321d60311",
+            timestamp=datetime(2026, 5, 14, 12, tzinfo=UTC),
+            processes=[
+                ProcessSummaryItem(
+                    name="trader_coordinator",
+                    status="running",
+                    pid=4242,
+                    started_at="2026-05-14T11:00:00Z",
+                    command="snapper trade",
+                ),
+            ],
+            snapshot_at=datetime(2026, 5, 14, 12, tzinfo=UTC),
+        )
+
+        parsed = parse_message(event.to_json())
+
+        assert isinstance(parsed, ProcessSummaryEventData)
+        assert len(parsed.processes) == 1
+        assert parsed.processes[0].name == "trader_coordinator"
+        assert parsed.processes[0].pid == 4242
+
+    def test_process_configured_event_roundtrip(self) -> None:
+        """``ProcessConfiguredEventData`` carries the process-name list."""
+        from snapper.messaging.schemas.data import ProcessConfiguredEventData
+
+        event = ProcessConfiguredEventData(
+            session_id="s1",
+            sequence_id=2,
+            public_id="019dbb34-f439-77bd-afa8-ee5321d60312",
+            timestamp=datetime(2026, 5, 14, 12, tzinfo=UTC),
+            process_names=["trader_coordinator", "feed_publisher"],
+            snapshot_at=datetime(2026, 5, 14, 12, tzinfo=UTC),
+        )
+
+        parsed = parse_message(event.to_json())
+
+        assert isinstance(parsed, ProcessConfiguredEventData)
+        assert parsed.process_names == ["trader_coordinator", "feed_publisher"]
+
+    def test_process_run_event_roundtrip(self) -> None:
+        """``ProcessRunEventData`` carries a single run transition."""
+        from snapper.messaging.schemas.data import ProcessRunEventData
+
+        event = ProcessRunEventData(
+            session_id="s1",
+            sequence_id=3,
+            public_id="019dbb34-f439-77bd-afa8-ee5321d60313",
+            timestamp=datetime(2026, 5, 14, 12, tzinfo=UTC),
+            process_name="trader_coordinator",
+            run_id="run-42",
+            status="started",
+            started_at=datetime(2026, 5, 14, 11, tzinfo=UTC),
+        )
+
+        parsed = parse_message(event.to_json())
+
+        assert isinstance(parsed, ProcessRunEventData)
+        assert parsed.run_id == "run-42"
+        assert parsed.status == "started"
+        assert parsed.completed_at is None
+        assert parsed.exit_code is None
+
+    def test_strategy_list_event_roundtrip(self) -> None:
+        """``StrategyListEventData`` carries the strategy class path roster."""
+        from snapper.messaging.schemas.data import StrategyListEventData
+
+        event = StrategyListEventData(
+            session_id="s1",
+            sequence_id=4,
+            public_id="019dbb34-f439-77bd-afa8-ee5321d60314",
+            timestamp=datetime(2026, 5, 14, 12, tzinfo=UTC),
+            strategy_classes=[
+                "snapper.strategies.rsi_reversion.RSIReversion",
+                "snapper.strategies.macd_crossover.MACDCrossover",
+            ],
+            snapshot_at=datetime(2026, 5, 14, 12, tzinfo=UTC),
+        )
+
+        parsed = parse_message(event.to_json())
+
+        assert isinstance(parsed, StrategyListEventData)
+        assert "snapper.strategies.rsi_reversion.RSIReversion" in parsed.strategy_classes

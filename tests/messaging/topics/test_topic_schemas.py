@@ -179,3 +179,65 @@ class TestTopicUtilities:
 
         assert len(results) == 1
         assert results[0].pattern == "alerts."
+
+
+class TestProcessesAndStrategiesTopics:
+    """Tests for the 2026-05-14 process/strategy WS event topic registrations.
+
+    Q3 declarations land before emit sites; the bridge will accept
+    subscriptions to these patterns immediately, but frames will not
+    flow until ``ProcessLauncherService`` / ``StrategyFactory`` start
+    publishing. The registry entries themselves are the contract.
+    """
+
+    def test_process_summary_topic_in_system_category(self) -> None:
+        """``processes.events.summary.`` is in the ``system`` category.
+
+        Given: TOPIC_REGISTRY,
+        When: Filtering for the process-summary pattern,
+        Then: It sits in the ``system`` category so VIEWER /
+              OPERATOR / ADMIN principals all see live status snapshots
+              without holding MANAGE_PROCESSES.
+        """
+        summary = [s for s in TOPIC_REGISTRY if s.pattern == "processes.events.summary."]
+        assert len(summary) == 1
+        assert summary[0].category == "system"
+        assert summary[0].throttle_ms == 500
+
+    def test_process_configured_topic_in_processes_admin_category(self) -> None:
+        """``processes.events.configured.`` requires MANAGE_PROCESSES.
+
+        Given: TOPIC_REGISTRY,
+        When: Filtering for the configured-set pattern,
+        Then: Lives in the ``processes_admin`` category — config
+              snapshots are ops-only.
+        """
+        configured = [s for s in TOPIC_REGISTRY if s.pattern == "processes.events.configured."]
+        assert len(configured) == 1
+        assert configured[0].category == "processes_admin"
+
+    def test_process_runs_topic_in_processes_admin_category(self) -> None:
+        """``processes.events.runs.`` requires MANAGE_PROCESSES."""
+        runs = [s for s in TOPIC_REGISTRY if s.pattern == "processes.events.runs."]
+        assert len(runs) == 1
+        assert runs[0].category == "processes_admin"
+
+    def test_strategy_list_topic_in_strategies_read_category(self) -> None:
+        """``strategies.events.list.`` lives in the new ``strategies_read`` category.
+
+        Given: TOPIC_REGISTRY,
+        When: Filtering for the strategy-list pattern,
+        Then: ``strategies_read`` category gates the topic by
+              READ_STRATEGIES alone — VIEWER / OPERATOR / ADMIN see
+              the strategy roster without holding START_STRATEGIES.
+        """
+        strategies = [s for s in TOPIC_REGISTRY if s.pattern == "strategies.events.list."]
+        assert len(strategies) == 1
+        assert strategies[0].category == "strategies_read"
+        assert strategies[0].throttle_ms == 1000
+
+    def test_processes_admin_category_groups_two_topics(self) -> None:
+        """``get_topics_by_category('processes_admin')`` returns both ops topics."""
+        admin = get_topics_by_category("processes_admin")
+        patterns = {schema.pattern for schema in admin}
+        assert patterns == {"processes.events.configured.", "processes.events.runs."}
