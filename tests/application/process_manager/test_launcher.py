@@ -2679,10 +2679,16 @@ class TestEmitSitesIntegration:
         assert publisher.sent == []
 
     @pytest.mark.asyncio
-    async def test_create_process_config_emits_configured_and_strategy(
+    async def test_create_process_config_emits_configured_summary_and_strategy(
         self, launcher: ProcessLauncherService
     ) -> None:
-        """`create_process_config` emits configured + strategy-list events."""
+        """`create_process_config` emits configured + summary + strategy-list events.
+
+        The summary emit is required (Codex P1 fix 2026-05-14): without
+        it, REST `useProcessSummary` totals stay stale after a create
+        until the next reconnect because the hook now uses
+        `staleTime: Infinity`.
+        """
         publisher = _RecordingPublisher()
         launcher.set_msg_publisher(publisher)
         launcher._registry_syncer.create_process_config = AsyncMock()
@@ -2701,13 +2707,14 @@ class TestEmitSitesIntegration:
         )
         topics = [topic for topic, _ in publisher.sent]
         assert any(t.startswith("processes.events.configured.") for t in topics)
+        assert any(t.startswith("processes.events.summary.") for t in topics)
         assert any(t.startswith("strategies.events.list.") for t in topics)
 
     @pytest.mark.asyncio
     async def test_create_process_config_non_strategy_skips_strategy_emit(
         self, launcher: ProcessLauncherService
     ) -> None:
-        """Non-strategy create still emits configured but not strategy-list."""
+        """Non-strategy create still emits configured + summary but not strategy-list."""
         publisher = _RecordingPublisher()
         launcher.set_msg_publisher(publisher)
         launcher._registry_syncer.create_process_config = AsyncMock()
@@ -2726,4 +2733,28 @@ class TestEmitSitesIntegration:
         )
         topics = [topic for topic, _ in publisher.sent]
         assert any(t.startswith("processes.events.configured.") for t in topics)
+        assert any(t.startswith("processes.events.summary.") for t in topics)
         assert not any(t.startswith("strategies.events.list.") for t in topics)
+
+    @pytest.mark.asyncio
+    async def test_stop_all_processes_clears_active_runs(
+        self, launcher: ProcessLauncherService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`stop_all_processes` clears both active_runs + active_run_started_at.
+
+        Without the explicit `active_runs.clear()` (Codex P1 fix
+        2026-05-14), a task that never completes via its done-callback
+        leaves a stale `(name, run_public_id)` entry and the next emit
+        would re-attach the dead run_public_id to a new launch.
+        """
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        launcher.get_process_configs = AsyncMock(return_value=[])
+        launcher.active_runs["ghost"] = "run-orphan"
+        launcher.active_run_started_at["ghost"] = datetime(2026, 5, 14, tzinfo=UTC)
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes", lambda: {}
+        )
+        await launcher.stop_all_processes()
+        assert launcher.active_runs == {}
+        assert launcher.active_run_started_at == {}

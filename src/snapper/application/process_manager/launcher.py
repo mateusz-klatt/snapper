@@ -998,11 +998,12 @@ class ProcessLauncherService:
             entry=entry,
             template_config=template_configs[exchange],
         )
+        self.instance_configs[instance_name] = instance_config
         try:
             await self.start_process(instance_config)
         except Exception as exc:
+            self.instance_configs.pop(instance_name, None)
             return _PerWalletSpawnOutcome(instance_name=instance_name, entry=entry, error=exc)
-        self.instance_configs[instance_name] = instance_config
         logger.info(f"Per-wallet spawner: started '{instance_name}' for wallet={wallet_public_id}")
         return _PerWalletSpawnOutcome(instance_name=instance_name, entry=entry, error=None)
 
@@ -1128,6 +1129,7 @@ class ProcessLauncherService:
         self.process_lifecycles.clear()
         self.instance_configs.clear()
         self.expected_terminations.clear()
+        self.active_runs.clear()
         self.active_run_started_at.clear()
         logger.info("All processes stopped")
         await self._emit_summary_snapshot()
@@ -1572,10 +1574,11 @@ class ProcessLauncherService:
         )
         if mode is not None:
             instance_config.mode = mode
+        self.instance_configs[name] = instance_config
         try:
             await self.start_process(instance_config)
-            self.instance_configs[name] = instance_config
         except Exception as exc:
+            self.instance_configs.pop(name, None)
             logger.error(f"Per-wallet start: failed to start '{name}': {exc}")
             return ProcessStartResult(
                 status=StartProcessStatusEnum.ERROR,
@@ -1865,5 +1868,6 @@ class ProcessLauncherService:
             note=note,
         )
         await self._emit_configured_snapshot()
+        await self._emit_summary_snapshot()
         if role is ProcessRoleEnum.STRATEGY:
             await self._emit_strategy_list_snapshot()
