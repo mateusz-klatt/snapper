@@ -38,8 +38,10 @@ from snapper.messaging.topics.validation import _validate_orders_commands_topic
 from snapper.messaging.topics.validation import _validate_orders_events_topic
 from snapper.messaging.topics.validation import _validate_plans_decisions_topic
 from snapper.messaging.topics.validation import _validate_prefix_pattern
+from snapper.messaging.topics.validation import _validate_processes_snapshot_topic
 from snapper.messaging.topics.validation import _validate_replay_source
 from snapper.messaging.topics.validation import _validate_signal_topic
+from snapper.messaging.topics.validation import _validate_strategies_list_topic
 from snapper.messaging.topics.validation import _validate_system_topic
 from snapper.messaging.topics.validation import validate_subscription_pattern
 from snapper.messaging.topics.validation import validate_topic
@@ -4315,8 +4317,6 @@ class TestProcessesAndStrategiesValidation:
         segment so the diagnostic message remains accurate when
         called outside the dispatcher.
         """
-        from snapper.messaging.topics.validation import _validate_processes_snapshot_topic
-
         valid, err = _validate_processes_snapshot_topic(
             "bogus.events.summary.coord-0",
             prefix="processes.events.summary.",
@@ -4327,8 +4327,6 @@ class TestProcessesAndStrategiesValidation:
 
     def test_strategies_helper_rejects_non_strategies_first_segment(self) -> None:
         """Same defensive guard for ``_validate_strategies_list_topic``."""
-        from snapper.messaging.topics.validation import _validate_strategies_list_topic
-
         valid, err = _validate_strategies_list_topic("bogus.events.list.coord-0")
         assert not valid
         assert "Expected 'strategies.events.list' prefix" in err
