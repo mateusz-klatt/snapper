@@ -725,6 +725,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         discover_processes()
         process_factory = ProcessLauncherService(settings)
         process_factory.set_market_persist_policy(market_persist_policy)
+        process_factory.set_msg_publisher(user_publisher)
+        logger.info(
+            "ProcessLauncherService publisher wired to ZMQ broker "
+            "for processes.events.* + strategies.events.list fanout"
+        )
         app.state.process_factory = process_factory
         logger.info("Starting application lifespan - checking autostart settings")
         await process_factory.sync_registry_to_database()
@@ -766,6 +771,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _shutdown_zmq_bridge(app)
         if process_factory is not None:
             await process_factory.stop_all_processes()
+            process_factory.set_msg_publisher(None)
         market_stats_worker_for_shutdown = getattr(app.state, "market_stats_worker", None)
         if market_stats_worker_for_shutdown is not None:
             await market_stats_worker_for_shutdown.stop()

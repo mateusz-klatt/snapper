@@ -1715,28 +1715,29 @@ class ExecutionPlanDecisionEventData(StrictDataSchema[Literal["execution_plan_de
 class ProcessSummaryItem(StrictBody):
     """Per-process status row for ``ProcessSummaryEventData``.
 
-    Mirrors the public-facing ``ProcessStatus`` REST schema fields with
-    the process ``name`` folded in so the frame is self-describing.
-    Emitted as part of full-snapshot replacement events; consumers
-    overwrite their query cache entry wholesale.
+    Mirrors the fields the launcher can deliver reliably for any
+    process mode (asyncio task, thread, or subprocess). PID / command /
+    exit_code intentionally absent because they only exist for native
+    subprocesses; consumers fetch detailed status via REST when needed.
 
     Attributes:
-        name: Configured process name (unique).
-        status: Spawner status (``running`` / ``stopped`` / ``error`` / etc).
-        pid: Process id when running.
-        started_at: ISO-8601 start time when running.
-        command: Command line that was executed.
-        exit_code: Exit code once stopped.
-        error: Last error message if the process failed.
+        name: Configured process name (unique within the launcher).
+        running: True when the launcher tracks the process as live.
+        enabled: Persisted autostart flag from the config row.
+        role: ``ProcessRoleEnum`` value (e.g. ``core`` / ``strategy``).
+        lifecycle: ``ProcessLifecycleEnum`` value
+            (``long_running`` / ``one_shot``).
+        active_public_id: ``ProcessRun.public_id`` for the in-flight run
+            when applicable; ``None`` for stopped / one-shot-completed
+            entries.
     """
 
     name: str
-    status: str
-    pid: int | None = None
-    started_at: str | None = None
-    command: str | None = None
-    exit_code: int | None = None
-    error: str | None = None
+    running: bool
+    enabled: bool
+    role: str
+    lifecycle: str
+    active_public_id: str | None = None
 
 
 class ProcessSummaryEventData(StrictDataSchema[Literal["process_summary_event"]]):
