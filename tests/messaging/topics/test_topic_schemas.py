@@ -184,10 +184,10 @@ class TestTopicUtilities:
 class TestProcessesAndStrategiesTopics:
     """Tests for the 2026-05-14 process/strategy WS event topic registrations.
 
-    Q3 declarations land before emit sites; the bridge will accept
-    subscriptions to these patterns immediately, but frames will not
-    flow until ``ProcessLauncherService`` / ``StrategyFactory`` start
-    publishing. The registry entries themselves are the contract.
+    Topic registry, publish-side validator, and ``ProcessLauncherService``
+    emit sites all shipped together in Q3. These tests pin the
+    registry contract; ``test_topic_validation.py`` covers the
+    publish-side validator pairings.
     """
 
     def test_process_summary_topic_in_system_category(self) -> None:

@@ -2073,7 +2073,9 @@ async def test_handle_process_completion_expected_failure(
     finalize_mock = mock.AsyncMock()
     monkeypatch.setattr(factory, "_finalize_process_run", finalize_mock)
     await factory._handle_process_completion("native", proc_info)
-    finalize_mock.assert_awaited_once_with("native", ProcessRunStatusEnum.CANCELLED, error=None)
+    finalize_mock.assert_awaited_once_with(
+        "native", ProcessRunStatusEnum.CANCELLED, error=None, exit_code=1
+    )
     assert "native" not in factory.started_processes
     spawner_mock.cleanup.assert_called_once_with("native")
 
@@ -2086,7 +2088,10 @@ async def test_handle_process_completion_unexpected_failure(
 
     Given: A native process not in expected_terminations with non-zero exit,
     When: _handle_process_completion is called,
-    Then: Run is finalized with FAILED status and exit code in error message.
+    Then: Run is finalized with FAILED status, exit code on the run-event
+        payload, AND a stringified ``error="exit_code=N"`` for the DB run
+        record (the launcher still folds the code into error to preserve
+        the pre-Q3 update_run_record contract).
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
@@ -2106,7 +2111,7 @@ async def test_handle_process_completion_unexpected_failure(
     monkeypatch.setattr(factory, "_finalize_process_run", finalize_mock)
     await factory._handle_process_completion("native", proc_info)
     finalize_mock.assert_awaited_once_with(
-        "native", ProcessRunStatusEnum.FAILED, error="exit_code=2"
+        "native", ProcessRunStatusEnum.FAILED, error="exit_code=2", exit_code=2
     )
     assert "native" not in factory.started_processes
     spawner_mock.cleanup.assert_called_once_with("native")
@@ -2623,7 +2628,9 @@ async def test_handle_process_completion_warns_for_long_running_non_native(
     finalize_mock = mock.AsyncMock()
     monkeypatch.setattr(factory, "_finalize_process_run", finalize_mock)
     await factory._handle_process_completion("job", proc_info)
-    finalize_mock.assert_awaited_once_with("job", ProcessRunStatusEnum.SUCCEEDED, error=None)
+    finalize_mock.assert_awaited_once_with(
+        "job", ProcessRunStatusEnum.SUCCEEDED, error=None, exit_code=0
+    )
     assert "job" not in factory.started_processes
 
 
@@ -6142,6 +6149,67 @@ class TestStartPerWalletInstanceByName:
         assert result.status == "error"
         assert "client init" in result.message
         assert self._INSTANCE_NAME not in factory.instance_configs
+
+    @pytest.mark.asyncio
+    async def test_start_process_failure_restores_prior_instance_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed manual restart preserves the previously stopped instance.
+
+        Codex review on parent PR #50 caught that the original
+        register-before-start pattern unconditionally popped the
+        instance on failure, dropping a stopped-but-configured per-wallet
+        executor from the summary/configured snapshots on a transient
+        startup hiccup. Fix: capture the prior entry and restore it on
+        exception instead of popping.
+
+        Given: A factory with an existing ``instance_configs[name]``
+            entry (the legitimate stopped instance),
+        When: ``start_per_wallet_instance_by_name`` fails inside
+            ``start_process``,
+        Then: ``instance_configs[name]`` still holds the PRIOR config
+            (not the overwritten one) and the ERROR result carries
+            the failure detail.
+        """
+        factory = self._make_factory()
+        prior_config = ProcessConfigModel(
+            name=self._INSTANCE_NAME,
+            enabled=True,
+            mode="thread",
+            class_path="legacy.X",
+            method="start",
+            parameters={"wallet_public_id": self._WALLET, "note": "prior"},
+            note="prior",
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=(),
+            parameters_schema=None,
+        )
+        factory.instance_configs[self._INSTANCE_NAME] = prior_config
+
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[self._credential_for_wallet(self._WALLET, "kraken")]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry()},
+        )
+        monkeypatch.setattr(
+            factory, "start_process", AsyncMock(side_effect=RuntimeError("transient"))
+        )
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+
+        result = await factory.start_per_wallet_instance_by_name(self._INSTANCE_NAME)
+
+        assert result.status == "error"
+        assert "transient" in result.message
+        assert self._INSTANCE_NAME in factory.instance_configs
+        assert factory.instance_configs[self._INSTANCE_NAME] is prior_config
 
 
 class TestStartProcessByNameDispatch:

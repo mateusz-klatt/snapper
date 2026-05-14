@@ -1751,7 +1751,11 @@ class ProcessSummaryEventData(StrictDataSchema[Literal["process_summary_event"]]
 
     Attributes:
         type: Payload discriminator (always ``process_summary_event``).
-        processes: Chronological list of per-process status rows.
+        processes: Unordered snapshot of per-process status rows. The
+            launcher emits persisted configs first (in repository row
+            order) followed by runtime per-wallet instances in
+            ``instance_configs`` dict order; consumers must NOT rely on
+            this order being stable or chronological.
         snapshot_at: Bus time the snapshot was assembled.
     """
 
@@ -1790,12 +1794,18 @@ class ProcessRunEventData(StrictDataSchema[Literal["process_run_event"]]):
         type: Payload discriminator (always ``process_run_event``).
         process_name: Owning process.
         run_id: Stable identifier for this run.
-        status: ``started`` / ``completed`` / ``failed``.
+        status: Stringified ``ProcessRunStatusEnum`` value — one of
+            ``running`` / ``succeeded`` / ``failed`` / ``cancelled``.
+            The launcher emits the enum's ``.value`` directly so
+            consumers can compare to ``ProcessRunStatusEnum`` from the
+            shared types module.
         started_at: Bus time the run kicked off.
         completed_at: Bus time the run finished; ``None`` while
             still in flight.
-        exit_code: Process exit code when terminated; ``None`` while
-            still in flight.
+        exit_code: Native subprocess exit code; ``None`` for async-task
+            processes (the launcher folds non-zero exits into the
+            ``error`` payload field on the run record) and ``None``
+            while still in flight.
     """
 
     type: Literal["process_run_event"] = "process_run_event"
@@ -1808,16 +1818,20 @@ class ProcessRunEventData(StrictDataSchema[Literal["process_run_event"]]):
 
 
 class StrategyListEventData(StrictDataSchema[Literal["strategy_list_event"]]):
-    """Snapshot of all registered strategy class paths.
+    """Snapshot of canonical class paths for every STRATEGY-role process.
 
-    Published on ``strategies.events.list.{instance_id}`` whenever the
-    strategy registry mutates (a new class is registered or removed).
-    Frontend uses this to refresh the Strategies dropdown without
-    polling.
+    Published on ``strategies.events.list.{instance_id}`` whenever a
+    STRATEGY-role process config is created or its start / stop state
+    transitions. The launcher derives the payload from persisted
+    process configs filtered by ``role == STRATEGY`` — NOT from the
+    in-memory :class:`StrategyFactory.STRATEGY_CLASSES` registry, which
+    is static after import time. Frontend uses this signal to refresh
+    the Strategies view without polling.
 
     Attributes:
         type: Payload discriminator (always ``strategy_list_event``).
-        strategy_classes: Canonical class paths in registration order.
+        strategy_classes: Sorted canonical class paths of every active
+            STRATEGY-role process config.
         snapshot_at: Bus time the snapshot was assembled.
     """
 

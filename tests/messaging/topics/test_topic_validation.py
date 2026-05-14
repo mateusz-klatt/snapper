@@ -4202,3 +4202,133 @@ class TestAlertTypeParity:
         annotation = DeviceAlertPrefBody.model_fields["alert_type"].annotation
 
         assert frozenset(typing.get_args(annotation)) == _ALERT_TYPES
+
+
+class TestProcessesAndStrategiesValidation:
+    """Validator pairings for the four 2026-05-14 process/strategy topics.
+
+    ``TOPIC_REGISTRY`` declares the patterns and
+    :class:`ValidatedPublisher` consults ``validate_topic`` /
+    ``validate_subscription_pattern`` BEFORE the registry. Without
+    matching validator entries every launcher emit would be rejected
+    at the publisher boundary and every WS subscribe would be denied.
+    Copilot review on parent PR #50 caught the missing pairing; these
+    tests pin it.
+    """
+
+    def test_processes_summary_topic_accepted(self) -> None:
+        """``processes.events.summary.{instance_id}`` validates."""
+        valid, err = validate_topic("processes.events.summary.coord-0")
+        assert valid, err
+
+    def test_processes_configured_topic_accepted(self) -> None:
+        """``processes.events.configured.{instance_id}`` validates."""
+        valid, err = validate_topic("processes.events.configured.coord-0")
+        assert valid, err
+
+    def test_processes_runs_topic_accepted(self) -> None:
+        """``processes.events.runs.{process_name}`` validates."""
+        valid, err = validate_topic("processes.events.runs.trader_coordinator")
+        assert valid, err
+
+    def test_processes_runs_topic_with_hyphen_accepted(self) -> None:
+        """Process names with hyphens (e.g. wallet-prefixed instances) validate."""
+        valid, err = validate_topic("processes.events.runs.executor_kraken_w019dbb34f439")
+        assert valid, err
+
+    def test_processes_topic_with_empty_tail_rejected(self) -> None:
+        """Trailing-dot ``processes.events.summary.`` is NOT a topic."""
+        valid, err = validate_topic("processes.events.summary.")
+        assert not valid
+        assert "requires 4 segments" in err
+
+    def test_processes_topic_with_invalid_tail_rejected(self) -> None:
+        """Tail starting with a digit fails the regex constraint."""
+        valid, err = validate_topic("processes.events.summary.0bad")
+        assert not valid
+        assert "[A-Za-z]" in err
+
+    def test_strategies_list_topic_accepted(self) -> None:
+        """``strategies.events.list.{instance_id}`` validates."""
+        valid, err = validate_topic("strategies.events.list.coord-0")
+        assert valid, err
+
+    def test_strategies_list_topic_with_empty_tail_rejected(self) -> None:
+        """Trailing-dot ``strategies.events.list.`` is NOT a topic."""
+        valid, err = validate_topic("strategies.events.list.")
+        assert not valid
+        assert "requires 4 segments" in err
+
+    def test_strategies_list_topic_with_invalid_tail_rejected(self) -> None:
+        """Tail starting with a digit fails the regex constraint."""
+        valid, err = validate_topic("strategies.events.list.0bad")
+        assert not valid
+
+    def test_processes_summary_prefix_accepted(self) -> None:
+        """``processes.events.summary.`` is a valid subscription prefix."""
+        valid, err = validate_subscription_pattern("processes.events.summary.")
+        assert valid, err
+
+    def test_processes_configured_prefix_accepted(self) -> None:
+        """``processes.events.configured.`` is a valid subscription prefix."""
+        valid, err = validate_subscription_pattern("processes.events.configured.")
+        assert valid, err
+
+    def test_processes_runs_prefix_accepted(self) -> None:
+        """``processes.events.runs.`` is a valid subscription prefix."""
+        valid, err = validate_subscription_pattern("processes.events.runs.")
+        assert valid, err
+
+    def test_strategies_list_prefix_accepted(self) -> None:
+        """``strategies.events.list.`` is a valid subscription prefix."""
+        valid, err = validate_subscription_pattern("strategies.events.list.")
+        assert valid, err
+
+    def test_strategies_root_prefix_accepted(self) -> None:
+        """``strategies.`` root prefix subscribes to all strategy topics."""
+        valid, err = validate_subscription_pattern("strategies.")
+        assert valid, err
+
+    def test_processes_root_prefix_accepted(self) -> None:
+        """``processes.`` root prefix subscribes to all processes topics."""
+        valid, err = validate_subscription_pattern("processes.")
+        assert valid, err
+
+    def test_processes_wrong_third_segment_rejected(self) -> None:
+        """``processes.events.bogus.foo`` falls through to unknown-category.
+
+        The prefix dispatcher only knows the three documented kinds
+        (``summary`` / ``configured`` / ``runs``); any other 3rd
+        segment misses every registered prefix and falls back to the
+        ``Unknown topic category: processes`` error.
+        """
+        valid, err = validate_topic("processes.events.bogus.foo")
+        assert not valid
+        assert "Unknown topic category" in err
+
+    def test_processes_helper_rejects_non_processes_first_segment(self) -> None:
+        """The processes helper is defensive against direct (non-dispatched) calls.
+
+        Normally the prefix dispatcher only routes ``processes.events.*``
+        into ``_validate_processes_snapshot_topic``, but the helper
+        also guards against being invoked with a malformed first
+        segment so the diagnostic message remains accurate when
+        called outside the dispatcher.
+        """
+        from snapper.messaging.topics.validation import _validate_processes_snapshot_topic
+
+        valid, err = _validate_processes_snapshot_topic(
+            "bogus.events.summary.coord-0",
+            prefix="processes.events.summary.",
+            suffix_label="instance_id",
+        )
+        assert not valid
+        assert "Expected 'processes.events.summary' prefix" in err
+
+    def test_strategies_helper_rejects_non_strategies_first_segment(self) -> None:
+        """Same defensive guard for ``_validate_strategies_list_topic``."""
+        from snapper.messaging.topics.validation import _validate_strategies_list_topic
+
+        valid, err = _validate_strategies_list_topic("bogus.events.list.coord-0")
+        assert not valid
+        assert "Expected 'strategies.events.list' prefix" in err
