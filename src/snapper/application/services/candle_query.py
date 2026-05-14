@@ -155,7 +155,21 @@ class CandleQueryResult:
 
 
 def row_from_snap(snap: CandleSnap, timeframe: str) -> CandleQueryRow:
-    """Project a cache :class:`CandleSnap` to the uniform query row."""
+    """Project a cache :class:`CandleSnap` to the uniform query row.
+
+    Cache snaps carry no original WS-frame provenance; the resulting
+    row leaves ``public_id`` / ``timestamp`` / ``session_id`` /
+    ``sequence_id`` / ``vwap`` / ``trades`` as ``None`` so callers
+    project to wire types know to mint synthetic provenance.
+
+    Args:
+        snap: Compact in-memory snapshot from the deque.
+        timeframe: Resolved timeframe label to stamp on the row.
+
+    Returns:
+        :class:`CandleQueryRow` with OHLCV populated and provenance
+        slots set to ``None``.
+    """
     return CandleQueryRow(
         open_at=datetime.fromtimestamp(snap.open_at_ms / 1000.0, tz=UTC),
         timeframe=timeframe,
@@ -174,7 +188,20 @@ def row_from_snap(snap: CandleSnap, timeframe: str) -> CandleQueryRow:
 
 
 def row_from_db(row: CandleRow, timeframe: str) -> CandleQueryRow:
-    """Project a persisted :class:`CandleRow` to the uniform query row."""
+    """Project a persisted :class:`CandleRow` to the uniform query row.
+
+    DB rows already have full provenance from the original ZMQ frame
+    write; this helper passes ``public_id`` / ``timestamp`` /
+    ``session_id`` / ``sequence_id`` / ``vwap`` / ``trades`` through
+    so route handlers can emit the canonical identifiers.
+
+    Args:
+        row: One persisted :class:`CandleRow` dict.
+        timeframe: Resolved timeframe label to stamp on the row.
+
+    Returns:
+        :class:`CandleQueryRow` with OHLCV and full provenance.
+    """
     return CandleQueryRow(
         open_at=row["open_at"],
         timeframe=timeframe,
