@@ -40,6 +40,7 @@ import asyncio
 import contextlib
 import datetime as dt
 import os
+import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -104,6 +105,9 @@ from snapper.api.schemas.health import ZmqComponents
 from snapper.api.schemas.health import ZmqConfig
 from snapper.api.schemas.health import ZmqHealthData
 from snapper.api.schemas.health import ZmqHealthResponse
+from snapper.api.schemas.market_cache import CachedCandle
+from snapper.api.schemas.market_cache import CachedCandlesPayload
+from snapper.api.schemas.market_cache import CachedCandlesResponse
 from snapper.api.schemas.process import ProcessStatus
 from snapper.api.schemas.process import StrategyStatusPayload
 from snapper.api.schemas.process import SystemStatusData
@@ -117,6 +121,14 @@ from snapper.application.db_stats.snapshotter import (
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.retention.scheduler import RetentionScheduler
+from snapper.application.services.candle_query import (
+    VALID_TIMEFRAMES as _CANDLE_QUERY_VALID_TIMEFRAMES,
+)
+from snapper.application.services.candle_query import CacheUnavailableError
+from snapper.application.services.candle_query import CandleQueryRow
+from snapper.application.services.candle_query import fetch_cache_only as fetch_cache_only_candles
+from snapper.application.services.candle_query import fetch_candles as fetch_candle_query
+from snapper.application.services.candle_query import fetch_db_only as fetch_db_only_candles
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.services.market_cache import MarketCacheService
 from snapper.application.services.market_persist_policy import MarketPersistPolicy
@@ -146,6 +158,7 @@ from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.config.settings_routes import router as settings_router
 from snapper.core.partitioning import ShardOwnership
+from snapper.core.types import AllExchange
 from snapper.core.types import ComponentStatusEnum
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import HealthStatus
@@ -979,6 +992,103 @@ def _build_strategy_payload(
 TRADER_COORDINATOR_PROCESS = "trader_coordinator"
 _REST_HEALTH_STREAM = "rest.health"
 _REST_DATA_STREAM = "rest.data"
+_CACHE_CANDLE_NAMESPACE = uuid.UUID("4d4f1f7e-aa6a-4a32-9f3c-3c1b5e9a4b00")
+"""Namespace for deterministic ``uuid5`` provenance on cache-served candles.
+
+The same logical 1m bar identified by ``(exchange, instrument,
+timeframe, open_at_ms)`` always serialises to the same ``public_id``
+across calls so iOS / SPA clients that deduplicate on ``public_id``
+see a stable view of cache-backed candles. Once the bar persists to
+the ``candles`` table its real ``public_id`` from the original ZMQ
+frame supersedes the synthetic one; clients then see the bar twice
+under two different ids unless they also dedup on ``open_at``."""
+_CACHE_CANDLE_SESSION_ID = "market-cache"
+"""Sentinel ``session_id`` for cache-served candles.
+
+Log + audit consumers can distinguish cache-projection rows from
+real publisher-emitted rows by spotting this constant in the
+``session_id`` field. Routes never persist this sentinel; it lives
+only on the wire."""
+
+
+def project_query_row_to_candle_data(
+    row: CandleQueryRow,
+    *,
+    instrument: str,
+    exchange: MarketDataExchange,
+) -> CandleData:
+    """Project a uniform candle query row onto the wire-shape ``CandleData``.
+
+    Persisted rows ride their original ZMQ-frame provenance. Cache-
+    sourced rows mint **deterministic** provenance so the same logical
+    1m bar serialises to the same identifier on every call (iOS
+    clients deduplicating by ``public_id`` see a stable view of
+    cache-backed candles):
+
+    - ``public_id`` is :func:`uuid.uuid5` over
+      :data:`_CACHE_CANDLE_NAMESPACE` and the canonical
+      ``{exchange}|{instrument}|{timeframe}|{open_at_ms}`` tuple.
+    - ``sequence_id`` is the bar's ``open_at_ms`` so the sequence
+      is monotonic per instrument-timeframe and stable across calls
+      (no REST tracker inflation per row).
+    - ``session_id`` is :data:`_CACHE_CANDLE_SESSION_ID`.
+    - ``timestamp`` is the bar's ``open_at`` (domain time).
+    """
+    if (
+        row.public_id is not None
+        and row.timestamp is not None
+        and row.session_id is not None
+        and row.sequence_id is not None
+    ):
+        return CandleData(
+            public_id=row.public_id,
+            timestamp=row.timestamp,
+            session_id=row.session_id,
+            sequence_id=row.sequence_id,
+            instrument=instrument,
+            exchange=exchange,
+            timeframe=row.timeframe,
+            open_at=row.open_at,
+            open=row.open,
+            high=row.high,
+            low=row.low,
+            close=row.close,
+            volume=row.volume,
+            vwap=row.vwap,
+            trades=row.trades,
+        )
+    open_at_ms = int(row.open_at.timestamp() * 1000)
+    name = f"{exchange}|{instrument}|{row.timeframe}|{open_at_ms}"
+    return CandleData(
+        public_id=str(uuid.uuid5(_CACHE_CANDLE_NAMESPACE, name)),
+        timestamp=row.open_at,
+        session_id=_CACHE_CANDLE_SESSION_ID,
+        sequence_id=open_at_ms,
+        instrument=instrument,
+        exchange=exchange,
+        timeframe=row.timeframe,
+        open_at=row.open_at,
+        open=row.open,
+        high=row.high,
+        low=row.low,
+        close=row.close,
+        volume=row.volume,
+        vwap=row.vwap,
+        trades=row.trades,
+    )
+
+
+def project_query_row_to_cached_candle(row: CandleQueryRow) -> CachedCandle:
+    """Project a uniform candle query row onto the diagnostic ``CachedCandle`` shape."""
+    return CachedCandle(
+        open_at_ms=int(row.open_at.timestamp() * 1000),
+        timeframe=row.timeframe,
+        open=row.open,
+        high=row.high,
+        low=row.low,
+        close=row.close,
+        volume=row.volume,
+    )
 
 
 def _resolve_trader_status(
@@ -1036,6 +1146,25 @@ def _create_candles_signals_router() -> APIRouter:
     """
     router = APIRouter()
 
+    def _wrap_candle_list_response(
+        request: Request,
+        items: list[CandleData],
+    ) -> CandleListResponse:
+        """Wrap a projected ``items`` list with REST envelope provenance."""
+        tracker: SequenceTracker = request.app.state.rest_tracker
+        sid = tracker.session_id
+        seq = tracker.next_sequence(_REST_DATA_STREAM)
+        ts = dt.datetime.now(dt.UTC)
+        pid = str(uuid7())
+        return CandleListResponse(
+            session_id=sid,
+            sequence_id=seq,
+            public_id=pid,
+            timestamp=ts,
+            payload=items,
+            count=len(items),
+        )
+
     @router.get(
         "/candles",
         response_model=None,
@@ -1051,76 +1180,236 @@ def _create_candles_signals_router() -> APIRouter:
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         instrument: Annotated[str, Query(description="Instrument symbol")],
         exchange: Annotated[MarketDataExchange, Query(description="Exchange name")],
-        timeframe: Annotated[str, Query(description="Timeframe")],
-        limit: Annotated[int, Query(le=1000, description="Number of candles to return")] = 100,
+        timeframe: Annotated[str, Query(description="Timeframe: 1m/5m/15m/30m/1h/4h/1d")],
+        limit: Annotated[
+            int, Query(ge=1, le=1000, description="Number of candles to return")
+        ] = 100,
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
     ) -> CandleListResponse:
-        """Fetch historical candle data for an instrument.
+        """Fetch historical candle data with smart cache/DB routing.
+
+        The public façade: live reads (``as_of`` absent) for the
+        cache-eligible timeframes (1m / 5m / 15m / 30m) are served
+        from the in-process :class:`MarketCacheService`, with the DB
+        backfilling older bars when the cache is short. Point-in-time
+        queries and 1h/4h/1d frames always read from the persisted
+        ``candles`` table. Old iOS / snapper-mcp / the legacy frontend
+        hook benefit automatically when ``MarketPersistPolicy`` is OFF
+        for the instrument because the cache fills the gap that DB
+        used to expose as an empty array.
 
         Args:
-            request: FastAPI request (provides REST tracker for provenance).
+            request: FastAPI request (provides REST tracker provenance
+                + access to ``app.state.market_cache``).
             _auth: Authenticated user with READ_MARKET_DATA permission.
             _csrf: CSRF token validation.
             repo: Database repository.
-            instrument: Instrument symbol to query.
+            instrument: Native symbol to query (e.g. ``BTC-USD``).
             exchange: Exchange name to query.
-            timeframe: Candle timeframe (e.g. '1m', '1h').
+            timeframe: Candle timeframe (e.g. ``1m`` / ``1h``).
             limit: Maximum number of candles to return.
-            as_of: Optional point-in-time query timestamp.
+            as_of: Optional point-in-time query timestamp. When set,
+                hard-routes to DB so time-travel cannot lie.
 
         Returns:
-            CandleListResponse wrapping the candle data (empty payload if no instrument found).
+            CandleListResponse wrapping the candle data (empty payload
+            if neither cache nor DB have rows for the instrument).
+
+        Raises:
+            HTTPException(400): ``timeframe`` outside the supported set.
         """
-        processing_date = as_of or datetime.now(UTC)
+        if timeframe not in _CANDLE_QUERY_VALID_TIMEFRAMES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported timeframe: {timeframe!r}",
+            )
         try:
-            rows = await repo.get_candles(
-                instrument,
-                timeframe,
-                start=None,
-                end=None,
-                exchange=exchange,
-                as_of=processing_date,
+            cache: MarketCacheService | None = getattr(request.app.state, "market_cache", None)
+            result = await fetch_candle_query(
+                cache=cache,
+                repo=repo,
+                exchange=cast(AllExchange, exchange),
+                native_symbol=instrument,
+                timeframe=timeframe,
                 limit=limit,
-                order="desc",
+                as_of=as_of,
             )
             items = [
-                CandleData(
-                    public_id=r["public_id"],
-                    timestamp=r["timestamp"],
-                    session_id=r["session_id"],
-                    sequence_id=r["sequence_id"],
-                    instrument=instrument,
-                    exchange=exchange,
-                    timeframe=r["timeframe"],
-                    open_at=r["open_at"],
-                    open=r["open"],
-                    high=r["high"],
-                    low=r["low"],
-                    close=r["close"],
-                    volume=r["volume"],
-                    vwap=r["vwap"],
-                    trades=r["trades"],
-                )
-                for r in reversed(rows)
+                project_query_row_to_candle_data(row, instrument=instrument, exchange=exchange)
+                for row in result.rows
             ]
-            tracker: SequenceTracker = request.app.state.rest_tracker
-            sid = tracker.session_id
-            seq = tracker.next_sequence(_REST_DATA_STREAM)
-            ts = dt.datetime.now(dt.UTC)
-            pid = str(uuid7())
-            return CandleListResponse(
-                session_id=sid,
-                sequence_id=seq,
-                public_id=pid,
-                timestamp=ts,
-                payload=items,
-                count=len(items),
-            )
+            return _wrap_candle_list_response(request, items)
         except HTTPException:
             raise
         except Exception as exc:
             logger.error(f"Failed to fetch candles for {instrument}: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch candle data") from exc
+
+    @router.get(
+        "/candles/db",
+        response_model=None,
+        responses={
+            200: {"model": CandleListResponse},
+            500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION},
+        },
+    )
+    async def get_candles_db(
+        request: Request,
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
+        instrument: Annotated[str, Query(description="Instrument symbol")],
+        exchange: Annotated[MarketDataExchange, Query(description="Exchange name")],
+        timeframe: Annotated[str, Query(description="Timeframe: 1m/5m/15m/30m/1h/4h/1d")],
+        limit: Annotated[
+            int, Query(ge=1, le=1000, description="Number of candles to return")
+        ] = 100,
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+    ) -> CandleListResponse:
+        """Explicit DB-only candle read for operators.
+
+        Bypasses the cache unconditionally so operators can verify the
+        persisted ``candles`` table directly (e.g. answering "is the
+        cache lying?" during incident response). Response shape is the
+        same ``CandleListResponse`` as ``/api/candles`` so the URL is
+        a drop-in substitute for one-off ops queries.
+
+        Args:
+            request: FastAPI request (REST tracker provenance).
+            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+            instrument: Native symbol to query.
+            exchange: Exchange name.
+            timeframe: Candle timeframe.
+            limit: Maximum candles to return.
+            as_of: Optional point-in-time query timestamp.
+
+        Returns:
+            CandleListResponse wrapping the persisted candle rows
+            (empty payload if no instrument found).
+
+        Raises:
+            HTTPException(400): ``timeframe`` outside the supported set.
+        """
+        if timeframe not in _CANDLE_QUERY_VALID_TIMEFRAMES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported timeframe: {timeframe!r}",
+            )
+        try:
+            result = await fetch_db_only_candles(
+                repo=repo,
+                exchange=cast(AllExchange, exchange),
+                native_symbol=instrument,
+                timeframe=timeframe,
+                limit=limit,
+                as_of=as_of,
+            )
+            items = [
+                project_query_row_to_candle_data(row, instrument=instrument, exchange=exchange)
+                for row in result.rows
+            ]
+            return _wrap_candle_list_response(request, items)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(f"Failed to fetch DB candles for {instrument}: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to fetch candle data") from exc
+
+    @router.get(
+        "/candles/cache",
+        response_model=None,
+        responses={
+            200: {"model": CachedCandlesResponse},
+            400: {"description": "Invalid timeframe"},
+            503: {"description": "Market cache not initialized"},
+        },
+    )
+    async def get_candles_cache(
+        request: Request,
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
+        instrument: Annotated[str, Query(description="Native symbol (e.g. BTC-USD)")],
+        exchange: Annotated[MarketDataExchange, Query(description="Exchange name")],
+        timeframe: Annotated[str, Query(description="Timeframe: 1m/5m/15m/30m/1h/4h/1d")] = "1m",
+        limit: Annotated[
+            int, Query(ge=1, le=1000, description="Number of candles to return")
+        ] = 100,
+    ) -> CachedCandlesResponse:
+        """Explicit cache-only candle read with diagnostic extras.
+
+        The diagnostic view of the in-process :class:`MarketCacheService`.
+        Drives the ``CacheWarmingBanner`` UI through three extra fields
+        on the payload — ``is_warm`` (cache satisfied the requested
+        ``limit``), ``source`` (``cache`` / ``derived`` / ``db``), and
+        ``sample_count``.
+
+        Returns ``[]`` with ``is_warm=False`` when the cache is cold
+        for the requested instrument; does NOT silently fall back to
+        DB for cache-eligible timeframes (1m / 5m / 15m / 30m). Long
+        frames (1h / 4h / 1d) fall through to the repository because
+        the cache literally cannot serve them — the discriminator
+        surfaces this as ``source="db"``.
+
+        Args:
+            request: FastAPI request (REST tracker provenance).
+            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _csrf: CSRF token validation.
+            repo: Database repository (used for the 1h/4h/1d fallback).
+            instrument: Native symbol to query.
+            exchange: Exchange name.
+            timeframe: Candle timeframe.
+            limit: Maximum candles to return.
+
+        Returns:
+            CachedCandlesResponse wrapping the cache-shaped payload.
+
+        Raises:
+            HTTPException(400): Unsupported timeframe.
+            HTTPException(503): Market cache not initialized and the
+                requested timeframe is cache-eligible.
+        """
+        if timeframe not in _CANDLE_QUERY_VALID_TIMEFRAMES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported timeframe: {timeframe!r}",
+            )
+        cache: MarketCacheService | None = getattr(request.app.state, "market_cache", None)
+        try:
+            result = await fetch_cache_only_candles(
+                cache=cache,
+                repo=repo,
+                exchange=cast(AllExchange, exchange),
+                native_symbol=instrument,
+                timeframe=timeframe,
+                limit=limit,
+            )
+        except CacheUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc),
+            ) from exc
+        candles = [project_query_row_to_cached_candle(row) for row in result.rows]
+        payload = CachedCandlesPayload(
+            candles=candles,
+            sample_count=result.sample_count,
+            is_warm=result.is_warm,
+            source=result.source,
+        )
+        tracker: SequenceTracker = request.app.state.rest_tracker
+        sid = tracker.session_id
+        seq = tracker.next_sequence(_REST_DATA_STREAM)
+        ts = dt.datetime.now(dt.UTC)
+        pid = str(uuid7())
+        return CachedCandlesResponse(
+            session_id=sid,
+            sequence_id=seq,
+            public_id=pid,
+            timestamp=ts,
+            payload=payload,
+        )
 
     @router.get("/signals", responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}})
     async def get_signals(
