@@ -173,8 +173,8 @@ existing audit-bypass contract.
 
 The `ai_review_public_id` carried on the published `SignalData`
 is transport-only end-to-end through the ZMQ wire. The
-companion `ai_review_dispatch_version` (Plan A Q18 dedup key) is
-also transport-only — the strategy citation validator does not
+companion `ai_review_dispatch_version` (dedup key) is also
+transport-only — the strategy citation validator does not
 compare it; the bus publisher reads `dispatch_version` from the
 cited row at publish time so downstream caps-violation fanout
 events are always tagged with the row-of-record version.
@@ -469,8 +469,8 @@ the stop is breached. Attach a trailing stop to an open
   the price moves against you. A decision warning is logged on the
   `trailing_stop_created` row at create time.
 - **Single trailing stop per cycle:** enforced by the partial unique
-  index `uq_ep_active_trailing_stop_per_cycle` (Alembic migration
-  `0009`). A second create on the same open cycle returns HTTP 409.
+  index `uq_ep_active_trailing_stop_per_cycle`. A second create on
+  the same open cycle returns HTTP 409.
 - **Cycle close sweeps the plan:** if the cycle closes externally
   (reconciliation flat, manual close, bracket fill),
   `_sweep_cycle_closures()` cancels the trailing stop on the next
@@ -502,17 +502,16 @@ is swept by the cycle-close handler.
   `supports_reduce_only`). Not supported on Kraken spot.
 - No breakeven-move feature (ratchet stop to entry after N % profit).
 - No time-based activation (arm after N minutes regardless of price).
-- Live rollout gated on the same Phase 2 follow-ups (wallet-safe
+- Live rollout gated on the same follow-ups (wallet-safe
   routing + orphan-cycle admin) that brackets depend on.
 
 ## Cross-asset market-data pattern
 
-Snapper Phase A / TradFi Market Data P3 enables strategies to subscribe
-to a market-data-only feed (``SymbolExchangeCapability.can_trade=False``)
-and emit signals whose target is an execution-capable instrument on a
-different venue. Kraken FCM index futures (``kraken_equities``) are the
-primary driver: they publish ~10-minute-delayed candles + ticks but have
-no order API.
+Snapper enables strategies to subscribe to a market-data-only feed
+(``SymbolExchangeCapability.can_trade=False``) and emit signals whose
+target is an execution-capable instrument on a different venue.
+Kraken FCM index futures (``kraken_equities``) are the primary driver:
+they publish ~10-minute-delayed candles + ticks but have no order API.
 
 ### Rules
 

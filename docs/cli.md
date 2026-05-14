@@ -89,11 +89,10 @@ snapper broker --xsub tcp://127.0.0.1:7500 --xpub tcp://127.0.0.1:7501
 Starts the central trade runtime coordinator.
 
 The process still runs as the `trade-zmq` command, but after the trade
-runtime redesign it also hosts `TradeService`, `BalanceService`, and,
-when durable mode is enabled, the outbox dispatcher and reconciliation loop.
-In dual-write mode the same process still writes `TradeCommand` rows,
-consumes `orders.events.*` to keep projections in sync, and persists
-checkpoints for recovery.
+runtime redesign it also hosts `TradeService`, `BalanceService`, the
+outbox dispatcher, and the reconciliation loops. It writes
+`TradeCommand` rows, consumes `orders.events.*` to keep projections in
+sync, and persists checkpoints for recovery.
 
 ```bash
 snapper trade-zmq [OPTIONS]
@@ -104,8 +103,8 @@ snapper trade-zmq [OPTIONS]
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
 | `--signal-topics` | string | `signals.` | Signal topics to subscribe |
-| `--instance-id` | int | `0` (or `$SNAPPER_COORDINATOR_INSTANCE_ID`) | Phase 4 partitioning: zero-based id for this coordinator in a multi-instance deployment. CLI flag > env var > default. |
-| `--instance-count` | int | `1` (or `$SNAPPER_COORDINATOR_INSTANCE_COUNT`) | Phase 4 partitioning: total coordinator instance count across the deployment. Must match across all coordinators. |
+| `--instance-id` | int | `0` (or `$SNAPPER_COORDINATOR_INSTANCE_ID`) | Multi-instance partitioning: zero-based id for this coordinator in a multi-instance deployment. CLI flag > env var > default. |
+| `--instance-count` | int | `1` (or `$SNAPPER_COORDINATOR_INSTANCE_COUNT`) | Multi-instance partitioning: total coordinator instance count across the deployment. Must match across all coordinators. |
 
 **Example:**
 
@@ -113,7 +112,7 @@ snapper trade-zmq [OPTIONS]
 snapper trade-zmq --signal-topics "signals.paper.BTC-USD.rsi_btc_1h,signals.kraken.BTC-USD.live"
 ```
 
-**Multi-instance deployment (Phase 4):**
+**Multi-instance deployment:**
 
 ```bash
 # Coordinator 0 of 2
@@ -125,7 +124,8 @@ snapper trade-zmq --instance-id 1 --instance-count 2
 
 Each instance owns `~1/N` of the shard_keys via deterministic
 SHA-256 hashing. Default `--instance-count 1` is byte-identical to
-pre-Phase-4 behavior (every shard owned by the single coordinator).
+single-coordinator behavior (every shard owned by the single
+coordinator).
 See [docs/operations.md](operations.md) for systemd template unit +
 scale-up/down/crash-recovery runbooks.
 

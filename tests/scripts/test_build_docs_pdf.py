@@ -1579,10 +1579,10 @@ class TestParseArgs:
 
         Given: No command line arguments,
         When: Calling parse_args,
-        Then: The default output is 'snapper.pdf'.
+        Then: The default output is 'frontend/public/snapper.pdf'.
         """
         args = parse_args([])
-        assert args.output == "snapper.pdf"
+        assert args.output == "frontend/public/snapper.pdf"
 
     def test_custom_output(self) -> None:
         """Verify custom output.

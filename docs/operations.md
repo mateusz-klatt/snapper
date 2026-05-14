@@ -1,8 +1,7 @@
-# Operations runbook — multi-instance trade coordinator (Phase 4)
+# Operations runbook — multi-instance trade coordinator
 
-Phase 4 introduces static-hash shard partitioning for the trade
-runtime. At `SNAPPER_COORDINATOR_INSTANCE_COUNT=1` (the default)
-everything behaves identically to pre-Phase-4 — a single
+The trade runtime supports static-hash shard partitioning. At
+`SNAPPER_COORDINATOR_INSTANCE_COUNT=1` (the default) a single
 `TraderCoordinator` owns every shard. Scaling to `N >= 2` deploys
 multiple coordinators against the same DB and ZMQ broker, each
 owning `~1/N` of the shards deterministically via SHA-256 of the
@@ -11,10 +10,9 @@ shard key.
 This document covers operating the N-instance trade runtime:
 scale-up, scale-down, and crash recovery. It is intentionally
 opinionated about systemd because systemd template units are the
-stable recipe across 28 rounds of plan review. A contract for
-alternative orchestrators (Docker Compose, Kubernetes, Nomad) is
-also specified so operators can adopt them with empirical
-verification.
+stable recipe. A contract for alternative orchestrators (Docker
+Compose, Kubernetes, Nomad) is also specified so operators can
+adopt them with empirical verification.
 
 ## Prerequisites: systemd template unit
 
@@ -116,8 +114,8 @@ starting instance 1 as `count=2`:
   `status='created' → 'dispatched'`.
 
 The `~10s` dispatch pause for owned shards during the cutover
-window is the explicit no-HA trade-off of Phase 4. HA was excluded
-from scope by design (plan §D2).
+window is the explicit no-HA trade-off. HA was excluded from
+scope by design.
 
 ## Crash recovery (systemd)
 
@@ -147,7 +145,7 @@ Recovery rebuilds engines from:
 1. Checkpoints (carry `shard_key` directly, filtered by ownership).
 2. Live executions (filtered by recovered shard_key; paper rows
    are EXCLUDED under N>1 because `ExecutionRow` has no
-   `strategy_tag` — see plan §3.5).
+   `strategy_tag`).
 3. Active orders (same treatment as executions).
 
 Under N>1 paper mode, state that never produced a checkpoint is
@@ -156,22 +154,22 @@ need to survive restart MUST persist checkpoints.
 
 ## Known limitation — REST orders with `wallet_public_id` under N>1
 
-Pre-existing behavior (predates Phase 4): the REST order endpoints
-at `src/snapper/server/order_routes.py` build the
-``TradeCommand.shard_key`` without the wallet segment, while the
-signal-driven engine's shard_key appends ``.w{wallet_short}`` via
-``_compute_shard_key`` when ``wallet_public_id`` is non-empty.
+The REST order endpoints at `src/snapper/server/order_routes.py`
+build the ``TradeCommand.shard_key`` without the wallet segment,
+while the signal-driven engine's shard_key appends
+``.w{wallet_short}`` via ``_compute_shard_key`` when
+``wallet_public_id`` is non-empty.
 
 At N=1 this is dormant because every shard is owned by the single
-coordinator, the outbox has no ownership filter, and the §3.2 CID
-guard is gated on ``instance_count > 1``.
+coordinator, the outbox has no ownership filter, and the CID guard
+is gated on ``instance_count > 1``.
 
 Under N>1, a REST order with a non-empty ``wallet_public_id``
 writes a TradeCommand whose shard_key hashes to a different
 instance than the engine for the same (exchange, instrument,
 wallet). The owning coordinator dispatches the command to the
-venue correctly, but the venue ACK is dropped by the §3.2 CID
-guard on every coordinator because the CID was never registered
+venue correctly, but the venue ACK is dropped by the CID guard
+on every coordinator because the CID was never registered
 in ``_order_shard_keys`` (the REST path does not populate it).
 
 Consequence at N>1: REST orders with ``wallet_public_id`` reach
@@ -187,10 +185,9 @@ driven + REST-driven orders. Signal-only workflows are unaffected.
 
 ## Non-systemd deployments (contract)
 
-This plan's operational recipes are anchored on the systemd
-template above because it has been stable across 28 plan-review
-rounds. For non-systemd platforms, the deployment author writes a
-recipe that satisfies the same contract:
+The operational recipes are anchored on the systemd template above.
+For non-systemd platforms, the deployment author writes a recipe
+that satisfies the same contract:
 
 1. Two distinct supervised processes on the same host (or across
    hosts) with `SNAPPER_COORDINATOR_INSTANCE_ID=0` and `=1`

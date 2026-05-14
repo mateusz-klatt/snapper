@@ -1468,9 +1468,9 @@ Returns `PayloadListResponse` with `ContractData` items. Each item includes
 
 ## Multi-Tenant (Wallets, Operators, Scope Grants, Credentials)
 
-All multi-tenant endpoints were added in Phase 0d. ADMIN principals
-see the full catalogue; VIEWER and OPERATOR principals see only the
-subset covered by their operator memberships and active scope grants.
+ADMIN principals see the full catalogue; VIEWER and OPERATOR
+principals see only the subset covered by their operator memberships
+and active scope grants.
 
 ### GET /api/wallets
 

@@ -111,7 +111,7 @@ help:
 	$(info server-check                  Health check server [cross-platform])
 	$(info )
 	$(info Docs:)
-	$(info docs-pdf Export README + docs/*.md into snapper.pdf)
+	$(info docs-pdf Export README + docs/*.md into frontend/public/snapper.pdf)
 	$(info )
 	$(info Code Maintenance:)
 	$(info move-imports Move all imports to top of Python files)
@@ -521,7 +521,7 @@ bridge-check:
 
 docs-pdf:
 	$(VENV_PY) scripts/build_docs_pdf.py
-	$(info Generated snapper.pdf)
+	$(info Generated frontend/public/snapper.pdf)
 
 ios-gen-types:
 	$(info Generating Swift types from backend schemas...)

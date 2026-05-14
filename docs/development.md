@@ -488,4 +488,4 @@ Markdown documentation in `docs/` directory.
 make docs-pdf
 ```
 
-Generates `snapper.pdf` from README + docs/*.md.
+Generates `frontend/public/snapper.pdf` from README + docs/*.md so the docs ship with the frontend bundle and are linked from the login page.

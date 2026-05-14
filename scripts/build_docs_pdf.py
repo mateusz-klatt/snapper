@@ -420,15 +420,18 @@ class MarkdownToPdf:
                 font-size: {max(self._config.body_font_size_pt - 1, 6)}pt;
             }}
             figure.diagram {{
-                display: flex;
-                justify-content: center;
+                text-align: center;
                 margin: 1.2em 0;
+                page-break-inside: avoid;
+                page-break-before: avoid;
+                break-inside: avoid;
+                break-before: avoid;
             }}
             figure.diagram img {{
                 max-width: 100%;
-                max-height: 85vh;
+                max-height: 580pt;
+                width: auto;
                 height: auto;
-                object-fit: contain;
             }}
             table {{
                 border-collapse: collapse;
@@ -854,8 +857,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export Markdown documentation to a PDF file")
     parser.add_argument(
         "--output",
-        default="snapper.pdf",
-        help="Path to the target PDF file (default: snapper.pdf)",
+        default="frontend/public/snapper.pdf",
+        help="Path to the target PDF file (default: frontend/public/snapper.pdf)",
     )
     parser.add_argument(
         "--font",

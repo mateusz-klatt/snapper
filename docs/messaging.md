@@ -498,14 +498,14 @@ snapper executor -e kraken
 Executor:
 
 1.  Subscribes to `orders.commands.{exchange}.*` topics
-2.  Receives `OrderRequestData` from the trade runtime, either from the direct
-    dual-write path or the durable outbox dispatcher
+2.  Receives `OrderRequestData` from the trade runtime via the durable
+    outbox dispatcher
 3.  Executes order via exchange API
 4.  Persists `VenueEvent` rows for accepted, fill, and terminal observations
 5.  Publishes `ExecutionData` or `OrderData`
 
-In durable mode, failed `VenueEvent` persistence is treated as fail-closed on
-the accepted/fill paths and aborts downstream publish from the executor.
+Failed `VenueEvent` persistence is treated as fail-closed on the
+accepted/fill paths and aborts downstream publish from the executor.
 
 The trade runtime subscribes to `orders.events.*` to keep `TradeService` and
 `BalanceService` in sync during normal operation. `VenueEvent` rows are used as

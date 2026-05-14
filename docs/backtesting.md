@@ -95,11 +95,11 @@ The replay path adds a few primitives the live system does not need:
   so a second cancel arriving mid-write does not interrupt the write
   coroutine.
 
-## Phase 2c — advanced metrics, live progress, comparison
+## Advanced metrics, live progress, comparison
 
-Phase 2c ships three interlocking surfaces:
+The backtest surface ships three interlocking capabilities:
 
-### Advanced metrics (migration 0005)
+### Advanced metrics
 
 Eight additional metric columns on `backtest_results` — five
 promoted from the `extra_metrics` JSON blob
@@ -120,7 +120,7 @@ promoted from the `extra_metrics` JSON blob
   equity. Zero-trade returns `0.0`; non-positive mean equity
   returns `None` + warning.
 
-Read-side fallback at `GET /api/backtests/{id}` collapses pre-0005
+Read-side fallback at `GET /api/backtests/{id}` collapses legacy
 `extra_metrics` JSON into the typed slots using explicit `is not
 None` coalescing (never Python truthiness — preserves legitimate
 `0.0` values). The response strips the five promoted names from the
@@ -154,7 +154,7 @@ every subscribed client.
   event == 'milestone'` so a malformed payload cannot reach the
   frontend chip logic.
 
-### Config hash for auto-pair (migration 0006)
+### Config hash for auto-pair
 
 Every new run persists a `config_hash` via
 `compute_fingerprint(config, for_pairing=True)` — SHA-256 over the
@@ -163,8 +163,8 @@ Every new run persists a `config_hash` via
 `initial_balance`, `strategy_params`, `timeframe`, `fill_model`,
 `slippage_bps`, `commission_bps`), plus
 `target_execution_exchange` when it is set on the config
-(see §"Cross-asset execution" → "Fingerprint + pairing" below —
-legacy default-`None` runs keep their exact pre-v1.2 hash). `execution_mode`,
+(see "Cross-asset execution" → "Fingerprint + pairing" below —
+legacy default-`None` runs keep their exact prior hash). `execution_mode`,
 `snapshot_as_of`, `warmup_bars`, and `buffer_size` are explicitly
 excluded so Direct-DB and ZMQ replay runs on the same config share
 a hash.
@@ -173,7 +173,7 @@ a hash.
 the auto-pair UI; the repository query is wallet-scoped and
 indexed on `(wallet_public_id, config_hash, timestamp)`.
 
-### Comparison (migration 0007)
+### Comparison
 
 `POST /api/backtests/compare` creates (or returns existing) a
 comparison row; `GET /api/backtests/compare/{id}` returns the
@@ -300,8 +300,8 @@ Three explicit non-goals in the current implementation:
 `compute_fingerprint` includes `target_execution_exchange` in the
 payload **only when non-None**, so legacy (default-None) runs keep
 their exact pre-cross-asset hash in both the default and
-`for_pairing=True` paths. This preserves Phase 2c dedup cache
-validity and the auto-pair UI grouping logic at
-`backtest_routes.py:348`. Explicit cross-asset runs (field set to a
-concrete venue like `"kraken"`) generate distinct fingerprints so
-they never collide with single-venue baselines.
+`for_pairing=True` paths. This preserves dedup cache validity and
+the auto-pair UI grouping logic at `backtest_routes.py:348`.
+Explicit cross-asset runs (field set to a concrete venue like
+`"kraken"`) generate distinct fingerprints so they never collide
+with single-venue baselines.

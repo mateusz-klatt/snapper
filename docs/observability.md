@@ -344,7 +344,7 @@ alphabetical).
 
 The cold-start window lasts up to `DB_METRICS_INTERVAL_SECONDS`
 (default 60s) — by design, the sampler does NOT block lifespan
-startup on the first sample (plan §11.2). Frontend dashboards must
+startup on the first sample. Frontend dashboards must
 poll-with-backoff using the `Retry-After` header.
 
 ## Snapshot fields

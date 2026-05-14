@@ -340,7 +340,7 @@ flowchart TB
     Signal["Strategy Signal"] -->|ZMQ| Runtime["Trade Runtime"]
     Runtime --> Engine["TradingEngineService\n(per instrument / shard)"]
     Engine --> Command["TradeCommand\n(durable DB command log)"]
-    Command --> Dispatch["Command dispatch\n(direct ZMQ or OutboxDispatcher)"]
+    Command --> Dispatch["Command dispatch\n(OutboxDispatcher)"]
     Dispatch -->|orders.commands.*| Executor["Order Executor"]
     Executor --> Exchange["Exchange API / private WS"]
     Exchange --> VenueEvent["VenueEvent\n(persisted by executor)"]
@@ -416,15 +416,15 @@ and integrates `TradeService` (command lifecycle) and `BalanceService`
 loops that feed the circuit breaker. Canonical `Order` and `Execution`
 rows are persisted on the exchange/executor path.
 
-Since Phase 4 (2026-04-18), multiple `TraderCoordinator` processes can
-run against the same DB + broker with deterministic SHA-256 shard
-partitioning via `snapper.core.partitioning.ShardOwnership`. Each
-coordinator owns `~1/N` of the `shard_key` set; signals, venue events,
-recovery, outbox dispatch, and reconciliation all filter by ownership
-so no two instances process the same shard. Default `--instance-count
-1` is byte-identical to pre-Phase-4 behavior. See
-[`docs/operations.md`](operations.md) for the systemd template recipe
-and scale-up / scale-down / crash-recovery procedures.
+Multiple `TraderCoordinator` processes can run against the same DB
++ broker with deterministic SHA-256 shard partitioning via
+`snapper.core.partitioning.ShardOwnership`. Each coordinator owns
+`~1/N` of the `shard_key` set; signals, venue events, recovery,
+outbox dispatch, and reconciliation all filter by ownership so no
+two instances process the same shard. Default `--instance-count 1`
+is byte-identical to single-coordinator behavior. See
+[`docs/operations.md`](operations.md) for the systemd template
+recipe and scale-up / scale-down / crash-recovery procedures.
 
 ## Bitemporal Model
 
@@ -514,8 +514,8 @@ the contention entirely.
 the same natural key, batches serialize strictly. If a long-running
 batch holds the lock for many milliseconds per row, throughput falls
 linearly in contention. The current single-publisher-per-exchange
-shape makes this a non-issue; revisit when Trade Runtime Phase 4
-(multi-instance) lands.
+shape makes this a non-issue; revisit if multi-publisher contention
+on the same natural key becomes a real workload.
 
 **Non-atomic fallback (`_upsert_batch` row-by-row path):** the
 dialect-agnostic fallback at `repository.py:2540-2550` wraps each row
@@ -550,8 +550,8 @@ ZMQ-WebSocket bridge still starts, so the frontend receives live data from
 a separately-running engine. Useful when broker/strategies/executors run
 on different hosts.
 
-**Multi-instance deployment (Plan D Phase 2 #8 — AI-review fanout dedup):**
-multi-worker uvicorn is now a supported production topology. The
+**Multi-instance deployment (AI-review fanout dedup):**
+multi-worker uvicorn is a supported production topology. The
 shared ZMQ XPUB-XSUB broker delivers every internal bus event to
 every FastAPI worker's ``AiReviewService.start_bus_listener``;
 each subscribed topic has its own dedup story so connected
@@ -578,8 +578,8 @@ regardless of worker count:
   ``ShardOwnership.owns`` return True unconditionally so behaviour
   is byte-identical to single-worker.
 
-The same partitioning primitive backs the Trade Runtime Phase 4
-shard ownership; AI-review reuses it via the
+The same partitioning primitive backs the Trade Runtime shard
+ownership; AI-review reuses it via the
 ``set_shard_ownership(ShardOwnership(coordinator_instance_id,
 coordinator_instance_count))`` injection seam wired by the FastAPI
 lifespan after the publisher seam and before the bus listener
@@ -591,9 +591,9 @@ workers each with a distinct ``SNAPPER_COORDINATOR_INSTANCE_ID`` in
 ``[0, N)`` (env vars only — ``snapper server`` does not expose
 per-worker CLI flags; the ``--instance-id`` / ``--instance-count``
 CLI flags exist on ``snapper trade-zmq`` for the Trade Runtime
-Phase 4 coordinator partitioning, not on the FastAPI server). Each
-worker subscribes to every bus topic; only the SHA-256 owner runs
-the caps-violation external fanout.
+coordinator partitioning, not on the FastAPI server). Each worker
+subscribes to every bus topic; only the SHA-256 owner runs the
+caps-violation external fanout.
 
 ## Execution Plans
 
@@ -607,11 +607,11 @@ classes running inside `PlanExecutorService`.
 `instrument_order_capabilities` (capability matrix), `venue_fee_schedules` (fee tiers),
 `position_cycles` (one open→close lifetime per shard, brackets attach by `position_cycle_public_id`).
 
-**Plan types:** `manual_once` (Phase 1 + Phase 1.5 hardening, shipped),
-`bracket` (Phase 2 step 2, shipped 2026-04-12 — attaches to `position_cycles` row from step 1),
-`trailing_stop` (Phase 3, shipped 2026-04-13 — stateful ratcheting stop with
+**Plan types:** `manual_once` (shipped),
+`bracket` (shipped — attaches to a `position_cycles` row),
+`trailing_stop` (shipped — stateful ratcheting stop with
 checkpoint persistence, separate `/api/trailing-stops` route module),
-`peg` (Phase 4), `scheduler` (Phase 5).
+`peg`, `scheduler`.
 
 **Manual order create flow:** `POST /api/orders` creates a `manual_once`
 plan (pending), stamps `child_client_order_id`, `native_instrument`, and
@@ -651,9 +651,9 @@ sleeps 500 ms for ZMQ XPUB/XSUB slow-joiner stabilization before
 recovery to avoid losing terminal events triggered by stranded-cancel
 re-emits.
 
-**Position cycles (Phase 2 step 1, shipped 2026-04-11):** the
-`position_cycles` table represents one flat→non-flat→flat lifetime per
-shard via the standard `TemporalMixin` SCD2 envelope. A partial unique
+**Position cycles:** the `position_cycles` table represents one
+flat→non-flat→flat lifetime per shard via the standard
+`TemporalMixin` SCD2 envelope. A partial unique
 index `uq_pc_shard_open_active` enforces at most one open cycle per
 `shard_key` at any instant. Five repository methods cover the lifecycle:
 `insert_position_cycle`, `close_position_cycle` (SCD2 close-and-insert),
@@ -693,11 +693,10 @@ row → hydrate the cache and bump `max_qty` if downtime scaled-up beyond
 the stored peak; recovered non-flat with an opposite-direction row →
 atomic flip via `flip_position_cycle` (or degrade to close-only on
 unresolved instrument); recovered non-flat with no row → bootstrap a
-synthetic cycle. Brackets (shipped Phase 2 step 2, 2026-04-12) attach to
-`position_cycle_public_id`, not to an order, so a flat reopen does not
-inherit stale stop levels. Orphan cycles (open rows without a matching
-engine) can be detected and closed via admin endpoints at
-`/api/position-cycles/` (shipped 2026-04-13).
+synthetic cycle. Brackets attach to `position_cycle_public_id`, not
+to an order, so a flat reopen does not inherit stale stop levels.
+Orphan cycles (open rows without a matching engine) can be detected
+and closed via admin endpoints at `/api/position-cycles/`.
 
 **`max_qty` is per-cycle, not lifetime.** Each `position_cycles` row
 tracks the peak absolute quantity reached within its own
@@ -725,7 +724,7 @@ flowchart TB
 ### Backtesting
 
 The backtesting subsystem runs strategy simulations against historical candle
-data. Phase 1 uses DirectDbEngine (synchronous candle reads from DB).
+data. DirectDbEngine performs synchronous candle reads from DB.
 
 **Architecture:**
 
@@ -812,9 +811,8 @@ instrument (crypto spot, xStocks). See
 `src/snapper/strategies/examples/tradfi_observe_crypto_execute.py`
 for an illustrative EMA-crossover implementation + activation
 instructions in the module docstring. Cross-asset execution at the
-backtest-engine level is out of scope for Phase A — see
-`plan_tradfi_market_data_p3.md` §5 item 18 for the deferred follow-up
-(engine changes required: `batch_processor` needs to use
+backtest-engine level is a deferred follow-up (engine changes
+required: `batch_processor` needs to use
 `signal.instrument`/`signal.exchange` for target attribution, plus
 multi-feed `domain_time` alignment).
 

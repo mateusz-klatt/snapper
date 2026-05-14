@@ -260,8 +260,8 @@ caps enforcer + per-tool permissions.
 
 - **`list_orders(wallet_public_id?, status?, exchange?, instrument?,
     limit=50, offset=0)`** — paged read of the delegate's order
-    history within accessible wallets. Requires `READ_ORDERS`. Plan B
-    Q14 envelope; surfaces `order_not_found` for inaccessible wallets
+    history within accessible wallets. Requires `READ_ORDERS`.
+    Surfaces `order_not_found` for inaccessible wallets
     (anti-enumeration).
 
 - **`get_order_status(command_public_id: str)`** — single-order
@@ -331,7 +331,7 @@ optional; `null` means "unbounded on this axis".
 
 Caps are enforced at every trade-command insert site via the
 `TradingCapsEnforcer.guard()` surface. MCP `submit_manual_order` is
-the only tool in Phase A that triggers them.
+the only tool that triggers them.
 
 Update caps via `PATCH /api/ai-delegates/{id}` — the write is SCD2
 close+insert, so cap history is auditable.
@@ -349,7 +349,7 @@ operator deactivation:
     in one SQL UPDATE, and seeds the in-memory JTI blacklist with a
     10-second grace period.
 3. `UserService.deactivate_user` publishes `admin.user_deactivated`
-    on the bus (sole publisher per plan §3.6.1).
+    on the bus (sole publisher).
 4. Every Snapper instance's `WebSocketAuthManager` subscribes to the
     topic and closes matching WebSocket connections with code `4003`.
 5. Every Snapper instance's `TokenManager` subscribes to the topic
@@ -361,8 +361,8 @@ before LRU in `verify_token_with_db`); cross-instance kill is bounded
 by one bus-message round-trip (sub-second on local ZMQ) instead of
 the 30-second LRU TTL.
 
-In-flight MCP tool handlers are **not** force-cancelled. The plan §2
-item 6 guarantee is narrowly "the NEXT MCP request is rejected".
+In-flight MCP tool handlers are **not** force-cancelled. The
+guarantee is narrowly "the NEXT MCP request is rejected".
 
 ---
 
@@ -389,7 +389,7 @@ not on status text.
 | 503    | `mcp_unavailable`          | Repository dep unavailable (lifespan not ready)  | Retry with backoff                                    |
 | 401    | `missing_bearer_token`     | No `Authorization: Bearer …` header              | Prompt user to authenticate                           |
 | 401    | `invalid_bearer_token`     | JWT signature/expiry/blacklist/inventory failure | Call `POST /api/auth/refresh`; fail → re-login        |
-| 401    | `user_deactivated`         | Owner account deactivated (plan §2 item 6)       | Prompt re-login; don't auto-refresh                   |
+| 401    | `user_deactivated`         | Owner account deactivated                        | Prompt re-login; don't auto-refresh                   |
 | 401    | Refresh token redeemed     | Replay of a spent refresh JWT                    | Re-login                                              |
 | 401    | Account deactivated        | Session cookie flow                              | Re-login                                              |
 | 403    | `wallet_out_of_scope`      | Tool targets a wallet outside the caller's scope | Pick a wallet the caller still has a live grant on    |
@@ -434,7 +434,7 @@ Delegate password hashes are bcrypt-derived from 32 bytes of
 cryptographically random data the operator never sees. An attacker
 with DB read rights cannot brute-force the hash.
 
-### Single-publisher invariant (§3.6.1)
+### Single-publisher invariant
 
 `UserService.deactivate_user` is the SOLE publisher of
 `admin.user_deactivated` across the entire process. `TokenManager`
@@ -445,10 +445,10 @@ operator deactivation AND delegate deactivation (the route reuses
 
 ### MCP transport = Streamable HTTP
 
-Per plan §3.2 the MCP endpoint uses Model Context Protocol's
-Streamable HTTP transport. No cookies, no CSRF on MCP calls (bearer
-header bypass per plan §3.7 item 4). Every tool call opens a
-sub-request inside the same bearer-authenticated HTTP connection.
+The MCP endpoint uses Model Context Protocol's Streamable HTTP
+transport. No cookies, no CSRF on MCP calls (bearer header bypass).
+Every tool call opens a sub-request inside the same
+bearer-authenticated HTTP connection.
 
 ---
 

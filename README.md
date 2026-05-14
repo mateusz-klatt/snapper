@@ -28,7 +28,7 @@ before running `make migrate-dev`, or rotate after first login via
     YAML-driven pattern matching, front-month rollover, contract ladder API
 - **Trade runtime** — Facts-canonical live and paper trading with canonical
     Order and Execution facts, rebuildable Position and Balance projections,
-    and optional durable command mode
+    dispatched via a durable outbox
 - **Strategies** — Framework for creating strategies based on RSI, MACD,
   cointegration, and TA-Lib indicators
 - **ZeroMQ messaging** — Pub/sub architecture for market data and signals
@@ -106,18 +106,13 @@ snapper server
 
 Dashboard available at `http://localhost:8000/`.
 
-### Trade Runtime Mode
+### Trade Runtime Dispatch
 
-The trade runtime supports two DB-backed modes controlled by the
-`use_durable_commands` setting:
-
-- `false` (default) — dual-write mode. The engine writes durable command rows
-    and still publishes directly to ZMQ.
-- `true` — outbox-driven durable mode. Commands are published from the
-    database outbox and executor venue-event persistence becomes fail-closed.
-
-Restart `snapper trade-zmq` and the relevant executors after changing this
-setting.
+The trade runtime always uses durable, outbox-driven dispatch: commands
+are persisted as `TradeCommand` rows and published by the outbox
+dispatcher. On the accepted/fill paths, executor `VenueEvent`
+persistence is fail-closed — a failed write raises before the
+corresponding `orders.events.*` publish.
 
 ## System Overview
 
