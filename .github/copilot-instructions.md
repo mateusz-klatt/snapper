@@ -45,6 +45,7 @@ the complete quality gate using the consolidated Makefile targets before creatin
 - Keep all content inside source code files (identifiers, docstrings, comments, log messages, UI strings, CLI output, runtime content) in English.
 - Write and maintain Markdown documentation (README, docs/*.md) in English.
 - Maintain Markdown using a strict CommonMark-compatible structure (indent nested content by four spaces, keep required blank lines) so the Python `markdown` renderer produces correct HTML/PDF output.
+- Exception: translation catalog files under `frontend/src/locales/**/*.json` are exempt — they contain UI copy for all supported locales. Polish (and any future-locale) characters must be stored as UTF-8 codepoints, not Unicode escapes.
 
 ## Checklist (ALWAYS run before finishing tasks or creating PR)
 
