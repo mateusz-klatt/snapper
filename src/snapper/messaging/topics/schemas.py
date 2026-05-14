@@ -42,6 +42,12 @@ TOPIC_REGISTRY: tuple[TopicSchema, ...] = (
     TopicSchema(pattern="alerts.", category="notifications", throttle_ms=500),
     TopicSchema(pattern="plans.decisions.", category="trade", throttle_ms=0),
     TopicSchema(pattern="ai_reviews.", category="ai_reviews", throttle_ms=0),
+    TopicSchema(pattern="processes.events.summary.", category="system", throttle_ms=500),
+    TopicSchema(
+        pattern="processes.events.configured.", category="processes_admin", throttle_ms=500
+    ),
+    TopicSchema(pattern="processes.events.runs.", category="processes_admin", throttle_ms=500),
+    TopicSchema(pattern="strategies.events.list.", category="strategies_read", throttle_ms=1000),
 )
 
 
