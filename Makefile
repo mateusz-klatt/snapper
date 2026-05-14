@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ts-bridge bridge-regen bridge-check ios-gen-types docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes move-imports run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ts-bridge bridge-regen bridge-check ios-gen-types docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -41,10 +41,6 @@ help:
 	$(info fix-all                   Complete quality fixes [backend + frontend])
 	$(info )
 	$(info Application:)
-	$(info run-collector              Start data collector)
-	$(info run-trader                 Start live trading)
-	$(info run-paper                  Start paper trading [no real orders])
-	$(info run-backtest               Run strategy backtest)
 	$(info run-server                 Start web dashboard [production mode])
 	$(info run-static                 Refresh verified symbol mappings)
 	$(info run-polygon-aggregates     Backfill Polygon OHLCV [settings symbols])
@@ -297,18 +293,6 @@ check-pydantic-routes:
 move-imports:
 	$(VENV_PY) scripts/move_imports_to_top.py $(PY_DIRS)
 	$(info Imports moved to top of files)
-
-run-collector:
-	$(PYRUN) snapper collect
-
-run-trader:
-	$(PYRUN) snapper trade --strategy rsi_reversion
-
-run-paper:
-	$(PYRUN) snapper trade --strategy rsi_reversion --paper
-
-run-backtest:
-	$(PYRUN) snapper backtest --strategy macd_crossover --from 2024-01-01 --to 2024-12-31
 
 run-server:
 	$(PYRUN) snapper server --host 0.0.0.0

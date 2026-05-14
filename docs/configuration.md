@@ -43,12 +43,71 @@ DB_URL=postgresql+asyncpg://user:password@localhost:5432/snapper
 | `SERVER_API_ONLY` | `false` | Skip process autostart; serve API + WS bridge only (separate-engine boots). Multi-worker uvicorn (multiple FastAPI processes sharing a broker) is supported — see `docs/architecture.md` Deployment Modes for the AI-review fanout dedup contract under N>1. Set `SNAPPER_COORDINATOR_INSTANCE_ID` + `SNAPPER_COORDINATOR_INSTANCE_COUNT` per worker to enable the shared partitioning. |
 | `TELEMETRY_RECORDING_ENABLED` | `false` | Record pings, heartbeats, and GET reads to `telemetry` table. High volume — enable for debugging only |
 
+The `Default` column reflects the Pydantic defaults on
+`BootstrapSettingsLoader` (`src/snapper/config/bootstrap.py`) for
+the server / encryption / ZMQ / coordinator rows. The
+observability rows further down (`SYSTEM_METRICS_*`, `RETENTION_*`,
+`DB_METRICS_*`) are NOT loaded through that class.
+`application/system_metrics/snapshotter.py` and
+`application/db_stats/snapshotter.py` read their env vars directly
+via `os.environ`. The retention env vars are read in two places:
+`application/retention/scheduler.py` (`RETENTION_INTERVAL_SECONDS`,
+`RETENTION_DISABLED`, `RETENTION_OUTPUT_DIR`) and
+`application/retention/service.py` (`RETENTION_DRY_RUN`), with
+fallback resolvers defined in `application/retention/policies.py`.
+The defaults shown for those rows reflect the per-module fallbacks.
+
+The repo-root `.env.example` intentionally ships with Docker-friendly
+overrides for two server values: `SERVER_HOST=0.0.0.0` (so the dev
+server binds inside containers) and
+`SERVER_FORWARDED_ALLOW_IPS=127.0.0.1,172.17.0.1` (so requests
+forwarded by the default Docker bridge are accepted). Caveat: the
+`make run-server` / `make dev-backend` targets in the Makefile
+pass `--host 0.0.0.0` on the command line, which wins over the
+`.env` value via Typer's `host or s.server_host` resolution — so
+editing `.env` only changes `SERVER_HOST` for direct
+`snapper server` invocations (no `--host` flag).
+`SERVER_FORWARDED_ALLOW_IPS` is honored on every server-start path
+because no CLI flag overrides it; `make migrate-dev` does not bind
+either value.
+
 ### ZeroMQ
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
 | `ZMQ_BROKER_XSUB` | `tcp://127.0.0.1:7500` | XSUB endpoint (publishers connect here) |
 | `ZMQ_BROKER_XPUB` | `tcp://127.0.0.1:7501` | XPUB endpoint (subscribers connect here) |
+
+### Coordinator Sharding
+
+The trade runtime supports horizontal sharding via these variables.
+With `SNAPPER_COORDINATOR_INSTANCE_COUNT > 1` each instance owns a
+partition of the active wallets / outbox rows, enabling multi-worker
+uvicorn deployments and parallel `trade-zmq` instances.
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `SNAPPER_COORDINATOR_INSTANCE_ID` | `0` | Zero-based shard index for this instance |
+| `SNAPPER_COORDINATOR_INSTANCE_COUNT` | `1` | Total number of instances in the cluster |
+| `SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS` | `1000` | Per-tick upper bound on outbox rows scanned by this shard |
+
+### Observability Pipeline
+
+These variables tune the always-on background pipelines that emit
+system-metrics snapshots, run retention archive+purge sweeps, and
+sample DB stats. See [observability.md](observability.md) for the
+underlying snapshots and the retention window math.
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `SYSTEM_METRICS_INTERVAL_SECONDS` | `5` | Cadence for the in-process system-metrics snapshotter |
+| `SYSTEM_METRICS_HISTORY_CAP` | `17280` | Maximum number of snapshots retained in memory (≈ 24 h at 5 s cadence) |
+| `RETENTION_INTERVAL_SECONDS` | `3600` | Cadence for the retention archive+purge tick |
+| `RETENTION_DISABLED` | `false` | Disable the retention loop entirely (still allow on-demand archive via CLI) |
+| `RETENTION_DRY_RUN` | `false` | Compute the window and counts but skip writes/purges |
+| `RETENTION_OUTPUT_DIR` | `data` | Base directory for archive CSV writes (matches the CLI `--output-dir` default) |
+| `DB_METRICS_INTERVAL_SECONDS` | `60` | Cadence for the per-table row-count / index-health sampler |
+| `DB_METRICS_DISABLED` | `false` | Disable the DB stats sampler |
 
 ## Database Settings
 
@@ -81,16 +140,29 @@ Envelope shapes by `credential_type`:
 
 - `api_key_secret` — `{"api_key": "...", "api_secret": "..."}` (Kraken, Kraken Futures)
 - `rsa_pem` — `{"api_key": "...", "private_key_pem": "..."}` (Walutomat)
+- `oauth` — `{"client_id": "...", "client_secret": "...", "refresh_token": "..."}`
 - `paper` — `{"initial_balance": "10000.0"}` (paper wallets)
 
-Seed profiles (`dev.toml` / `prod.toml`) are the current mechanism
-for populating `wallet_credentials`. A runtime credential management
-UI (list / add / rotate / delete per-wallet credentials, with
-automatic executor restart on rotation) is on the frontend roadmap.
-Until the UI ships, rotation requires editing the seed file and
-running the seed command against a clean database (seed is
-idempotent — it skips wallets that already exist), or direct SQL
-surgery on the encrypted payload.
+Seed profiles (`dev.toml` / `prod.toml`) bootstrap `wallet_credentials`
+on a fresh database. Note: the seed loader supports the
+`api_key_secret`, `rsa_pem`, and `paper` envelope shapes — the
+`oauth` shape is accepted at the credential-resolver layer but
+**not** by the current seed loader, so OAuth credentials must be
+inserted through the REST `wallet_credentials` create/rotate routes
+(`POST /api/wallets/{wallet_public_id}/credentials`,
+`POST /api/wallets/{wallet_public_id}/credentials/{credential_public_id}/rotate`)
+rather than via
+seed.
+
+The credential management REST surface AND the matching frontend UI
+(`frontend/src/features/admin/CredentialManagement/`) are both
+shipped. Day-to-day operators use the dashboard's Credential
+Management view; headless callers can hit the REST routes directly
+(curl / Postman — the snapper-mcp bridge does NOT expose
+credential CRUD as MCP tools). Other recovery options
+are re-running the seed against a clean DB (seed is idempotent — it
+skips wallets that already exist) or direct SQL surgery on the
+encrypted payload as a last resort.
 
 Seed file structure:
 
@@ -163,6 +235,12 @@ restart to take effect.
 
 ## `.env.example` File
 
+The block below mirrors the variables documented in
+`.env.example` at the repo root. The inline comments are
+abbreviated here for readability; the canonical version of the
+file (with full per-variable rationale and rotation guidance)
+lives in `.env.example` itself.
+
 ```bash
 # Database connection
 DB_URL=sqlite+aiosqlite:///./data/snapper.db
@@ -179,9 +257,31 @@ SERVER_API_ONLY=false
 SERVER_PROXY_HEADERS=true
 SERVER_FORWARDED_ALLOW_IPS=127.0.0.1,172.17.0.1
 
+# Telemetry recording (pings, heartbeats, GET reads — high volume)
+TELEMETRY_RECORDING_ENABLED=false
+
 # ZMQ broker settings
 ZMQ_BROKER_XSUB=tcp://127.0.0.1:7500
 ZMQ_BROKER_XPUB=tcp://127.0.0.1:7501
+
+# Coordinator sharding (multi-instance trade-zmq / multi-worker uvicorn)
+SNAPPER_COORDINATOR_INSTANCE_ID=0
+SNAPPER_COORDINATOR_INSTANCE_COUNT=1
+SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS=1000
+
+# Observability pipeline (system-metrics snapshotter)
+SYSTEM_METRICS_INTERVAL_SECONDS=5
+SYSTEM_METRICS_HISTORY_CAP=17280
+
+# Retention policy framework
+RETENTION_INTERVAL_SECONDS=3600
+RETENTION_DISABLED=false
+RETENTION_DRY_RUN=false
+RETENTION_OUTPUT_DIR=data
+
+# DB stats sampler (per-table row-count snapshots)
+DB_METRICS_INTERVAL_SECONDS=60
+DB_METRICS_DISABLED=false
 ```
 
 ## Accessing Configuration in Code

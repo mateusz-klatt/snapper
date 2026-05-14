@@ -139,7 +139,7 @@ class RSIReversion(BaseStrategy):
 | `strategy_class` | string | Strategy class name |
 | `inputs` | list[str] | List of ZMQ topics to subscribe |
 | `outputs` | list[str] | List of instruments for signals |
-| `exchange` | string | Target exchange (`paper`, `kraken`, `walutomat`) |
+| `exchange` | string | Target exchange (`paper`, `kraken`, `kraken_futures`, `walutomat`) |
 | `params` | dict | Strategy-specific parameters |
 | `wallet_public_id` | string | Wallet that will execute orders for this strategy. Empty default for backwards compatibility; **REQUIRED (non-empty) for any strategy that uses `create_ai_review_and_await()`** — see "AI delegate consultation" below. |
 | `operator_public_id` | string | Trading-identity operator that owns this strategy instance. Empty default; validated against the launching principal's `operator_public_ids` when populated. |
@@ -228,12 +228,19 @@ Mean-reversion strategy based on RSI.
 | `period` | 14 | RSI period |
 | `upper` | 70.0 | Overbought threshold (sell) |
 | `lower` | 30.0 | Oversold threshold (buy) |
-| `cooldown` | 2 | Candles between signals |
+| `cooldown` | `0` (class fallback) / `2` (registered process preset) | Candles between signals |
 
 **Logic:**
 
-- Buy when RSI <= lower
-- Sell when RSI >= upper
+- Buy when RSI <= lower **or** RSI was at or below `lower` on the
+  previous candle (`r_prev <= lower`) and price has since reversed
+  upward.
+- Sell when RSI >= upper **or** RSI was at or above `upper` on the
+  previous candle (`r_prev >= upper`) and price has since reversed
+  downward.
+- The previous-threshold + reversal branch lets the strategy
+  capture exits that miss the strict edge-touch but confirm via
+  price action.
 
 ```python
 from snapper.strategies.rsi import RSIReversion
@@ -293,16 +300,17 @@ from snapper.messaging.schemas.data import CandleData
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `type` | string | `"candle"` |
-| `public_id` | string | UUID7 external identifier |
-| `open` | float | Open price |
-| `high` | float | High |
-| `low` | float | Low |
-| `close` | float | Close price |
-| `volume` | float | Volume |
-| `timestamp` | datetime | Timestamp |
-| `timeframe` | string | Timeframe |
-| `instrument` | string | Symbol |
-| `exchange` | string | Exchange |
+| `instrument` | string | Trading pair symbol (e.g. `BTC-USD`) |
+| `exchange` | string | Source exchange |
+| `timeframe` | string | Candle duration (`1m`, `1h`, `1d`, ...) |
+| `open_at` | datetime | Exchange-provided candle interval start time |
+| `open` | float | Opening price |
+| `high` | float | High price |
+| `low` | float | Low price |
+| `close` | float | Closing price |
+| `volume` | float | Total traded volume |
+| `vwap` | float \| None | Volume-weighted average price (optional) |
+| `trades` | int \| None | Number of trades in the candle (optional) |
 
 ## Technical Indicators
 
@@ -338,7 +346,7 @@ Framework automatically validates:
 1.  **Strategy name** — cannot be empty
 2.  **Inputs** — at least one required
 3.  **Outputs** — at least one instrument must be defined
-4.  **Exchange** — must be one of: `paper`, `kraken`, `walutomat`
+4.  **Exchange** — must be one of: `paper`, `kraken`, `kraken_futures`, `walutomat`
 5.  **Instruments** — must be available on selected exchange
 6.  **Paper/live mixing** — mixing paper inputs with live exchange not allowed
 
@@ -356,8 +364,14 @@ flowchart TB
     end
 
     Loop --> Stop["stop()"]
-    Stop --> Cleanup["cleanup()"]
+    Stop --> Teardown["__del__"]
 ```
+
+`BaseStrategy` does not expose a separate `cleanup()` hook —
+teardown happens in `stop()` (cancel heartbeat + listen tasks,
+unsubscribe inputs, close the ZMQ publisher + context) and the
+implicit `__del__` (cancel any surviving tasks, close
+subscriber/publisher sockets, terminate the ZMQ context).
 
 ## Running Strategies
 
@@ -378,6 +392,13 @@ import asyncio
 from snapper.strategies.factory import StrategyFactory
 from snapper.strategies.base import StrategyConfig
 
+# Importing the strategy module fires the @register_strategy
+# side effect that populates the factory's registry. Snapper's
+# strategies/__init__.py is intentionally empty (no re-exports
+# per project convention), so each concrete strategy must be
+# imported by hand before the factory can resolve it by name.
+import snapper.strategies.rsi  # noqa: F401  # register RSIReversion
+
 config = StrategyConfig(
     name="test_rsi",
     strategy_class="RSIReversion",
@@ -390,8 +411,15 @@ config = StrategyConfig(
 factory = StrategyFactory()
 strategy = factory.create_strategy(config)
 
-async def main():
+async def main() -> None:
+    # `BaseStrategy.start()` is non-blocking — it wires sockets and
+    # spawns the listen + heartbeat tasks, then returns. Keep the
+    # event loop alive while the background tasks process data.
     await strategy.start()
+    try:
+        await asyncio.Event().wait()  # block until Ctrl-C / cancel
+    finally:
+        await strategy.stop()
 
 asyncio.run(main())
 ```
@@ -430,15 +458,25 @@ async def test_buy_signal_on_low_rsi(rsi_strategy: RSIReversion) -> None:
 
 ### Backtesting
 
-Use replay data from paper topics:
+Use replay data from the dedicated `paper.{source_exchange}` market
+sub-prefix — the strategy listens to the same `market.*` shape as
+in live mode, only the source exchange is swapped for `paper`:
 
 ```python
 default_config={
-    "inputs": ["replay.BTC-USD.candles.1h"],
+    "inputs": ["market.paper.kraken.BTC-USD.candles.1h"],
     "exchange": "paper",
     ...
 }
 ```
+
+`replay.*` is not a valid ZMQ topic — `BaseStrategy._listen_loop`
+filters incoming frames to `market.*` and routes them through
+`BaseStrategy._dispatch_market_data`. The canonical builder is
+`market_topic(...)` in `src/snapper/messaging/topics/builders.py`;
+paper topics are built by passing `exchange="paper"` together with
+the venue under `source_exchange=...` (there is no separate
+`paper_market_topic` symbol).
 
 ## Trailing Stop Plans
 
@@ -528,9 +566,13 @@ they publish ~10-minute-delayed candles + ticks but have no order API.
   ``TickData.is_delayed=True`` before treating the price as current.
   Candle-driven cross-asset strategies inherit the source-feed latency
   implicitly; document the lag in the live runbook.
-- Output instruments listed in ``StrategyConfig.outputs`` are validated
-  at startup against the launching operator's scope grants. The
-  execution target must fall within the operator's scope.
+- Output-coverage enforcement at startup is conditional: when both
+  ``operator_public_id`` and ``wallet_public_id`` are populated on
+  the process config, ``_enforce_strategy_outputs_covered`` checks
+  that every instrument in ``StrategyConfig.outputs`` falls within
+  the operator's active scope grants. The empty-default path
+  (neither field set) is permitted for backwards compatibility, and
+  operator-only launches skip the output-coverage check.
 
 ### Reference implementation
 

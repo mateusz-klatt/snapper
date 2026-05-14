@@ -6,9 +6,11 @@ surface is **Cluster A** of the three-cluster monitoring initiative:
 process-level counters sampled into an in-memory ring buffer with a
 REST query API.
 
-> Cluster B (per-table SCD2 DB stats) and Cluster C (retention policy
-> framework) are sequenced after this. C lands before B because C
-> defines what "archivable" means.
+Cluster B (per-table SCD2 DB stats — `/api/metrics/db/tables`) and
+Cluster C (retention policy framework — `/api/metrics/retention`)
+are both live alongside Cluster A. Cluster C defines what
+"archivable" means, which Cluster B's `archivable` counter then
+mirrors.
 
 ## Endpoints
 
@@ -86,6 +88,13 @@ from the backend OpenAPI / JSON-Schema export and pin the wire shape.
 | `pending_tasks` | int  | Subset of `all_tasks` whose `done()` is `False`. |
 
 ### `gc`
+
+The fields below describe the API/wire shape returned by
+`/api/metrics/system`. Internally, the snapshotter stores the
+generation counters as a tuple (`collections_per_gen:
+tuple[int, int, int]` on `SystemMetricsSnapshot`); the route
+mapper flattens that tuple into the three `collections_gen{N}`
+fields below before serializing.
 
 | Field                | Type | Description |
 |----------------------|------|-------------|
@@ -291,7 +300,7 @@ The shipped default policy:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `RETENTION_INTERVAL_SECONDS` | `3600` | Scheduler loop period. Empty / unparseable / `<= 0` → default. |
+| `RETENTION_INTERVAL_SECONDS` | `3600` | Scheduler loop period. Parsed as a positive `float`; empty / unparseable / non-positive values silently fall back to the default. |
 | `RETENTION_DISABLED`         | `false` | Truthy (`"1"/"true"/"yes"`, case-insensitive) parks the scheduler entirely. |
 | `RETENTION_DRY_RUN`          | `false` | Truthy forces `purge=False` on every archiver call regardless of policy. Operators flip to `true` for one cycle when adding a NEW high-volume policy to verify the window before any DB row is deleted. |
 | `RETENTION_OUTPUT_DIR`       | `data`  | Filesystem root passed to `EventArchiver`; matches the `snapper archive` CLI default. |
@@ -368,7 +377,7 @@ poll-with-backoff using the `Retry-After` header.
 |---|---|---|
 | `snapshot_started_at` | `datetime` | When the sampler began the cycle. |
 | `snapshot_completed_at` | `datetime` | When the sampler finished the cycle. |
-| `interval_seconds` | `float` | Echo of the configured cadence. |
+| `interval_seconds` | `int` | Echo of the configured cadence. |
 | `tables` | `list[TableStatsItem]` | One entry per registered table. |
 
 ## Per-kind semantics
@@ -401,7 +410,7 @@ test pins the equality contract.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `DB_METRICS_INTERVAL_SECONDS` | `60` | Sampler loop period. Empty / unparseable / `<= 0` → default. |
+| `DB_METRICS_INTERVAL_SECONDS` | `60` | Sampler loop period. Empty / unset → default; a non-integer or out-of-range value raises `ValueError` at startup. |
 | `DB_METRICS_DISABLED` | `false` | Truthy (`"1"/"true"/"yes"`, case-insensitive) parks the snapshotter entirely. PG operators with deployments lacking `psycopg2` in deps boot cleanly with this flag (the underlying repo factory is never called). |
 
 `PER_TABLE_TIMEOUT_SECONDS` is a module constant (30s, not env-
@@ -420,18 +429,14 @@ timeouts: if a heavy EVENT table (e.g. `ticks` at 50M rows) times
 out, STATE counters were already computed and the snapshot still
 publishes with EVENT entries marked `is_stale=True` from a prior run.
 
-## Migration `0002_telemetry_timestamp_index`
+## `telemetry.timestamp` index
 
 Cluster B's `archivable` query on `telemetry` filters on
 `Telemetry.timestamp` (the bus-time column inherited from
 `TemporalMixin`). Without an index on that column, the query is a
 full table scan over a high-volume audit table. The
-`0002_telemetry_timestamp_index` migration adds
-`Index("ix_telemetry_timestamp", "timestamp")` so both Cluster B's
-counter and Cluster C's existing retention scan run in `O(log n)`.
-
-The PG path uses
-`op.get_context().autocommit_block()` +
-`postgresql_concurrently=True` so a live deploy can apply the
-migration without blocking writes. SQLite path runs the standard
-create/drop without the block.
+`ix_telemetry_timestamp` index over `Telemetry.timestamp` is part
+of the consolidated `0001_init` migration
+(`src/snapper/data/migrations/versions/0001_init.py`), so both
+Cluster B's counter and Cluster C's existing retention scan run
+in `O(log n)` from the first deployed schema.

@@ -249,30 +249,45 @@ Contracts used by this flow:
 #    cache hits; default deny on missing row.)
 snapper update-kraken-equities-symbols --force
 
-# 2. Verify the rows landed.
+# 2. Verify the rows landed. SCD2 active rows have known_to set to the
+#    canonical sentinel (9999-12-31 23:59:59.000000 on SQLite — see
+#    _KNOWN_TO_ACTIVE_SQLITE in src/snapper/data/models.py).
 sqlite3 snapper.db \
   "SELECT COUNT(*) FROM symbol_exchange_capabilities
-   WHERE exchange='kraken_equities' AND valid_to='9999-12-31T23:59:59';"
+   WHERE exchange='kraken_equities'
+         AND known_to='9999-12-31 23:59:59.000000';"
 # expect >= 38 (indices only; full catalog up to ~180 contracts)
 
-# 3. Enable the symbol-updater + feed-publisher processes via DB
-#    Setting rows (NOT env vars — see feedback_no_asking_continue.md
-#    for the rollout preference). ``category='process'`` matches the
-#    existing ``registry_syncer`` writes; the column is NOT NULL on
-#    the settings table (see ``src/snapper/data/models.py::Setting``).
-sqlite3 snapper.db <<SQL
-INSERT OR REPLACE INTO settings
-    (key, value, category, timestamp, session_id, sequence_id)
-VALUES
-  ('process_kraken_equities_symbol_updater',
-   '{"enabled":true}', 'process', datetime('now'), 'ops', 0),
-  ('process_kraken_equities_feed_publisher',
-   '{"enabled":true}', 'process', datetime('now'), 'ops', 0);
-SQL
+# 3. Trigger an immediate runtime launch of the symbol-updater +
+#    feed-publisher processes. `POST /api/processes/<name>/start`
+#    invokes `ProcessLauncherService.start_process_by_name`, which
+#    reads the existing persisted Setting row and applies the
+#    request payload as RUNTIME-ONLY overrides — it does NOT
+#    persist a new config row, and it does NOT go through
+#    `ProcessRegistrySyncer`. (Persistent enable/autostart state
+#    lives on the create / configure path: `POST /api/processes` or
+#    the Settings page; the registry syncer reconciles that
+#    persisted state onto the launcher.)
+curl -X POST http://localhost:8000/api/processes/kraken_equities_symbol_updater/start \
+     -H "Authorization: Bearer <token>" \
+     -H "X-CSRF-Token: <csrf>" \
+     -H "Content-Type: application/json" \
+     -d '{"payload":{}}'
 
-# 4. Restart the runtime OR trigger a live registry sync
-#    (registry_syncer picks up the Setting rows automatically
-#    on the next interval).
+curl -X POST http://localhost:8000/api/processes/kraken_equities_feed_publisher/start \
+     -H "Authorization: Bearer <token>" \
+     -H "X-CSRF-Token: <csrf>" \
+     -H "Content-Type: application/json" \
+     -d '{"payload":{}}'
+
+# To stop a running process later:
+# curl -X POST http://localhost:8000/api/processes/<name>/stop ...
+
+# 4. `/start` returns once the process is launched in the runtime;
+#    there is no "wait one syncer interval" step on this path.
+#    If you need the new state persisted across restarts, do that
+#    via `POST /api/processes` (create / configure) rather than
+#    via `/start`.
 ```
 
 ## Backfill historical candles
@@ -298,17 +313,26 @@ kraken_equities.py:get_ohlcv` for the error contract.
 
 Default TradFi symbols are quarterly expiry contracts
 (`MNQM6-CME` = Jun 26, etc.) and must be rotated before the
-`SymbolExchangeCapability.maturity` timestamp on any default
-symbol drops below 14 days. Rotation cadence:
+`InstrumentSpec.expiry_at` timestamp on any default symbol drops
+below 14 days. Rotation cadence:
 
-1. Pull the current maturity list:
+1. Pull the current expiry list. `native_symbol` lives on the
+   `symbols` table (joined to `instruments` via
+   `symbol_public_id`); expiry data lives on `instrument_specs`
+   keyed by `instrument_public_id`:
+
    ```
    sqlite3 snapper.db \
-     "SELECT native_symbol, datetime(maturity,'unixepoch')
-        FROM symbols JOIN symbol_exchange_capabilities
-             ON symbols.public_id = symbol_exchange_capabilities.symbol_public_id
-        WHERE exchange='kraken_equities'
-              AND valid_to='9999-12-31T23:59:59';"
+     "SELECT sym.native_symbol, datetime(spec.expiry_at)
+        FROM instruments AS i
+        JOIN symbols AS sym
+          ON sym.public_id = i.symbol_public_id
+         AND sym.known_to = '9999-12-31 23:59:59.000000'
+        JOIN instrument_specs AS spec
+          ON spec.instrument_public_id = i.public_id
+         AND spec.known_to = '9999-12-31 23:59:59.000000'
+        WHERE i.exchange = 'kraken_equities'
+              AND i.known_to = '9999-12-31 23:59:59.000000';"
    ```
 2. Identify the next quarterly (e.g. `MNQU6-CME` Sep 26 when
    `MNQM6-CME` Jun 26 drops below 14 days).

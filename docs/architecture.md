@@ -42,7 +42,7 @@ Fundamental types and aliases used throughout the application:
 - `OrderType` — Order type (`market`, `limit`, `stop`, `stop_limit`)
 - `OrderStatus` — Order status in lifecycle
 - `ExecutionMode` — Execution mode (`live`, `paper`)
-- `OrderExchange` — Order-capable exchanges (`paper`, `kraken`, `walutomat`)
+- `OrderExchange` — Order-capable exchanges (`paper`, `kraken`, `kraken_futures`, `walutomat`)
 
 ### Config (`src/snapper/config/`)
 
@@ -101,7 +101,10 @@ Persistence layer with SQLAlchemy:
     - `Telemetry` — Toggleable high-volume table for pings, heartbeats, pongs, and
       GET read requests. Recording gated by `TELEMETRY_RECORDING_ENABLED` setting
 
-    All ORM models carry provenance via `TemporalMixin`:
+    Most ORM models carry provenance via `TemporalMixin` (the few
+    exceptions — `UserActiveToken`, `AiDelegate`, `AiReview`,
+    `AiReviewEvent` — opt out because they manage their own
+    lifecycle / revocation semantics):
 
     - `session_id` (str, required) — producer session identity
     - `sequence_id` (int, required) — per-table monotonic counter for gap detection
@@ -205,13 +208,13 @@ Always-on — runs alongside the executor's order handler + heartbeat
 tasks (no feature flag; the defensive polling is cheap enough that
 gating it provided no value).
 
-**`_reconcile_fill_gap`** (`messaging/executors/base.py:1139-1211`)
+**`_reconcile_fill_gap`** (in `messaging/executors/base.py`)
 emits a corrective `ExecutionUpdate` covering the observed cum-qty
 delta, stamping the synthetic execution with
 `exec_id=recon-<exchange_oid>-<monotonic_ns>` so downstream de-dup
 stays correct.
 
-**`_reconcile_disappeared_order`** (`messaging/executors/base.py:1074-1137`)
+**`_reconcile_disappeared_order`** (in `messaging/executors/base.py`)
 calls `get_order()` on orders missing from the open-orders snapshot to
 determine their actual terminal status (CLOSED / CANCELED / EXPIRED),
 emits any residual fill gap first, then publishes the terminal
@@ -303,7 +306,10 @@ Authentication system:
 
 - JWT tokens with access/refresh via HTTP-only cookies
 - CSRF protection
-- Role-based access (viewer, operator, admin)
+- Role-based access (`viewer`, `operator`, `admin`, `ai_delegate`). The
+  `ai_delegate` role is the principal type minted by the AI Delegates
+  flow (see [ai-integration.md](ai-integration.md)) and is gated by
+  its own permission matrix separate from human operators.
 - WebSocket authentication
 
 ### CLI (`src/snapper/cli/`)
@@ -368,23 +374,66 @@ market_snapshots    -- Real-time market data (SCD2 per instrument, one active ro
 orders              -- Order history (mode: live/paper)
 executions          -- Order executions (joined to orders via order_public_id)
 positions           -- Portfolio positions (mode: live/paper)
+position_cycles     -- Open/closed cycles tracking per-cycle peak qty
 signals             -- Strategy signals
+execution_plans     -- Plan envelopes (brackets, trailing stops, manual)
+execution_plan_checkpoints -- Materialized plan state snapshots
+execution_plan_decisions   -- Per-tick plan decisions (audit trail)
 
 -- Trade runtime (durable command path)
 trade_commands              -- Durable trade intent (engine writes before execution)
 venue_events                -- Durable venue observations and acknowledgements from executors
 trade_projection_checkpoints -- Materialized position/balance snapshots
 
+-- Multi-tenant
+wallets                     -- Trading accounts (label, is_paper)
+wallet_credentials          -- Per-wallet exchange credentials (Fernet-encrypted)
+wallet_operator_scope_grants -- Per-wallet operator scope grants
+operators                   -- Operator identities (multi-tenant trade actors)
+user_operator_memberships   -- Operator memberships per user
+user_trading_caps           -- Per-user trading-caps overrides
+
 -- Symbol management
-symbols             -- Symbol identity + versioned attributes (SCD2)
-symbol_aliases      -- Exchange-specific symbol mappings
+symbols              -- Symbol identity + versioned attributes (SCD2)
+symbol_aliases       -- Exchange-specific symbol mappings
 symbol_exchange_capabilities -- Exchange-specific capabilities
+underlying_assets    -- Underlying-asset definitions (YAML-sourced)
+instrument_underlying_mappings -- Active instrument → underlying mappings
+continuous_contract_configs -- Continuous-contract series config
 
 -- Instrument specifications
-instrument_specs    -- Trading specifications (tick_size, lot_size, limits)
+instrument_specs              -- Trading specifications (tick_size, lot_size, limits)
+instrument_order_capabilities -- Per-instrument order-side capability flags
+venue_fee_schedules           -- Maker/taker fee schedules per venue
+
+-- Funding + accruals
+funding_rates       -- Per-instrument funding rate history (perps)
+accrual_ledger      -- Funding / rollover / borrow accrual entries
+
+-- Backtest
+backtest_runs           -- One row per backtest run
+backtest_events         -- Lifecycle events (started/failed/completed/...)
+backtest_signals        -- Strategy signals emitted during a run
+backtest_trades         -- Trades minted by the backtest engine
+backtest_equity_points  -- Equity curve samples
+backtest_results        -- Final per-run metrics
+backtest_comparisons    -- Pairing-grouping fingerprint anchors
+
+-- AI Reviews + Delegates
+ai_delegates        -- AI delegate principals (PAT-style auth)
+ai_reviews          -- Human-in-the-loop review queue rows
+ai_review_events    -- Per-review lifecycle audit trail
+
+-- Notifications
+alert_events        -- APNs alert payloads
+alert_deliveries    -- Per-device delivery attempts
+device_alert_prefs  -- Per-(device, alert_type, scope) preferences
+notification_devices -- Registered APNs device tokens
+user_alert_defaults -- Per-user fallback alert preferences
 
 -- System
 users               -- User accounts
+user_active_tokens  -- Active JWT inventory (revocation)
 settings            -- Settings (encrypted)
 user_login_events   -- Authentication event log
 process_runs        -- Background process execution records
@@ -428,8 +477,11 @@ recipe and scale-up / scale-down / crash-recovery procedures.
 
 ## Bitemporal Model
 
-All entity tables inherit `TemporalMixin` which provides `id`, `public_id`,
-`timestamp` (bus-time / known_from), and `known_to` columns.
+Most entity tables inherit `TemporalMixin` which provides `id`,
+`public_id`, `timestamp` (bus-time / known_from), and `known_to`
+columns. A small number of tables that manage their own
+lifecycle (notably `user_active_tokens`, `ai_delegates`,
+`ai_reviews`, `ai_review_events`) opt out.
 
 Key concepts:
 
@@ -487,9 +539,13 @@ split into two shapes:
     transaction and are committed at the final `await s.commit()`, while
     rows that hit `IntegrityError` are skipped. This trades all-or-nothing
     for conflict tolerance.
--   `upsert_ticks` is plain `session.add_all(rows)` + single
-    `await s.commit()`. Atomic per-batch on every dialect — it is not routed
-    through `_upsert_batch` and has no duplicate-skipping behaviour.
+-   `upsert_ticks` issues a Core bulk insert via
+    `session.execute(insert(Tick), list(rows))`. The function has
+    two branches: when the caller passes a `session`, commit is
+    external (caller-managed); otherwise it opens its own session
+    and commits internally. Atomic per-batch on every dialect — it
+    is not routed through `_upsert_batch` and has no
+    duplicate-skipping behaviour.
 
 Serialization on the same natural key: on **PostgreSQL**, row-level
 `SELECT ... FOR UPDATE` serializes concurrent transactions via MVCC
@@ -518,7 +574,7 @@ shape makes this a non-issue; revisit if multi-publisher contention
 on the same natural key becomes a real workload.
 
 **Non-atomic fallback (`_upsert_batch` row-by-row path):** the
-dialect-agnostic fallback at `repository.py:2540-2550` wraps each row
+dialect-agnostic fallback (`_upsert_batch` in `data/repository.py`) wraps each row
 in a `begin_nested()` SAVEPOINT and continues on `IntegrityError`.
 Successful rows are NOT committed immediately — they are held in the
 outer transaction and finalised only by the final `await s.commit()`.
@@ -634,9 +690,11 @@ or `POST /api/orders/by-client-order-id/{client_order_id}/cancel` (UI
 convenience route) resolves the plan, verifies wallet scope, transitions
 the plan to `cancel_requested`, hydrates `exchange_order_id` from the
 active `orders` row, and inserts a `cancel` `TradeCommand`. On insert
-failure the plan is marked `failed` and the route returns HTTP 500;
-`PlanExecutorService._recover_plans` then re-emits the cancel on the
-next service restart (deduplicated via `has_pending_cancel_command`).
+failure the plan is rolled back to `failed` and the route returns
+HTTP 500 — this is terminal (no retry). `PlanExecutorService._recover_plans`
+on the next service restart re-emits cancel commands only for plans
+still in `cancel_requested` state (deduplicated via
+`has_pending_cancel_command`); `failed` plans are not retried.
 The outbox dispatcher branches on `command_type` and re-hydrates
 `exchange_order_id` one more time at publish time so a late venue ACK
 is picked up, then publishes `OrderCancelData` on the
@@ -696,7 +754,9 @@ unresolved instrument); recovered non-flat with no row → bootstrap a
 synthetic cycle. Brackets attach to `position_cycle_public_id`, not
 to an order, so a flat reopen does not inherit stale stop levels.
 Orphan cycles (open rows without a matching engine) can be detected
-and closed via admin endpoints at `/api/position-cycles/`.
+via `GET /api/position-cycles/open` and closed individually with
+`POST /api/position-cycles/close-orphan` or in bulk with
+`POST /api/position-cycles/sweep-orphans`.
 
 **`max_qty` is per-cycle, not lifetime.** Each `position_cycles` row
 tracks the peak absolute quantity reached within its own
@@ -741,8 +801,9 @@ data. DirectDbEngine performs synchronous candle reads from DB.
 swept to failed at server startup via `reconcile_stale_runs()`. This runs
 only on the normal startup path (skipped in `SERVER_API_ONLY` mode).
 
-**Storage:** 6 bitemporal tables (BacktestRun, BacktestEvent, BacktestSignal,
-BacktestTrade, BacktestEquityPoint, BacktestResult) all with TemporalMixin.
+**Storage:** 7 bitemporal tables (BacktestRun, BacktestEvent,
+BacktestSignal, BacktestTrade, BacktestEquityPoint, BacktestResult,
+BacktestComparison) all with TemporalMixin.
 
 ### Authentication
 
@@ -811,10 +872,15 @@ instrument (crypto spot, xStocks). See
 `src/snapper/strategies/examples/tradfi_observe_crypto_execute.py`
 for an illustrative EMA-crossover implementation + activation
 instructions in the module docstring. Cross-asset execution at the
-backtest-engine level is a deferred follow-up (engine changes
-required: `batch_processor` needs to use
-`signal.instrument`/`signal.exchange` for target attribution, plus
-multi-feed `domain_time` alignment).
+backtest-engine level is partially supported:
+`BacktestConfig.target_execution_exchange` (in
+`application/backtest/config.py`) routes simulated fills to a
+different venue from the source feed, and `batch_processor` already
+attributes those fills to `signal.instrument` /
+`config.target_execution_exchange` via the cross-asset attribution
+branch. Multi-feed `domain_time` alignment across heterogeneous
+source feeds is the remaining engine work for fully general
+cross-asset backtests.
 
 ### Operational runbook
 

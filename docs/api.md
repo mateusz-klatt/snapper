@@ -27,16 +27,26 @@ Multi-tenant permissions (ADMIN only): ``read:wallet_credentials``,
 Authenticate and create a session. Sets `access_token`, `refresh_token`,
 and `csrf_token` cookies on the response.
 
-**Request:**
+**Request:** the body is a `LoginRequest` envelope (`PayloadRequest`)
+wrapping a `LoginBody` payload — the client stamps its own
+provenance on the outer envelope.
 
 ```http
 POST /api/auth/login
 Content-Type: application/json
 
 {
-    "username": "admin",
-    "password": "password123",
-    "remember_me": false
+    "type": "login_request",
+    "sequence_id": 1,
+    "public_id": "<client-uuid7>",
+    "timestamp": "2026-01-18T12:00:00Z",
+    "session_id": "<client-session>",
+    "topic": null,
+    "payload": {
+        "username": "admin",
+        "password": "password123",
+        "remember_me": false
+    }
 }
 ```
 
@@ -44,17 +54,58 @@ Content-Type: application/json
 
 ```json
 {
-    "message": "Login successful",
-    "expires_in": 900,
-    "user": {
-        "username": "admin",
-        "email": "admin@example.com",
-        "role": "admin",
-        "is_active": true,
-        "created_at": "2026-01-10T08:00:00Z"
+    "type": "login_response",
+    "sequence_id": 1,
+    "public_id": "<uuid7>",
+    "timestamp": "2026-01-18T12:00:00Z",
+    "session_id": "<server-session>",
+    "topic": null,
+    "payload": {
+        "type": "login",
+        "sequence_id": 1,
+        "public_id": "<uuid7>",
+        "timestamp": "2026-01-18T12:00:00Z",
+        "session_id": "<server-session>",
+        "topic": null,
+        "message": "Login successful",
+        "expires_in": 900,
+        "user": {
+            "type": "user_profile",
+            "sequence_id": 1,
+            "public_id": "<uuid7>",
+            "timestamp": "2026-01-18T12:00:00Z",
+            "session_id": "<server-session>",
+            "topic": null,
+            "username": "admin",
+            "email": "admin@example.com",
+            "role": "admin",
+            "is_active": true,
+            "created_at": "2026-01-10T08:00:00Z",
+            "operator_public_ids": [],
+            "primary_operator_public_id": null,
+            "active_wallet_public_id": null
+        },
+        "access_token": null,
+        "refresh_token": null
     }
 }
 ```
+
+The login handler returns the raw `UserProfile` from
+`authenticate_user()` and overlays `principal.active_wallet_public_id`
+onto the returned `user` via `model_copy`. On the initial login
+path the freshly-built principal has no wallet selected yet, so
+`active_wallet_public_id` lands as `null`; the operator-membership
+fields are not enriched on this surface either
+(`operator_public_ids` = `[]`, `primary_operator_public_id` =
+`null`). Call `GET /api/auth/me` after login to get a fully-enriched
+profile with operator memberships resolved.
+
+The outer envelope (`LoginResponse`) and the inner `payload` (`LoginData`)
+both carry the standard provenance fields (`type`, `sequence_id`, `public_id`,
+`timestamp`, `session_id`, `topic`). `access_token` and `refresh_token` are
+`null` in the cookie flow; they are populated only when the caller passes
+`?return_tokens=true` for headless integrations.
 
 **Cookies set:**
 
@@ -83,19 +134,65 @@ POST /api/auth/refresh
 
 ```json
 {
-    "message": "session refreshed",
-    "ws_token": "eyJhbGciOi...",
-    "ws_token_exp": "2026-01-18T12:30:00Z",
-    "csrf_token": "abc123def456...",
-    "user": {
-        "username": "admin",
-        "email": "admin@example.com",
-        "role": "admin",
-        "is_active": true,
-        "created_at": "2026-01-10T08:00:00Z"
+    "type": "refresh_response",
+    "sequence_id": 2,
+    "public_id": "<uuid7>",
+    "timestamp": "2026-01-18T12:00:00Z",
+    "session_id": "<server-session>",
+    "topic": null,
+    "payload": {
+        "type": "refresh",
+        "sequence_id": 2,
+        "public_id": "<uuid7>",
+        "timestamp": "2026-01-18T12:00:00Z",
+        "session_id": "<server-session>",
+        "topic": null,
+        "message": "session refreshed",
+        "ws_token": "eyJhbGciOi...",
+        "ws_token_exp": "2026-01-18T12:30:00Z",
+        "csrf_token": "abc123def456...",
+        "user": {
+            "type": "user_profile",
+            "sequence_id": 2,
+            "public_id": "<uuid7>",
+            "timestamp": "2026-01-18T12:00:00Z",
+            "session_id": "<server-session>",
+            "topic": null,
+            "username": "admin",
+            "email": "admin@example.com",
+            "role": "admin",
+            "is_active": true,
+            "created_at": "2026-01-10T08:00:00Z",
+            "operator_public_ids": [],
+            "primary_operator_public_id": null,
+            "active_wallet_public_id": null
+        },
+        "access_token": null,
+        "refresh_token": null
     }
 }
 ```
+
+The refresh handler returns the `UserProfile` from
+`get_user_by_id()` and overlays the principal's
+`active_wallet_public_id` onto it — that value is seeded from
+`token_data.active_wallet_public_id` (and may be swapped via an
+optional `RefreshTokenPayload` wallet hint), so the refresh
+response generally carries the active wallet (it is only `null`
+when the refresh JWT itself carries no wallet claim and no hint
+is supplied). Operator memberships are still NOT resolved here
+(`operator_public_ids` = `[]`, `primary_operator_public_id` =
+`null`); use `GET /api/auth/me` for the enriched view.
+
+`access_token` and `refresh_token` are populated only when
+`?return_tokens=true` is set (headless integrations); the cookie flow
+leaves them `null` and writes the rotated JWTs as `Set-Cookie` headers.
+The `RefreshTokenRequest` body (optional) carries
+`active_wallet_public_id` / `clear_active_wallet` to atomically swap
+the caller's active wallet during the rotation; an
+`Authorization: Bearer <refresh-jwt>` header is accepted as a
+fallback for headless callers that don't have access to the
+`refresh_token` cookie.
 
 ### POST /api/auth/ws_token
 
@@ -171,22 +268,53 @@ GET /api/auth/me
 
 **Response (200):**
 
+Handler returns a `UserResponse` envelope (`PayloadResponse[user_response, UserProfile]`)
+wrapping the full `UserProfile` payload, which carries the multi-tenant trio:
+
 ```json
 {
-    "username": "admin",
-    "email": "admin@example.com",
-    "role": "admin",
-    "is_active": true,
-    "created_at": "2026-01-10T08:00:00Z",
-    "operator_public_ids": ["019d6ca4-..."],
-    "primary_operator_public_id": "019d6ca4-..."
+    "type": "user_response",
+    "sequence_id": 3,
+    "public_id": "<uuid7>",
+    "timestamp": "2026-01-18T12:00:00Z",
+    "session_id": "<server-session>",
+    "topic": null,
+    "payload": {
+        "type": "user_profile",
+        "sequence_id": 3,
+        "public_id": "<uuid7>",
+        "timestamp": "2026-01-18T12:00:00Z",
+        "session_id": "<server-session>",
+        "topic": null,
+        "username": "admin",
+        "email": "admin@example.com",
+        "role": "admin",
+        "is_active": true,
+        "created_at": "2026-01-10T08:00:00Z",
+        "operator_public_ids": ["019d6ca4-..."],
+        "primary_operator_public_id": "019d6ca4-...",
+        "active_wallet_public_id": "019d7e9a-..."
+    }
 }
 ```
 
-The ``operator_public_ids`` and ``primary_operator_public_id`` fields
-are populated from ``user_operator_memberships`` (ADMIN receives every
-active operator; OPERATOR/VIEWER receive only their explicit memberships).
-These fields power the frontend OperatorPicker without a second round trip.
+Only `/api/auth/me` enriches the full `UserProfile`. The
+`operator_public_ids` / `primary_operator_public_id` fields are
+populated from `user_operator_memberships` (ADMIN receives every
+active operator; OPERATOR/VIEWER receive only their explicit
+memberships); `active_wallet_public_id` reflects the active
+wallet selection. These fields power the frontend OperatorPicker
+without a second round trip. The login / refresh responses
+return the `UserProfile` from `authenticate_user()` /
+`get_user_by_id()` with the active wallet overlaid from the
+request principal — operator memberships are NOT resolved on
+those two surfaces (`operator_public_ids` = `[]`,
+`primary_operator_public_id` = `null`). Active-wallet semantics
+differ between the two: login lands `active_wallet_public_id`
+= `null` (no wallet selected at first auth); refresh propagates
+whatever wallet the refresh JWT carries (or the request hint).
+Clients should call `/api/auth/me` to get a fully-resolved
+profile.
 
 ### CSRF Protection
 
@@ -1969,14 +2097,28 @@ BASE_URL = "http://localhost:8000/api"
 
 async def main():
     async with httpx.AsyncClient() as client:
+        # Login: LoginRequest envelope around LoginBody payload
         login_resp = await client.post(
             f"{BASE_URL}/auth/login",
-            json={"username": "admin", "password": "password123"},
+            json={
+                "type": "login_request",
+                "sequence_id": 1,
+                "public_id": "<client-uuid7>",
+                "timestamp": "2026-01-18T12:00:00Z",
+                "session_id": "<client-session>",
+                "topic": None,
+                "payload": {
+                    "username": "admin",
+                    "password": "password123",
+                    "remember_me": False,
+                },
+            },
         )
         csrf_token = client.cookies.get("csrf_token")
 
         refresh_resp = await client.post(f"{BASE_URL}/auth/refresh")
-        ws_token = refresh_resp.json()["ws_token"]
+        # RefreshResponse envelope: ws_token lives under .payload
+        ws_token = refresh_resp.json()["payload"]["ws_token"]
 
         candles_resp = await client.get(
             f"{BASE_URL}/candles",
@@ -2003,7 +2145,9 @@ async function connect() {
         method: "POST",
         credentials: "include",
     });
-    const { ws_token } = await refreshResp.json();
+    // RefreshResponse envelope wraps the data in `.payload`.
+    const { payload } = await refreshResp.json();
+    const { ws_token } = payload;
 
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${protocol}//${location.host}/api/ws`);
@@ -2114,3 +2258,268 @@ Get paginated signals for a completed backtest run.
 ### GET /api/backtests/{run_id}/events
 
 Get lifecycle events for a backtest run (started, failed, etc.).
+
+## AI Reviews
+
+Endpoints for the human-in-the-loop review queue. Strategies emit
+`ai_reviews.*` requests via the `create_ai_review_and_await()`
+primitive (see [strategies.md](strategies.md)); the selected
+AI delegate (or an operator with the AI_DELEGATE role) replies via
+these routes.
+
+### POST /api/ai-reviews/{review_public_id}/decision
+
+REST mirror of the `submit_ai_review_decision` MCP tool. Body is
+`AiReviewDecisionCommand`, an envelope wrapping an inner
+`AiReviewDecisionRequest`:
+
+```json
+{
+    "type": "ai_review_decision_command",
+    "sequence_id": 1,
+    "public_id": "<uuid7>",
+    "timestamp": "2026-01-18T12:00:00Z",
+    "session_id": "<client-session>",
+    "topic": null,
+    "payload": {
+        "decision": "approve",
+        "rationale": "Risk profile within bounds."
+    }
+}
+```
+
+`decision` is `"approve"` or `"reject"` (validated against
+`AiReviewDecisionEnum`; unknown values yield `422` with
+`error_code='invalid_decision'`). `rationale` is optional free
+text, ≤ 4096 chars per the `ai_reviews.rationale` column
+constraint. Requires `Permission.CREATE_ORDERS`. The dispatch
+fans out on `bus.ai_review_decision` and emits
+`ai_reviews.{user}.{strategy}.decision_ack` on the WS surface.
+
+Responses use `AiReviewDecisionResponse` — the canonical envelope
+shared with the MCP `CallToolResult` payload:
+
+```json
+{
+    "success": true,
+    "error_code": null,
+    "message": "Decision recorded.",
+    "details": { "...": "..." }
+}
+```
+
+Error status codes: `404` (review not found), `403` (caller not
+authorized for this review), `409` (already resolved by peer),
+`410` (deadline elapsed), `422` (invalid decision).
+
+### GET /api/ai-reviews/pending
+
+List pending CONSULT reviews where the caller is the selected
+AI delegate. Used by the bridge for catch-up after WS reconnect
+and by operator dashboards. Snapshot is bounded by `limit` and
+ordered by `fanout_after ASC` (oldest first). The route first
+requires `Permission.READ_SIGNALS` (callers without it receive
+`403`); callers that pass that gate but are not registered as an
+AI delegate principal receive `422`.
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `limit` | int | Page size, 1..500 (default 100) |
+| `wallet_public_id` | string | Optional wallet filter |
+
+**Response:** `PendingReviewListResponse` (`items` +
+`count`) where each `PendingReviewSummaryItem` carries the
+resolved `instrument` ticker plus the raw `signal_envelope`
+payload (thesis, side, news anchors) so the AI delegate inbox
+can render a meaningful row without a follow-up read.
+
+## Devices
+
+APNs device registration for the iOS app (push notifications for
+order / position / system events) plus per-device alert preferences.
+All rows are bound to `user_public_id` and follow the SCD2
+close-and-insert convention.
+
+### POST /api/devices
+
+Register or refresh the caller's APNs device token. Body is
+`RegisterDeviceCommand`. Same-token re-registrations collapse onto
+the existing SCD2 row via `upsert_notification_device` and return
+the stable `public_id` reused across versions. Returns
+`NotificationDeviceResponse`.
+
+### GET /api/devices
+
+List the caller's active devices, newest registered first. Returns
+`NotificationDeviceListResponse` (`payload` + `count` — `PayloadListResponse` base); rows whose
+active version has `token_status='user_unregistered'` (tombstones)
+are excluded.
+
+### DELETE /api/devices/{device_public_id}
+
+Soft-delete a device via SCD2 close + tombstone successor: the
+active row is closed and a successor with
+`token_status='user_unregistered'` is inserted so an `as_of`
+query after the close sees an inactive row rather than a gap.
+Returns `MessageResponse`. Marking a nonexistent or not-owned
+device inactive returns `404`.
+
+### PATCH /api/devices/{device_public_id}/prefs
+
+Upsert a per-`(device, alert_type, scope)` preference for the
+caller. Body is `UpdateDevicePrefCommand`. The composite scope key
+is `(device_public_id, alert_type, operator_public_id,
+wallet_public_id)` — three null-permutations map to the three
+partial unique indexes on `device_alert_prefs`. Returns
+`DeviceAlertPrefResponse`.
+
+### POST /api/devices/{device_public_id}/prefs/{pref_public_id}/revoke
+
+Close one device-scoped alert preference (SCD2 in place). Backend
+convention is `POST` + envelope (not `DELETE`) so every write
+carries client-side provenance for the gap detector — same as
+`cancel_order` / `revoke_scope_grant`. The pref row is closed by
+stamping `known_to` at the revoke timestamp; no successor is
+inserted, which frees the slot in the partial unique index. Body
+is `RevokeDevicePrefCommand`; returns `RevokeDevicePrefResponse`.
+
+### GET /api/devices/{device_public_id}/prefs
+
+List active per-`(alert_type, scope)` prefs for a caller-owned
+device. Returns `DeviceAlertPrefListResponse`. Tombstoned device
+prefs are filtered out server-side via the join to
+`notification_devices` on `token_status='active'`.
+
+## Alerts
+
+Real-time alert feed for the dashboard + iOS notification panel.
+Alert events are minted by various subsystems and surfaced via WS
+on `alerts.*` (see [messaging.md](messaging.md) for the canonical
+`AlertType` enumeration) plus this REST catch-up tail.
+
+### GET /api/alerts/history
+
+Keyset-paginated page of the caller's active `alert_events`.
+Order: `(timestamp DESC, public_id DESC)`.
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `limit` | int | Page size, 1..200 (default 50) |
+| `before` | string | Opaque cursor token from a previous page's `next_cursor`; `None` or malformed values map to page 1 (max 160 chars) |
+
+The `before` cursor is decoded server-side back into the internal
+`AlertListCursor` and applied as a keyset predicate against
+`Repository.list_recent_alerts_for_user`. Returns
+`AlertHistoryResponse`.
+
+### GET /api/alerts/{alert_public_id}
+
+Fetch a single active `alert_events` row if owned by the caller.
+Returns `AlertEventResponse`. Ownership is enforced server-side
+via `user_public_id` equality; `404` is returned for unknown IDs
+**and** for IDs owned by other users, so the endpoint never leaks
+the existence of foreign alert events.
+
+## Alert Defaults
+
+Per-user fallback preferences that apply when no per-device
+`device_alert_prefs` row matches.
+
+### GET /api/alert_defaults
+
+List the caller's active user-level fallback prefs. Returns
+`UserAlertDefaultListResponse` (`payload` + `count` — `PayloadListResponse` base). An empty list
+is the legitimate "no overrides" state — clients should fall
+through to the in-app default UI; the route does **not**
+auto-create rows on first read.
+
+### PATCH /api/alert_defaults
+
+Upsert the caller's user-level fallback pref for a given
+`alert_type` via SCD2 close-and-insert. Body is
+`UpdateUserAlertDefaultCommand`.
+
+## Metrics
+
+Observability endpoints surfaced for the operations dashboard and
+the iOS health widget. All routes require
+`Permission.READ_SYSTEM_STATUS`. See
+[observability.md](observability.md) for the underlying retention /
+system-metrics pipeline and snapshot schemas.
+
+### GET /api/metrics/notifications
+
+Current notify-sidecar outbox counters (per-status row counts —
+*not* a rolling window). Returns `NotificationMetricsResponse`.
+
+### GET /api/metrics/system
+
+Most recent `SystemMetricsSnapshot` from the in-memory ring
+buffer (CPU, memory, GC, file descriptors, plus the process
+connection count under `process.num_connections`). Returns
+`SystemMetricsResponse`.
+
+### GET /api/metrics/system/history
+
+Bounded slice of the in-memory system-metrics history (no
+cursor / page tokens — the caller filters with `since` / `until`
++ `limit`). Returns `SystemMetricsHistoryResponse`.
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `since` | datetime | Lower bound (inclusive) |
+| `until` | datetime | Upper bound (inclusive) |
+| `limit` | int | Page size, 1..100000 (default 720 — roughly the last hour at the default 5-second cadence) |
+
+Ring-buffer depth is capped by `SYSTEM_METRICS_HISTORY_CAP`
+(default 17280, ~24 h at 5 s cadence — see
+[configuration.md](configuration.md)).
+
+### POST /api/metrics/system/tracemalloc/start
+
+Arm Python `tracemalloc` with an auto-stop deadline. Body-less;
+`duration_s` is supplied as a query parameter. Returns
+`TracemallocStateResponse`.
+
+### POST /api/metrics/system/tracemalloc/stop
+
+Disarm `tracemalloc` and cancel any pending auto-stop deadline.
+Returns `TracemallocStateResponse`.
+
+### GET /api/metrics/retention
+
+Most recent retention-scheduler run summary. Returns
+`RetentionRunResponse` whose `payload` is a `RetentionRunData`
+with top-level fields `run_started_at`, `run_completed_at`,
+`dry_run`, and `results: list[RetentionPolicyResult]`. Each
+per-policy result inside `results` carries `archived_rows`,
+`purged_rows`, `files_written`, and the window boundaries
+(`day_start`, `day_end`).
+
+### GET /api/metrics/db/tables
+
+Most recent per-table row-count snapshot. Refreshed on the
+cadence configured by `DB_METRICS_INTERVAL_SECONDS`. Returns
+`DbStatsResponse`.
+
+### GET /api/metrics/rest-rate
+
+Per-exchange REST call rates + venue rate-limit utilization
+(`rps_1s` / `rps_10s` / `rps_60s` rolling windows, plus `limit_rps`
++ `utilization` when the venue's documented cap is known).
+Read from the in-process `RestCallTracker` snapshot. Returns
+`RestRateResponse`.
+
+## AI Delegates
+
+The PAT-minting routes (`POST /api/ai-delegates`, list, deactivate)
+are documented end-to-end in [ai-integration.md](ai-integration.md)
+alongside the Claude Code / Claude Desktop / Cursor / Windsurf
+wire-up instructions. They follow the same `PayloadResponse`
+envelope convention used by the auth routes above.

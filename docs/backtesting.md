@@ -28,7 +28,7 @@ is structural rather than aspirational.
 |---|---|---|
 | Speed | fastest (no IPC) | slower (per-candle ZMQ hop) |
 | Fidelity | bypasses message bus | mirrors live wire path |
-| Concurrency | unlimited | at most one active run (DB-enforced) |
+| Concurrency | at most one active run (global `uq_bt_single_running` invariant — see below) | at most one active run (same DB-enforced invariant) |
 | Cancel SLA | bounded by `cancel_poll_ms` | bounded by `cancel_poll_ms` |
 
 ## At-most-one-running invariant
@@ -203,11 +203,13 @@ submit is idempotent via SELECT-then-INSERT with an
 Every backtest read endpoint (list, detail, trades, signals,
 events, equity, compare) returns **400 `no active wallet selected`**
 when `principal.active_wallet_public_id is None`. WS subscribes
-return `topic_denied`. The picker triggers a
-`selectWalletAndRefresh` on change that mints a new JWT carrying
-the chosen wallet claim before swapping the client scope, so REST
-and WS both authorise against the same wallet after the picker
-moves.
+respond with a `subscription_success` frame whose `status` is
+`denied` (or `partial` when some requested topics succeeded), with
+the offending topics surfaced in `denied_topics`. The picker
+triggers a `selectWalletAndRefresh` on change that mints a new JWT
+carrying the chosen wallet claim before swapping the client
+scope, so REST and WS both authorise against the same wallet
+after the picker moves.
 
 ## Cross-asset execution
 
@@ -277,7 +279,7 @@ byte-identical with pre-cross-asset behaviour.
 
 ### Scope limits
 
-Three explicit non-goals in the current implementation:
+Two explicit non-goals in the current implementation:
 
 - **Same-symbol multi-venue** — `Portfolio.positions` is keyed by
   instrument only, so running BTC-USD on Kraken Spot + Kraken Futures
@@ -286,14 +288,17 @@ Three explicit non-goals in the current implementation:
 - **Multi-target cross-asset** — a single
   `target_execution_exchange` per run means one strategy cannot emit
   signals for different target venues inside the same backtest.
-- **Public REST create path** — `POST /api/backtests` accepts an
-  optional `target_execution_exchange` field on `BacktestCreateBody`.
-  When set, simulated fills are attributed to that order-capable venue
-  while candles still feed from `exchange`. When unset, the run stays
-  single-exchange and byte-identical to legacy behaviour. The same
-  field round-trips through DB persistence + the rerun endpoint, and
-  surfaces on `BacktestRunData` for frontend display. Allowed target
-  values: `paper` / `kraken` / `kraken_futures` / `walutomat`.
+
+### Supported: cross-asset via REST
+
+`POST /api/backtests` accepts an optional `target_execution_exchange`
+field on `BacktestCreateBody`. When set, simulated fills are
+attributed to that order-capable venue while candles still feed from
+`exchange`. When unset, the run stays single-exchange and
+byte-identical to legacy behaviour. The same field round-trips
+through DB persistence + the rerun endpoint, and surfaces on
+`BacktestRunData` for frontend display. Allowed target values:
+`paper` / `kraken` / `kraken_futures` / `walutomat`.
 
 ### Fingerprint + pairing
 

@@ -92,6 +92,11 @@ immediately — Snapper never re-serves them:
 ```json
 {
   "type": "delegate_created_response",
+  "sequence_id": 1,
+  "public_id": "<envelope-uuid7>",
+  "timestamp": "2026-04-20T00:00:00Z",
+  "session_id": "<server-session>",
+  "topic": null,
   "payload": {
     "delegate": {
       "public_id": "019da9e...",
@@ -100,7 +105,7 @@ immediately — Snapper never re-serves them:
       "created_by_user_public_id": "<operator-id>",
       "created_at": "2026-04-20T00:00:00Z",
       "is_active": true,
-      "caps": { "max_open_orders": 3, "max_daily_notional_usd": 1000.0 }
+      "caps": { "max_open_orders": 3, "max_daily_notional_usd": 1000.0, "max_cancels_per_minute": 10 }
     },
     "access_token": "<jwt-with-10y-exp>",
     "expires_in": 315360000
@@ -147,25 +152,31 @@ In any Claude Code session:
 /reload-plugins
 ```
 
-Claude Code prompts for two required values plus one optional value
-at install time:
+Claude Code prompts for two required values at install time
+(per the plugin's `userConfig` schema in `.claude-plugin/plugin.json`):
 
 - **Snapper API URL** -- your backend's `/api/mcp` endpoint. The
   `@mateusz-klatt/snapper-mcp` bridge accepts the value with or without
   a trailing slash and normalizes it before connecting.
 - **Access token** -- the `access_token` from the `delegate_created`
   response (or paste from the Settings -> AI Delegates config-snippet
-  generator).
-- **Refresh token** *(optional)* -- the `refresh_token` for rotating
-  delegates; **leave blank** for long-lived PAT delegates.
+  generator). Delegates are PAT-style: the JWT lifetime is
+  ~10 years (`LONG_LIVED_TOKEN_EXPIRE_DAYS = 3650`), so no
+  refresh-token rotation is needed -- revocation is done by
+  deactivating the delegate in Snapper, which invalidates the
+  associated `user_active_tokens` row server-side.
 
 Run `/mcp list` to confirm the `snapper` server is connected. The
 plugin pins the runtime to a specific `@mateusz-klatt/snapper-mcp`
-version (`v0.2.1` -> `@0.2.0`, `v0.2.2` -> `@0.2.2`, etc.) so future
+version — the manifest hardcodes the exact version string in
+`mcpServers.snapper.args` (currently `@0.11.0`), kept in lockstep
+with the plugin's own `version` field by the
+`integrations/snapper-mcp/test/plugin_manifest.test.ts` parity
+test so a bump to either side fails CI until both match. Future
 runtime publishes do not silently upgrade existing installs;
-`/plugin update snapper-mcp` opts in. Sensitive values land in the OS
-keychain (with `~/.claude/.credentials.json` fallback) -- never in
-`settings.json` or the plugin manifest.
+`/plugin update snapper-mcp` opts in. Sensitive values land in the
+OS keychain (with `~/.claude/.credentials.json` fallback) -- never
+in `settings.json` or the plugin manifest.
 
 ### Claude Desktop
 
@@ -208,10 +219,12 @@ In `~/.cursor/config.json`:
 }
 ```
 
-Cursor currently requires manual token rotation when the access
-token expires (15 minutes by default). Use the refresh token via
-`POST /api/auth/refresh?return_tokens=true` with
-`Authorization: Bearer <refresh-jwt>` to mint a fresh pair.
+The delegate access token Cursor sends as a Bearer header is a
+long-lived PAT JWT (~10 years), so day-to-day operation does not
+require token rotation. Revocation is by deactivating the delegate
+in Snapper (which invalidates the underlying `user_active_tokens`
+row); recovery is to recreate the delegate and update Cursor's
+`Authorization` header with the new token.
 
 ### Windsurf
 
@@ -241,7 +254,7 @@ curl -X POST http://localhost:8000/api/mcp/ \
   -H "Authorization: Bearer <access-token>" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"8"}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl","version":"8"}}}'
 ```
 
 ---
@@ -249,9 +262,13 @@ curl -X POST http://localhost:8000/api/mcp/ \
 ## Available tools
 
 Read-only tools surface the delegate's order book, position state,
-and venue market data; write tools (`submit_manual_order`,
-`cancel_order`, `submit_ai_review_decision`) gate on the
-caps enforcer + per-tool permissions.
+and venue market data. Write tools (`submit_manual_order`,
+`cancel_order`) are gated by per-tool permissions; only
+`submit_manual_order` is unconditionally guarded by
+`TradingCapsEnforcer.guard` — `cancel_order` invokes the guard
+only on the cancel paths that affect open exposure, and
+`submit_ai_review_decision` is not wired to
+`caps_enforcer_getter` at registration.
 
 - **`list_instruments(exchange: str)`** — returns sorted instrument
     symbols visible to the delegate's operator for the given exchange.
@@ -290,16 +307,27 @@ caps enforcer + per-tool permissions.
     8601 UTC. Requires `READ_SIGNALS`; surfaces `signal_not_found`
     on wallet scope violation (anti-enumeration).
 
-- **`submit_manual_order(exchange, instrument, side, quantity,
-    price?, mode?)`** — enqueues a trade command under the
-    delegate's user_public_id with `source_surface='mcp'` + the
-    caps check from `TradingCapsEnforcer.guard`. Fails closed on
-    any cap violation.
+- **`submit_manual_order(exchange, instrument, instrument_public_id,
+    side, order_type, quantity, wallet_public_id, idempotency_key,
+    price?, operator_public_id?, ai_review_public_id?)`** —
+    enqueues a trade command under the delegate's user_public_id
+    with `source_surface='mcp'` + the caps check from
+    `TradingCapsEnforcer.guard`. Fails closed on any cap violation.
+    Wraps the REST `create_order` route.
 
 - **`cancel_order(plan_public_id, idempotency_key)`** — cancels an
     active execution plan via the same `PlansCancelService` REST
     goes through. Idempotent: same `idempotency_key` on retry
     returns the current plan state without re-executing.
+
+- **`submit_ai_review_decision(review_id, decision, rationale?)`** —
+    REST mirror of the
+    `POST /api/ai-reviews/{review_public_id}/decision` route for
+    the in-process MCP surface; lets the delegate approve or
+    reject a pending CONSULT review. `review_id` is the UUID7 of
+    the `ai_reviews` row. Not gated by the caps enforcer (the
+    underlying review-decision path does its own SCD2
+    close-and-insert + bus fanout).
 
 The tool catalog is discoverable via the MCP `tools/list` JSON-RPC
 method:
@@ -329,9 +357,13 @@ optional; `null` means "unbounded on this axis".
     commitment basis; partial fills don't change accounting).
 - `max_cancels_per_minute` — sliding-window cancel rate.
 
-Caps are enforced at every trade-command insert site via the
-`TradingCapsEnforcer.guard()` surface. MCP `submit_manual_order` is
-the only tool that triggers them.
+Caps are enforced at trade-command insert sites via the
+`TradingCapsEnforcer.guard()` surface — `submit_manual_order`
+routes through it unconditionally; `cancel_order` invokes the
+guard only on the cancel paths that affect open exposure (the
+bare-cancel fast path skips it). The other MCP tools
+(`submit_ai_review_decision`, etc.) are not currently wired to
+`caps_enforcer_getter` at registration.
 
 Update caps via `PATCH /api/ai-delegates/{id}` — the write is SCD2
 close+insert, so cap history is auditable.
@@ -362,18 +394,23 @@ by one bus-message round-trip (sub-second on local ZMQ) instead of
 the 30-second LRU TTL.
 
 In-flight MCP tool handlers are **not** force-cancelled. The
-guarantee is narrowly "the NEXT MCP request is rejected".
+guarantee is narrowly "subsequent MCP requests are rejected once
+the JTI blacklist propagates" — the in-memory blacklist carries
+a small grace period (so requests that raced the propagation
+window can still complete) before subsequent verifies fail.
 
 ---
 
 ## Rate limits
 
 REST rate limits apply globally via `RestCallTracker` — observed via
-`GET /api/metrics/rest-rate`. MCP-specific rate limits live on top of
-the per-delegate `max_cancels_per_minute` cap. Bursts are served best-
-effort; sustained abuse over published exchange limits (Walutomat 20
-req/s, Kraken 15 req/s, Polygon 5/min) surfaces as `rate_limited`
-warnings at 80/95% utilisation.
+`GET /api/metrics/rest-rate`. MCP-specific rate limits are enforced
+by a separate per-principal middleware on `/api/mcp` (default
+`60/minute`); the per-delegate `max_cancels_per_minute` cap then
+applies on top inside `cancel_order`. Bursts are served best-effort;
+sustained abuse over published exchange limits (Walutomat 20 req/s,
+Kraken 15 req/s, Polygon 5/min) surfaces as `rate_limited` warnings
+at 80/95% utilisation.
 
 ---
 
@@ -385,15 +422,16 @@ not on status text.
 
 | Status | `error_code`               | When it fires                                    | Client action                                         |
 | ------ | -------------------------- | ------------------------------------------------ | ----------------------------------------------------- |
-| 503    | `feature_disabled`         | Flag off OR settings service not ready           | Show "AI Integration disabled" banner                 |
+| 503    | `feature_disabled`         | Flag explicitly set to false                     | Show "AI Integration disabled" banner                 |
+| 429    | `rate_limit_exceeded`      | Per-principal MCP middleware quota exhausted     | Back off and retry after `Retry-After` seconds        |
 | 503    | `mcp_unavailable`          | Repository dep unavailable (lifespan not ready)  | Retry with backoff                                    |
 | 401    | `missing_bearer_token`     | No `Authorization: Bearer …` header              | Prompt user to authenticate                           |
-| 401    | `invalid_bearer_token`     | JWT signature/expiry/blacklist/inventory failure | Call `POST /api/auth/refresh`; fail → re-login        |
+| 401    | `invalid_bearer_token`     | JWT signature/expiry/blacklist/inventory failure | AI delegates have no refresh token (10-year PAT); deactivate + recreate the delegate in Snapper, then update the client's bearer token. Operator (cookie) sessions can fall back to `POST /api/auth/refresh`. |
 | 401    | `user_deactivated`         | Owner account deactivated                        | Prompt re-login; don't auto-refresh                   |
 | 401    | Refresh token redeemed     | Replay of a spent refresh JWT                    | Re-login                                              |
 | 401    | Account deactivated        | Session cookie flow                              | Re-login                                              |
-| 403    | `wallet_out_of_scope`      | Tool targets a wallet outside the caller's scope | Pick a wallet the caller still has a live grant on    |
-| 403    | `operator_out_of_scope`    | Tool targets an operator not in the caller's JWT | Pick an operator from the caller's authenticated set  |
+| 403    | MCP: `wallet_out_of_scope:` *(prefixed message)* / REST: `"Wallet not in accessible set"` *(detail string)* | Tool targets a wallet outside the caller's scope. The two surfaces emit **different** strings: MCP raises `PermissionError(f"wallet_out_of_scope: ...")` lifted by FastMCP into a `ToolError`; REST raises `HTTPException(403, detail="Wallet not in accessible set")` from `server/scoping.py`. Neither path uses a structured `error_code` JSON field | Pick a wallet the caller still has a live grant on    |
+| 403    | MCP: `operator_out_of_scope:` *(prefixed message)* / REST: `"Operator not in accessible set"` *(detail string)* | Same shape as the wallet variant — MCP carries the prefixed `PermissionError` message, REST emits its own English detail string. No structured `error_code` field on either surface | Pick an operator from the caller's authenticated set  |
 
 Delegate CRUD:
 
@@ -412,8 +450,11 @@ Delegate CRUD:
 
 ### Token lifetime
 
-- Access tokens live **15 minutes** (configurable via
-    `auth_access_token_expire_minutes`).
+- **Operator** access tokens live **15 minutes** (configurable via
+    `auth_access_token_expire_minutes`). **AI delegate** access
+    tokens are PAT-style and live for `LONG_LIVED_TOKEN_EXPIRE_DAYS`
+    (~10 years); they are revoked by deactivating the delegate
+    rather than by short expiry.
 - Refresh tokens live **7 days** (30 days with `remember_me=true`).
 - Refresh rotation is **atomic**: one DB transaction revokes the old
     refresh JTI AND persists the new access+refresh pair. Replay of

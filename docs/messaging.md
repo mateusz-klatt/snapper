@@ -79,7 +79,7 @@ Topic format varies by category (see per-category tables below).
 | ----- | ----------- |
 | `market.kraken.BTC-USD.candles.1h` | Hourly BTC/USD candles from Kraken |
 | `market.kraken.BTC-USD.ticks` | BTC/USD ticks from Kraken |
-| `market.polygon.AAPL.candles.1d` | Daily AAPL candles from Polygon |
+| `market.kraken.AAPL.candles.1d` | Daily AAPL candles from Kraken Equities (note: live `market.*` topics exclude `polygon` — Polygon is replay-only via `market.paper.polygon.…`) |
 
 ### Signals
 
@@ -109,13 +109,11 @@ database artifacts used by the trade runtime. They are not additional ZMQ topics
 | Topic | Description |
 | ----- | ----------- |
 | `system.heartbeats.executor.{exchange}` | Executor heartbeat for the single-wallet template path (4 segments) |
-| `system.heartbeats.executor.{exchange}.{wallet_short}` | Per-wallet executor heartbeat (5 segments). `wallet_short` is the first 12 lowercase hex characters of the wallet UUID |
+| `system.heartbeats.executor.{exchange}.{wallet_short}` | Per-wallet executor heartbeat (5 segments). `wallet_short` is the **last** 12 lowercase hex characters of the wallet UUID (see `snapper.core.wallet_short`) |
 | `system.heartbeats.strategy.{name}` | Strategy heartbeat (e.g. `strategy.rsi_btc_1h`) |
 | `system.heartbeats.feed.{exchange}` | Feed heartbeat (e.g. `feed.kraken`, `feed.paper.kraken`) |
 | `system.settings` | Configuration change notifications |
 | `system.symbol_aliases` | Symbol cache invalidation |
-| `system.replay.start` | Data replay start |
-| `system.replay.end` | Replay end |
 
 Heartbeat `component` values use dot notation matching the topic path after
 `system.heartbeats.`: `executor.kraken`, `executor.kraken.019d6ca45f2e`,
@@ -123,6 +121,158 @@ Heartbeat `component` values use dot notation matching the topic path after
 executor heartbeat envelope additionally carries `meta.wallet_public_id` so
 subscribers that prefix-match the 4-segment parent topic can still
 disambiguate by reading the payload.
+
+### Admin
+
+Cross-cutting administrative notifications fanned out to every
+backend subscriber that cares about user/operator state changes.
+
+| Topic | Description |
+| ----- | ----------- |
+| `admin.user_deactivated` | A user (or AI delegate) was deactivated; revocation hook for in-process token caches |
+| `admin.user_activated` | A user was re-activated |
+| `admin.operator_membership_changed` | `user_operator_memberships` row mutation |
+
+Shape: `admin.{resource}` — exactly 2 segments. The validator only
+enforces the 2-segment shape; the `resource` token itself is not
+character-class-checked, so consumers must use the payload's
+`type` discriminator as the authoritative routing hint.
+
+### Accruals
+
+Funding / rollover / borrow ledger entries that affect mark-to-market.
+
+| Topic | Description |
+| ----- | ----------- |
+| `accruals.kraken_futures.BTC-USD-PERP.funding` | Perpetual funding |
+| `accruals.kraken.EUR-USD.rollover` | FX rollover |
+| `accruals.kraken.BTC-USD.borrow` | Borrow interest |
+
+Shape: `accruals.{exchange}.{instrument}.{accrual_type}` (4 segments).
+`accrual_type` must be one of `funding`, `rollover`, `borrow`.
+
+### Alerts
+
+Per-user push-notification fanout consumed by the WS bridge and the
+APNs sidecar.
+
+| Topic | Description |
+| ----- | ----------- |
+| `alerts.<user_public_id>.order_fill_full` | Order filled in full |
+| `alerts.<user_public_id>.order_rejected` | Venue rejected the order |
+| `alerts.<user_public_id>.position_stop_loss_fired` | Stop-loss fired on an open position |
+| `alerts.<user_public_id>.margin_warning` | Margin warning |
+| `alerts.<user_public_id>.critical_system_error` | Critical system error |
+
+Shape: `alerts.{user_public_id}.{alert_type}` (3 segments). `user_public_id`
+must be a UUID7; `alert_type` is the discriminated union in the
+`AlertType` Literal — the validator pulls the set via
+`typing.get_args(AlertType)` so adding a new alert type to the
+schema flows through automatically.
+
+### Plan Decisions
+
+Bracket / trailing-stop / execution-plan decisions, emitted by the
+`PlanExecutorService` immediately after each `ExecutionPlanDecision`
+SCD2 insert. The notify sidecar subscribes to turn stop-loss / take-profit
+fires into iOS pushes.
+
+| Topic | Description |
+| ----- | ----------- |
+| `plans.decisions.<plan_public_id>` | One topic per execution plan; payload carries the decision frame |
+
+Shape: `plans.decisions.{plan_public_id}` (3 segments) with `plan_public_id`
+in UUID7 form.
+
+### AI Reviews
+
+Outbound delegate-consultation frames for the human-in-the-loop review
+queue. The bridge applies a per-frame scope filter so each operator only
+sees their own strategy.
+
+| Topic | Description |
+| ----- | ----------- |
+| `ai_reviews.<user_public_id>.<strategy_public_id>.request` | Strategy is asking for review |
+| `ai_reviews.<user_public_id>.<strategy_public_id>.decision_ack` | Operator's decision acknowledged |
+| `ai_reviews.<user_public_id>.<strategy_public_id>.caps_violation` | Caps violation after approval |
+
+Shape: `ai_reviews.{user_public_id}.{strategy_public_id}.{suffix}` (4 segments).
+Both ID segments are UUID7; `suffix` is one of the three frame
+discriminators above.
+
+### Backtest
+
+Per-run lifecycle and progress events.
+
+| Topic | Description |
+| ----- | ----------- |
+| `backtest.<wallet_public_id>.<run_public_id>.started` | Run kicked off |
+| `backtest.<wallet_public_id>.<run_public_id>.progress` | Periodic progress tick |
+| `backtest.<wallet_public_id>.<run_public_id>.milestone` | Engine progress milestone — payload's `milestone` field is one of `25pct`/`50pct`/`75pct` (`BacktestProgressMilestone` Literal) |
+| `backtest.<wallet_public_id>.<run_public_id>.completed` | Run finished |
+| `backtest.<wallet_public_id>.<run_public_id>.failed` | Run failed |
+| `backtest.<wallet_public_id>.<run_public_id>.cancelled` | Run cancelled |
+
+Shape: `backtest.{wallet_public_id}.{run_public_id}.{event}` (4 segments).
+`wallet_public_id` and `run_public_id` are UUID7; `event` is drawn from
+`BacktestProgressEvent` in [data.py](../src/snapper/messaging/schemas/data.py)
+— the validator's `BACKTEST_EVENTS` set is derived via
+`typing.get_args(BacktestProgressEvent)` so the wire schema and the
+validator share one source of truth. Subscription-only prefixes
+(`backtest.`, `backtest.{wallet}.`, `backtest.{wallet}.{run}.`) are
+accepted on the `subscribe.py` / `bridge.py` paths.
+
+### Bus
+
+Internal cross-service event bus over the shared broker.
+
+| Topic | Description |
+| ----- | ----------- |
+| `bus.delegate_offline` | Delegate session torn down |
+| `bus.ai_review_decision` | AI review decision recorded — fast-path fanout to the in-process AI review bus listener that resolves the strategy's await future (WS fanout of the operator's ack is the separate external `ai_reviews.<user>.<strategy>.decision_ack` topic). The matching `bus.ai_review_request` topic is intentionally NOT published today |
+| `bus.caps_violation_after_ai_approve` | Caps violation post-approval |
+
+Shape: `bus.{name}` (2 segments) where `name` matches
+`[a-z][a-z0-9_]*` (snake_case). The payload's
+`StrictDataSchema.type` discriminator is the authoritative routing
+hint; the validator only enforces structural shape so the schema
+layer can reject unknown payload types.
+
+### Process Manager Events
+
+Snapshot + per-run events emitted by `ProcessLauncherService` whenever
+the configured set of processes changes or a run transitions. Frontend
+subscribes via `wsDispatcher` and uses these to invalidate React Query
+caches (no REST polling).
+
+| Topic | Description |
+| ----- | ----------- |
+| `processes.events.summary.<instance_id>` | Full snapshot of every configured process's current status (start/stop/crash/completion transitions) |
+| `processes.events.configured.<instance_id>` | Snapshot of currently-known process names. Emits in two places: `create_process_config` (persisted-config-row create), and `spawn_per_wallet_executors` (per-wallet executor instances appear). It does NOT fire on persisted-row delete or on per-wallet teardown today. The snapshot's `process_names` is the union of persisted config names and `instance_configs.keys()`. |
+| `processes.events.runs.<process_name>` | Per-run lifecycle transitions: `running` / `succeeded` / `failed` / `cancelled` |
+| `strategies.events.list.<instance_id>` | Snapshot of canonical class paths for every STRATEGY-role process config (drives the Strategies view) |
+
+Shape: 4 segments. The instance-id / process-name tail must match
+`[A-Za-z][A-Za-z0-9_-]*` (regex `_PROCESSES_TOPIC_NAME_PATTERN`).
+
+**Known limitation:** the regex requires a leading letter, but
+`SNAPPER_COORDINATOR_INSTANCE_ID` is typed `int` (default `0`)
+end-to-end (env loader, `AppSettings.coordinator_instance_id`,
+the `trade-zmq --instance-id` CLI flag). Every default numeric
+instance_id therefore fails the validator at publish time and
+the launcher's best-effort emit silently logs+swallows the
+`ValueError`. Until either the regex widens to allow leading
+digits (`[A-Za-z0-9]...`) or the field switches to `str`, the
+fanout topics whose tail is `coordinator_instance_id` —
+`processes.events.summary.*`, `processes.events.configured.*`,
+`strategies.events.list.*` — are effectively dark in
+single-instance deployments. `processes.events.runs.<process_name>`
+is unaffected because its tail is the process name (a string that
+satisfies the regex), so per-run events still flow. The launcher
+emits these best-effort — if no `MessagePublisher` is
+wired the helper silently no-ops; if `send_multipart` raises the
+exception is logged and never propagates, so a broker outage never
+corrupts process state.
 
 ## Message Data Classes
 
@@ -329,6 +479,78 @@ heartbeat = HeartbeatData(
     lag_ms=5,
 )
 ```
+
+### ProcessSummaryEventData
+
+Full snapshot published on `processes.events.summary.<instance_id>`
+whenever the launcher detects a status transition. Frontend replaces
+its React Query cache entry wholesale — no diff reconciliation.
+
+**Fields:**
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `type` | string | `"process_summary_event"` |
+| `processes` | list[`ProcessSummaryItem`] | Unordered snapshot of per-process rows (configured first in repository row order, then runtime per-wallet instances — consumers must not rely on this order) |
+| `snapshot_at` | datetime | Bus time the snapshot was assembled |
+
+`ProcessSummaryItem` fields: `name`, `running`, `enabled`, `role`,
+`lifecycle`, `active_public_id`. PID / command / exit_code are
+intentionally absent — they only exist for native subprocesses, so
+detailed status is fetched via REST when needed.
+
+### ProcessConfiguredEventData
+
+Published on `processes.events.configured.<instance_id>` from two
+launcher sites only: `create_process_config` (persisted-config-row
+create) and `spawn_per_wallet_executors` (per-wallet executor
+instances appear). The launcher does NOT emit on persisted-row
+delete or on per-wallet teardown today. `process_names` is the
+sorted union of persisted config names AND
+`instance_configs.keys()` at snapshot time.
+
+**Fields:**
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `type` | string | `"process_configured_event"` |
+| `process_names` | list[string] | All configured process names at snapshot time |
+| `snapshot_at` | datetime | Bus time the snapshot was assembled |
+
+### ProcessRunEventData
+
+A single process-run lifecycle transition. Per-run (not snapshot) so
+consumers can append to their run-history view without re-fetching.
+
+**Fields:**
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `type` | string | `"process_run_event"` |
+| `process_name` | string | Owning process |
+| `run_id` | string | Stable identifier for this run |
+| `status` | string | `running` / `succeeded` / `failed` / `cancelled` (mirrors `ProcessRunStatusEnum.value`) |
+| `started_at` | datetime | Bus time the run kicked off |
+| `completed_at` | datetime \| None | Bus time the run finished; `None` while in flight |
+| `exit_code` | int \| None | Native subprocess exit code; `None` for async-task processes (the launcher folds non-zero exits into the run record's `error` field) and `None` while in flight |
+
+### StrategyListEventData
+
+Published on `strategies.events.list.<instance_id>` whenever a
+STRATEGY-role process config is created or its start/stop state
+transitions. The launcher derives the payload from **persisted**
+process configs filtered by `role == STRATEGY` — NOT from the
+in-memory `StrategyFactory.STRATEGY_CLASSES` registry (which is
+static after import time). Frontend uses this to refresh the
+Strategies view without REST polling.
+
+**Fields:**
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `type` | string | `"strategy_list_event"` |
+| `strategy_classes` | list[string] | Sorted canonical class paths of every active STRATEGY-role process config |
+| `snapshot_at` | datetime | Bus time the snapshot was assembled |
 
 ## Publisher
 
@@ -544,7 +766,10 @@ Bridge automatically:
 
 ## Gap Detection
 
-`GapDetector` tracks `session_id` and `sequence_id` per received ZMQ topic and emits log
+`GapDetector` tracks `session_id` and `sequence_id` partitioned by the
+tuple `(received_topic, wallet_public_id)` — wallet scoping avoids
+false gaps when interleaved per-wallet streams share a topic — and
+emits log
 messages when it finds sequence gaps or producer session resets.
 
 ```python
@@ -670,7 +895,8 @@ Two destination tables provide always-available observability for non-domain tra
     from inbound messages via `_extract_client_provenance()` and stored as
     `client_session_id` and `client_public_id` on the control row.
   - **REST middleware** — `ClientProvenanceMiddleware._record_control()` records
-    every mutation (POST) with `transport="rest"`, redacted payload,
+    every mutation (`POST` / `PUT` / `DELETE` / `PATCH` per
+    `_MUTATION_METHODS`) with `transport="rest"`, redacted payload,
     outcome (`ok`/`error`/`exception`), and server-side provenance.
   - **ZMQ bridge** — `_record_bridge_control()` records subscribe errors and
     client disconnects with `transport="zmq"`.

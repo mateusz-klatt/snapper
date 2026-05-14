@@ -1,12 +1,19 @@
 # Snapper
 
 Trading platform with market data collection, trade runtime, and backtester.
-Supports Kraken, Zonda, Walutomat exchanges and Polygon.io data.
+Supports Kraken (WebSocket; spot + futures + equities), Walutomat
+(REST polling), and Polygon.io (REST) market data.
 
 ## Quick Steps
 
 ```bash
-# Initialize database with seed data and build static assets
+# One-time: install frontend deps and build the static UI so the
+# FastAPI server can serve the dashboard at `/`.
+make ui-setup
+make ui-build
+
+# Initialize the database + seed dev data, then refresh the verified
+# symbol mappings and market snapshots so the dashboard has data to show.
 make migrate-dev run-static
 
 # Start the server
@@ -17,12 +24,13 @@ Open <http://localhost:8000/> and log in with the dev seed credentials —
 the default values are defined in `proprietary/data/seed/dev.toml` (the
 proprietary submodule). Override per-environment by editing the seed file
 before running `make migrate-dev`, or rotate after first login via
-`POST /api/auth/users/<username>/password`.
+`POST /api/auth/users/{user_id}/change-password` (self-service) or
+`POST /api/auth/users/{user_id}/admin-reset-password` (admin reset).
 
 ## Features
 
-- **Market data collection** — WebSocket and REST API from Kraken, Zonda,
-  Walutomat, Polygon.io
+- **Market data collection** — Kraken (WebSocket; spot + futures +
+  equities), Walutomat (REST polling), Polygon.io (REST)
 - **Symbol correlation** — Underlying asset model linking instruments across
     exchanges (e.g., SPY, ESM6-CME, SPYX-USD-PERP all map to S&P 500).
     YAML-driven pattern matching, front-month rollover, contract ladder API
@@ -45,7 +53,7 @@ before running `make migrate-dev`, or rotate after first login via
 
 - Python 3.14+
 - Poetry
-- Node.js 25+ and pnpm (for frontend)
+- Node.js 22.13+ (per frontend `engines`) and pnpm 11+ (for frontend)
 - TA-Lib (C library)
 
 ### Installation
@@ -80,11 +88,12 @@ DB_URL=sqlite+aiosqlite:///./data/snapper.db
 MASTER_PASSWORD=your_master_password
 
 # HTTP Server
-SERVER_HOST=127.0.0.1
+SERVER_HOST=0.0.0.0
 SERVER_PORT=8000
+SERVER_RELOAD=false
 SERVER_API_ONLY=false
 SERVER_PROXY_HEADERS=true
-SERVER_FORWARDED_ALLOW_IPS=127.0.0.1
+SERVER_FORWARDED_ALLOW_IPS=127.0.0.1,172.17.0.1
 
 # Telemetry recording (pings, heartbeats, GET reads)
 TELEMETRY_RECORDING_ENABLED=false
@@ -104,7 +113,18 @@ make migrate-dev
 snapper server
 ```
 
-Dashboard available at `http://localhost:8000/`.
+Two ways to bring up the dashboard:
+
+- **Backend-served (production / single port).** Run `make ui-setup`
+  + `make ui-build` to produce `frontend/dist/`, then start the
+  server. The FastAPI app mounts the static UI at `/` only when
+  `frontend/dist/` exists; the dashboard is then at
+  `http://localhost:8000/`.
+- **Vite dev server (hot reload).** Run `make ui-dev` in a separate
+  terminal — Vite serves the dashboard at `http://localhost:3000/`
+  with a backend proxy for `/api` and `/api/ws`. This does NOT
+  produce `frontend/dist/`, so `http://localhost:8000/` will still
+  return 404 for the UI until the build step is run.
 
 ### Trade Runtime Dispatch
 
@@ -200,14 +220,17 @@ Wire your `~/.claude.json` mcpServers entry once with the file path:
 }
 ```
 
-After `rm data/snapper.db && make dev-backend && snapper dev-mint-pat` the
+After running, in this order, (a) `rm data/snapper.db`, (b)
+`make migrate-dev`, (c) `make dev-backend` (in a separate terminal —
+it blocks the foreground with the live backend), and (d)
+`snapper dev-mint-pat`, the
 bridge picks up the refreshed token automatically — no manual edits to
 `~/.claude.json` per DB wipe. CLI flags + environment overrides:
 
 ```text
 --base-url URL        SNAPPER_DEV_BASE_URL          (default http://localhost:8000)
---admin-username USER SNAPPER_DEV_ADMIN_USERNAME    (default admin)
---admin-password PASS SNAPPER_DEV_ADMIN_PASSWORD    (default matches dev.toml)
+--admin-username USER SNAPPER_DEV_ADMIN_USERNAME    (default None → resolved from seed profiles, mcp then dev)
+--admin-password PASS SNAPPER_DEV_ADMIN_PASSWORD    (default None → resolved from seed profiles, mcp then dev)
 --output PATH         SNAPPER_DEV_PAT_OUTPUT        (default data/dev-pat.json)
 --label LABEL                                         (default "Local Dev MCP")
 ```
@@ -256,6 +279,9 @@ class MyStrategy(BaseStrategy):
         super().__init__(config)
         self.threshold = self.params.get("threshold", 0.5)
 
+    async def reset(self) -> None:
+        """Clear any per-instrument indicator/state buffers."""
+
     async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         if some_condition:
             return StrategySignal(
@@ -267,6 +293,10 @@ class MyStrategy(BaseStrategy):
             )
         return None
 ```
+
+`reset()` is abstract on `BaseStrategy` — every subclass must
+implement it so the runtime can recycle per-instrument state on
+restart / replay.
 
 ## Development
 

@@ -6,7 +6,8 @@ Guidelines for developers working on the Snapper project.
 
 - Python 3.14+
 - Poetry
-- Node.js 25+ and pnpm
+- Node.js (frontend `engines` floor: `>=22.13.0`; root CI pins
+  Node 25; per-workflow frontend `setup-node` steps pin Node 22) and pnpm
 - TA-Lib (C library)
 - Pre-commit hooks
 
@@ -48,8 +49,10 @@ Executes the complete quality gate:
 7.  Empty `__init__.py` files
 8.  No forbidden temporal mutations
 9.  No pragma/noqa/ignore exclusions
-10. Tests with 100% coverage
-11. Frontend (ESLint, Prettier, dead code, tests with coverage)
+10. Vendor-neutrality check (`check-vendor-neutral`)
+11. Pydantic-only FastAPI I/O (`check-pydantic-routes`)
+12. Tests with 100% coverage
+13. Frontend (`ui-typecheck`, ESLint, Prettier, dead code, tests with coverage)
 
 ### Individual Steps
 
@@ -98,7 +101,7 @@ async def test_rsi_calculation() -> None:
 ### Docstrings (Google style)
 
 ```python
-def process_signal(signal: Signal, config: dict[str, Any]) -> Order | None:
+def process_signal(signal: Signal, config: StrategyConfig) -> Order | None:
     """Process trading signal and generate order.
 
     Takes a trading signal and configuration, validates the signal,
@@ -140,7 +143,6 @@ Imports at the top of file, single lines:
 ```python
 from datetime import UTC
 from datetime import datetime
-from typing import Any
 
 import pandas as pd
 from sqlalchemy import select
@@ -226,6 +228,20 @@ async def test_fetch_candles() -> None:
     assert len(candles) <= 10
 ```
 
+Tests must produce zero pytest warnings. A common pitfall:
+`AsyncMock()` makes **every** attribute on the mock async, including
+synchronous methods such as `session.add()` or `session.expunge()`.
+The fix is to override the synchronous attributes explicitly:
+
+```python
+from unittest.mock import AsyncMock, MagicMock
+
+session = AsyncMock(add=MagicMock(), expunge=MagicMock())
+```
+
+Run `python -m pytest tests/ -W error::RuntimeWarning` to fail the
+suite on any unawaited-coroutine warnings.
+
 ### Fixtures
 
 ```python
@@ -246,7 +262,9 @@ The project requires 100% code coverage (TDD). Check:
 make cov
 ```
 
-Configuration in `.coveragerc`.
+Coverage is configured under `[tool.coverage.run]` /
+`[tool.coverage.report]` in `pyproject.toml`. The `fail_under = 100`
+threshold enforces the TDD requirement.
 
 ## Frontend
 
@@ -348,7 +366,7 @@ Pipeline executes the same consolidated gate used locally:
 For debugging a failing pipeline locally, the equivalent steps are:
 
 1.  `make check` — Backend quality checks
-2.  `make ui-check` — Frontend lint, format, and dead-code checks
+2.  `make ui-check` — Frontend lint, format, dead-code, and type checks (`ui-lint ui-format ui-dead-code ui-typecheck`)
 3.  `make check-exclusions` — No pragma/noqa/ignore bypasses
 4.  `make cov` — Backend tests with coverage
 5.  `make ui-cov` — Frontend tests with coverage
@@ -391,8 +409,9 @@ snapper/
 │   ├── data/              # Data layer
 │   ├── indicators/        # Technical indicators
 │   ├── infrastructure/    # External integrations
-│   ├── interface/         # WebSocket
-│   ├── messaging/         # ZeroMQ
+│   ├── interface/        # WebSocket
+│   ├── mcp/              # MCP server (delegate-facing tool surface)
+│   ├── messaging/        # ZeroMQ
 │   ├── server/            # FastAPI
 │   ├── strategies/        # Trading strategies
 │   └── utils/             # Utilities
