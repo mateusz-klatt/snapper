@@ -125,6 +125,7 @@ from snapper.application.services.candle_query import (
     VALID_TIMEFRAMES as _CANDLE_QUERY_VALID_TIMEFRAMES,
 )
 from snapper.application.services.candle_query import CacheUnavailableError
+from snapper.application.services.candle_query import CandleQueryResult
 from snapper.application.services.candle_query import CandleQueryRow
 from snapper.application.services.candle_query import fetch_cache_only as fetch_cache_only_candles
 from snapper.application.services.candle_query import fetch_candles as fetch_candle_query
@@ -1144,6 +1145,296 @@ def _collect_strategy_statuses(
     return strategies
 
 
+def _wrap_candle_list_response(
+    request: Request,
+    items: list[CandleData],
+) -> CandleListResponse:
+    """Wrap projected candle rows with REST envelope provenance.
+
+    Args:
+        request: FastAPI request carrying ``app.state.rest_tracker``.
+        items: Projected candle payload rows.
+
+    Returns:
+        CandleListResponse with REST sequence metadata.
+    """
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_DATA_STREAM)
+    ts = dt.datetime.now(dt.UTC)
+    pid = str(uuid7())
+    return CandleListResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=items,
+        count=len(items),
+    )
+
+
+def _wrap_cached_candles_response(
+    request: Request,
+    result: CandleQueryResult,
+) -> CachedCandlesResponse:
+    """Wrap cache-query rows with REST envelope provenance.
+
+    Args:
+        request: FastAPI request carrying ``app.state.rest_tracker``.
+        result: Cache query result from candle-query service.
+
+    Returns:
+        CachedCandlesResponse with REST sequence metadata.
+    """
+    candles = [project_query_row_to_cached_candle(row) for row in result.rows]
+    payload = CachedCandlesPayload(
+        candles=candles,
+        sample_count=result.sample_count,
+        is_warm=result.is_warm,
+        source=result.source,
+    )
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_DATA_STREAM)
+    ts = dt.datetime.now(dt.UTC)
+    pid = str(uuid7())
+    return CachedCandlesResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=payload,
+    )
+
+
+async def _handle_get_candles(
+    request: Request,
+    repo: Repository,
+    instrument: str,
+    exchange: MarketDataExchange,
+    timeframe: str,
+    limit: int,
+    as_of: datetime | None,
+) -> CandleListResponse:
+    """Fetch smart-routed candles for the legacy REST endpoint.
+
+    Args:
+        request: FastAPI request carrying cache and REST tracker state.
+        repo: Database repository.
+        instrument: Native symbol to query.
+        exchange: Exchange name to query.
+        timeframe: Candle timeframe.
+        limit: Maximum number of candles to return.
+        as_of: Optional point-in-time query timestamp.
+
+    Returns:
+        CandleListResponse wrapping projected candle rows.
+
+    Raises:
+        HTTPException: For unsupported timeframe or mapped service failures.
+    """
+    if timeframe not in _CANDLE_QUERY_VALID_TIMEFRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported timeframe: {timeframe!r}",
+        )
+    try:
+        cache: MarketCacheService | None = getattr(request.app.state, "market_cache", None)
+        result = await fetch_candle_query(
+            cache=cache,
+            repo=repo,
+            exchange=cast(AllExchange, exchange),
+            native_symbol=instrument,
+            timeframe=timeframe,
+            limit=limit,
+            as_of=as_of,
+        )
+        items = [
+            project_query_row_to_candle_data(row, instrument=instrument, exchange=exchange)
+            for row in result.rows
+        ]
+        return _wrap_candle_list_response(request, items)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Failed to fetch candles for {instrument}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to fetch candle data") from exc
+
+
+async def _handle_get_candles_db(
+    request: Request,
+    repo: Repository,
+    instrument: str,
+    exchange: MarketDataExchange,
+    timeframe: str,
+    limit: int,
+    as_of: datetime | None,
+) -> CandleListResponse:
+    """Fetch DB-only candles for diagnostic reads.
+
+    Args:
+        request: FastAPI request carrying REST tracker state.
+        repo: Database repository.
+        instrument: Native symbol to query.
+        exchange: Exchange name to query.
+        timeframe: Candle timeframe.
+        limit: Maximum number of candles to return.
+        as_of: Optional point-in-time query timestamp.
+
+    Returns:
+        CandleListResponse wrapping projected candle rows.
+
+    Raises:
+        HTTPException: For unsupported timeframe or mapped service failures.
+    """
+    if timeframe not in _CANDLE_QUERY_VALID_TIMEFRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported timeframe: {timeframe!r}",
+        )
+    try:
+        result = await fetch_db_only_candles(
+            repo=repo,
+            exchange=cast(AllExchange, exchange),
+            native_symbol=instrument,
+            timeframe=timeframe,
+            limit=limit,
+            as_of=as_of,
+        )
+        items = [
+            project_query_row_to_candle_data(row, instrument=instrument, exchange=exchange)
+            for row in result.rows
+        ]
+        return _wrap_candle_list_response(request, items)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Failed to fetch DB candles for {instrument}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to fetch candle data") from exc
+
+
+async def _handle_get_candles_cache(
+    request: Request,
+    repo: Repository,
+    instrument: str,
+    exchange: MarketDataExchange,
+    timeframe: str,
+    limit: int,
+) -> CachedCandlesResponse:
+    """Fetch cache-only candles with DB fallback for long frames.
+
+    Args:
+        request: FastAPI request carrying cache and REST tracker state.
+        repo: Database repository used for long-frame fallback.
+        instrument: Native symbol to query.
+        exchange: Exchange name to query.
+        timeframe: Candle timeframe.
+        limit: Maximum number of candles to return.
+
+    Returns:
+        CachedCandlesResponse wrapping cache diagnostic payload.
+
+    Raises:
+        HTTPException: For unsupported timeframe or mapped service failures.
+    """
+    if timeframe not in _CANDLE_QUERY_VALID_TIMEFRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported timeframe: {timeframe!r}",
+        )
+    cache: MarketCacheService | None = getattr(request.app.state, "market_cache", None)
+    try:
+        result = await fetch_cache_only_candles(
+            cache=cache,
+            repo=repo,
+            exchange=cast(AllExchange, exchange),
+            native_symbol=instrument,
+            timeframe=timeframe,
+            limit=limit,
+        )
+    except CacheUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Failed to fetch cache candles for {instrument}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to fetch cache candle data") from exc
+    return _wrap_cached_candles_response(request, result)
+
+
+async def _handle_get_signals(
+    request: Request,
+    principal: AuthPrincipal,
+    repo: Repository,
+    instrument: str | None,
+    strategy: str | None,
+    exchange: OrderExchange | None,
+    hours: int,
+    limit: int,
+    as_of: datetime | None,
+    operator_public_id: str | None,
+    wallet_public_id: str | None,
+) -> SignalListResponse:
+    """Fetch trading signals with optional filters.
+
+    Args:
+        request: FastAPI request carrying REST tracker state.
+        principal: Authenticated user principal.
+        repo: Database repository.
+        instrument: Optional instrument symbol filter.
+        strategy: Optional strategy name filter.
+        exchange: Optional exchange filter.
+        hours: Hours of history to return.
+        limit: Maximum number of signals to return.
+        as_of: Optional point-in-time query timestamp.
+        operator_public_id: Optional operator scope.
+        wallet_public_id: Optional wallet scope.
+
+    Returns:
+        SignalListResponse wrapping projected signal rows.
+
+    Raises:
+        HTTPException: For mapped service failures or scope errors.
+    """
+    processing_date = as_of or datetime.now(UTC)
+    try:
+        target_wallets = await resolve_target_wallets(
+            principal, repo, operator_public_id, wallet_public_id
+        )
+        since = processing_date - timedelta(hours=hours)
+        rows = await repo.get_signals(
+            since=since,
+            limit=limit,
+            as_of=processing_date,
+            instrument=instrument,
+            strategy=strategy,
+            exchange=exchange,
+            wallet_public_ids=target_wallets,
+        )
+        items = [SignalData(**cast(dict[str, Any], r)) for r in rows]
+        tracker: SequenceTracker = request.app.state.rest_tracker
+        sid = tracker.session_id
+        seq = tracker.next_sequence(_REST_DATA_STREAM)
+        ts = dt.datetime.now(dt.UTC)
+        pid = str(uuid7())
+        return SignalListResponse(
+            session_id=sid,
+            sequence_id=seq,
+            public_id=pid,
+            timestamp=ts,
+            payload=items,
+            count=len(items),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Failed to fetch signals: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to fetch signals") from exc
+
+
 def _create_candles_signals_router() -> APIRouter:
     """Create router for candles and signals endpoints.
 
@@ -1152,30 +1443,12 @@ def _create_candles_signals_router() -> APIRouter:
     """
     router = APIRouter()
 
-    def _wrap_candle_list_response(
-        request: Request,
-        items: list[CandleData],
-    ) -> CandleListResponse:
-        """Wrap a projected ``items`` list with REST envelope provenance."""
-        tracker: SequenceTracker = request.app.state.rest_tracker
-        sid = tracker.session_id
-        seq = tracker.next_sequence(_REST_DATA_STREAM)
-        ts = dt.datetime.now(dt.UTC)
-        pid = str(uuid7())
-        return CandleListResponse(
-            session_id=sid,
-            sequence_id=seq,
-            public_id=pid,
-            timestamp=ts,
-            payload=items,
-            count=len(items),
-        )
-
     @router.get(
         "/candles",
         response_model=None,
         responses={
             200: {"model": CandleListResponse},
+            400: {"description": "Invalid timeframe"},
             500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION},
         },
     )
@@ -1224,38 +1497,22 @@ def _create_candles_signals_router() -> APIRouter:
         Raises:
             HTTPException(400): ``timeframe`` outside the supported set.
         """
-        if timeframe not in _CANDLE_QUERY_VALID_TIMEFRAMES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported timeframe: {timeframe!r}",
-            )
-        try:
-            cache: MarketCacheService | None = getattr(request.app.state, "market_cache", None)
-            result = await fetch_candle_query(
-                cache=cache,
-                repo=repo,
-                exchange=cast(AllExchange, exchange),
-                native_symbol=instrument,
-                timeframe=timeframe,
-                limit=limit,
-                as_of=as_of,
-            )
-            items = [
-                project_query_row_to_candle_data(row, instrument=instrument, exchange=exchange)
-                for row in result.rows
-            ]
-            return _wrap_candle_list_response(request, items)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error(f"Failed to fetch candles for {instrument}: {exc}")
-            raise HTTPException(status_code=500, detail="Failed to fetch candle data") from exc
+        return await _handle_get_candles(
+            request,
+            repo,
+            instrument,
+            exchange,
+            timeframe,
+            limit,
+            as_of,
+        )
 
     @router.get(
         "/candles/db",
         response_model=None,
         responses={
             200: {"model": CandleListResponse},
+            400: {"description": "Invalid timeframe"},
             500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION},
         },
     )
@@ -1298,30 +1555,15 @@ def _create_candles_signals_router() -> APIRouter:
         Raises:
             HTTPException(400): ``timeframe`` outside the supported set.
         """
-        if timeframe not in _CANDLE_QUERY_VALID_TIMEFRAMES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported timeframe: {timeframe!r}",
-            )
-        try:
-            result = await fetch_db_only_candles(
-                repo=repo,
-                exchange=cast(AllExchange, exchange),
-                native_symbol=instrument,
-                timeframe=timeframe,
-                limit=limit,
-                as_of=as_of,
-            )
-            items = [
-                project_query_row_to_candle_data(row, instrument=instrument, exchange=exchange)
-                for row in result.rows
-            ]
-            return _wrap_candle_list_response(request, items)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error(f"Failed to fetch DB candles for {instrument}: {exc}")
-            raise HTTPException(status_code=500, detail="Failed to fetch candle data") from exc
+        return await _handle_get_candles_db(
+            request,
+            repo,
+            instrument,
+            exchange,
+            timeframe,
+            limit,
+            as_of,
+        )
 
     @router.get(
         "/candles/cache",
@@ -1329,6 +1571,7 @@ def _create_candles_signals_router() -> APIRouter:
         responses={
             200: {"model": CachedCandlesResponse},
             400: {"description": "Invalid timeframe"},
+            500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION},
             503: {"description": "Market cache not initialized"},
         },
     )
@@ -1377,51 +1620,13 @@ def _create_candles_signals_router() -> APIRouter:
             HTTPException(503): Market cache not initialized and the
                 requested timeframe is cache-eligible.
         """
-        if timeframe not in _CANDLE_QUERY_VALID_TIMEFRAMES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported timeframe: {timeframe!r}",
-            )
-        cache: MarketCacheService | None = getattr(request.app.state, "market_cache", None)
-        try:
-            result = await fetch_cache_only_candles(
-                cache=cache,
-                repo=repo,
-                exchange=cast(AllExchange, exchange),
-                native_symbol=instrument,
-                timeframe=timeframe,
-                limit=limit,
-            )
-        except CacheUnavailableError as exc:
-            raise HTTPException(
-                status_code=503,
-                detail=str(exc),
-            ) from exc
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error(f"Failed to fetch cache candles for {instrument}: {exc}")
-            raise HTTPException(
-                status_code=500, detail="Failed to fetch cache candle data"
-            ) from exc
-        candles = [project_query_row_to_cached_candle(row) for row in result.rows]
-        payload = CachedCandlesPayload(
-            candles=candles,
-            sample_count=result.sample_count,
-            is_warm=result.is_warm,
-            source=result.source,
-        )
-        tracker: SequenceTracker = request.app.state.rest_tracker
-        sid = tracker.session_id
-        seq = tracker.next_sequence(_REST_DATA_STREAM)
-        ts = dt.datetime.now(dt.UTC)
-        pid = str(uuid7())
-        return CachedCandlesResponse(
-            session_id=sid,
-            sequence_id=seq,
-            public_id=pid,
-            timestamp=ts,
-            payload=payload,
+        return await _handle_get_candles_cache(
+            request,
+            repo,
+            instrument,
+            exchange,
+            timeframe,
+            limit,
         )
 
     @router.get("/signals", responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}})
@@ -1458,40 +1663,19 @@ def _create_candles_signals_router() -> APIRouter:
         Returns:
             SignalListResponse wrapping the signal data.
         """
-        processing_date = as_of or datetime.now(UTC)
-        try:
-            target_wallets = await resolve_target_wallets(
-                _auth, repo, operator_public_id, wallet_public_id
-            )
-            since = processing_date - timedelta(hours=hours)
-            rows = await repo.get_signals(
-                since=since,
-                limit=limit,
-                as_of=processing_date,
-                instrument=instrument,
-                strategy=strategy,
-                exchange=exchange,
-                wallet_public_ids=target_wallets,
-            )
-            items = [SignalData(**cast(dict[str, Any], r)) for r in rows]
-            tracker: SequenceTracker = request.app.state.rest_tracker
-            sid = tracker.session_id
-            seq = tracker.next_sequence(_REST_DATA_STREAM)
-            ts = dt.datetime.now(dt.UTC)
-            pid = str(uuid7())
-            return SignalListResponse(
-                session_id=sid,
-                sequence_id=seq,
-                public_id=pid,
-                timestamp=ts,
-                payload=items,
-                count=len(items),
-            )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error(f"Failed to fetch signals: {exc}")
-            raise HTTPException(status_code=500, detail="Failed to fetch signals") from exc
+        return await _handle_get_signals(
+            request,
+            _auth,
+            repo,
+            instrument,
+            strategy,
+            exchange,
+            hours,
+            limit,
+            as_of,
+            operator_public_id,
+            wallet_public_id,
+        )
 
     return router
 
