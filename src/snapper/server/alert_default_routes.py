@@ -133,7 +133,7 @@ async def update_alert_default(
     returns the stable ``public_id`` (preserved across SCD2
     versions) so the response is synthesized from the validated
     body without an extra read that could race against other writers
-    on the same key (mirrors the pattern Copilot BE-1c locked in for
+    on the same key (mirrors the pattern used in
     ``upsert_device_alert_pref``).
 
     Args:

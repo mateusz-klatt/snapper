@@ -181,8 +181,7 @@ class PushBetaConfigRead(StrictDataSchema[Literal["push_beta_config_read"]]):
     when ``enabled`` is true, only ``user_public_ids`` receive APNs
     pushes; everyone else is suppressed at the routing layer
     regardless of their per-device prefs. When ``enabled`` is false
-    every authenticated user receives pushes (the legacy default
-    pre-iOS-5).
+    every authenticated user receives pushes (the legacy default).
 
     Attributes:
         type: Payload item type discriminator.

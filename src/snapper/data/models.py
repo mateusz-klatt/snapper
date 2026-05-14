@@ -2538,7 +2538,7 @@ class AlertDelivery(TemporalMixin, Base):
     (``user_public_id`` / ``operator_public_id`` / ``wallet_public_id``)
     are denormalised from the source ``alert_event`` at queue time so
     scope-based cancel passes do NOT depend on the current active
-    SCD2 version of the event (closes Copilot R1 correctness finding).
+    SCD2 version of the event.
     """
 
     __tablename__ = "alert_deliveries"

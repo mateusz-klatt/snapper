@@ -344,9 +344,7 @@ Sweet-spot params from the cointegration screening session:
 
 Engine FET/RENDER backtest with these params produced Sharpe 0.61 /
 return +60% / max DD -65% over the 2023-11 → 2026-05 period after
-the Bug L paired-signal fix. See
-``proprietary/plans/plan_2026_05_07_fet_render_forward_test.md``
-for the full spec + decision criteria.
+the paired-signal fix.
 """
 
 _create_strategy_process(

@@ -1,4 +1,4 @@
-"""REST routes for iOS Push Foundation alert reads (BE-1c).
+"""REST routes for iOS Push Foundation alert reads.
 
 Two endpoints, both authenticated and server-side scoped on
 ``user_public_id == principal.user_public_id``:

@@ -691,7 +691,7 @@ _ALERT_TYPES: frozenset[str] = frozenset(typing.get_args(AlertType))
 """Canonical alert_type names — derived from ``AlertType`` in
 ``snapper.messaging.schemas.data`` via ``typing.get_args`` so the
 validator and the wire schema share a single source of truth
-(closes Copilot BE-2 recommendation on drift risk). Any addition to
+(eliminates drift risk). Any addition to
 ``AlertType`` flows here automatically; the matching entry in
 ``DeviceAlertPrefBody.alert_type`` (``src/snapper/api/schemas/devices.py``)
 is still a separate Literal — the parity is asserted in the test

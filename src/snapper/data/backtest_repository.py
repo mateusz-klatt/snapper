@@ -100,11 +100,11 @@ def _event_to_dict(row: BacktestEvent) -> BacktestEventRow:
 def _result_to_dict(row: BacktestResult) -> BacktestResultRow:
     """Project a BacktestResult ORM row into the TypedDict shape.
 
-    Carries the 8 advanced-metric columns added in migration 0005 —
-    pre-0005 rows have all 8 as ``None`` but the 5 promoted values
-    remain reachable via ``extra_metrics`` for read-side fallback at
-    the route layer (see ``backtest_routes.py`` inline-result
-    projection).
+    Carries the 8 advanced-metric columns — legacy rows written
+    before these columns existed have all 8 as ``None`` but the 5
+    promoted values remain reachable via ``extra_metrics`` for
+    read-side fallback at the route layer (see ``backtest_routes.py``
+    inline-result projection).
     """
     return BacktestResultRow(
         public_id=row.public_id,

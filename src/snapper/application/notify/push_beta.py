@@ -1,4 +1,4 @@
-"""Push-beta rollout gate helpers (iOS-5 sub-scope b).
+"""Push-beta rollout gate helpers.
 
 When admins want to roll out APNs pushes to a subset of users
 without ripping the rule registry apart, the push-beta gate
@@ -6,7 +6,7 @@ intercepts ``application/notify/routing.route_alert_to_devices``
 before the per-device cascade runs:
 
 - ``enabled = False`` (default) — every authenticated user gets
-  pushes (legacy behaviour pre-iOS-5).
+  pushes (legacy behaviour).
 - ``enabled = True`` — only users whose ``user_public_id`` is in
   ``user_public_ids`` receive pushes; everyone else is silently
   dropped at the routing layer regardless of their per-device prefs.

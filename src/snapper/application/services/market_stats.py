@@ -17,10 +17,10 @@ UI:
 
 - ``market_stats_pairs``: list of
   ``"{exchange}:{native_symbol}|{exchange}:{native_symbol}"`` pipe-
-  separated pair specs. The worker validates the cap (≤ 50 entries
-  per plan v6) + the exchange Literal at load time; malformed pairs
-  trigger a warning and are silently dropped from the working set so
-  one bad config row cannot break the entire worker.
+  separated pair specs. The worker validates the cap (≤ 50 entries)
+  and the exchange Literal at load time; malformed pairs trigger a
+  warning and are silently dropped from the working set so one bad
+  config row cannot break the entire worker.
 - ``system.settings`` bus event triggers a re-read so a live edit
   through the admin UI surfaces within one event cycle.
 
@@ -69,7 +69,7 @@ _COINT_MIN_SAMPLES = 60
 """Minimum aligned sample count below which cointegration skips."""
 
 _MAX_STATS_PAIRS = 50
-"""Hard cap on configured pairs per plan v6 (rejects on overflow)."""
+"""Hard cap on configured pairs (rejects on overflow)."""
 
 _STATS_PAIRS_KEY = "market_stats_pairs"
 """Settings key holding the pipe-separated pair config."""

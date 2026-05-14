@@ -422,7 +422,7 @@ class PlanExecutorService(RegisterableProcess):
         bypass is audit-visible at the call site.
         When the service was constructed without a caps enforcer
         (legacy test fixtures), the insert is issued directly
-        matches pre-Phase-A behavior so existing tests continue to
+        matches the legacy behavior so existing tests continue to
         pass unchanged.
         """
         if self._caps_enforcer is None:
@@ -877,7 +877,7 @@ class PlanExecutorService(RegisterableProcess):
         DB insert is the source of truth — publish failure logs
         ``logger.warning`` and returns without raising so the caller
         (bracket / trailing-stop firing paths) completes normally.
-        Durable replay of missed publishes is deferred to BE-3c.
+        Durable replay of missed publishes is a deferred follow-up.
 
         Short-circuits when ``self._publisher is None`` (unit-test
         harness that never called ``_setup_publisher`` or environments

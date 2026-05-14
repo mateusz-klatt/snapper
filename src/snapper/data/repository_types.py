@@ -1752,8 +1752,8 @@ class AlertDeliveryInsertRow(TypedDict, total=False):
     status, created_at, session_id, sequence_id, timestamp. Optional:
     public_id (auto-generated if absent), operator_public_id,
     wallet_public_id (denormalised from the source alert_event at
-    queue time for scope-based cancel queries — closes Copilot R1
-    finding on SCD2-join correctness), attempt_count (defaults 0),
+    queue time for scope-based cancel queries — avoids SCD2-join
+    correctness issues), attempt_count (defaults 0),
     last_attempt_at, next_attempt_at (NULL = immediate retry),
     apns_id, error_reason, known_to (defaults KNOWN_TO_MAX on insert).
     """

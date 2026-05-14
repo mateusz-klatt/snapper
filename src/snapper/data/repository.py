@@ -1886,7 +1886,7 @@ class Repository(ABC):
 
         Bulk variant of :meth:`get_latest_plan_checkpoint` for the
         :py:class:`~snapper.application.plans.service.PlanExecutorService`
-        startup recovery path (closes the per-plan N+1 round-trip on
+        startup recovery path (avoids a per-plan N+1 round-trip in
         ``_recover_plans``). Plans without an active checkpoint are
         absent from the returned dict.
 
@@ -3119,7 +3119,7 @@ class Repository(ABC):
         ``"user_unregistered"`` for explicit user deregistration from
         the app). The successor keeps ``known_to = KNOWN_TO_MAX`` so
         ``as_of`` queries after the close see a visible inactive
-        device row instead of a gap (BE-3a R1 invariant INV-9).
+        device row instead of a gap (invariant INV-9).
 
         Idempotent: returns ``False`` when no active row exists for
         ``public_id`` (deactivation already ran); returns ``True`` on
@@ -3154,8 +3154,7 @@ class Repository(ABC):
         Returns the stable ``public_id`` (preserved across SCD2
         versions) so the caller can synthesize a response without an
         extra read that races against other writers on the same scope
-        tuple (closes Copilot BE-1c recommendation on post-upsert
-        race).
+        tuple (avoids the post-upsert race).
         """
         ...
 
@@ -3420,7 +3419,7 @@ class Repository(ABC):
 
         Returns:
             True on successful transition; False when the active row
-            is no longer ``queued`` (BE-3c R1 race guard — a scope-
+            is no longer ``queued`` (race guard — a scope-
             revoke cancel raced the retry-loop bump).
         """
         ...
@@ -3536,7 +3535,7 @@ class Repository(ABC):
     async def count_deliveries_by_status(self) -> dict[str, int]:
         """Aggregate counts of ``alert_deliveries`` rows per ``status``.
 
-        Covers the BE-3c ``GET /api/metrics/notifications`` endpoint —
+        Covers the ``GET /api/metrics/notifications`` endpoint —
         returns a dict keyed by ``status`` (``queued`` / ``sent`` /
         ``failed`` / ``unregistered`` / ``cancelled_scope``). Status
         values absent from the DB are also absent from the returned
@@ -10105,7 +10104,7 @@ class SQLAlchemyRepository(Repository):
         """Register or refresh a device via SCD2 close-and-insert.
 
         Two concurrent callers on the same ``device_token`` converge
-        idempotently (closes Copilot R2 new HIGH). Two race paths are
+        idempotently. Two race paths are
         handled, both via the one-retry outer loop:
           - **IntegrityError on INSERT** (competitor committed a new
             active row between our SELECT and our COMMIT — partial
@@ -10259,7 +10258,7 @@ class SQLAlchemyRepository(Repository):
         session_id: str,
         sequence_id: int,
     ) -> bool:
-        """Close active row + insert tombstone successor (BE-3a R1 INV-9)."""
+        """Close active row + insert tombstone successor (INV-9)."""
         async with self.session() as s:
             existing = (
                 await s.execute(
@@ -10301,13 +10300,12 @@ class SQLAlchemyRepository(Repository):
         """Active per-device prefs for user's active devices.
 
         The device-side join filters by ``token_status = 'active'`` in
-        addition to ``known_to = KNOWN_TO_MAX`` because BE-3a R1 added
-        tombstone successor rows
+        addition to ``known_to = KNOWN_TO_MAX`` because tombstone
+        successor rows
         (``token_status IN ('unregistered', 'user_unregistered')``)
-        that also remain at ``known_to = KNOWN_TO_MAX``. Without the
+        also remain at ``known_to = KNOWN_TO_MAX``. Without the
         status filter, prefs attached to a 410'd or user-unregistered
-        device would leak back into this listing (BE-3a R1.1
-        regression closure).
+        device would leak back into this listing (regression closure).
         """
         async with self.session() as s:
             result = await s.execute(
@@ -10471,11 +10469,11 @@ class SQLAlchemyRepository(Repository):
         same atomic-close + IntegrityError-retry pattern as
         ``upsert_notification_device``; the partial unique indexes
         ``uq_device_alert_{device,operator,wallet}_scope`` bound one
-        active row per scope permutation (closes Copilot R2 new HIGH).
+        active row per scope permutation.
         Returns the stable ``public_id`` preserved across versions —
         callers use it to synthesize the response without a second
         read that would race against other writers on the same scope
-        (closes Copilot BE-1c recommendation).
+        (avoids the post-upsert race).
         """
         max_attempts = 20
         last_error: Exception = RuntimeError("upsert_device_alert_pref: retry budget exhausted.")
@@ -10640,7 +10638,7 @@ class SQLAlchemyRepository(Repository):
 
         Concurrent same-key upserts converge idempotently via the same
         atomic-close + IntegrityError-retry pattern as
-        ``upsert_notification_device`` (closes Copilot R2 new HIGH).
+        ``upsert_notification_device``.
 
         Returns:
             The stable ``public_id`` of the now-active row. Reused
@@ -11082,7 +11080,7 @@ class SQLAlchemyRepository(Repository):
             True when the active queued row was transitioned; False
             when the row is no longer queued (e.g. cancelled mid-send
             by an admin.scope_revoked handler racing the retry loop —
-            BE-3c R1 race guard). Callers use the False branch to
+            race guard). Callers use the False branch to
             short-circuit the APNs send.
         """
         return await self._scd2_transition_delivery(
@@ -11288,8 +11286,8 @@ class SQLAlchemyRepository(Repository):
         ``sent`` / ``failed`` would collide on the partial unique
         index ``(public_id, known_to=KNOWN_TO_MAX)`` and raise
         ``IntegrityError`` out of the admin-topic dispatcher — which
-        in turn would kill the sidecar's receive loop (BE-3c R1 race-
-        safety fix from `gpt-5.3-codex` final review).
+        in turn would kill the sidecar's receive loop (race-safety
+        fix from `gpt-5.3-codex` final review).
         """
         async with self.session() as s:
             rows = await self._select_queued_deliveries_by_user(s, user_public_id)
