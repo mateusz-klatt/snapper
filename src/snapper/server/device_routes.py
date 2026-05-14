@@ -1,4 +1,4 @@
-"""REST routes for iOS Push Foundation device management (BE-1c).
+"""REST routes for iOS Push Foundation device management.
 
 Four endpoints, all gated by the authenticated principal and
 ownership-checked on ``user_public_id``:

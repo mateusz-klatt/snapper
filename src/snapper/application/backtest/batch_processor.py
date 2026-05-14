@@ -211,7 +211,7 @@ async def process_time_batch(
         emitter: Optional WS progress emitter. When supplied
             ``on_candle_processed`` is called after the equity sample
             with the current equity + cumulative signal/trade counts.
-            ``None`` keeps the helper byte-identical with pre-Phase-2c
+            ``None`` keeps the helper byte-identical with the legacy
             callers.
     """
     for event in batch:

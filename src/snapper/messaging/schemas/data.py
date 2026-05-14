@@ -1570,7 +1570,7 @@ of priority.
 class AlertEventData(StrictDataSchema[Literal["alert_event"]]):
     """ZMQ bus payload published on ``alerts.{user_public_id}.{alert_type}``.
 
-    The sidecar (``snapper notify``, BE-3a) subscribes to the
+    The sidecar (``snapper notify``) subscribes to the
     ``alerts.`` prefix via ``ValidatedSubscriber.subscribe("alerts.")``
     and dispatches into the APNs outbox. Producers are
     domain services (trader / portfolio / system health) that call

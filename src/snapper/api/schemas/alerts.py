@@ -1,6 +1,6 @@
 """Pydantic schemas for iOS Push Foundation alert read endpoints.
 
-Covers BE-1c's two alert endpoints:
+Covers the two alert endpoints:
 ``GET /api/alerts/history?limit=&before=`` and ``GET /api/alerts/{id}``.
 Both are read-only projections of the currently-active
 ``alert_events`` SCD2 row for the authenticated caller, filtered

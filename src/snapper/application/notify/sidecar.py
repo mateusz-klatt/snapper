@@ -11,7 +11,7 @@ Flow per received ``alerts.`` message:
    payload's ``user_public_id`` — mismatch is a producer bug and
    drops the message with a warning (never sends to a token owned
    by a different user).
-3. ``insert_alert_event`` (SCD2 row for history + BE-1c
+3. ``insert_alert_event`` (SCD2 row for history +
    ``GET /api/alerts/history`` reads).
 4. Fan out: for each active device owned by the target user, insert
    one ``alert_deliveries`` row with ``status='queued'`` and
@@ -425,7 +425,7 @@ class NotifySidecar(RegisterableProcess):
         new attempt number is returned when the transition succeeded;
         ``None`` when the row is no longer queued (a concurrent admin
         handler cancelled it between our ``should_skip_send`` check
-        and this call — BE-3c R1 race guard, ``gpt-5.3-codex`` final
+        and this call — race guard, ``gpt-5.3-codex`` final
         review). Callers treating ``None`` as "abort this attempt"
         keep the sidecar from emitting a send for a row that was
         just cancelled.
@@ -505,7 +505,7 @@ class NotifySidecar(RegisterableProcess):
         use the exponential backoff. Retry exhaustion
         emits a ``logger.warning`` before the terminal ``failed``
         transition so ops alerting has a single log record to pivot
-        on (BE-3a R1 invariant INV-10).
+        on (invariant INV-10).
         """
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)

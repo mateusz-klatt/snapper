@@ -1,6 +1,6 @@
 """Pydantic schemas for iOS Push Foundation device-management routes.
 
-Covers the four BE-1c device endpoints: register/upsert, list caller's
+Covers the four device endpoints: register/upsert, list caller's
 active devices, soft-delete by public_id, and per-(device, alert_type)
 preference updates. The five SCD2 tables behind these routes live in
 ``src/snapper/data/models.py``; the schemas here are the wire contract

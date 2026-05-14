@@ -465,9 +465,9 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         ``:BTNL`` (a registered Bitnomial trademark). The Bitnomial
         product catalog enumerates these as SPOT products with their
         own venue order books, distinct from Kraken's primary spot
-        market — Phase 0 measurement confirmed persistent non-zero
-        offsets vs Kraken spot prices, consistent with two separate
-        spot venues for the same underlying asset.
+        market — measurement confirmed persistent non-zero offsets
+        vs Kraken spot prices, consistent with two separate spot
+        venues for the same underlying asset.
 
         BTNL ticker updates run 5-100× less frequently than Kraken's
         primary spot stream, so the discovery window must be sized
