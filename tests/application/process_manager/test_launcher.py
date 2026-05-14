@@ -34,6 +34,7 @@ from snapper.messaging.schemas.data import ProcessConfiguredEventData
 from snapper.messaging.schemas.data import ProcessRunEventData
 from snapper.messaging.schemas.data import ProcessSummaryEventData
 from snapper.messaging.schemas.data import StrategyListEventData
+from snapper.messaging.topics.validation import validate_topic
 
 
 class DummySettings(SimpleNamespace):
@@ -2192,6 +2193,36 @@ class TestEmitHelpersWithPublisher:
         launcher.set_msg_publisher(None)
         assert launcher._msg_publisher is None
 
+    def test_coordinator_topic_slug_default(self, launcher: ProcessLauncherService) -> None:
+        """Default ``coordinator_instance_id`` of ``0`` slugifies to ``coord-0``.
+
+        Given: A launcher built from default ``BootstrapSettingsLoader``,
+        When: ``_coordinator_topic_slug()`` is called,
+        Then: It returns ``"coord-0"`` and the result satisfies the
+            registry validator pattern.
+        """
+        slug = launcher._coordinator_topic_slug()
+        assert slug == "coord-0"
+        valid, err = validate_topic(f"processes.events.summary.{slug}")
+        assert valid, err
+
+    def test_coordinator_topic_slug_with_nonzero_instance_id(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Non-zero ``coordinator_instance_id`` slugifies to ``coord-{n}``.
+
+        Given: A launcher whose ``settings.coordinator_instance_id`` is ``7``,
+        When: ``_coordinator_topic_slug()`` is called,
+        Then: It returns ``"coord-7"`` and the result satisfies the
+            registry validator pattern (leading-letter constraint preserved
+            even for numeric ids).
+        """
+        launcher.settings = SimpleNamespace(coordinator_instance_id=7)
+        slug = launcher._coordinator_topic_slug()
+        assert slug == "coord-7"
+        valid, err = validate_topic(f"strategies.events.list.{slug}")
+        assert valid, err
+
     @pytest.mark.asyncio
     async def test_summary_emit_publishes_snapshot(
         self, launcher: ProcessLauncherService, monkeypatch: pytest.MonkeyPatch
@@ -2240,6 +2271,8 @@ class TestEmitHelpersWithPublisher:
         assert len(publisher.sent) == 1
         topic, payload = publisher.sent[0]
         assert topic.startswith("processes.events.summary.")
+        valid, err = validate_topic(topic)
+        assert valid, f"emitted topic {topic!r} must satisfy registry validator: {err}"
         assert isinstance(payload, ProcessSummaryEventData)
         names = {item.name: item for item in payload.processes}
         assert names["trader_coordinator"].running is True
@@ -2299,6 +2332,8 @@ class TestEmitHelpersWithPublisher:
         assert len(publisher.sent) == 1
         topic, payload = publisher.sent[0]
         assert topic.startswith("processes.events.configured.")
+        valid, err = validate_topic(topic)
+        assert valid, f"emitted topic {topic!r} must satisfy registry validator: {err}"
         assert isinstance(payload, ProcessConfiguredEventData)
         assert payload.process_names == [
             "executor_kraken",
@@ -2343,6 +2378,8 @@ class TestEmitHelpersWithPublisher:
         assert len(publisher.sent) == 1
         topic, payload = publisher.sent[0]
         assert topic.startswith("strategies.events.list.")
+        valid, err = validate_topic(topic)
+        assert valid, f"emitted topic {topic!r} must satisfy registry validator: {err}"
         assert isinstance(payload, StrategyListEventData)
         assert payload.strategy_classes == [
             "snapper.strategies.momentum.Momentum",

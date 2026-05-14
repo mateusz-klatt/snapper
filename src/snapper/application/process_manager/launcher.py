@@ -164,6 +164,18 @@ class ProcessLauncherService:
         """
         self._msg_publisher = publisher
 
+    def _coordinator_topic_slug(self) -> str:
+        """Return a topic-safe slug for ``coordinator_instance_id``.
+
+        Wraps the int ``coordinator_instance_id`` (zero-based, default ``0``)
+        with a literal ``coord-`` prefix so the result satisfies the
+        ``processes.events.*`` and ``strategies.events.list.*`` validator
+        pattern ``[A-Za-z][A-Za-z0-9_-]*``. Without the prefix a bare
+        ``"0"`` suffix fails the validator's leading-letter constraint
+        and the emit-site send raises ``TopicValidationError``.
+        """
+        return f"coord-{self.settings.coordinator_instance_id}"
+
     async def _build_process_summary_items(self) -> list[ProcessSummaryItem]:
         """Compose a snapshot of every tracked process row.
 
@@ -217,7 +229,7 @@ class ProcessLauncherService:
         """
         if self._msg_publisher is None:
             return
-        topic = f"{_PROCESSES_SUMMARY_STREAM}.{self.settings.coordinator_instance_id}"
+        topic = f"{_PROCESSES_SUMMARY_STREAM}.{self._coordinator_topic_slug()}"
         try:
             items = await self._build_process_summary_items()
             tracker = self._msg_publisher.tracker
@@ -242,7 +254,7 @@ class ProcessLauncherService:
         """
         if self._msg_publisher is None:
             return
-        topic = f"{_PROCESSES_CONFIGURED_STREAM}.{self.settings.coordinator_instance_id}"
+        topic = f"{_PROCESSES_CONFIGURED_STREAM}.{self._coordinator_topic_slug()}"
         try:
             configs = await self.get_process_configs()
             names = sorted({config.name for config in configs} | set(self.instance_configs.keys()))
@@ -268,7 +280,7 @@ class ProcessLauncherService:
         """
         if self._msg_publisher is None:
             return
-        topic = f"{_STRATEGIES_LIST_STREAM}.{self.settings.coordinator_instance_id}"
+        topic = f"{_STRATEGIES_LIST_STREAM}.{self._coordinator_topic_slug()}"
         try:
             configs = await self.get_process_configs()
             class_paths = sorted(
