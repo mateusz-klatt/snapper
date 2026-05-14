@@ -155,15 +155,19 @@ class TestRoleCategorySecurityMatrix:
     """
 
     def test_viewer_gets_market_system_backtest_and_trade_events(self) -> None:
-        """VIEWER role receives read-only categories (market, system, backtest, trade_events).
+        """VIEWER role receives read-only categories.
 
         Given: A VIEWER role,
         When: Getting allowed categories,
-        Then: market, system, backtest, and trade_events are allowed (no
-            trade, strategy, admin). ``trade_events`` is the v0.7.0
-            split for live ``orders.events.*`` streams — gated by
-            ``READ_ORDERS`` so VIEWER's WebSocket access mirrors the
+        Then: market, system, backtest, trade_events, and the
+            2026-05-14 ``strategies_read`` are allowed (no trade,
+            strategy, admin, processes_admin). ``trade_events`` is the
+            v0.7.0 split for live ``orders.events.*`` streams — gated
+            by ``READ_ORDERS`` so VIEWER's WebSocket access mirrors the
             REST `/api/orders` snapshot they already see.
+            ``strategies_read`` is gated by ``READ_STRATEGIES`` so the
+            Strategies dropdown stays live for viewers without granting
+            ``START_STRATEGIES``.
         """
         categories = role_allowed_categories(UserRole.VIEWER)
         assert categories == {
@@ -175,14 +179,19 @@ class TestRoleCategorySecurityMatrix:
         }
 
     def test_operator_gets_full_trade_categories(self) -> None:
-        """OPERATOR receives both trade categories + signals/strategy/system/backtest/ai_reviews.
+        """OPERATOR receives every non-admin category.
 
         Given: An OPERATOR role,
         When: Getting allowed categories,
-        Then: market, trade, trade_events, signals, strategy, system, backtest,
-            ai_reviews allowed but NOT admin. ``trade`` is gated by
+        Then: market, trade, trade_events, signals, strategy, system,
+            backtest, ai_reviews, ``strategies_read``, ``processes_admin``
+            are allowed but NOT ``admin``. ``trade`` is gated by
             ``CREATE_ORDERS`` (write commands); ``trade_events`` by
-            ``READ_ORDERS`` (read-side echo). OPERATOR holds both.
+            ``READ_ORDERS`` (read-side echo); the 2026-05-14
+            ``processes_admin`` category lifts to OPERATOR+ via
+            ``MANAGE_PROCESSES`` so configured + runs WS topics gate on
+            the same permission as the REST routes. OPERATOR holds all
+            of these.
         """
         categories = role_allowed_categories(UserRole.OPERATOR)
         assert categories == {
@@ -200,13 +209,15 @@ class TestRoleCategorySecurityMatrix:
         assert "admin" not in categories
 
     def test_admin_gets_all_categories_including_admin(self) -> None:
-        """ADMIN role receives all categories including admin + trade_events.
+        """ADMIN role receives every category.
 
         Given: An ADMIN role,
         When: Getting allowed categories,
-        Then: All nine categories are allowed
-            (market, trade, trade_events, signals, strategy, system, admin,
-            backtest, ai_reviews).
+        Then: All eleven categories defined in
+            :data:`CATEGORY_PERMISSIONS` are allowed — every category
+            from OPERATOR plus ``admin``. The 2026-05-14
+            ``strategies_read`` and ``processes_admin`` lift to ADMIN
+            naturally because ADMIN holds every permission.
         """
         categories = role_allowed_categories(UserRole.ADMIN)
         assert categories == {

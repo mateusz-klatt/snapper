@@ -1397,6 +1397,13 @@ def _create_candles_signals_router() -> APIRouter:
                 status_code=503,
                 detail=str(exc),
             ) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(f"Failed to fetch cache candles for {instrument}: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Failed to fetch cache candle data"
+            ) from exc
         candles = [project_query_row_to_cached_candle(row) for row in result.rows]
         payload = CachedCandlesPayload(
             candles=candles,

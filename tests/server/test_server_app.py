@@ -1937,6 +1937,24 @@ class TestCreateApiRouter:
         assert response.status_code == 500
         assert "Failed to fetch candle data" in response.text
 
+    def test_get_candles_cache_returns_500_on_db_fallback_failure(self) -> None:
+        """``/api/candles/cache`` maps DB-fallback exceptions to HTTP 500.
+
+        For long timeframes (1h/4h/1d) the cache route falls back to
+        the persisted ``candles`` table because the in-process 100-bar
+        deque can't synthesise them. Copilot review on parent PR #50
+        caught that an exception in that fallback path bypassed the
+        redacted 500 mapping used by the adjacent candle routes; the
+        new generic exception handler closes that hole.
+        """
+        repo = MockRepository(session_result=[], error=RuntimeError("boom"))
+        client = create_app_with_overrides(repo)
+        response = client.get(
+            "/api/candles/cache?instrument=BTC-USD&exchange=kraken&timeframe=1h&limit=10"
+        )
+        assert response.status_code == 500
+        assert "Failed to fetch cache candle data" in response.text
+
     def test_get_system_status_success(self) -> None:
         """Test system status returns running processes info.
 
@@ -3880,6 +3898,21 @@ class TestCandlesHttpExceptionReraise:
         repo = MockRepository(error=HTTPException(status_code=403, detail="Forbidden"))
         client = create_app_with_overrides(repo)
         response = client.get("/api/candles/db?instrument=BTC-USD&exchange=kraken&timeframe=1h")
+        assert response.status_code == 403
+        assert "Forbidden" in response.json()["detail"]
+
+    def test_candles_cache_reraises_http_exception(self) -> None:
+        """``/api/candles/cache`` propagates HTTPException without swallowing.
+
+        The DB-fallback path inside ``fetch_cache_only`` (used for
+        1h/4h/1d timeframes) can surface auth/permission HTTPExceptions
+        from upstream deps. The ``except HTTPException: raise`` branch
+        preserves the original status instead of folding it into the
+        generic 500 mapping added in the Copilot Q3 review fix.
+        """
+        repo = MockRepository(error=HTTPException(status_code=403, detail="Forbidden"))
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/candles/cache?instrument=BTC-USD&exchange=kraken&timeframe=1h")
         assert response.status_code == 403
         assert "Forbidden" in response.json()["detail"]
 

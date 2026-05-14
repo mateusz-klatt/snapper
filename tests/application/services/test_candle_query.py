@@ -12,7 +12,6 @@ by :class:`TestFetchCacheOnly`; DB-only escape hatch by
 
 from datetime import UTC
 from datetime import datetime
-from typing import Any
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -30,6 +29,8 @@ from snapper.application.services.candle_query import fetch_db_only
 from snapper.application.services.candle_query import row_from_db
 from snapper.application.services.candle_query import row_from_snap
 from snapper.application.services.market_cache import CandleSnap
+from snapper.core.types import AllExchange
+from snapper.data.repository import Repository
 from snapper.data.repository_types import CandleRow
 
 
@@ -73,7 +74,9 @@ def _stub_cache(snaps: list[CandleSnap]) -> MagicMock:
     cache mock.
     """
 
-    def _get_1m_candles(_exchange: Any, _symbol: Any, *, limit: int = 100) -> list[CandleSnap]:
+    def _get_1m_candles(
+        _exchange: AllExchange, _symbol: str, *, limit: int = 100
+    ) -> list[CandleSnap]:
         if limit >= len(snaps):
             return list(snaps)
         return list(snaps[-limit:])
@@ -241,7 +244,7 @@ class TestFetchDbOnly:
         rows = [_row(i * 3600_000, float(i), timeframe="1h") for i in range(3)]
         repo = _stub_repo(rows)
         result = await fetch_db_only(
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1h",
@@ -258,7 +261,7 @@ class TestFetchDbOnly:
         rows = [_row(i * 3600_000, 1.0) for i in range(5)]
         repo = _stub_repo(rows)
         result = await fetch_db_only(
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1h",
@@ -272,7 +275,7 @@ class TestFetchDbOnly:
         rows = [_row(2_000, 2.0), _row(1_000, 1.0)]
         repo = _stub_repo(rows)
         result = await fetch_db_only(
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1h",
@@ -286,7 +289,7 @@ class TestFetchDbOnly:
         repo = _stub_repo([])
         explicit = datetime(2026, 1, 1, tzinfo=UTC)
         await fetch_db_only(
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1h",
@@ -307,7 +310,7 @@ class TestFetchCacheOnly:
         cache = _stub_cache(snaps)
         result = await fetch_cache_only(
             cache=cache,
-            repo=cast(Any, _stub_repo([])),
+            repo=cast(Repository, _stub_repo([])),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1m",
@@ -323,7 +326,7 @@ class TestFetchCacheOnly:
         cache = _stub_cache([_snap(0, 1.0)])
         result = await fetch_cache_only(
             cache=cache,
-            repo=cast(Any, _stub_repo([])),
+            repo=cast(Repository, _stub_repo([])),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1m",
@@ -339,7 +342,7 @@ class TestFetchCacheOnly:
         cache = _stub_cache(snaps)
         result = await fetch_cache_only(
             cache=cache,
-            repo=cast(Any, _stub_repo([])),
+            repo=cast(Repository, _stub_repo([])),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="5m",
@@ -355,7 +358,7 @@ class TestFetchCacheOnly:
         cache = _stub_cache(snaps)
         result = await fetch_cache_only(
             cache=cache,
-            repo=cast(Any, _stub_repo([])),
+            repo=cast(Repository, _stub_repo([])),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="5m",
@@ -369,7 +372,7 @@ class TestFetchCacheOnly:
         rows = [_row(i * 3600_000, float(i), timeframe="1h") for i in range(3)]
         result = await fetch_cache_only(
             cache=_stub_cache([_snap(0, 1.0)]),
-            repo=cast(Any, _stub_repo(rows)),
+            repo=cast(Repository, _stub_repo(rows)),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1h",
@@ -384,7 +387,7 @@ class TestFetchCacheOnly:
         with pytest.raises(CacheUnavailableError):
             await fetch_cache_only(
                 cache=None,
-                repo=cast(Any, _stub_repo([])),
+                repo=cast(Repository, _stub_repo([])),
                 exchange="kraken",
                 native_symbol="BTC-USD",
                 timeframe="1m",
@@ -397,7 +400,7 @@ class TestFetchCacheOnly:
         with pytest.raises(CacheUnavailableError):
             await fetch_cache_only(
                 cache=None,
-                repo=cast(Any, _stub_repo([])),
+                repo=cast(Repository, _stub_repo([])),
                 exchange="kraken",
                 native_symbol="BTC-USD",
                 timeframe="5m",
@@ -410,7 +413,7 @@ class TestFetchCacheOnly:
         rows = [_row(0, 1.0, timeframe="1h")]
         result = await fetch_cache_only(
             cache=None,
-            repo=cast(Any, _stub_repo(rows)),
+            repo=cast(Repository, _stub_repo(rows)),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1h",
@@ -432,7 +435,7 @@ class TestFetchCandlesSmartRouter:
         repo = _stub_repo(rows)
         result = await fetch_candles(
             cache=cache,
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1m",
@@ -450,7 +453,7 @@ class TestFetchCandlesSmartRouter:
         repo = _stub_repo(rows)
         result = await fetch_candles(
             cache=None,
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1m",
@@ -468,7 +471,7 @@ class TestFetchCandlesSmartRouter:
         repo = _stub_repo(rows)
         result = await fetch_candles(
             cache=cache,
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1h",
@@ -485,7 +488,7 @@ class TestFetchCandlesSmartRouter:
         repo = _stub_repo([])
         result = await fetch_candles(
             cache=cache,
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1m",
@@ -504,7 +507,7 @@ class TestFetchCandlesSmartRouter:
         repo = _stub_repo([])
         result = await fetch_candles(
             cache=cache,
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="5m",
@@ -531,7 +534,7 @@ class TestFetchCandlesBackfill:
         repo = _stub_repo(rows)
         result = await fetch_candles(
             cache=cache,
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1m",
@@ -550,7 +553,7 @@ class TestFetchCandlesBackfill:
         repo = _stub_repo(rows)
         result = await fetch_candles(
             cache=cache,
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1m",
@@ -568,7 +571,7 @@ class TestFetchCandlesBackfill:
         repo = _stub_repo(rows)
         result = await fetch_candles(
             cache=cache,
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1m",
@@ -591,7 +594,7 @@ class TestFetchCandlesBackfill:
         repo = _stub_repo(rows)
         result = await fetch_candles(
             cache=cache,
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="1m",
@@ -618,7 +621,7 @@ class TestFetchCandlesBackfill:
         repo = _stub_repo(rows)
         result = await fetch_candles(
             cache=cache,
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="5m",
@@ -634,10 +637,13 @@ class TestFetchCandlesBackfill:
     async def test_backfill_derived_five_minute(self) -> None:
         """5m short cache backfills from DB with ``source='derived'``.
 
-        Cache holds one derived 5m bar at ``open_at_ms=1_500_000``
-        (built from five 1m bars starting at ``300_000``). DB returns
-        three older non-overlapping 5m rows so the merged chronological
-        slice is ``[db, db, db, cache]`` — exactly the requested limit.
+        Cache holds one derived 5m bar at ``open_at_ms=300_000``
+        (built from five 1m bars at indices 5..9 → 300_000 / 360_000 /
+        420_000 / 480_000 / 540_000, with the canonical-boundary
+        chunker emitting one 5m bar at the first 1m bar's open_at_ms).
+        DB returns three older non-overlapping 5m rows so the merged
+        chronological slice is ``[db, db, db, cache]`` — exactly the
+        requested limit.
         """
         snaps = [_snap((i + 5) * 60_000, 1.0) for i in range(5)]
         cache = _stub_cache(snaps)
@@ -649,7 +655,7 @@ class TestFetchCandlesBackfill:
         repo = _stub_repo(rows)
         result = await fetch_candles(
             cache=cache,
-            repo=cast(Any, repo),
+            repo=cast(Repository, repo),
             exchange="kraken",
             native_symbol="BTC-USD",
             timeframe="5m",

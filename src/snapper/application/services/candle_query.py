@@ -36,8 +36,13 @@ The returned :class:`CandleQueryResult` exposes a uniform
 wire shape: ``CandleData`` with envelope provenance for the
 ``CandleListResponse`` routes, ``CachedCandle`` for the diagnostic
 route. Cache-sourced rows carry ``public_id=None`` etc.; the public
-façade route mints synthetic provenance via the REST tracker so old
-clients see byte-shaped-compatible payloads.
+façade route mints deterministic provenance via
+``uuid5(NAMESPACE, "{exchange}|{instrument}|{timeframe}|{open_at_ms}")``
+plus a sentinel ``session_id="market-cache"`` and ``sequence_id``
+equal to ``open_at_ms`` so the same logical bar serialises
+identically across calls and old clients see byte-shape-compatible
+payloads. See ``project_query_row_to_candle_data`` for the wire
+projection.
 """
 
 from collections.abc import Sequence

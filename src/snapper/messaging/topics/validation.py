@@ -119,6 +119,10 @@ def _get_topic_prefix_validators() -> list[tuple[str, Callable[[str], tuple[bool
         ("plans.decisions.", _validate_plans_decisions_topic),
         ("ai_reviews.", _validate_ai_reviews_topic),
         ("bus.", _validate_bus_topic),
+        ("processes.events.summary.", _validate_processes_summary_topic),
+        ("processes.events.configured.", _validate_processes_configured_topic),
+        ("processes.events.runs.", _validate_processes_runs_topic),
+        ("strategies.events.list.", _validate_strategies_list_topic),
     ]
 
 
@@ -856,6 +860,100 @@ def _validate_bus_topic(topic: str) -> tuple[bool, str]:
     return True, ""
 
 
+_PROCESSES_TOPIC_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+"""Process / strategy snapshot topic suffix shape — alphanumeric +
+underscore/hyphen, leading letter. Matches the launcher's
+``coordinator_instance_id`` (UUID7 or short slug) and process names
+that ``ProcessLauncherService`` produces. The discriminator on the
+wire payload (``type`` field on ``StrictDataSchema``) is the
+authoritative routing hint so the validator only enforces structural
+shape on the trailing segment."""
+
+
+def _validate_processes_snapshot_topic(
+    topic: str,
+    *,
+    prefix: str,
+    suffix_label: str,
+) -> tuple[bool, str]:
+    """Shared validator for the three ``processes.events.*`` snapshot topics.
+
+    Each topic is exactly 4 segments: ``processes.events.{kind}.{tail}``
+    where ``kind`` is ``summary`` / ``configured`` / ``runs`` and
+    ``tail`` is either the coordinator instance id (for fanout topics)
+    or the process name (for the per-process runs topic). The tail
+    must match :data:`_PROCESSES_TOPIC_NAME_PATTERN`.
+
+    Args:
+        topic: Topic string starting with ``prefix``.
+        prefix: The 3-segment ``processes.events.{kind}.`` prefix.
+        suffix_label: Human-readable name of the tail segment for
+            diagnostic messages.
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    segments = topic.split(".")
+    if topic.endswith(".") or len(segments) != 4:
+        return False, f"{prefix}* requires 4 segments ({prefix}<{suffix_label}>), got '{topic}'"
+    if segments[0] != "processes" or segments[1] != "events":
+        return (
+            False,
+            f"Expected '{prefix.rstrip('.')}' prefix, got '{segments[0]}.{segments[1]}'",
+        )
+    tail = segments[3]
+    if not _PROCESSES_TOPIC_NAME_PATTERN.fullmatch(tail):
+        return False, (f"{prefix}* {suffix_label} must match [A-Za-z][A-Za-z0-9_-]*, got '{tail}'")
+    return True, ""
+
+
+def _validate_processes_summary_topic(topic: str) -> tuple[bool, str]:
+    """Validate ``processes.events.summary.{instance_id}`` topics."""
+    return _validate_processes_snapshot_topic(
+        topic, prefix="processes.events.summary.", suffix_label="instance_id"
+    )
+
+
+def _validate_processes_configured_topic(topic: str) -> tuple[bool, str]:
+    """Validate ``processes.events.configured.{instance_id}`` topics."""
+    return _validate_processes_snapshot_topic(
+        topic, prefix="processes.events.configured.", suffix_label="instance_id"
+    )
+
+
+def _validate_processes_runs_topic(topic: str) -> tuple[bool, str]:
+    """Validate ``processes.events.runs.{process_name}`` topics."""
+    return _validate_processes_snapshot_topic(
+        topic, prefix="processes.events.runs.", suffix_label="process_name"
+    )
+
+
+def _validate_strategies_list_topic(topic: str) -> tuple[bool, str]:
+    """Validate ``strategies.events.list.{instance_id}`` topics.
+
+    Strategy fanout topics share the launcher coordinator id with the
+    processes.* topics so the regex constraint matches.
+    """
+    segments = topic.split(".")
+    if topic.endswith(".") or len(segments) != 4:
+        return False, (
+            f"strategies.events.list.* requires 4 segments "
+            f"(strategies.events.list.<instance_id>), got '{topic}'"
+        )
+    if segments[0] != "strategies" or segments[1] != "events" or segments[2] != "list":
+        return False, (
+            f"Expected 'strategies.events.list' prefix, "
+            f"got '{segments[0]}.{segments[1]}.{segments[2]}'"
+        )
+    tail = segments[3]
+    if not _PROCESSES_TOPIC_NAME_PATTERN.fullmatch(tail):
+        return False, (
+            f"strategies.events.list.* instance_id must match "
+            f"[A-Za-z][A-Za-z0-9_-]*, got '{tail}'"
+        )
+    return True, ""
+
+
 def _validate_plans_decisions_topic(topic: str) -> tuple[bool, str]:
     """Validate a ``plans.decisions.{plan_public_id}`` topic.
 
@@ -1003,6 +1101,8 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
         "plans",
         "ai_reviews",
         "bus",
+        "processes",
+        "strategies",
     }
     if category not in valid_categories:
         return False, f"Unknown topic category: {category}"

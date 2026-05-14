@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import pytest
 
+from snapper.api.schemas.base import StrictDataSchema
 from snapper.application.process_manager.config_resolver import resolve_mode
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.models import ProcessConfigModel
@@ -1954,7 +1955,13 @@ async def test_handle_process_completion_long_running_unexpected(
     launcher.started_processes["worker"] = proc_info
     finalize_calls: list[tuple[str, ProcessLifecycleEnum]] = []
 
-    async def fake_finalize(name: str, status: Any, error: str | None = None) -> None:
+    async def fake_finalize(
+        name: str,
+        status: Any,
+        error: str | None = None,
+        exit_code: int | None = None,
+    ) -> None:
+        del error, exit_code
         finalize_calls.append((name, status))
 
     monkeypatch.setattr(launcher.spawner, "cleanup", lambda name: None)
@@ -2085,19 +2092,25 @@ class _RecordingPublisher:
     Mirrors :class:`snapper.messaging.infrastructure.publisher.MessagePublisher`
     well enough for the launcher emit paths — exposes ``tracker``
     (with ``session_id`` + ``next_sequence``) plus an ``async`` ``send``.
+
+    Payload typing matches the production publisher's ``data:
+    StrictDataSchema[Any]`` signature so test assertions can introspect
+    the same schema base every emit site builds against. ``Any`` here
+    is the generic type-literal slot inherited from the production
+    contract, not an opaque ``Any`` escape hatch.
     """
 
     def __init__(self) -> None:
         """Initialize the capture buffer + a deterministic tracker."""
-        self.sent: list[tuple[str, Any]] = []
+        self.sent: list[tuple[str, StrictDataSchema[Any]]] = []
         self._tracker = SequenceTracker()
 
     @property
-    def tracker(self) -> Any:
+    def tracker(self) -> SequenceTracker:
         """Expose the SequenceTracker for launcher emit helpers."""
         return self._tracker
 
-    async def send(self, stream_key: str, data: Any) -> None:
+    async def send(self, stream_key: str, data: StrictDataSchema[Any]) -> None:
         """Record the (topic, payload) pair for assertion."""
         self.sent.append((stream_key, data))
 
@@ -2110,7 +2123,7 @@ class _RaisingPublisher(_RecordingPublisher):
     control flow.
     """
 
-    async def send(self, stream_key: str, data: Any) -> None:
+    async def send(self, stream_key: str, data: StrictDataSchema[Any]) -> None:
         """Record the call then raise to simulate a broker hiccup."""
         await super().send(stream_key, data)
         raise RuntimeError("broker unreachable")
@@ -2522,7 +2535,7 @@ class TestCompletionEmitBranches:
         async def _noop() -> None:
             return None
 
-        task: asyncio.Task[Any] = asyncio.create_task(_noop())
+        task: asyncio.Task[None] = asyncio.create_task(_noop())
         await task
         launcher.process_tasks["momentum"] = task
 
@@ -2577,11 +2590,19 @@ class TestEmitSitesIntegration:
             snapshot, AND the strategy-list snapshot (because role is
             STRATEGY).
         """
+
+        def _import_dummy_process(_path: str, name: str | None = None) -> type[DummyProcess]:
+            del name
+            return DummyProcess
+
+        def _no_op_register(_name: str, _task: asyncio.Task[Any]) -> None:
+            return None
+
         publisher = _RecordingPublisher()
         launcher.set_msg_publisher(publisher)
         launcher._create_process_run_record = AsyncMock(return_value="run-1")
-        launcher.import_class = lambda path, name=None: DummyProcess
-        launcher._register_task_completion = lambda name, task: None
+        launcher.import_class = _import_dummy_process
+        launcher._register_task_completion = _no_op_register
         launcher.get_process_configs = AsyncMock(return_value=[])
         config = ProcessConfigModel(
             name="momentum",

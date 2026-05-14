@@ -957,10 +957,10 @@ class TestExecutionPlanDecisionEventDataSchema:
 class TestProcessAndStrategyEventSchemas:
     """Round-trip tests for the 2026-05-14 process/strategy event schemas.
 
-    Q3 declarations register the schemas + topics; emit sites land in a
-    follow-up. Verifying ``parse_message`` recognises the type
-    discriminators NOW ensures the bridge will dispatch frames the
-    moment producers start publishing.
+    Schemas + topic registry entries + emit sites all shipped together
+    in this PR. These tests pin the schema contract so producer-side
+    drift (e.g. status discriminator values) surfaces against the
+    bridge dispatch path the moment ``parse_message`` is invoked.
     """
 
     def test_process_summary_event_roundtrip(self) -> None:
@@ -1017,7 +1017,14 @@ class TestProcessAndStrategyEventSchemas:
         assert parsed.process_names == ["trader_coordinator", "feed_publisher"]
 
     def test_process_run_event_roundtrip(self) -> None:
-        """``ProcessRunEventData`` carries a single run transition."""
+        """``ProcessRunEventData`` carries a single run transition.
+
+        The ``status`` field uses the ``ProcessRunStatusEnum.value``
+        stringification the launcher emits (``running`` / ``succeeded``
+        / ``failed`` / ``cancelled``); ``started`` is intentionally
+        NOT a producer-side value — Copilot review caught the drift
+        between the test fixture and the actual emit payload.
+        """
         event = ProcessRunEventData(
             session_id="s1",
             sequence_id=3,
@@ -1025,7 +1032,7 @@ class TestProcessAndStrategyEventSchemas:
             timestamp=datetime(2026, 5, 14, 12, tzinfo=UTC),
             process_name="trader_coordinator",
             run_id="run-42",
-            status="started",
+            status="running",
             started_at=datetime(2026, 5, 14, 11, tzinfo=UTC),
         )
 
@@ -1033,7 +1040,7 @@ class TestProcessAndStrategyEventSchemas:
 
         assert isinstance(parsed, ProcessRunEventData)
         assert parsed.run_id == "run-42"
-        assert parsed.status == "started"
+        assert parsed.status == "running"
         assert parsed.completed_at is None
         assert parsed.exit_code is None
 

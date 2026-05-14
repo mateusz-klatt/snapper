@@ -208,10 +208,12 @@ class ProcessLauncherService:
     async def _emit_summary_snapshot(self) -> None:
         """Publish ``processes.events.summary.{instance_id}`` snapshot.
 
-        Best-effort: a missing publisher logs a warning and a send
-        failure logs the exception. Matches the
-        :class:`ScopeGrantService` resilience contract — emit failures
-        must not propagate into the launcher's start / stop control flow.
+        Best-effort: a missing publisher silently no-ops (the launcher
+        may be used in test harnesses or process-only modes that don't
+        wire one), and a send failure logs the exception at exception
+        level. Matches the :class:`ScopeGrantService` resilience
+        contract — emit failures must not propagate into the launcher's
+        start / stop control flow.
         """
         if self._msg_publisher is None:
             return
@@ -294,14 +296,16 @@ class ProcessLauncherService:
         started_at: datetime,
         completed_at: datetime | None,
         error: str | None,
+        exit_code: int | None = None,
     ) -> None:
         """Publish ``processes.events.runs.{process_name}`` lifecycle event.
 
         Unlike the summary topic, run events are per-run (not full
         snapshots) so consumers can append to their run-history view
-        without re-fetching. Exit code is intentionally unset — only
-        meaningful for native subprocess termination, and the launcher
-        already folds that into ``error`` for non-zero exits.
+        without re-fetching. ``exit_code`` is populated for native
+        subprocess termination (folded out of the ``error`` string by
+        :meth:`_finalize_process_run` callers) and left ``None`` for
+        asyncio-task processes which have no equivalent exit code.
         """
         if self._msg_publisher is None:
             return
@@ -318,6 +322,7 @@ class ProcessLauncherService:
                 status=status.value,
                 started_at=started_at,
                 completed_at=completed_at,
+                exit_code=exit_code,
             )
             if error is not None:
                 logger.debug("run-event error for {} run {}: {}", process_name, run_id, error)
@@ -393,6 +398,7 @@ class ProcessLauncherService:
         *,
         result: JsonObject | None = None,
         error: str | None = None,
+        exit_code: int | None = None,
     ) -> None:
         """Finalize a process run by updating its record.
 
@@ -405,6 +411,10 @@ class ProcessLauncherService:
             status: Final status.
             result: Optional result data.
             error: Optional error message.
+            exit_code: Native subprocess exit code when applicable;
+                forwarded onto the run event so direct event consumers
+                can reconstruct termination details without joining the
+                stringified ``error`` field.
         """
         public_id = self.active_runs.pop(name, None)
         started_at = self.active_run_started_at.pop(name, None)
@@ -419,6 +429,7 @@ class ProcessLauncherService:
             started_at=started_at if started_at is not None else completed_at,
             completed_at=completed_at,
             error=error,
+            exit_code=exit_code,
         )
 
     @staticmethod
@@ -1285,7 +1296,9 @@ class ProcessLauncherService:
                 self.spawner.cleanup(name)
             except Exception as cleanup_error:
                 logger.warning(f"Failed to cleanup process '{name}': {cleanup_error}")
-            await self._finalize_process_run(name, run_status, error=error_message)
+            await self._finalize_process_run(
+                name, run_status, error=error_message, exit_code=exit_code
+            )
         except Exception as e:
             logger.error(f"Error handling completion of native process '{name}': {e}")
         finally:
@@ -1574,11 +1587,15 @@ class ProcessLauncherService:
         )
         if mode is not None:
             instance_config.mode = mode
+        prior_instance_config = self.instance_configs.get(name)
         self.instance_configs[name] = instance_config
         try:
             await self.start_process(instance_config)
         except Exception as exc:
-            self.instance_configs.pop(name, None)
+            if prior_instance_config is not None:
+                self.instance_configs[name] = prior_instance_config
+            else:
+                self.instance_configs.pop(name, None)
             logger.error(f"Per-wallet start: failed to start '{name}': {exc}")
             return ProcessStartResult(
                 status=StartProcessStatusEnum.ERROR,
