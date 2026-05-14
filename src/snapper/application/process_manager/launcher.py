@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from uuid import uuid7
 
 from loguru import logger
 from sqlalchemy import select
@@ -64,6 +65,18 @@ from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
 from snapper.data.repository_types import WalletCredentialRow
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.schemas.data import ProcessConfiguredEventData
+from snapper.messaging.schemas.data import ProcessRunEventData
+from snapper.messaging.schemas.data import ProcessSummaryEventData
+from snapper.messaging.schemas.data import ProcessSummaryItem
+from snapper.messaging.schemas.data import StrategyListEventData
+
+_PROCESSES_SUMMARY_STREAM = "processes.events.summary"
+_PROCESSES_CONFIGURED_STREAM = "processes.events.configured"
+_PROCESSES_RUNS_STREAM = "processes.events.runs"
+_STRATEGIES_LIST_STREAM = "strategies.events.list"
+_BROADCAST_FAILURE_TEMPLATE = "Failed to broadcast {}: {}"
 
 
 class CoreProcessStartupError(RuntimeError):
@@ -128,11 +141,189 @@ class ProcessLauncherService:
         self.process_roles: dict[str, ProcessRoleEnum] = {}
         self.instance_configs: dict[str, ProcessConfigModel] = {}
         self.active_runs: dict[str, str] = {}
+        self.active_run_started_at: dict[str, datetime] = {}
         self.spawner = ProcessSpawnerService()
         self.expected_terminations: set[str] = set()
         self._run_recorder = ProcessRunRecorder(settings)
         self._registry_syncer = ProcessRegistrySyncer(settings)
         self._market_persist_policy: MarketPersistPolicy | None = None
+        self._msg_publisher: MessagePublisher | None = None
+
+    def set_msg_publisher(self, publisher: MessagePublisher | None) -> None:
+        """Inject the bus publisher used for processes/strategies fanout.
+
+        Mirrors :class:`ScopeGrantService.set_msg_publisher` exactly so
+        the FastAPI lifespan can share the existing
+        ``user_service_publisher`` socket — no second PUB socket is
+        opened. Called once after launcher construction and BEFORE
+        :meth:`start_all_processes` so autostart emits go out on the
+        first start cycle.
+
+        Args:
+            publisher: Configured ``MessagePublisher`` or ``None`` to clear.
+        """
+        self._msg_publisher = publisher
+
+    async def _build_process_summary_items(self) -> list[ProcessSummaryItem]:
+        """Compose a snapshot of every tracked process row.
+
+        Joins persisted configs from :meth:`get_process_configs` (the
+        source of truth for ``enabled``) with runtime per-wallet
+        instances held in ``instance_configs``. The result is the
+        launcher's authoritative "what exists right now" view —
+        consumers invalidate their cache against this signal and
+        re-fetch via REST for full detail.
+        """
+        configs = await self.get_process_configs()
+        items: list[ProcessSummaryItem] = []
+        seen: set[str] = set()
+        for config in configs:
+            name = config.name
+            items.append(
+                ProcessSummaryItem(
+                    name=name,
+                    running=name in self.started_processes,
+                    enabled=config.enabled,
+                    role=config.role.value,
+                    lifecycle=config.lifecycle.value,
+                    active_public_id=self.active_runs.get(name),
+                )
+            )
+            seen.add(name)
+        for name, instance_config in self.instance_configs.items():
+            if name in seen:
+                continue
+            items.append(
+                ProcessSummaryItem(
+                    name=name,
+                    running=name in self.started_processes,
+                    enabled=instance_config.enabled,
+                    role=instance_config.role.value,
+                    lifecycle=instance_config.lifecycle.value,
+                    active_public_id=self.active_runs.get(name),
+                )
+            )
+        return items
+
+    async def _emit_summary_snapshot(self) -> None:
+        """Publish ``processes.events.summary.{instance_id}`` snapshot.
+
+        Best-effort: a missing publisher logs a warning and a send
+        failure logs the exception. Matches the
+        :class:`ScopeGrantService` resilience contract — emit failures
+        must not propagate into the launcher's start / stop control flow.
+        """
+        if self._msg_publisher is None:
+            return
+        topic = f"{_PROCESSES_SUMMARY_STREAM}.{self.settings.coordinator_instance_id}"
+        try:
+            items = await self._build_process_summary_items()
+            tracker = self._msg_publisher.tracker
+            payload = ProcessSummaryEventData(
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence(topic),
+                public_id=str(uuid7()),
+                timestamp=datetime.now(UTC),
+                processes=items,
+                snapshot_at=datetime.now(UTC),
+            )
+            await self._msg_publisher.send(topic, payload)
+        except Exception as exc:
+            logger.exception(_BROADCAST_FAILURE_TEMPLATE, topic, exc)
+
+    async def _emit_configured_snapshot(self) -> None:
+        """Publish ``processes.events.configured.{instance_id}`` snapshot.
+
+        Fired when the persisted configuration set mutates
+        (``create_process_config``) or when runtime per-wallet executor
+        instances appear after :meth:`spawn_per_wallet_executors`.
+        """
+        if self._msg_publisher is None:
+            return
+        topic = f"{_PROCESSES_CONFIGURED_STREAM}.{self.settings.coordinator_instance_id}"
+        try:
+            configs = await self.get_process_configs()
+            names = sorted({config.name for config in configs} | set(self.instance_configs.keys()))
+            tracker = self._msg_publisher.tracker
+            payload = ProcessConfiguredEventData(
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence(topic),
+                public_id=str(uuid7()),
+                timestamp=datetime.now(UTC),
+                process_names=names,
+                snapshot_at=datetime.now(UTC),
+            )
+            await self._msg_publisher.send(topic, payload)
+        except Exception as exc:
+            logger.exception(_BROADCAST_FAILURE_TEMPLATE, topic, exc)
+
+    async def _emit_strategy_list_snapshot(self) -> None:
+        """Publish ``strategies.events.list.{instance_id}`` snapshot.
+
+        Carries the canonical class paths of every persisted
+        strategy-role process. Frontend invalidates against this
+        signal — payload identity fields are informational only.
+        """
+        if self._msg_publisher is None:
+            return
+        topic = f"{_STRATEGIES_LIST_STREAM}.{self.settings.coordinator_instance_id}"
+        try:
+            configs = await self.get_process_configs()
+            class_paths = sorted(
+                {config.class_path for config in configs if config.role is ProcessRoleEnum.STRATEGY}
+            )
+            tracker = self._msg_publisher.tracker
+            payload = StrategyListEventData(
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence(topic),
+                public_id=str(uuid7()),
+                timestamp=datetime.now(UTC),
+                strategy_classes=class_paths,
+                snapshot_at=datetime.now(UTC),
+            )
+            await self._msg_publisher.send(topic, payload)
+        except Exception as exc:
+            logger.exception(_BROADCAST_FAILURE_TEMPLATE, topic, exc)
+
+    async def _emit_run_event(
+        self,
+        *,
+        process_name: str,
+        run_id: str,
+        status: ProcessRunStatusEnum,
+        started_at: datetime,
+        completed_at: datetime | None,
+        error: str | None,
+    ) -> None:
+        """Publish ``processes.events.runs.{process_name}`` lifecycle event.
+
+        Unlike the summary topic, run events are per-run (not full
+        snapshots) so consumers can append to their run-history view
+        without re-fetching. Exit code is intentionally unset — only
+        meaningful for native subprocess termination, and the launcher
+        already folds that into ``error`` for non-zero exits.
+        """
+        if self._msg_publisher is None:
+            return
+        topic = f"{_PROCESSES_RUNS_STREAM}.{process_name}"
+        try:
+            tracker = self._msg_publisher.tracker
+            payload = ProcessRunEventData(
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence(topic),
+                public_id=str(uuid7()),
+                timestamp=datetime.now(UTC),
+                process_name=process_name,
+                run_id=run_id,
+                status=status.value,
+                started_at=started_at,
+                completed_at=completed_at,
+            )
+            if error is not None:
+                logger.debug("run-event error for {} run {}: {}", process_name, run_id, error)
+            await self._msg_publisher.send(topic, payload)
+        except Exception as exc:
+            logger.exception(_BROADCAST_FAILURE_TEMPLATE, topic, exc)
 
     def set_market_persist_policy(self, policy: MarketPersistPolicy | None) -> None:
         """Inject the :class:`MarketPersistPolicy` for publisher gating.
@@ -205,8 +396,9 @@ class ProcessLauncherService:
     ) -> None:
         """Finalize a process run by updating its record.
 
-        Removes run from active_runs and delegates DB update
-        to run_recorder.
+        Removes run from active_runs, delegates DB update to
+        run_recorder, then emits a terminal ``processes.events.runs``
+        frame so consumers can drop the run from their in-flight view.
 
         Args:
             name: Process name.
@@ -215,9 +407,19 @@ class ProcessLauncherService:
             error: Optional error message.
         """
         public_id = self.active_runs.pop(name, None)
+        started_at = self.active_run_started_at.pop(name, None)
         if public_id is None:
             return
         await self._run_recorder.update_run_record(public_id, status, result=result, error=error)
+        completed_at = datetime.now(UTC)
+        await self._emit_run_event(
+            process_name=name,
+            run_id=public_id,
+            status=status,
+            started_at=started_at if started_at is not None else completed_at,
+            completed_at=completed_at,
+            error=error,
+        )
 
     @staticmethod
     def _resolve_lifecycle(
@@ -412,6 +614,12 @@ class ProcessLauncherService:
     async def _try_create_run_record(self, config: ProcessConfigModel) -> str | None:
         """Attempt to create a database run record.
 
+        On success the started_at clock is stamped into
+        ``active_run_started_at`` so the matching ``processes.events.runs``
+        emit on finalize carries the correct duration. A ``started``
+        run event is emitted best-effort right after the DB insert so
+        consumers see the run before its terminal status arrives.
+
         Args:
             config: Process configuration.
 
@@ -424,7 +632,17 @@ class ProcessLauncherService:
         }
         try:
             public_id = await self._create_process_run_record(config, run_parameters)
+            started_at = datetime.now(UTC)
             self.active_runs[config.name] = public_id
+            self.active_run_started_at[config.name] = started_at
+            await self._emit_run_event(
+                process_name=config.name,
+                run_id=public_id,
+                status=ProcessRunStatusEnum.RUNNING,
+                started_at=started_at,
+                completed_at=None,
+                error=None,
+            )
             return public_id
         except Exception as run_error:
             logger.warning(
@@ -439,12 +657,17 @@ class ProcessLauncherService:
     ) -> None:
         """Handle process startup failure by cleaning up and recording.
 
+        Emits a terminal ``processes.events.runs`` frame so consumers
+        see the failed run alongside the started frame published by
+        :meth:`_try_create_run_record`.
+
         Args:
             config_name: Name of the failed process.
             public_id: Database run record public ID, or None if not persisted.
             exc: The exception that caused the failure.
         """
         self._cleanup_failed_start(config_name)
+        started_at = self.active_run_started_at.pop(config_name, None)
         if public_id is not None:
             await self._update_process_run_record(
                 public_id,
@@ -452,6 +675,15 @@ class ProcessLauncherService:
                 error=str(exc),
             )
             self.active_runs.pop(config_name, None)
+            completed_at = datetime.now(UTC)
+            await self._emit_run_event(
+                process_name=config_name,
+                run_id=public_id,
+                status=ProcessRunStatusEnum.FAILED,
+                started_at=started_at if started_at is not None else completed_at,
+                completed_at=completed_at,
+                error=str(exc),
+            )
 
     async def _finalize_one_shot(self, config: ProcessConfigModel) -> None:
         """Finalize a one-shot process that has already completed.
@@ -474,6 +706,10 @@ class ProcessLauncherService:
         - Process mode: Spawns subprocess via ProcessSpawnerService
 
         Creates database run record and handles completion tracking.
+        On success the launcher emits a ``processes.events.summary``
+        snapshot — and a ``strategies.events.list`` snapshot when the
+        config carries the STRATEGY role — so subscribers can refresh
+        their cached views without polling.
 
         Args:
             config: Process configuration to start.
@@ -504,6 +740,9 @@ class ProcessLauncherService:
             await self._handle_start_failure(config.name, public_id, exc)
             raise
         await self._finalize_one_shot(config)
+        await self._emit_summary_snapshot()
+        if config.role is ProcessRoleEnum.STRATEGY:
+            await self._emit_strategy_list_snapshot()
 
     async def start_all_processes(self) -> None:
         """Start all enabled processes in priority order.
@@ -843,6 +1082,8 @@ class ProcessLauncherService:
             ):
                 failed_core_names.append(outcome.instance_name)
         logger.info(f"Per-wallet spawner: started {spawned} per-wallet executor(s)")
+        if spawned > 0:
+            await self._emit_configured_snapshot()
         if failed_core_names:
             raise CoreProcessStartupError(failed_core_names)
         return spawned
@@ -887,7 +1128,9 @@ class ProcessLauncherService:
         self.process_lifecycles.clear()
         self.instance_configs.clear()
         self.expected_terminations.clear()
+        self.active_run_started_at.clear()
         logger.info("All processes stopped")
+        await self._emit_summary_snapshot()
 
     def _try_chain_result(self, name: str, result: Any) -> bool:
         """Chain a task or coroutine result into a new tracked task.
@@ -1028,6 +1271,7 @@ class ProcessLauncherService:
         return ProcessRunStatusEnum.FAILED, f"exit_code={exit_code}"
 
     async def _handle_process_completion(self, name: str, proc_info: ProcessInstanceInfo) -> None:
+        was_strategy = self.process_roles.get(name) is ProcessRoleEnum.STRATEGY
         try:
             lifecycle = self.process_lifecycles.get(name, ProcessLifecycleEnum.LONG_RUNNING)
             expected = name in self.expected_terminations
@@ -1047,6 +1291,9 @@ class ProcessLauncherService:
             self.process_roles.pop(name, None)
             self.started_processes.pop(name, None)
             self.expected_terminations.discard(name)
+            await self._emit_summary_snapshot()
+            if was_strategy:
+                await self._emit_strategy_list_snapshot()
 
     def _resolve_task_exception_status(
         self,
@@ -1129,6 +1376,7 @@ class ProcessLauncherService:
         try:
             lifecycle = self.process_lifecycles.get(name, ProcessLifecycleEnum.LONG_RUNNING)
             expected = name in self.expected_terminations
+            was_strategy = self.process_roles.get(name) is ProcessRoleEnum.STRATEGY
             run_status: ProcessRunStatusEnum = ProcessRunStatusEnum.CANCELLED
             error_message: str | None = None
             if task.cancelled():
@@ -1143,6 +1391,9 @@ class ProcessLauncherService:
             )
             if should_finalize:
                 await self._finalize_process_run(name, run_status, error=error_message)
+            await self._emit_summary_snapshot()
+            if was_strategy:
+                await self._emit_strategy_list_snapshot()
         except Exception as e:
             if not isinstance(e, (GeneratorExit, StopAsyncIteration, asyncio.CancelledError)):
                 logger.error(f"Error handling completion of process '{name}': {e}")
@@ -1439,6 +1690,11 @@ class ProcessLauncherService:
     async def stop_process_by_name(self, name: str) -> ProcessStopResult:
         """Stop a running process by name.
 
+        Emits a ``processes.events.summary`` snapshot — and a
+        ``strategies.events.list`` snapshot when the stopped process
+        carried the STRATEGY role — after the spawner releases so
+        subscribers refresh without polling.
+
         Args:
             name: Process name to stop.
 
@@ -1451,6 +1707,7 @@ class ProcessLauncherService:
                 status=StopProcessStatusEnum.NOT_RUNNING,
                 message=f"Process '{name}' is not running",
             )
+        was_strategy = self.process_roles.get(name) is ProcessRoleEnum.STRATEGY
         try:
             self.expected_terminations.add(name)
             await self._cancel_process_task(name)
@@ -1463,6 +1720,9 @@ class ProcessLauncherService:
             self.process_roles.pop(name, None)
             logger.info(f"Process '{name}' stopped successfully")
             await self._finalize_process_run(name, ProcessRunStatusEnum.CANCELLED)
+            await self._emit_summary_snapshot()
+            if was_strategy:
+                await self._emit_strategy_list_snapshot()
             return ProcessStopResult(
                 status=StopProcessStatusEnum.SUCCESS,
                 message=f"Process '{name}' stopped successfully",
@@ -1573,6 +1833,11 @@ class ProcessLauncherService:
     ) -> None:
         """Create a new process configuration in the database.
 
+        Emits a ``processes.events.configured`` snapshot after the
+        insert commits — and a ``strategies.events.list`` snapshot
+        when the new config carries the STRATEGY role — so subscribers
+        refresh without polling.
+
         Args:
             name: Process name.
             class_path: Fully qualified class path.
@@ -1599,3 +1864,6 @@ class ProcessLauncherService:
             parameters_schema=parameters_schema,
             note=note,
         )
+        await self._emit_configured_snapshot()
+        if role is ProcessRoleEnum.STRATEGY:
+            await self._emit_strategy_list_snapshot()

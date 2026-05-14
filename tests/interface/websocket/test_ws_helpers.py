@@ -166,7 +166,13 @@ class TestRoleCategorySecurityMatrix:
             REST `/api/orders` snapshot they already see.
         """
         categories = role_allowed_categories(UserRole.VIEWER)
-        assert categories == {"market", "system", "backtest", "trade_events"}
+        assert categories == {
+            "market",
+            "system",
+            "backtest",
+            "trade_events",
+            "strategies_read",
+        }
 
     def test_operator_gets_full_trade_categories(self) -> None:
         """OPERATOR receives both trade categories + signals/strategy/system/backtest/ai_reviews.
@@ -188,6 +194,8 @@ class TestRoleCategorySecurityMatrix:
             "system",
             "backtest",
             "ai_reviews",
+            "strategies_read",
+            "processes_admin",
         }
         assert "admin" not in categories
 
@@ -211,6 +219,8 @@ class TestRoleCategorySecurityMatrix:
             "admin",
             "backtest",
             "ai_reviews",
+            "strategies_read",
+            "processes_admin",
         }
 
     def test_admin_available_topics_include_admin_prefix(self) -> None:

@@ -28,6 +28,11 @@ from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRunStatusEnum
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import ProcessConfiguredEventData
+from snapper.messaging.schemas.data import ProcessRunEventData
+from snapper.messaging.schemas.data import ProcessSummaryEventData
+from snapper.messaging.schemas.data import StrategyListEventData
 
 
 class DummySettings(SimpleNamespace):
@@ -387,7 +392,9 @@ class TestProcessLauncherServiceInit:
         assert service.process_lifecycles == {}
         assert service.process_roles == {}
         assert service.active_runs == {}
+        assert service.active_run_started_at == {}
         assert service.expected_terminations == set()
+        assert service._msg_publisher is None
 
     def test_init_creates_spawner(self, settings: AppSettings) -> None:
         """Verify init creates ProcessSpawnerService instance.
@@ -2070,3 +2077,653 @@ def test_inject_market_persist_policy_skips_non_publisher(
     launcher.set_market_persist_policy(MagicMock())
     process = MagicMock(spec=[])
     launcher._inject_market_persist_policy(process, "pub:test")
+
+
+class _RecordingPublisher:
+    """Stub MessagePublisher capturing every (topic, payload) pair.
+
+    Mirrors :class:`snapper.messaging.infrastructure.publisher.MessagePublisher`
+    well enough for the launcher emit paths — exposes ``tracker``
+    (with ``session_id`` + ``next_sequence``) plus an ``async`` ``send``.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the capture buffer + a deterministic tracker."""
+        self.sent: list[tuple[str, Any]] = []
+        self._tracker = SequenceTracker()
+
+    @property
+    def tracker(self) -> Any:
+        """Expose the SequenceTracker for launcher emit helpers."""
+        return self._tracker
+
+    async def send(self, stream_key: str, data: Any) -> None:
+        """Record the (topic, payload) pair for assertion."""
+        self.sent.append((stream_key, data))
+
+
+class _RaisingPublisher(_RecordingPublisher):
+    """Publisher whose ``send`` raises after recording the call.
+
+    Lets the emit-failure tests exercise the launcher's best-effort
+    contract — a broker hiccup must NOT propagate into start / stop
+    control flow.
+    """
+
+    async def send(self, stream_key: str, data: Any) -> None:
+        """Record the call then raise to simulate a broker hiccup."""
+        await super().send(stream_key, data)
+        raise RuntimeError("broker unreachable")
+
+
+class TestEmitHelpersNoPublisher:
+    """All emit helpers no-op cleanly when no publisher is wired."""
+
+    @pytest.mark.asyncio
+    async def test_summary_emit_without_publisher_is_noop(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Summary emit silently returns when no publisher is wired.
+
+        Given: A launcher with ``self._msg_publisher is None``,
+        When: ``_emit_summary_snapshot`` is awaited,
+        Then: No exception is raised.
+        """
+        await launcher._emit_summary_snapshot()
+
+    @pytest.mark.asyncio
+    async def test_configured_emit_without_publisher_is_noop(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Configured emit silently returns when no publisher is wired."""
+        await launcher._emit_configured_snapshot()
+
+    @pytest.mark.asyncio
+    async def test_strategy_list_emit_without_publisher_is_noop(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Strategy-list emit silently returns when no publisher is wired."""
+        await launcher._emit_strategy_list_snapshot()
+
+    @pytest.mark.asyncio
+    async def test_run_event_emit_without_publisher_is_noop(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Run-event emit silently returns when no publisher is wired."""
+        await launcher._emit_run_event(
+            process_name="proc",
+            run_id="run-1",
+            status=ProcessRunStatusEnum.RUNNING,
+            started_at=datetime.now(UTC),
+            completed_at=None,
+            error=None,
+        )
+
+
+class TestEmitHelpersWithPublisher:
+    """Each emit helper sends one (topic, payload) pair with the right shape."""
+
+    @pytest.mark.asyncio
+    async def test_set_msg_publisher_round_trip(self, launcher: ProcessLauncherService) -> None:
+        """``set_msg_publisher`` installs + clears the publisher reference.
+
+        Given: A launcher with no publisher bound,
+        When: ``set_msg_publisher(publisher)`` then ``set_msg_publisher(None)``,
+        Then: ``self._msg_publisher`` mirrors each assignment.
+        """
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        assert launcher._msg_publisher is publisher
+        launcher.set_msg_publisher(None)
+        assert launcher._msg_publisher is None
+
+    @pytest.mark.asyncio
+    async def test_summary_emit_publishes_snapshot(
+        self, launcher: ProcessLauncherService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Summary emit sends a snapshot on ``processes.events.summary.{id}``.
+
+        Given: Two persisted process configs (one running, one stopped),
+        When: ``_emit_summary_snapshot`` runs,
+        Then: Publisher captures one ``ProcessSummaryEventData`` on the
+            instance-id-suffixed topic, with both items present and
+            ``running`` set correctly.
+        """
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        running_cfg = ProcessConfigModel(
+            name="trader_coordinator",
+            enabled=True,
+            mode="thread",
+            class_path="x.Y",
+            method="start",
+            parameters={},
+            note=None,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=(),
+            parameters_schema=None,
+        )
+        stopped_cfg = ProcessConfigModel(
+            name="paper_backfill",
+            enabled=False,
+            mode="thread",
+            class_path="x.Z",
+            method="start",
+            parameters={},
+            note=None,
+            lifecycle=ProcessLifecycleEnum.ONE_SHOT,
+            role=ProcessRoleEnum.STRATEGY,
+            tags=(),
+            parameters_schema=None,
+        )
+        launcher.get_process_configs = AsyncMock(return_value=[running_cfg, stopped_cfg])
+        launcher.started_processes["trader_coordinator"] = MagicMock()
+
+        await launcher._emit_summary_snapshot()
+
+        assert len(publisher.sent) == 1
+        topic, payload = publisher.sent[0]
+        assert topic.startswith("processes.events.summary.")
+        assert isinstance(payload, ProcessSummaryEventData)
+        names = {item.name: item for item in payload.processes}
+        assert names["trader_coordinator"].running is True
+        assert names["paper_backfill"].running is False
+        assert names["paper_backfill"].role == "strategy"
+
+    @pytest.mark.asyncio
+    async def test_summary_emit_send_failure_is_logged_not_raised(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Best-effort: a broker hiccup must not propagate.
+
+        Given: A publisher whose ``send`` raises,
+        When: ``_emit_summary_snapshot`` is awaited,
+        Then: No exception escapes; the failure was logged.
+        """
+        publisher = _RaisingPublisher()
+        launcher.set_msg_publisher(publisher)
+        launcher.get_process_configs = AsyncMock(return_value=[])
+        await launcher._emit_summary_snapshot()
+        assert len(publisher.sent) == 1
+
+    @pytest.mark.asyncio
+    async def test_configured_emit_publishes_names(self, launcher: ProcessLauncherService) -> None:
+        """Configured emit sends the sorted union of config + instance names."""
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        cfg_a = ProcessConfigModel(
+            name="executor_kraken",
+            enabled=True,
+            mode="thread",
+            class_path="x.Y",
+            method="start",
+            parameters={},
+            note=None,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=(),
+            parameters_schema=None,
+        )
+        instance_cfg = ProcessConfigModel(
+            name="executor_kraken_w019dbb34f439",
+            enabled=True,
+            mode="thread",
+            class_path="x.Y",
+            method="start",
+            parameters={"wallet_public_id": "wal-1"},
+            note=None,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=(),
+            parameters_schema=None,
+        )
+        launcher.get_process_configs = AsyncMock(return_value=[cfg_a])
+        launcher.instance_configs["executor_kraken_w019dbb34f439"] = instance_cfg
+        await launcher._emit_configured_snapshot()
+        assert len(publisher.sent) == 1
+        topic, payload = publisher.sent[0]
+        assert topic.startswith("processes.events.configured.")
+        assert isinstance(payload, ProcessConfiguredEventData)
+        assert payload.process_names == [
+            "executor_kraken",
+            "executor_kraken_w019dbb34f439",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_strategy_list_emit_filters_to_strategy_role(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Strategy emit carries class_path of STRATEGY-role configs only."""
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        strategy_cfg = ProcessConfigModel(
+            name="momentum",
+            enabled=True,
+            mode="thread",
+            class_path="snapper.strategies.momentum.Momentum",
+            method="start",
+            parameters={},
+            note=None,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.STRATEGY,
+            tags=(),
+            parameters_schema=None,
+        )
+        non_strategy_cfg = ProcessConfigModel(
+            name="trader_coordinator",
+            enabled=True,
+            mode="thread",
+            class_path="snapper.coordinators.trader.Trader",
+            method="start",
+            parameters={},
+            note=None,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=(),
+            parameters_schema=None,
+        )
+        launcher.get_process_configs = AsyncMock(return_value=[strategy_cfg, non_strategy_cfg])
+        await launcher._emit_strategy_list_snapshot()
+        assert len(publisher.sent) == 1
+        topic, payload = publisher.sent[0]
+        assert topic.startswith("strategies.events.list.")
+        assert isinstance(payload, StrategyListEventData)
+        assert payload.strategy_classes == [
+            "snapper.strategies.momentum.Momentum",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_run_event_emit_publishes_lifecycle_frame(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Run event carries the per-run lifecycle transition."""
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        started_at = datetime(2026, 5, 14, 12, tzinfo=UTC)
+        completed_at = datetime(2026, 5, 14, 12, 5, tzinfo=UTC)
+        await launcher._emit_run_event(
+            process_name="trader_coordinator",
+            run_id="run-42",
+            status=ProcessRunStatusEnum.SUCCEEDED,
+            started_at=started_at,
+            completed_at=completed_at,
+            error=None,
+        )
+        assert len(publisher.sent) == 1
+        topic, payload = publisher.sent[0]
+        assert topic == "processes.events.runs.trader_coordinator"
+        assert isinstance(payload, ProcessRunEventData)
+        assert payload.process_name == "trader_coordinator"
+        assert payload.run_id == "run-42"
+        assert payload.status == "succeeded"
+        assert payload.started_at == started_at
+        assert payload.completed_at == completed_at
+
+    @pytest.mark.asyncio
+    async def test_run_event_emit_logs_error_message(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Run event includes the error string when terminal status is failure.
+
+        Exercises the debug-log branch in ``_emit_run_event`` so coverage
+        sees both the error-present and error-absent paths.
+        """
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        started_at = datetime(2026, 5, 14, 12, tzinfo=UTC)
+        completed_at = datetime(2026, 5, 14, 12, 5, tzinfo=UTC)
+        await launcher._emit_run_event(
+            process_name="trader_coordinator",
+            run_id="run-42",
+            status=ProcessRunStatusEnum.FAILED,
+            started_at=started_at,
+            completed_at=completed_at,
+            error="boom",
+        )
+        assert len(publisher.sent) == 1
+
+
+class TestEmitFailurePaths:
+    """`send` failures on configured/strategy/run emit helpers must not propagate.
+
+    Mirrors the :class:`ScopeGrantService` resilience contract for the
+    three non-summary emit helpers.
+    """
+
+    @pytest.mark.asyncio
+    async def test_configured_emit_send_failure_is_logged_not_raised(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Broker hiccup on configured emit logs + suppresses."""
+        publisher = _RaisingPublisher()
+        launcher.set_msg_publisher(publisher)
+        launcher.get_process_configs = AsyncMock(return_value=[])
+        await launcher._emit_configured_snapshot()
+        assert len(publisher.sent) == 1
+
+    @pytest.mark.asyncio
+    async def test_strategy_list_emit_send_failure_is_logged_not_raised(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Broker hiccup on strategy-list emit logs + suppresses."""
+        publisher = _RaisingPublisher()
+        launcher.set_msg_publisher(publisher)
+        launcher.get_process_configs = AsyncMock(return_value=[])
+        await launcher._emit_strategy_list_snapshot()
+        assert len(publisher.sent) == 1
+
+    @pytest.mark.asyncio
+    async def test_run_event_emit_send_failure_is_logged_not_raised(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Broker hiccup on run-event emit logs + suppresses."""
+        publisher = _RaisingPublisher()
+        launcher.set_msg_publisher(publisher)
+        await launcher._emit_run_event(
+            process_name="proc",
+            run_id="run-1",
+            status=ProcessRunStatusEnum.SUCCEEDED,
+            started_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
+            error=None,
+        )
+        assert len(publisher.sent) == 1
+
+
+class TestSummarySnapshotInstanceConfigs:
+    """`_build_process_summary_items` joins persisted + instance configs cleanly."""
+
+    @pytest.mark.asyncio
+    async def test_instance_config_only_appears_in_snapshot(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """An instance_config absent from persisted configs is appended.
+
+        Given: ``instance_configs`` carries a per-wallet executor but
+            ``get_process_configs`` is empty,
+        When: the snapshot is built,
+        Then: the instance entry is present.
+        """
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        launcher.get_process_configs = AsyncMock(return_value=[])
+        instance_cfg = ProcessConfigModel(
+            name="executor_kraken_w019dbb34f439",
+            enabled=True,
+            mode="thread",
+            class_path="x.Y",
+            method="start",
+            parameters={"wallet_public_id": "wal-1"},
+            note=None,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=(),
+            parameters_schema=None,
+        )
+        launcher.instance_configs["executor_kraken_w019dbb34f439"] = instance_cfg
+
+        await launcher._emit_summary_snapshot()
+
+        assert len(publisher.sent) == 1
+        _, payload = publisher.sent[0]
+        names = {item.name: item for item in payload.processes}
+        assert "executor_kraken_w019dbb34f439" in names
+        assert names["executor_kraken_w019dbb34f439"].running is False
+
+    @pytest.mark.asyncio
+    async def test_instance_config_duplicate_is_skipped(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """An instance_config name also in persisted configs is NOT duplicated."""
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        instance_cfg = ProcessConfigModel(
+            name="executor_kraken_w019dbb34f439",
+            enabled=True,
+            mode="thread",
+            class_path="x.Y",
+            method="start",
+            parameters={"wallet_public_id": "wal-1"},
+            note=None,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=(),
+            parameters_schema=None,
+        )
+        launcher.instance_configs["executor_kraken_w019dbb34f439"] = instance_cfg
+        launcher.get_process_configs = AsyncMock(return_value=[instance_cfg])
+        await launcher._emit_summary_snapshot()
+        _, payload = publisher.sent[0]
+        names = [item.name for item in payload.processes]
+        assert names.count("executor_kraken_w019dbb34f439") == 1
+
+
+class TestCompletionEmitBranches:
+    """Strategy-role completion fires both summary + strategy-list emits."""
+
+    @pytest.mark.asyncio
+    async def test_handle_task_completion_strategy_emits_strategy_list(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Async strategy task completion fires the strategy-list event.
+
+        Given: A strategy-role task that finished normally,
+        When: ``_handle_task_completion`` runs,
+        Then: Publisher captures BOTH a summary + strategy-list frame.
+        """
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        launcher.get_process_configs = AsyncMock(return_value=[])
+        launcher._finalize_process_run = AsyncMock()
+        launcher.process_roles["momentum"] = ProcessRoleEnum.STRATEGY
+        launcher.process_lifecycles["momentum"] = ProcessLifecycleEnum.LONG_RUNNING
+
+        async def _noop() -> None:
+            return None
+
+        task: asyncio.Task[Any] = asyncio.create_task(_noop())
+        await task
+        launcher.process_tasks["momentum"] = task
+
+        await launcher._handle_task_completion("momentum", task)
+
+        topics = [topic for topic, _ in publisher.sent]
+        assert any(t.startswith("processes.events.summary.") for t in topics)
+        assert any(t.startswith("strategies.events.list.") for t in topics)
+
+    @pytest.mark.asyncio
+    async def test_handle_process_completion_strategy_emits_strategy_list(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Native strategy subprocess completion fires the strategy event.
+
+        Given: A strategy subprocess that exited cleanly,
+        When: ``_handle_process_completion`` runs,
+        Then: Publisher captures BOTH a summary + strategy-list frame.
+        """
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        launcher.get_process_configs = AsyncMock(return_value=[])
+        launcher._finalize_process_run = AsyncMock()
+        launcher.spawner = MagicMock()
+        launcher.spawner.cleanup = MagicMock()
+        launcher.process_roles["momentum"] = ProcessRoleEnum.STRATEGY
+        launcher.process_lifecycles["momentum"] = ProcessLifecycleEnum.LONG_RUNNING
+        launcher.expected_terminations.add("momentum")
+        proc_info = MagicMock()
+        proc_info.process = MagicMock()
+        proc_info.process.returncode = 0
+
+        await launcher._handle_process_completion("momentum", proc_info)
+
+        topics = [topic for topic, _ in publisher.sent]
+        assert any(t.startswith("processes.events.summary.") for t in topics)
+        assert any(t.startswith("strategies.events.list.") for t in topics)
+
+
+class TestEmitSitesIntegration:
+    """Emit sites fire from the lifecycle methods that mutate launcher state."""
+
+    @pytest.mark.asyncio
+    async def test_start_process_emits_summary_and_run_event(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """`start_process` emits one ``run`` (RUNNING) + one ``summary``.
+
+        Given: A wired publisher + a STRATEGY-role config,
+        When: ``start_process`` succeeds,
+        Then: Publisher captures the RUNNING run frame, the summary
+            snapshot, AND the strategy-list snapshot (because role is
+            STRATEGY).
+        """
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        launcher._create_process_run_record = AsyncMock(return_value="run-1")
+        launcher.import_class = lambda path, name=None: DummyProcess
+        launcher._register_task_completion = lambda name, task: None
+        launcher.get_process_configs = AsyncMock(return_value=[])
+        config = ProcessConfigModel(
+            name="momentum",
+            enabled=True,
+            mode="thread",
+            class_path="snapper.strategies.momentum.Momentum",
+            method="start",
+            parameters={},
+            note=None,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.STRATEGY,
+            tags=(),
+            parameters_schema=None,
+        )
+
+        await launcher.start_process(config)
+
+        topics = [topic for topic, _ in publisher.sent]
+        assert "processes.events.runs.momentum" in topics
+        assert any(t.startswith("processes.events.summary.") for t in topics)
+        assert any(t.startswith("strategies.events.list.") for t in topics)
+        assert launcher.active_run_started_at["momentum"] is not None
+
+    @pytest.mark.asyncio
+    async def test_start_process_failure_emits_failed_run_event(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """`_handle_start_failure` emits a FAILED run-event frame.
+
+        Given: A wired publisher + a config whose mode is invalid,
+        When: ``start_process`` is awaited (which raises ValueError),
+        Then: Publisher captured both a STARTED and a FAILED run-event
+            frame.
+        """
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        launcher._create_process_run_record = AsyncMock(return_value="run-1")
+        launcher._update_process_run_record = AsyncMock()
+        launcher.get_process_configs = AsyncMock(return_value=[])
+        config = ProcessConfigModel(
+            name="oops",
+            enabled=True,
+            mode="worker",
+            class_path="x.Y",
+            method="start",
+            parameters={},
+            note=None,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=(),
+            parameters_schema=None,
+        )
+        with pytest.raises(ValueError):
+            await launcher.start_process(config)
+
+        run_frames = [
+            payload for topic, payload in publisher.sent if topic == "processes.events.runs.oops"
+        ]
+        assert len(run_frames) == 2
+        statuses = {frame.status for frame in run_frames}
+        assert statuses == {"running", "failed"}
+        assert "oops" not in launcher.active_run_started_at
+
+    @pytest.mark.asyncio
+    async def test_stop_process_by_name_emits_summary(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """`stop_process_by_name` emits one summary + strategy frame on success."""
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        launcher.get_process_configs = AsyncMock(return_value=[])
+        launcher._finalize_process_run = AsyncMock()
+        instance = MagicMock()
+        instance.stop = AsyncMock()
+        launcher.started_processes["momentum"] = instance
+        launcher.process_roles["momentum"] = ProcessRoleEnum.STRATEGY
+        launcher.process_lifecycles["momentum"] = ProcessLifecycleEnum.LONG_RUNNING
+
+        result = await launcher.stop_process_by_name("momentum")
+
+        assert result.status.value == "success"
+        topics = [topic for topic, _ in publisher.sent]
+        assert any(t.startswith("processes.events.summary.") for t in topics)
+        assert any(t.startswith("strategies.events.list.") for t in topics)
+
+    @pytest.mark.asyncio
+    async def test_stop_process_by_name_not_running_skips_emit(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Stop for an unknown process skips emit (NOT_RUNNING branch)."""
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        result = await launcher.stop_process_by_name("nonexistent")
+        assert result.status.value == "not_running"
+        assert publisher.sent == []
+
+    @pytest.mark.asyncio
+    async def test_create_process_config_emits_configured_and_strategy(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """`create_process_config` emits configured + strategy-list events."""
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        launcher._registry_syncer.create_process_config = AsyncMock()
+        launcher.get_process_configs = AsyncMock(return_value=[])
+
+        await launcher.create_process_config(
+            name="momentum",
+            class_path="x.Y",
+            method="start",
+            enabled=True,
+            mode="thread",
+            parameters={},
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.STRATEGY,
+            tags=(),
+        )
+        topics = [topic for topic, _ in publisher.sent]
+        assert any(t.startswith("processes.events.configured.") for t in topics)
+        assert any(t.startswith("strategies.events.list.") for t in topics)
+
+    @pytest.mark.asyncio
+    async def test_create_process_config_non_strategy_skips_strategy_emit(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """Non-strategy create still emits configured but not strategy-list."""
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        launcher._registry_syncer.create_process_config = AsyncMock()
+        launcher.get_process_configs = AsyncMock(return_value=[])
+
+        await launcher.create_process_config(
+            name="trader_coordinator",
+            class_path="x.Y",
+            method="start",
+            enabled=True,
+            mode="thread",
+            parameters={},
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=(),
+        )
+        topics = [topic for topic, _ in publisher.sent]
+        assert any(t.startswith("processes.events.configured.") for t in topics)
+        assert not any(t.startswith("strategies.events.list.") for t in topics)

@@ -17,7 +17,12 @@ from snapper.messaging.schemas.data import OrderCancelData
 from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import OrderReplaceData
 from snapper.messaging.schemas.data import OrderRequestData
+from snapper.messaging.schemas.data import ProcessConfiguredEventData
+from snapper.messaging.schemas.data import ProcessRunEventData
+from snapper.messaging.schemas.data import ProcessSummaryEventData
+from snapper.messaging.schemas.data import ProcessSummaryItem
 from snapper.messaging.schemas.data import SignalData
+from snapper.messaging.schemas.data import StrategyListEventData
 from snapper.messaging.schemas.data import TickData
 from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.schemas.messages import parse_message
@@ -960,9 +965,6 @@ class TestProcessAndStrategyEventSchemas:
 
     def test_process_summary_event_roundtrip(self) -> None:
         """``ProcessSummaryEventData`` survives JSON roundtrip via parse_message."""
-        from snapper.messaging.schemas.data import ProcessSummaryEventData
-        from snapper.messaging.schemas.data import ProcessSummaryItem
-
         event = ProcessSummaryEventData(
             session_id="s1",
             sequence_id=1,
@@ -971,10 +973,18 @@ class TestProcessAndStrategyEventSchemas:
             processes=[
                 ProcessSummaryItem(
                     name="trader_coordinator",
-                    status="running",
-                    pid=4242,
-                    started_at="2026-05-14T11:00:00Z",
-                    command="snapper trade",
+                    running=True,
+                    enabled=True,
+                    role="core",
+                    lifecycle="long_running",
+                    active_public_id="019dbb34-f439-77bd-afa8-ee5321d60411",
+                ),
+                ProcessSummaryItem(
+                    name="paper_backfill",
+                    running=False,
+                    enabled=False,
+                    role="strategy",
+                    lifecycle="one_shot",
                 ),
             ],
             snapshot_at=datetime(2026, 5, 14, 12, tzinfo=UTC),
@@ -983,14 +993,15 @@ class TestProcessAndStrategyEventSchemas:
         parsed = parse_message(event.to_json())
 
         assert isinstance(parsed, ProcessSummaryEventData)
-        assert len(parsed.processes) == 1
+        assert len(parsed.processes) == 2
         assert parsed.processes[0].name == "trader_coordinator"
-        assert parsed.processes[0].pid == 4242
+        assert parsed.processes[0].running is True
+        assert parsed.processes[0].role == "core"
+        assert parsed.processes[1].running is False
+        assert parsed.processes[1].active_public_id is None
 
     def test_process_configured_event_roundtrip(self) -> None:
         """``ProcessConfiguredEventData`` carries the process-name list."""
-        from snapper.messaging.schemas.data import ProcessConfiguredEventData
-
         event = ProcessConfiguredEventData(
             session_id="s1",
             sequence_id=2,
@@ -1007,8 +1018,6 @@ class TestProcessAndStrategyEventSchemas:
 
     def test_process_run_event_roundtrip(self) -> None:
         """``ProcessRunEventData`` carries a single run transition."""
-        from snapper.messaging.schemas.data import ProcessRunEventData
-
         event = ProcessRunEventData(
             session_id="s1",
             sequence_id=3,
@@ -1030,8 +1039,6 @@ class TestProcessAndStrategyEventSchemas:
 
     def test_strategy_list_event_roundtrip(self) -> None:
         """``StrategyListEventData`` carries the strategy class path roster."""
-        from snapper.messaging.schemas.data import StrategyListEventData
-
         event = StrategyListEventData(
             session_id="s1",
             sequence_id=4,
