@@ -596,6 +596,7 @@ class TestStartProcess:
                 launcher, "_create_process_run_record", new_callable=AsyncMock
             ) as mock_create_run,
             patch.object(launcher, "import_class") as mock_import,
+            patch.object(launcher, "_finalize_process_run", new_callable=AsyncMock),
         ):
             mock_create_run.return_value = str(uuid4())
             mock_import.return_value = AsyncProcess
@@ -606,6 +607,7 @@ class TestStartProcess:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
+            await asyncio.sleep(0)
 
     @pytest.mark.asyncio
     async def test_start_process_sync_method_runs_in_executor(
