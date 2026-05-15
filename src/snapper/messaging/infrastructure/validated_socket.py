@@ -49,11 +49,13 @@ Subscribing with validation::
 """
 
 import contextlib
+from time import perf_counter_ns
 
 import zmq
 import zmq.asyncio
 from loguru import logger
 
+from snapper.messaging.infrastructure.tick_probe import get_probe
 from snapper.messaging.topics.validation import TopicValidationError
 from snapper.messaging.topics.validation import validate_subscription_pattern
 from snapper.messaging.topics.validation import validate_topic
@@ -140,6 +142,12 @@ class ValidatedPublisher:
         Validates the topic against messaging hierarchy rules before sending.
         The message is sent as two frames: [topic, payload].
 
+        The tick probe (enabled by ``SNAPPER_TICK_PROBE``) records
+        ``validate_topic`` and ``socket_send`` separately so an operator
+        can attribute publisher hot-path latency between the regex
+        validation and the awaited ZMQ socket send (which can stall
+        under broker / HWM backpressure).
+
         Args:
             topic: Topic string (e.g., "market.kraken.BTC-USD.ticks").
             payload: Message payload as bytes.
@@ -148,7 +156,11 @@ class ValidatedPublisher:
         Raises:
             TopicValidationError: If topic fails validation.
         """
+        probe = get_probe()
+        t0 = perf_counter_ns()
         is_valid, error_msg = validate_topic(topic)
+        t1 = perf_counter_ns()
+        probe.record("validate_topic", t1 - t0)
         if not is_valid:
             raise TopicValidationError(f"Invalid topic '{topic}': {error_msg}")
         logger.debug(f"ZMQ PUB: {topic} ({len(payload)} bytes)")
@@ -156,6 +168,7 @@ class ValidatedPublisher:
             [topic.encode("utf-8"), payload],
             flags=flags,
         )
+        probe.record("socket_send", perf_counter_ns() - t1)
 
     def close(self) -> None:
         """Close the underlying socket."""

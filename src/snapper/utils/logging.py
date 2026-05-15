@@ -177,6 +177,15 @@ def setup_logging(level: str = "INFO", json_logs: bool = False, logfile: str | N
     Also configures standard library logging interception for uvicorn
     and other libraries using stdlib logging.
 
+    Aggressively replaces every stdlib logger's handlers with an
+    :class:`InterceptStdLogHandler` so third-party libraries that
+    transitively install :class:`rich.logging.RichHandler` (observed
+    via ``python-kraken-sdk`` ``_recover_subscriptions`` consuming
+    >50% of GIL time rendering ``rich.table`` / ``rich.text`` per log
+    line) cannot route logs through their own formatters. Without
+    this every kraken WS subscription ack would format through rich,
+    blocking the publisher consumer for milliseconds at a time.
+
     Args:
         level: Minimum log level ('DEBUG', 'INFO', 'WARNING', etc.).
         json_logs: If True, output JSON instead of formatted text.
@@ -185,7 +194,12 @@ def setup_logging(level: str = "INFO", json_logs: bool = False, logfile: str | N
     logging.basicConfig(
         handlers=[InterceptStdLogHandler()],
         level=logging.INFO if level == "INFO" else logging.DEBUG,
+        force=True,
     )
+    for log_name in list(logging.Logger.manager.loggerDict.keys()):
+        log_obj = logging.getLogger(log_name)
+        log_obj.handlers = []
+        log_obj.propagate = True
     for logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
         uvicorn_logger = logging.getLogger(logger_name)
         uvicorn_logger.handlers = [InterceptStdLogHandler()]

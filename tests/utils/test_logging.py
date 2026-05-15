@@ -153,6 +153,53 @@ def test_setup_logging_json_and_file(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert made_directories == [str(log_file.parent)]
 
 
+def test_setup_logging_clears_third_party_handlers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """setup_logging strips handlers from every pre-existing named logger.
+
+    Given: a third-party library installed its own handler (e.g.
+        ``rich.logging.RichHandler`` registered transitively at import
+        time, observed via ``python-kraken-sdk`` ``_recover_subscriptions``
+        consuming >50% of GIL time on rich.table rendering),
+    When: ``setup_logging`` runs,
+    Then: every pre-existing named logger has its handlers cleared and
+        ``propagate`` re-enabled so log records route through the
+        single :class:`InterceptStdLogHandler` on root.
+    """
+
+    class DummyLogger:
+        def __init__(self) -> None:
+            self.add_calls: list[dict[str, Any]] = []
+            self.extra: dict[str, Any] = {}
+
+        def remove(self) -> None:
+            return None
+
+        def configure(self, **kwargs: Any) -> None:
+            if "extra" in kwargs:
+                self.extra.update(kwargs["extra"])
+
+        def add(self, sink: Any, *args: Any, **kwargs: Any) -> int:
+            call = {"sink": sink}
+            call.update(kwargs)
+            self.add_calls.append(call)
+            return 1
+
+    monkeypatch.setattr(logging, "logger", DummyLogger())
+    monkeypatch.setattr(stdlib_logging, "basicConfig", lambda **_kwargs: None)
+    third_party_logger = stdlib_logging.getLogger("kraken.spot.websocket.connectors_for_test")
+    sentinel_handler = stdlib_logging.NullHandler()
+    third_party_logger.addHandler(sentinel_handler)
+    third_party_logger.propagate = False
+    try:
+        logging.setup_logging(level="INFO", json_logs=False, logfile=None)
+        assert sentinel_handler not in third_party_logger.handlers
+        assert third_party_logger.handlers == []
+        assert third_party_logger.propagate is True
+    finally:
+        third_party_logger.handlers = []
+        third_party_logger.propagate = True
+
+
 def test_setup_logging_plain_text(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test setup_logging with plain text mode.
 

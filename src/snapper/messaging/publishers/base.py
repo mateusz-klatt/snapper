@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
 from time import monotonic
+from time import perf_counter_ns
 from typing import Any
 from typing import Final
 from typing import cast
@@ -50,6 +51,7 @@ from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.infrastructure.tick_probe import get_probe
 from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
@@ -976,31 +978,28 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if not self._exchange_client:
             logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
+        probe = get_probe()
         exchange = self._get_data_exchange()
         exchange_label = self._get_exchange_name()
-        iterator = self._exchange_client.subscribe_ticks(symbols).__aiter__()
-        next_fut: asyncio.Future[TickerUpdate | object] | None = None
+        iterator = self._exchange_client.subscribe_ticks(symbols)
         try:
-            while self.running:
-                next_fut = next_fut or asyncio.ensure_future(anext(iterator, _STREAM_END))
-                done, _ = await asyncio.wait({next_fut}, timeout=self._batch_max_age_s)
-                if not done:
-                    continue
-                next_fut = None
-                message = done.pop().result()
-                if message is _STREAM_END:
+            t_iter_start = perf_counter_ns()
+            async for message in iterator:
+                t_after_wait = perf_counter_ns()
+                probe.record("iter_wait", t_after_wait - t_iter_start)
+                if not self.running:
                     break
-                row = await self._process_tick(cast(TickerUpdate, message), exchange)
-                if row is not None and self._should_persist_row(
-                    "ticks", exchange, cast(TickerUpdate, message).symbol
-                ):
+                row = await self._process_tick(message, exchange)
+                if row is not None and self._should_persist_row("ticks", exchange, message.symbol):
                     _enqueue_or_drop_oldest_tick_write(self._tick_write_queue, row, exchange_label)
+                t_iter_end = perf_counter_ns()
+                probe.record("tick_iter_total", t_iter_end - t_iter_start)
+                probe.maybe_flush()
+                t_iter_start = t_iter_end
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"Tick loop error for {symbols}: {e}")
-        finally:
-            _cleanup_pending_future(next_fut)
 
     async def _tick_writer_loop(self) -> None:
         """Drain :attr:`_tick_write_queue` and flush ticks to the database.
@@ -1122,13 +1121,26 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         Publish-first: ZMQ delivery happens before instrument resolution.
         Returns None when instrument is unknown (ZMQ still delivered).
 
+        Tick-probe stages recorded here (enabled by
+        ``SNAPPER_TICK_PROBE``):
+
+        * ``build_topic`` — topic f-string assembly
+        * ``build_tick_model`` — Pydantic ``TickData(...)`` construction
+        * ``ensure_instrument`` — symbol → instrument cache lookup
+        * ``build_row`` — ``_build_tick_row`` dict assembly
+        * ``tick_total`` — end-to-end cost from method entry
+
         Args:
             message: Raw ticker update from exchange client.
             exchange: Exchange name for message provenance.
         """
+        probe = get_probe()
+        t_start = perf_counter_ns()
         native_symbol = message.symbol
         topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TICKS)
         received_at = datetime.now(UTC)
+        t_after_topic = perf_counter_ns()
+        probe.record("build_topic", t_after_topic - t_start)
         tick_msg = TickData(
             public_id=str(uuid7()),
             timestamp=received_at,
@@ -1143,12 +1155,22 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             is_delayed=message.is_delayed,
             is_extended_hours=message.is_extended_hours,
         )
+        t_after_build = perf_counter_ns()
+        probe.record("build_tick_model", t_after_build - t_after_topic)
         await self._publish_message(topic, tick_msg)
         self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
+        t_before_instr = perf_counter_ns()
         instrument_public_id = await self._ensure_instrument(native_symbol)
+        t_after_instr = perf_counter_ns()
+        probe.record("ensure_instrument", t_after_instr - t_before_instr)
         if instrument_public_id is None:
+            probe.record("tick_total", t_after_instr - t_start)
             return None
-        return self._build_tick_row(tick_msg, instrument_public_id)
+        row = self._build_tick_row(tick_msg, instrument_public_id)
+        t_end = perf_counter_ns()
+        probe.record("build_row", t_end - t_after_instr)
+        probe.record("tick_total", t_end - t_start)
+        return row
 
     async def _trade_loop(self, symbols: list[str]) -> None:
         """Subscribe to trade data, publish to ZMQ, and hand off DB rows to the writer.

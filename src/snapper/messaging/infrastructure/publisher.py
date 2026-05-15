@@ -9,10 +9,12 @@ one component lifetime. MessagePublisher wraps ValidatedPublisher and
 delegates routing to the caller via explicit stream_key.
 """
 
+from time import perf_counter_ns
 from typing import Any
 from uuid import uuid7
 
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.messaging.infrastructure.tick_probe import get_probe
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 
 
@@ -104,13 +106,22 @@ class MessagePublisher:
         downstream consumer sees the routing key alongside the domain
         fields without reverse-engineering it.
 
+        The tick probe (enabled by ``SNAPPER_TICK_PROBE``) records
+        ``publish_to`` separately from ``socket_send`` so an operator
+        can tell Pydantic-serialize CPU apart from ZMQ-send latency on
+        a saturated publisher hot-path.
+
         Args:
             stream_key: Routing key (ZMQ topic or logical channel);
                 also stamped onto the payload as the ``topic`` field.
             data: Complete payload item with provenance already set.
             flags: Optional ZMQ send flags (e.g. zmq.NOBLOCK).
         """
+        probe = get_probe()
+        t0 = perf_counter_ns()
         payload = data.publish_to(stream_key)
+        t1 = perf_counter_ns()
+        probe.record("publish_to", t1 - t0)
         await self._publisher.send_multipart(stream_key, payload, flags=flags)
 
     @property
