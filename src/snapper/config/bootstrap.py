@@ -91,7 +91,7 @@ class BootstrapSettingsLoader(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", case_sensitive=False
+        env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
     db_url: str = Field(default="sqlite+aiosqlite:///./data/snapper.db", alias="DB_URL")
     master_password: str = Field(
