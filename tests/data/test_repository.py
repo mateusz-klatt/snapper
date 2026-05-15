@@ -1131,13 +1131,20 @@ def test_sqlalchemy_repository_pool_setup_sqlite_memory() -> None:
 async def test_sqlalchemy_repository_forgets_closed_aiosqlite_connections(
     tmp_path: Path,
 ) -> None:
-    """Closed file-backed SQLite sessions must not accumulate in the tracker.
+    """Disposing the engine empties the aiosqlite tracker.
 
-    Given: file-backed SQLite uses NullPool and opens one aiosqlite
-        worker connection per session,
-    When: sessions are opened and closed repeatedly,
-    Then: the shutdown tracker forgets each closed connection instead
-        of retaining dead connection objects for the process lifetime.
+    Given: file-backed SQLite now uses a small ``AsyncAdaptedQueuePool``
+        (architect review 2026-05-15) so each session checks a
+        connection back to the pool on close instead of tearing it
+        down,
+    When: ``engine.dispose()`` runs,
+    Then: every aiosqlite worker connection ever registered in the
+        shutdown tracker is forgotten — the engine close path closes
+        every pooled connection, which fires the ``close`` event
+        handler and removes the entry. The pool retention during
+        normal operation is intentional: the per-commit aiosqlite
+        reopen + PRAGMA replay was the dominant publisher write cost
+        before this change.
     """
     repo_module._live_aiosqlite_connections.clear()
     db_path = tmp_path / "tracked-connections.db"
@@ -1146,9 +1153,10 @@ async def test_sqlalchemy_repository_forgets_closed_aiosqlite_connections(
         for _ in range(3):
             async with sa_repo.session() as session:
                 await session.execute(text("select 1"))
-            assert repo_module._live_aiosqlite_connections == {}
+        assert len(repo_module._live_aiosqlite_connections) >= 1
     finally:
         await sa_repo.engine.dispose()
+        assert repo_module._live_aiosqlite_connections == {}
         repo_module._live_aiosqlite_connections.clear()
 
 
@@ -2456,10 +2464,16 @@ class _MinimalRepository(Repository):
     ) -> dict[tuple[str, str], tuple[datetime, str]]:
         return {}
 
-    async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
+    async def upsert_candles(
+        self, rows: list[dict[str, Any]], session: AsyncSession | None = None
+    ) -> int:
+        del session
         return 0
 
-    async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
+    async def upsert_trades(
+        self, rows: list[dict[str, Any]], session: AsyncSession | None = None
+    ) -> int:
+        del session
         return 0
 
     async def upsert_ticks(self, rows: list[dict[str, Any]]) -> int:

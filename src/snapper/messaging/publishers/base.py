@@ -1494,6 +1494,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     async def _flush_candle_batch(self, batch: list[CandleUpsertRow]) -> None:
         """Flush candle batch to DB. On IntegrityError, retry row-by-row.
 
+        Mirrors :meth:`_flush_tick_batch`'s writer-session pattern:
+        when the candle writer task injected a pinned session via
+        :meth:`_open_candle_writer_session`, the upsert runs on that
+        session without acquiring a fresh DBAPI connection per
+        flush, and this method commits explicitly afterwards.
+
         Args:
             batch: List of candle rows to persist.
         """
@@ -1501,13 +1507,26 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return
         assert self.repository is not None, _REPO_NOT_INIT_MSG
         try:
-            await self.repository.upsert_candles(batch)
+            writer_session = self._candle_writer_session
+            if writer_session is not None:
+                await self.repository.upsert_candles(batch, session=writer_session)
+                await writer_session.commit()
+            else:
+                await self.repository.upsert_candles(batch)
             self._flush_errors["candle"] = 0
         except IntegrityError:
+            writer_session = self._candle_writer_session
+            if writer_session is not None:
+                with contextlib.suppress(Exception):
+                    await writer_session.rollback()
             await self._flush_candle_batch_row_by_row(batch)
         except Exception as e:
             self._flush_errors["candle"] += 1
             logger.error(f"Candle batch flush failed ({len(batch)} rows): {e}")
+            writer_session = self._candle_writer_session
+            if writer_session is not None:
+                with contextlib.suppress(Exception):
+                    await writer_session.rollback()
 
     async def _flush_candle_batch_row_by_row(self, batch: list[CandleUpsertRow]) -> None:
         """Fallback: retry each candle individually to isolate bad rows.
@@ -1517,18 +1536,29 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         assert self.repository is not None, _REPO_NOT_INIT_MSG
         had_generic_error = False
+        writer_session = self._candle_writer_session
         for row in batch:
             try:
-                await self.repository.upsert_candles([row])
+                if writer_session is not None:
+                    await self.repository.upsert_candles([row], session=writer_session)
+                    await writer_session.commit()
+                else:
+                    await self.repository.upsert_candles([row])
             except IntegrityError as exc:
                 logger.warning(
                     f"Candle upsert skipped: instrument={row.get('instrument_public_id')}, "
                     f"open_at={row.get('open_at')}, error={exc}"
                 )
+                if writer_session is not None:
+                    with contextlib.suppress(Exception):
+                        await writer_session.rollback()
             except Exception as e:
                 had_generic_error = True
                 self._flush_errors["candle"] += 1
                 logger.error(f"Candle row flush failed: {e}")
+                if writer_session is not None:
+                    with contextlib.suppress(Exception):
+                        await writer_session.rollback()
         if not had_generic_error:
             self._flush_errors["candle"] = 0
 
@@ -1566,6 +1596,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     async def _flush_trade_batch(self, batch: list[TradeUpsertRow]) -> None:
         """Flush trade batch to DB (ON CONFLICT DO NOTHING).
 
+        Mirrors :meth:`_flush_tick_batch`'s writer-session pattern:
+        when the trade writer task injected a pinned session via
+        :meth:`_open_trade_writer_session`, the upsert runs on that
+        session without acquiring a fresh DBAPI connection per
+        flush, and this method commits explicitly afterwards.
+
         Args:
             batch: List of trade rows to persist.
         """
@@ -1573,11 +1609,20 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return
         assert self.repository is not None, _REPO_NOT_INIT_MSG
         try:
-            await self.repository.upsert_trades(batch)
+            writer_session = self._trade_writer_session
+            if writer_session is not None:
+                await self.repository.upsert_trades(batch, session=writer_session)
+                await writer_session.commit()
+            else:
+                await self.repository.upsert_trades(batch)
             self._flush_errors["trade"] = 0
         except Exception as e:
             self._flush_errors["trade"] += 1
             logger.error(f"Trade batch flush failed ({len(batch)} rows): {e}")
+            writer_session = self._trade_writer_session
+            if writer_session is not None:
+                with contextlib.suppress(Exception):
+                    await writer_session.rollback()
 
     async def _symbol_aliases_loop(self) -> None:
         """Listen for system messages and handle cache invalidation."""

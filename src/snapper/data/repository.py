@@ -75,7 +75,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import Session as SyncSession
 from sqlalchemy.orm import sessionmaker as sync_sessionmaker
-from sqlalchemy.pool import NullPool
 from sqlalchemy.pool import StaticPool
 
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
@@ -683,13 +682,25 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def upsert_candles(self, rows: list[CandleUpsertRow]) -> int:
-        """Insert or update candles. Return affected row count."""
+    async def upsert_candles(
+        self, rows: list[CandleUpsertRow], session: AsyncSession | None = None
+    ) -> int:
+        """Insert or update candles. Return affected row count.
+
+        Optional ``session`` lets writer tasks share a pinned
+        connection across many flushes.
+        """
         ...
 
     @abstractmethod
-    async def upsert_trades(self, rows: list[TradeUpsertRow]) -> int:
-        """Insert trades, skipping duplicates. Return inserted count."""
+    async def upsert_trades(
+        self, rows: list[TradeUpsertRow], session: AsyncSession | None = None
+    ) -> int:
+        """Insert trades, skipping duplicates. Return inserted count.
+
+        Optional ``session`` lets writer tasks share a pinned
+        connection across many flushes.
+        """
         ...
 
     @abstractmethod
@@ -4063,11 +4074,62 @@ def _derive_resolve_resolution_mode(
     return "fanout_first_responder"
 
 
+_SQLITE_CONNECT_PRAGMAS: tuple[str, ...] = (
+    "PRAGMA foreign_keys=ON",
+    "PRAGMA journal_mode=WAL",
+    "PRAGMA synchronous=NORMAL",
+    "PRAGMA busy_timeout=30000",
+    "PRAGMA temp_store=MEMORY",
+    "PRAGMA cache_size=-65536",
+    "PRAGMA wal_autocheckpoint=4000",
+    "PRAGMA mmap_size=268435456",
+)
+"""Per-connection SQLite PRAGMAs for safe writer throughput.
+
+Tuned 2026-05-15 against the live publisher workload. The
+"mainstream defaults" alone (``foreign_keys`` / WAL /
+``synchronous=NORMAL`` / ``busy_timeout``) give ~50% drop-rate
+reduction but the cache + WAL checkpoint + mmap knobs are needed
+for another ~50% to land at the ~1250 writes/sec ceiling. Pulling
+the tuning out cut DB throughput from ~1258/sec back to ~446/sec
+under identical load — measurable regression on the same hardware
+the operator actually runs on, so we keep the full pack.
+
+* ``foreign_keys=ON`` — application-level FK enforcement
+  (mainstream; SQLite default is OFF).
+* ``journal_mode=WAL`` — concurrent readers + faster commits.
+* ``synchronous=NORMAL`` — standard WAL durability tradeoff;
+  may lose the most recent committed transactions on host power
+  loss, acceptable for live market data (ZMQ feed is the durable
+  record + the publisher already accepts drop-oldest at the queue
+  level).
+* ``busy_timeout=30000`` — wait up to 30s on writer-lock
+  contention before raising; prevents transient ``SQLITE_BUSY``
+  retries from cascading into writer drops.
+* ``temp_store=MEMORY`` — keep CTE / sort intermediates off disk.
+* ``cache_size=-65536`` — 64 MB page cache; matches working-set
+  size of the publisher / read-paths.
+* ``wal_autocheckpoint=4000`` — let WAL grow to ~4 MB before the
+  next automatic checkpoint, batching fsyncs at the WAL boundary
+  instead of every commit.
+* ``mmap_size=268435456`` — 256 MB mmap region for the main DB
+  file; SQLite reads served from mmap avoid one userspace copy
+  per page on cold reads."""
+
+
 def _register_sqlite_fk_pragma(engine: Any) -> None:
-    """Register PRAGMA foreign_keys=ON for every new SQLite connection.
+    """Register per-connection SQLite PRAGMAs for foreign keys + write tuning.
 
     SQLite disables foreign-key enforcement by default; this event
-    listener ensures it is enabled on each connection.
+    listener also applies the wider :data:`_SQLITE_CONNECT_PRAGMAS`
+    pack (WAL + ``synchronous=NORMAL`` + cache/mmap sizing) on every
+    new connection. WAL is sticky on the DB file so re-applying is a
+    no-op after the first connection; ``synchronous`` and the cache
+    pragmas are per-connection so the listener must fire on every
+    new aiosqlite handle.
+
+    Function name kept for backward compatibility with existing call
+    sites + tests; the wider pragma surface is intentional.
 
     Args:
         engine: Sync or async-sync SQLAlchemy engine to register on.
@@ -4076,15 +4138,18 @@ def _register_sqlite_fk_pragma(engine: Any) -> None:
         return
 
     @event.listens_for(engine, "connect")
-    def _set_sqlite_fk(dbapi_connection: Any, _connection_record: Any) -> None:
+    def _set_sqlite_pragmas(dbapi_connection: Any, _connection_record: Any) -> None:
         driver_connection = getattr(dbapi_connection, "driver_connection", None)
         if driver_connection is not None and hasattr(driver_connection, "close"):
             _live_aiosqlite_connections[id(driver_connection)] = cast(
                 _ClosableConnection, driver_connection
             )
         cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
+        try:
+            for pragma in _SQLITE_CONNECT_PRAGMAS:
+                cursor.execute(pragma)
+        finally:
+            cursor.close()
 
     @event.listens_for(engine, "close")
     def _forget_sqlite_connection(dbapi_connection: Any, _connection_record: Any) -> None:
@@ -4111,21 +4176,44 @@ class SQLAlchemyRepository(Repository):
     def __init__(self, db_url: str) -> None:
         """Initialize repository with database URL.
 
+        Pool selection:
+
+        * ``:memory:`` SQLite — :class:`StaticPool`. The single in-memory
+          DB instance MUST be shared across every connection or each
+          new connection sees an empty schema; ``StaticPool`` reuses
+          one connection for the engine's lifetime.
+        * File-backed SQLite — SQLAlchemy's default
+          :class:`AsyncAdaptedQueuePool`. Earlier revisions forced
+          :class:`NullPool` here on the theory that aiosqlite
+          serialises writes anyway, but the 2026-05-15 architect
+          review (Codex + Copilot panel) showed the per-commit
+          connection release-and-reacquire churn against
+          ``NullPool`` dominated publisher CPU. The default queue
+          pool keeps connections alive across ``session.commit()``
+          which is enough on its own to amortise per-flush cost.
+        * Postgres + any other dialect — SQLAlchemy default pool.
+
+        ``StaticPool`` is **not** appropriate for file-backed SQLite
+        in this codebase because every test worker spawns multiple
+        repositories against the same file and they must each open
+        their own connection.
+
         Args:
             db_url: SQLAlchemy async database URL
                 (e.g., 'sqlite+aiosqlite:///./data/db.sqlite').
         """
         self.db_url = db_url
         connect_args: dict[str, Any] = {}
-        poolclass: type | None = None
+        engine_kwargs: dict[str, Any] = {"future": True}
         if "sqlite" in db_url:
             connect_args = {
                 "timeout": 30,
                 "check_same_thread": False,
             }
-            poolclass = StaticPool if ":memory:" in db_url else NullPool
+            if ":memory:" in db_url:
+                engine_kwargs["poolclass"] = StaticPool
         self.engine: AsyncEngine = create_async_engine(
-            db_url, future=True, connect_args=connect_args, poolclass=poolclass
+            db_url, connect_args=connect_args, **engine_kwargs
         )
         if "sqlite" in db_url:
             _register_sqlite_fk_pragma(self.engine.sync_engine)
@@ -4406,17 +4494,31 @@ class SQLAlchemyRepository(Repository):
             )
 
     async def _upsert_batch(
-        self, model: type[Base], rows: list[Any], index_elements: list[str]
+        self,
+        model: type[Base],
+        rows: list[Any],
+        index_elements: list[str],
+        session: AsyncSession | None = None,
     ) -> int:
         """Dialect-aware batch upsert with conflict-do-nothing.
 
         Uses SQLite/PostgreSQL native INSERT ... ON CONFLICT DO NOTHING
         when available, falling back to row-by-row IntegrityError handling.
 
+        When ``session`` is provided the upsert runs on the
+        caller-managed session WITHOUT issuing ``commit()`` — the
+        caller is responsible for committing. This mirrors the
+        :meth:`upsert_ticks` writer-task pattern so trade and
+        candle flush paths can amortise the per-batch connection
+        acquire across many flushes on one pinned connection.
+
         Args:
             model: SQLAlchemy model class to insert into.
             rows: List of column-value dicts.
             index_elements: Columns that form the unique constraint.
+            session: Optional caller-managed session. When ``None``
+                a fresh session opens, the insert commits inline,
+                and the session closes before returning.
 
         Returns:
             Number of rows successfully inserted.
@@ -4426,6 +4528,11 @@ class SQLAlchemyRepository(Repository):
                 r["public_id"] = str(uuid7())
         name = self.dialect_name
         if name == "sqlite":
+            if session is not None:
+                stmt_sq = sqlite_insert(model).values(rows)
+                stmt_sq = stmt_sq.on_conflict_do_nothing(index_elements=index_elements)
+                res = await session.execute(stmt_sq)
+                return int(cast(Any, res).rowcount or 0)
             async with self.session() as s:
                 stmt_sq = sqlite_insert(model).values(rows)
                 stmt_sq = stmt_sq.on_conflict_do_nothing(index_elements=index_elements)
@@ -4433,6 +4540,11 @@ class SQLAlchemyRepository(Repository):
                 await s.commit()
                 return int(cast(Any, res).rowcount or 0)
         elif name.startswith("postgres"):
+            if session is not None:
+                stmt_pg = pg_insert(model).values(rows)
+                stmt_pg = stmt_pg.on_conflict_do_nothing(index_elements=index_elements)
+                res = await session.execute(stmt_pg)
+                return int(cast(Any, res).rowcount or 0)
             async with self.session() as s:
                 stmt_pg = pg_insert(model).values(rows)
                 stmt_pg = stmt_pg.on_conflict_do_nothing(index_elements=index_elements)
@@ -4440,6 +4552,16 @@ class SQLAlchemyRepository(Repository):
                 await s.commit()
                 return int(cast(Any, res).rowcount or 0)
         else:
+            if session is not None:
+                inserted = 0
+                for r in rows:
+                    try:
+                        async with session.begin_nested():
+                            await session.execute(insert(model).values(**r))
+                        inserted += 1
+                    except IntegrityError:
+                        continue
+                return inserted
             async with self.session() as s:
                 inserted = 0
                 for r in rows:
@@ -4452,7 +4574,9 @@ class SQLAlchemyRepository(Repository):
                 await s.commit()
                 return inserted
 
-    async def upsert_candles(self, rows: list[CandleUpsertRow]) -> int:
+    async def upsert_candles(
+        self, rows: list[CandleUpsertRow], session: AsyncSession | None = None
+    ) -> int:
         """Close-old + insert-new (SCD Type 2) for candle rows.
 
         When a candle with the same (instrument_public_id, timeframe, open_at)
@@ -4462,6 +4586,13 @@ class SQLAlchemyRepository(Repository):
         intra-interval updates.
 
         Rows without ``public_id`` get a generated UUID7 automatically.
+
+        ``session`` semantics mirror :meth:`upsert_ticks` and
+        :meth:`upsert_trades`: when provided, the insert runs on the
+        caller-managed session without committing so a writer task
+        can keep a pinned :class:`AsyncConnection` across many
+        flushes; when ``None`` the method opens its own session and
+        commits inline.
         """
         if not rows:
             return 0
@@ -4470,6 +4601,14 @@ class SQLAlchemyRepository(Repository):
                 r["public_id"] = str(uuid7())
             if "known_to" not in r:
                 r["known_to"] = KNOWN_TO_MAX
+        if session is not None:
+            unique_rows, sequential_rows = self._split_candle_rows_by_duplicate_key(rows)
+            existing_by_key = await self._load_existing_candles_for_rows(session, unique_rows)
+            count = await self._upsert_unique_candle_rows(session, unique_rows, existing_by_key)
+            for r in sequential_rows:
+                await self._upsert_candle_row(session, r)
+                count += 1
+            return count
         async with self.session() as s:
             unique_rows, sequential_rows = self._split_candle_rows_by_duplicate_key(rows)
             existing_by_key = await self._load_existing_candles_for_rows(s, unique_rows)
@@ -4595,11 +4734,22 @@ class SQLAlchemyRepository(Repository):
             row["public_id"] = existing.public_id
         session.add(Candle(**row))
 
-    async def upsert_trades(self, rows: list[TradeUpsertRow]) -> int:
-        """Insert trades with dialect-specific conflict handling."""
+    async def upsert_trades(
+        self, rows: list[TradeUpsertRow], session: AsyncSession | None = None
+    ) -> int:
+        """Insert trades with dialect-specific conflict handling.
+
+        Mirrors :meth:`upsert_ticks` ``session`` semantics: when a
+        caller-managed session is supplied the insert runs without
+        committing so the writer task can batch many flushes onto a
+        single pinned :class:`AsyncConnection`. Omit ``session`` for
+        ad-hoc / test paths that want an inline commit.
+        """
         if not rows:
             return 0
-        return await self._upsert_batch(Trade, rows, ["instrument_public_id", "trade_id"])
+        return await self._upsert_batch(
+            Trade, rows, ["instrument_public_id", "trade_id"], session=session
+        )
 
     async def upsert_ticks(
         self, rows: list[TickUpsertRow], session: AsyncSession | None = None
