@@ -55,6 +55,12 @@ PER_TABLE_TIMEOUT_SECONDS: Final[float] = 30.0
 _INTERVAL_ENV_VAR: Final[str] = "DB_METRICS_INTERVAL_SECONDS"
 _DISABLED_ENV_VAR: Final[str] = "DB_METRICS_DISABLED"
 _TRUTHY_ENV_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes"})
+ENV_VARS: Final[frozenset[str]] = frozenset({_INTERVAL_ENV_VAR, _DISABLED_ENV_VAR})
+"""Public allowlist of env vars db_stats reads via ``os.environ``.
+
+Consumed by :mod:`snapper.config.env_contract` to validate ``.env`` keys
+against the union of every subsystem's contract.
+"""
 
 
 def resolve_interval(env_value: str | None) -> int:

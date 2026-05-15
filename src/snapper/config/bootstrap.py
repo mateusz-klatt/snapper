@@ -30,9 +30,14 @@ Example:
         ZMQ_BROKER_XPUB=tcp://127.0.0.1:7501
 """
 
+from typing import Any
+
 from pydantic import Field
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
+
+from snapper.config.env_contract import validate_env_file
 
 __all__ = ["BootstrapSettingsLoader"]
 
@@ -111,3 +116,18 @@ class BootstrapSettingsLoader(BaseSettings):
     coordinator_outbox_max_scan_rows: str | None = Field(
         default="1000", alias="SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS"
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_env_contract(cls, data: Any) -> Any:
+        """Validate the ``.env`` file against the shared allowlist.
+
+        Runs before pydantic field parsing. ``extra='ignore'`` on this
+        loader lets subsystem-owned keys (``RETENTION_*``,
+        ``SYSTEM_METRICS_*``, ``DB_METRICS_*``) pass through without
+        tripping bootstrap parsing, so the typo defence has to live
+        one layer up — :mod:`env_contract` enforces the shared
+        allowlist and surfaces :mod:`difflib` suggestions on typos.
+        """
+        validate_env_file()
+        return data

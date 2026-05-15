@@ -29,6 +29,14 @@ _DRY_RUN_ENV_VAR = "RETENTION_DRY_RUN"
 _OUTPUT_DIR_ENV_VAR = "RETENTION_OUTPUT_DIR"
 _DEFAULT_OUTPUT_DIR = "data"
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes"})
+ENV_VARS: frozenset[str] = frozenset(
+    {_INTERVAL_ENV_VAR, _DISABLED_ENV_VAR, _DRY_RUN_ENV_VAR, _OUTPUT_DIR_ENV_VAR}
+)
+"""Public allowlist of env vars retention reads via ``os.environ``.
+
+Consumed by :mod:`snapper.config.env_contract` to validate ``.env`` keys
+against the union of every subsystem's contract.
+"""
 
 
 @dataclass(frozen=True, slots=True)

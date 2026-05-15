@@ -65,6 +65,12 @@ except ImportError:
 DEFAULT_INTERVAL_SECONDS: Final = 5.0
 _INTERVAL_ENV_VAR: Final = "SYSTEM_METRICS_INTERVAL_SECONDS"
 _HISTORY_CAP_ENV_VAR: Final = "SYSTEM_METRICS_HISTORY_CAP"
+ENV_VARS: Final[frozenset[str]] = frozenset({_INTERVAL_ENV_VAR, _HISTORY_CAP_ENV_VAR})
+"""Public allowlist of env vars this module reads via ``os.environ``.
+
+Consumed by :mod:`snapper.config.env_contract` to validate ``.env`` keys
+against the union of every subsystem's contract.
+"""
 
 
 def _resolve_interval(env_value: str | None) -> float:
