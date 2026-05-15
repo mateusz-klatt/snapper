@@ -164,6 +164,36 @@ class TestExplicitModeResolution:
         assert policy.should_persist(ExchangeEnum.KRAKEN, "ticks", "DOGE-USD") is True
         assert policy.should_persist(ExchangeEnum.KRAKEN, "ticks", "BTC-USD") is False
 
+    @pytest.mark.asyncio
+    async def test_explicit_mode_wildcard_sentinel_persists_every_symbol(self) -> None:
+        """``"*"`` in the explicit allowlist matches every native symbol.
+
+        Given: operator configures ``exchanges = {"kraken": ["*"]}`` to
+            persist every Kraken instrument under wildcard subscribe,
+        When: ``should_persist`` is queried for any symbol,
+        Then: the wildcard short-circuit returns True without enumerating
+            the actual symbol — used for "persist everything from this
+            exchange" without listing every native_symbol.
+        """
+        settings = {
+            "market_persist_ticks": {
+                "mode": "explicit",
+                "exchanges": {"kraken": ["*"]},
+            },
+            "market_persist_trades": {"mode": "explicit", "exchanges": {}},
+            "market_persist_candles": {"mode": "explicit", "exchanges": {}},
+        }
+        policy, _, _ = _build_policy(
+            settings=settings,
+            operators=[_operator_row("op-1")],
+            pairs=set(),
+        )
+        await policy.initial_rebuild()
+
+        assert policy.should_persist(ExchangeEnum.KRAKEN, "ticks", "BTC-USD") is True
+        assert policy.should_persist(ExchangeEnum.KRAKEN, "ticks", "ANY-NEW-LISTING") is True
+        assert policy.should_persist(ExchangeEnum.KRAKEN_FUTURES, "ticks", "PI_XBTUSD") is False
+
 
 class TestOverlays:
     """``market_persist_extra`` adds; ``market_persist_exclude`` subtracts."""

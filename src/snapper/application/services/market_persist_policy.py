@@ -214,6 +214,14 @@ class MarketPersistPolicy:
         (no writes vs. a crash). The safety rail at startup catches
         the "wildcard + empty set" misconfig before any tick lands.
 
+        Wildcard sentinel: when the resolved set for
+        ``(exchange, data_type)`` contains the literal ``"*"`` token
+        (typically configured by an operator who wants every
+        publisher symbol persisted regardless of allowlist), the
+        check short-circuits and returns ``True``. ``"*"`` is never a
+        valid native symbol (the symbol-alias adapter rejects it)
+        so the sentinel is unambiguous.
+
         Args:
             exchange: Source exchange identifier.
             data_type: One of ``"ticks"``, ``"trades"``, ``"candles"``.
@@ -222,10 +230,13 @@ class MarketPersistPolicy:
 
         Returns:
             ``True`` iff the resolved set for ``(exchange, data_type)``
-            contains ``native_symbol``.
+            contains ``native_symbol`` or the wildcard ``"*"``.
         """
         target = self._select_persist_map(data_type)
-        return native_symbol in target.get(exchange, frozenset())
+        resolved = target.get(exchange, frozenset())
+        if "*" in resolved:
+            return True
+        return native_symbol in resolved
 
     def iter_persisted_instruments(
         self, data_type: MarketDataType
