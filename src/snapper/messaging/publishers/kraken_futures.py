@@ -41,7 +41,7 @@ from snapper.messaging.publishers.base import MarketDataPublisherService
     role=ProcessRoleEnum.CORE,
     tags=("market-data", "publisher", "kraken_futures"),
     parameters_model=PublisherSymbolsParameters,
-    enabled=False,
+    enabled=True,
     mode=ProcessModeEnum.THREAD,
 )
 class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesExchangeClient]):

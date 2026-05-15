@@ -310,15 +310,32 @@ class AppSettings:
     def instruments(self) -> dict[str, list[str]]:
         """Return configured trading instruments per exchange.
 
-        ``KRAKEN_EQUITIES`` ships four micro index-futures Jun26 contracts
-        (``MNQM6-CME``, ``MESM6-CME``, ``MYMM6-CBOT``, ``M2KM6-CME``) so the
-        happy-path "enable the feed" runbook requires no ad-hoc
-        configuration. These are ``can_trade=False`` market-data-only
-        instruments; every order-entry route rejects submits against them
-        via ``snapper.server._capability_guard.require_tradable``.
+        Default for every live-WS publisher exchange (Kraken spot,
+        Kraken Futures, Kraken Equities, Walutomat) is the wildcard
+        sentinel ``["*"]``. Each publisher's ``_validate_symbols``
+        expands the wildcard against ``get_available_*_symbols()`` at
+        runtime so a fresh DB subscribes to the full venue universe
+        without any operator configuration. Persistence is decoupled —
+        the ``market_persist_*`` settings (seeded as
+        ``{"mode":"explicit","exchanges":{}}`` in
+        ``proprietary/data/seed/{dev,prod}.toml``) keep every wildcard
+        tick out of the DB write path; data flows into the in-process
+        ``MarketCacheService`` + ZMQ broadcast and is dropped at the
+        publisher's persist gate.
 
-        FCM index-futures expire quarterly; operators must rotate the
-        default list ~2 weeks before the maturity column in
+        Operators that want a narrower allowlist (e.g. for a curated
+        backfill / strategy universe) override this setting via the
+        ``instruments`` DB row — Settings UI or
+        ``POST /api/settings`` ``{"key":"instruments", "value": {...}}``.
+
+        ``ExchangeEnum.POLYGON`` keeps an explicit small set because
+        Polygon REST backfills paginate per-symbol and a wildcard
+        expansion against 30k+ Polygon tickers would not be operator-
+        friendly as a default.
+
+        FCM index-futures expire quarterly; when narrowing
+        ``KRAKEN_EQUITIES`` to an explicit list, operators must rotate
+        the entries ~2 weeks before the maturity column in
         ``SymbolExchangeCapability`` reaches ``<= 14 days`` (see
         ``docs/operations.md`` "Kraken Equities (TradFi) market data"
         section for the rotation playbook + monitoring alert).
@@ -329,23 +346,10 @@ class AppSettings:
         return self._get_db_setting(
             "instruments",
             {
-                ExchangeEnum.KRAKEN: [
-                    "BTC-USD",
-                    "BTC-EUR",
-                    "BTC-USDC",
-                    "BTC-EURC",
-                    "EUR-USD",
-                    "ETH-USD",
-                    "SPY",
-                ],
-                ExchangeEnum.KRAKEN_FUTURES: [],
-                ExchangeEnum.KRAKEN_EQUITIES: [
-                    "MNQM6-CME",
-                    "MESM6-CME",
-                    "MYMM6-CBOT",
-                    "M2KM6-CME",
-                ],
-                ExchangeEnum.WALUTOMAT: ["EUR-PLN", "USD-PLN", "EUR-USD"],
+                ExchangeEnum.KRAKEN: ["*"],
+                ExchangeEnum.KRAKEN_FUTURES: ["*"],
+                ExchangeEnum.KRAKEN_EQUITIES: ["*"],
+                ExchangeEnum.WALUTOMAT: ["*"],
                 ExchangeEnum.POLYGON: ["BTC-USD", "BTC-EUR", "EUR-USD", "EUR-PLN", "USD-PLN"],
             },
         )

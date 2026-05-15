@@ -200,6 +200,33 @@ class TestAppSettingsTradingProperties:
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.instruments == custom_instruments
 
+    def test_instruments_default_is_wildcard_for_live_ws_publishers(self) -> None:
+        """Verify the fresh-DB default subscribes wildcard on all WS publishers.
+
+        Given service with no ``instruments`` setting persisted,
+        When accessing settings.instruments,
+        Then the four live-WS publisher exchanges (kraken / kraken_futures
+            / kraken_equities / walutomat) each map to the wildcard
+            sentinel ``["*"]`` and POLYGON keeps its explicit allowlist
+            (because Polygon REST backfill can't expand wildcards as
+            sanely as live-WS subscribers).
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService()
+        settings = AppSettings(bootstrap, settings_service=service)
+        default_instruments = settings.instruments
+        assert default_instruments["kraken"] == ["*"]
+        assert default_instruments["kraken_futures"] == ["*"]
+        assert default_instruments["kraken_equities"] == ["*"]
+        assert default_instruments["walutomat"] == ["*"]
+        assert default_instruments["polygon"] == [
+            "BTC-USD",
+            "BTC-EUR",
+            "EUR-USD",
+            "EUR-PLN",
+            "USD-PLN",
+        ]
+
     def test_timeframes_returns_value(self) -> None:
         """Verify timeframes returns configured list.
 

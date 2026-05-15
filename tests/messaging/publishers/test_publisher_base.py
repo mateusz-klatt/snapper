@@ -4736,3 +4736,49 @@ def test_verify_persist_policy_safety_rail_fires_on_all_empty() -> None:
     pub._persist_policy = policy
     with pytest.raises(RuntimeError, match="wildcard symbols"):
         pub._verify_persist_policy_safety_rail("pub:test")
+
+
+@pytest.mark.parametrize(
+    "publisher_name",
+    [
+        "kraken_feed_publisher",
+        "kraken_futures_feed_publisher",
+        "kraken_equities_feed_publisher",
+        "walutomat_feed_publisher",
+        "paper_feed_publisher",
+    ],
+)
+def test_market_data_publishers_autostart_by_default(publisher_name: str) -> None:
+    """Every live-WS publisher decorator ships ``enabled=True``.
+
+    Given: The global process registry populated at import time.
+    When: We look up each of the five market-data feed publishers,
+    Then: Its ``ProcessRegistryEntry.enabled`` is ``True`` so a fresh
+        DB autostarts the full publisher fleet (paired with the
+        wildcard ``instruments`` default in ``AppSettings.instruments``
+        and the ``market_persist_*`` zero-persist seed in the
+        proprietary ``{dev,prod}.toml`` profiles). Regression guard
+        for the wildcard-by-default contract — flipping any decorator
+        back to ``enabled=False`` would silently break the fresh-DB
+        runbook.
+    """
+    import importlib
+
+    from snapper.application.process_manager.registry import get_registered_processes
+
+    for module_path in (
+        "snapper.messaging.publishers.kraken",
+        "snapper.messaging.publishers.kraken_futures",
+        "snapper.messaging.publishers.kraken_equities",
+        "snapper.messaging.publishers.walutomat",
+        "snapper.messaging.publishers.paper",
+    ):
+        importlib.import_module(module_path)
+    registry = get_registered_processes()
+    assert publisher_name in registry, f"{publisher_name} not registered"
+    entry = registry[publisher_name]
+    assert entry.enabled is True, (
+        f"{publisher_name} decorator must ship enabled=True so fresh DB "
+        "autostarts the publisher (see AppSettings.instruments wildcard "
+        "default + proprietary/data/seed/*.toml market_persist_* seed)."
+    )
