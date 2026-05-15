@@ -66,6 +66,7 @@ jobs:
       - name: Docker run
         run: |
           cp .env.example .env
+          sed -i 's/^SERVER_API_ONLY=.*/SERVER_API_ONLY=true/' .env
           mkdir -p data
           make docker-run
 
