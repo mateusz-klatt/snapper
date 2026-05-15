@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes move-imports run-server run-static run-polygon-aggregates run-polygon-grouped migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-grouped docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes move-imports run-server run-static run-polygon-aggregates run-polygon-grouped migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-grouped docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -84,7 +84,8 @@ help:
 	$(info ui-test-serial     Run UI tests sequentially [debugging])
 	$(info ui-cov             Run UI tests with coverage)
 	$(info ui-cov-serial      Run UI tests with coverage sequentially [debugging])
-	$(info ui-check           UI quality checks [lint + format + dead-code])
+	$(info ui-i18n-check      Check for hardcoded user-facing strings in frontend)
+	$(info ui-check           UI quality checks [lint + format + dead-code + i18n])
 	$(info ui-fix             UI quality fixes)
 	$(info )
 	$(info iOS [snapper-ios submodule]:)
@@ -410,8 +411,11 @@ ui-format:
 ui-format-fix:
 	$(PNPM) format
 
-ui-check: ui-lint ui-format ui-dead-code ui-typecheck
-	$(info UI quality checks passed [lint + format + dead code + typecheck])
+ui-i18n-check:
+	$(PNPM) check:i18n
+
+ui-check: ui-lint ui-format ui-dead-code ui-typecheck ui-i18n-check
+	$(info UI quality checks passed [lint + format + dead code + typecheck + i18n])
 
 ui-fix: ui-lint-fix ui-format-fix ui-dead-code-fix
 	$(info UI quality fixes applied [lint + format + dead code])
