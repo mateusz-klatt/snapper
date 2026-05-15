@@ -97,6 +97,26 @@ class TestResolveSymbols:
         ):
             assert svc._resolve_symbols() == ["MNQM6-CME", "MESM6-CME"]
 
+    def test_wildcard_settings_expands_to_all_mapped(self) -> None:
+        """``settings.instruments=["*"]`` resolves identically to ``--all``.
+
+        Given: a service constructed without ``--all`` flag and without
+            ``--symbol`` args, with ``settings.instruments[KRAKEN_EQUITIES]``
+            set to the wildcard sentinel ``["*"]``,
+        When: ``_resolve_symbols`` runs,
+        Then: it delegates to ``get_available_kraken_equities_symbols()``
+            (same path as ``all_symbols=True``) so the single sentinel
+            consistently means "all venues" across publishers + backfill.
+        """
+        svc = KrakenEquitiesAggregatesBackfillService()
+        svc.settings.instruments = {"kraken_equities": ["*"]}
+        with patch(
+            "snapper.application.updaters.historical.kraken_equities_aggregates"
+            ".get_available_kraken_equities_symbols",
+            return_value=["MNQM6-CME", "M2KM6-CME"],
+        ):
+            assert svc._resolve_symbols() == ["MNQM6-CME", "M2KM6-CME"]
+
 
 class TestBuildCandleRows:
     """Tests for OhlcvSnapshot to CandleUpsertRow conversion."""

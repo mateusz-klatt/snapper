@@ -97,6 +97,27 @@ class TestResolveSymbols:
             result = svc._resolve_symbols()
         assert result == ["BTC-USD-PERP", "ETH-USD-PERP"]
 
+    def test_wildcard_settings_expands_to_all_mapped(self) -> None:
+        """``settings.instruments=["*"]`` resolves identically to ``--all``.
+
+        Given: Service constructed without ``--all`` flag and without
+            ``--symbol`` args, with ``settings.instruments[KRAKEN_FUTURES]``
+            set to the wildcard sentinel ``["*"]``,
+        When: ``_resolve_symbols`` runs,
+        Then: It delegates to ``get_available_kraken_futures_symbols()``
+            (same path as ``all_symbols=True``) so the single sentinel
+            consistently means "all venues" across publishers + backfill.
+        """
+        svc = KrakenFuturesAggregatesBackfillService()
+        svc.settings.instruments = {"kraken_futures": ["*"]}
+        with patch(
+            "snapper.application.updaters.historical.kraken_futures_aggregates"
+            ".get_available_kraken_futures_symbols",
+            return_value=["BTC-USD-PERP", "SOL-USD-PERP"],
+        ):
+            result = svc._resolve_symbols()
+        assert result == ["BTC-USD-PERP", "SOL-USD-PERP"]
+
 
 class TestBuildCandleRows:
     """Tests for OhlcvSnapshot to CandleUpsertRow conversion."""

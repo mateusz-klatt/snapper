@@ -117,6 +117,13 @@ class KrakenFuturesFundingBackfillService(RegisterableProcess):
         Only perpetual contracts (symbol containing ``PERP``) are
         included since non-perpetuals do not have funding rates.
 
+        Wildcard ``["*"]`` in ``settings.instruments[KRAKEN_FUTURES]``
+        expands the same way as the ``--all`` CLI flag — every
+        currently-mapped Kraken Futures symbol filtered to perpetuals.
+        This mirrors the publisher's ``_validate_symbols`` wildcard
+        behavior so the single sentinel ``["*"]`` consistently means
+        "all venues" regardless of which consumer reads it.
+
         Returns:
             List of native perpetual symbols to process.
         """
@@ -128,6 +135,11 @@ class KrakenFuturesFundingBackfillService(RegisterableProcess):
         if self._requested_symbols:
             return [s for s in self._requested_symbols if "PERP" in s.upper()]
         configured = self.settings.instruments.get(ExchangeEnum.KRAKEN_FUTURES, [])
+        if configured == ["*"]:
+            all_syms = get_available_kraken_futures_symbols()
+            perps = [s for s in all_syms if "PERP" in s.upper()]
+            logger.info(f"Resolved {len(perps)} Kraken Futures perpetuals from wildcard settings")
+            return perps
         return [s for s in configured if "PERP" in s.upper()]
 
     async def _ensure_instrument(self, native_symbol: str) -> str | None:

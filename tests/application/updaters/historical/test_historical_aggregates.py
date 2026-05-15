@@ -539,6 +539,102 @@ async def test_start_all_mapped_returns_when_no_symbols(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_start_wildcard_settings_delegates_to_all_mapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``settings.instruments=["*"]`` resolves identically to ``--all``.
+
+    Given: a service constructed WITHOUT ``all_mapped=True`` and without
+        explicit ``symbols=`` args, with ``settings.instruments[polygon]``
+        set to the wildcard sentinel ``["*"]``,
+    When: ``start()`` runs,
+    Then: It calls ``_get_all_mapped_symbols`` (the same path
+        ``all_mapped=True`` takes), logs the resolved count, then
+        iterates the wildcard-expanded list. Single wildcard sentinel
+        consistently means "all DB-mapped symbols" across publishers
+        + backfill — matching the contract for kraken/kraken_futures/
+        kraken_equities exposed via ``get_available_*_symbols()``.
+    """
+    svc = PolygonAggregatesBackfillService()
+    svc.settings = DummySettings(polygon_api_key="key", instruments={"polygon": ["*"]})
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.get_settings_service",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.get_settings_with_service",
+        lambda _svc: svc.settings,
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.PolygonExchangeClient",
+        lambda api_key: None,
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.PolygonHistoricalLoader",
+        lambda client, cache_root: None,
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.get_repository",
+        lambda url: None,
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.DatabaseRepository",
+        lambda _url: SimpleNamespace(get_archive_symbols=_PermissiveArchiveSymbols),
+    )
+    svc._get_all_mapped_symbols = Mock(return_value=["X:BTCUSD", "X:ETHUSD"])
+    svc._resolve_symbol_context = Mock(return_value=None)
+    await svc.start()
+    svc._get_all_mapped_symbols.assert_called_once()
+    assert svc._resolve_symbol_context.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_start_wildcard_settings_returns_when_no_mapped_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wildcard settings + empty DB-mapping list returns early with a warning.
+
+    Given: ``settings.instruments[polygon] = ["*"]`` but the
+        ``_get_all_mapped_symbols`` query returns an empty list (no
+        polygon-mapped Symbol rows yet),
+    When: ``start()`` runs,
+    Then: The wildcard branch logs the "no Polygon-mapped symbols"
+        warning and returns without invoking the per-symbol pipeline.
+    """
+    svc = PolygonAggregatesBackfillService()
+    svc.settings = DummySettings(polygon_api_key="key", instruments={"polygon": ["*"]})
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.get_settings_service",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.get_settings_with_service",
+        lambda _svc: svc.settings,
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.PolygonExchangeClient",
+        lambda api_key: None,
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.PolygonHistoricalLoader",
+        lambda client, cache_root: None,
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.get_repository",
+        lambda url: None,
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.DatabaseRepository",
+        lambda _url: SimpleNamespace(get_archive_symbols=_PermissiveArchiveSymbols),
+    )
+    svc._get_all_mapped_symbols = Mock(return_value=[])
+    svc._resolve_symbol_context = Mock(return_value=None)
+    await svc.start()
+    svc._get_all_mapped_symbols.assert_called_once()
+    svc._resolve_symbol_context.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_start_disposes_allocated_repositories(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify start disposes repositories after processing completes.
 

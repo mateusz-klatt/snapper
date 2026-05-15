@@ -217,7 +217,18 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
                 symbols = self._requested_symbols or self.settings.instruments.get(
                     ExchangeEnum.POLYGON, []
                 )
-                if not symbols:
+                if symbols == ["*"]:
+                    symbols = self._get_all_mapped_symbols()
+                    if not symbols:
+                        logger.warning(
+                            "Wildcard settings but no Polygon-mapped symbols in database"
+                        )
+                        return
+                    logger.info(
+                        f"Resolved {len(symbols)} Polygon symbols from wildcard settings "
+                        "(same as --all)"
+                    )
+                elif not symbols:
                     logger.warning("No Polygon symbols configured for backfill")
                     return
             for symbol in symbols:

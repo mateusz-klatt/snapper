@@ -112,6 +112,28 @@ class TestResolveSymbols:
             result = svc._resolve_symbols()
         assert result == ["BTC-USD-PERP", "ETH-USD-PERP-INV"]
 
+    def test_wildcard_settings_expands_then_filters_to_perpetuals(self) -> None:
+        """``settings.instruments=["*"]`` resolves like ``--all`` and filters perps.
+
+        Given: Service constructed without ``--all`` flag and without
+            ``--symbol`` args, with ``settings.instruments[KRAKEN_FUTURES]``
+            set to the wildcard sentinel ``["*"]``,
+        When: ``_resolve_symbols`` runs,
+        Then: It delegates to ``get_available_kraken_futures_symbols()``
+            (same path as ``all_symbols=True``) and filters the result
+            to perpetuals only — funding rates exist only on perps.
+        """
+        svc = KrakenFuturesFundingBackfillService()
+        svc.settings = MagicMock(spec=AppSettings)
+        svc.settings.instruments = {"kraken_futures": ["*"]}
+        with patch(
+            "snapper.application.updaters.historical.kraken_futures_funding"
+            ".get_available_kraken_futures_symbols",
+            return_value=["BTC-USD-PERP", "BTC-USD-260620", "SOL-USD-PERP"],
+        ):
+            result = svc._resolve_symbols()
+        assert result == ["BTC-USD-PERP", "SOL-USD-PERP"]
+
 
 class TestEnsureInstrument:
     """Tests for instrument resolution."""

@@ -135,6 +135,14 @@ class KrakenFuturesAggregatesBackfillService(RegisterableProcess):
     def _resolve_symbols(self) -> list[str]:
         """Determine which symbols to backfill.
 
+        Wildcard ``["*"]`` in ``settings.instruments[KRAKEN_FUTURES]``
+        expands the same way as the ``--all`` CLI flag — every
+        currently-mapped Kraken Futures symbol via
+        ``get_available_kraken_futures_symbols()``. This mirrors the
+        publisher's ``_validate_symbols`` wildcard behavior so the
+        single sentinel ``["*"]`` consistently means "all venues"
+        regardless of which consumer reads it.
+
         Returns:
             List of native symbols to process.
         """
@@ -144,7 +152,12 @@ class KrakenFuturesAggregatesBackfillService(RegisterableProcess):
             return symbols
         if self._requested_symbols:
             return self._requested_symbols
-        return self.settings.instruments.get(ExchangeEnum.KRAKEN_FUTURES, [])
+        configured = self.settings.instruments.get(ExchangeEnum.KRAKEN_FUTURES, [])
+        if configured == ["*"]:
+            symbols = get_available_kraken_futures_symbols()
+            logger.info(f"Resolved {len(symbols)} Kraken Futures symbols from wildcard settings")
+            return symbols
+        return configured
 
     async def _ensure_instrument(self, native_symbol: str) -> str | None:
         """Ensure instrument exists in database, return its public_id.
