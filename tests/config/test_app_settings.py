@@ -200,16 +200,21 @@ class TestAppSettingsTradingProperties:
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.instruments == custom_instruments
 
-    def test_instruments_default_is_wildcard_for_live_ws_publishers(self) -> None:
-        """Verify the fresh-DB default subscribes wildcard on all WS publishers.
+    def test_instruments_default_is_wildcard_for_every_exchange(self) -> None:
+        """Verify the fresh-DB default is wildcard on every exchange.
 
         Given service with no ``instruments`` setting persisted,
         When accessing settings.instruments,
-        Then the four live-WS publisher exchanges (kraken / kraken_futures
-            / kraken_equities / walutomat) each map to the wildcard
-            sentinel ``["*"]`` and POLYGON keeps its explicit allowlist
-            (because Polygon REST backfill can't expand wildcards as
-            sanely as live-WS subscribers).
+        Then every exchange (kraken / kraken_futures / kraken_equities
+            / walutomat / polygon) maps to the wildcard sentinel
+            ``["*"]``. Live-WS publishers expand via
+            ``get_available_*_symbols()`` in ``_validate_symbols``;
+            historical backfill services recognise the sentinel and
+            delegate to ``_get_all_mapped_symbols()`` /
+            ``get_available_*_symbols()`` (same path the ``--all`` CLI
+            flag takes). The wildcard is therefore semantically
+            equivalent to ``--all`` across publishers + backfill so a
+            single sentinel covers the full venue universe everywhere.
         """
         bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
         service = MockSettingsService()
@@ -219,13 +224,7 @@ class TestAppSettingsTradingProperties:
         assert default_instruments["kraken_futures"] == ["*"]
         assert default_instruments["kraken_equities"] == ["*"]
         assert default_instruments["walutomat"] == ["*"]
-        assert default_instruments["polygon"] == [
-            "BTC-USD",
-            "BTC-EUR",
-            "EUR-USD",
-            "EUR-PLN",
-            "USD-PLN",
-        ]
+        assert default_instruments["polygon"] == ["*"]
 
     def test_timeframes_returns_value(self) -> None:
         """Verify timeframes returns configured list.

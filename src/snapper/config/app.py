@@ -310,28 +310,34 @@ class AppSettings:
     def instruments(self) -> dict[str, list[str]]:
         """Return configured trading instruments per exchange.
 
-        Default for every live-WS publisher exchange (Kraken spot,
-        Kraken Futures, Kraken Equities, Walutomat) is the wildcard
-        sentinel ``["*"]``. Each publisher's ``_validate_symbols``
-        expands the wildcard against ``get_available_*_symbols()`` at
-        runtime so a fresh DB subscribes to the full venue universe
-        without any operator configuration. Persistence is decoupled —
-        the ``market_persist_*`` settings (seeded as
+        Default for every exchange is the wildcard sentinel ``["*"]``.
+
+        For live-WS publisher exchanges (Kraken spot, Kraken Futures,
+        Kraken Equities, Walutomat) each publisher's
+        ``_validate_symbols`` expands the wildcard against
+        ``get_available_*_symbols()`` at runtime so a fresh DB
+        subscribes to the full venue universe without any operator
+        configuration. Persistence is decoupled — the
+        ``market_persist_*`` settings (seeded as
         ``{"mode":"explicit","exchanges":{}}`` in
         ``proprietary/data/seed/{dev,prod}.toml``) keep every wildcard
         tick out of the DB write path; data flows into the in-process
         ``MarketCacheService`` + ZMQ broadcast and is dropped at the
         publisher's persist gate.
 
+        For ``ExchangeEnum.POLYGON`` (REST-only backfill, no live WS)
+        and the three Kraken historical backfill services, each
+        ``_resolve_symbols`` recognises ``["*"]`` and delegates to
+        ``_get_all_mapped_symbols()`` / ``get_available_*_symbols()`` —
+        the same path the ``--all`` CLI flag takes. The setting
+        wildcard is therefore semantically equivalent to ``--all``
+        across publishers + backfill, so the per-target Makefile
+        ``-all`` variants are redundant when wildcard is in settings.
+
         Operators that want a narrower allowlist (e.g. for a curated
         backfill / strategy universe) override this setting via the
         ``instruments`` DB row — Settings UI or
         ``POST /api/settings`` ``{"key":"instruments", "value": {...}}``.
-
-        ``ExchangeEnum.POLYGON`` keeps an explicit small set because
-        Polygon REST backfills paginate per-symbol and a wildcard
-        expansion against 30k+ Polygon tickers would not be operator-
-        friendly as a default.
 
         FCM index-futures expire quarterly; when narrowing
         ``KRAKEN_EQUITIES`` to an explicit list, operators must rotate
@@ -350,7 +356,7 @@ class AppSettings:
                 ExchangeEnum.KRAKEN_FUTURES: ["*"],
                 ExchangeEnum.KRAKEN_EQUITIES: ["*"],
                 ExchangeEnum.WALUTOMAT: ["*"],
-                ExchangeEnum.POLYGON: ["BTC-USD", "BTC-EUR", "EUR-USD", "EUR-PLN", "USD-PLN"],
+                ExchangeEnum.POLYGON: ["*"],
             },
         )
 
