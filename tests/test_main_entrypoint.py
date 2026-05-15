@@ -121,7 +121,6 @@ class TestMain:
         assert callable(app)
         assert callable(setup_logging)
 
-    @pytest.mark.timeout(45)
     @patch("snapper.__main__.app")
     @patch("snapper.__main__.setup_logging")
     def test_main_executed_as_module(
@@ -154,7 +153,7 @@ class TestMain:
             [sys.executable, "-m", "snapper", "--help"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=15,
             check=False,
             cwd=run_cwd,
             env=env,

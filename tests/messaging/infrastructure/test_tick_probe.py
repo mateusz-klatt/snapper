@@ -1,6 +1,5 @@
 """Tests for the publisher hot-path tick probe."""
 
-import importlib
 import math
 from time import perf_counter_ns
 from typing import Final
@@ -205,6 +204,7 @@ class TestGetProbe:
         the shared instance.
         """
         monkeypatch.setenv(TICK_PROBE_ENV_VAR, "1")
+        import importlib
 
         reloaded = importlib.reload(tick_probe)
         try:
