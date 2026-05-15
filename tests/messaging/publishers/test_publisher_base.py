@@ -1,6 +1,7 @@
 """Tests for the base market data publisher service."""
 
 import asyncio
+import importlib
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
@@ -19,6 +20,7 @@ import zmq
 from loguru import logger
 from sqlalchemy.exc import IntegrityError
 
+from snapper.application.process_manager.registry import get_registered_processes
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -4762,10 +4764,6 @@ def test_market_data_publishers_autostart_by_default(publisher_name: str) -> Non
         back to ``enabled=False`` would silently break the fresh-DB
         runbook.
     """
-    import importlib
-
-    from snapper.application.process_manager.registry import get_registered_processes
-
     for module_path in (
         "snapper.messaging.publishers.kraken",
         "snapper.messaging.publishers.kraken_futures",
