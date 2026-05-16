@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from typing import Self
+from uuid import uuid7
 
 import yaml
 from loguru import logger
@@ -348,7 +349,7 @@ class UnderlyingUpdater:
         assert self._repo is not None
         result: dict[str, str] = {}
         counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0}
-        session_id = f"underlying-updater-{now:%Y%m%d%H%M%S}"
+        session_id = str(uuid7())
 
         for seq, defn in enumerate(config.underlyings, start=1):
             public_id, status = await self._repo.upsert_underlying_asset(
@@ -379,7 +380,7 @@ class UnderlyingUpdater:
         assert self._repo is not None
         config_tickers = {defn.ticker for defn in config.underlyings}
         active = await self._repo.get_underlying_assets(now)
-        session_id = f"underlying-updater-{now:%Y%m%d%H%M%S}"
+        session_id = str(uuid7())
         stale = [row for row in active if row["ticker"] not in config_tickers]
         for seq, row in enumerate(stale, start=1):
             await self._repo.close_underlying_asset(
@@ -617,7 +618,7 @@ class UnderlyingUpdater:
     ) -> None:
         """Match instruments to underlyings and upsert/close mappings."""
         assert self._repo is not None
-        session_id = f"underlying-updater-{now:%Y%m%d%H%M%S}"
+        session_id = str(uuid7())
 
         desired: dict[str, _MatchResult] = {}
         conflicted: set[str] = set()

@@ -9,6 +9,7 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Annotated
 from typing import Literal
+from uuid import uuid7
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -121,7 +122,7 @@ async def list_open_cycles(
     return PositionCycleListResponse(
         public_id="list",
         timestamp=now,
-        session_id="admin",
+        session_id=str(uuid7()),
         sequence_id=0,
         payload=payload,
         count=len(payload),

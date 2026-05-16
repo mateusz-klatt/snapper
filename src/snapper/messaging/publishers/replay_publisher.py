@@ -35,6 +35,7 @@ from datetime import UTC
 from datetime import datetime
 from typing import Final
 from typing import cast
+from uuid import uuid7
 
 import zmq
 import zmq.asyncio
@@ -127,7 +128,7 @@ class ReplayPublisher:
         warmup = CandleData(
             public_id=WARMUP_PUBLIC_ID,
             timestamp=anchor,
-            session_id="backtest-warmup",
+            session_id=str(uuid7()),
             sequence_id=0,
             instrument=parsed.instrument,
             exchange=cast(MarketDataExchange, parsed.exchange),
