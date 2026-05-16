@@ -4523,56 +4523,127 @@ class SQLAlchemyRepository(Repository):
         Returns:
             Number of rows successfully inserted.
         """
-        for r in rows:
-            if "public_id" not in r:
-                r["public_id"] = str(uuid7())
+        self._ensure_public_ids(rows)
+        stmt = self._build_conflict_do_nothing_statement(model, rows, index_elements)
+        if stmt is not None:
+            return await self._execute_upsert_statement(stmt, session)
+        return await self._upsert_rows_with_integrity_fallback(model, rows, session)
+
+    @staticmethod
+    def _ensure_public_ids(rows: list[Any]) -> None:
+        """Fill missing public identifiers before an insert attempt.
+
+        Args:
+            rows: Mutable row dictionaries accepted by SQLAlchemy insert
+                statements.
+        """
+        for row in rows:
+            if "public_id" not in row:
+                row["public_id"] = str(uuid7())
+
+    def _build_conflict_do_nothing_statement(
+        self,
+        model: type[Base],
+        rows: list[Any],
+        index_elements: list[str],
+    ) -> Any | None:
+        """Build a native conflict-do-nothing statement when supported.
+
+        Args:
+            model: SQLAlchemy model class to insert into.
+            rows: Column-value dictionaries to insert.
+            index_elements: Columns that form the unique constraint.
+
+        Returns:
+            SQLAlchemy insert statement for native dialects, otherwise
+            ``None`` so callers can use the portable fallback.
+        """
         name = self.dialect_name
         if name == "sqlite":
-            if session is not None:
-                stmt_sq = sqlite_insert(model).values(rows)
-                stmt_sq = stmt_sq.on_conflict_do_nothing(index_elements=index_elements)
-                res = await session.execute(stmt_sq)
-                return int(cast(Any, res).rowcount or 0)
-            async with self.session() as s:
-                stmt_sq = sqlite_insert(model).values(rows)
-                stmt_sq = stmt_sq.on_conflict_do_nothing(index_elements=index_elements)
-                res = await s.execute(stmt_sq)
-                await s.commit()
-                return int(cast(Any, res).rowcount or 0)
-        elif name.startswith("postgres"):
-            if session is not None:
-                stmt_pg = pg_insert(model).values(rows)
-                stmt_pg = stmt_pg.on_conflict_do_nothing(index_elements=index_elements)
-                res = await session.execute(stmt_pg)
-                return int(cast(Any, res).rowcount or 0)
-            async with self.session() as s:
-                stmt_pg = pg_insert(model).values(rows)
-                stmt_pg = stmt_pg.on_conflict_do_nothing(index_elements=index_elements)
-                res = await s.execute(stmt_pg)
-                await s.commit()
-                return int(cast(Any, res).rowcount or 0)
-        else:
-            if session is not None:
-                inserted = 0
-                for r in rows:
-                    try:
-                        async with session.begin_nested():
-                            await session.execute(insert(model).values(**r))
-                        inserted += 1
-                    except IntegrityError:
-                        continue
-                return inserted
-            async with self.session() as s:
-                inserted = 0
-                for r in rows:
-                    try:
-                        async with s.begin_nested():
-                            await s.execute(insert(model).values(**r))
-                        inserted += 1
-                    except IntegrityError:
-                        continue
-                await s.commit()
-                return inserted
+            stmt_sq = sqlite_insert(model).values(rows)
+            return stmt_sq.on_conflict_do_nothing(index_elements=index_elements)
+        if name.startswith("postgres"):
+            stmt_pg = pg_insert(model).values(rows)
+            return stmt_pg.on_conflict_do_nothing(index_elements=index_elements)
+        return None
+
+    async def _execute_upsert_statement(self, stmt: Any, session: AsyncSession | None) -> int:
+        """Execute a native upsert statement in caller-owned or local scope.
+
+        Args:
+            stmt: SQLAlchemy native insert statement.
+            session: Optional caller-managed session.
+
+        Returns:
+            Number of rows reported as inserted.
+        """
+        if session is not None:
+            return await self._execute_statement_count(session, stmt)
+        async with self.session() as s:
+            inserted = await self._execute_statement_count(s, stmt)
+            await s.commit()
+            return inserted
+
+    @staticmethod
+    async def _execute_statement_count(session: AsyncSession, stmt: Any) -> int:
+        """Execute a statement and normalize rowcount.
+
+        Args:
+            session: Active async SQLAlchemy session.
+            stmt: SQLAlchemy statement to execute.
+
+        Returns:
+            Integer rowcount with ``None`` normalized to zero.
+        """
+        result = await session.execute(stmt)
+        return int(cast(Any, result).rowcount or 0)
+
+    async def _upsert_rows_with_integrity_fallback(
+        self,
+        model: type[Base],
+        rows: list[Any],
+        session: AsyncSession | None,
+    ) -> int:
+        """Insert rows one by one while ignoring integrity duplicates.
+
+        Args:
+            model: SQLAlchemy model class to insert into.
+            rows: Column-value dictionaries to insert.
+            session: Optional caller-managed session.
+
+        Returns:
+            Number of rows successfully inserted.
+        """
+        if session is not None:
+            return await self._insert_rows_ignoring_integrity_errors(model, rows, session)
+        async with self.session() as s:
+            inserted = await self._insert_rows_ignoring_integrity_errors(model, rows, s)
+            await s.commit()
+            return inserted
+
+    @staticmethod
+    async def _insert_rows_ignoring_integrity_errors(
+        model: type[Base], rows: list[Any], session: AsyncSession
+    ) -> int:
+        """Insert rows inside savepoints and skip duplicate failures.
+
+        Args:
+            model: SQLAlchemy model class to insert into.
+            rows: Column-value dictionaries to insert.
+            session: Active async SQLAlchemy session.
+
+        Returns:
+            Number of rows successfully inserted.
+        """
+        inserted = 0
+        for row in rows:
+            try:
+                async with session.begin_nested():
+                    await session.execute(insert(model).values(**row))
+                inserted += 1
+            except IntegrityError:
+                continue
+        return inserted
 
     async def upsert_candles(
         self, rows: list[CandleUpsertRow], session: AsyncSession | None = None

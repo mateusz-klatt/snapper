@@ -37,6 +37,7 @@ import os
 import sys
 import traceback
 import zlib
+from collections.abc import Callable
 from collections.abc import Mapping
 from typing import Any
 from typing import cast
@@ -166,6 +167,161 @@ def _filter_cancelled_errors(record: Any) -> bool:
     return True
 
 
+def _configure_stdlib_logging(level: str) -> None:
+    """Route standard library logging through Loguru interception.
+
+    Args:
+        level: Minimum application log level.
+    """
+    logging.basicConfig(
+        handlers=[InterceptStdLogHandler()],
+        level=logging.INFO if level == "INFO" else logging.DEBUG,
+        force=True,
+    )
+    for log_name in logging.Logger.manager.loggerDict:
+        log_obj = logging.getLogger(log_name)
+        log_obj.handlers = []
+        log_obj.propagate = True
+    for logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+        uvicorn_logger = logging.getLogger(logger_name)
+        uvicorn_logger.handlers = [InterceptStdLogHandler()]
+        uvicorn_logger.propagate = False
+
+
+def _format_message(record: Mapping[str, Any]) -> str:
+    """Format a plain text loguru record.
+
+    Args:
+        record: Loguru record mapping.
+
+    Returns:
+        Plain text log line, including traceback text when present.
+    """
+    time_str = record["time"].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    level_name = record["level"].name
+    process = record["process"]
+    context = _log_context.get()
+    module = record["module"]
+    function = record["function"]
+    line = record["line"]
+    message = record["message"]
+    formatted = (
+        f"{level_name:<8} | {_truncate(context)} | {time_str} | "
+        f"{process} | {module}:{function}:{line} | {message}\n"
+    )
+    if record.get("exception"):
+        exception_text = record["exception"]
+        if hasattr(exception_text, "type") and hasattr(exception_text, "value"):
+            exc_lines = traceback.format_exception(
+                exception_text.type, exception_text.value, exception_text.traceback
+            )
+            formatted += "".join(exc_lines)
+    return formatted
+
+
+def _serialize_json_record(record: object) -> str:
+    """Serialize a Loguru record to compact JSON.
+
+    Args:
+        record: Raw Loguru record object.
+
+    Returns:
+        JSON string containing the stable structured fields.
+    """
+    rec = cast(Mapping[str, Any], record)
+    payload = {
+        "ts": rec["time"].timestamp(),
+        "level": rec["level"].name,
+        "message": rec["message"],
+        "module": rec["module"],
+        "function": rec["function"],
+        "line": rec["line"],
+        "context": _log_context.get(),
+    }
+    return json.dumps(payload)
+
+
+def _add_json_logging(level: str) -> None:
+    """Add the JSON stdout Loguru sink.
+
+    Args:
+        level: Minimum log level.
+    """
+    logger.add(
+        lambda msg: print(msg, end=""),
+        level=level,
+        format=_serialize_json_record,
+        filter=_filter_cancelled_errors,
+    )
+
+
+def _add_text_logging(level: str) -> None:
+    """Add the terminal-appropriate text Loguru sink.
+
+    Args:
+        level: Minimum log level.
+    """
+    if sys.stdout.isatty():
+        logger.add(
+            _colorized_sink,
+            level=level,
+            format=_MSG_ONLY_FMT,
+            colorize=False,
+            filter=_filter_cancelled_errors,
+        )
+        return
+    logger.add(
+        lambda msg: print(_format_message(msg.record), end=""),
+        level=level,
+        format=_MSG_ONLY_FMT,
+        filter=_filter_cancelled_errors,
+    )
+
+
+def _colorized_sink(message: Any) -> None:
+    """Print a colorized Loguru message.
+
+    Args:
+        message: Loguru message object with a record attribute.
+    """
+    formatted = _colorize_record(message.record)
+    print(formatted, end="")
+
+
+def _add_file_logging(level: str, logfile: str) -> None:
+    """Add an append-only file sink.
+
+    Args:
+        level: Minimum log level.
+        logfile: Destination file path.
+    """
+    os.makedirs(os.path.dirname(logfile) or ".", exist_ok=True)
+    logger.add(
+        _file_sink(logfile),
+        level=level,
+        format=_MSG_ONLY_FMT,
+        filter=_filter_cancelled_errors,
+    )
+
+
+def _file_sink(logfile: str) -> Callable[[Any], None]:
+    """Build a file sink callable for a specific path.
+
+    Args:
+        logfile: Destination file path.
+
+    Returns:
+        Callable sink accepted by Loguru.
+    """
+
+    def sink(message: Any) -> None:
+        formatted = _format_message(message.record)
+        with open(logfile, "a", encoding="utf-8") as f:
+            f.write(formatted)
+
+    return sink
+
+
 def setup_logging(level: str = "INFO", json_logs: bool = False, logfile: str | None = None) -> None:
     """Configure application-wide logging.
 
@@ -191,97 +347,12 @@ def setup_logging(level: str = "INFO", json_logs: bool = False, logfile: str | N
         json_logs: If True, output JSON instead of formatted text.
         logfile: Optional file path for additional file logging.
     """
-    logging.basicConfig(
-        handlers=[InterceptStdLogHandler()],
-        level=logging.INFO if level == "INFO" else logging.DEBUG,
-        force=True,
-    )
-    for log_name in list(logging.Logger.manager.loggerDict.keys()):
-        log_obj = logging.getLogger(log_name)
-        log_obj.handlers = []
-        log_obj.propagate = True
-    for logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
-        uvicorn_logger = logging.getLogger(logger_name)
-        uvicorn_logger.handlers = [InterceptStdLogHandler()]
-        uvicorn_logger.propagate = False
+    _configure_stdlib_logging(level)
     logger.remove()
     logger.configure(extra={"context": "main"})
-
-    def _format_message(record: Mapping[str, Any]) -> str:
-        time_str = record["time"].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        level_name = record["level"].name
-        process = record["process"]
-        context = _log_context.get()
-        module = record["module"]
-        function = record["function"]
-        line = record["line"]
-        message = record["message"]
-        formatted = (
-            f"{level_name:<8} | {_truncate(context)} | {time_str} | "
-            f"{process} | {module}:{function}:{line} | {message}\n"
-        )
-        if record.get("exception"):
-            exception_text = record["exception"]
-            if hasattr(exception_text, "type") and hasattr(exception_text, "value"):
-                exc_lines = traceback.format_exception(
-                    exception_text.type, exception_text.value, exception_text.traceback
-                )
-                formatted += "".join(exc_lines)
-        return formatted
-
     if json_logs:
-
-        def _serialize(record: object) -> str:
-            rec = cast(Mapping[str, Any], record)
-            r = {
-                "ts": rec["time"].timestamp(),
-                "level": rec["level"].name,
-                "message": rec["message"],
-                "module": rec["module"],
-                "function": rec["function"],
-                "line": rec["line"],
-                "context": _log_context.get(),
-            }
-            return json.dumps(r)
-
-        logger.add(
-            lambda msg: print(msg, end=""),
-            level=level,
-            format=_serialize,
-            filter=_filter_cancelled_errors,
-        )
+        _add_json_logging(level)
     else:
-        if sys.stdout.isatty():
-
-            def colorized_sink(message: Any) -> None:
-                formatted = _colorize_record(message.record)
-                print(formatted, end="")
-
-            logger.add(
-                colorized_sink,
-                level=level,
-                format=_MSG_ONLY_FMT,
-                colorize=False,
-                filter=_filter_cancelled_errors,
-            )
-        else:
-            logger.add(
-                lambda msg: print(_format_message(msg.record), end=""),
-                level=level,
-                format=_MSG_ONLY_FMT,
-                filter=_filter_cancelled_errors,
-            )
+        _add_text_logging(level)
     if logfile:
-        os.makedirs(os.path.dirname(logfile) or ".", exist_ok=True)
-
-        def file_sink(message: Any) -> None:
-            formatted = _format_message(message.record)
-            with open(logfile, "a", encoding="utf-8") as f:
-                f.write(formatted)
-
-        logger.add(
-            file_sink,
-            level=level,
-            format=_MSG_ONLY_FMT,
-            filter=_filter_cancelled_errors,
-        )
+        _add_file_logging(level, logfile)
