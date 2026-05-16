@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration test-local cov cov-serial cov-xml cov-local migrate-dev-sqlite check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes move-imports run-server run-static run-polygon-aggregates run-polygon-grouped migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-grouped docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes move-imports run-server run-static run-polygon-aggregates run-polygon-grouped migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-grouped docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -22,12 +22,14 @@ help:
 	$(info lint                      Run linting checks [ruff])
 	$(info lint-fix                  Auto-fix linting issues [ruff --fix])
 	$(info typecheck                 Run type checking [mypy])
-	$(info test                      Run unit tests in parallel [pytest -n auto])
-	$(info test-serial               Run unit tests sequentially [debugging])
+	$(info test                      Run unit tests in parallel [pytest -n auto, isolated SQLite dev.db])
+	$(info test-serial               Run unit tests sequentially [debugging, isolated SQLite dev.db])
 	$(info test-integration          Run paper-mode E2E integration tests [tests/integration/])
-	$(info cov                       Run tests with coverage [parallel, 100% required])
-	$(info cov-serial                Run tests with coverage [sequential])
+	$(info cov                       Run tests with coverage [parallel, 100% required, isolated SQLite dev.db])
+	$(info cov-serial                Run tests with coverage [sequential, isolated SQLite dev.db])
 	$(info cov-xml                   Run tests with coverage + export XML [for SonarCloud])
+	$(info migrate-dev-sqlite        Rebuild ./data/dev.db SQLite fixture used by test/cov)
+	$(info                           override TEST_DB_URL to opt into Postgres test runs [staging only])
 	$(info check                     Backend quality checks [fmt + lint + typecheck])
 	$(info fix                       Backend quality fixes [fmt-fix + lint-fix + move-imports])
 	$(info check-all                 Complete quality gate [check + ui + exclusions + cov])
@@ -237,36 +239,30 @@ lint-fix:
 typecheck:
 	$(PYRUN) mypy $(PY_DIRS)
 
-test:
-	$(PYRUN) pytest $(PYTEST_PARALLEL) $(PYTEST_TIMEOUT) --max-worker-restart=0
+TEST_DB_FILE := ./data/dev.db
+TEST_DB_URL ?= sqlite+aiosqlite:///$(TEST_DB_FILE)
 
-test-serial:
-	$(PYRUN) pytest $(PYTEST_TIMEOUT)
+$(TEST_DB_FILE):
+	@echo "Bootstrapping local SQLite test fixture at $(TEST_DB_FILE)..."
+	DB_URL="sqlite+aiosqlite:///$(TEST_DB_FILE)" $(PYRUN) snapper db-init
+	DB_URL="sqlite+aiosqlite:///$(TEST_DB_FILE)" $(PYRUN) snapper db-seed --profile dev
 
-test-integration:
-	$(PYRUN) pytest tests/integration/ -v -m integration --timeout=120
+migrate-dev-sqlite: $(TEST_DB_FILE)
 
-LOCAL_TEST_DB := ./data/dev.db
-LOCAL_TEST_DB_URL := sqlite+aiosqlite:///$(LOCAL_TEST_DB)
+test: $(TEST_DB_FILE)
+	DB_URL="$(TEST_DB_URL)" $(PYRUN) pytest $(PYTEST_PARALLEL) $(PYTEST_TIMEOUT) --max-worker-restart=0
 
-migrate-dev-sqlite: $(LOCAL_TEST_DB)
+test-serial: $(TEST_DB_FILE)
+	DB_URL="$(TEST_DB_URL)" $(PYRUN) pytest $(PYTEST_TIMEOUT)
 
-$(LOCAL_TEST_DB):
-	@echo "Building local SQLite test fixture at $(LOCAL_TEST_DB)..."
-	DB_URL="$(LOCAL_TEST_DB_URL)" $(PYRUN) snapper db-init
-	DB_URL="$(LOCAL_TEST_DB_URL)" $(PYRUN) snapper db-seed --profile dev
+test-integration: $(TEST_DB_FILE)
+	DB_URL="$(TEST_DB_URL)" $(PYRUN) pytest tests/integration/ -v -m integration --timeout=120
 
-test-local: $(LOCAL_TEST_DB)
-	DB_URL="$(LOCAL_TEST_DB_URL)" $(PYRUN) pytest $(PYTEST_PARALLEL) $(PYTEST_TIMEOUT) --max-worker-restart=0
+cov: $(TEST_DB_FILE)
+	DB_URL="$(TEST_DB_URL)" $(PYRUN) pytest $(PYTEST_PARALLEL) --cov $(PYTEST_TIMEOUT) --max-worker-restart=0
 
-cov-local: $(LOCAL_TEST_DB)
-	DB_URL="$(LOCAL_TEST_DB_URL)" $(PYRUN) pytest $(PYTEST_PARALLEL) --cov $(PYTEST_TIMEOUT) --max-worker-restart=0
-
-cov:
-	$(PYRUN) pytest $(PYTEST_PARALLEL) --cov $(PYTEST_TIMEOUT) --max-worker-restart=0
-
-cov-serial:
-	$(PYRUN) pytest --cov $(PYTEST_TIMEOUT)
+cov-serial: $(TEST_DB_FILE)
+	DB_URL="$(TEST_DB_URL)" $(PYRUN) pytest --cov $(PYTEST_TIMEOUT)
 
 cov-xml:
 	$(PYRUN) coverage xml -o coverage.xml

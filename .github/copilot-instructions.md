@@ -90,6 +90,27 @@ the complete quality gate using the consolidated Makefile targets before creatin
 
 - `make check-all` - Complete quality gate: backend + frontend + exclusions + tests with coverage (100%)
 
+## Database Backend for Tests vs. Local Server (MANDATORY)
+
+Two distinct DB usages, do not mix:
+
+1. **Tests and coverage** (`make test`, `make cov`, `make test-serial`,
+    `make cov-serial`, `make check-all`) always use an **isolated SQLite
+    fixture at `./data/dev.db`** regardless of what's in `.env`. The
+    Makefile sets `DB_URL=sqlite+aiosqlite:///./data/dev.db` inline so
+    tests never touch the running server's database (which may be
+    Postgres in production-like configurations) and CI without a
+    Postgres service still passes. The fixture is auto-built on first
+    run via `migrate-dev-sqlite` and reused across runs.
+2. **Local server runs** (`make dev-backend`, `make run-server`,
+    `make run-static`, `make dev-all`) read `DB_URL` from `.env`. Snapper
+    deployments use Postgres there; local-only setups can keep SQLite.
+
+To run tests against Postgres (staging integration only, never against
+a production database): `make test TEST_DB_URL=postgresql+asyncpg://USER:PASS@HOST/DB`.
+Never override `TEST_DB_URL` to point at the live server's database —
+tests mutate state and `isolated_sqlite_db` only protects SQLite paths.
+
 **Auto-fix commands:**
 
 - `make fix` - Backend fixes: fmt-fix + lint-fix + move-imports
