@@ -242,27 +242,33 @@ typecheck:
 TEST_DB_FILE := ./data/dev.db
 TEST_DB_URL ?= sqlite+aiosqlite:///$(TEST_DB_FILE)
 
+ifeq ($(OS),Windows_NT)
+  WITH_TEST_DB := set DB_URL=$(TEST_DB_URL)&&
+else
+  WITH_TEST_DB := DB_URL="$(TEST_DB_URL)"
+endif
+
 $(TEST_DB_FILE):
 	@echo "Bootstrapping local SQLite test fixture at $(TEST_DB_FILE)..."
-	DB_URL="sqlite+aiosqlite:///$(TEST_DB_FILE)" $(PYRUN) snapper db-init
-	DB_URL="sqlite+aiosqlite:///$(TEST_DB_FILE)" $(PYRUN) snapper db-seed --profile dev
+	$(WITH_TEST_DB) $(PYRUN) snapper db-init
+	$(WITH_TEST_DB) $(PYRUN) snapper db-seed --profile dev
 
 migrate-dev-sqlite: $(TEST_DB_FILE)
 
 test: $(TEST_DB_FILE)
-	DB_URL="$(TEST_DB_URL)" $(PYRUN) pytest $(PYTEST_PARALLEL) $(PYTEST_TIMEOUT) --max-worker-restart=0
+	$(WITH_TEST_DB) $(PYRUN) pytest $(PYTEST_PARALLEL) $(PYTEST_TIMEOUT) --max-worker-restart=0
 
 test-serial: $(TEST_DB_FILE)
-	DB_URL="$(TEST_DB_URL)" $(PYRUN) pytest $(PYTEST_TIMEOUT)
+	$(WITH_TEST_DB) $(PYRUN) pytest $(PYTEST_TIMEOUT)
 
 test-integration: $(TEST_DB_FILE)
-	DB_URL="$(TEST_DB_URL)" $(PYRUN) pytest tests/integration/ -v -m integration --timeout=120
+	$(WITH_TEST_DB) $(PYRUN) pytest tests/integration/ -v -m integration --timeout=120
 
 cov: $(TEST_DB_FILE)
-	DB_URL="$(TEST_DB_URL)" $(PYRUN) pytest $(PYTEST_PARALLEL) --cov $(PYTEST_TIMEOUT) --max-worker-restart=0
+	$(WITH_TEST_DB) $(PYRUN) pytest $(PYTEST_PARALLEL) --cov $(PYTEST_TIMEOUT) --max-worker-restart=0
 
 cov-serial: $(TEST_DB_FILE)
-	DB_URL="$(TEST_DB_URL)" $(PYRUN) pytest --cov $(PYTEST_TIMEOUT)
+	$(WITH_TEST_DB) $(PYRUN) pytest --cov $(PYTEST_TIMEOUT)
 
 cov-xml:
 	$(PYRUN) coverage xml -o coverage.xml
