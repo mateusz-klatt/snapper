@@ -727,20 +727,40 @@ class TestTZDateTime:
         with pytest.raises(ValueError, match="Cannot save naive datetime"):
             tz_dt.process_bind_param(naive, mock_dialect)
 
-    def test_process_bind_param_aware_datetime_converted_to_utc(self) -> None:
-        """Test TZDateTime converts non-UTC to UTC.
+    def test_process_bind_param_aware_datetime_postgresql_keeps_tzinfo(self) -> None:
+        """Postgres path: convert to UTC and keep tz-aware (TIMESTAMPTZ native).
 
-        Given: Aware datetime in CET timezone,
+        Given: Aware datetime in CET + postgresql dialect,
         When: process_bind_param is called,
-        Then: Converts to UTC with adjusted hour.
+        Then: Result is UTC-aware (asyncpg writes to TIMESTAMPTZ
+            without any tzinfo stripping).
         """
         tz_dt = TZDateTime()
         mock_dialect = MagicMock()
+        mock_dialect.name = "postgresql"
         cet = timezone(offset=timedelta(hours=1))
         aware = datetime(2024, 1, 1, 13, 0, 0, tzinfo=cet)
         result = tz_dt.process_bind_param(aware, mock_dialect)
         assert result is not None
         assert result.tzinfo == UTC
+        assert result.hour == 12
+
+    def test_process_bind_param_aware_datetime_sqlite_strips_tzinfo(self) -> None:
+        """SQLite path: convert to UTC and drop tzinfo (no native tz type).
+
+        Given: Aware datetime in CET + sqlite dialect,
+        When: process_bind_param is called,
+        Then: Result is naive UTC (aiosqlite stores naive value;
+            process_result_value reattaches UTC on read).
+        """
+        tz_dt = TZDateTime()
+        mock_dialect = MagicMock()
+        mock_dialect.name = "sqlite"
+        cet = timezone(offset=timedelta(hours=1))
+        aware = datetime(2024, 1, 1, 13, 0, 0, tzinfo=cet)
+        result = tz_dt.process_bind_param(aware, mock_dialect)
+        assert result is not None
+        assert result.tzinfo is None
         assert result.hour == 12
 
     def test_process_result_value_none(self) -> None:

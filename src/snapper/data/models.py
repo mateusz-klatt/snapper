@@ -40,8 +40,36 @@ def _public_id() -> str:
 
 
 class TZDateTime(TypeDecorator[datetime]):
-    impl = DateTime
+    """Timezone-aware datetime column, dialect-native at rest.
+
+    Postgres (production): the column is ``TIMESTAMP WITH TIME ZONE``
+    (``TIMESTAMPTZ``) — PG stores the instant natively and asyncpg
+    accepts/returns tz-aware ``datetime`` values directly. No
+    application-level workaround.
+
+    SQLite (tests + dev): the column is ``DateTime`` (no timezone).
+    SQLite has no native tz type, so the decorator strips ``tzinfo``
+    on write (after converting to UTC) and re-attaches UTC on read.
+    Storage contract: every SQLite row is logically UTC by
+    construction.
+
+    Either way the application sees a tz-aware ``datetime`` on both
+    sides of the roundtrip. The dialect split keeps Postgres on its
+    native fast path instead of forcing the SQLite-style strip on
+    production — earlier revisions did the strip everywhere, which
+    landed a ``TIMESTAMP WITHOUT TIME ZONE`` schema in PG and lost
+    the timezone information the production backend was designed to
+    preserve (operator decision 2026-05-16: "Postgres = production,
+    natywne typy gdzie się da, SQLite konwertuje").
+    """
+
+    impl = DateTime(timezone=True)
     cache_ok = True
+
+    def load_dialect_impl(self, dialect: Dialect) -> types.TypeEngine[Any]:
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(DateTime(timezone=True))
+        return dialect.type_descriptor(DateTime(timezone=False))
 
     def process_bind_param(self, value: datetime | None, dialect: Dialect) -> datetime | None:
         if value is None:
@@ -51,7 +79,10 @@ class TZDateTime(TypeDecorator[datetime]):
                 f"Cannot save naive datetime {value} to database. "
                 "All datetime values must have timezone info."
             )
-        return value.astimezone(UTC)
+        utc_value = value.astimezone(UTC)
+        if dialect.name == "postgresql":
+            return utc_value
+        return utc_value.replace(tzinfo=None)
 
     def process_result_value(self, value: datetime | None, dialect: Dialect) -> datetime | None:
         if value is not None and value.tzinfo is None:
@@ -60,14 +91,28 @@ class TZDateTime(TypeDecorator[datetime]):
 
 
 class UUIDColumn(TypeDecorator[str]):
-    """UUID storage: native UUID on PostgreSQL, String(36) on SQLite."""
+    """UUID storage: native ``UUID`` on PostgreSQL, ``String(36)`` on SQLite.
+
+    Production runs on Postgres where the native ``UUID`` type is
+    8 bytes vs the 36 bytes a ``VARCHAR`` representation costs, plus
+    PG indexes UUIDs more efficiently. SQLite has no native UUID
+    type, so the decorator falls back to ``String(36)``; values
+    round-trip as ``str`` on both backends so application code is
+    dialect-agnostic.
+
+    The migration file 0001_init.py declares UUID columns with the
+    same ``with_variant(postgresql.UUID, "postgresql")`` mapping so
+    the schema agrees with the decorator on both backends — earlier
+    revisions had the columns as plain ``String(36)`` which produced
+    ``operator does not exist: character varying = uuid`` at query
+    compile time.
+    """
 
     impl = String(36)
     cache_ok = True
 
     def load_dialect_impl(self, dialect: Dialect) -> types.TypeEngine[Any]:
         if dialect.name == "postgresql":
-
             return dialect.type_descriptor(PG_UUID(as_uuid=False))
         return dialect.type_descriptor(String(36))
 
@@ -159,7 +204,7 @@ class TemporalMixin:
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
-    session_id: Mapped[str] = mapped_column(String(36))
+    session_id: Mapped[str] = mapped_column(UUIDColumn())
     sequence_id: Mapped[int] = mapped_column(Integer)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime())
     known_to: Mapped[datetime] = mapped_column(TZDateTime(), default=KNOWN_TO_MAX)
@@ -539,7 +584,7 @@ class Setting(TemporalMixin, Base):
         ),
     )
     key: Mapped[str] = mapped_column(String(64))
-    value: Mapped[str] = mapped_column(String(1024))
+    value: Mapped[str] = mapped_column(Text)
     category: Mapped[str] = mapped_column(String(32))
     description: Mapped[str | None] = mapped_column(String(1024))
     is_encrypted: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -876,8 +921,8 @@ class Control(TemporalMixin, Base):
     outcome: Mapped[str] = mapped_column(String(16))
     detail: Mapped[str | None] = mapped_column(Text)
     payload: Mapped[str | None] = mapped_column(Text)
-    client_session_id: Mapped[str | None] = mapped_column(String(36))
-    client_public_id: Mapped[str | None] = mapped_column(String(36))
+    client_session_id: Mapped[str | None] = mapped_column(UUIDColumn())
+    client_public_id: Mapped[str | None] = mapped_column(UUIDColumn())
 
 
 class Telemetry(TemporalMixin, Base):

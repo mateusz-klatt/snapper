@@ -4212,6 +4212,8 @@ class SQLAlchemyRepository(Repository):
             }
             if ":memory:" in db_url:
                 engine_kwargs["poolclass"] = StaticPool
+        elif "postgresql" in db_url:
+            connect_args["server_settings"] = {"timezone": "UTC"}
         self.engine: AsyncEngine = create_async_engine(
             db_url, connect_args=connect_args, **engine_kwargs
         )
@@ -12522,7 +12524,12 @@ class DatabaseRepository:
             db_url: Database URL (will be converted to sync driver if async).
         """
         self.db_url = self._convert_to_sync_url(db_url)
-        self.engine: SyncEngine = create_sync_engine(self.db_url, future=True)
+        connect_args: dict[str, Any] = {}
+        if "postgresql" in self.db_url:
+            connect_args["options"] = "-c timezone=UTC"
+        self.engine: SyncEngine = create_sync_engine(
+            self.db_url, future=True, connect_args=connect_args
+        )
         if "sqlite" in self.db_url:
             _register_sqlite_fk_pragma(self.engine)
         self.session_factory = sync_sessionmaker(
