@@ -1650,7 +1650,10 @@ def test_database_repository_converts_urls(
         def __init__(self, url: str) -> None:
             self.url = url
 
-    def fake_create_sync_engine(db_url: str, future: bool = True) -> DummySyncEngine:
+    def fake_create_sync_engine(
+        db_url: str, future: bool = True, connect_args: dict[str, Any] | None = None
+    ) -> DummySyncEngine:
+        del future, connect_args
         created_urls.append(db_url)
         return DummySyncEngine(db_url)
 
