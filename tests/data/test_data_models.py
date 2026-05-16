@@ -4,6 +4,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -713,6 +714,54 @@ class TestTZDateTime:
         mock_dialect = MagicMock()
         result = tz_dt.process_bind_param(None, mock_dialect)
         assert result is None
+
+    def test_load_dialect_impl_postgresql_returns_tz_aware_datetime(self) -> None:
+        """Postgres path picks the tz-aware ``DateTime`` impl.
+
+        Given: dialect with ``name == "postgresql"``,
+        When: ``load_dialect_impl`` is called,
+        Then: ``dialect.type_descriptor`` receives a tz-aware
+            ``DateTime`` so the column compiles to
+            ``TIMESTAMP WITH TIME ZONE`` and asyncpg's tz-aware bind
+            path engages.
+        """
+        tz_dt = TZDateTime()
+        mock_dialect = MagicMock()
+        mock_dialect.name = "postgresql"
+        captured: list[Any] = []
+
+        def _capture(type_engine: Any) -> Any:
+            captured.append(type_engine)
+            return type_engine
+
+        mock_dialect.type_descriptor = _capture
+        tz_dt.load_dialect_impl(mock_dialect)
+        assert len(captured) == 1
+        assert captured[0].timezone is True
+
+    def test_load_dialect_impl_sqlite_returns_naive_datetime(self) -> None:
+        """SQLite path picks the tz-naive ``DateTime`` impl.
+
+        Given: dialect with ``name == "sqlite"``,
+        When: ``load_dialect_impl`` is called,
+        Then: ``dialect.type_descriptor`` receives a tz-naive
+            ``DateTime`` (SQLite has no native tz type;
+            ``process_bind_param`` strips ``tzinfo`` after UTC
+            conversion to satisfy aiosqlite).
+        """
+        tz_dt = TZDateTime()
+        mock_dialect = MagicMock()
+        mock_dialect.name = "sqlite"
+        captured: list[Any] = []
+
+        def _capture(type_engine: Any) -> Any:
+            captured.append(type_engine)
+            return type_engine
+
+        mock_dialect.type_descriptor = _capture
+        tz_dt.load_dialect_impl(mock_dialect)
+        assert len(captured) == 1
+        assert captured[0].timezone is False
 
     def test_process_bind_param_naive_datetime_raises(self) -> None:
         """Test TZDateTime rejects naive datetimes.
