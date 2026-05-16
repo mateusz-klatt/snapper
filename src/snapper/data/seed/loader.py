@@ -286,7 +286,7 @@ def seed_users(conn: Connection, users: list[SeedUser], tracker: SequenceTracker
                 "INSERT INTO users"
                 " (public_id, username, email, password_hash, role, is_active,"
                 "  created_at, timestamp, known_to, session_id, sequence_id)"
-                " VALUES (:public_id, :username, :email, :password_hash, :role, 1,"
+                " VALUES (:public_id, :username, :email, :password_hash, :role, :is_active,"
                 "  :created_at, :timestamp, :known_to, :session_id, :sequence_id)"
             ),
             {
@@ -295,6 +295,7 @@ def seed_users(conn: Connection, users: list[SeedUser], tracker: SequenceTracker
                 "email": user.email,
                 "password_hash": password_hash,
                 "role": user.role,
+                "is_active": True,
                 "created_at": now,
                 "timestamp": now,
                 "known_to": _known_to_value(conn),
@@ -327,10 +328,10 @@ def seed_settings(conn: Connection, settings: list[SeedSetting], tracker: Sequen
     inserted = 0
     for setting in settings:
         stored_value = setting.value
-        is_encrypted = 0
+        is_encrypted = False
         if SettingsEncryptionService.is_sensitive_setting(setting.key):
             stored_value = encryption.encrypt(setting.value)
-            is_encrypted = 1
+            is_encrypted = True
         result = conn.execute(
             text(
                 "INSERT INTO settings"
@@ -429,7 +430,7 @@ def _seed_wallet_with_credentials(
             "public_id": wallet_public_id,
             "label": wallet.label,
             "description": wallet.description,
-            "is_paper": 1 if wallet.is_paper else 0,
+            "is_paper": bool(wallet.is_paper),
             "timestamp": now,
             "known_to": known_to,
             "session_id": tracker.session_id,
@@ -592,7 +593,7 @@ def seed_default_multi_tenant(
                 "public_id": str(uuid7()),
                 "user_public_id": admin_row[0],
                 "operator_public_id": operator_public_id,
-                "is_primary": 1,
+                "is_primary": True,
                 "timestamp": now,
                 "known_to": known_to,
                 "session_id": tracker.session_id,
@@ -612,6 +613,16 @@ def seed_default_multi_tenant(
 def _sync_db_url(db_url: str) -> str:
     """Convert an async database URL to sync for direct engine use.
 
+    Async drivers cannot drive ``create_engine``; seed + migration
+    paths need the matching sync driver:
+
+    * ``sqlite+aiosqlite://`` → ``sqlite://``
+    * ``postgresql+asyncpg://`` → ``postgresql+psycopg2://``
+
+    Both sync drivers (``sqlite3`` from stdlib, ``psycopg2-binary``)
+    are runtime-required so the seed loader can run without a
+    separate async event loop.
+
     Args:
         db_url: SQLAlchemy database URL (possibly async).
 
@@ -620,6 +631,8 @@ def _sync_db_url(db_url: str) -> str:
     """
     if "aiosqlite" in db_url:
         return db_url.replace("sqlite+aiosqlite://", "sqlite://")
+    if "asyncpg" in db_url:
+        return db_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
     return db_url
 
 

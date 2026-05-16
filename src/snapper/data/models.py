@@ -363,7 +363,7 @@ class Order(TemporalMixin, Base):
     error: Mapped[str | None] = mapped_column(String(512))
     leverage: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reduce_only: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="0"
+        Boolean, nullable=False, default=False, server_default=text("false")
     )
     plan_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True, index=True)
 
@@ -541,7 +541,7 @@ class Setting(TemporalMixin, Base):
     key: Mapped[str] = mapped_column(String(64))
     value: Mapped[str] = mapped_column(String(1024))
     category: Mapped[str] = mapped_column(String(32))
-    description: Mapped[str | None] = mapped_column(String(256))
+    description: Mapped[str | None] = mapped_column(String(1024))
     is_encrypted: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_by: Mapped[str | None] = mapped_column(String(64))
 
@@ -959,7 +959,7 @@ class TradeCommand(TemporalMixin, Base):
     quantity: Mapped[float] = mapped_column(Float)
     price: Mapped[float | None] = mapped_column(Float)
     leverage: Mapped[int | None] = mapped_column(Integer)
-    reduce_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    reduce_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     status: Mapped[str] = mapped_column(String(32))
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     last_error: Mapped[str | None] = mapped_column(String(512))
@@ -1350,7 +1350,7 @@ class Wallet(TemporalMixin, Base):
     )
     label: Mapped[str] = mapped_column(String(128))
     description: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    is_paper: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    is_paper: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
 
 
 class WalletCredential(TemporalMixin, Base):
@@ -1481,7 +1481,7 @@ class UserOperatorMembership(TemporalMixin, Base):
     )
     user_public_id: Mapped[str] = mapped_column(UUIDColumn())
     operator_public_id: Mapped[str] = mapped_column(UUIDColumn())
-    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
 
 
 class WalletOperatorScopeGrant(TemporalMixin, Base):
@@ -2420,7 +2420,9 @@ class DeviceAlertPref(TemporalMixin, Base):
     alert_type: Mapped[str] = mapped_column(String(50), nullable=False)
     operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     wallet_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
     min_priority: Mapped[str] = mapped_column(String(10), nullable=False, server_default="medium")
     quiet_hours_start_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
     quiet_hours_end_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -2460,7 +2462,9 @@ class UserAlertDefault(TemporalMixin, Base):
     )
     user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     alert_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
     min_priority: Mapped[str] = mapped_column(String(10), nullable=False, server_default="medium")
 
 
@@ -2511,7 +2515,7 @@ class AlertEvent(TemporalMixin, Base):
     alert_type: Mapped[str] = mapped_column(String(50), nullable=False)
     priority: Mapped[str] = mapped_column(String(10), nullable=False)
     is_safety_critical: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="0"
+        Boolean, nullable=False, default=False, server_default=text("false")
     )
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     body: Mapped[str] = mapped_column(String(500), nullable=False)
