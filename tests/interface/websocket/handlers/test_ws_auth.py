@@ -62,9 +62,11 @@ from snapper.auth.websocket_auth import get_ws_auth_manager
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import User as _User
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import where_active_now
 from snapper.data.repository_types import UserActiveTokenVerificationRow
 from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
+from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.handlers.auth import AUTH_TIMEOUT_SECONDS
 from snapper.interface.websocket.handlers.auth import REAUTH_GRACE_PERIOD
 from snapper.interface.websocket.handlers.auth import REAUTH_WARN_OFFSET
@@ -78,15 +80,17 @@ from snapper.interface.websocket.handlers.subscribe import handle_subscribe
 from snapper.interface.websocket.handlers.subscribe import handle_unsubscribe
 from snapper.interface.websocket.helpers import determine_topic_category
 from snapper.interface.websocket.helpers import filter_topics
+from snapper.interface.websocket.models import ConnectionStats
+from snapper.interface.websocket.models import TopicMetricSnapshot
 from snapper.interface.websocket.schemas import WSReauthRequest
 from snapper.interface.websocket.schemas import WSSubscribeRequest
 from snapper.interface.websocket.schemas import WSUnsubscribeRequest
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.app import create_api_router
 from snapper.server.app import create_app
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.authenticated_websocket import get_allowed_topics_for_role
 from snapper.server.authenticated_websocket import has_trading_permission
-from snapper.server.dependencies import get_repository_dependency
 
 
 def _make_rest_request() -> MagicMock:
@@ -98,24 +102,120 @@ def _make_rest_request() -> MagicMock:
 
 pytest = cast(Any, pytest)
 create_app = cast(Any, create_app)
+create_api_router = cast(Any, create_api_router)
 create_authenticated_websocket_router = cast(Any, create_authenticated_websocket_router)
 has_trading_permission = cast(Any, has_trading_permission)
 
 
+class _TestZmqBridge:
+    """Minimal bridge implementation for websocket route integration tests."""
+
+    def __init__(self) -> None:
+        """Initialize in-memory subscription state."""
+        bootstrap = BootstrapSettingsLoader()
+        self.topic_subscriptions: dict[str, set[WebSocket]] = {}
+        self.client_subscriptions: dict[WebSocket, set[str]] = {}
+        self.subscriber_tasks: dict[str, asyncio.Task[None]] = {}
+        self.context: None = None
+        self.settings = SimpleNamespace(zmq_broker_xpub=bootstrap.zmq_broker_xpub)
+        self.available_topics: dict[str, object] = {
+            "market.": object(),
+            "signals.": object(),
+            "system.heartbeats.": object(),
+            "orders.commands.": object(),
+            "orders.events.": object(),
+        }
+
+    async def add_subscription(self, websocket: WebSocket, topics: list[str]) -> None:
+        """Record subscriptions without starting ZMQ sockets."""
+        client_topics = self.client_subscriptions.setdefault(websocket, set())
+        for topic in topics:
+            client_topics.add(topic)
+            self.topic_subscriptions.setdefault(topic, set()).add(websocket)
+
+    async def remove_subscription(self, websocket: WebSocket, topics: list[str]) -> None:
+        """Remove subscriptions from in-memory state."""
+        client_topics = self.client_subscriptions.get(websocket)
+        for topic in topics:
+            if client_topics is not None:
+                client_topics.discard(topic)
+            subscribers = self.topic_subscriptions.get(topic)
+            if subscribers is None:
+                continue
+            subscribers.discard(websocket)
+            if not subscribers:
+                del self.topic_subscriptions[topic]
+        if client_topics is not None and not client_topics:
+            del self.client_subscriptions[websocket]
+
+    async def disconnect_client(self, websocket: WebSocket) -> None:
+        """Remove all subscriptions for a disconnected websocket."""
+        await self.remove_subscription(
+            websocket,
+            list(self.client_subscriptions.get(websocket, set())),
+        )
+
+    async def cleanup(self) -> None:
+        """Clear in-memory bridge state."""
+        self.topic_subscriptions.clear()
+        self.client_subscriptions.clear()
+        self.subscriber_tasks.clear()
+
+    def get_connection_stats(self) -> ConnectionStats:
+        """Return connection stats for the minimal bridge."""
+        return ConnectionStats(
+            subscriber_tasks=len(self.subscriber_tasks),
+            active_topics=len(self.topic_subscriptions),
+            active_clients=len(self.client_subscriptions),
+        )
+
+    def get_topic_stats(self) -> dict[str, TopicMetricSnapshot]:
+        """Return empty topic metrics for tests that only assert shape."""
+        return {}
+
+    def get_available_topics(self) -> list[str]:
+        """Return available topic names."""
+        return list(self.available_topics)
+
+
 @pytest.fixture
-def test_client(mock_settings_for_tests: Any) -> Generator[Any]:
+def test_client(mock_settings_for_tests: None) -> Generator[TestClient]:
     """Provide a TestClient with mocked authentication."""
+    del mock_settings_for_tests
+    db_url = BootstrapSettingsLoader().db_url
+    manager = WebSocketConnectionManager()
+    manager.zmq_bridge = cast(ZmqWebSocketBridgeService, _TestZmqBridge())
+    app = FastAPI()
+    app.state.manager = manager
+    app.state.rest_tracker = SequenceTracker()
+    app.state.settings = SimpleNamespace(
+        db_url=db_url,
+        session_secure=False,
+        session_same_site="lax",
+        session_domain="",
+        ui_origin="",
+        zmq_heartbeat_interval_ms=1000,
+        instruments={
+            "kraken": ["BTC-USD", "ETH-USD", "EUR-USD"],
+            "walutomat": [],
+            "polygon": [],
+        },
+    )
+
+    def skip_csrf_validation() -> None:
+        return None
+
+    def skip_authentication() -> AuthPrincipal:
+        return AuthPrincipal(username="test_user", role=UserRole.ADMIN)
+
+    app.include_router(create_api_router(manager), prefix="/api")
+    app.include_router(create_authenticated_websocket_router(manager), prefix="/api")
+    app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
+    app.dependency_overrides[require_authentication] = skip_authentication
+    ws_repo = SQLAlchemyRepository(db_url)
     with (
-        patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
-        patch("snapper.server.app.discover_processes", return_value=None),
-        patch(
-            "snapper.server.provenance_middleware.ClientProvenanceMiddleware._record_control",
-            new=AsyncMock(return_value=None),
-        ),
-        patch(
-            "snapper.server.provenance_middleware.ClientProvenanceMiddleware._record_telemetry",
-            new=AsyncMock(return_value=None),
-        ),
+        patch("snapper.server.authenticated_websocket.get_repository", return_value=ws_repo),
+        patch("snapper.interface.websocket.dispatcher.get_repository", return_value=ws_repo),
         patch(
             "snapper.interface.websocket.dispatcher._record_ws_control",
             new=AsyncMock(return_value=None),
@@ -124,36 +224,14 @@ def test_client(mock_settings_for_tests: Any) -> Generator[Any]:
             "snapper.interface.websocket.dispatcher._record_ws_telemetry",
             new=AsyncMock(return_value=None),
         ),
+        TestClient(app) as client,
     ):
-        mock_factory = MagicMock()
-        mock_factory.sync_registry_to_database = AsyncMock(return_value=None)
-        mock_factory.start_all_processes = AsyncMock(return_value=None)
-        mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
-        mock_factory.stop_all_processes = AsyncMock(return_value=None)
-        mock_factory.get_core_health = AsyncMock(return_value="healthy")
-        mock_factory.started_processes = {}
-        mock_factory_cls.return_value = mock_factory
-        app: Any = create_app()
-        app.state.settings = SimpleNamespace(
-            session_secure=False,
-            session_same_site="lax",
-            instruments={
-                "kraken": ["BTC-USD", "ETH-USD", "EUR-USD"],
-                "walutomat": [],
-                "polygon": [],
-            },
-        )
-
-        def skip_csrf_validation() -> None:
-            return None
-
-        def skip_authentication() -> AuthPrincipal:
-            return AuthPrincipal(username="test_user", role=UserRole.ADMIN)
-
-        app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
-        app.dependency_overrides[require_authentication] = skip_authentication
-        with TestClient(app) as client:
+        try:
             yield client
+        finally:
+            portal = client.portal
+            assert portal is not None
+            portal.call(ws_repo.engine.dispose)
 
 
 WS_PATH = "/api/ws"
@@ -185,34 +263,47 @@ def _connect_with_cookie(test_client: Any, token: str) -> Any:
 
 
 def _issue_test_auth_tokens(test_client: Any, *, username: str, password: str) -> tuple[str, str]:
+    """Issue persisted auth tokens through a short-lived repository."""
+    db_url = str(test_client.app.state.settings.db_url)
+    ws_token, access_token, refresh_token = asyncio.run(
+        _issue_test_auth_tokens_async(username=username, password=password, db_url=db_url)
+    )
+    test_client.cookies.clear()
+    test_client.cookies.set("access_token", access_token)
+    test_client.cookies.set("refresh_token", refresh_token)
+    test_client.cookies.set("csrf_token", f"csrf-{username}")
+    return ws_token, access_token
+
+
+async def _issue_test_auth_tokens_async(
+    *, username: str, password: str, db_url: str
+) -> tuple[str, str, str]:
+    """Issue persisted auth tokens without crossing async repository event loops."""
     user_data = _TEST_WS_USER_DATA.get(username)
     assert user_data is not None, f"Unknown websocket test user: {username}"
     expected_password, role, _fallback_public_id = user_data
     assert password == expected_password
-    repo = get_repository_dependency()
-    resolved_public_id = asyncio.run(
-        _resolve_or_seed_user(username, role, _fallback_public_id, repo)
-    )
-    session_id = f"ws-test-session-{username}"
-    token_manager = get_token_manager()
-    ws_token_service = get_ws_token_service()
-    token_pair = token_manager.create_tokens(
-        AuthPrincipal(
-            username=username,
-            role=role,
-            email=f"{username}@example.test",
-            is_active=True,
-            user_public_id=resolved_public_id,
-        ),
-        session_id=session_id,
-    )
-    asyncio.run(token_manager.persist_tokens(token_pair, resolved_public_id, repo))
-    ws_token = ws_token_service.generate(user_id=username, session_id=session_id).token
-    test_client.cookies.clear()
-    test_client.cookies.set("access_token", token_pair.access_token)
-    test_client.cookies.set("refresh_token", token_pair.refresh_token)
-    test_client.cookies.set("csrf_token", f"csrf-{username}")
-    return ws_token, token_pair.access_token
+    repo = SQLAlchemyRepository(db_url)
+    try:
+        resolved_public_id = await _resolve_or_seed_user(username, role, _fallback_public_id, repo)
+        session_id = f"ws-test-session-{username}"
+        token_manager = get_token_manager()
+        ws_token_service = get_ws_token_service()
+        token_pair = token_manager.create_tokens(
+            AuthPrincipal(
+                username=username,
+                role=role,
+                email=f"{username}@example.test",
+                is_active=True,
+                user_public_id=resolved_public_id,
+            ),
+            session_id=session_id,
+        )
+        await token_manager.persist_tokens(token_pair, resolved_public_id, repo)
+        ws_token = ws_token_service.generate(user_id=username, session_id=session_id).token
+        return ws_token, token_pair.access_token, token_pair.refresh_token
+    finally:
+        await repo.engine.dispose()
 
 
 async def _resolve_or_seed_user(

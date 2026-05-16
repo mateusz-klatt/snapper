@@ -934,6 +934,26 @@ class TestSubscribeWebsocket:
         return ws
 
     @pytest.mark.asyncio
+    async def test_add_subscription_delegates_each_topic(
+        self, bridge: ZmqWebSocketBridgeService, mock_websocket: AsyncMock
+    ) -> None:
+        """Verify add_subscription delegates every topic.
+
+        Given: A bridge and two requested topics,
+        When: Adding subscriptions through the compatibility wrapper,
+        Then: Each topic is passed to subscribe_websocket.
+        """
+        topics = [
+            "market.kraken.BTC-USD.candles.1m",
+            "market.kraken.ETH-USD.ticks",
+        ]
+        with patch.object(bridge, "subscribe_websocket", new=AsyncMock()) as mock_subscribe:
+            await bridge.add_subscription(mock_websocket, topics)
+        assert mock_subscribe.await_count == 2
+        assert mock_subscribe.await_args_list[0].args == (mock_websocket, topics[0])
+        assert mock_subscribe.await_args_list[1].args == (mock_websocket, topics[1])
+
+    @pytest.mark.asyncio
     async def test_subscribe_websocket_success(
         self, bridge: ZmqWebSocketBridgeService, mock_websocket: AsyncMock
     ) -> None:

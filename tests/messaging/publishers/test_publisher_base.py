@@ -19,8 +19,13 @@ import pytest
 import zmq
 from loguru import logger
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.process_manager.registry import get_registered_processes
+from snapper.data.repository import Repository
+from snapper.data.repository_types import CandleUpsertRow
+from snapper.data.repository_types import TickUpsertRow
+from snapper.data.repository_types import TradeUpsertRow
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -3500,6 +3505,235 @@ async def test_flush_trade_batch_empty_is_noop() -> None:
     pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
     await pub._flush_trade_batch([])
     pub.repository.upsert_trades.assert_not_awaited()
+
+
+def _publisher_writer_session() -> tuple[AsyncSession, AsyncMock, AsyncMock]:
+    """Build a cast writer session with inspectable transaction methods."""
+    commit = AsyncMock()
+    rollback = AsyncMock()
+    session = cast(AsyncSession, SimpleNamespace(commit=commit, rollback=rollback))
+    return session, commit, rollback
+
+
+def _publisher_candle_row(public_id: str, sequence_id: int = 0) -> CandleUpsertRow:
+    """Build a typed candle upsert row for publisher flush tests."""
+    timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+    return {
+        "public_id": public_id,
+        "instrument_public_id": "inst-1",
+        "open_at": timestamp,
+        "timestamp": timestamp,
+        "timeframe": "1m",
+        "open": 1.0,
+        "high": 2.0,
+        "low": 0.5,
+        "close": 1.5,
+        "volume": 10.0,
+        "vwap": 1.2,
+        "trades": 5,
+        "session_id": "",
+        "sequence_id": sequence_id,
+    }
+
+
+def _publisher_tick_row(public_id: str) -> TickUpsertRow:
+    """Build a typed tick upsert row for publisher flush tests."""
+    return {
+        "public_id": public_id,
+        "instrument_public_id": "inst-1",
+        "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+        "bid": 100.0,
+        "ask": 101.0,
+        "last": 100.5,
+        "volume": 5.0,
+        "session_id": "",
+        "sequence_id": 0,
+    }
+
+
+def _publisher_trade_row(public_id: str) -> TradeUpsertRow:
+    """Build a typed trade upsert row for publisher flush tests."""
+    return {
+        "public_id": public_id,
+        "instrument_public_id": "inst-1",
+        "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+        "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+        "price": 100.0,
+        "size": 1.5,
+        "side": "buy",
+        "trade_id": "exch-42",
+        "session_id": "",
+        "sequence_id": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_flush_candle_batch_commits_writer_session() -> None:
+    """Verify candle flush commits the held writer session.
+
+    Given: A publisher with a held candle writer session,
+    When: _flush_candle_batch persists a batch,
+    Then: The repository receives the session and the session is committed.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    writer_session, commit, rollback = _publisher_writer_session()
+    upsert_candles = AsyncMock(return_value=1)
+    pub.repository = cast(Repository, SimpleNamespace(upsert_candles=upsert_candles))
+    pub._candle_writer_session = writer_session
+    batch = [_publisher_candle_row("c1")]
+
+    await pub._flush_candle_batch(batch)
+
+    upsert_candles.assert_awaited_once_with(batch, session=writer_session)
+    commit.assert_awaited_once()
+    rollback.assert_not_awaited()
+    assert pub._flush_errors["candle"] == 0
+
+
+@pytest.mark.asyncio
+async def test_flush_candle_batch_integrity_error_rolls_back_then_commits_row() -> None:
+    """Verify candle IntegrityError fallback uses writer-session boundaries.
+
+    Given: A held candle writer session and a batch upsert IntegrityError,
+    When: _flush_candle_batch falls back to row-by-row persistence,
+    Then: The batch transaction is rolled back and the recovered row is committed.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    writer_session, commit, rollback = _publisher_writer_session()
+    upsert_candles = AsyncMock(
+        side_effect=[
+            IntegrityError("dup", params=None, orig=Exception("dup")),
+            1,
+        ]
+    )
+    pub.repository = cast(Repository, SimpleNamespace(upsert_candles=upsert_candles))
+    pub._candle_writer_session = writer_session
+    batch = [_publisher_candle_row("c1")]
+
+    await pub._flush_candle_batch(batch)
+
+    assert upsert_candles.await_count == 2
+    rollback.assert_awaited_once()
+    commit.assert_awaited_once()
+    assert pub._flush_errors["candle"] == 0
+
+
+@pytest.mark.asyncio
+async def test_flush_candle_batch_generic_error_rolls_back_writer_session() -> None:
+    """Verify generic candle flush errors roll back the held session.
+
+    Given: A held candle writer session and a failing repository,
+    When: _flush_candle_batch catches a non-IntegrityError exception,
+    Then: The held writer session is rolled back and the error counter increments.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    writer_session, commit, rollback = _publisher_writer_session()
+    upsert_candles = AsyncMock(side_effect=RuntimeError("db fail"))
+    pub.repository = cast(Repository, SimpleNamespace(upsert_candles=upsert_candles))
+    pub._candle_writer_session = writer_session
+
+    await pub._flush_candle_batch([_publisher_candle_row("c1")])
+
+    commit.assert_not_awaited()
+    rollback.assert_awaited_once()
+    assert pub._flush_errors["candle"] == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_candle_batch_row_by_row_rolls_back_writer_session_errors() -> None:
+    """Verify row-by-row candle fallback rolls back each writer-session failure.
+
+    Given: A held candle writer session and per-row IntegrityError and RuntimeError,
+    When: _flush_candle_batch_row_by_row isolates rows,
+    Then: Each failed row rolls back the session and generic errors remain counted.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    writer_session, commit, rollback = _publisher_writer_session()
+    upsert_candles = AsyncMock(
+        side_effect=[
+            IntegrityError("dup", params=None, orig=Exception("dup")),
+            RuntimeError("db fail"),
+        ]
+    )
+    pub.repository = cast(Repository, SimpleNamespace(upsert_candles=upsert_candles))
+    pub._candle_writer_session = writer_session
+    batch = [
+        _publisher_candle_row("c1"),
+        _publisher_candle_row("c2", sequence_id=1),
+    ]
+
+    await pub._flush_candle_batch_row_by_row(batch)
+
+    commit.assert_not_awaited()
+    assert rollback.await_count == 2
+    assert pub._flush_errors["candle"] == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_tick_batch_commits_writer_session() -> None:
+    """Verify tick flush commits the held writer session.
+
+    Given: A publisher with a held tick writer session,
+    When: _flush_tick_batch persists a batch,
+    Then: The repository receives the session and the session is committed.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    writer_session, commit, rollback = _publisher_writer_session()
+    upsert_ticks = AsyncMock(return_value=1)
+    pub.repository = cast(Repository, SimpleNamespace(upsert_ticks=upsert_ticks))
+    pub._tick_writer_session = writer_session
+    batch = [_publisher_tick_row("t1")]
+
+    await pub._flush_tick_batch(batch)
+
+    upsert_ticks.assert_awaited_once_with(batch, session=writer_session)
+    commit.assert_awaited_once()
+    rollback.assert_not_awaited()
+    assert pub._flush_errors["tick"] == 0
+
+
+@pytest.mark.asyncio
+async def test_flush_trade_batch_commits_writer_session() -> None:
+    """Verify trade flush commits the held writer session.
+
+    Given: A publisher with a held trade writer session,
+    When: _flush_trade_batch persists a batch,
+    Then: The repository receives the session and the session is committed.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    writer_session, commit, rollback = _publisher_writer_session()
+    upsert_trades = AsyncMock(return_value=1)
+    pub.repository = cast(Repository, SimpleNamespace(upsert_trades=upsert_trades))
+    pub._trade_writer_session = writer_session
+    batch = [_publisher_trade_row("tr1")]
+
+    await pub._flush_trade_batch(batch)
+
+    upsert_trades.assert_awaited_once_with(batch, session=writer_session)
+    commit.assert_awaited_once()
+    rollback.assert_not_awaited()
+    assert pub._flush_errors["trade"] == 0
+
+
+@pytest.mark.asyncio
+async def test_flush_trade_batch_rolls_back_writer_session_on_error() -> None:
+    """Verify trade flush errors roll back the held writer session.
+
+    Given: A held trade writer session and a failing repository,
+    When: _flush_trade_batch catches the exception,
+    Then: The held writer session is rolled back and the error counter increments.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    writer_session, commit, rollback = _publisher_writer_session()
+    upsert_trades = AsyncMock(side_effect=RuntimeError("db fail"))
+    pub.repository = cast(Repository, SimpleNamespace(upsert_trades=upsert_trades))
+    pub._trade_writer_session = writer_session
+
+    await pub._flush_trade_batch([_publisher_trade_row("tr1")])
+
+    commit.assert_not_awaited()
+    rollback.assert_awaited_once()
+    assert pub._flush_errors["trade"] == 1
 
 
 def _dummy_tick_row(idx: int) -> dict[str, Any]:

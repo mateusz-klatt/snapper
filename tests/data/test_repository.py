@@ -64,6 +64,7 @@ from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import OrderInsertRow
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TradeRow
+from snapper.data.repository_types import TradeUpsertRow
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 
 
@@ -502,6 +503,103 @@ async def test_upsert_candles_duplicate_keys_use_sequential_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_upsert_candles_with_caller_session_defers_commit() -> None:
+    """Verify caller-managed candle upserts use the supplied session only.
+
+    Given: A caller-owned session and a mixed batch of unique and duplicate keys,
+    When: upsert_candles is called with that session,
+    Then: Unique rows use the batch path, duplicate rows use the sequential path,
+        and no repository-owned commit occurs.
+    """
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    existing_candle = SimpleNamespace(
+        id=42,
+        public_id="existing-uuid",
+        instrument_public_id="inst-dup",
+        timeframe="1m",
+        open_at=ts,
+        timestamp=ts,
+        known_to=KNOWN_TO_MAX,
+    )
+    call_count = 0
+    added_objects: list[object] = []
+
+    async def _execute(stmt: object) -> object:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+        if call_count == 2:
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: existing_candle))
+        if call_count == 3:
+            return SimpleNamespace(rowcount=1)
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+
+    def _add(obj: object) -> None:
+        added_objects.append(obj)
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
+    session.add = _add
+    repo = _make_repo(lambda: _session_factory(_DummyAsyncSession()), dialect="custom")
+    rows: list[CandleUpsertRow] = [
+        {
+            "instrument_public_id": "inst-unique",
+            "open_at": ts,
+            "timestamp": ts,
+            "timeframe": "1m",
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 1000.0,
+            "vwap": None,
+            "trades": 10,
+            "session_id": "test-session",
+            "sequence_id": 1,
+        },
+        {
+            "instrument_public_id": "inst-dup",
+            "open_at": ts,
+            "timestamp": ts,
+            "timeframe": "1m",
+            "open": 101.0,
+            "high": 102.0,
+            "low": 100.0,
+            "close": 101.5,
+            "volume": 1200.0,
+            "vwap": None,
+            "trades": 12,
+            "session_id": "test-session",
+            "sequence_id": 2,
+        },
+        {
+            "instrument_public_id": "inst-dup",
+            "open_at": ts,
+            "timestamp": ts + timedelta(minutes=1),
+            "timeframe": "1m",
+            "open": 102.0,
+            "high": 103.0,
+            "low": 101.0,
+            "close": 102.5,
+            "volume": 1300.0,
+            "vwap": None,
+            "trades": 13,
+            "session_id": "test-session",
+            "sequence_id": 3,
+        },
+    ]
+
+    inserted = await repo.upsert_candles(rows, session=cast(AsyncSession, session))
+
+    assert inserted == 3
+    assert session.commit_called is False
+    assert len(added_objects) == 3
+    assert call_count == 4
+    assert rows[1]["public_id"] == "existing-uuid"
+
+
+@pytest.mark.asyncio
 async def test_load_existing_candles_filters_timestamp_window() -> None:
     """Verify broad batch lookup candidates are filtered per row timestamp.
 
@@ -633,6 +731,70 @@ async def test_upsert_trades_savepoint_preserves_earlier_inserts(
     assert inserted == 2
     assert session.savepoint_rollbacks == 1
     assert session.commit_called is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dialect", ["sqlite", "postgresql"])
+async def test_upsert_trades_native_dialects_with_caller_session_defer_commit(
+    dialect: str,
+) -> None:
+    """Verify native conflict paths use caller-owned sessions without committing.
+
+    Given: SQLite or PostgreSQL and a caller-owned session,
+    When: upsert_trades is called with that session,
+    Then: The native ON CONFLICT statement executes and commit remains caller-owned.
+    """
+    session = _DummyAsyncSession()
+    repo = _make_repo(lambda: _session_factory(_DummyAsyncSession()), dialect=dialect)
+    rows: list[TradeUpsertRow] = [
+        {
+            "instrument_public_id": "inst-pub-1",
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "price": 100.5,
+            "size": 1.25,
+            "side": "buy",
+            "trade_id": "trade-1",
+            "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+            "session_id": "s1",
+            "sequence_id": 1,
+        },
+    ]
+
+    inserted = await repo.upsert_trades(rows, session=cast(AsyncSession, session))
+
+    assert inserted == 1
+    assert session.calls == 1
+    assert session.commit_called is False
+    assert "public_id" in rows[0]
+
+
+@pytest.mark.asyncio
+async def test_upsert_trades_other_dialect_with_caller_session_skips_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify fallback caller-session upserts isolate duplicate rows.
+
+    Given: A non-native dialect session whose second insert raises IntegrityError,
+    When: upsert_trades is called with a caller-owned session,
+    Then: The duplicate row is skipped and no repository-owned commit occurs.
+    """
+
+    def fake_insert(model: object) -> _DummyInsert:
+        return _DummyInsert()
+
+    session = _DummyAsyncSession(fail_on=2)
+    repo = _make_repo(lambda: _session_factory(_DummyAsyncSession()), dialect="custom")
+    monkeypatch.setattr(repository, "insert", fake_insert)
+    rows: list[TradeUpsertRow] = [
+        {"trade_id": "trade-1"},
+        {"trade_id": "trade-2"},
+    ]
+
+    inserted = await repo.upsert_trades(rows, session=cast(AsyncSession, session))
+
+    assert inserted == 1
+    assert session.savepoint_rollbacks == 1
+    assert session.commit_called is False
 
 
 @pytest.mark.asyncio

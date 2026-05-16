@@ -352,6 +352,16 @@ class TestSyncDbUrl:
         url = "postgresql://user:pass@localhost/db"
         assert _sync_db_url(url) == url
 
+    def test_converts_asyncpg_to_psycopg2(self) -> None:
+        """Test asyncpg URL is converted to sync psycopg2.
+
+        Given: an async PostgreSQL URL,
+        When: converting to sync,
+        Then: asyncpg is replaced with psycopg2.
+        """
+        result = _sync_db_url("postgresql+asyncpg://user:pass@localhost/db")
+        assert result == "postgresql+psycopg2://user:pass@localhost/db"
+
     def test_plain_sqlite_url_unchanged(self) -> None:
         """Test plain sqlite URL is returned unchanged.
 
