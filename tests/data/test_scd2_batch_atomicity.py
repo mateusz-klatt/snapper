@@ -376,75 +376,85 @@ async def test_concurrent_upsert_candles_serializes() -> None:
     ``IntegrityError`` (not some other unexpected error).
     """
     with tempfile.TemporaryDirectory() as td:
+        seed_repo: SQLAlchemyRepository | None = None
+        repo_a: SQLAlchemyRepository | None = None
+        repo_b: SQLAlchemyRepository | None = None
         db_path = Path(td) / "scd2_concurrent.db"
-        seed_repo, _inst_id, inst_public_id = await _create_repo_with_instrument(db_path)
+        try:
+            seed_repo, _inst_id, inst_public_id = await _create_repo_with_instrument(db_path)
 
-        open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
-        seed_ts = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
-        inserted = await seed_repo.upsert_candles(
-            [_candle_row(inst_public_id, open_at, seed_ts, close=100.0)]
-        )
-        assert inserted == 1
-
-        async with seed_repo.session() as s:
-            seeded = (
-                (await s.execute(select(Candle).where(Candle.open_at == open_at))).scalars().first()
+            open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+            seed_ts = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
+            inserted = await seed_repo.upsert_candles(
+                [_candle_row(inst_public_id, open_at, seed_ts, close=100.0)]
             )
-        assert seeded is not None
-        seed_public_id = seeded.public_id
+            assert inserted == 1
 
-        db_url = f"sqlite+aiosqlite:///{db_path}"
-        repo_a = SQLAlchemyRepository(db_url)
-        repo_b = SQLAlchemyRepository(db_url)
+            async with seed_repo.session() as s:
+                seeded = (
+                    (await s.execute(select(Candle).where(Candle.open_at == open_at)))
+                    .scalars()
+                    .first()
+                )
+            assert seeded is not None
+            seed_public_id = seeded.public_id
 
-        ts_a = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
-        ts_b = datetime(2024, 6, 1, 12, 0, 30, tzinfo=UTC)
-        task_a = asyncio.create_task(
-            repo_a.upsert_candles([_candle_row(inst_public_id, open_at, ts_a, close=111.0)])
-        )
-        task_b = asyncio.create_task(
-            repo_b.upsert_candles([_candle_row(inst_public_id, open_at, ts_b, close=222.0)])
-        )
-        results = await asyncio.gather(task_a, task_b, return_exceptions=True)
+            db_url = f"sqlite+aiosqlite:///{db_path}"
+            repo_a = SQLAlchemyRepository(db_url)
+            repo_b = SQLAlchemyRepository(db_url)
 
-        successes = [r for r in results if isinstance(r, int)]
-        failures = [r for r in results if isinstance(r, BaseException)]
-        assert successes, "at least one concurrent upsert must succeed"
-        for failure in failures:
-            assert isinstance(
-                failure, IntegrityError
-            ), f"unexpected failure type under contention: {type(failure).__name__}"
+            ts_a = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
+            ts_b = datetime(2024, 6, 1, 12, 0, 30, tzinfo=UTC)
+            task_a = asyncio.create_task(
+                repo_a.upsert_candles([_candle_row(inst_public_id, open_at, ts_a, close=111.0)])
+            )
+            task_b = asyncio.create_task(
+                repo_b.upsert_candles([_candle_row(inst_public_id, open_at, ts_b, close=222.0)])
+            )
+            results = await asyncio.gather(task_a, task_b, return_exceptions=True)
 
-        async with seed_repo.session() as s:
-            rows = (
-                (
-                    await s.execute(
-                        select(Candle).where(
-                            and_(
-                                Candle.instrument_public_id == inst_public_id,
-                                Candle.open_at == open_at,
+            successes = [r for r in results if isinstance(r, int)]
+            failures = [r for r in results if isinstance(r, BaseException)]
+            assert successes, "at least one concurrent upsert must succeed"
+            for failure in failures:
+                assert isinstance(
+                    failure, IntegrityError
+                ), f"unexpected failure type under contention: {type(failure).__name__}"
+
+            async with seed_repo.session() as s:
+                rows = (
+                    (
+                        await s.execute(
+                            select(Candle).where(
+                                and_(
+                                    Candle.instrument_public_id == inst_public_id,
+                                    Candle.open_at == open_at,
+                                )
                             )
                         )
                     )
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
 
-        active = [r for r in rows if r.known_to == KNOWN_TO_MAX]
-        closed = [r for r in rows if r.known_to != KNOWN_TO_MAX]
-        assert len(active) == 1, f"SCD2 chain broken: expected 1 active row, got {len(active)}"
-        public_ids = {r.public_id for r in rows}
-        assert public_ids == {
-            seed_public_id
-        }, f"orphan public_id introduced under contention: {public_ids}"
-        expected_rows = len(successes) + 1
-        assert (
-            len(rows) == expected_rows
-        ), f"expected seed + {len(successes)} successful version(s), got {len(rows)}"
-        assert len(closed) == len(
-            successes
-        ), f"expected {len(successes)} closed version(s), got {len(closed)}"
+            active = [r for r in rows if r.known_to == KNOWN_TO_MAX]
+            closed = [r for r in rows if r.known_to != KNOWN_TO_MAX]
+            assert len(active) == 1, f"SCD2 chain broken: expected 1 active row, got {len(active)}"
+            public_ids = {r.public_id for r in rows}
+            assert public_ids == {
+                seed_public_id
+            }, f"orphan public_id introduced under contention: {public_ids}"
+            expected_rows = len(successes) + 1
+            assert (
+                len(rows) == expected_rows
+            ), f"expected seed + {len(successes)} successful version(s), got {len(rows)}"
+            assert len(closed) == len(
+                successes
+            ), f"expected {len(successes)} closed version(s), got {len(closed)}"
+        finally:
+            for repo in (repo_b, repo_a, seed_repo):
+                if repo is not None:
+                    await repo.engine.dispose()
 
 
 async def _seed_second_symbol(
