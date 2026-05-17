@@ -127,6 +127,14 @@ class TestMarginWarningRule:
         assert payload is not None
         assert payload["deep_link_path"] == "/orders/coid-mw"
         assert payload["client_order_id"] == "coid-mw"
+        assert payload["title_loc_key"] == "alerts.title.margin_warning"
+        assert payload["body_loc_key"] == "alerts.body.margin_warning"
+        assert payload["body_loc_args"] == [
+            "BUY",
+            "0.5",
+            "BTC-USD",
+            "Margin requirement not met",
+        ]
         assert row["source_topic"] == "orders.events.kraken.BTC-USD.rejected"
 
     @pytest.mark.asyncio

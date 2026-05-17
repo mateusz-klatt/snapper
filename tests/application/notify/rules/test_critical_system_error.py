@@ -77,6 +77,12 @@ class TestCriticalSystemErrorRule:
 
         assert len(rows) == 2
         assert {r["user_public_id"] for r in rows} == {"admin-1", "admin-2"}
+        payload = rows[0]["payload"]
+        assert payload is not None
+        assert payload["title_loc_key"] == "alerts.title.critical_system_error"
+        assert payload["title_loc_args"] == ["executor"]
+        assert payload["body_loc_key"] == "alerts.body.critical_system_error"
+        assert payload["body_loc_args"] == ["executor", "kraken", "warning", 3]
 
     @pytest.mark.asyncio
     async def test_healthy_heartbeat_resets_window(self) -> None:

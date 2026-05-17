@@ -6,6 +6,7 @@ from loguru import logger
 
 from snapper.application.notify.rules.base import AlertRule
 from snapper.application.notify.rules.dedup import check_dedup_window
+from snapper.core.json_types import JsonValue
 from snapper.data.repository import Repository
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.messaging.schemas.data import ExecutionPlanDecisionEventData
@@ -102,7 +103,8 @@ class PositionStopLossFiredRule(AlertRule):
             return []
         exchange = plan["exchange"]
         title = "Stop-loss fired"
-        body = f"Stop-loss fired on {native_symbol} ({exchange})"
+        body_args: list[JsonValue] = [native_symbol, exchange]
+        body = f"Stop-loss fired on {body_args[0]} ({body_args[1]})"
         row = AlertEventInsertRow(
             user_public_id=user_public_id,
             operator_public_id=plan.get("operator_public_id"),
@@ -118,6 +120,9 @@ class PositionStopLossFiredRule(AlertRule):
                 "decision_public_id": data.decision_public_id,
                 "reason": data.reason,
                 "body_suppressed": False,
+                "title_loc_key": "alerts.title.position_stop_loss_fired",
+                "body_loc_key": "alerts.body.position_stop_loss_fired",
+                "body_loc_args": body_args,
             },
             dedup_key=dedup_key,
             thread_key=(

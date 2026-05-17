@@ -6,6 +6,7 @@ from loguru import logger
 
 from snapper.application.notify.rules.base import AlertRule
 from snapper.application.notify.rules.dedup import check_dedup_window
+from snapper.core.json_types import JsonValue
 from snapper.data.repository import Repository
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.messaging.schemas.data import OrderData
@@ -146,10 +147,13 @@ class MarginWarningRule(AlertRule):
         ):
             return []
         reason_text = data.reason or data.error or "unknown reason"
-        body = (
-            f"{data.side.upper()} {data.size} {data.instrument}"
-            f" blocked by margin: {reason_text}"
-        )
+        body_args: list[JsonValue] = [
+            data.side.upper(),
+            str(data.size),
+            data.instrument,
+            reason_text,
+        ]
+        body = f"{body_args[0]} {body_args[1]} {body_args[2]} blocked by margin: {body_args[3]}"
         row = AlertEventInsertRow(
             user_public_id=user_public_id,
             operator_public_id=data.operator_public_id,
@@ -165,6 +169,9 @@ class MarginWarningRule(AlertRule):
                 "reason": data.reason,
                 "error": data.error,
                 "body_suppressed": False,
+                "title_loc_key": "alerts.title.margin_warning",
+                "body_loc_key": "alerts.body.margin_warning",
+                "body_loc_args": body_args,
             },
             dedup_key=dedup_key,
             thread_key=(f"{self.thread_key_prefix}.{data.wallet_public_id or 'no-wallet'}"),

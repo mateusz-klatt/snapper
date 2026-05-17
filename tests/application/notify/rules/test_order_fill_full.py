@@ -64,6 +64,17 @@ class TestOrderFillFullRule:
         assert rows[0]["alert_type"] == "order_fill_full"
         assert rows[0]["dedup_key"] == "order_fill_full.coid-abc"
         assert "BTC-USD" in rows[0]["body"]
+        payload = rows[0]["payload"]
+        assert payload is not None
+        assert payload["title_loc_key"] == "alerts.title.order_fill_full"
+        assert payload["body_loc_key"] == "alerts.body.order_fill_full"
+        assert payload["body_loc_args"] == [
+            "BUY",
+            "0.1",
+            "BTC-USD",
+            "50000.00",
+            "kraken",
+        ]
 
     @pytest.mark.asyncio
     async def test_ignored_on_partial(self) -> None:

@@ -84,6 +84,11 @@ class TestPositionStopLossFiredRule:
         assert "kraken" in rows[0]["body"]
         dedup_key = rows[0]["dedup_key"]
         assert dedup_key is not None and dedup_key.startswith("stop_loss.")
+        payload = rows[0]["payload"]
+        assert payload is not None
+        assert payload["title_loc_key"] == "alerts.title.position_stop_loss_fired"
+        assert payload["body_loc_key"] == "alerts.body.position_stop_loss_fired"
+        assert payload["body_loc_args"] == ["BTC-USD", "kraken"]
 
     @pytest.mark.asyncio
     async def test_fires_on_trailing_stop_hit(self) -> None:
