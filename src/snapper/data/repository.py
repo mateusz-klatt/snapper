@@ -3301,6 +3301,33 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_default_languages_for_users(
+        self, user_public_ids: list[str]
+    ) -> dict[str, str | None]:
+        """Bulk ``default_language`` lookup keyed by ``user_public_id``.
+
+        Used by the notify sidecar's drain / retry path to localize
+        APNs ``aps.alert.title`` / ``body`` per recipient before emit.
+        One ``WHERE public_id IN (...)`` SELECT against the active
+        ``users`` row replaces the per-row round-trip; missing
+        ``user_public_id``s map to ``None`` so callers can treat
+        absent / never-set preferences identically.
+
+        Args:
+            user_public_ids: List of user ``public_id`` UUIDs to look
+                up. Duplicates are deduplicated; empty input returns
+                an empty dict without touching the DB.
+
+        Returns:
+            Mapping ``{user_public_id: default_language | None}``. The
+            value is ``None`` both when the user row exists with
+            ``default_language = NULL`` AND when the user has no
+            active row at all — the sidecar treats both as "emit
+            English" so the distinction is irrelevant downstream.
+        """
+        ...
+
+    @abstractmethod
     async def list_users_with_permission(self, permission: str) -> list[str]:
         """Active user ``public_id``s whose role grants ``permission``.
 
@@ -11007,6 +11034,30 @@ class SQLAlchemyRepository(Repository):
                 )
             )
             return [self._alert_event_row_from(row) for row in result.scalars().all()]
+
+    async def get_default_languages_for_users(
+        self, user_public_ids: list[str]
+    ) -> dict[str, str | None]:
+        """Bulk ``default_language`` lookup keyed by ``user_public_id``.
+
+        One ``WHERE public_id IN (...)`` SELECT against the active
+        ``users`` rows. Missing ``user_public_id``s map to ``None`` so
+        the sidecar treats unknown users + users-with-no-preference
+        identically (both fall back to English emission).
+        """
+        if not user_public_ids:
+            return {}
+        unique_ids = list(dict.fromkeys(user_public_ids))
+        result: dict[str, str | None] = dict.fromkeys(unique_ids)
+        async with self.session() as s:
+            rows = await s.execute(
+                select(User.public_id, User.default_language).where(
+                    User.public_id.in_(unique_ids),
+                    User.known_to == KNOWN_TO_MAX,
+                )
+            )
+            result.update(dict(rows.tuples().all()))
+        return result
 
     async def list_users_with_permission(self, permission: str) -> list[str]:
         """Active user public_ids whose role grants ``permission``.

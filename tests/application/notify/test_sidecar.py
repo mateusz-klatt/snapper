@@ -30,6 +30,7 @@ from snapper.application.notify.sidecar import NotifySidecar
 from snapper.application.notify.sidecar import _backoff_seconds
 from snapper.application.notify.sidecar import _build_apns_payload
 from snapper.application.notify.sidecar import _priority_to_apns
+from snapper.core.json_types import JsonObject
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import NotificationDevice
 from snapper.data.models import User
@@ -58,8 +59,18 @@ async def repo(tmp_path: Path) -> AsyncGenerator[SQLAlchemyRepository]:
         await r.engine.dispose()
 
 
-async def _seed_user(repo: SQLAlchemyRepository, user_public_id: str) -> None:
-    """Insert a minimal active ``User`` row the fanout will target."""
+async def _seed_user(
+    repo: SQLAlchemyRepository,
+    user_public_id: str,
+    *,
+    default_language: str | None = None,
+) -> None:
+    """Insert a minimal active ``User`` row the fanout will target.
+
+    ``default_language`` lets a test scenario pin the SCD2 row to a
+    specific catalog language code (Phase C i18n) without going
+    through the full update path.
+    """
     async with repo.session() as s:
         s.add(
             User(
@@ -68,6 +79,7 @@ async def _seed_user(repo: SQLAlchemyRepository, user_public_id: str) -> None:
                 email=f"{user_public_id}@example.test",
                 password_hash="x",
                 role="viewer",
+                default_language=default_language,
                 created_at=_ts(),
                 session_id="t",
                 sequence_id=1,
@@ -101,7 +113,13 @@ async def _seed_device(
 
 
 class _SingleRowRule(AlertRule):
-    """Minimal rule emitting exactly one alert per dispatch — for flow tests."""
+    """Minimal rule emitting exactly one alert per dispatch — for flow tests.
+
+    Optional ``row_payload`` lets a test pin Phase C loc_keys on the
+    emitted row so we can exercise the live-fanout localization path
+    (``sidecar._persist_and_fanout_row`` must look up the recipient's
+    ``default_language`` and pass it through ``_attempt_once``).
+    """
 
     def __init__(
         self,
@@ -111,6 +129,7 @@ class _SingleRowRule(AlertRule):
         alert_type: str = "order_fill_full",
         priority: str = "medium",
         safety_critical: bool = False,
+        row_payload: dict[str, object] | None = None,
     ) -> None:
         self.alert_type = alert_type
         self.subscribe_topic_prefixes = (topic_prefix,)
@@ -120,26 +139,28 @@ class _SingleRowRule(AlertRule):
         self.suppression_window_seconds = 0
         self._user = user_public_id
         self._counter = 0
+        self._row_payload = row_payload
 
     async def evaluate(
         self, topic: str, payload: bytes, repo: Repository, now: datetime
     ) -> list[AlertEventInsertRow]:
         self._counter += 1
-        return [
-            AlertEventInsertRow(
-                user_public_id=self._user,
-                operator_public_id=None,
-                wallet_public_id=None,
-                alert_type=self.alert_type,
-                priority=self.priority,
-                is_safety_critical=self.is_safety_critical,
-                title="Fixture",
-                body="Fixture body",
-                dedup_key=f"fixture.{self._counter}",
-                thread_key=f"test.{self._counter}",
-                source_topic=topic,
-            )
-        ]
+        row = AlertEventInsertRow(
+            user_public_id=self._user,
+            operator_public_id=None,
+            wallet_public_id=None,
+            alert_type=self.alert_type,
+            priority=self.priority,
+            is_safety_critical=self.is_safety_critical,
+            title="Fixture",
+            body="Fixture body",
+            dedup_key=f"fixture.{self._counter}",
+            thread_key=f"test.{self._counter}",
+            source_topic=topic,
+        )
+        if self._row_payload is not None:
+            row["payload"] = cast(JsonObject, self._row_payload)
+        return [row]
 
 
 class _NoopRule(AlertRule):
@@ -343,6 +364,252 @@ class TestBuildApnsPayload:
         assert payload["alert_type"] == "order_rejected"
         assert payload["priority"] == "high"
 
+    def test_user_language_none_keeps_english_title_body(self) -> None:
+        """No-preference path emits stored EN title/body.
+
+        Given: An AlertEventRow with loc_key/loc_args populated and
+            ``user_language=None``.
+        When: ``_build_apns_payload`` is called.
+        Then: ``aps.alert.title``/``body`` use the EN columns; the
+            catalog is NOT consulted.
+        """
+        row = self._row(
+            title="Order filled",
+            body="BUY 100 BTCUSD @ $50000.00 filled on Kraken",
+            payload={
+                "title_loc_key": "alerts.title.order_fill_full",
+                "body_loc_key": "alerts.body.order_fill_full",
+                "body_loc_args": ["BUY", "100", "BTCUSD", "50000.00", "Kraken"],
+            },
+        )
+        payload = _build_apns_payload(row, user_language=None)
+        aps = payload["aps"]
+        assert isinstance(aps, dict)
+        alert = aps["alert"]
+        assert isinstance(alert, dict)
+        assert alert["title"] == "Order filled"
+        assert alert["body"] == "BUY 100 BTCUSD @ $50000.00 filled on Kraken"
+
+    def test_user_language_pl_resolves_polish_title_body(self) -> None:
+        """PL user with loc_key set gets Polish APNs payload.
+
+        Given: An AlertEventRow with body_loc_key + body_loc_args set
+            and ``user_language='pl'``.
+        When: ``_build_apns_payload`` is called.
+        Then: ``aps.alert.title``/``body`` render in Polish via the
+            backend catalog; ``%@`` placeholders are substituted in
+            source order.
+        """
+        row = self._row(
+            title="Order filled",
+            body="BUY 100 BTCUSD @ $50000.00 filled on Kraken",
+            payload={
+                "title_loc_key": "alerts.title.order_fill_full",
+                "body_loc_key": "alerts.body.order_fill_full",
+                "body_loc_args": ["BUY", "100", "BTCUSD", "50000.00", "Kraken"],
+            },
+        )
+        payload = _build_apns_payload(row, user_language="pl")
+        aps = payload["aps"]
+        assert isinstance(aps, dict)
+        alert = aps["alert"]
+        assert isinstance(alert, dict)
+        assert alert["title"] == "Zlecenie zrealizowane"
+        body_pl = alert["body"]
+        assert isinstance(body_pl, str)
+        assert "zrealizowane na Kraken" in body_pl
+
+    def test_user_language_ar_renders_rtl_template(self) -> None:
+        """Arabic recipient gets RTL APNs title/body.
+
+        Given: A ``critical_system_error`` row with loc_keys set and
+            ``user_language='ar'``.
+        When: ``_build_apns_payload`` is called.
+        Then: title + body render in Arabic; ``%lld`` placeholder for
+            the threshold count is substituted as an int.
+        """
+        row = self._row(
+            title="System degraded: executor",
+            body="executor/kraken reported warning for 3 consecutive heartbeats",
+            alert_type="critical_system_error",
+            payload={
+                "title_loc_key": "alerts.title.critical_system_error",
+                "title_loc_args": ["executor"],
+                "body_loc_key": "alerts.body.critical_system_error",
+                "body_loc_args": ["executor", "kraken", "warning", 3],
+            },
+        )
+        payload = _build_apns_payload(row, user_language="ar")
+        aps = payload["aps"]
+        assert isinstance(aps, dict)
+        alert = aps["alert"]
+        assert isinstance(alert, dict)
+        assert alert["title"] != "System degraded: executor"
+        body_ar = alert["body"]
+        assert isinstance(body_ar, str)
+        assert body_ar != "executor/kraken reported warning for 3 consecutive heartbeats"
+        assert "executor" in body_ar
+
+    def test_user_language_set_but_payload_missing_loc_keys_falls_back(self) -> None:
+        """Legacy rows without loc_keys emit EN even with a PL user.
+
+        Given: An AlertEventRow whose payload lacks
+            ``title_loc_key``/``body_loc_key`` (predates Phase C, or
+            a rule that opted out).
+        When: ``_build_apns_payload`` is called with
+            ``user_language='pl'``.
+        Then: The stored EN columns drive ``aps.alert`` — fallback
+            keeps push delivery working for legacy data.
+        """
+        row = self._row(
+            title="Custom title",
+            body="Custom body",
+            payload={"deep_link_path": "/x"},
+        )
+        payload = _build_apns_payload(row, user_language="pl")
+        aps = payload["aps"]
+        assert isinstance(aps, dict)
+        alert = aps["alert"]
+        assert isinstance(alert, dict)
+        assert alert["title"] == "Custom title"
+        assert alert["body"] == "Custom body"
+
+    def test_loc_key_unknown_in_catalog_falls_back_to_en(self) -> None:
+        """Unrecognized loc_key (catalog miss) falls back to EN.
+
+        Given: A loc_key that doesn't exist in the backend catalog.
+        When: ``_build_apns_payload`` is called with a non-EN language.
+        Then: The EN ``event.title``/``body`` are used — the catalog
+            ``render`` returns the key itself on miss, which the
+            resolver detects and substitutes back to EN to avoid
+            shipping the literal key as an alert title.
+        """
+        row = self._row(
+            title="Custom title",
+            body="Custom body",
+            payload={
+                "title_loc_key": "alerts.title.nonexistent",
+                "body_loc_key": "alerts.body.nonexistent",
+            },
+        )
+        payload = _build_apns_payload(row, user_language="pl")
+        aps = payload["aps"]
+        assert isinstance(aps, dict)
+        alert = aps["alert"]
+        assert isinstance(alert, dict)
+        assert alert["title"] == "Custom title"
+        assert alert["body"] == "Custom body"
+
+    def test_loc_args_must_be_lists_to_render(self) -> None:
+        """Malformed loc_args (non-list) falls back to EN.
+
+        Given: ``body_loc_args`` is a string (corrupt payload).
+        When: ``_build_apns_payload`` is called.
+        Then: Fallback to EN — avoids a crash on bad inputs and
+            surfaces the bug in the EN render.
+        """
+        row = self._row(
+            title="Custom title",
+            body="Custom body",
+            payload={
+                "title_loc_key": "alerts.title.order_fill_full",
+                "body_loc_key": "alerts.body.order_fill_full",
+                "body_loc_args": "should-be-a-list",
+            },
+        )
+        payload = _build_apns_payload(row, user_language="pl")
+        aps = payload["aps"]
+        assert isinstance(aps, dict)
+        alert = aps["alert"]
+        assert isinstance(alert, dict)
+        assert alert["title"] == "Custom title"
+        assert alert["body"] == "Custom body"
+
+    def test_loc_args_arity_mismatch_falls_back_to_en(self) -> None:
+        """Wrong argument count for a real catalog key falls back to EN.
+
+        Given: ``body_loc_key`` resolves to a template that takes 5
+            placeholders, but ``body_loc_args`` only supplies 2.
+        When: ``_build_apns_payload`` runs with a non-EN language.
+        Then: ``catalog.render`` raises ``ValueError`` internally; the
+            resolver catches it and emits the stored EN columns so the
+            user still gets a (legible) push instead of a crash that
+            leaves the delivery stuck in retry.
+        """
+        row = self._row(
+            title="Filled fallback",
+            body="Filled body fallback",
+            payload={
+                "title_loc_key": "alerts.title.order_fill_full",
+                "body_loc_key": "alerts.body.order_fill_full",
+                "body_loc_args": ["BUY", "100"],
+            },
+        )
+        payload = _build_apns_payload(row, user_language="pl")
+        aps = payload["aps"]
+        assert isinstance(aps, dict)
+        alert = aps["alert"]
+        assert isinstance(alert, dict)
+        assert alert["title"] == "Filled fallback"
+        assert alert["body"] == "Filled body fallback"
+
+    def test_loc_keys_are_stripped_from_apns_custom_payload(self) -> None:
+        """Internal localization fields never reach the APNs wire payload.
+
+        Given: An event payload that carries the
+            ``title_loc_key``/``body_loc_key``/``title_loc_args``/
+            ``body_loc_args`` set emitted by Phase C notify rules.
+        When: ``_build_apns_payload`` assembles the dict.
+        Then: The APNs custom payload contains the public deep link
+            but NOT the four localization keys — they're a backend-only
+            contract once title/body are resolved server-side, and
+            the 4 KB APNs budget would otherwise re-pay for the same
+            exchange/instrument values already in ``aps.alert.body``.
+        """
+        row = self._row(
+            payload={
+                "deep_link_path": "/orders/1",
+                "title_loc_key": "alerts.title.order_fill_full",
+                "title_loc_args": ["unused"],
+                "body_loc_key": "alerts.body.order_fill_full",
+                "body_loc_args": ["BUY", "100", "BTCUSD", "50000.00", "Kraken"],
+            },
+        )
+        payload = _build_apns_payload(row, user_language="pl")
+        assert payload["deep_link_path"] == "/orders/1"
+        assert "title_loc_key" not in payload
+        assert "title_loc_args" not in payload
+        assert "body_loc_key" not in payload
+        assert "body_loc_args" not in payload
+
+    def test_partial_catalog_miss_falls_back_both_fields_to_en(self) -> None:
+        """All-or-nothing locale resolution: title-miss forces body to EN too.
+
+        Given: A ``title_loc_key`` that exists in the catalog but
+            a ``body_loc_key`` that does not (drift between rule and
+            catalog after a key rename, say).
+        When: ``_build_apns_payload`` runs with ``user_language='pl'``.
+        Then: The push goes out in EN for BOTH fields — a mixed PL
+            title + EN body would look broken to the user, so we treat
+            either miss as a full catalog drop.
+        """
+        row = self._row(
+            title="EN title",
+            body="EN body",
+            payload={
+                "title_loc_key": "alerts.title.order_fill_full",
+                "body_loc_key": "alerts.body.does_not_exist",
+                "body_loc_args": [],
+            },
+        )
+        payload = _build_apns_payload(row, user_language="pl")
+        aps = payload["aps"]
+        assert isinstance(aps, dict)
+        alert = aps["alert"]
+        assert isinstance(alert, dict)
+        assert alert["title"] == "EN title"
+        assert alert["body"] == "EN body"
+
 
 class TestDispatchFlow:
     """Rule-registry based dispatch: topic matches → rule emits → persist + fanout."""
@@ -364,6 +631,53 @@ class TestDispatchFlow:
         history = await repo.list_recent_alerts_for_user(user, limit=10, before=None)
         assert len(history) == 1
         apns.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_live_fanout_resolves_user_language_from_repo(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """The first-attempt push (live fanout) localizes to the recipient.
+
+        Given: A user pinned to ``default_language='pl'`` and a rule
+            emitting a row with the Phase C loc_key contract.
+        When: ``_dispatch`` runs the live path
+            (``_persist_and_fanout_row`` → ``_attempt_once``).
+        Then: ``apns.send`` receives an ``aps.alert.title`` rendered
+            via the Polish catalog — proves the live path looks up the
+            user's language from the repo, not just the drain/retry
+            loop which previously read from a prefetched cache.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user, default_language="pl")
+        await _seed_device(repo, user)
+        reg = RuleRegistry()
+        reg.register(
+            _SingleRowRule(
+                user_public_id=user,
+                topic_prefix="test.",
+                row_payload={
+                    "title_loc_key": "alerts.title.order_fill_full",
+                    "body_loc_key": "alerts.body.order_fill_full",
+                    "body_loc_args": [
+                        "BUY",
+                        "100",
+                        "BTCUSD",
+                        "50000.00",
+                        "Kraken",
+                    ],
+                },
+            )
+        )
+        sidecar, apns = _make_sidecar(repo, registry=reg)
+
+        await sidecar._dispatch("test.something", b"{}", _ts())
+
+        apns.send.assert_awaited_once()
+        sent_payload = apns.send.await_args.kwargs["payload"]
+        aps = sent_payload["aps"]
+        alert = aps["alert"]
+        assert alert["title"] == "Zlecenie zrealizowane"
+        assert "zrealizowane na Kraken" in alert["body"]
 
     @pytest.mark.asyncio
     async def test_unknown_topic_silent_skip(self, repo: SQLAlchemyRepository) -> None:

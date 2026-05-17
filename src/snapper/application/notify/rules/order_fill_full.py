@@ -6,6 +6,7 @@ from loguru import logger
 
 from snapper.application.notify.rules.base import AlertRule
 from snapper.application.notify.rules.dedup import check_dedup_window
+from snapper.core.json_types import JsonValue
 from snapper.core.types import FillStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import AlertEventInsertRow
@@ -80,10 +81,14 @@ class OrderFillFullRule(AlertRule):
         ):
             return []
         title = "Order filled"
-        body = (
-            f"{data.side.upper()} {abs(data.size)} {data.instrument}"
-            f" @ ${data.price:.2f} filled on {data.exchange}"
-        )
+        body_args: list[JsonValue] = [
+            data.side.upper(),
+            str(abs(data.size)),
+            data.instrument,
+            f"{data.price:.2f}",
+            data.exchange,
+        ]
+        body = f"{body_args[0]} {body_args[1]} {body_args[2]} @ ${body_args[3]} filled on {body_args[4]}"
         row = AlertEventInsertRow(
             user_public_id=user_public_id,
             operator_public_id=data.operator_public_id,
@@ -98,6 +103,9 @@ class OrderFillFullRule(AlertRule):
                 "client_order_id": data.client_order_id,
                 "exchange_order_id": data.exchange_order_id,
                 "body_suppressed": False,
+                "title_loc_key": "alerts.title.order_fill_full",
+                "body_loc_key": "alerts.body.order_fill_full",
+                "body_loc_args": body_args,
             },
             dedup_key=dedup_key,
             thread_key=f"{self.thread_key_prefix}.{data.client_order_id}",

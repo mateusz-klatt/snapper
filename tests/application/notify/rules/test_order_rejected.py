@@ -67,6 +67,16 @@ class TestOrderRejectedRule:
         assert rows[0]["is_safety_critical"] is True
         assert rows[0]["priority"] == "high"
         assert "insufficient_funds" in rows[0]["body"]
+        payload = rows[0]["payload"]
+        assert payload is not None
+        assert payload["title_loc_key"] == "alerts.title.order_rejected"
+        assert payload["body_loc_key"] == "alerts.body.order_rejected"
+        assert payload["body_loc_args"] == [
+            "BUY",
+            "0.2",
+            "BTC-USD",
+            "insufficient_funds",
+        ]
 
     @pytest.mark.asyncio
     async def test_emits_fallback_when_no_reason(self) -> None:

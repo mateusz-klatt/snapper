@@ -942,6 +942,105 @@ class TestListUsersWithPermission:
         assert result == []
 
 
+class TestGetDefaultLanguagesForUsers:
+    """Bulk ``user.default_language`` lookup used by the APNs sidecar."""
+
+    @pytest.mark.asyncio
+    async def test_returns_default_language_per_user(self, repo: SQLAlchemyRepository) -> None:
+        """Mixed coverage: one user has PL, one has NULL, one missing.
+
+        Given: ``user-lang-pl`` with ``default_language='pl'``,
+            ``user-lang-none`` with ``default_language=NULL``, and a
+            third public_id ``user-lang-missing`` that has no User row.
+        When: ``get_default_languages_for_users`` is called with all
+            three IDs.
+        Then: The returned dict carries every key — PL value, None for
+            the user with NULL, None for the missing user.
+        """
+        async with repo.session() as s:
+            s.add_all(
+                [
+                    User(
+                        public_id="user-lang-pl",
+                        username="user_pl",
+                        email=None,
+                        password_hash="x",
+                        role="viewer",
+                        default_language="pl",
+                        created_at=_ts(),
+                        session_id="seed",
+                        sequence_id=1,
+                        timestamp=_ts(),
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                    User(
+                        public_id="user-lang-none",
+                        username="user_none",
+                        email=None,
+                        password_hash="x",
+                        role="viewer",
+                        default_language=None,
+                        created_at=_ts(),
+                        session_id="seed",
+                        sequence_id=2,
+                        timestamp=_ts(),
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                ]
+            )
+            await s.commit()
+        result = await repo.get_default_languages_for_users(
+            ["user-lang-pl", "user-lang-none", "user-lang-missing"]
+        )
+        assert result == {
+            "user-lang-pl": "pl",
+            "user-lang-none": None,
+            "user-lang-missing": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_empty_input_returns_empty_dict(self, repo: SQLAlchemyRepository) -> None:
+        """Empty input short-circuits — no DB round-trip.
+
+        Given: An empty user_public_id list.
+        When: ``get_default_languages_for_users`` is called.
+        Then: Returns ``{}`` without touching the DB.
+        """
+        result = await repo.get_default_languages_for_users([])
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_deduplicates_repeated_ids(self, repo: SQLAlchemyRepository) -> None:
+        """Duplicate input IDs collapse to one DB row, one dict entry.
+
+        Given: A user with default_language='de' and a list of IDs
+            containing the same public_id three times.
+        When: ``get_default_languages_for_users`` is called.
+        Then: The result has exactly one key with the expected value.
+        """
+        async with repo.session() as s:
+            s.add(
+                User(
+                    public_id="user-lang-dup",
+                    username="user_dup",
+                    email=None,
+                    password_hash="x",
+                    role="viewer",
+                    default_language="de",
+                    created_at=_ts(),
+                    session_id="seed",
+                    sequence_id=3,
+                    timestamp=_ts(),
+                    known_to=KNOWN_TO_MAX,
+                )
+            )
+            await s.commit()
+        result = await repo.get_default_languages_for_users(
+            ["user-lang-dup", "user-lang-dup", "user-lang-dup"]
+        )
+        assert result == {"user-lang-dup": "de"}
+
+
 class TestCancelDeliveriesForUser:
     """``cancel_pending_deliveries_for_user`` admin kill-switch helper."""
 

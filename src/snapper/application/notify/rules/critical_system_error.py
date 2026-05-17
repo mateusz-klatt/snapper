@@ -7,6 +7,7 @@ from loguru import logger
 
 from snapper.application.notify.rules.base import AlertRule
 from snapper.application.notify.rules.dedup import check_dedup_window
+from snapper.core.json_types import JsonValue
 from snapper.core.types import HealthStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import AlertEventInsertRow
@@ -121,6 +122,12 @@ class CriticalSystemErrorRule(AlertRule):
                 now=now,
             ):
                 continue
+            body_args: list[JsonValue] = [
+                component,
+                name,
+                data.status,
+                _CONSECUTIVE_WARNING_THRESHOLD,
+            ]
             rows.append(
                 AlertEventInsertRow(
                     user_public_id=admin_user_id,
@@ -131,8 +138,8 @@ class CriticalSystemErrorRule(AlertRule):
                     is_safety_critical=self.is_safety_critical,
                     title=f"System degraded: {component}",
                     body=(
-                        f"{component}/{name} reported {data.status} for"
-                        f" {_CONSECUTIVE_WARNING_THRESHOLD} consecutive heartbeats"
+                        f"{body_args[0]}/{body_args[1]} reported {body_args[2]} for"
+                        f" {body_args[3]} consecutive heartbeats"
                     ),
                     payload={
                         "deep_link_path": "/system",
@@ -140,6 +147,10 @@ class CriticalSystemErrorRule(AlertRule):
                         "name": name,
                         "status": data.status,
                         "body_suppressed": False,
+                        "title_loc_key": "alerts.title.critical_system_error",
+                        "title_loc_args": [component],
+                        "body_loc_key": "alerts.body.critical_system_error",
+                        "body_loc_args": body_args,
                     },
                     dedup_key=dedup_key,
                     thread_key=f"{self.thread_key_prefix}.{component}.{name}",

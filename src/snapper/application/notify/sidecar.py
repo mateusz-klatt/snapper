@@ -55,6 +55,7 @@ from snapper.data.repository_types import AlertDeliveryRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import NotificationDeviceRow
+from snapper.i18n import catalog
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 
@@ -283,11 +284,14 @@ class NotifySidecar(RegisterableProcess):
                 at=alert_row.get("alert_type"),
             )
             return
+        recipient_user_pid = event["user_public_id"]
+        languages = await self._repo.get_default_languages_for_users([recipient_user_pid])
+        user_language = languages.get(recipient_user_pid)
         for device in recipients:
             delivery_pid = await self._insert_delivery_for_event(
                 event=event, device=device, now=now
             )
-            await self._attempt_once(delivery_pid, device, event, now)
+            await self._attempt_once(delivery_pid, device, event, now, user_language=user_language)
 
     async def _insert_alert_event(self, alert_row: AlertEventInsertRow, now: datetime) -> str:
         """Write the SCD2 ``alert_events`` row and return its public_id."""
@@ -350,6 +354,8 @@ class NotifySidecar(RegisterableProcess):
         device: NotificationDeviceRow,
         event: AlertEventRow,
         now: datetime,
+        *,
+        user_language: str | None = None,
     ) -> None:
         """Run exactly one APNs send attempt on a queued delivery row.
 
@@ -363,6 +369,14 @@ class NotifySidecar(RegisterableProcess):
         Otherwise, bumps ``attempt_count`` first (attempt-number-before-
         attempt rule), builds the APNs payload, calls through the
         pool, and maps the result to the SCD2 terminal / retry schedule.
+
+        ``user_language`` is the recipient's ``User.default_language``
+        preference (or ``None`` when never set). When non-null AND the
+        event payload carries ``title_loc_key``/``body_loc_key``, the
+        APNs ``aps.alert.title``/``body`` fields are resolved through
+        the backend catalog so the push notification renders in the
+        user's chosen language. Falls back to the EN ``event.title``/
+        ``event.body`` otherwise.
         """
         if await self._scope_revalidator.should_skip_send(event, self._repo, now):
             sid = self._tracker.session_id
@@ -391,7 +405,7 @@ class NotifySidecar(RegisterableProcess):
                 pid=delivery_public_id,
             )
             return
-        payload = _build_apns_payload(event)
+        payload = _build_apns_payload(event, user_language=user_language)
         try:
             result = await self._apns.send(
                 env=device["env"],
@@ -568,33 +582,41 @@ class NotifySidecar(RegisterableProcess):
                 r["created_at"],
             )
         )
-        events_cache, devices_cache = await self._prefetch_caches_for_rows(queued)
+        events_cache, devices_cache, languages_cache = await self._prefetch_caches_for_rows(queued)
         for row in queued:
             await self._attempt_on_queued_row(
                 row,
                 now,
                 events_cache=events_cache,
                 devices_cache=devices_cache,
+                languages_cache=languages_cache,
             )
 
-    async def _prefetch_caches_for_rows(
-        self, rows: list[AlertDeliveryRow]
-    ) -> tuple[dict[str, AlertEventRow], dict[str, list[NotificationDeviceRow]]]:
-        """Bulk-load the alert_event + device-list maps for a delivery batch.
+    async def _prefetch_caches_for_rows(self, rows: list[AlertDeliveryRow]) -> tuple[
+        dict[str, AlertEventRow],
+        dict[str, list[NotificationDeviceRow]],
+        dict[str, str | None],
+    ]:
+        """Bulk-load alert_event + device-list + default_language maps.
 
-        Returns one ``{event_public_id: AlertEventRow}`` and one
-        ``{user_public_id: list[NotificationDeviceRow]}`` cache,
+        Returns one ``{event_public_id: AlertEventRow}``, one
+        ``{user_public_id: list[NotificationDeviceRow]}`` and one
+        ``{user_public_id: default_language | None}`` cache,
         deduplicating IDs so the underlying SELECTs touch each row
         at most once even when many deliveries share an alert_event
-        or user.
+        or user. The third cache feeds the APNs sidecar's
+        catalog-resolution path so push titles/bodies render in the
+        recipient's preferred language (Phase C of
+        ``plan_2026_05_17_backend_user_language_i18n.md``).
         """
         if not rows:
-            return {}, {}
+            return {}, {}, {}
         event_pids = [row["alert_event_public_id"] for row in rows]
         user_pids = [row["user_public_id"] for row in rows]
         events_cache = await self._repo.get_alert_events_by_public_ids(event_pids)
         devices_cache = await self._repo.list_active_notification_devices_for_users(user_pids)
-        return events_cache, devices_cache
+        languages_cache = await self._repo.get_default_languages_for_users(user_pids)
+        return events_cache, devices_cache, languages_cache
 
     async def _attempt_on_queued_row(
         self,
@@ -603,6 +625,7 @@ class NotifySidecar(RegisterableProcess):
         *,
         events_cache: dict[str, AlertEventRow] | None = None,
         devices_cache: dict[str, list[NotificationDeviceRow]] | None = None,
+        languages_cache: dict[str, str | None] | None = None,
     ) -> None:
         """Load the source alert_event + device for one queued row and send.
 
@@ -640,11 +663,17 @@ class NotifySidecar(RegisterableProcess):
             )
             await self._mark_unregistered_no_device(row["public_id"], now)
             return
+        if languages_cache is not None and user_pid in languages_cache:
+            user_language: str | None = languages_cache[user_pid]
+        else:
+            language_map = await self._repo.get_default_languages_for_users([user_pid])
+            user_language = language_map.get(user_pid)
         await self._attempt_once(
             row["public_id"],
             device,
             event,
             now,
+            user_language=user_language,
         )
 
     async def _mark_failed(self, delivery_public_id: str, error_reason: str, now: datetime) -> None:
@@ -688,13 +717,16 @@ class NotifySidecar(RegisterableProcess):
                 return
             now = datetime.now(UTC)
             rows = await self._repo.list_deliveries_ready_for_retry(now)
-            events_cache, devices_cache = await self._prefetch_caches_for_rows(rows)
+            events_cache, devices_cache, languages_cache = await self._prefetch_caches_for_rows(
+                rows
+            )
             for row in rows:
                 await self._attempt_on_queued_row(
                     row,
                     now,
                     events_cache=events_cache,
                     devices_cache=devices_cache,
+                    languages_cache=languages_cache,
                 )
 
 
@@ -711,7 +743,7 @@ def _priority_to_apns(priority: str) -> int:
     return 10 if priority == "high" else 5
 
 
-def _build_apns_payload(event: AlertEventRow) -> JsonObject:
+def _build_apns_payload(event: AlertEventRow, *, user_language: str | None = None) -> JsonObject:
     """Assemble the APNs payload dict from a persisted ``AlertEventRow``.
 
     Keeps the ``aps.alert.title`` / ``aps.alert.body`` mapping
@@ -720,15 +752,28 @@ def _build_apns_payload(event: AlertEventRow) -> JsonObject:
     source row actually carried them, minimising the 4KB APNs
     payload budget.
 
+    When ``user_language`` is non-null AND the event payload carries
+    ``title_loc_key``/``body_loc_key`` (emitted by every notify rule
+    as of Phase C of ``plan_2026_05_17_backend_user_language_i18n.md``),
+    the title/body are resolved through ``snapper.i18n.catalog.render``
+    so the APNs push renders in the recipient's chosen language.
+    Falls back to the EN ``event.title``/``event.body`` columns for
+    legacy rows / users with no preference. ``loc_args`` lists are
+    coerced to ``str`` per element so integer args like
+    ``%lld`` placeholders work without callers having to pre-stringify.
+
     Args:
         event: Persisted ``AlertEventRow`` as returned by
             ``get_alert_event_by_public_id``.
+        user_language: Recipient's ``User.default_language``
+            preference, or ``None`` when never set.
 
     Returns:
         JSON-ready dict to hand to ``ApnsClientPool.send``.
     """
+    title, body = _resolve_localized_title_body(event, user_language)
     aps: JsonObject = {
-        "alert": {"title": event["title"], "body": event["body"]},
+        "alert": {"title": title, "body": body},
     }
     thread_key = event.get("thread_key")
     if thread_key is not None:
@@ -737,9 +782,81 @@ def _build_apns_payload(event: AlertEventRow) -> JsonObject:
     extra = event.get("payload")
     if extra is not None:
         for key, value in extra.items():
-            if key == "aps":
+            if key in _APNS_PAYLOAD_SKIP_KEYS:
                 continue
             payload[key] = value
     payload["alert_type"] = event["alert_type"]
     payload["priority"] = event["priority"]
     return payload
+
+
+_APNS_PAYLOAD_SKIP_KEYS: frozenset[str] = frozenset(
+    {
+        "aps",
+        "title_loc_key",
+        "title_loc_args",
+        "body_loc_key",
+        "body_loc_args",
+    }
+)
+"""Keys excluded from the APNs custom payload.
+
+``aps`` is rewritten by ``_build_apns_payload`` directly. The four
+``*_loc_key``/``*_loc_args`` keys are an internal contract between
+notify rules and the backend resolver — iOS does not consume them
+(Phase C resolves the title/body server-side), so we strip them
+from the wire payload to (a) save the 4 KB APNs budget and (b)
+avoid leaking exchange/instrument/reason values in a second place.
+"""
+
+
+def _resolve_localized_title_body(
+    event: AlertEventRow, user_language: str | None
+) -> tuple[str, str]:
+    """Return localized ``(title, body)`` for the APNs alert dict.
+
+    Falls back to the stored EN ``event.title``/``event.body`` when:
+
+    - ``user_language`` is ``None`` (user never set a preference)
+    - The event payload lacks ``title_loc_key`` / ``body_loc_key``
+      (legacy event row predating Phase C, or rule that opted out)
+    - The catalog lookup itself misses (returns the key verbatim,
+      which we detect and treat as "not localized")
+
+    Args:
+        event: Source alert event row.
+        user_language: Recipient's preferred catalog language code.
+
+    Returns:
+        ``(title, body)`` strings ready to embed in ``aps.alert``.
+    """
+    en_title = event["title"]
+    en_body = event["body"]
+    if user_language is None:
+        return en_title, en_body
+    extra = event.get("payload") or {}
+    title_loc_key = extra.get("title_loc_key")
+    body_loc_key = extra.get("body_loc_key")
+    if not isinstance(title_loc_key, str) or not isinstance(body_loc_key, str):
+        return en_title, en_body
+    title_args_raw = extra.get("title_loc_args") or []
+    body_args_raw = extra.get("body_loc_args") or []
+    if not isinstance(title_args_raw, list) or not isinstance(body_args_raw, list):
+        return en_title, en_body
+    title_args = [str(a) for a in title_args_raw]
+    body_args = [str(a) for a in body_args_raw]
+    try:
+        title = catalog.render(title_loc_key, user_language, *title_args)
+        body = catalog.render(body_loc_key, user_language, *body_args)
+    except ValueError as exc:
+        logger.warning(
+            "sidecar: catalog render mismatch for alert_event {pid} (lang={lang}) —"
+            " falling back to EN. {err}",
+            pid=event["public_id"],
+            lang=user_language,
+            err=exc,
+        )
+        return en_title, en_body
+    if title == title_loc_key or body == body_loc_key:
+        return en_title, en_body
+    return title, body
