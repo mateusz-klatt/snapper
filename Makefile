@@ -531,7 +531,7 @@ ios-gen-types:
 
 gen-backend-i18n-catalog:
 	$(info Generating backend i18n catalog JSONs from iOS xcstrings...)
-	$(PYRUN) scripts/gen_backend_i18n_catalog.py
+	$(VENV_PY) scripts/gen_backend_i18n_catalog.py
 	$(info Generated backend catalogs in src/snapper/i18n/catalogs/)
 
 ios-i18n-check:
