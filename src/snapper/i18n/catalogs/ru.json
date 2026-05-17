@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ сообщил %@ в течение %lld последовательных heartbeat-сигналов",
+  "alerts.body.margin_warning": "%@ %@ %@ заблокировано из-за маржи: %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ исполнено на %@",
+  "alerts.body.order_rejected": "%@ %@ %@ отклонено: %@",
+  "alerts.body.position_stop_loss_fired": "Стоп-лосс сработал для %@ (%@)",
+  "alerts.title.critical_system_error": "Система деградирована: %@",
+  "alerts.title.margin_warning": "Предупреждение о марже",
+  "alerts.title.order_fill_full": "Ордер исполнен",
+  "alerts.title.order_rejected": "Ордер отклонён",
+  "alerts.title.position_stop_loss_fired": "Стоп-лосс сработал"
+}

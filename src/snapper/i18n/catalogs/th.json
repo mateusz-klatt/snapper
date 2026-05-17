@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ รายงาน %@ เป็นเวลา %lld heartbeat ติดต่อกัน",
+  "alerts.body.margin_warning": "%@ %@ %@ ถูกบล็อกโดยมาร์จิ้น: %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ ที่ $%@ จับคู่แล้วบน %@",
+  "alerts.body.order_rejected": "%@ %@ %@ ถูกปฏิเสธ: %@",
+  "alerts.body.position_stop_loss_fired": "หยุดขาดทุนถูกเรียกใช้บน %@ (%@)",
+  "alerts.title.critical_system_error": "ระบบเสื่อมสภาพ: %@",
+  "alerts.title.margin_warning": "คำเตือนมาร์จิ้น",
+  "alerts.title.order_fill_full": "คำสั่งถูกจับคู่แล้ว",
+  "alerts.title.order_rejected": "คำสั่งถูกปฏิเสธ",
+  "alerts.title.position_stop_loss_fired": "คำสั่งหยุดขาดทุนถูกเรียกใช้"
+}

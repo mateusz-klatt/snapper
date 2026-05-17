@@ -1,0 +1,180 @@
+"""Tests for ``snapper.i18n.catalog`` — backend i18n loader + resolver."""
+
+from pathlib import Path
+
+import pytest
+
+from snapper.i18n.catalog import load_catalogs_from
+from snapper.i18n.catalog import localized
+from snapper.i18n.catalog import render
+from snapper.i18n.catalog import supported_catalog_languages
+
+
+def test_catalog_loads_all_45_languages() -> None:
+    """All language JSON files are committed and loaded.
+
+    Given: the generator runs on every iOS xcstrings change and writes
+        one ``<lang>.json`` per catalog language.
+    When: ``supported_catalog_languages`` is queried.
+    Then: 45 codes are present — the count locked in by Batch 9.
+    """
+    langs = supported_catalog_languages()
+    assert len(langs) == 45
+    assert "en" in langs
+    assert "pl" in langs
+    assert "ar" in langs
+    assert "ga" in langs
+
+
+def test_en_lookup_returns_source_template() -> None:
+    """EN is the source language.
+
+    Given: the EN catalog has every key.
+    When: ``localized`` is called for an EN key.
+    Then: the raw English template is returned unchanged.
+    """
+    assert localized("alerts.title.margin_warning", "en") == "Margin warning"
+
+
+def test_pl_lookup_returns_polish_template() -> None:
+    """Spot-check translation for PL.
+
+    Given: PL catalog is generated from xcstrings.
+    When: ``localized`` is called for PL.
+    Then: the Polish template is returned.
+    """
+    assert localized("alerts.title.order_fill_full", "pl") == "Zlecenie zrealizowane"
+
+
+def test_unknown_language_falls_back_to_en() -> None:
+    """Unknown language code falls back to EN.
+
+    Given: the user's ``default_language`` is a frontend-only code
+        (e.g. ``"pt"`` against the iOS catalog where it's ``"pt-BR"``).
+    When: ``localized`` is called for ``"pt"`` (no catalog file).
+    Then: the EN template is returned so the user sees content.
+    """
+    assert localized("alerts.title.order_fill_full", "pt") == "Order filled"
+
+
+def test_unknown_key_falls_back_to_key_itself() -> None:
+    """Unknown key returns the key unchanged.
+
+    Given: a catalog key that wasn't generated (e.g. a typo in the
+        rule code).
+    When: ``localized`` is called.
+    Then: the key itself is returned — better than a crash, surfaces
+        the bug at the alert text.
+    """
+    assert localized("alerts.title.nonexistent_key", "en") == "alerts.title.nonexistent_key"
+
+
+def test_render_substitutes_placeholders_for_polish_template() -> None:
+    """End-to-end render for a body template.
+
+    Given: the PL ``alerts.body.order_fill_full`` template.
+    When: ``render`` is called with positional args.
+    Then: placeholders are substituted in source order.
+    """
+    rendered = render(
+        "alerts.body.order_fill_full",
+        "pl",
+        "BUY",
+        "100",
+        "BTCUSD",
+        "50000.00",
+        "Kraken",
+    )
+    assert "BUY" in rendered
+    assert "Kraken" in rendered
+    assert "%@" not in rendered
+
+
+def test_render_skips_substitution_for_missing_key() -> None:
+    """Missing key bypasses ``render_template`` to avoid a crash.
+
+    Given: a key that doesn't exist.
+    When: ``render`` is called with args.
+    Then: the key is returned verbatim — extra args don't trigger the
+        underlying format-mismatch ValueError.
+    """
+    result = render("alerts.title.unknown", "en", "ignored")
+    assert result == "alerts.title.unknown"
+
+
+def test_render_works_for_critical_system_error_with_int_arg() -> None:
+    """The only template using ``%lld`` round-trips.
+
+    Given: ``alerts.body.critical_system_error`` is the only template
+        that mixes ``%@`` and ``%lld``.
+    When: ``render`` is called with the canonical 4-arg signature.
+    Then: the integer arg renders correctly.
+    """
+    rendered = render(
+        "alerts.body.critical_system_error",
+        "en",
+        "kraken",
+        "spot",
+        "WARNING",
+        5,
+    )
+    assert rendered == "kraken/spot reported WARNING for 5 consecutive heartbeats"
+
+
+def test_load_catalogs_raises_when_directory_missing(tmp_path: Path) -> None:
+    """Missing catalog directory surfaces with an actionable error.
+
+    Given: A ``tmp_path`` location that does not contain a catalogs/
+        directory.
+    When: ``load_catalogs_from`` is called against it.
+    Then: ``FileNotFoundError`` is raised with the script-name hint
+        so the maintainer knows to run the generator.
+    """
+    nonexistent = tmp_path / "missing"
+    with pytest.raises(FileNotFoundError, match="gen_backend_i18n_catalog"):
+        load_catalogs_from(nonexistent)
+
+
+def test_load_catalogs_raises_when_en_fallback_is_missing(tmp_path: Path) -> None:
+    """EN is a required invariant.
+
+    Given: A catalog directory containing only non-EN JSONs.
+    When: ``load_catalogs_from`` is called.
+    Then: ``FileNotFoundError`` is raised — the EN fallback path is
+        load-bearing for unknown-language lookups.
+    """
+    catalog_dir = tmp_path / "catalogs"
+    catalog_dir.mkdir()
+    (catalog_dir / "pl.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="EN fallback"):
+        load_catalogs_from(catalog_dir)
+
+
+def test_load_catalogs_raises_when_file_is_not_a_json_object(tmp_path: Path) -> None:
+    """Non-object JSON content is rejected.
+
+    Given: A catalog file containing a JSON list (not an object).
+    When: ``load_catalogs_from`` is called.
+    Then: ``ValueError`` is raised so a malformed generator output
+        cannot silently load as an empty/strange catalog at import.
+    """
+    catalog_dir = tmp_path / "catalogs"
+    catalog_dir.mkdir()
+    (catalog_dir / "en.json").write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="did not parse as a JSON object"):
+        load_catalogs_from(catalog_dir)
+
+
+def test_load_catalogs_raises_when_values_are_not_strings(tmp_path: Path) -> None:
+    """All catalog values must be strings.
+
+    Given: A catalog with a numeric value (e.g. ``{"alerts.x": 1}``).
+    When: ``load_catalogs_from`` is called.
+    Then: ``ValueError`` is raised — the resolver and format converter
+        both assume string template values.
+    """
+    catalog_dir = tmp_path / "catalogs"
+    catalog_dir.mkdir()
+    (catalog_dir / "en.json").write_text('{"alerts.x": 1}', encoding="utf-8")
+    with pytest.raises(ValueError, match="non-string"):
+        load_catalogs_from(catalog_dir)

@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ đã báo cáo %@ trong %lld heartbeat liên tiếp",
+  "alerts.body.margin_warning": "%@ %@ %@ bị chặn bởi ký quỹ: %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ đã khớp trên %@",
+  "alerts.body.order_rejected": "%@ %@ %@ bị từ chối: %@",
+  "alerts.body.position_stop_loss_fired": "Cắt lỗ đã kích hoạt cho %@ (%@)",
+  "alerts.title.critical_system_error": "Hệ thống suy giảm: %@",
+  "alerts.title.margin_warning": "Cảnh báo ký quỹ",
+  "alerts.title.order_fill_full": "Lệnh đã khớp",
+  "alerts.title.order_rejected": "Lệnh bị từ chối",
+  "alerts.title.position_stop_loss_fired": "Cắt lỗ đã kích hoạt"
+}

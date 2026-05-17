@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ a signalé %@ pendant %lld heartbeats consécutifs",
+  "alerts.body.margin_warning": "%@ %@ %@ bloqué par la marge : %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ exécuté sur %@",
+  "alerts.body.order_rejected": "%@ %@ %@ rejeté : %@",
+  "alerts.body.position_stop_loss_fired": "Stop loss déclenché sur %@ (%@)",
+  "alerts.title.critical_system_error": "Système dégradé : %@",
+  "alerts.title.margin_warning": "Avertissement de marge",
+  "alerts.title.order_fill_full": "Ordre exécuté",
+  "alerts.title.order_rejected": "Ordre rejeté",
+  "alerts.title.position_stop_loss_fired": "Stop loss déclenché"
+}

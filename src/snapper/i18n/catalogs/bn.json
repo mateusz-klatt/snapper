@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ %@ রিপোর্ট করেছে %lld ধারাবাহিক heartbeat ধরে",
+  "alerts.body.margin_warning": "%@ %@ %@ মার্জিনের কারণে ব্লক হয়েছে: %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ %@-এ সম্পন্ন হয়েছে",
+  "alerts.body.order_rejected": "%@ %@ %@ প্রত্যাখ্যাত: %@",
+  "alerts.body.position_stop_loss_fired": "%@ (%@)-এ স্টপ-লস ট্রিগার হয়েছে",
+  "alerts.title.critical_system_error": "সিস্টেম অবনমিত: %@",
+  "alerts.title.margin_warning": "মার্জিন সতর্কতা",
+  "alerts.title.order_fill_full": "অর্ডার পূরণ হয়েছে",
+  "alerts.title.order_rejected": "অর্ডার প্রত্যাখ্যাত",
+  "alerts.title.position_stop_loss_fired": "স্টপ-লস ট্রিগার হয়েছে"
+}

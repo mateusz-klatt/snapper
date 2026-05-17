@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ דיווח על %@ במשך %lld פעימות רצופות",
+  "alerts.body.margin_warning": "%@ %@ %@ נחסמה עקב מרג'ין: %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ ב-$%@ ב-%@ בוצעה",
+  "alerts.body.order_rejected": "%@ %@ %@ נדחתה: %@",
+  "alerts.body.position_stop_loss_fired": "סטופ-לוס הופעל ב-%@ (%@)",
+  "alerts.title.critical_system_error": "מערכת במצב ירוד: %@",
+  "alerts.title.margin_warning": "אזהרת מרג'ין",
+  "alerts.title.order_fill_full": "הפקודה בוצעה",
+  "alerts.title.order_rejected": "הפקודה נדחתה",
+  "alerts.title.position_stop_loss_fired": "סטופ-לוס הופעל"
+}

@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ وضعیت %@ را برای %lld ضربان پیاپی گزارش کرد",
+  "alerts.body.margin_warning": "%@ %@ %@ به دلیل وجه تضمین مسدود شد: %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ با قیمت $%@ در %@ اجرا شد",
+  "alerts.body.order_rejected": "%@ %@ %@ رد شد: %@",
+  "alerts.body.position_stop_loss_fired": "حد ضرر روی %@ (%@) فعال شد",
+  "alerts.title.critical_system_error": "افت عملکرد سیستم: %@",
+  "alerts.title.margin_warning": "هشدار وجه تضمین",
+  "alerts.title.order_fill_full": "سفارش اجرا شد",
+  "alerts.title.order_rejected": "سفارش رد شد",
+  "alerts.title.position_stop_loss_fired": "حد ضرر فعال شد"
+}

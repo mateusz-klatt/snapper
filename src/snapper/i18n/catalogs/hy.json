@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ հաղորդեց %@ %lld հաջորդական heartbeat-ների ընթացքում",
+  "alerts.body.margin_warning": "%@ %@ %@ արգելափակվել է մարժայի պատճառով՝ %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ կատարվեց %@-ում",
+  "alerts.body.order_rejected": "%@ %@ %@ մերժվել է՝ %@",
+  "alerts.body.position_stop_loss_fired": "Stop-loss-ը գործարկվեց %@ (%@)-ի համար",
+  "alerts.title.critical_system_error": "Համակարգի աշխատանքը խաթարված է՝ %@",
+  "alerts.title.margin_warning": "Մարժայի զգուշացում",
+  "alerts.title.order_fill_full": "Հանձնարարականը կատարված է",
+  "alerts.title.order_rejected": "Հանձնարարականը մերժվել է",
+  "alerts.title.position_stop_loss_fired": "Կորստի սահմանափակումը գործարկվեց"
+}

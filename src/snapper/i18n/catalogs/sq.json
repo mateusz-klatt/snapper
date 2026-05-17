@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ raportoi %@ për %lld heartbeat-e radhazi",
+  "alerts.body.margin_warning": "%@ %@ %@ u bllokua nga marzhi: %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ u ekzekutua në %@",
+  "alerts.body.order_rejected": "%@ %@ %@ u refuzua: %@",
+  "alerts.body.position_stop_loss_fired": "Stop-loss u aktivizua për %@ (%@)",
+  "alerts.title.critical_system_error": "Sistemi është degraduar: %@",
+  "alerts.title.margin_warning": "Paralajmërim për marzhën",
+  "alerts.title.order_fill_full": "Porosia u plotësua",
+  "alerts.title.order_rejected": "Porosia u refuzua",
+  "alerts.title.position_stop_loss_fired": "Stop-loss u aktivizua"
+}

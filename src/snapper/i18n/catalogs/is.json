@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ tilkynnti %@ í %lld heartbeat-merkjum í röð",
+  "alerts.body.margin_warning": "%@ %@ %@ lokað vegna tryggingarfjár: %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ framkvæmt á %@",
+  "alerts.body.order_rejected": "%@ %@ %@ hafnað: %@",
+  "alerts.body.position_stop_loss_fired": "Stop-loss virkjað fyrir %@ (%@)",
+  "alerts.title.critical_system_error": "Kerfi í skertu ástandi: %@",
+  "alerts.title.margin_warning": "Viðvörun um tryggingarfé",
+  "alerts.title.order_fill_full": "Pöntun framkvæmd",
+  "alerts.title.order_rejected": "Pöntun hafnað",
+  "alerts.title.position_stop_loss_fired": "Stop-loss virkjað"
+}

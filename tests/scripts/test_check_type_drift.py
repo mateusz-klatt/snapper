@@ -50,6 +50,38 @@ class TestGetFilesToCheck:
         assert isinstance(files, list)
         assert all(isinstance(f, Path) for f in files)
 
+    def test_includes_backend_i18n_catalog_files_when_directory_exists(
+        self, tmp_path: Path
+    ) -> None:
+        """Verify includes backend i18n catalog JSONs.
+
+        Given: A project root where ``src/snapper/i18n/catalogs/``
+            contains generated language JSONs.
+        When: Getting files to check for type drift.
+        Then: Each ``<lang>.json`` is returned alongside the
+            client-side generated type files.
+        """
+        catalog_dir = tmp_path / "src" / "snapper" / "i18n" / "catalogs"
+        catalog_dir.mkdir(parents=True)
+        (catalog_dir / "en.json").write_text("{}", encoding="utf-8")
+        (catalog_dir / "pl.json").write_text("{}", encoding="utf-8")
+
+        files = get_files_to_check(tmp_path)
+        names = {f.name for f in files}
+        assert "en.json" in names
+        assert "pl.json" in names
+
+    def test_omits_backend_i18n_catalog_files_when_directory_missing(self, tmp_path: Path) -> None:
+        """Verify graceful skip when backend catalog directory is absent.
+
+        Given: A bare ``tmp_path`` with no ``src/snapper/i18n/catalogs/``.
+        When: Getting files to check for type drift.
+        Then: The function returns the client-only file list without
+            raising.
+        """
+        files = get_files_to_check(tmp_path)
+        assert all(not f.name.endswith(".json") or "schemas" in str(f) for f in files)
+
 
 class TestBackupFiles:
     """Test suite for BackupFiles functionality."""
@@ -139,7 +171,7 @@ class TestRegenerateTypes:
 
         Given: A mocked subprocess.run,
         When: Regenerating types for a project root,
-        Then: Executes 'make ui-gen-types ios-gen-types' with correct options.
+        Then: Executes 'make ui-gen-types ios-gen-types gen-backend-i18n-catalog' with correct options.
         """
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = subprocess.CompletedProcess([], 0)
@@ -147,7 +179,7 @@ class TestRegenerateTypes:
             regenerate_types(tmp_path)
 
             mock_run.assert_called_once_with(
-                ["make", "ui-gen-types", "ios-gen-types"],
+                ["make", "ui-gen-types", "ios-gen-types", "gen-backend-i18n-catalog"],
                 check=False,
                 cwd=tmp_path,
                 capture_output=True,
