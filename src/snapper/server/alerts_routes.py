@@ -42,6 +42,7 @@ from snapper.core.json_types import JsonObject
 from snapper.data.repository import Repository
 from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import AlertListCursor
+from snapper.i18n import catalog
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
 
@@ -106,10 +107,33 @@ def _decode_cursor(token: str | None) -> AlertListCursor | None:
     return AlertListCursor(timestamp=ts, public_id=pid_raw)
 
 
-def _alert_info_from_row(row: AlertEventRow) -> AlertEventInfo:
-    """Project an ``AlertEventRow`` TypedDict into the wire schema."""
+def _alert_info_from_row(row: AlertEventRow, *, user_language: str | None) -> AlertEventInfo:
+    """Project an ``AlertEventRow`` TypedDict into the wire schema.
+
+    ``title`` / ``body`` are resolved server-side via the i18n catalog
+    when ``user_language`` is set AND the row carries the Phase C
+    ``title_loc_key`` / ``body_loc_key`` contract. Falls back to the
+    stored EN columns otherwise — same all-or-nothing funnel as the
+    APNs sidecar uses. ``title_loc_key`` / ``title_loc_args`` /
+    ``body_loc_key`` / ``body_loc_args`` are surfaced separately so
+    iOS can re-localize without a server round-trip when the in-app
+    locale picker changes.
+    """
     payload_val = row.get("payload")
     narrowed_payload: JsonObject | None = payload_val if payload_val is not None else None
+    title, body = catalog.resolve_alert_strings(
+        payload=narrowed_payload,
+        fallback_title=row["title"],
+        fallback_body=row["body"],
+        user_language=user_language,
+        log_context=f"alert_event={row['public_id']}",
+    )
+    title_loc_key, title_loc_args = _extract_loc_pair(
+        narrowed_payload, key_name="title_loc_key", args_name="title_loc_args"
+    )
+    body_loc_key, body_loc_args = _extract_loc_pair(
+        narrowed_payload, key_name="body_loc_key", args_name="body_loc_args"
+    )
     return AlertEventInfo(
         session_id=row["session_id"],
         sequence_id=row["sequence_id"],
@@ -121,13 +145,49 @@ def _alert_info_from_row(row: AlertEventRow) -> AlertEventInfo:
         alert_type=row["alert_type"],
         priority=row["priority"],
         is_safety_critical=row["is_safety_critical"],
-        title=row["title"],
-        body=row["body"],
+        title=title,
+        body=body,
         payload=narrowed_payload,
+        title_loc_key=title_loc_key,
+        title_loc_args=title_loc_args,
+        body_loc_key=body_loc_key,
+        body_loc_args=body_loc_args,
         dedup_key=row.get("dedup_key"),
         thread_key=row.get("thread_key"),
         source_topic=row.get("source_topic"),
     )
+
+
+def _extract_loc_pair(
+    payload: JsonObject | None, *, key_name: str, args_name: str
+) -> tuple[str | None, list[str]]:
+    """Project ``(loc_key, loc_args)`` out of a payload dict for the wire.
+
+    Three documented shapes:
+
+    - Legacy row (no payload / no key / non-string key): ``(None, [])`` —
+      iOS uses ``key is None`` as the signal "do not attempt in-app
+      re-localization, the server's resolved EN ``title``/``body`` are
+      authoritative".
+    - Phase C row with a valid string ``key`` but malformed args (non-
+      list ``args``, e.g. a buggy rule emitted a string): ``(key, [])``
+      — surfaces the key for iOS to inspect, but normalizes args to
+      ``[]`` so the wire never carries a non-list. The catalog resolver
+      already returned the EN fallback strings on this same payload,
+      so iOS will see EN title/body + key + empty args; the empty args
+      cause iOS's render to fall through to its own EN fallback too.
+    - Well-formed: ``(key, [str(a) for a in args])`` — args coerced to
+      str (the only type ``%@`` / ``%lld`` placeholders accept).
+    """
+    if payload is None:
+        return None, []
+    raw_key = payload.get(key_name)
+    if not isinstance(raw_key, str):
+        return None, []
+    raw_args = payload.get(args_name) or []
+    if not isinstance(raw_args, list):
+        return raw_key, []
+    return raw_key, [str(a) for a in raw_args]
 
 
 @router.get("/history")
@@ -166,7 +226,8 @@ async def list_alert_history(
         limit=limit,
         before=cursor,
     )
-    items = [_alert_info_from_row(r) for r in rows]
+    user_language = await _lookup_caller_language(repo, principal.user_public_id)
+    items = [_alert_info_from_row(r, user_language=user_language) for r in rows]
     next_cursor = _encode_cursor(rows[-1]) if len(rows) == limit else None
     tracker: SequenceTracker = request.app.state.rest_tracker
     sid = tracker.session_id
@@ -216,6 +277,7 @@ async def get_alert_event(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Alert {alert_public_id} not found.",
         )
+    user_language = await _lookup_caller_language(repo, principal.user_public_id)
     tracker: SequenceTracker = request.app.state.rest_tracker
     sid = tracker.session_id
     seq = tracker.next_sequence(_REST_STREAM)
@@ -226,5 +288,17 @@ async def get_alert_event(
         sequence_id=seq,
         public_id=pid,
         timestamp=ts,
-        payload=_alert_info_from_row(row),
+        payload=_alert_info_from_row(row, user_language=user_language),
     )
+
+
+async def _lookup_caller_language(repo: Repository, user_public_id: str) -> str | None:
+    """Resolve the caller's ``user.default_language`` (or ``None``) via one SELECT.
+
+    Reuses the Phase C bulk repository helper with a singleton input
+    so the single-row read path stays identical to the sidecar's
+    batched prefetch (same SCD2 active-row predicate). A user mid-
+    update therefore never sees an inactive row's stale preference.
+    """
+    languages = await repo.get_default_languages_for_users([user_public_id])
+    return languages.get(user_public_id)

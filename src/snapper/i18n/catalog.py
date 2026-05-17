@@ -26,6 +26,9 @@ import json
 from pathlib import Path
 from typing import Final
 
+from loguru import logger
+
+from snapper.core.json_types import JsonObject
 from snapper.i18n.format import render as render_template
 
 _CATALOG_DIR: Final[Path] = Path(__file__).resolve().parent / "catalogs"
@@ -130,3 +133,75 @@ def render(key: str, language: str, *args: object) -> str:
     if template == key:
         return key
     return render_template(template, args)
+
+
+def resolve_alert_strings(
+    *,
+    payload: JsonObject | None,
+    fallback_title: str,
+    fallback_body: str,
+    user_language: str | None,
+    log_context: str | None = None,
+) -> tuple[str, str]:
+    """Resolve ``(title, body)`` for one alert row, with full EN fallback.
+
+    Single funnel used by both the APNs sidecar (push notifications)
+    and the REST alert-history endpoints. The function is intentionally
+    payload-shape-aware rather than ``AlertEventRow``-aware so it can
+    live in ``snapper.i18n`` without depending on the data layer.
+
+    Falls back to ``(fallback_title, fallback_body)`` (the stored EN
+    columns at the call site) when any of:
+
+    - ``user_language`` is ``None`` (user never set a preference)
+    - ``payload`` lacks string ``title_loc_key`` / ``body_loc_key``
+      (legacy row predating Phase C, or a rule that opted out)
+    - ``title_loc_args`` / ``body_loc_args`` are not lists
+    - The catalog lookup misses (``render`` returns the key verbatim)
+      on either field — all-or-nothing so the alert never goes out
+      half-localized
+    - ``catalog.render`` raises ``ValueError`` (template arity drift)
+
+    Args:
+        payload: ``AlertEventRow.payload`` JSON (or ``None``).
+        fallback_title: Stored EN ``title`` column to return on any
+            failure path.
+        fallback_body: Stored EN ``body`` column to return on any
+            failure path.
+        user_language: Recipient's ``User.default_language``
+            preference, or ``None`` when never set.
+        log_context: Identifier embedded in the render-failure warn
+            log (e.g. ``"alert_event=<public_id>"``) — ``None``
+            suppresses the contextual tail.
+
+    Returns:
+        Two-tuple of ``(title, body)`` strings ready to use in either
+        an APNs ``aps.alert`` dict or a REST response field.
+    """
+    if user_language is None or payload is None:
+        return fallback_title, fallback_body
+    title_loc_key = payload.get("title_loc_key")
+    body_loc_key = payload.get("body_loc_key")
+    if not isinstance(title_loc_key, str) or not isinstance(body_loc_key, str):
+        return fallback_title, fallback_body
+    title_args_raw = payload.get("title_loc_args") or []
+    body_args_raw = payload.get("body_loc_args") or []
+    if not isinstance(title_args_raw, list) or not isinstance(body_args_raw, list):
+        return fallback_title, fallback_body
+    title_args = [str(a) for a in title_args_raw]
+    body_args = [str(a) for a in body_args_raw]
+    try:
+        title = render(title_loc_key, user_language, *title_args)
+        body = render(body_loc_key, user_language, *body_args)
+    except ValueError as exc:
+        context = f" ({log_context})" if log_context else ""
+        logger.warning(
+            "i18n: catalog render mismatch{ctx} for lang={lang} — falling back to EN. {err}",
+            ctx=context,
+            lang=user_language,
+            err=exc,
+        )
+        return fallback_title, fallback_body
+    if title == title_loc_key or body == body_loc_key:
+        return fallback_title, fallback_body
+    return title, body

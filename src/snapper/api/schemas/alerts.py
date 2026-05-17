@@ -41,10 +41,23 @@ class AlertEventInfo(StrictDataSchema[Literal["alert_event_info"]]):
         priority: ``low``, ``medium`` or ``high``.
         is_safety_critical: True for alerts that bypass user prefs
             (e.g. ``critical_system_error``).
-        title: Short title string (APNs ``aps.alert.title``).
-        body: Localised body string (APNs ``aps.alert.body``).
+        title: Resolved title — pre-rendered server-side against
+            ``user.default_language`` if the caller has one set AND
+            the row carries Phase C ``title_loc_key``. Falls back to
+            the stored EN string for legacy rows / unset preference.
+        body: Resolved body — same semantics as ``title``.
         payload: Optional structured context rendered by the iOS
             client when expanding the notification.
+        title_loc_key: Catalog key used to resolve ``title`` server-
+            side. Surfaced to iOS so the client can re-localize the
+            row when the in-app locale picker changes without a
+            server round-trip. ``None`` for legacy rows.
+        title_loc_args: Positional args substituted into the
+            ``title_loc_key`` template; iOS reuses them for in-app
+            re-localization.
+        body_loc_key: Catalog key for ``body``. Mirrors
+            ``title_loc_key`` semantics.
+        body_loc_args: Positional args for ``body_loc_key``.
         dedup_key: Optional idempotency key — server collapses
             duplicate emits that share the same key within a window.
         thread_key: Optional APNs ``aps.thread-id`` for iOS
@@ -63,6 +76,10 @@ class AlertEventInfo(StrictDataSchema[Literal["alert_event_info"]]):
     title: str
     body: str
     payload: JsonObject | None = None
+    title_loc_key: str | None = None
+    title_loc_args: list[str] = Field(default_factory=list)
+    body_loc_key: str | None = None
+    body_loc_args: list[str] = Field(default_factory=list)
     dedup_key: str | None = None
     thread_key: str | None = None
     source_topic: str | None = None
