@@ -22,6 +22,7 @@ from fastapi import Request
 
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.core.json_types import JsonObject
 from snapper.data.repository_types import AlertEventRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.alerts_routes import _decode_cursor
@@ -56,8 +57,16 @@ def _alert_row(
     user_public_id: str = "user-alpha",
     alert_type: str = "order_fill_full",
     timestamp: datetime | None = None,
+    payload: JsonObject | None = None,
+    title: str = "Filled",
+    body: str = "BTC-USD 0.1 filled",
 ) -> AlertEventRow:
-    """Return a fully-populated active ``AlertEventRow`` fixture."""
+    """Return a fully-populated active ``AlertEventRow`` fixture.
+
+    ``payload`` and ``title`` / ``body`` are exposed so localization
+    tests can pin Phase C loc_key contracts on a row without
+    fabricating their own AlertEventRow shape.
+    """
     return AlertEventRow(
         public_id=public_id,
         session_id="sid",
@@ -70,13 +79,38 @@ def _alert_row(
         alert_type=alert_type,
         priority="medium",
         is_safety_critical=False,
-        title="Filled",
-        body="BTC-USD 0.1 filled",
-        payload=None,
+        title=title,
+        body=body,
+        payload=payload,
         dedup_key=None,
         thread_key=None,
         source_topic=None,
     )
+
+
+def _make_repo(
+    default_language: str | None = None, *, user_public_id: str = "user-alpha"
+) -> MagicMock:
+    """Build a repo mock with the Phase C ``default_language`` lookup pre-stubbed.
+
+    Uses ``MagicMock`` as the parent (NOT ``AsyncMock``) so unstubbed
+    attribute access falls back to plain MagicMock and never produces
+    a dangling coroutine. Each async method the routes touch is
+    individually stubbed as an ``AsyncMock`` here — adding a new repo
+    call to a route therefore requires adding the matching stub here,
+    which surfaces test gaps explicitly instead of silently passing on
+    auto-generated AsyncMock children.
+
+    Tests that don't otherwise care about the language path get the
+    natural EN fallback via ``default_language=None``; localization
+    tests pass ``default_language='pl'`` (etc) explicitly.
+    """
+    repo = MagicMock()
+    payload: dict[str, str | None] = (
+        {} if default_language is None else {user_public_id: default_language}
+    )
+    repo.get_default_languages_for_users = AsyncMock(return_value=payload)
+    return repo
 
 
 class TestCursorCodec:
@@ -142,7 +176,7 @@ class TestListAlertHistory:
     @pytest.mark.asyncio
     async def test_returns_page_with_next_cursor_when_full(self) -> None:
         """A page exactly at limit yields a next_cursor for the last row."""
-        repo = AsyncMock()
+        repo = _make_repo()
         rows = [
             _alert_row("pid-3", timestamp=_ts(3)),
             _alert_row("pid-2", timestamp=_ts(2)),
@@ -168,7 +202,7 @@ class TestListAlertHistory:
     @pytest.mark.asyncio
     async def test_returns_none_cursor_when_page_under_limit(self) -> None:
         """A partial page is the last page — next_cursor is None."""
-        repo = AsyncMock()
+        repo = _make_repo()
         repo.list_recent_alerts_for_user = AsyncMock(
             return_value=[_alert_row("pid-1", timestamp=_ts(1))]
         )
@@ -187,7 +221,7 @@ class TestListAlertHistory:
     @pytest.mark.asyncio
     async def test_passes_decoded_cursor_to_repo(self) -> None:
         """The opaque ``before`` is decoded into the internal pair."""
-        repo = AsyncMock()
+        repo = _make_repo()
         repo.list_recent_alerts_for_user = AsyncMock(return_value=[])
         anchor = _alert_row("anchor-pid", timestamp=_ts(9))
         token = _encode_cursor(anchor)
@@ -208,7 +242,7 @@ class TestListAlertHistory:
     @pytest.mark.asyncio
     async def test_malformed_cursor_returns_first_page(self) -> None:
         """A tampered cursor falls through to page 1 (not 4xx)."""
-        repo = AsyncMock()
+        repo = _make_repo()
         repo.list_recent_alerts_for_user = AsyncMock(return_value=[])
 
         await list_alert_history(
@@ -225,7 +259,7 @@ class TestListAlertHistory:
     @pytest.mark.asyncio
     async def test_scopes_to_principal_user_public_id(self) -> None:
         """The repo is always queried with the caller's user_public_id."""
-        repo = AsyncMock()
+        repo = _make_repo()
         repo.list_recent_alerts_for_user = AsyncMock(return_value=[])
 
         await list_alert_history(
@@ -246,7 +280,7 @@ class TestGetAlertEvent:
     @pytest.mark.asyncio
     async def test_returns_owned_alert(self) -> None:
         """An alert owned by the caller is returned verbatim."""
-        repo = AsyncMock()
+        repo = _make_repo()
         repo.get_alert_event_by_public_id = AsyncMock(
             return_value=_alert_row("pid-own", user_public_id="user-alpha")
         )
@@ -264,7 +298,7 @@ class TestGetAlertEvent:
     @pytest.mark.asyncio
     async def test_returns_404_for_unknown_id(self) -> None:
         """Unknown id -> 404, not 403."""
-        repo = AsyncMock()
+        repo = _make_repo()
         repo.get_alert_event_by_public_id = AsyncMock(return_value=None)
 
         with pytest.raises(HTTPException) as exc:
@@ -280,7 +314,7 @@ class TestGetAlertEvent:
     @pytest.mark.asyncio
     async def test_returns_404_for_foreign_owned_alert(self) -> None:
         """An alert owned by another user is indistinguishable from unknown."""
-        repo = AsyncMock()
+        repo = _make_repo()
         repo.get_alert_event_by_public_id = AsyncMock(
             return_value=_alert_row("pid-foreign", user_public_id="user-gamma")
         )
@@ -294,3 +328,218 @@ class TestGetAlertEvent:
             )
 
         assert exc.value.status_code == 404
+
+
+def _phase_c_row_payload() -> JsonObject:
+    """Return a payload dict shaped like the Phase C notify-rule emits.
+
+    Pinned to ``order_fill_full`` so the catalog will actually resolve
+    against the Polish template; tests that need a different shape can
+    override the loc-key pair inline.
+    """
+    return {
+        "deep_link_path": "/orders/coid-1",
+        "title_loc_key": "alerts.title.order_fill_full",
+        "body_loc_key": "alerts.body.order_fill_full",
+        "body_loc_args": ["BUY", "100", "BTCUSD", "50000.00", "Kraken"],
+    }
+
+
+class TestAlertHistoryLocalization:
+    """Phase D — server-side ``title``/``body`` resolution + loc field exposure."""
+
+    @pytest.mark.asyncio
+    async def test_pl_user_history_returns_localized_title_and_body(self) -> None:
+        """A PL user gets Polish strings AND the loc fields for in-app re-render.
+
+        Given: ``user.default_language = 'pl'`` and a row carrying the
+            Phase C loc_key contract.
+        When: ``GET /api/alerts/history`` runs.
+        Then: ``payload[0].title``/``body`` are pre-rendered in Polish
+            server-side, AND ``title_loc_key`` / ``body_loc_key`` /
+            ``body_loc_args`` are surfaced so iOS can re-render the row
+            after an in-app locale-picker change without a round-trip.
+        """
+        repo = _make_repo(default_language="pl")
+        repo.list_recent_alerts_for_user = AsyncMock(
+            return_value=[
+                _alert_row(
+                    "pid-pl",
+                    payload=_phase_c_row_payload(),
+                    title="Order filled",
+                    body="BUY 100 BTCUSD @ $50000.00 filled on Kraken",
+                )
+            ]
+        )
+
+        response = await list_alert_history(
+            request=_make_request(),
+            principal=_principal(),
+            repo=repo,
+            limit=10,
+            before=None,
+        )
+
+        item = response.payload[0]
+        assert item.title == "Zlecenie zrealizowane"
+        assert "zrealizowane na Kraken" in item.body
+        assert item.title_loc_key == "alerts.title.order_fill_full"
+        assert item.body_loc_key == "alerts.body.order_fill_full"
+        assert item.body_loc_args == [
+            "BUY",
+            "100",
+            "BTCUSD",
+            "50000.00",
+            "Kraken",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_no_preference_returns_stored_en_strings(self) -> None:
+        """A user with no language preference gets the stored EN columns.
+
+        Given: ``user.default_language`` not set (``{}`` from the
+            bulk lookup).
+        When: history runs over a Phase C row.
+        Then: response ``title``/``body`` mirror the EN columns AND
+            the loc fields still flow through (iOS can re-render to
+            its in-app locale even when the server has no preference
+            for this user).
+        """
+        repo = _make_repo()
+        repo.list_recent_alerts_for_user = AsyncMock(
+            return_value=[
+                _alert_row(
+                    "pid-en",
+                    payload=_phase_c_row_payload(),
+                    title="Order filled",
+                    body="BUY 100 BTCUSD @ $50000.00 filled on Kraken",
+                )
+            ]
+        )
+
+        response = await list_alert_history(
+            request=_make_request(),
+            principal=_principal(),
+            repo=repo,
+            limit=10,
+            before=None,
+        )
+
+        item = response.payload[0]
+        assert item.title == "Order filled"
+        assert item.body == "BUY 100 BTCUSD @ $50000.00 filled on Kraken"
+        assert item.title_loc_key == "alerts.title.order_fill_full"
+        assert item.body_loc_key == "alerts.body.order_fill_full"
+
+    @pytest.mark.asyncio
+    async def test_legacy_row_without_loc_keys_omits_loc_fields(self) -> None:
+        """Rows persisted before Phase C surface ``loc_key=None``.
+
+        Given: a row whose payload predates Phase C (no loc_keys) and
+            a PL user.
+        When: history runs.
+        Then: title/body fall back to EN columns; loc fields are
+            ``None`` / ``[]`` so iOS knows to not attempt in-app
+            re-localization (it would have no template).
+        """
+        repo = _make_repo(default_language="pl")
+        repo.list_recent_alerts_for_user = AsyncMock(
+            return_value=[
+                _alert_row(
+                    "pid-legacy",
+                    payload={"deep_link_path": "/orders/legacy"},
+                    title="Legacy stored title",
+                    body="Legacy stored body",
+                )
+            ]
+        )
+
+        response = await list_alert_history(
+            request=_make_request(),
+            principal=_principal(),
+            repo=repo,
+            limit=10,
+            before=None,
+        )
+
+        item = response.payload[0]
+        assert item.title == "Legacy stored title"
+        assert item.body == "Legacy stored body"
+        assert item.title_loc_key is None
+        assert item.body_loc_key is None
+        assert item.title_loc_args == []
+        assert item.body_loc_args == []
+
+    @pytest.mark.asyncio
+    async def test_malformed_body_loc_args_coerces_to_empty_list(self) -> None:
+        """Non-list ``body_loc_args`` still surfaces the key with ``[]`` args.
+
+        Given: a row whose ``body_loc_args`` is a string (corrupt or
+            mis-emitted by a buggy rule).
+        When: history runs.
+        Then: the key is still surfaced for inspection but args are
+            normalized to ``[]`` so iOS never receives a non-list on
+            the wire — the resolver itself already falls back to EN
+            for the title/body strings.
+        """
+        bad_payload = _phase_c_row_payload()
+        bad_payload["body_loc_args"] = "this-is-not-a-list"
+        repo = _make_repo(default_language="pl")
+        repo.list_recent_alerts_for_user = AsyncMock(
+            return_value=[
+                _alert_row(
+                    "pid-bad",
+                    payload=bad_payload,
+                    title="EN fallback title",
+                    body="EN fallback body",
+                )
+            ]
+        )
+
+        response = await list_alert_history(
+            request=_make_request(),
+            principal=_principal(),
+            repo=repo,
+            limit=10,
+            before=None,
+        )
+
+        item = response.payload[0]
+        assert item.title == "EN fallback title"
+        assert item.body == "EN fallback body"
+        assert item.body_loc_key == "alerts.body.order_fill_full"
+        assert item.body_loc_args == []
+
+
+class TestGetAlertEventLocalization:
+    """Phase D — singleton endpoint mirrors history's localization."""
+
+    @pytest.mark.asyncio
+    async def test_pl_user_singleton_returns_localized_strings(self) -> None:
+        """Singleton response honors ``user.default_language`` identically.
+
+        Server-side render must match what the sidecar emitted to APNs
+        (Phase C); otherwise an alert that pushed in PL would render
+        in EN when re-opened from the history list.
+        """
+        repo = _make_repo(default_language="pl")
+        repo.get_alert_event_by_public_id = AsyncMock(
+            return_value=_alert_row(
+                "pid-singleton",
+                payload=_phase_c_row_payload(),
+                title="Order filled",
+                body="BUY 100 BTCUSD @ $50000.00 filled on Kraken",
+            )
+        )
+
+        response = await get_alert_event(
+            request=_make_request(),
+            alert_public_id="pid-singleton",
+            principal=_principal(),
+            repo=repo,
+        )
+
+        assert response.payload.title == "Zlecenie zrealizowane"
+        assert "zrealizowane na Kraken" in response.payload.body
+        assert response.payload.title_loc_key == "alerts.title.order_fill_full"
+        assert response.payload.body_loc_key == "alerts.body.order_fill_full"

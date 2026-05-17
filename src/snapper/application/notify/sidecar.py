@@ -815,48 +815,16 @@ def _resolve_localized_title_body(
 ) -> tuple[str, str]:
     """Return localized ``(title, body)`` for the APNs alert dict.
 
-    Falls back to the stored EN ``event.title``/``event.body`` when:
-
-    - ``user_language`` is ``None`` (user never set a preference)
-    - The event payload lacks ``title_loc_key`` / ``body_loc_key``
-      (legacy event row predating Phase C, or rule that opted out)
-    - The catalog lookup itself misses (returns the key verbatim,
-      which we detect and treat as "not localized")
-
-    Args:
-        event: Source alert event row.
-        user_language: Recipient's preferred catalog language code.
-
-    Returns:
-        ``(title, body)`` strings ready to embed in ``aps.alert``.
+    Thin wrapper around ``snapper.i18n.catalog.resolve_alert_strings``
+    that supplies the AlertEventRow shape — the same helper is used by
+    the REST alert-history endpoints so the two surfaces share a
+    single fallback funnel (no risk of divergent legacy-row behavior
+    between APNs and REST).
     """
-    en_title = event["title"]
-    en_body = event["body"]
-    if user_language is None:
-        return en_title, en_body
-    extra = event.get("payload") or {}
-    title_loc_key = extra.get("title_loc_key")
-    body_loc_key = extra.get("body_loc_key")
-    if not isinstance(title_loc_key, str) or not isinstance(body_loc_key, str):
-        return en_title, en_body
-    title_args_raw = extra.get("title_loc_args") or []
-    body_args_raw = extra.get("body_loc_args") or []
-    if not isinstance(title_args_raw, list) or not isinstance(body_args_raw, list):
-        return en_title, en_body
-    title_args = [str(a) for a in title_args_raw]
-    body_args = [str(a) for a in body_args_raw]
-    try:
-        title = catalog.render(title_loc_key, user_language, *title_args)
-        body = catalog.render(body_loc_key, user_language, *body_args)
-    except ValueError as exc:
-        logger.warning(
-            "sidecar: catalog render mismatch for alert_event {pid} (lang={lang}) —"
-            " falling back to EN. {err}",
-            pid=event["public_id"],
-            lang=user_language,
-            err=exc,
-        )
-        return en_title, en_body
-    if title == title_loc_key or body == body_loc_key:
-        return en_title, en_body
-    return title, body
+    return catalog.resolve_alert_strings(
+        payload=event.get("payload"),
+        fallback_title=event["title"],
+        fallback_body=event["body"],
+        user_language=user_language,
+        log_context=f"alert_event={event['public_id']}",
+    )

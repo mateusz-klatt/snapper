@@ -7,6 +7,7 @@ import pytest
 from snapper.i18n.catalog import load_catalogs_from
 from snapper.i18n.catalog import localized
 from snapper.i18n.catalog import render
+from snapper.i18n.catalog import resolve_alert_strings
 from snapper.i18n.catalog import supported_catalog_languages
 
 
@@ -178,3 +179,123 @@ def test_load_catalogs_raises_when_values_are_not_strings(tmp_path: Path) -> Non
     (catalog_dir / "en.json").write_text('{"alerts.x": 1}', encoding="utf-8")
     with pytest.raises(ValueError, match="non-string"):
         load_catalogs_from(catalog_dir)
+
+
+_PHASE_C_PAYLOAD = {
+    "title_loc_key": "alerts.title.order_fill_full",
+    "body_loc_key": "alerts.body.order_fill_full",
+    "body_loc_args": ["BUY", "100", "BTCUSD", "50000.00", "Kraken"],
+}
+
+
+class TestResolveAlertStrings:
+    """Cross-surface alert resolver — shared by APNs sidecar + REST routes."""
+
+    def test_pl_payload_renders_polish_title_and_body(self) -> None:
+        """Happy path: valid loc_keys + matching args resolve via the catalog."""
+        title, body = resolve_alert_strings(
+            payload=_PHASE_C_PAYLOAD,
+            fallback_title="Order filled",
+            fallback_body="BUY 100 BTCUSD @ $50000.00 filled on Kraken",
+            user_language="pl",
+        )
+        assert title == "Zlecenie zrealizowane"
+        assert "zrealizowane na Kraken" in body
+
+    def test_user_language_none_returns_fallback(self) -> None:
+        """No preference → no catalog round-trip, just the stored EN strings."""
+        title, body = resolve_alert_strings(
+            payload=_PHASE_C_PAYLOAD,
+            fallback_title="EN title",
+            fallback_body="EN body",
+            user_language=None,
+        )
+        assert title == "EN title"
+        assert body == "EN body"
+
+    def test_payload_none_returns_fallback(self) -> None:
+        """Legacy row with no payload → fallback (cannot localize without keys)."""
+        title, body = resolve_alert_strings(
+            payload=None,
+            fallback_title="EN title",
+            fallback_body="EN body",
+            user_language="pl",
+        )
+        assert title == "EN title"
+        assert body == "EN body"
+
+    def test_missing_loc_keys_returns_fallback(self) -> None:
+        """Payload without loc_keys (legacy or opted-out rule) → fallback."""
+        title, body = resolve_alert_strings(
+            payload={"deep_link_path": "/orders/1"},
+            fallback_title="EN title",
+            fallback_body="EN body",
+            user_language="pl",
+        )
+        assert title == "EN title"
+        assert body == "EN body"
+
+    def test_non_list_args_returns_fallback(self) -> None:
+        """Malformed args (string instead of list) → fallback all-or-nothing."""
+        bad_payload = dict(_PHASE_C_PAYLOAD)
+        bad_payload["body_loc_args"] = "not-a-list"
+        title, body = resolve_alert_strings(
+            payload=bad_payload,
+            fallback_title="EN title",
+            fallback_body="EN body",
+            user_language="pl",
+        )
+        assert title == "EN title"
+        assert body == "EN body"
+
+    def test_catalog_miss_on_either_field_returns_fallback(self) -> None:
+        """Partial miss → all-or-nothing EN fallback (never half-localized).
+
+        Title key exists in the catalog; body key intentionally does
+        not. The resolver must not return PL title + EN body, since
+        that would visibly mix locales in the rendered alert.
+        """
+        partial_miss = {
+            "title_loc_key": "alerts.title.order_fill_full",
+            "body_loc_key": "alerts.body.does_not_exist",
+            "body_loc_args": [],
+        }
+        title, body = resolve_alert_strings(
+            payload=partial_miss,
+            fallback_title="EN title",
+            fallback_body="EN body",
+            user_language="pl",
+        )
+        assert title == "EN title"
+        assert body == "EN body"
+
+    def test_render_arity_mismatch_returns_fallback(self) -> None:
+        """Drift between catalog template + rule args → fallback + warn log.
+
+        Supplies only 2 args for a template that needs 5. ``catalog.render``
+        raises ``ValueError``; the resolver catches it so the caller never
+        sees a partially-resolved string or a crash.
+        """
+        wrong_arity = dict(_PHASE_C_PAYLOAD)
+        wrong_arity["body_loc_args"] = ["BUY", "100"]
+        title, body = resolve_alert_strings(
+            payload=wrong_arity,
+            fallback_title="EN title",
+            fallback_body="EN body",
+            user_language="pl",
+            log_context="test_render_arity_mismatch",
+        )
+        assert title == "EN title"
+        assert body == "EN body"
+
+    def test_non_string_loc_keys_return_fallback(self) -> None:
+        """``title_loc_key``/``body_loc_key`` must be strings to render."""
+        bad = {"title_loc_key": 42, "body_loc_key": "alerts.body.order_fill_full"}
+        title, body = resolve_alert_strings(
+            payload=bad,
+            fallback_title="EN title",
+            fallback_body="EN body",
+            user_language="pl",
+        )
+        assert title == "EN title"
+        assert body == "EN body"
