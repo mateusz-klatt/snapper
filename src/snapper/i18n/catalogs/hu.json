@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ %@ állapotot jelzett %lld egymást követő heartbeat során",
+  "alerts.body.margin_warning": "%@ %@ %@ fedezethiány miatt blokkolva: %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ teljesült a(z) %@ tőzsdén",
+  "alerts.body.order_rejected": "%@ %@ %@ elutasítva: %@",
+  "alerts.body.position_stop_loss_fired": "Stop-loss aktiválódott ehhez: %@ (%@)",
+  "alerts.title.critical_system_error": "A rendszer degradált: %@",
+  "alerts.title.margin_warning": "Fedezeti figyelmeztetés",
+  "alerts.title.order_fill_full": "Megbízás teljesült",
+  "alerts.title.order_rejected": "Megbízás elutasítva",
+  "alerts.title.position_stop_loss_fired": "Stop-loss aktiválódott"
+}

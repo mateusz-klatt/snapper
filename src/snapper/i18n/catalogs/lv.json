@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ ziņoja %@ %lld secīgos heartbeatos",
+  "alerts.body.margin_warning": "%@ %@ %@ bloķēts maržas dēļ: %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ izpildīts biržā %@",
+  "alerts.body.order_rejected": "%@ %@ %@ noraidīts: %@",
+  "alerts.body.position_stop_loss_fired": "Stop-loss aktivizēts %@ (%@)",
+  "alerts.title.critical_system_error": "Sistēma degradēta: %@",
+  "alerts.title.margin_warning": "Maržas brīdinājums",
+  "alerts.title.order_fill_full": "Rīkojums izpildīts",
+  "alerts.title.order_rejected": "Rīkojums noraidīts",
+  "alerts.title.position_stop_loss_fired": "Stop-loss aktivizēts"
+}

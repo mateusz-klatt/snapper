@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ が %@ を %lld 回連続のハートビートで報告",
+  "alerts.body.margin_warning": "%@ %@ %@ は証拠金によりブロックされました: %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ を $%@ で %@ にて約定",
+  "alerts.body.order_rejected": "%@ %@ %@ は拒否されました: %@",
+  "alerts.body.position_stop_loss_fired": "%@（%@）でストップロス発動",
+  "alerts.title.critical_system_error": "システム劣化: %@",
+  "alerts.title.margin_warning": "証拠金警告",
+  "alerts.title.order_fill_full": "注文約定",
+  "alerts.title.order_rejected": "注文拒否",
+  "alerts.title.position_stop_loss_fired": "ストップロス発動"
+}

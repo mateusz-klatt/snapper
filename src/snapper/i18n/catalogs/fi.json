@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ ilmoitti tilan %@ %lld peräkkäisen heartbeatin ajan",
+  "alerts.body.margin_warning": "%@ %@ %@ estetty vakuusvaatimuksen takia: %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ toteutettu pörssissä %@",
+  "alerts.body.order_rejected": "%@ %@ %@ hylätty: %@",
+  "alerts.body.position_stop_loss_fired": "Stop-loss aktivoitui kohteessa %@ (%@)",
+  "alerts.title.critical_system_error": "Järjestelmä heikentynyt: %@",
+  "alerts.title.margin_warning": "Vakuusvaroitus",
+  "alerts.title.order_fill_full": "Toimeksianto toteutettu",
+  "alerts.title.order_rejected": "Toimeksianto hylätty",
+  "alerts.title.position_stop_loss_fired": "Stop-loss aktivoitui"
+}

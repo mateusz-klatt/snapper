@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ 回報 %@，已連續 %lld 次心跳",
+  "alerts.body.margin_warning": "%@ %@ %@ 因保證金不足被阻止：%@",
+  "alerts.body.order_fill_full": "%@ %@ %@ 以 $%@ 在 %@ 成交",
+  "alerts.body.order_rejected": "%@ %@ %@ 已拒絕：%@",
+  "alerts.body.position_stop_loss_fired": "%@（%@）觸發止損",
+  "alerts.title.critical_system_error": "系統降級：%@",
+  "alerts.title.margin_warning": "保證金警示",
+  "alerts.title.order_fill_full": "訂單已成交",
+  "alerts.title.order_rejected": "訂單已拒絕",
+  "alerts.title.position_stop_loss_fired": "止損已觸發"
+}

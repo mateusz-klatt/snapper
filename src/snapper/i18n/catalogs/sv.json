@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ rapporterade %@ under %lld på varandra följande heartbeats",
+  "alerts.body.margin_warning": "%@ %@ %@ blockerad av marginalkrav: %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ utförd på %@",
+  "alerts.body.order_rejected": "%@ %@ %@ avvisad: %@",
+  "alerts.body.position_stop_loss_fired": "Stop-loss utlöst för %@ (%@)",
+  "alerts.title.critical_system_error": "System degraderat: %@",
+  "alerts.title.margin_warning": "Marginalvarning",
+  "alerts.title.order_fill_full": "Order utförd",
+  "alerts.title.order_rejected": "Order avvisad",
+  "alerts.title.position_stop_loss_fired": "Stop-loss utlöst"
+}

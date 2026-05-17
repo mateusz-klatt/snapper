@@ -18,8 +18,13 @@ def get_files_to_check(project_root: Path) -> list[Path]:
         project_root: Root directory of the project.
 
     Returns:
-        List of paths to generated TypeScript and Swift files.
+        List of paths to generated TypeScript, Swift, and backend-i18n
+        JSON files.
     """
+    backend_i18n_catalog = project_root / "src" / "snapper" / "i18n" / "catalogs"
+    catalog_files: list[Path] = []
+    if backend_i18n_catalog.is_dir():
+        catalog_files = sorted(backend_i18n_catalog.glob("*.json"))
     return [
         project_root / "frontend" / "src" / "types" / "api.generated.ts",
         project_root / "frontend" / "src" / "types" / "ws.generated.ts",
@@ -30,6 +35,7 @@ def get_files_to_check(project_root: Path) -> list[Path]:
         project_root / "ios" / "Snapper" / "Models" / "Generated" / "WSMessages.swift",
         project_root / "ios" / "Snapper" / "Models" / "Generated" / "APITypes.swift",
         project_root / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift",
+        *catalog_files,
     ]
 
 
@@ -72,7 +78,7 @@ def regenerate_types(project_root: Path) -> subprocess.CompletedProcess[str]:
         Completed process result from the type generation command.
     """
     return subprocess.run(
-        ["make", "ui-gen-types", "ios-gen-types"],
+        ["make", "ui-gen-types", "ios-gen-types", "gen-backend-i18n-catalog"],
         check=False,
         cwd=project_root,
         capture_output=True,

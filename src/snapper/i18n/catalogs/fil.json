@@ -1,0 +1,12 @@
+{
+  "alerts.body.critical_system_error": "%@/%@ nag-ulat ng %@ sa loob ng %lld sunod-sunod na heartbeat",
+  "alerts.body.margin_warning": "%@ %@ %@ hinarang dahil sa margin: %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ naisagawa sa %@",
+  "alerts.body.order_rejected": "%@ %@ %@ tinanggihan: %@",
+  "alerts.body.position_stop_loss_fired": "Na-activate ang tigil-pagkalugi sa %@ (%@)",
+  "alerts.title.critical_system_error": "Humina ang sistema: %@",
+  "alerts.title.margin_warning": "Babala sa margin",
+  "alerts.title.order_fill_full": "Naisagawa ang order",
+  "alerts.title.order_rejected": "Tinanggihan ang order",
+  "alerts.title.position_stop_loss_fired": "Na-activate ang tigil-pagkalugi"
+}
