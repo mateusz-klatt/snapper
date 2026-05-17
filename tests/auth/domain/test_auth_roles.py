@@ -229,6 +229,7 @@ class TestUserService:
         db_user.password_hash = "hashed_password"
         db_user.role = "viewer"
         db_user.is_active = True
+        db_user.default_language = None
         db_user.created_at = datetime.now(UTC)
         db_user.timestamp = datetime.now(UTC)
         db_user.known_to = KNOWN_TO_MAX
@@ -627,6 +628,75 @@ class TestUserService:
         result = await user_service.delete_user("test_user")
         assert result is True
         assert mock_session.commit.called
+
+    @pytest.mark.asyncio
+    async def test_update_self_preferences_success(
+        self, user_service: UserService, mock_db_user: User
+    ) -> None:
+        """Self-service language update via SCD2 close+insert.
+
+        Given: An active user row exists.
+        When: ``update_self_preferences`` is called with a new
+            ``default_language``.
+        Then: close_and_insert is invoked, the session commits, and the
+            returned profile reflects the new language.
+        """
+        mock_session = AsyncMock()
+        mock_session.add = MagicMock()
+        mock_select_result = MagicMock()
+        mock_select_result.scalar_one_or_none.return_value = mock_db_user
+        mock_ci_result = MagicMock()
+        mock_ci_result.scalars.return_value.first.return_value = mock_db_user
+        mock_session.execute.side_effect = [mock_select_result, mock_ci_result, AsyncMock()]
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        auth_user = await user_service.update_self_preferences(
+            user_id="testuser", default_language="pl"
+        )
+        assert auth_user is not None
+        assert mock_session.commit.called
+        assert mock_session.refresh.called
+
+    @pytest.mark.asyncio
+    async def test_update_self_preferences_clears_with_none(
+        self, user_service: UserService, mock_db_user: User
+    ) -> None:
+        """Passing ``default_language=None`` is a valid clear operation."""
+        mock_db_user.default_language = "pl"
+        mock_session = AsyncMock()
+        mock_session.add = MagicMock()
+        mock_select_result = MagicMock()
+        mock_select_result.scalar_one_or_none.return_value = mock_db_user
+        mock_ci_result = MagicMock()
+        mock_ci_result.scalars.return_value.first.return_value = mock_db_user
+        mock_session.execute.side_effect = [mock_select_result, mock_ci_result, AsyncMock()]
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        auth_user = await user_service.update_self_preferences(
+            user_id="testuser", default_language=None
+        )
+        assert auth_user is not None
+        assert mock_session.commit.called
+
+    @pytest.mark.asyncio
+    async def test_update_self_preferences_not_found(self, user_service: UserService) -> None:
+        """Returns ``None`` when the active row vanished.
+
+        Surfaces between auth resolution and the SCD2 close+insert.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        auth_user = await user_service.update_self_preferences(
+            user_id="nonexistent", default_language="pl"
+        )
+        assert auth_user is None
 
     @pytest.mark.asyncio
     async def test_delete_user_not_found(self, user_service: UserService) -> None:

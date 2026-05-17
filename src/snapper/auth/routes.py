@@ -35,6 +35,7 @@ from snapper.auth.schemas.requests import DeactivateUserRequest
 from snapper.auth.schemas.requests import LoginRequest
 from snapper.auth.schemas.requests import RefreshTokenPayload
 from snapper.auth.schemas.requests import RefreshTokenRequest
+from snapper.auth.schemas.requests import UpdateAuthMeRequest
 from snapper.auth.schemas.requests import UpdateUserRequest
 from snapper.auth.schemas.responses import LoginData
 from snapper.auth.schemas.responses import LoginResponse
@@ -601,6 +602,58 @@ async def get_current_user_profile(
         public_id=pid,
         timestamp=ts,
         payload=user,
+    )
+
+
+@router.post("/me/update", openapi_extra=openapi_schema(UpdateAuthMeRequest))
+async def update_current_user_preferences(
+    request: Request,
+    current_user: Annotated[AuthPrincipal, Depends(require_authentication)],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    body: Annotated[UpdateAuthMeRequest, Depends(json_body(UpdateAuthMeRequest))],
+) -> UserResponse:
+    """Update the caller's self-service preferences.
+
+    Currently exposes ``default_language`` only. Mirrors the codebase's
+    ``POST + verb`` admin endpoint shape (:func:`update_user` at
+    ``POST /api/users/{user_id}/update``) so CORS stays untouched —
+    ``POST`` is already in the allowlist and we don't introduce REST
+    ``PATCH`` semantics here.
+
+    Args:
+        request: FastAPI request (provides REST tracker for provenance).
+        current_user: Authenticated principal from dependency.
+        _csrf: CSRF guard (cookie+header double-submit).
+        body: Validated request envelope with ``default_language``.
+
+    Returns:
+        UserResponse wrapping the updated user profile.
+
+    Raises:
+        HTTPException: 404 if the caller's user row was not found
+        (concurrent admin deactivation between auth-dep resolution
+        and update is the only known way this surfaces).
+    """
+    user_service = get_user_service()
+    updated_user = await user_service.update_self_preferences(
+        user_id=current_user.username,
+        default_language=body.payload.default_language,
+    )
+    if not updated_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=_USER_NOT_FOUND,
+        )
+    sid, seq, pid, ts = _mint_provenance(request)
+    updated_user = updated_user.model_copy(
+        update={"active_wallet_public_id": current_user.active_wallet_public_id}
+    )
+    return UserResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=updated_user,
     )
 
 
