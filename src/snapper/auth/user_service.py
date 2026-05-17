@@ -121,6 +121,7 @@ class UserService:
             role=UserRole(db_user.role),
             is_active=db_user.is_active,
             created_at=db_user.created_at,
+            default_language=db_user.default_language,
         )
 
     async def build_auth_principal(self, user: UserProfile) -> AuthPrincipal:
@@ -385,6 +386,59 @@ class UserService:
                 "password_hash": db_user.password_hash,
                 "role": role.value if role is not None else db_user.role,
                 "is_active": is_active if is_active is not None else db_user.is_active,
+                "default_language": db_user.default_language,
+                "created_at": db_user.created_at,
+                "session_id": self._tracker.session_id,
+                "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
+            }
+            new_row = await close_and_insert(
+                session=session,
+                model=User,
+                match_filters=[User.username == user_id],
+                new_values=new_values,
+                bus_time=now,
+            )
+            await session.commit()
+            await session.refresh(new_row)
+            return self._db_user_to_auth_user(new_row)
+
+    async def update_self_preferences(
+        self,
+        user_id: str,
+        default_language: str | None,
+    ) -> UserProfile | None:
+        """Update the caller's self-service preferences via SCD2 close+insert.
+
+        Currently only ``default_language`` is preference-managed. The
+        admin-facing :meth:`update_user` is intentionally separate so
+        ``MANAGE_USERS`` permission stays narrowly-scoped.
+
+        Args:
+            user_id: Caller's username (from auth principal).
+            default_language: New ``default_language`` value. Passing
+                ``None`` clears the preference (alert pipeline reverts
+                to English emission for that user).
+
+        Returns:
+            Updated UserProfile or ``None`` if the user was not found.
+        """
+        async with self.repository.session() as session:
+            stmt = select(User).where(
+                User.username == user_id,
+                *where_active_now(User),
+            )
+            result = await session.execute(stmt)
+            db_user = result.scalar_one_or_none()
+            if not db_user:
+                return None
+            now = datetime.now(UTC)
+            new_values: dict[str, object | None] = {
+                "username": db_user.username,
+                "email": db_user.email,
+                "password_hash": db_user.password_hash,
+                "role": db_user.role,
+                "is_active": db_user.is_active,
+                "default_language": default_language,
                 "created_at": db_user.created_at,
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
@@ -444,12 +498,13 @@ class UserService:
             if not db_user:
                 return False
             now = datetime.now(UTC)
-            new_values: dict[str, object] = {
+            new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
                 "password_hash": db_user.password_hash,
                 "role": db_user.role,
                 "is_active": False,
+                "default_language": db_user.default_language,
                 "created_at": db_user.created_at,
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
@@ -532,12 +587,13 @@ class UserService:
             if not db_user:
                 return False
             now = datetime.now(UTC)
-            new_values: dict[str, object] = {
+            new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
                 "password_hash": db_user.password_hash,
                 "role": db_user.role,
                 "is_active": False,
+                "default_language": db_user.default_language,
                 "created_at": db_user.created_at,
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
@@ -576,12 +632,13 @@ class UserService:
             if not self._verify_password(old_password, db_user.password_hash):
                 return False
             now = datetime.now(UTC)
-            new_values: dict[str, object] = {
+            new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
                 "password_hash": self.hash_password(new_password),
                 "role": db_user.role,
                 "is_active": db_user.is_active,
+                "default_language": db_user.default_language,
                 "created_at": db_user.created_at,
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
@@ -616,12 +673,13 @@ class UserService:
             if not db_user:
                 raise ValueError(f"User '{user_id}' not found")
             now = datetime.now(UTC)
-            new_values: dict[str, object] = {
+            new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
                 "password_hash": self.hash_password(new_password),
                 "role": db_user.role,
                 "is_active": db_user.is_active,
+                "default_language": db_user.default_language,
                 "created_at": db_user.created_at,
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
@@ -655,12 +713,13 @@ class UserService:
             if not db_user:
                 raise ValueError(f"User '{username}' not found")
             now = datetime.now(UTC)
-            new_values: dict[str, object] = {
+            new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
                 "password_hash": self.hash_password(new_password),
                 "role": db_user.role,
                 "is_active": db_user.is_active,
+                "default_language": db_user.default_language,
                 "created_at": db_user.created_at,
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),

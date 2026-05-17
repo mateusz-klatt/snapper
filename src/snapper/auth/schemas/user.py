@@ -47,6 +47,13 @@ class UserProfile(StrictDataSchema[Literal["user_profile"]]):
             The frontend reads this field to route WS subscriptions
             and REST requests against the same wallet scope the
             backend authorises.
+        default_language: Optional catalog-language code (e.g.
+            ``"pl"``, ``"de"``, ``"zh-Hans"``) that drives backend
+            localization of push-notification titles/bodies + REST
+            alert-history rendering. ``None`` for legacy users who
+            have not yet picked a language via the frontend
+            ``LocaleSwitcher``; the alert pipeline falls through to
+            English emission in that case.
     """
 
     type: Literal["user_profile"] = "user_profile"
@@ -58,3 +65,4 @@ class UserProfile(StrictDataSchema[Literal["user_profile"]]):
     operator_public_ids: list[str] = Field(default=[])
     primary_operator_public_id: str | None = None
     active_wallet_public_id: str | None = None
+    default_language: str | None = None

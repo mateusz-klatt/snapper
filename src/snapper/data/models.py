@@ -535,6 +535,7 @@ class User(TemporalMixin, Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(32))
     is_active: Mapped[bool] = mapped_column(default=True)
+    default_language: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     created_by_user_public_id: Mapped[str | None] = mapped_column(
         UUIDColumn(), nullable=True, index=True

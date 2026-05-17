@@ -18,6 +18,7 @@ from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import StrictBody
 from snapper.auth.domain.roles import UserRole
 from snapper.core.ids import is_uuid7
+from snapper.i18n.supported_languages import SUPPORTED_LANGUAGES
 
 
 class LoginBody(StrictBody):
@@ -96,6 +97,53 @@ class UpdateUserRequest(PayloadRequest[Literal["update_user_request"], UpdateUse
     """
 
     type: Literal["update_user_request"] = "update_user_request"
+
+
+class UpdateAuthMeBody(StrictBody):
+    """Self-service caller preferences request body.
+
+    Used by the authenticated user to update their own preferences via
+    ``POST /api/auth/me/update``. Currently exposes only
+    ``default_language`` — additional preference fields may be added
+    later as Phase A or follow-up plans evolve. The admin-facing
+    :class:`UpdateUserBody` deliberately stays separate so the
+    ``MANAGE_USERS`` permission does not silently expand its scope.
+
+    Attributes:
+        default_language: Catalog-language code (one of
+            :data:`snapper.i18n.supported_languages.SUPPORTED_LANGUAGES`)
+            or ``None`` to clear the preference and revert push
+            notifications + alert history to English emission for this
+            user.
+    """
+
+    default_language: str | None = Field(default=None, max_length=20)
+
+    @field_validator("default_language")
+    @classmethod
+    def _validate_language_code(cls, value: str | None) -> str | None:
+        """Reject unknown language codes at the schema boundary.
+
+        Lets the service layer trust the value without a second check.
+        """
+        if value is None:
+            return None
+        if value not in SUPPORTED_LANGUAGES:
+            raise ValueError(
+                f"Unknown language code '{value}'. Must be one of the "
+                f"{len(SUPPORTED_LANGUAGES)} catalog languages."
+            )
+        return value
+
+
+class UpdateAuthMeRequest(PayloadRequest[Literal["update_auth_me_request"], UpdateAuthMeBody]):
+    """Self-service caller preferences request envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["update_auth_me_request"] = "update_auth_me_request"
 
 
 class ChangePasswordBody(StrictBody):

@@ -602,6 +602,7 @@ def upgrade() -> None:
         sa.Column("password_hash", sa.String(255), nullable=False),
         sa.Column("role", sa.String(32), nullable=False),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
+        sa.Column("default_language", sa.String(20), nullable=True),
         sa.Column("created_by_user_public_id", _uuid_col(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("session_id", _uuid_col(), nullable=False),
