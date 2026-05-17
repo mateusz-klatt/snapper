@@ -21,15 +21,50 @@ def test_set_is_frozen_so_callers_cannot_mutate_the_canonical_list() -> None:
     assert isinstance(SUPPORTED_LANGUAGES, frozenset)
 
 
-def test_count_locks_in_45_codes() -> None:
-    """Locks the count to 45.
+def test_count_locks_in_50_union_codes() -> None:
+    """Locks the union count to 50.
 
-    Given: The catalog ships 44 non-EN languages + EN as source.
+    Given: The union of frontend (45) and iOS (45) catalog codes
+        contains 5 codes that differ in shape (``pt`` vs ``pt-BR``,
+        ``no`` vs ``nb``, ``zh`` vs ``zh-Hans``, ``sr`` vs ``sr-Latn``,
+        ``my`` vs ``my-MM``).
     When: ``SUPPORTED_LANGUAGES`` cardinality is measured.
-    Then: The count is exactly 45 — bump deliberately when a new
+    Then: The count is exactly 50 — bump deliberately when a new
         language lands in iOS / frontend.
     """
-    assert len(SUPPORTED_LANGUAGES) == 45
+    assert len(SUPPORTED_LANGUAGES) == 50
+
+
+def test_includes_frontend_only_code_forms() -> None:
+    """Frontend code forms are accepted.
+
+    Given: The frontend's ``CatalogLanguage`` uses ``pt``, ``no``,
+        ``zh``, ``sr``, ``my-MM`` while iOS uses the alternative forms.
+    When: We check membership of frontend forms.
+    Then: All are present — the frontend can store its preference
+        without a translation step.
+    """
+    assert "pt" in SUPPORTED_LANGUAGES
+    assert "no" in SUPPORTED_LANGUAGES
+    assert "zh" in SUPPORTED_LANGUAGES
+    assert "sr" in SUPPORTED_LANGUAGES
+    assert "my-MM" in SUPPORTED_LANGUAGES
+
+
+def test_includes_ios_only_code_forms() -> None:
+    """The iOS code forms are accepted.
+
+    Given: The iOS ``CatalogLanguage`` uses ``pt-BR``, ``nb``,
+        ``zh-Hans``, ``sr-Latn``, ``my``.
+    When: We check membership of iOS forms.
+    Then: All are present — the iOS app can store its preference
+        directly.
+    """
+    assert "pt-BR" in SUPPORTED_LANGUAGES
+    assert "nb" in SUPPORTED_LANGUAGES
+    assert "zh-Hans" in SUPPORTED_LANGUAGES
+    assert "sr-Latn" in SUPPORTED_LANGUAGES
+    assert "my" in SUPPORTED_LANGUAGES
 
 
 def test_english_is_present_as_the_source_language() -> None:

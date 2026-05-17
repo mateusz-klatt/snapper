@@ -1,11 +1,16 @@
 """Catalog language codes a user may pick as their ``default_language``.
 
-Mirrors ``CatalogLanguage`` in ``ios/Snapper/I18n/CatalogLanguage.swift``
-(44 cases). Phase B of `plan_2026_05_17_backend_user_language_i18n.md`
-will replace this hardcoded set with a parser that reads the actual
-xcstrings file at build time, but for Phase A the values are inlined so
-the API endpoint can validate input without depending on the catalog
-infrastructure.
+Union of ``CatalogLanguage`` codes from both the iOS xcstrings catalog
+(``ios/Snapper/I18n/CatalogLanguage.swift``) and the frontend i18n
+catalog (``frontend/src/i18n/types.ts``). The two clients ship slightly
+different code forms for the same languages (e.g. iOS uses ``pt-BR`` and
+``nb``; frontend uses ``pt`` and ``no``) — Phase B will introduce a
+canonical normalization layer, but Phase A accepts both forms so each
+client can send what its own catalog uses without a translation step.
+
+Phase B of `plan_2026_05_17_backend_user_language_i18n.md` will replace
+this hardcoded set with a generator-driven constant sourced from the
+authoritative xcstrings parse + a frontend-↔-iOS code mapping table.
 """
 
 SUPPORTED_LANGUAGES: frozenset[str] = frozenset(
@@ -18,8 +23,10 @@ SUPPORTED_LANGUAGES: frozenset[str] = frozenset(
         "es",
         "it",
         "nl",
+        "pt",
         "pt-BR",
         "sv",
+        "no",
         "nb",
         "da",
         "fi",
@@ -32,6 +39,7 @@ SUPPORTED_LANGUAGES: frozenset[str] = frozenset(
         "ru",
         "lt",
         "lv",
+        "sr",
         "sr-Latn",
         "bs",
         "sq",
@@ -43,6 +51,7 @@ SUPPORTED_LANGUAGES: frozenset[str] = frozenset(
         "id",
         "sw",
         "bn",
+        "zh",
         "zh-Hans",
         "zh-Hant",
         "ja",
@@ -50,6 +59,7 @@ SUPPORTED_LANGUAGES: frozenset[str] = frozenset(
         "th",
         "vi",
         "my",
+        "my-MM",
         "hi",
         "ar",
         "he",
@@ -57,10 +67,11 @@ SUPPORTED_LANGUAGES: frozenset[str] = frozenset(
         "hy",
     }
 )
-"""Frozen set of 45 catalog language codes a user may select as their
-``default_language``. Source of truth mirrors iOS ``CatalogLanguage``;
-must stay in sync until Phase B replaces this with a generator-driven
-constant. Drift is currently caught by the catalog-parity test."""
+"""Frozen set of catalog language codes a user may select as their
+``default_language``. Source: union of iOS ``CatalogLanguage`` (45
+cases) and frontend ``CatalogLanguage`` (45 cases), differing in 5
+codes — total 50. Phase B will collapse the union via a single
+normalization layer."""
 
 
 def is_supported_language(value: str) -> bool:

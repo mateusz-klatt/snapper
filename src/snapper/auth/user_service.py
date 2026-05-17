@@ -498,12 +498,13 @@ class UserService:
             if not db_user:
                 return False
             now = datetime.now(UTC)
-            new_values: dict[str, object] = {
+            new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
                 "password_hash": db_user.password_hash,
                 "role": db_user.role,
                 "is_active": False,
+                "default_language": db_user.default_language,
                 "created_at": db_user.created_at,
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
@@ -586,12 +587,13 @@ class UserService:
             if not db_user:
                 return False
             now = datetime.now(UTC)
-            new_values: dict[str, object] = {
+            new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
                 "password_hash": db_user.password_hash,
                 "role": db_user.role,
                 "is_active": False,
+                "default_language": db_user.default_language,
                 "created_at": db_user.created_at,
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
@@ -630,12 +632,13 @@ class UserService:
             if not self._verify_password(old_password, db_user.password_hash):
                 return False
             now = datetime.now(UTC)
-            new_values: dict[str, object] = {
+            new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
                 "password_hash": self.hash_password(new_password),
                 "role": db_user.role,
                 "is_active": db_user.is_active,
+                "default_language": db_user.default_language,
                 "created_at": db_user.created_at,
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
@@ -670,12 +673,13 @@ class UserService:
             if not db_user:
                 raise ValueError(f"User '{user_id}' not found")
             now = datetime.now(UTC)
-            new_values: dict[str, object] = {
+            new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
                 "password_hash": self.hash_password(new_password),
                 "role": db_user.role,
                 "is_active": db_user.is_active,
+                "default_language": db_user.default_language,
                 "created_at": db_user.created_at,
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
@@ -709,12 +713,13 @@ class UserService:
             if not db_user:
                 raise ValueError(f"User '{username}' not found")
             now = datetime.now(UTC)
-            new_values: dict[str, object] = {
+            new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
                 "password_hash": self.hash_password(new_password),
                 "role": db_user.role,
                 "is_active": db_user.is_active,
+                "default_language": db_user.default_language,
                 "created_at": db_user.created_at,
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
