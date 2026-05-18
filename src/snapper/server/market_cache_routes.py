@@ -3,6 +3,9 @@
 Two endpoints surface the cache + stats worker to the SPA and ops
 dashboards:
 
+- ``GET /api/market/cache/stats/configured``
+  - Returns every configured pair with its current cached stats or a
+    placeholder when the worker has not computed the pair yet.
 - ``GET /api/market/cache/stats/{exchange_a}/{symbol_a}/{exchange_b}/{symbol_b}``
   - Returns a placeholder envelope with ``is_warm=false`` when the
     worker has yet to compute the pair; ``404`` only when the pair
@@ -42,6 +45,8 @@ from snapper.api.schemas.market_cache import CachedStatsPayload
 from snapper.api.schemas.market_cache import CachedStatsResponse
 from snapper.api.schemas.market_cache import CacheHealthPayload
 from snapper.api.schemas.market_cache import CacheHealthResponse
+from snapper.api.schemas.market_cache import ListedCachedStatsPayload
+from snapper.api.schemas.market_cache import ListedCachedStatsResponse
 from snapper.application.services.market_cache import MarketCacheService
 from snapper.application.services.market_cache import PairStats
 from snapper.application.services.market_stats import MarketStatsWorker
@@ -87,6 +92,52 @@ def _envelope_provenance(request: Request) -> tuple[str, int, str, datetime]:
     return sid, seq, pid, ts
 
 
+def _cached_stats_payload(left: str, right: str, stats: PairStats) -> CachedStatsPayload:
+    """Project a cache :class:`PairStats` snapshot onto the REST payload shape."""
+    return CachedStatsPayload(
+        left=left,
+        right=right,
+        pearson_r=stats.pearson_r,
+        pearson_n=stats.pearson_n,
+        coint_t=stats.coint_t,
+        coint_pvalue=stats.coint_pvalue,
+        coint_critical_values=stats.coint_critical_values,
+        computed_at=stats.computed_at,
+        sample_count=stats.sample_count,
+        is_warm=stats.is_warm,
+    )
+
+
+@router.get(
+    "/stats/configured",
+)
+async def get_configured_cached_pair_stats(
+    request: Request,
+    _principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+) -> ListedCachedStatsResponse:
+    """Return cached stats for every configured market-stats pair."""
+    worker: MarketStatsWorker | None = getattr(request.app.state, "market_stats_worker", None)
+    cache: MarketCacheService | None = getattr(request.app.state, "market_cache", None)
+    if worker is None or cache is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Stats worker not initialized",
+        )
+    pairs: list[CachedStatsPayload] = []
+    for spec in sorted(worker.configured_pairs(), key=lambda item: (item.left_str, item.right_str)):
+        stats = await cache.get_pair_stats(spec.left_str, spec.right_str) or PairStats()
+        pairs.append(_cached_stats_payload(spec.left_str, spec.right_str, stats))
+    payload = ListedCachedStatsPayload(count=len(pairs), pairs=pairs)
+    sid, seq, pid, ts = _envelope_provenance(request)
+    return ListedCachedStatsResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=payload,
+    )
+
+
 @router.get(
     "/stats/{exchange_a}/{symbol_a}/{exchange_b}/{symbol_b}",
 )
@@ -127,18 +178,7 @@ async def get_cached_pair_stats(
             detail=f"Pair not configured: {left_str} | {right_str}",
         )
     stats = await cache.get_pair_stats(left_str, right_str) or PairStats()
-    payload = CachedStatsPayload(
-        left=left_str,
-        right=right_str,
-        pearson_r=stats.pearson_r,
-        pearson_n=stats.pearson_n,
-        coint_t=stats.coint_t,
-        coint_pvalue=stats.coint_pvalue,
-        coint_critical_values=stats.coint_critical_values,
-        computed_at=stats.computed_at,
-        sample_count=stats.sample_count,
-        is_warm=stats.is_warm,
-    )
+    payload = _cached_stats_payload(left_str, right_str, stats)
     sid, seq, pid, ts = _envelope_provenance(request)
     return CachedStatsResponse(
         session_id=sid,
