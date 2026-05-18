@@ -36,14 +36,12 @@ Using threaded broker
 """
 
 import asyncio
-import contextlib
 import threading
 from dataclasses import dataclass
 from typing import Any
 from typing import Final
 
 import zmq
-import zmq.asyncio
 from loguru import logger
 
 from snapper.application.process_manager.models import RegisterableProcess
@@ -57,28 +55,16 @@ from snapper.messaging.infrastructure.validated_socket import HWM_BROKER
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.utils.logging import set_log_context
 
-_MAX_DRAIN_PER_BURST: Final[int] = 64
-"""Per-direction cap on messages drained inside one ``_forward_polled_messages`` call.
+_POLL_TIMEOUT_MS: Final[int] = 100
+"""Per-iteration poll timeout (ms) in the blocking proxy thread.
 
-Bounds how aggressively the broker can monopolise the shared event loop
-during sustained bursts. After hitting this cap on a single drain
-direction the broker yields via ``asyncio.sleep(0)`` so other coroutines
-(API request handlers, DB writers, publishers) get scheduling time
-before the next poll cycle.
-
-Tuning history (production rollout 2026-05-18):
-* 256: V1 GREEN but ``/api/health`` p95 ≈ 0.80s (event-loop saturated).
-* 64:  V1 GREEN, p95 ≈ 0.64s — best balance found.
-* 16:  V1 RED for kraken (broker delivery ~22% — too aggressive
-       yielding causes XSUB buffer overflow at high inbound rate),
-       p95 ≈ 0.49s.
-
-The async proxy hits a structural ceiling under production load:
-no cap value satisfies both V1 (≥0.95 ZMQ/PG ratio) AND V5
-(p95 <0.05s) simultaneously. cap=64 is the local optimum until
-the threaded blocking proxy (escalation to ``ZmqBrokerThread`` at
-broker.py:431+) is wired into the launcher — that fix lives in
-a follow-up PR."""
+100ms balances responsiveness (cooperative shutdown via
+``_stop_event``) against CPU idle when no traffic flows. The proxy
+thread runs entirely off the FastAPI asyncio event loop — there is
+no per-message yield latency cost like the prior asyncio
+implementation, so the cap-tuning history (256→64→16) that mattered
+on the event loop is irrelevant here. We forward every available
+message per poll wake-up without any artificial cap."""
 
 
 @dataclass
@@ -107,24 +93,32 @@ class BrokerStatus:
     mode=ProcessModeEnum.THREAD,
 )
 class ZmqBrokerProcess(RegisterableProcess):
-    """Async ZMQ XPUB/XSUB broker as a RegisterableProcess.
+    """Threaded blocking ZMQ XPUB/XSUB broker as a RegisterableProcess.
 
-    This broker implements the XPUB/XSUB proxy pattern using asyncio for
-    non-blocking operation. It integrates with the process manager for
-    lifecycle management and monitoring.
+    Refactored 2026-05-18 from an asyncio-loop proxy to a blocking
+    proxy running in a dedicated daemon thread. The async event loop
+    no longer participates in message forwarding, freeing FastAPI
+    request handlers + DB writer coroutines to run without
+    competition. Public ``start()``/``stop()``/``get_status()``/
+    ``wait_for_subscription()`` API and the XSUB/XPUB endpoint
+    contract are unchanged so the wider system needs no edits.
 
     The broker creates two bound sockets:
-    - XSUB: Publishers connect here to send messages
-    - XPUB: Subscribers connect here to receive messages
+    - XSUB: Publishers connect here to send messages.
+    - XPUB: Subscribers connect here to receive messages.
 
-    Messages are forwarded bidirectionally: data flows XSUB -> XPUB,
-    while subscriptions flow XPUB -> XSUB.
+    Messages are forwarded bidirectionally inside the proxy thread:
+    data flows XSUB -> XPUB; subscriptions flow XPUB -> XSUB. With
+    ``xpub_verbose=True`` every subscription frame from each
+    subscriber is forwarded (including duplicates) so the broker can
+    update an observed-set the backtest replay engine uses to
+    confirm wiring before streaming.
 
     Attributes:
         settings: Application settings instance.
         xsub_endpoint: Endpoint where publishers connect (e.g., "tcp://*:5555").
         xpub_endpoint: Endpoint where subscribers connect (e.g., "tcp://*:5556").
-        context: ZMQ async context for socket creation.
+        context: Synchronous ZMQ context for socket creation.
         xsub_socket: XSUB socket receiving from publishers.
         xpub_socket: XPUB socket sending to subscribers.
         running: Flag indicating if broker is active.
@@ -133,7 +127,7 @@ class ZmqBrokerProcess(RegisterableProcess):
         Using with process manager::
 
             broker = ZmqBrokerProcess()
-            await broker.start()  # Non-blocking
+            await broker.start()  # Non-blocking — spawns the proxy thread.
             status = broker.get_status()
             await broker.stop()
     """
@@ -159,7 +153,7 @@ class ZmqBrokerProcess(RegisterableProcess):
         xpub_endpoint: str | None = None,
         xpub_verbose: bool = False,
     ):
-        """Initialize the async ZMQ broker.
+        """Initialise the threaded ZMQ broker facade.
 
         Args:
             xsub_endpoint: Endpoint for publishers to connect. Defaults to settings value.
@@ -167,28 +161,32 @@ class ZmqBrokerProcess(RegisterableProcess):
             xpub_verbose: When True, enable XPUB_VERBOSE sockopt (forwards every
                 subscription frame including duplicates) and track subscriptions
                 into ``_observed_subscriptions``. Used by the backtest ZMQ replay
-                engine to prove end-to-end PUB→SUB wiring before streaming. Default
+                engine to prove end-to-end PUB->SUB wiring before streaming. Default
                 False preserves live-broker behaviour.
         """
         self.settings = get_settings()
         self.xsub_endpoint = xsub_endpoint or self.settings.zmq_broker_xsub
         self.xpub_endpoint = xpub_endpoint or self.settings.zmq_broker_xpub
         self.xpub_verbose = xpub_verbose
-        self.context: zmq.asyncio.Context | None = None
-        self.xsub_socket: zmq.asyncio.Socket | None = None
-        self.xpub_socket: zmq.asyncio.Socket | None = None
-        self.proxy_task: asyncio.Task[None] | None = None
+        self.context: zmq.Context[zmq.Socket[bytes]] | None = None
+        self.xsub_socket: zmq.Socket[bytes] | None = None
+        self.xpub_socket: zmq.Socket[bytes] | None = None
+        self.proxy_thread: threading.Thread | None = None
         self.running = False
         self._observed_subscriptions: dict[bytes, int] | None = None
-        self._observation_changed: asyncio.Condition | None = None
-        self._poller: zmq.asyncio.Poller | None = None
+        self._observation_changed: threading.Condition | None = None
+        self._stop_event = threading.Event()
 
     async def start(self) -> None:
-        """Start the async broker and begin forwarding messages.
+        """Start the broker by spawning the proxy thread.
 
-        Creates ZMQ context, binds XSUB and XPUB sockets, and starts
-        the proxy loop as an asyncio task. Idempotent - does nothing
-        if already running.
+        Creates a synchronous ZMQ context, binds XSUB and XPUB
+        sockets, optionally enables ``XPUB_VERBOSE`` subscription
+        tracking, and launches the blocking proxy loop in a daemon
+        thread. Socket creation + bind are wrapped in
+        :func:`asyncio.to_thread` so the calling event loop never
+        blocks on ZMQ ``bind()`` syscalls under contention.
+        Idempotent.
 
         Raises:
             zmq.ZMQError: If socket binding fails (e.g., address in use).
@@ -197,7 +195,14 @@ class ZmqBrokerProcess(RegisterableProcess):
         if self.running:
             logger.warning("Broker already running")
             return
-        self.context = zmq.asyncio.Context()
+        await asyncio.to_thread(self._sync_start)
+        self.running = True
+        logger.info(f"ZMQ Broker started: {self.xsub_endpoint} -> {self.xpub_endpoint}")
+
+    def _sync_start(self) -> None:
+        """Bind sockets and spawn the proxy thread (called via to_thread)."""
+        self._stop_event.clear()
+        self.context = zmq.Context()
         self.xsub_socket = self.context.socket(zmq.XSUB)
         apply_hwm(self.xsub_socket, rcvhwm=HWM_BROKER)
         self.xsub_socket.bind(self.xsub_endpoint)
@@ -207,39 +212,51 @@ class ZmqBrokerProcess(RegisterableProcess):
         if self.xpub_verbose:
             self.xpub_socket.setsockopt(zmq.XPUB_VERBOSE, 1)
             self._observed_subscriptions = {}
-            self._observation_changed = asyncio.Condition()
+            self._observation_changed = threading.Condition()
         self.xpub_socket.bind(self.xpub_endpoint)
         self.xpub_endpoint = self._resolve_endpoint(self.xpub_socket, self.xpub_endpoint)
-        self._poller = zmq.asyncio.Poller()
-        self._poller.register(self.xsub_socket, zmq.POLLIN)
-        self._poller.register(self.xpub_socket, zmq.POLLIN)
-        self.proxy_task = asyncio.create_task(self._proxy_loop())
-        self.running = True
-        logger.info(f"ZMQ Broker started: {self.xsub_endpoint} -> {self.xpub_endpoint}")
+        self.proxy_thread = threading.Thread(
+            target=self._proxy_loop, name="zmq-broker-proxy", daemon=True
+        )
+        self.proxy_thread.start()
 
     async def stop(self) -> None:
         """Stop the broker and clean up resources.
 
-        Cancels the proxy task, closes sockets with LINGER=0 to discard
-        pending messages, and terminates the ZMQ context. Idempotent.
+        Signals the proxy thread to stop, joins it with a timeout,
+        closes sockets with LINGER=0 to discard pending messages,
+        and terminates the ZMQ context. The shutdown sequence runs
+        in a worker thread so the calling event loop never blocks
+        on ``context.term()`` (which can hang briefly while sockets
+        finish draining). Also notifies any waiters on the
+        subscription condition so :meth:`wait_for_subscription`
+        callers wake up promptly when the broker dies. Idempotent.
         """
         if not self.running:
             return
         self.running = False
-        if self.proxy_task:
-            self.proxy_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.proxy_task
-        if self.xsub_socket:
+        await asyncio.to_thread(self._sync_stop)
+        logger.info("ZMQ Broker stopped")
+
+    def _sync_stop(self) -> None:
+        """Signal the proxy thread, join it, and tear down sockets."""
+        self._stop_event.set()
+        condition = self._observation_changed
+        if condition is not None:
+            with condition:
+                condition.notify_all()
+        thread = self.proxy_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5.0)
+        self.proxy_thread = None
+        if self.xsub_socket is not None:
             self.xsub_socket.setsockopt(zmq.LINGER, 0)
             self.xsub_socket.close()
-        if self.xpub_socket:
+        if self.xpub_socket is not None:
             self.xpub_socket.setsockopt(zmq.LINGER, 0)
             self.xpub_socket.close()
-        if self.context:
+        if self.context is not None:
             self.context.term()
-        self._poller = None
-        logger.info("ZMQ Broker stopped")
 
     @staticmethod
     def _resolve_endpoint(socket: Any, configured: str) -> str:
@@ -264,7 +281,7 @@ class ZmqBrokerProcess(RegisterableProcess):
             return actual
         return configured
 
-    async def _handle_subscription_frame(self, message: list[bytes]) -> bool:
+    def _handle_subscription_frame(self, message: list[bytes]) -> bool:
         r"""Forward a XPUB-side frame and update the observed-set if applicable.
 
         Returns True when the frame was a subscription/unsubscription frame
@@ -273,11 +290,14 @@ class ZmqBrokerProcess(RegisterableProcess):
         subscription frames (caller should perform a normal forward) or when
         verbose tracking is disabled.
 
-        The forward happens BEFORE the dict mutation so a mid-flight cancel
+        The forward happens BEFORE the dict mutation so a mid-flight stop
         never publishes a false ack of a subscription that did not reach
-        XSUB. Mutation is followed by ``notify_all()`` on a condition variable
-        — race-free against waiters that are between the dict pre-check and
-        the suspend point in ``wait_for_subscription``.
+        XSUB. Mutation is followed by ``notify_all()`` on a
+        :class:`threading.Condition` — race-free against waiters that are
+        between the dict pre-check and the suspend point in
+        :meth:`wait_for_subscription`.
+
+        Sync (not async) because this is called from the proxy thread.
         """
         if (
             self._observed_subscriptions is None
@@ -289,7 +309,7 @@ class ZmqBrokerProcess(RegisterableProcess):
         frame = message[0]
         if not frame or frame[:1] not in (b"\x01", b"\x00"):
             return False
-        await self.xsub_socket.send_multipart(message)
+        self.xsub_socket.send_multipart(message)
         topic = frame[1:]
         if frame[:1] == b"\x01":
             self._observed_subscriptions[topic] = self._observed_subscriptions.get(topic, 0) + 1
@@ -299,67 +319,9 @@ class ZmqBrokerProcess(RegisterableProcess):
                 self._observed_subscriptions.pop(topic, None)
             else:
                 self._observed_subscriptions[topic] = count - 1
-        async with self._observation_changed:
+        with self._observation_changed:
             self._observation_changed.notify_all()
         return True
-
-    async def _forward_polled_messages(self, events: dict[Any, int]) -> None:
-        r"""Forward messages based on poll results, draining each ready socket.
-
-        XSUB → XPUB carries data frames (publishers to subscribers).
-        XPUB → XSUB carries subscription frames (``b"\x01" + topic`` for
-        subscribe, ``b"\x00" + topic`` for unsubscribe). When ``xpub_verbose``
-        is on, every subscription frame from each subscriber is forwarded
-        (including duplicates) so the broker can update an observed-set the
-        backtest replay engine uses to confirm wiring before streaming.
-
-        Per ready socket we run a bounded drain loop:
-        ``recv_multipart(NOBLOCK)`` → forward; on the next iteration either
-        another message arrives and we forward it, or ``zmq.Again`` signals
-        the queue is empty and we exit the inner loop. The hard cap
-        ``_MAX_DRAIN_PER_BURST`` bounds time spent forwarding per direction
-        per call so the event loop is never starved during sustained bursts;
-        when we hit the cap we ``await asyncio.sleep(0)`` to yield once
-        before returning. Exiting via ``zmq.Again`` does NOT yield — there
-        is nothing more to forward right now, so the outer ``_proxy_loop``
-        will block on the poller until something arrives.
-
-        ``continue`` (not ``return``) is used after handling each socket so
-        the outer loop still services the other ready socket within the
-        same poll cycle.
-
-        Args:
-            events: Dictionary mapping socket objects to event flags.
-        """
-        for socket, event in events.items():
-            if not (event & zmq.POLLIN):
-                continue
-            if socket == self.xsub_socket and self.xpub_socket:
-                forwarded = 0
-                while forwarded < _MAX_DRAIN_PER_BURST:
-                    try:
-                        message = await socket.recv_multipart(zmq.NOBLOCK)
-                    except zmq.Again:
-                        break
-                    await self.xpub_socket.send_multipart(message)
-                    forwarded += 1
-                if forwarded >= _MAX_DRAIN_PER_BURST:
-                    await asyncio.sleep(0)
-                continue
-            if socket == self.xpub_socket and self.xsub_socket:
-                forwarded = 0
-                while forwarded < _MAX_DRAIN_PER_BURST:
-                    try:
-                        message = await socket.recv_multipart(zmq.NOBLOCK)
-                    except zmq.Again:
-                        break
-                    if await self._handle_subscription_frame(message):
-                        forwarded += 1
-                        continue
-                    await self.xsub_socket.send_multipart(message)
-                    forwarded += 1
-                if forwarded >= _MAX_DRAIN_PER_BURST:
-                    await asyncio.sleep(0)
 
     async def wait_for_subscription(self, topic_prefix: bytes) -> None:
         """Return when a SUB has subscribed to a topic starting with ``topic_prefix``.
@@ -368,10 +330,18 @@ class ZmqBrokerProcess(RegisterableProcess):
         before issuing the echo-ack handshake. Only available when the broker
         was started with ``xpub_verbose=True``.
 
+        Bridges the sync :class:`threading.Condition` (signalled by the
+        proxy thread) onto the asyncio event loop via
+        :func:`asyncio.to_thread` so the existing async call sites
+        (``async with asyncio.timeout(...)`` for bounded waits) keep
+        their semantics.
+
         Race-free w.r.t. concurrent subscription frames: re-checks the dict
         while holding the condition's lock before suspending. Producers acquire
         the same lock around ``notify_all()``, so the change cannot land
-        between the consumer's pre-check and its ``wait()``.
+        between the consumer's pre-check and its ``wait()``. Also wakes on
+        :attr:`_stop_event` so callers exit promptly when the broker is
+        torn down mid-wait.
 
         No timeout parameter: the function waits indefinitely on the
         observation condition. Callers MUST wrap the ``await`` in an
@@ -388,53 +358,86 @@ class ZmqBrokerProcess(RegisterableProcess):
         """
         if self._observed_subscriptions is None or self._observation_changed is None:
             raise RuntimeError("broker was not started with xpub_verbose=True")
-        async with self._observation_changed:
-            while True:
-                if any(topic.startswith(topic_prefix) for topic in self._observed_subscriptions):
+        await asyncio.to_thread(self._wait_for_subscription_blocking, topic_prefix)
+
+    def _wait_for_subscription_blocking(self, topic_prefix: bytes) -> None:
+        """Block until a matching subscription is observed or broker stops.
+
+        Args:
+            topic_prefix: Byte prefix to match against observed subscription
+                topics.
+        """
+        observed = self._observed_subscriptions
+        condition = self._observation_changed
+        if observed is None or condition is None:
+            return
+        with condition:
+            while not self._stop_event.is_set():
+                if any(topic.startswith(topic_prefix) for topic in observed):
                     return
-                await self._observation_changed.wait()
+                condition.wait()
 
-    async def _proxy_loop(self) -> None:
-        """Forward messages between XSUB and XPUB sockets.
+    def _proxy_loop(self) -> None:
+        """Blocking proxy loop forwarding XSUB <-> XPUB inside the broker thread.
 
-        Polls both sockets for incoming messages and forwards them to
-        the opposite socket. XSUB receives from publishers and forwards
-        to XPUB. XPUB receives subscriptions and forwards to XSUB.
-
-        Runs until `self.running` becomes False or task is cancelled.
+        Polls both sockets with a short timeout (``_POLL_TIMEOUT_MS``) so
+        cooperative shutdown via :attr:`_stop_event` stays responsive,
+        then drains every ready socket of its pending frames before
+        polling again. Subscription frames from XPUB are inspected via
+        :meth:`_handle_subscription_frame` (which performs its own
+        ``send_multipart`` to XSUB and updates the observed-set) when
+        ``xpub_verbose=True``; otherwise they are forwarded blindly.
         """
+        if self.xsub_socket is None or self.xpub_socket is None:
+            return
         try:
-            while self.running:
-                try:
-                    async with asyncio.timeout(1.0):
-                        events = await self._poll_sockets()
-                    await self._forward_polled_messages(events)
-                except (TimeoutError, zmq.Again):
-                    continue
-        except Exception as e:
-            logger.error(f"Broker proxy error: {e}")
+            poller = zmq.Poller()
+            poller.register(self.xsub_socket, zmq.POLLIN)
+            poller.register(self.xpub_socket, zmq.POLLIN)
+            while not self._stop_event.is_set():
+                socks = dict(poller.poll(timeout=_POLL_TIMEOUT_MS))
+                if self.xsub_socket in socks:
+                    self._drain_xsub_to_xpub()
+                if self.xpub_socket in socks:
+                    self._drain_xpub_to_xsub()
+        except zmq.ContextTerminated:
+            return
+        except Exception as exc:
+            logger.error(f"Broker proxy error: {exc}")
 
-    async def _poll_sockets(self) -> dict[Any, int]:
-        """Poll the cached XSUB+XPUB poller for incoming messages.
+    def _drain_xsub_to_xpub(self) -> None:
+        """Forward every available XSUB frame to XPUB, exit on Again."""
+        xsub = self.xsub_socket
+        xpub = self.xpub_socket
+        if xsub is None or xpub is None:
+            return
+        while True:
+            try:
+                message = xsub.recv_multipart(zmq.NOBLOCK)
+            except zmq.Again:
+                return
+            xpub.send_multipart(message)
 
-        Uses ``self._poller`` built once at ``start()`` rather than
-        recreating + re-registering a new poller per iteration. The old
-        approach was visible CPU overhead under hot-loop iteration rates
-        when the broker is processing thousands of messages per second.
+    def _drain_xpub_to_xsub(self) -> None:
+        """Forward every available XPUB frame to XSUB, exit on Again.
 
-        Returns ``{}`` when ``_poller`` is ``None`` (broker not started
-        or already stopped) so the caller sees an empty event set and
-        the proxy loop falls through to its next iteration without
-        crashing.
-
-        Returns:
-            Dictionary mapping socket objects to event flags.
+        Subscription frames are routed through
+        :meth:`_handle_subscription_frame` when ``xpub_verbose=True``
+        so the observed-set update + ``notify_all`` happen on the same
+        thread that did the forward.
         """
-        poller = self._poller
-        if poller is None:
-            return {}
-        events = await poller.poll()
-        return dict(events)
+        xsub = self.xsub_socket
+        xpub = self.xpub_socket
+        if xsub is None or xpub is None:
+            return
+        while True:
+            try:
+                message = xpub.recv_multipart(zmq.NOBLOCK)
+            except zmq.Again:
+                return
+            if self._handle_subscription_frame(message):
+                continue
+            xsub.send_multipart(message)
 
     def get_status(self) -> dict[str, Any]:
         """Get current broker status for monitoring.
