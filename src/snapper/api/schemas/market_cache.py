@@ -118,6 +118,26 @@ class CachedStatsResponse(PayloadResponse[Literal["cached_stats"], CachedStatsPa
     type: Literal["cached_stats"] = "cached_stats"
 
 
+class ListedCachedStatsPayload(StrictBody):
+    """Configured-pair stats list for :class:`ListedCachedStatsResponse`.
+
+    Attributes:
+        count: Number of configured pairs represented in ``pairs``.
+        pairs: One :class:`CachedStatsPayload` per configured pair.
+    """
+
+    count: int
+    pairs: list[CachedStatsPayload]
+
+
+class ListedCachedStatsResponse(
+    PayloadResponse[Literal["listed_cached_stats"], ListedCachedStatsPayload]
+):
+    """Wraps :class:`ListedCachedStatsPayload` with envelope provenance."""
+
+    type: Literal["listed_cached_stats"] = "listed_cached_stats"
+
+
 class CacheHealthPayload(StrictBody):
     """Inner payload for :class:`CacheHealthResponse`.
 
