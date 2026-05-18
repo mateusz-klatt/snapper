@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 import zmq
 import zmq.asyncio
+from loguru import logger as loguru_logger
 
 from snapper.config.settings import get_settings
 from snapper.messaging.infrastructure.broker import ZmqBrokerProcess
@@ -915,8 +916,6 @@ def test_proxy_loop_logs_unexpected_exception(monkeypatch: pytest.MonkeyPatch) -
         ``caplog`` only sees stdlib ``logging`` records and loguru does
         not propagate by default.
     """
-    from loguru import logger as loguru_logger
-
     broker = ZmqBrokerProcess()
     broker.xsub_socket = MagicMock()
     broker.xpub_socket = MagicMock()
@@ -1130,8 +1129,6 @@ def test_zmq_broker_thread_proxy_loop_logs_unexpected_exception(
     When: ``_proxy_loop`` runs.
     Then: The exception is logged at ERROR via loguru and the loop exits.
     """
-    from loguru import logger as loguru_logger
-
     broker = ZmqBrokerThread()
     broker.xsub_socket = MagicMock()
     broker.xpub_socket = MagicMock()
