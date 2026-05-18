@@ -57,17 +57,28 @@ from snapper.messaging.infrastructure.validated_socket import HWM_BROKER
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.utils.logging import set_log_context
 
-_MAX_DRAIN_PER_BURST: Final[int] = 256
+_MAX_DRAIN_PER_BURST: Final[int] = 64
 """Per-direction cap on messages drained inside one ``_forward_polled_messages`` call.
 
 Bounds how aggressively the broker can monopolise the shared event loop
 during sustained bursts. After hitting this cap on a single drain
 direction the broker yields via ``asyncio.sleep(0)`` so other coroutines
 (API request handlers, DB writers, publishers) get scheduling time
-before the next poll cycle. The cap was sized for the production load
-of ~600-1500 msgs/s aggregate: at 256/burst the broker can sustain a
-~12-25 kHz forward rate, which is ~20x the current peak with the
-yield acting as a backpressure release valve."""
+before the next poll cycle.
+
+Tuning history (production rollout 2026-05-18):
+* 256: V1 GREEN but ``/api/health`` p95 ≈ 0.80s (event-loop saturated).
+* 64:  V1 GREEN, p95 ≈ 0.64s — best balance found.
+* 16:  V1 RED for kraken (broker delivery ~22% — too aggressive
+       yielding causes XSUB buffer overflow at high inbound rate),
+       p95 ≈ 0.49s.
+
+The async proxy hits a structural ceiling under production load:
+no cap value satisfies both V1 (≥0.95 ZMQ/PG ratio) AND V5
+(p95 <0.05s) simultaneously. cap=64 is the local optimum until
+the threaded blocking proxy (escalation to ``ZmqBrokerThread`` at
+broker.py:431+) is wired into the launcher — that fix lives in
+a follow-up PR."""
 
 
 @dataclass

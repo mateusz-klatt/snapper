@@ -1447,7 +1447,7 @@ async def test_forward_stops_at_zmq_again(monkeypatch: pytest.MonkeyPatch) -> No
     xpub = _QueueBackedDummySocket("xpub")
     broker.xsub_socket = xsub
     broker.xpub_socket = xpub
-    xsub.recv_queue = [[f"msg-{i}".encode()] for i in range(100)]
+    xsub.recv_queue = [[f"msg-{i}".encode()] for i in range(30)]
 
     sleep_zero_calls = 0
 
@@ -1465,7 +1465,7 @@ async def test_forward_stops_at_zmq_again(monkeypatch: pytest.MonkeyPatch) -> No
 
     await broker._forward_polled_messages({xsub: zmq.POLLIN})
 
-    assert len(xpub.sent) == 100
+    assert len(xpub.sent) == 30
     assert len(xsub.recv_queue) == 0
     assert sleep_zero_calls == 0
 
