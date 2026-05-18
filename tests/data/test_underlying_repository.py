@@ -10,6 +10,7 @@ from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Instrument
 from snapper.data.models import Symbol
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import UnderlyingAssetRow
 
 
 @pytest.fixture()
@@ -144,6 +145,85 @@ class TestUpsertUnderlyingAsset:
             sector="US Large Cap",
         )
         assert status == "updated"
+
+    @pytest.mark.asyncio
+    async def test_description_round_trips_as_locale_map(self, repo: SQLAlchemyRepository) -> None:
+        """Given locale descriptions, When querying, Then JSON map round-trips."""
+        ts = _ts()
+        await repo.upsert_underlying_asset(
+            ticker="SPX",
+            name="S&P 500",
+            asset_class="index",
+            session_id="s1",
+            sequence_id=1,
+            timestamp=ts,
+            description={
+                "en": "English description.",
+                "pl": "Polish description.",
+            },
+        )
+        row = await repo.get_underlying_by_ticker("SPX", ts + timedelta(seconds=1))
+        assert row is not None
+        assert row["description"] == {
+            "en": "English description.",
+            "pl": "Polish description.",
+        }
+
+    @pytest.mark.asyncio
+    async def test_resolve_description_prefers_locale(self, repo: SQLAlchemyRepository) -> None:
+        """Given locale description exists, When resolving, Then returns it."""
+        row = UnderlyingAssetRow(
+            public_id="ua-1",
+            ticker="SPX",
+            name="S&P 500",
+            asset_class="index",
+            sector=None,
+            description={
+                "en": "English description.",
+                "pl": "Polish description.",
+            },
+            timestamp=_ts(),
+            session_id="s1",
+            sequence_id=1,
+            instrument_count=0,
+        )
+        assert repo.resolve_underlying_description(row, "pl") == "Polish description."
+
+    @pytest.mark.asyncio
+    async def test_resolve_description_falls_back_to_en(self, repo: SQLAlchemyRepository) -> None:
+        """Given locale description missing, When resolving, Then English returns."""
+        row = UnderlyingAssetRow(
+            public_id="ua-1",
+            ticker="SPX",
+            name="S&P 500",
+            asset_class="index",
+            sector=None,
+            description={"en": "English description."},
+            timestamp=_ts(),
+            session_id="s1",
+            sequence_id=1,
+            instrument_count=0,
+        )
+        assert repo.resolve_underlying_description(row, "pl") == "English description."
+
+    @pytest.mark.asyncio
+    async def test_resolve_description_returns_none_without_description(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Given no description map, When resolving, Then returns none."""
+        row = UnderlyingAssetRow(
+            public_id="ua-1",
+            ticker="SPX",
+            name="S&P 500",
+            asset_class="index",
+            sector=None,
+            description=None,
+            timestamp=_ts(),
+            session_id="s1",
+            sequence_id=1,
+            instrument_count=0,
+        )
+        assert repo.resolve_underlying_description(row, "pl") is None
 
 
 class TestUpsertInstrumentUnderlyingMapping:

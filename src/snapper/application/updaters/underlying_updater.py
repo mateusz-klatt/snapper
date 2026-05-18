@@ -90,8 +90,27 @@ class UnderlyingDefinition(BaseModel):
     name: str
     asset_class: AssetTypeEnum
     sector: str | None = None
-    description: str | None = None
+    description: dict[str, str] | None = None
     patterns: list[PatternRule]
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_description(cls, data: object) -> object:
+        """Normalize legacy scalar descriptions to the multilingual map shape.
+
+        Args:
+            data: Raw Pydantic input before field validation.
+
+        Returns:
+            Input with legacy scalar ``description`` moved under ``en``.
+        """
+        if isinstance(data, dict):
+            description = data.get("description")
+            if isinstance(description, str):
+                normalized = dict(data)
+                normalized["description"] = {"en": description}
+                return normalized
+        return data
 
 
 class UnderlyingMappingConfig(BaseModel):

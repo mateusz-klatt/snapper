@@ -1001,6 +1001,7 @@ class UnderlyingAssetData(StrictDataSchema[Literal["underlying_asset"]]):
         name: Canonical name (e.g. 'S&P 500').
         asset_class: Asset type category.
         sector: Optional sector classification.
+        description: Optional description resolved for the caller locale.
         instrument_count: Number of instruments mapped to this underlying.
     """
 
@@ -1009,6 +1010,7 @@ class UnderlyingAssetData(StrictDataSchema[Literal["underlying_asset"]]):
     name: str
     asset_class: str
     sector: str | None
+    description: str | None
     instrument_count: int
 
 
@@ -1138,8 +1140,8 @@ class RelatedInstrumentsSelected(StrictBody):
 class RelatedInstrumentsUnderlying(StrictBody):
     """Slim underlying summary for the related-instruments row context.
 
-    Carries only the fields the MarketData related-row needs (ticker
-    + display name + class) — the full ``UnderlyingAssetData`` adds an
+    Carries only the fields the MarketData related-row and description
+    banner need. The full ``UnderlyingAssetData`` adds an
     ``instrument_count`` that callers of the related endpoint don't use.
 
     Attributes:
@@ -1148,6 +1150,7 @@ class RelatedInstrumentsUnderlying(StrictBody):
         name: Canonical name (e.g. 'S&P 500').
         asset_class: Asset type category.
         sector: Optional sector classification.
+        description: Optional description resolved for the caller locale.
     """
 
     public_id: str
@@ -1155,6 +1158,7 @@ class RelatedInstrumentsUnderlying(StrictBody):
     name: str
     asset_class: str
     sector: str | None
+    description: str | None
 
 
 class RelatedInstrumentsGroup(StrictBody):

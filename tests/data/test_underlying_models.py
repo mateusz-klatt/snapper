@@ -39,7 +39,7 @@ class TestUnderlyingAsset:
             ticker="SPX",
             asset_class="index",
             sector="US Large Cap",
-            description="Standard & Poor 500 Index",
+            description={"en": "Standard & Poor 500 Index"},
             session_id="sess-1",
             sequence_id=1,
             timestamp=_now(),
@@ -52,7 +52,7 @@ class TestUnderlyingAsset:
         assert rows[0].ticker == "SPX"
         assert rows[0].name == "S&P 500"
         assert rows[0].sector == "US Large Cap"
-        assert rows[0].description == "Standard & Poor 500 Index"
+        assert rows[0].description == {"en": "Standard & Poor 500 Index"}
 
     def test_nullable_fields(self, db_session: Session) -> None:
         """Given sector=None and description=None, When inserted, Then succeeds."""

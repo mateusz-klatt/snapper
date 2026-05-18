@@ -80,6 +80,7 @@ from sqlalchemy.pool import StaticPool
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.roles import UserRole
 from snapper.core.json_types import JsonObject
+from snapper.core.json_types import JsonValue
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
 from snapper.core.types import AllExchange
@@ -1348,6 +1349,27 @@ class Repository(ABC):
         """
         ...
 
+    def resolve_underlying_description(
+        self,
+        row: UnderlyingAssetRow,
+        locale: str,
+    ) -> str | None:
+        """Resolve an underlying description map for a caller locale.
+
+        Args:
+            row: Underlying asset row containing the stored locale map.
+            locale: Preferred caller language.
+
+        Returns:
+            Locale-specific description, English fallback, or ``None``.
+        """
+        description = row["description"]
+        if description is None:
+            return None
+        if locale in description:
+            return description[locale]
+        return description.get("en")
+
     @abstractmethod
     async def upsert_underlying_asset(
         self,
@@ -1358,7 +1380,7 @@ class Repository(ABC):
         sequence_id: int,
         timestamp: datetime,
         sector: str | None = None,
-        description: str | None = None,
+        description: dict[str, str] | None = None,
     ) -> tuple[str, str]:
         """SCD2 upsert for an underlying asset.
 
@@ -1370,7 +1392,7 @@ class Repository(ABC):
             sequence_id: Provenance sequence number.
             timestamp: Bus time.
             sector: Optional sector (e.g. 'Precious Metals').
-            description: Optional human-readable description.
+            description: Optional locale-keyed human-readable descriptions.
 
         Returns:
             Tuple of (underlying_public_id, status) where status is
@@ -7964,9 +7986,10 @@ class SQLAlchemyRepository(Repository):
         sequence_id: int,
         timestamp: datetime,
         sector: str | None = None,
-        description: str | None = None,
+        description: dict[str, str] | None = None,
     ) -> tuple[str, str]:
         """SCD2 upsert for an underlying asset."""
+        description_json = cast(dict[str, JsonValue] | None, description)
         async with self.session() as s:
             existing = (
                 (
@@ -7988,7 +8011,7 @@ class SQLAlchemyRepository(Repository):
                     existing.name != name
                     or existing.asset_class != asset_class
                     or existing.sector != sector
-                    or existing.description != description
+                    or existing.description != description_json
                 )
                 if not changed:
                     return existing.public_id, "unchanged"
@@ -8004,7 +8027,7 @@ class SQLAlchemyRepository(Repository):
                     name=name,
                     asset_class=asset_class,
                     sector=sector,
-                    description=description,
+                    description=description_json,
                     session_id=session_id,
                     sequence_id=sequence_id,
                     timestamp=timestamp,
@@ -8019,7 +8042,7 @@ class SQLAlchemyRepository(Repository):
                 name=name,
                 asset_class=asset_class,
                 sector=sector,
-                description=description,
+                description=description_json,
                 session_id=session_id,
                 sequence_id=sequence_id,
                 timestamp=timestamp,

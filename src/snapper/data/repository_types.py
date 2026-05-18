@@ -656,7 +656,7 @@ class UnderlyingAssetRow(TypedDict):
     name: str
     asset_class: str
     sector: str | None
-    description: str | None
+    description: dict[str, str] | None
     timestamp: datetime
     session_id: str
     sequence_id: int

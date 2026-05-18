@@ -27,6 +27,7 @@ from sqlalchemy.orm import mapped_column
 from sqlalchemy.types import TypeDecorator
 
 from snapper.core.json_types import JsonObject
+from snapper.core.json_types import JsonValue
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import RelationshipTypeEnum
@@ -1153,7 +1154,7 @@ class UnderlyingAsset(TemporalMixin, Base):
     ticker: Mapped[str] = mapped_column(String(16))
     asset_class: Mapped[str] = mapped_column(String(16))
     sector: Mapped[str | None] = mapped_column(String(32))
-    description: Mapped[str | None] = mapped_column(String(256))
+    description: Mapped[dict[str, JsonValue] | None] = mapped_column(JSON, nullable=True)
 
 
 class InstrumentUnderlyingMapping(TemporalMixin, Base):
