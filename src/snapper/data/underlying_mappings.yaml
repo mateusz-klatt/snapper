@@ -1159,8 +1159,9 @@ underlyings:
   name: S&P 500
   asset_class: index
   sector: US Large Cap
-  description: S&P 500 exposure via SPY, SPYx perpetual, and ES/MES futures. Excludes
-    crypto SPX6900 spot/perp symbols.
+  description:
+    en: S&P 500 exposure via SPY, SPYx perpetual, and ES/MES futures. Excludes
+      crypto SPX6900 spot/perp symbols.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1247,9 +1248,10 @@ underlyings:
   name: Gold
   asset_class: commodity
   sector: Precious Metals
-  description: Return-level gold exposure. GLD/IAU are gold trust share units while
-    PAXG is a 1 fine troy ounce token; do not compare raw price levels without unit
-    normalization.
+  description:
+    en: Return-level gold exposure. GLD/IAU are gold trust share units while
+      PAXG is a 1 fine troy ounce token; do not compare raw price levels without unit
+      normalization.
   patterns:
   - exchange: polygon
     match_type: exact
