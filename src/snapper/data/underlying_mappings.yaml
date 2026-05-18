@@ -1612,6 +1612,8 @@ underlyings:
 - ticker: EURUSD
   name: Euro / US Dollar
   asset_class: forex
+  description:
+    en: Euro versus US dollar exposure via Kraken, Walutomat, Polygon, 6E CME futures, and EUR-USD perpetual. ECB-Fed policy gaps drive the most liquid FX pair.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1635,6 +1637,8 @@ underlyings:
 - ticker: USDPLN
   name: US Dollar / Polish Zloty
   asset_class: forex
+  description:
+    en: US dollar versus Polish zloty exposure via Walutomat and Polygon. A core Poland retail FX pair; NBP-Fed policy gaps and global USD risk drive it.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1645,6 +1649,8 @@ underlyings:
 - ticker: EURPLN
   name: Euro / Polish Zloty
   asset_class: forex
+  description:
+    en: Euro versus Polish zloty exposure via Walutomat and Polygon. The key PLN cross reflects NBP-ECB policy gaps, EU funds flow, and regional risk.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1655,6 +1661,8 @@ underlyings:
 - ticker: GBPPLN
   name: British Pound / Polish Zloty
   asset_class: forex
+  description:
+    en: British pound versus Polish zloty exposure via Walutomat and Polygon. Less liquid than EURPLN, often behaving like EURGBP times EURPLN.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1665,6 +1673,8 @@ underlyings:
 - ticker: GBPUSD
   name: British Pound / US Dollar
   asset_class: forex
+  description:
+    en: British pound versus US dollar exposure via Kraken, Walutomat, Polygon, 6B CME futures, and GBP-USD perpetual. Cable reacts to BOE rates and UK political risk.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1688,6 +1698,8 @@ underlyings:
 - ticker: EURGBP
   name: Euro / British Pound
   asset_class: forex
+  description:
+    en: Euro versus British pound exposure via Kraken, Walutomat, and Polygon. ECB-BOE policy gaps drive the cross without direct USD exposure.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1701,6 +1713,8 @@ underlyings:
 - ticker: AUDPLN
   name: Australian Dollar / Polish Zloty
   asset_class: forex
+  description:
+    en: Australian dollar versus Polish zloty exposure via Walutomat and Polygon. Commodity and China risk feed through AUD, while PLN follows NBP policy.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1711,6 +1725,8 @@ underlyings:
 - ticker: BGNPLN
   name: Bulgarian Lev / Polish Zloty
   asset_class: forex
+  description:
+    en: Bulgarian lev versus Polish zloty exposure via Walutomat. Because BGN is EUR-pegged, BGNPLN usually behaves like EURPLN scaled by the peg.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1718,6 +1734,8 @@ underlyings:
 - ticker: CADPLN
   name: Canadian Dollar / Polish Zloty
   asset_class: forex
+  description:
+    en: Canadian dollar versus Polish zloty exposure via Walutomat and Polygon. Oil sensitivity drives CAD while NBP policy drives the PLN leg.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1728,6 +1746,8 @@ underlyings:
 - ticker: CHFPLN
   name: Swiss Franc / Polish Zloty
   asset_class: forex
+  description:
+    en: Swiss franc versus Polish zloty exposure via Walutomat and Polygon. CHFPLN carries Swiss-franc mortgage legacy risk in Poland and SNB shock memory.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1738,6 +1758,8 @@ underlyings:
 - ticker: CNYPLN
   name: Chinese Yuan / Polish Zloty
   asset_class: forex
+  description:
+    en: Chinese yuan versus Polish zloty exposure via Walutomat. CNY is managed by PBoC fixings, so the PLN cross can move through USD or EUR legs.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1745,6 +1767,8 @@ underlyings:
 - ticker: CZKPLN
   name: Czech Koruna / Polish Zloty
   asset_class: forex
+  description:
+    en: Czech koruna versus Polish zloty exposure via Walutomat and Polygon. A regional rates cross; CNB versus NBP policy gaps drive relative moves.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1755,6 +1779,8 @@ underlyings:
 - ticker: DKKPLN
   name: Danish Krone / Polish Zloty
   asset_class: forex
+  description:
+    en: Danish krone versus Polish zloty exposure via Walutomat and Polygon. DKK is EUR-managed in ERM II, so DKKPLN mostly tracks EURPLN adjusted for the peg.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1765,6 +1791,8 @@ underlyings:
 - ticker: HKDPLN
   name: Hong Kong Dollar / Polish Zloty
   asset_class: forex
+  description:
+    en: Hong Kong dollar versus Polish zloty exposure via Walutomat and Polygon. HKD's USD peg makes this behave closer to USDPLN than a free HKD cross.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1775,6 +1803,8 @@ underlyings:
 - ticker: HUFPLN
   name: Hungarian Forint / Polish Zloty
   asset_class: forex
+  description:
+    en: Hungarian forint versus Polish zloty exposure via Walutomat and Polygon. It is a regional CEE cross driven by MNB-NBP policy and risk sentiment.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1785,6 +1815,8 @@ underlyings:
 - ticker: ILSPLN
   name: Israeli Shekel / Polish Zloty
   asset_class: forex
+  description:
+    en: Israeli shekel versus Polish zloty exposure via Walutomat and Polygon. BOI policy and geopolitical risk can widen spreads versus core PLN pairs.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1795,6 +1827,8 @@ underlyings:
 - ticker: JPYPLN
   name: Japanese Yen / Polish Zloty
   asset_class: forex
+  description:
+    en: Japanese yen versus Polish zloty exposure via Walutomat and Polygon. Often derived through USDJPY and USDPLN, so effective spreads can be wider.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1805,6 +1839,8 @@ underlyings:
 - ticker: NOKPLN
   name: Norwegian Krone / Polish Zloty
   asset_class: forex
+  description:
+    en: Norwegian krone versus Polish zloty exposure via Walutomat and Polygon. Oil-linked NOK and NBP-sensitive PLN make this a cyclical cross.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1815,6 +1851,8 @@ underlyings:
 - ticker: NZDPLN
   name: New Zealand Dollar / Polish Zloty
   asset_class: forex
+  description:
+    en: New Zealand dollar versus Polish zloty exposure via Walutomat and Polygon. NZD liquidity is thinner than AUD, so PLN crosses can move in wider jumps.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1825,6 +1863,8 @@ underlyings:
 - ticker: RONPLN
   name: Romanian Leu / Polish Zloty
   asset_class: forex
+  description:
+    en: Romanian leu versus Polish zloty exposure via Walutomat. RON is managed by the NBR, so this can be sticky until policy pressure breaks through.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1832,6 +1872,8 @@ underlyings:
 - ticker: SEKPLN
   name: Swedish Krona / Polish Zloty
   asset_class: forex
+  description:
+    en: Swedish krona versus Polish zloty exposure via Walutomat and Polygon. Riksbank-NBP policy gaps and Nordic risk sentiment drive the cross.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1842,6 +1884,8 @@ underlyings:
 - ticker: SGDPLN
   name: Singapore Dollar / Polish Zloty
   asset_class: forex
+  description:
+    en: Singapore dollar versus Polish zloty exposure via Walutomat and Polygon. MAS manages SGD by basket, so USD and EUR legs can both affect the PLN quote.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1852,6 +1896,8 @@ underlyings:
 - ticker: TRYPLN
   name: Turkish Lira / Polish Zloty
   asset_class: forex
+  description:
+    en: Turkish lira versus Polish zloty exposure via Walutomat and Polygon. Exotic cross; usually derived through EUR or USD legs, so spreads can be wide.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1862,6 +1908,8 @@ underlyings:
 - ticker: ZARPLN
   name: South African Rand / Polish Zloty
   asset_class: forex
+  description:
+    en: South African rand versus Polish zloty exposure via Walutomat and Polygon. High-yield ZAR and PLN risk sentiment make this volatile and spread-sensitive.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1872,6 +1920,8 @@ underlyings:
 - ticker: EURAUD
   name: Euro / Australian Dollar
   asset_class: forex
+  description:
+    en: Euro versus Australian dollar exposure via Walutomat, Kraken, and Polygon. AUD commodity beta and carry demand make this more cyclical than EURUSD.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1885,6 +1935,8 @@ underlyings:
 - ticker: EURBGN
   name: Euro / Bulgarian Lev
   asset_class: forex
+  description:
+    en: Euro versus Bulgarian lev exposure via Walutomat. BGN is pegged to EUR around 1.95583, so moves mostly reflect peg mechanics and conversion spread.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1892,6 +1944,8 @@ underlyings:
 - ticker: EURCAD
   name: Euro / Canadian Dollar
   asset_class: forex
+  description:
+    en: Euro versus Canadian dollar exposure via Walutomat, Kraken, and Polygon. CAD oil sensitivity adds commodity risk to the ECB-BoC policy spread.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1905,6 +1959,8 @@ underlyings:
 - ticker: EURCHF
   name: Euro / Swiss Franc
   asset_class: forex
+  description:
+    en: Euro versus Swiss franc exposure via Walutomat, Kraken, and Polygon. The old 1.20 floor is gone, but SNB policy and CHF haven flows still matter.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1918,6 +1974,8 @@ underlyings:
 - ticker: EURCNY
   name: Euro / Chinese Yuan
   asset_class: forex
+  description:
+    en: Euro versus Chinese yuan exposure via Walutomat and Polygon. CNY is managed through daily PBoC fixings, so policy can override spot momentum.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1928,6 +1986,8 @@ underlyings:
 - ticker: EURCZK
   name: Euro / Czech Koruna
   asset_class: forex
+  description:
+    en: Euro versus Czech koruna exposure via Walutomat and Polygon. CZK floats since the 2017 CNB cap exit; CNB policy and intervention risk still matter.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1938,6 +1998,8 @@ underlyings:
 - ticker: EURDKK
   name: Euro / Danish Krone
   asset_class: forex
+  description:
+    en: Euro versus Danish krone exposure via Walutomat and Polygon. DKK trades in ERM II around 7.46038, so this is a managed-peg pair, not a free float.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1948,6 +2010,8 @@ underlyings:
 - ticker: EURHKD
   name: Euro / Hong Kong Dollar
   asset_class: forex
+  description:
+    en: Euro versus Hong Kong dollar exposure via Walutomat and Polygon. HKD is USD-pegged near 7.75-7.85, so EURHKD largely tracks EURUSD times the peg.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1958,6 +2022,8 @@ underlyings:
 - ticker: EURHUF
   name: Euro / Hungarian Forint
   asset_class: forex
+  description:
+    en: Euro versus Hungarian forint exposure via Walutomat and Polygon. MNB policy and inflation risk dominate; HUF can weaken quickly in regional stress.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1968,6 +2034,8 @@ underlyings:
 - ticker: EURILS
   name: Euro / Israeli Shekel
   asset_class: forex
+  description:
+    en: Euro versus Israeli shekel exposure via Walutomat and Polygon. BOI policy and geopolitical risk can overpower rate differentials.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1978,6 +2046,8 @@ underlyings:
 - ticker: EURJPY
   name: Euro / Japanese Yen
   asset_class: forex
+  description:
+    en: Euro versus Japanese yen exposure via Walutomat, Kraken, and Polygon. Risk-off moves often favor JPY, making this a policy and carry barometer.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1991,6 +2061,8 @@ underlyings:
 - ticker: EURNOK
   name: Euro / Norwegian Krone
   asset_class: forex
+  description:
+    en: Euro versus Norwegian krone exposure via Walutomat and Polygon. Oil exposure and Norges Bank policy make NOK more cyclical than EUR.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2001,6 +2073,8 @@ underlyings:
 - ticker: EURNZD
   name: Euro / New Zealand Dollar
   asset_class: forex
+  description:
+    en: Euro versus New Zealand dollar exposure via Walutomat and Polygon. Smaller NZD liquidity can make moves wider than in EURAUD.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2011,6 +2085,8 @@ underlyings:
 - ticker: EURRON
   name: Euro / Romanian Leu
   asset_class: forex
+  description:
+    en: Euro versus Romanian leu exposure via Walutomat and Polygon. RON is a managed float, so NBR smoothing can mask pressure until wider moves arrive.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2021,6 +2097,8 @@ underlyings:
 - ticker: EURSEK
   name: Euro / Swedish Krona
   asset_class: forex
+  description:
+    en: Euro versus Swedish krona exposure via Walutomat and Polygon. Riksbank policy and housing-sensitive Swedish growth drive this Scandi cross.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2031,6 +2109,8 @@ underlyings:
 - ticker: EURSGD
   name: Euro / Singapore Dollar
   asset_class: forex
+  description:
+    en: Euro versus Singapore dollar exposure via Walutomat and Polygon. MAS manages SGD against a trade-weighted basket, so EURSGD is policy-band sensitive.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2041,6 +2121,8 @@ underlyings:
 - ticker: EURTRY
   name: Euro / Turkish Lira
   asset_class: forex
+  description:
+    en: Euro versus Turkish lira exposure via Walutomat and Polygon. TRY has crisis history and policy credibility risk, so gaps and wide spreads are normal.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2051,6 +2133,8 @@ underlyings:
 - ticker: EURZAR
   name: Euro / South African Rand
   asset_class: forex
+  description:
+    en: Euro versus South African rand exposure via Walutomat and Polygon. ZAR is high-yield and commodity-linked, so volatility can exceed G10 crosses.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2061,6 +2145,8 @@ underlyings:
 - ticker: GBPCHF
   name: British Pound / Swiss Franc
   asset_class: forex
+  description:
+    en: British pound versus Swiss franc exposure via Walutomat and Polygon. GBP volatility plus CHF safe-haven demand makes liquidity thinner than major USD pairs.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2071,6 +2157,8 @@ underlyings:
 - ticker: USDCHF
   name: US Dollar / Swiss Franc
   asset_class: forex
+  description:
+    en: US dollar versus Swiss franc exposure via Walutomat, Kraken, and Polygon. CHF safe-haven demand and SNB intervention history can dominate rate spreads.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2084,6 +2172,8 @@ underlyings:
 - ticker: AUDUSD
   name: Australian Dollar / US Dollar
   asset_class: forex
+  description:
+    en: Australian dollar versus US dollar exposure via Kraken, Polygon, 6A CME futures, and AUD-USD perpetual. AUD is commodity-linked and sensitive to China demand.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -2104,6 +2194,8 @@ underlyings:
 - ticker: USDCAD
   name: US Dollar / Canadian Dollar
   asset_class: forex
+  description:
+    en: US dollar versus Canadian dollar exposure via Kraken and Polygon. CAD is oil-sensitive, so crude moves and BoC-Fed policy gaps both matter.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2114,6 +2206,8 @@ underlyings:
 - ticker: USDJPY
   name: US Dollar / Japanese Yen
   asset_class: forex
+  description:
+    en: US dollar versus Japanese yen exposure via Kraken and Polygon. Yen funding flows make carry trades and BOJ policy shocks central.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2124,6 +2218,8 @@ underlyings:
 - ticker: NZDUSD
   name: New Zealand Dollar / US Dollar
   asset_class: forex
+  description:
+    en: New Zealand dollar versus US dollar exposure via 6N CME futures. Liquidity is thinner than AUDUSD; dairy prices and carry demand can matter.
   patterns:
   - exchange: kraken_equities
     match_type: regex
