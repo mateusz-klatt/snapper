@@ -4,6 +4,9 @@ underlyings:
   asset_class: crypto
   description:
     en: Bitcoin monetary asset and deepest crypto market. Halving cycles shape supply issuance; the store-of-value thesis matters more than payment throughput.
+    pl: Bitcoin to aktywo monetarne i najgłębszy rynek krypto. Cykle halvingu
+      kształtują emisję podaży; teza magazynu wartości waży bardziej niż
+      przepustowość płatności.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -104,6 +107,9 @@ underlyings:
   asset_class: crypto
   description:
     en: Ethereum smart-contract L1 and settlement layer. EIP-1559 burns base fees while staking rewards compensate validators, so issuance can vary with usage.
+    pl: Ethereum to L1 smart kontraktów i warstwa rozliczeniowa. EIP-1559 spala
+      opłaty bazowe, a staking wynagradza walidatorów, więc emisja zmienia się z
+      użyciem.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -186,6 +192,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Tether USD centralized dollar stablecoin. It has the deepest stablecoin liquidity, but reserve transparency and de-peg risk matter.
+    pl: Tether USD to scentralizowany stablecoin dolarowy. Ma największą płynność
+      stablecoinów, ale przejrzystość rezerw i ryzyko de-peg są kluczowe.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -220,6 +228,9 @@ underlyings:
   asset_class: crypto
   description:
     en: Circle USDC centralized dollar stablecoin. Reserve quality and banking access matter; stablecoin de-pegs can break assumed cash equivalence.
+    pl: Circle USDC to scentralizowany stablecoin dolarowy. Jakość rezerw i dostęp
+      do banków są ważne; de-pegi stablecoinów mogą łamać założenie równowartości
+      gotówki.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -254,6 +265,8 @@ underlyings:
   asset_class: crypto
   description:
     en: DAI is a MakerDAO/Sky overcollateralized dollar stablecoin. Oracle prices and vault liquidations can move peg risk during market stress.
+    pl: DAI to nadzabezpieczony stablecoin dolarowy MakerDAO/Sky. Ceny z oracle i
+      likwidacje vaultów mogą ruszać ryzyko pegu w stresie rynku.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -272,6 +285,8 @@ underlyings:
   asset_class: crypto
   description:
     en: PayPal USD is a PayPal-branded dollar stablecoin. Liquidity is smaller than USDT/USDC, so venue support and redemption rails matter.
+    pl: PayPal USD to dolarowy stablecoin marki PayPal. Płynność jest mniejsza niż
+      USDT/USDC, więc wsparcie venue i ścieżki wykupu są ważne.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -287,6 +302,9 @@ underlyings:
   asset_class: crypto
   description:
     en: Ripple USD is a dollar stablecoin tied to Ripple payment rails. Watch issuer reserve reports and liquidity depth before treating it like cash.
+    pl: Ripple USD to dolarowy stablecoin powiązany z torami płatniczymi Ripple.
+      Sprawdzaj raporty rezerw emitenta i głębokość płynności, zanim traktujesz go
+      jak gotówkę.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -308,6 +326,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Solana is a high-throughput smart-contract L1. Outage history matters because validator coordination and network liveness can drive risk.
+    pl: Solana to wysokoprzepustowy L1 smart kontraktów. Historia awarii ma
+      znaczenie, bo koordynacja walidatorów i ciągłość sieci mogą napędzać ryzyko.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -360,6 +380,9 @@ underlyings:
   asset_class: crypto
   description:
     en: XRP is the settlement asset of the XRP Ledger, linked to Ripple payment use cases. SEC litigation history still shapes liquidity and venue risk.
+    pl: XRP to aktywo rozliczeniowe XRP Ledger, powiązane z zastosowaniami
+      płatniczymi Ripple. Historia sporów z SEC nadal kształtuje płynność i ryzyko
+      venue.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -419,6 +442,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Dogecoin is a proof-of-work meme coin. Social attention and large-holder flows matter more than protocol utility.
+    pl: Dogecoin to memecoin proof-of-work. Uwaga społeczności i przepływy dużych
+      posiadaczy ważą bardziej niż użyteczność protokołu.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -456,6 +481,9 @@ underlyings:
   asset_class: crypto
   description:
     en: Litecoin is a Bitcoin-derived proof-of-work payments coin. It is liquid and old, but utility is mostly transfer and relative-value trading.
+    pl: Litecoin to płatnicza moneta proof-of-work wywodząca się z Bitcoina. Jest
+      płynny i długo notowany, ale użyteczność to głównie transfery i relative-value
+      trading.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -520,6 +548,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Chainlink is a decentralized oracle network token. DeFi price feeds and cross-chain services drive demand; oracle trust is the core risk.
+    pl: Chainlink to zdecentralizowana sieć oracle. Feedy cenowe DeFi i usługi
+      cross-chain napędzają popyt; zaufanie do oracle to główne ryzyko.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -560,6 +590,9 @@ underlyings:
   asset_class: crypto
   description:
     en: Polkadot is a shared-security and interoperability network. DOT value depends on ecosystem demand and governance, not just parachain activity.
+    pl: Polkadot to sieć współdzielonego bezpieczeństwa i interoperacyjności.
+      Wartość DOT zależy od popytu ekosystemu i governance, nie tylko aktywności
+      parachainów.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -597,6 +630,9 @@ underlyings:
   asset_class: crypto
   description:
     en: Cardano is a proof-of-stake smart-contract L1. Development milestones and app adoption drive sentiment more than raw throughput claims.
+    pl: Cardano to L1 smart kontraktów proof-of-stake. Kamienie milowe rozwoju i
+      adopcja aplikacji napędzają sentyment bardziej niż surowe deklaracje
+      przepustowości.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -634,6 +670,9 @@ underlyings:
   asset_class: crypto
   description:
     en: Avalanche is a smart-contract L1 with subnet architecture. Throughput claims need to be checked against mainnet activity and bridge liquidity.
+    pl: Avalanche to L1 smart kontraktów z architekturą subnetów. Deklaracje
+      przepustowości trzeba sprawdzać wobec aktywności mainnetu i płynności
+      bridge'y.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -659,6 +698,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Uniswap is a DEX governance token. V3+ liquidity is concentrated, so LP risk is not the same as simple spot exposure.
+    pl: Uniswap to token governance DEX. Płynność V3+ jest skoncentrowana, więc
+      ryzyko LP nie jest tym samym co prosta ekspozycja spot.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -684,6 +725,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Aave is a decentralized lending protocol token. Borrow demand, liquidations, and flash-loan use drive protocol risk.
+    pl: Aave to token zdecentralizowanego protokołu pożyczkowego. Popyt na pożyczki,
+      likwidacje i użycie flash loanów napędzają ryzyko protokołu.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -717,6 +760,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Cosmos Hub token for the IBC app-chain ecosystem. ATOM value capture can diverge from total Cosmos ecosystem activity.
+    pl: ATOM to token Cosmos Hub dla ekosystemu app-chainów IBC. Przechwytywanie
+      wartości przez ATOM może odbiegać od aktywności całego ekosystemu Cosmos.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -751,6 +796,8 @@ underlyings:
   asset_class: crypto
   description:
     en: NEAR Protocol is a sharded smart-contract L1. Adoption and developer activity matter more than throughput marketing.
+    pl: NEAR Protocol to shardowany L1 smart kontraktów. Adopcja i aktywność
+      deweloperów ważą bardziej niż marketing przepustowości.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -770,6 +817,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Algorand is a proof-of-stake L1. Low fees and fast finality are core features; token demand depends on real app usage.
+    pl: Algorand to L1 proof-of-stake. Niskie opłaty i szybka finalność są
+      kluczowe; popyt na token zależy od realnego użycia aplikacji.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -804,6 +853,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Filecoin is a decentralized storage network token. Storage-provider economics and protocol emissions can dominate cloud-storage narratives.
+    pl: Filecoin to token zdecentralizowanej sieci przechowywania danych. Ekonomia
+      dostawców storage'u i emisje protokołu mogą dominować narracje cloud storage.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -832,6 +883,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Stellar is a payments network focused on fiat and asset transfer rails. Anchor quality and regulatory corridors matter for real usage.
+    pl: Stellar to sieć płatnicza dla torów transferu fiat i aktywów. Jakość
+      anchorów i korytarze regulacyjne mają znaczenie dla realnego użycia.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -857,6 +910,8 @@ underlyings:
   asset_class: crypto
   description:
     en: TRON is a smart-contract chain with heavy stablecoin transfer use. USDT flow is important, while governance concentration is a risk.
+    pl: TRON to łańcuch smart kontraktów z dużym użyciem transferów stablecoinów.
+      Przepływy USDT są ważne, a koncentracja governance jest ryzykiem.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -885,6 +940,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Ethereum Classic is the original Ethereum proof-of-work chain. It preserves pre-DAO history, but 51% attack history remains the key risk.
+    pl: Ethereum Classic to oryginalny łańcuch Ethereum proof-of-work. Zachowuje
+      historię sprzed DAO, ale historia ataków 51% pozostaje głównym ryzykiem.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -910,6 +967,8 @@ underlyings:
   asset_class: crypto
   description:
     en: ApeCoin is a governance and ecosystem token linked to BAYC/Yuga assets. NFT-cycle sentiment can dominate protocol fundamentals.
+    pl: ApeCoin to token governance i ekosystemu powiązany z aktywami BAYC/Yuga.
+      Sentyment cyklu NFT może dominować fundamenty protokołu.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -935,6 +994,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Shiba Inu is a meme-token ecosystem. Community attention, exchange liquidity, and supply concentration matter more than base utility.
+    pl: Shiba Inu to ekosystem memecoinowy. Uwaga społeczności, płynność giełdowa i
+      koncentracja podaży ważą bardziej niż bazowa użyteczność.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -960,6 +1021,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Render is a decentralized GPU rendering and compute network token. Usage demand and AI/GPU-cycle sentiment can diverge.
+    pl: Render to token zdecentralizowanej sieci renderingu GPU i compute. Popyt
+      na użycie i sentyment cyklu AI/GPU mogą się rozjeżdżać.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -979,6 +1042,9 @@ underlyings:
   asset_class: crypto
   description:
     en: Bittensor is a decentralized AI subnet network. Token incentives reward miners and validators, making emissions and subnet quality central.
+    pl: Bittensor to zdecentralizowana sieć subnetów AI. Zachęty tokenowe
+      wynagradzają minerów i walidatorów, więc emisje i jakość subnetów są
+      kluczowe.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -998,6 +1064,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Zcash is a privacy-focused coin with shielded transaction support. Exchange delistings and regulatory pressure can limit liquidity.
+    pl: Zcash to moneta prywatności ze wsparciem transakcji shielded. Delistingi
+      giełdowe i presja regulacyjna mogą ograniczać płynność.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1022,6 +1090,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Ondo is a tokenized real-world-asset and Treasury exposure project. TradFi regulation, custody, and permissioning shape the risk.
+    pl: Ondo to projekt tokenizowanych aktywów realnych i ekspozycji na Treasuries.
+      Regulacje TradFi, custody i permissioning kształtują ryzyko.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1041,6 +1111,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Celestia is a modular data-availability network token. Rollup demand for blobspace matters more than generic L1 transaction counts.
+    pl: Celestia to token modułowej sieci dostępności danych. Popyt rollupów na
+      blobspace waży bardziej niż ogólne liczby transakcji L1.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1060,6 +1132,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Injective is a DeFi-focused app chain for exchange and derivatives use cases. Volume incentives can make activity look cyclical.
+    pl: Injective to app-chain DeFi dla zastosowań giełdowych i pochodnych.
+      Zachęty wolumenowe mogą sprawiać, że aktywność wygląda cyklicznie.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1079,6 +1153,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Optimism is an Ethereum optimistic-rollup ecosystem token. L2 fees are lower, but withdrawals and finality still route back to Ethereum.
+    pl: Optimism to token ekosystemu optimistic rollup Ethereum. Opłaty L2 są
+      niższe, ale wypłaty i finalność nadal wracają do Ethereum.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1098,6 +1174,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Arbitrum is an Ethereum optimistic-rollup ecosystem token. Lower fees come with L1 settlement lag, and ARB is governance rather than gas.
+    pl: Arbitrum to token ekosystemu optimistic rollup Ethereum. Niższe opłaty mają
+      lag rozliczenia L1, a ARB jest governance, nie gazem.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1117,6 +1195,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Sui is a Move-based smart-contract L1. High-throughput claims need to be judged against live app demand and token unlocks.
+    pl: Sui to L1 smart kontraktów oparty na Move. Deklaracje wysokiej
+      przepustowości trzeba oceniać wobec popytu aplikacji live i unlocków tokena.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1144,6 +1224,9 @@ underlyings:
   asset_class: crypto
   description:
     en: Monero is a privacy coin with default-obscured transactions. Regulatory pressure has led to delistings, so venue liquidity is a key risk.
+    pl: Monero to moneta prywatności z domyślnie ukrytymi transakcjami. Presja
+      regulacyjna doprowadziła do delistingów, więc płynność venue jest kluczowym
+      ryzykiem.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1172,6 +1255,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Polygon ecosystem token replacing MATIC. Migration, validator incentives, and app-chain adoption drive value capture risk.
+    pl: POL to token ekosystemu Polygon zastępujący MATIC. Migracja, zachęty
+      walidatorów i adopcja app-chainów napędzają ryzyko przechwytywania wartości.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1191,6 +1276,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Hyperliquid token tied to its perpetual DEX and L1 ecosystem. Exchange volume can dominate sentiment more than generic L1 metrics.
+    pl: HYPE to token powiązany z perpetual DEX Hyperliquid i ekosystemem L1.
+      Wolumen giełdy może dominować sentyment bardziej niż ogólne metryki L1.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1210,6 +1297,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Pepe is a meme coin with no core protocol cash flow. Liquidity and social attention drive price more than utility.
+    pl: Pepe to memecoin bez bazowego cash flow protokołu. Płynność i uwaga
+      społeczności napędzają cenę bardziej niż użyteczność.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1240,6 +1329,8 @@ underlyings:
   description:
     en: S&P 500 exposure via SPY, SPYx perpetual, and ES/MES futures. Excludes
       crypto SPX6900 spot/perp symbols.
+    pl: Ekspozycja na S&P 500 przez SPY, perpetual SPYx i kontrakty ES/MES. Nie
+      obejmuje krypto symboli SPX6900 spot/perp.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1269,6 +1360,8 @@ underlyings:
   description:
     en: Nasdaq 100 exposure via QQQ ETF and NQ/MNQ CME futures. Top-name tech
       concentration matters; NQ notional is index points x $20, MNQ is 1/10 size.
+    pl: Ekspozycja na Nasdaq 100 przez ETF QQQ i kontrakty CME NQ/MNQ. Liczy się
+      koncentracja w największych spółkach tech; NQ = punkty indeksu x $20, MNQ to 1/10.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1295,6 +1388,9 @@ underlyings:
     en: Dow Jones Industrial Average exposure via DIA ETF and YM/MYM CBOT futures.
       Price-weighted; high-price stocks move the index more than market cap would
       imply.
+    pl: Ekspozycja na Dow Jones Industrial Average przez ETF DIA i kontrakty CBOT
+      YM/MYM. Indeks jest ważony cenami; drogie akcje ruszają go mocniej niż
+      wynikałoby z kapitalizacji.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1320,6 +1416,8 @@ underlyings:
   description:
     en: Russell 2000 small-cap exposure via IWM ETF and RTY CME futures. June
       Russell reconstitution can create unusual index and ETF flow.
+    pl: Ekspozycja na małe spółki Russell 2000 przez ETF IWM i kontrakty CME RTY.
+      Czerwcowa rekonstytucja Russell może wywołać nietypowe przepływy w indeksie i ETF.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1340,6 +1438,8 @@ underlyings:
     en: Return-level gold exposure. GLD/IAU are gold trust share units while
       PAXG is a 1 fine troy ounce token; do not compare raw price levels without unit
       normalization.
+    pl: Ekspozycja na stopę zwrotu złota. GLD/IAU to jednostki funduszy złota, a
+      PAXG to token 1 uncji trojańskiej; nie porównuj cen bez normalizacji jednostek.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1390,6 +1490,8 @@ underlyings:
     en: Silver exposure via SLV ETF and SI/SIL/QI COMEX futures. Industrial demand
       is material, so it can diverge from gold even when precious metals trade
       together.
+    pl: Ekspozycja na srebro przez ETF SLV i kontrakty COMEX SI/SIL/QI. Popyt
+      przemysłowy jest istotny, więc srebro może odchylać się od złota.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1421,6 +1523,8 @@ underlyings:
   description:
     en: Platinum exposure via PL NYMEX futures. Auto catalyst demand links it to
       emissions rules; diesel vehicles historically mattered more than gasoline.
+    pl: Ekspozycja na platynę przez kontrakty NYMEX PL. Popyt na katalizatory wiąże
+      ją z normami emisji; historycznie diesel liczył się bardziej niż benzyna.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1435,6 +1539,8 @@ underlyings:
   description:
     en: Palladium exposure via PALL ETF and PA NYMEX futures. Auto catalyst demand
       is central, historically tied more to gasoline vehicles than diesel.
+    pl: Ekspozycja na pallad przez ETF PALL i kontrakty NYMEX PA. Popyt na
+      katalizatory jest kluczowy, historycznie bardziej z aut benzynowych niż diesli.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1455,6 +1561,8 @@ underlyings:
     en: Copper exposure via CPER ETF and HG/MHG/QC COMEX futures. Dr. Copper
       reputation comes from sensitivity to global manufacturing and construction
       demand.
+    pl: Ekspozycja na miedź przez ETF CPER i kontrakty COMEX HG/MHG/QC. Reputacja
+      Dr. Copper wynika z wrażliwości na globalny przemysł i budownictwo.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1486,6 +1594,8 @@ underlyings:
   description:
     en: West Texas Intermediate crude exposure via USO ETF and CL/MCL/QM NYMEX
       futures. USO rolls futures, so contango can drag returns versus spot crude.
+    pl: Ekspozycja na ropę WTI przez ETF USO i kontrakty NYMEX CL/MCL/QM. USO
+      roluje kontrakty, więc kontango może obniżać zwrot względem spot.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1517,6 +1627,8 @@ underlyings:
   description:
     en: Brent crude exposure via BZ NYMEX futures. It is the global seaborne oil
       benchmark, so local WTI storage shocks may not map one-for-one.
+    pl: Ekspozycja na ropę Brent przez kontrakty NYMEX BZ. To globalny morski
+      benchmark ropy, więc lokalne szoki magazynowe WTI nie muszą przenosić się 1:1.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1531,6 +1643,8 @@ underlyings:
   description:
     en: Heating oil exposure via HO/QH NYMEX futures. Distillate demand has winter
       seasonality, so cold-weather forecasts can move front contracts quickly.
+    pl: Ekspozycja na olej opałowy przez kontrakty NYMEX HO/QH. Popyt na destylaty
+      ma sezonowość zimową, więc prognozy mrozów szybko ruszają najbliższe kontrakty.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1551,6 +1665,8 @@ underlyings:
   description:
     en: RBOB gasoline exposure via RB NYMEX futures. Demand is tied to the US
       summer driving season, with refinery outages adding short-term spread risk.
+    pl: Ekspozycja na benzynę RBOB przez kontrakty NYMEX RB. Popyt zależy od
+      letniego sezonu jazdy w USA, a awarie rafinerii dodają krótkoterminowe ryzyko spreadu.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1565,6 +1681,8 @@ underlyings:
   description:
     en: Natural gas exposure via UNG ETF and NG/MNG/QG NYMEX futures. UNG rolls
       front-month Henry Hub futures, so contango can dominate returns.
+    pl: Ekspozycja na gaz ziemny przez ETF UNG i kontrakty NYMEX NG/MNG/QG. UNG
+      roluje najbliższe kontrakty Henry Hub, więc kontango może dominować zwrot.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1596,6 +1714,8 @@ underlyings:
   description:
     en: Soybean oil exposure via ZL/MZL CBOT futures. Biodiesel demand and the
       soybean crush spread link it to soybean meal and bean prices.
+    pl: Ekspozycja na olej sojowy przez kontrakty CBOT ZL/MZL. Popyt na biodiesel
+      i spread crush soi łączą go ze śrutą sojową i cenami soi.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1617,6 +1737,8 @@ underlyings:
     en: Soybean meal exposure via ZM/MZM CBOT futures. It is livestock feed, so
       crush spreads versus soybean oil can matter as much as outright bean
       direction.
+    pl: Ekspozycja na śrutę sojową przez kontrakty CBOT ZM/MZM. To pasza dla
+      zwierząt, więc spready crush wobec oleju sojowego mogą ważyć tyle co kierunek soi.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1637,6 +1759,8 @@ underlyings:
   description:
     en: Rough rice exposure via ZR CBOT futures. The market is small and less
       liquid than major grain contracts, so order size and rolls need care.
+    pl: Ekspozycja na ryż łuskany przez kontrakty CBOT ZR. Rynek jest mały i mniej
+      płynny niż główne zboża, więc rozmiar zlecenia i rolowanie wymagają uwagi.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1652,6 +1776,8 @@ underlyings:
     en: Lumber exposure via LBR CME futures. Housing starts drive demand; the
       post-2022 contract is 27,500 board feet, smaller than the old 110,000
       board-foot contract.
+    pl: Ekspozycja na tarcicę przez kontrakty CME LBR. Popyt zależy od rozpoczętych
+      budów domów; po 2022 kontrakt ma 27 500 stóp deskowych, nie dawne 110 000.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1666,6 +1792,8 @@ underlyings:
   description:
     en: Feeder cattle exposure via GF CME futures. Contracts are cash-settled to an
       index, unlike physically delivered livestock futures.
+    pl: Ekspozycja na bydło opasowe przez kontrakty CME GF. Kontrakty są rozliczane
+      gotówkowo do indeksu, w odróżnieniu od fizycznie dostarczanych kontraktów na żywiec.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1680,6 +1808,8 @@ underlyings:
   description:
     en: Lean hog exposure via HE CME futures. Contracts are cash-settled to the CME
       Lean Hog Index, so cash index behavior drives expiry.
+    pl: Ekspozycja na wieprzowinę chudą przez kontrakty CME HE. Kontrakty rozliczają
+      się gotówkowo do CME Lean Hog Index, więc rynek kasowy wpływa na wygaśnięcie.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1692,6 +1822,9 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus US dollar exposure via Kraken, Walutomat, Polygon, 6E CME futures, and EUR-USD perpetual. ECB-Fed policy gaps drive the most liquid FX pair.
+    pl: Ekspozycja na euro względem dolara USA przez Kraken, Walutomat, Polygon,
+      futures CME 6E i perpetual EUR-USD. Różnice polityki EBC-Fed napędzają
+      najpłynniejszą parę FX.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1717,6 +1850,9 @@ underlyings:
   asset_class: forex
   description:
     en: US dollar versus Polish zloty exposure via Walutomat and Polygon. A core Poland retail FX pair; NBP-Fed policy gaps and global USD risk drive it.
+    pl: Ekspozycja na dolara USA względem PLN przez Walutomat i Polygon. Kluczowa
+      para detaliczna w Polsce; luki polityki NBP-Fed i globalny apetyt na USD ją
+      napędzają.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1729,6 +1865,8 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Polish zloty exposure via Walutomat and Polygon. The key PLN cross reflects NBP-ECB policy gaps, EU funds flow, and regional risk.
+    pl: Ekspozycja na euro względem PLN przez Walutomat i Polygon. Główny cross
+      PLN odzwierciedla różnice NBP-EBC, napływ funduszy UE i ryzyko regionu.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1741,6 +1879,8 @@ underlyings:
   asset_class: forex
   description:
     en: British pound versus Polish zloty exposure via Walutomat and Polygon. Less liquid than EURPLN, often behaving like EURGBP times EURPLN.
+    pl: Ekspozycja na funta względem PLN przez Walutomat i Polygon. Mniej płynna
+      niż EURPLN, często zachowuje się jak EURGBP razy EURPLN.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1753,6 +1893,9 @@ underlyings:
   asset_class: forex
   description:
     en: British pound versus US dollar exposure via Kraken, Walutomat, Polygon, 6B CME futures, and GBP-USD perpetual. Cable reacts to BOE rates and UK political risk.
+    pl: Ekspozycja na funta względem dolara USA przez Kraken, Walutomat, Polygon,
+      futures CME 6B i perpetual GBP-USD. Cable reaguje na stopy BOE i ryzyko
+      polityczne UK.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1778,6 +1921,8 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus British pound exposure via Kraken, Walutomat, and Polygon. ECB-BOE policy gaps drive the cross without direct USD exposure.
+    pl: Ekspozycja na euro względem funta przez Kraken, Walutomat i Polygon.
+      Różnice polityki EBC-BOE napędzają cross bez bezpośredniej ekspozycji na USD.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1793,6 +1938,9 @@ underlyings:
   asset_class: forex
   description:
     en: Australian dollar versus Polish zloty exposure via Walutomat and Polygon. Commodity and China risk feed through AUD, while PLN follows NBP policy.
+    pl: Ekspozycja na dolara australijskiego względem PLN przez Walutomat i
+      Polygon. Ryzyko surowców i Chin przechodzi przez AUD, a PLN śledzi politykę
+      NBP.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1805,6 +1953,8 @@ underlyings:
   asset_class: forex
   description:
     en: Bulgarian lev versus Polish zloty exposure via Walutomat. Because BGN is EUR-pegged, BGNPLN usually behaves like EURPLN scaled by the peg.
+    pl: Ekspozycja na lewa bułgarskiego względem PLN przez Walutomat. Ponieważ BGN
+      ma peg do EUR, BGNPLN zwykle zachowuje się jak EURPLN skorygowany o peg.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1814,6 +1964,8 @@ underlyings:
   asset_class: forex
   description:
     en: Canadian dollar versus Polish zloty exposure via Walutomat and Polygon. Oil sensitivity drives CAD while NBP policy drives the PLN leg.
+    pl: Ekspozycja na dolara kanadyjskiego względem PLN przez Walutomat i Polygon.
+      Wrażliwość na ropę napędza CAD, a polityka NBP steruje nogą PLN.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1826,6 +1978,9 @@ underlyings:
   asset_class: forex
   description:
     en: Swiss franc versus Polish zloty exposure via Walutomat and Polygon. CHFPLN carries Swiss-franc mortgage legacy risk in Poland and SNB shock memory.
+    pl: Ekspozycja na franka szwajcarskiego względem PLN przez Walutomat i
+      Polygon. CHFPLN niesie ryzyko kredytów frankowych w Polsce i pamięć szoku
+      SNB z 2015.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1838,6 +1993,8 @@ underlyings:
   asset_class: forex
   description:
     en: Chinese yuan versus Polish zloty exposure via Walutomat. CNY is managed by PBoC fixings, so the PLN cross can move through USD or EUR legs.
+    pl: Ekspozycja na juana względem PLN przez Walutomat. CNY jest zarządzany
+      fixingami PBoC, więc cross PLN może ruszać przez nogi USD lub EUR.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1847,6 +2004,8 @@ underlyings:
   asset_class: forex
   description:
     en: Czech koruna versus Polish zloty exposure via Walutomat and Polygon. A regional rates cross; CNB versus NBP policy gaps drive relative moves.
+    pl: Ekspozycja na koronę czeską względem PLN przez Walutomat i Polygon.
+      Regionalny cross stóp; różnice polityki CNB-NBP napędzają relatywne ruchy.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1859,6 +2018,9 @@ underlyings:
   asset_class: forex
   description:
     en: Danish krone versus Polish zloty exposure via Walutomat and Polygon. DKK is EUR-managed in ERM II, so DKKPLN mostly tracks EURPLN adjusted for the peg.
+    pl: Ekspozycja na koronę duńską względem PLN przez Walutomat i Polygon. DKK
+      jest zarządzana wobec EUR w ERM II, więc DKKPLN głównie śledzi EURPLN po
+      korekcie o peg.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1871,6 +2033,9 @@ underlyings:
   asset_class: forex
   description:
     en: Hong Kong dollar versus Polish zloty exposure via Walutomat and Polygon. HKD's USD peg makes this behave closer to USDPLN than a free HKD cross.
+    pl: Ekspozycja na dolara hongkońskiego względem PLN przez Walutomat i Polygon.
+      Peg HKD do USD sprawia, że para zachowuje się bliżej USDPLN niż wolnego
+      crossa HKD.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1883,6 +2048,8 @@ underlyings:
   asset_class: forex
   description:
     en: Hungarian forint versus Polish zloty exposure via Walutomat and Polygon. It is a regional CEE cross driven by MNB-NBP policy and risk sentiment.
+    pl: Ekspozycja na forinta względem PLN przez Walutomat i Polygon. Regionalny
+      cross CEE napędzany polityką MNB-NBP i sentymentem do ryzyka.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1895,6 +2062,9 @@ underlyings:
   asset_class: forex
   description:
     en: Israeli shekel versus Polish zloty exposure via Walutomat and Polygon. BOI policy and geopolitical risk can widen spreads versus core PLN pairs.
+    pl: Ekspozycja na szekla izraelskiego względem PLN przez Walutomat i Polygon.
+      Polityka BOI i ryzyko geopolityczne mogą rozszerzać spready wobec głównych
+      par PLN.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1907,6 +2077,8 @@ underlyings:
   asset_class: forex
   description:
     en: Japanese yen versus Polish zloty exposure via Walutomat and Polygon. Often derived through USDJPY and USDPLN, so effective spreads can be wider.
+    pl: Ekspozycja na jena względem PLN przez Walutomat i Polygon. Często
+      wyprowadzana przez USDJPY i USDPLN, więc efektywne spready bywają szersze.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1919,6 +2091,8 @@ underlyings:
   asset_class: forex
   description:
     en: Norwegian krone versus Polish zloty exposure via Walutomat and Polygon. Oil-linked NOK and NBP-sensitive PLN make this a cyclical cross.
+    pl: Ekspozycja na koronę norweską względem PLN przez Walutomat i Polygon. NOK
+      zależna od ropy i PLN wrażliwy na NBP tworzą cykliczny cross.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1931,6 +2105,9 @@ underlyings:
   asset_class: forex
   description:
     en: New Zealand dollar versus Polish zloty exposure via Walutomat and Polygon. NZD liquidity is thinner than AUD, so PLN crosses can move in wider jumps.
+    pl: Ekspozycja na dolara nowozelandzkiego względem PLN przez Walutomat i
+      Polygon. Płynność NZD jest cieńsza niż AUD, więc crossy PLN mogą skakać
+      szerzej.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1943,6 +2120,9 @@ underlyings:
   asset_class: forex
   description:
     en: Romanian leu versus Polish zloty exposure via Walutomat. RON is managed by the NBR, so this can be sticky until policy pressure breaks through.
+    pl: Ekspozycja na leja rumuńskiego względem PLN przez Walutomat. RON jest
+      zarządzany przez NBR, więc para bywa lepka, aż presja przebije się większym
+      ruchem.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1952,6 +2132,9 @@ underlyings:
   asset_class: forex
   description:
     en: Swedish krona versus Polish zloty exposure via Walutomat and Polygon. Riksbank-NBP policy gaps and Nordic risk sentiment drive the cross.
+    pl: Ekspozycja na koronę szwedzką względem PLN przez Walutomat i Polygon.
+      Różnice polityki Riksbank-NBP i sentyment do ryzyka nordyckiego napędzają
+      cross.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1964,6 +2147,9 @@ underlyings:
   asset_class: forex
   description:
     en: Singapore dollar versus Polish zloty exposure via Walutomat and Polygon. MAS manages SGD by basket, so USD and EUR legs can both affect the PLN quote.
+    pl: Ekspozycja na dolara singapurskiego względem PLN przez Walutomat i
+      Polygon. MAS zarządza SGD koszykiem, więc nogi USD i EUR mogą wpływać na
+      kwotowanie PLN.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1976,6 +2162,9 @@ underlyings:
   asset_class: forex
   description:
     en: Turkish lira versus Polish zloty exposure via Walutomat and Polygon. Exotic cross; usually derived through EUR or USD legs, so spreads can be wide.
+    pl: Ekspozycja na lirę turecką względem PLN przez Walutomat i Polygon.
+      Egzotyczny cross zwykle wyprowadzany przez nogi EUR lub USD, więc spready
+      bywają szerokie.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -1988,6 +2177,9 @@ underlyings:
   asset_class: forex
   description:
     en: South African rand versus Polish zloty exposure via Walutomat and Polygon. High-yield ZAR and PLN risk sentiment make this volatile and spread-sensitive.
+    pl: Ekspozycja na randa RPA względem PLN przez Walutomat i Polygon.
+      Wysokodochodowy ZAR i sentyment do ryzyka PLN czynią parę zmienną i
+      wrażliwą na spread.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2000,6 +2192,9 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Australian dollar exposure via Walutomat, Kraken, and Polygon. AUD commodity beta and carry demand make this more cyclical than EURUSD.
+    pl: Ekspozycja na euro względem dolara australijskiego przez Walutomat, Kraken
+      i Polygon. Beta AUD do surowców i popyt na carry czynią parę bardziej
+      cykliczną niż EURUSD.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2015,6 +2210,9 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Bulgarian lev exposure via Walutomat. BGN is pegged to EUR around 1.95583, so moves mostly reflect peg mechanics and conversion spread.
+    pl: Ekspozycja na euro względem lewa bułgarskiego przez Walutomat. BGN ma peg
+      do EUR około 1,95583, więc ruchy głównie oddają mechanikę pegu i spread
+      przewalutowania.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2024,6 +2222,9 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Canadian dollar exposure via Walutomat, Kraken, and Polygon. CAD oil sensitivity adds commodity risk to the ECB-BoC policy spread.
+    pl: Ekspozycja na euro względem dolara kanadyjskiego przez Walutomat, Kraken i
+      Polygon. Wrażliwość CAD na ropę dodaje ryzyko surowcowe do spreadu polityki
+      EBC-BoC.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2039,6 +2240,9 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Swiss franc exposure via Walutomat, Kraken, and Polygon. The old 1.20 floor is gone, but SNB policy and CHF haven flows still matter.
+    pl: Ekspozycja na euro względem franka szwajcarskiego przez Walutomat, Kraken i
+      Polygon. Dawny floor 1,20 zniknął, ale polityka SNB i safe haven CHF nadal
+      ważą.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2054,6 +2258,9 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Chinese yuan exposure via Walutomat and Polygon. CNY is managed through daily PBoC fixings, so policy can override spot momentum.
+    pl: Ekspozycja na euro względem juana przez Walutomat i Polygon. CNY jest
+      zarządzany dziennymi fixingami PBoC, więc polityka może przebić momentum
+      spot.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2066,6 +2273,9 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Czech koruna exposure via Walutomat and Polygon. CZK floats since the 2017 CNB cap exit; CNB policy and intervention risk still matter.
+    pl: Ekspozycja na euro względem korony czeskiej przez Walutomat i Polygon. CZK
+      ma płynny kurs od wyjścia z capu CNB w 2017; polityka CNB i ryzyko
+      interwencji nadal ważą.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2078,6 +2288,9 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Danish krone exposure via Walutomat and Polygon. DKK trades in ERM II around 7.46038, so this is a managed-peg pair, not a free float.
+    pl: Ekspozycja na euro względem korony duńskiej przez Walutomat i Polygon. DKK
+      handluje w ERM II wokół 7,46038, więc to para z zarządzanym pegiem, nie
+      swobodny kurs.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2090,6 +2303,9 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Hong Kong dollar exposure via Walutomat and Polygon. HKD is USD-pegged near 7.75-7.85, so EURHKD largely tracks EURUSD times the peg.
+    pl: Ekspozycja na euro względem dolara hongkońskiego przez Walutomat i Polygon.
+      HKD ma peg do USD blisko 7,75-7,85, więc EURHKD głównie śledzi EURUSD razy
+      peg.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2102,6 +2318,8 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Hungarian forint exposure via Walutomat and Polygon. MNB policy and inflation risk dominate; HUF can weaken quickly in regional stress.
+    pl: Ekspozycja na euro względem forinta przez Walutomat i Polygon. Polityka
+      MNB i ryzyko inflacji dominują; HUF może szybko słabnąć w stresie regionu.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2114,6 +2332,8 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Israeli shekel exposure via Walutomat and Polygon. BOI policy and geopolitical risk can overpower rate differentials.
+    pl: Ekspozycja na euro względem szekla izraelskiego przez Walutomat i Polygon.
+      Polityka BOI i ryzyko geopolityczne mogą przeważyć różnice stóp.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2126,6 +2346,8 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Japanese yen exposure via Walutomat, Kraken, and Polygon. Risk-off moves often favor JPY, making this a policy and carry barometer.
+    pl: Ekspozycja na euro względem jena przez Walutomat, Kraken i Polygon. Ruchy
+      risk-off często wzmacniają JPY, więc para jest barometrem polityki i carry.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2141,6 +2363,9 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Norwegian krone exposure via Walutomat and Polygon. Oil exposure and Norges Bank policy make NOK more cyclical than EUR.
+    pl: Ekspozycja na euro względem korony norweskiej przez Walutomat i Polygon.
+      Ekspozycja NOK na ropę i polityka Norges Bank czynią NOK bardziej cykliczną
+      niż EUR.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2153,6 +2378,8 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus New Zealand dollar exposure via Walutomat and Polygon. Smaller NZD liquidity can make moves wider than in EURAUD.
+    pl: Ekspozycja na euro względem dolara nowozelandzkiego przez Walutomat i
+      Polygon. Mniejsza płynność NZD może dawać szersze ruchy niż w EURAUD.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2165,6 +2392,9 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Romanian leu exposure via Walutomat and Polygon. RON is a managed float, so NBR smoothing can mask pressure until wider moves arrive.
+    pl: Ekspozycja na euro względem leja rumuńskiego przez Walutomat i Polygon.
+      RON ma kurs zarządzany, więc wygładzanie NBR może maskować presję do czasu
+      większych ruchów.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2177,6 +2407,8 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Swedish krona exposure via Walutomat and Polygon. Riksbank policy and housing-sensitive Swedish growth drive this Scandi cross.
+    pl: Ekspozycja na euro względem korony szwedzkiej przez Walutomat i Polygon.
+      Polityka Riksbanku i rynek mieszkaniowy Szwecji napędzają ten cross Scandi.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2189,6 +2421,9 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Singapore dollar exposure via Walutomat and Polygon. MAS manages SGD against a trade-weighted basket, so EURSGD is policy-band sensitive.
+    pl: Ekspozycja na euro względem dolara singapurskiego przez Walutomat i
+      Polygon. MAS zarządza SGD wobec koszyka handlowego, więc EURSGD jest wrażliwy
+      na pasmo polityki.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2201,6 +2436,9 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus Turkish lira exposure via Walutomat and Polygon. TRY has crisis history and policy credibility risk, so gaps and wide spreads are normal.
+    pl: Ekspozycja na euro względem liry tureckiej przez Walutomat i Polygon. TRY
+      ma historię kryzysów i ryzyko wiarygodności polityki, więc luki i szerokie
+      spready są normalne.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2213,6 +2451,9 @@ underlyings:
   asset_class: forex
   description:
     en: Euro versus South African rand exposure via Walutomat and Polygon. ZAR is high-yield and commodity-linked, so volatility can exceed G10 crosses.
+    pl: Ekspozycja na euro względem randa RPA przez Walutomat i Polygon. ZAR jest
+      wysokodochodowy i powiązany z surowcami, więc zmienność może przewyższać
+      crossy G10.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2225,6 +2466,9 @@ underlyings:
   asset_class: forex
   description:
     en: British pound versus Swiss franc exposure via Walutomat and Polygon. GBP volatility plus CHF safe-haven demand makes liquidity thinner than major USD pairs.
+    pl: Ekspozycja na funta względem franka szwajcarskiego przez Walutomat i
+      Polygon. Zmienność GBP plus popyt safe haven na CHF daje cieńszą płynność
+      niż główne pary USD.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2237,6 +2481,9 @@ underlyings:
   asset_class: forex
   description:
     en: US dollar versus Swiss franc exposure via Walutomat, Kraken, and Polygon. CHF safe-haven demand and SNB intervention history can dominate rate spreads.
+    pl: Ekspozycja na dolara USA względem franka szwajcarskiego przez Walutomat,
+      Kraken i Polygon. Popyt safe haven na CHF i historia interwencji SNB mogą
+      zdominować spready stóp.
   patterns:
   - exchange: walutomat
     match_type: exact
@@ -2252,6 +2499,9 @@ underlyings:
   asset_class: forex
   description:
     en: Australian dollar versus US dollar exposure via Kraken, Polygon, 6A CME futures, and AUD-USD perpetual. AUD is commodity-linked and sensitive to China demand.
+    pl: Ekspozycja na dolara australijskiego względem dolara USA przez Kraken,
+      Polygon, futures CME 6A i perpetual AUD-USD. AUD jest powiązany z surowcami i
+      popytem Chin.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -2274,6 +2524,9 @@ underlyings:
   asset_class: forex
   description:
     en: US dollar versus Canadian dollar exposure via Kraken and Polygon. CAD is oil-sensitive, so crude moves and BoC-Fed policy gaps both matter.
+    pl: Ekspozycja na dolara USA względem dolara kanadyjskiego przez Kraken i
+      Polygon. CAD jest wrażliwy na ropę, więc liczą się ruchy crude i różnice
+      polityki BoC-Fed.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2286,6 +2539,8 @@ underlyings:
   asset_class: forex
   description:
     en: US dollar versus Japanese yen exposure via Kraken and Polygon. Yen funding flows make carry trades and BOJ policy shocks central.
+    pl: Ekspozycja na dolara USA względem jena przez Kraken i Polygon. Przepływy
+      finansowania w JPY czynią carry trade i szoki polityki BOJ kluczowymi.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2298,6 +2553,9 @@ underlyings:
   asset_class: forex
   description:
     en: New Zealand dollar versus US dollar exposure via 6N CME futures. Liquidity is thinner than AUDUSD; dairy prices and carry demand can matter.
+    pl: Ekspozycja na dolara nowozelandzkiego względem dolara USA przez futures CME
+      6N. Płynność jest cieńsza niż AUDUSD; ceny nabiału i popyt carry mogą mieć
+      znaczenie.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -2312,6 +2570,8 @@ underlyings:
   description:
     en: CBOT 10-year Treasury note futures. Contract trades on price; yield moves
       opposite. $100k face, quarterly H/M/U/Z settle.
+    pl: Kontrakt terminowy CBOT na 10-letnie obligacje skarbowe USA. Kurs porusza
+      się odwrotnie do rentowności. Nominał $100k, rozliczenie kwartalne H/M/U/Z.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -2326,6 +2586,8 @@ underlyings:
   description:
     en: CBOT 30-year Treasury bond futures. Contract trades on price; yield moves
       opposite. $100k face, quarterly H/M/U/Z settle.
+    pl: Kontrakt terminowy CBOT na 30-letnie obligacje skarbowe USA. Kurs porusza
+      się odwrotnie do rentowności. Nominał $100k, rozliczenie kwartalne H/M/U/Z.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -2340,6 +2602,8 @@ underlyings:
   description:
     en: CBOT 2-year Treasury note futures. Contract trades on price; yield moves
       opposite. $200k face, quarterly H/M/U/Z settle.
+    pl: Kontrakt terminowy CBOT na 2-letnie obligacje skarbowe USA. Kurs porusza
+      się odwrotnie do rentowności. Nominał $200k, rozliczenie kwartalne H/M/U/Z.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -2354,6 +2618,8 @@ underlyings:
   description:
     en: CBOT 5-year Treasury note futures. Contract trades on price; yield moves
       opposite. $100k face, quarterly H/M/U/Z settle.
+    pl: Kontrakt terminowy CBOT na 5-letnie obligacje skarbowe USA. Kurs porusza
+      się odwrotnie do rentowności. Nominał $100k, rozliczenie kwartalne H/M/U/Z.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -2390,6 +2656,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Aleo is a privacy-focused zero-knowledge L1. Proving costs, private app adoption, and compliance risk are the main gotchas.
+    pl: Aleo to nastawiony na prywatność L1 zero-knowledge. Koszty dowodów, adopcja
+      prywatnych aplikacji i ryzyko compliance to główne ryzyka.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2470,6 +2738,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Flux is a decentralized cloud and infrastructure network token. Node economics and real compute demand matter more than generic AI hype.
+    pl: Flux to token zdecentralizowanej chmury i sieci infrastruktury. Ekonomia
+      node'ów i realny popyt na compute ważą bardziej niż ogólny hype AI.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2486,6 +2756,8 @@ underlyings:
   asset_class: crypto
   description:
     en: ICON is a smart-contract and interoperability network. Cross-chain adoption and Korean-market liquidity can drive sentiment.
+    pl: ICON to sieć smart kontraktów i interoperacyjności. Adopcja cross-chain i
+      płynność rynku koreańskiego mogą napędzać sentyment.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2505,6 +2777,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Kava is a Cosmos/EVM DeFi chain token. App liquidity, bridge assumptions, and incentive emissions are the key risks.
+    pl: Kava to token łańcucha DeFi Cosmos/EVM. Płynność aplikacji, założenia
+      bridge'y i emisje zachęt są kluczowymi ryzykami.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2524,6 +2798,8 @@ underlyings:
   asset_class: crypto
   description:
     en: KNC is the Kyber Network token for DEX liquidity and aggregation. Protocol volume and upgrade history matter for token demand.
+    pl: KNC to token Kyber Network dla płynności DEX i agregacji. Wolumen protokołu
+      i historia upgrade'ów mają znaczenie dla popytu na token.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2549,6 +2825,8 @@ underlyings:
   asset_class: crypto
   description:
     en: LUNA is Terra 2.0, the post-collapse Terra chain token. It is distinct from original LUNC/UST history, but confidence damage remains central.
+    pl: LUNA to Terra 2.0, token łańcucha Terra po upadku. Jest odrębna od historii
+      pierwotnych LUNC/UST, ale szkoda zaufania pozostaje centralna.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2724,6 +3002,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Songbird is Flare Network's canary network token. It tests upgrades before Flare, so experimental risk is part of the asset.
+    pl: Songbird to token canary network Flare Network. Testuje upgrade'y przed
+      Flare, więc ryzyko eksperymentalne jest częścią aktywa.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2763,6 +3043,8 @@ underlyings:
   asset_class: crypto
   description:
     en: SUSHI is the SushiSwap DEX governance token. Liquidity incentives, fee capture, and DEX market share drive fundamentals.
+    pl: SUSHI to token governance DEX SushiSwap. Zachęty płynnościowe,
+      przechwytywanie opłat i udział DEX w rynku napędzają fundamenty.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2795,6 +3077,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Telcoin is a payments and remittance-focused token. Regulatory corridors and mobile-money adoption matter more than generic crypto beta.
+    pl: Telcoin to token płatności i przekazów pieniężnych. Korytarze regulacyjne i
+      adopcja mobile money ważą bardziej niż ogólna beta krypto.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2847,6 +3131,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Worldcoin token for the World ID proof-of-personhood network. Iris-scan onboarding and privacy controversy are the key risks.
+    pl: WLD to token Worldcoin dla sieci World ID proof-of-personhood. Onboarding
+      przez skan tęczówki i spór o prywatność są kluczowymi ryzykami.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2863,6 +3149,9 @@ underlyings:
   asset_class: crypto
   description:
     en: Tether Gold token representing 1 fine troy ounce of physical gold. Treat it as commodity-pegged; redemption, custody, and spread matter.
+    pl: XAUT to token Tether Gold reprezentujący 1 uncję trojańską fizycznego
+      złota. Traktuj go jako powiązany z towarem; wykup, custody i spread mają
+      znaczenie.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2882,6 +3171,8 @@ underlyings:
   asset_class: crypto
   description:
     en: XDC Network is an enterprise-focused EVM-compatible chain tied to trade-finance use cases. Adoption risk is the main gotcha.
+    pl: XDC Network to korporacyjny łańcuch zgodny z EVM, powiązany z trade
+      finance. Ryzyko adopcji jest głównym ryzykiem.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2923,6 +3214,8 @@ underlyings:
   asset_class: crypto
   description:
     en: Tezos is a proof-of-stake L1 with on-chain governance and baking. Upgrade cadence is strong, but app adoption drives token demand.
+    pl: Tezos to L1 proof-of-stake z governance on-chain i bakingiem. Tempo
+      upgrade'ów jest mocne, ale adopcja aplikacji napędza popyt na token.
   patterns:
   - exchange: kraken
     match_type: exact
