@@ -2076,6 +2076,9 @@ underlyings:
   name: US 10-Year Treasury Note
   asset_class: yield
   sector: US Government
+  description:
+    en: CBOT 10-year Treasury note futures. Contract trades on price; yield moves
+      opposite. $100k face, quarterly H/M/U/Z settle.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -2087,6 +2090,9 @@ underlyings:
   name: US 30-Year Treasury Bond
   asset_class: yield
   sector: US Government
+  description:
+    en: CBOT 30-year Treasury bond futures. Contract trades on price; yield moves
+      opposite. $100k face, quarterly H/M/U/Z settle.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -2098,6 +2104,9 @@ underlyings:
   name: US 2-Year Treasury Note
   asset_class: yield
   sector: US Government
+  description:
+    en: CBOT 2-year Treasury note futures. Contract trades on price; yield moves
+      opposite. $200k face, quarterly H/M/U/Z settle.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -2109,6 +2118,9 @@ underlyings:
   name: US 5-Year Treasury Note
   asset_class: yield
   sector: US Government
+  description:
+    en: CBOT 5-year Treasury note futures. Contract trades on price; yield moves
+      opposite. $100k face, quarterly H/M/U/Z settle.
   patterns:
   - exchange: kraken_equities
     match_type: regex
