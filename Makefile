@@ -432,8 +432,11 @@ ui-format-fix:
 ui-i18n-check:
 	$(PNPM) check:i18n
 
-ui-check: ui-lint ui-format ui-dead-code ui-typecheck ui-i18n-check
-	$(info UI quality checks passed [lint + format + dead code + typecheck + i18n])
+ui-i18n-check-alerts:
+	$(VENV_PY) scripts/port_ios_alert_catalog.py --check
+
+ui-check: ui-lint ui-format ui-dead-code ui-typecheck ui-i18n-check ui-i18n-check-alerts
+	$(info UI quality checks passed [lint + format + dead code + typecheck + i18n + alerts])
 
 ui-fix: ui-lint-fix ui-format-fix ui-dead-code-fix
 	$(info UI quality fixes applied [lint + format + dead code])
