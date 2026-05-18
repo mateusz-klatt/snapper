@@ -609,6 +609,7 @@ async def test_start_and_stop_use_context(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(
         "snapper.messaging.infrastructure.broker.zmq.asyncio.Context", lambda: dummy_ctx
     )
+    monkeypatch.setattr("snapper.messaging.infrastructure.broker.zmq.asyncio.Poller", MagicMock)
     broker._proxy_loop = AsyncMock()
     await broker.start()
     assert broker.running
@@ -941,12 +942,16 @@ def test_thread_stop_when_thread_not_alive() -> None:
 
 
 @pytest.mark.asyncio
-async def test_poll_sockets_uses_poller(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test _poll_sockets uses ZMQ Poller.
+async def test_poll_sockets_uses_cached_poller() -> None:
+    """Test ``_poll_sockets`` uses the cached ``self._poller`` instance.
 
-    Given: A broker with sockets,
-    When: _poll_sockets is called,
-    Then: ZMQ Poller is used to poll sockets.
+    Given: A broker with a pre-installed dummy poller on ``self._poller``.
+    When: ``_poll_sockets`` is called.
+    Then: The cached poller's ``poll`` coroutine is awaited and its event
+        list is converted to a dict for the caller. This is the post-fix
+        contract — the per-call ``Poller()`` construction the old code
+        used was removed in favour of the single instance built at
+        ``start()``.
     """
     broker: Any = ZmqBrokerProcess()
     xsub = DummySocket("pub")
@@ -955,18 +960,49 @@ async def test_poll_sockets_uses_poller(monkeypatch: pytest.MonkeyPatch) -> None
     broker.xpub_socket = xpub
 
     class DummyPoller:
+        """Dummy poller stub that returns a fixed event set."""
+
         def __init__(self) -> None:
+            """Track registrations for assertion convenience."""
             self.registered: list[Any] = []
 
         def register(self, socket: Any, _flag: int) -> None:
+            """Record a registration (unused in this test).
+
+            Args:
+                socket: Any socket-like object.
+                _flag: Ignored POLL flag.
+            """
             self.registered.append(socket)
 
         async def poll(self) -> list[tuple[Any, int]]:
+            """Return a fixed POLLIN event for the xsub socket.
+
+            Returns:
+                A single ``(xsub, zmq.POLLIN)`` tuple.
+            """
             return [(xsub, zmq.POLLIN)]
 
-    monkeypatch.setattr("snapper.messaging.infrastructure.broker.zmq.asyncio.Poller", DummyPoller)
+    broker._poller = DummyPoller()
     events = await broker._poll_sockets()
     assert xsub in events
+
+
+@pytest.mark.asyncio
+async def test_poll_sockets_returns_empty_when_poller_is_none() -> None:
+    """Test ``_poll_sockets`` returns ``{}`` when ``self._poller`` is unset.
+
+    Given: A broker whose ``_poller`` is ``None`` (no ``start()`` yet, or
+        already stopped).
+    When: ``_poll_sockets`` is called directly.
+    Then: An empty dict is returned so the caller (``_proxy_loop``) sees
+        no events and falls through to the next iteration without
+        crashing on the None attribute.
+    """
+    broker: Any = ZmqBrokerProcess()
+    broker._poller = None
+    events = await broker._poll_sockets()
+    assert events == {}
 
 
 class DummySocketMessaging:
@@ -993,20 +1029,26 @@ class DummySocketMessaging:
         self.bound_endpoint = endpoint
 
     async def recv_multipart(self, *args: Any, **kwargs: Any) -> list[bytes]:
-        """Receive multipart message from queue.
+        """Receive multipart message from queue with NOBLOCK semantics.
+
+        Mirrors ``zmq.asyncio.Socket.recv_multipart(zmq.NOBLOCK)``: raises
+        ``zmq.Again`` when the queue is empty so the broker's batch-drain
+        loop can exit cleanly instead of seeing a generic ``RuntimeError``
+        that propagates up to ``_proxy_loop``'s exception handler and
+        kills the proxy.
 
         Args:
-            *args: Ignored arguments.
+            *args: Ignored ZMQ flags.
             **kwargs: Ignored keyword arguments.
 
         Returns:
             List of message parts from queue.
 
         Raises:
-            RuntimeError: If no messages queued.
+            zmq.Again: When the queue is empty (NOBLOCK semantics).
         """
         if not self.recv_queue:
-            raise RuntimeError(f"No queued messages for {self.name}")
+            raise zmq.Again()
         return self.recv_queue.pop(0)
 
     async def send_multipart(self, message: list[bytes]) -> None:
@@ -1299,3 +1341,245 @@ async def test_handle_subscription_frame_returns_false_for_non_subscription_payl
 
     assert handled is False
     broker.xsub_socket.send_multipart.assert_not_called()
+
+
+class _QueueBackedDummySocket:
+    """Queue-backed socket stub for batch-drain tests.
+
+    Each call to ``recv_multipart`` pops the next queued message; when the
+    queue is empty it raises ``zmq.Again`` to mirror real
+    ``recv_multipart(zmq.NOBLOCK)`` semantics. Existing ``DummySocket`` in
+    this module returns a fixed message forever which would never trip the
+    ``zmq.Again`` exit branch the new batch-drain code depends on, so the
+    batch-drain tests need this queue-backed variant.
+    """
+
+    def __init__(self, name: str) -> None:
+        """Initialise an empty queue-backed dummy socket.
+
+        Args:
+            name: Diagnostic identifier kept on the instance for debugging
+                failures.
+        """
+        self.name = name
+        self.recv_queue: list[list[bytes]] = []
+        self.sent: list[list[bytes]] = []
+
+    async def recv_multipart(self, *_args: Any) -> list[bytes]:
+        """Pop the next queued message, or raise ``zmq.Again`` when empty.
+
+        Args:
+            *_args: Ignored ZMQ flags (e.g. ``zmq.NOBLOCK``); the queue
+                semantics are non-blocking by construction.
+
+        Returns:
+            The next queued multipart message.
+
+        Raises:
+            zmq.Again: When the queue is empty (mirrors NOBLOCK semantics).
+        """
+        if not self.recv_queue:
+            raise zmq.Again()
+        return self.recv_queue.pop(0)
+
+    async def send_multipart(self, message: list[bytes]) -> None:
+        """Record a sent multipart message for later assertion.
+
+        Args:
+            message: The multipart frame the caller sent.
+        """
+        self.sent.append(message)
+
+
+@pytest.mark.asyncio
+async def test_forward_drains_up_to_cap_per_burst(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that ``_forward_polled_messages`` caps draining at ``_MAX_DRAIN_PER_BURST``.
+
+    Given: An xsub queue with 1000 pre-loaded messages and an empty xpub.
+    When: ``_forward_polled_messages`` is invoked once with only xsub POLLIN.
+    Then: Exactly ``_MAX_DRAIN_PER_BURST`` (256) messages are forwarded to
+        xpub, ``asyncio.sleep(0)`` is awaited exactly once, and the xsub
+        queue retains ``1000 - 256 = 744`` items for the next forward call.
+    """
+    from snapper.messaging.infrastructure.broker import _MAX_DRAIN_PER_BURST
+
+    broker: Any = ZmqBrokerProcess(xsub_endpoint="inproc://xsub", xpub_endpoint="inproc://xpub")
+    xsub = _QueueBackedDummySocket("xsub")
+    xpub = _QueueBackedDummySocket("xpub")
+    broker.xsub_socket = xsub
+    broker.xpub_socket = xpub
+    xsub.recv_queue = [[f"msg-{i}".encode()] for i in range(1000)]
+
+    sleep_zero_calls = 0
+
+    async def counted_sleep(delay: float) -> None:
+        """Count zero-delay yields without delaying the test.
+
+        Args:
+            delay: Sleep duration; only zero-delay yields are counted.
+        """
+        nonlocal sleep_zero_calls
+        if delay == 0:
+            sleep_zero_calls += 1
+
+    monkeypatch.setattr(asyncio, "sleep", counted_sleep)
+
+    await broker._forward_polled_messages({xsub: zmq.POLLIN})
+
+    assert len(xpub.sent) == _MAX_DRAIN_PER_BURST
+    assert len(xsub.recv_queue) == 1000 - _MAX_DRAIN_PER_BURST
+    assert sleep_zero_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_forward_stops_at_zmq_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test the drain exits on ``zmq.Again`` without yielding when below the cap.
+
+    Given: An xsub queue with 100 messages (well below the 256 cap).
+    When: ``_forward_polled_messages`` is invoked once with xsub POLLIN.
+    Then: All 100 messages are forwarded, the drain exits via ``zmq.Again``,
+        and ``asyncio.sleep(0)`` is NEVER awaited. The yield is gated on
+        the cap-hit branch only — there is nothing left to forward, so
+        yielding would only add latency to the next poll cycle.
+    """
+    broker: Any = ZmqBrokerProcess(xsub_endpoint="inproc://xsub", xpub_endpoint="inproc://xpub")
+    xsub = _QueueBackedDummySocket("xsub")
+    xpub = _QueueBackedDummySocket("xpub")
+    broker.xsub_socket = xsub
+    broker.xpub_socket = xpub
+    xsub.recv_queue = [[f"msg-{i}".encode()] for i in range(100)]
+
+    sleep_zero_calls = 0
+
+    async def counted_sleep(delay: float) -> None:
+        """Count zero-delay yields; should never fire for sub-cap drains.
+
+        Args:
+            delay: Sleep duration; only zero-delay yields are counted.
+        """
+        nonlocal sleep_zero_calls
+        if delay == 0:
+            sleep_zero_calls += 1
+
+    monkeypatch.setattr(asyncio, "sleep", counted_sleep)
+
+    await broker._forward_polled_messages({xsub: zmq.POLLIN})
+
+    assert len(xpub.sent) == 100
+    assert len(xsub.recv_queue) == 0
+    assert sleep_zero_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_proxy_loop_drains_1000_over_multiple_iterations() -> None:
+    """Test that 1000 queued messages flow through across multiple forward cycles.
+
+    Given: An xsub queue pre-loaded with 1000 messages.
+    When: ``_proxy_loop`` runs until the queue is drained.
+    Then: All 1000 messages reach ``xpub.sent`` across at least
+        ``ceil(1000 / _MAX_DRAIN_PER_BURST) = 4`` poll iterations.
+    """
+    from snapper.messaging.infrastructure.broker import _MAX_DRAIN_PER_BURST
+
+    broker: Any = ZmqBrokerProcess(xsub_endpoint="inproc://xsub", xpub_endpoint="inproc://xpub")
+    xsub = _QueueBackedDummySocket("xsub")
+    xpub = _QueueBackedDummySocket("xpub")
+    broker.xsub_socket = xsub
+    broker.xpub_socket = xpub
+    broker.running = True
+    xsub.recv_queue = [[f"msg-{i}".encode()] for i in range(1000)]
+    poll_count = 0
+
+    async def fake_poll() -> dict[Any, int]:
+        """Drive the proxy loop until the xsub queue is drained.
+
+        Returns:
+            ``{xsub: POLLIN}`` while messages remain; an empty dict to
+            terminate after the drain completes.
+        """
+        nonlocal poll_count
+        poll_count += 1
+        if not xsub.recv_queue or poll_count > 50:
+            broker.running = False
+            return {}
+        return {xsub: zmq.POLLIN}
+
+    broker._poll_sockets = fake_poll
+    await broker._proxy_loop()
+
+    assert len(xpub.sent) == 1000
+    expected_iterations = (1000 + _MAX_DRAIN_PER_BURST - 1) // _MAX_DRAIN_PER_BURST
+    assert poll_count >= expected_iterations
+
+
+@pytest.mark.asyncio
+async def test_subscription_frame_forwards_under_xsub_saturation() -> None:
+    r"""Test that subscription frames forward even while xsub->xpub drain is active.
+
+    Given: An xsub queue saturated with 1000 data frames and an xpub queue
+        holding a single subscription frame ``b"\x01market."``.
+    When: ``_forward_polled_messages`` is invoked once with both sockets
+        POLLIN.
+    Then: Both directions drain — the subscription frame reaches xsub
+        (``xsub.sent`` contains ``[b"\x01market."]``) AND data frames
+        reach xpub (``xpub.sent`` is non-empty). This guards the
+        backtest-replay ``wait_for_subscription`` path against regression
+        under load.
+    """
+    broker: Any = ZmqBrokerProcess(xsub_endpoint="inproc://xsub", xpub_endpoint="inproc://xpub")
+    xsub = _QueueBackedDummySocket("xsub")
+    xpub = _QueueBackedDummySocket("xpub")
+    broker.xsub_socket = xsub
+    broker.xpub_socket = xpub
+    xsub.recv_queue = [[f"data-{i}".encode()] for i in range(1000)]
+    xpub.recv_queue = [[b"\x01market."]]
+
+    await broker._forward_polled_messages({xsub: zmq.POLLIN, xpub: zmq.POLLIN})
+
+    assert xpub.sent
+    assert [b"\x01market."] in xsub.sent
+
+
+@pytest.mark.asyncio
+async def test_poller_registered_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test the broker reuses a single ``zmq.asyncio.Poller`` across iterations.
+
+    Given: ``zmq.asyncio.Poller`` is patched with a factory that returns a
+        single MagicMock-backed poller instance, and a dummy socket
+        context so ``start()`` does not bind real ZMQ sockets.
+    When: ``start()`` is awaited then ``_poll_sockets`` is invoked 10
+        times directly.
+    Then: The patched ``Poller`` factory was called exactly once (during
+        ``start()``), both XSUB+XPUB sockets were registered on that
+        single instance, and the cached poller's ``poll`` coroutine was
+        awaited on each ``_poll_sockets`` call.
+
+    Python 3.14 made ``SimpleNamespace`` instances with ``AsyncMock``
+    attributes unhashable, so this test uses ``MagicMock`` for the
+    poller (which never tries to store the socket as a dict key)
+    instead of a hand-rolled stub.
+    """
+    poller_mock = MagicMock()
+    poller_mock.poll = AsyncMock(return_value=[])
+    poller_factory = MagicMock(return_value=poller_mock)
+    monkeypatch.setattr(
+        "snapper.messaging.infrastructure.broker.zmq.asyncio.Poller", poller_factory
+    )
+
+    dummy_ctx = DummyContext()
+    monkeypatch.setattr(
+        "snapper.messaging.infrastructure.broker.zmq.asyncio.Context", lambda: dummy_ctx
+    )
+
+    broker: Any = ZmqBrokerProcess(xsub_endpoint="inproc://xsub", xpub_endpoint="inproc://xpub")
+    broker._proxy_loop = AsyncMock()
+    await broker.start()
+
+    for _ in range(10):
+        await broker._poll_sockets()
+
+    assert poller_factory.call_count == 1
+    assert poller_mock.register.call_count == 2
+    assert poller_mock.poll.await_count == 10
+
+    await broker.stop()

@@ -257,18 +257,18 @@ class TestHwmConstants:
 
         Given: HWM_BROKER constant,
         When: Compared to libzmq default of 1000,
-        Then: Value is significantly higher.
+        Then: Value is significantly higher (50x default).
         """
-        assert HWM_BROKER == 10_000
+        assert HWM_BROKER == 50_000
 
     def test_market_data_hwm_above_default(self) -> None:
         """Test market data HWM exceeds libzmq default.
 
         Given: HWM_MARKET_DATA constant,
         When: Compared to default,
-        Then: Value provides burst tolerance.
+        Then: Value provides burst tolerance (20x default).
         """
-        assert HWM_MARKET_DATA == 5_000
+        assert HWM_MARKET_DATA == 20_000
 
     def test_audit_hwm_is_generous(self) -> None:
         """Test audit HWM minimizes message loss.
