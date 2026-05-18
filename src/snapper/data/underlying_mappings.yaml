@@ -1188,6 +1188,9 @@ underlyings:
   name: Nasdaq 100
   asset_class: index
   sector: US Tech
+  description:
+    en: Nasdaq 100 exposure via QQQ ETF and NQ/MNQ CME futures. Top-name tech
+      concentration matters; NQ notional is index points x $20, MNQ is 1/10 size.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1210,6 +1213,10 @@ underlyings:
   name: Dow Jones Industrial Average
   asset_class: index
   sector: US Large Cap
+  description:
+    en: Dow Jones Industrial Average exposure via DIA ETF and YM/MYM CBOT futures.
+      Price-weighted; high-price stocks move the index more than market cap would
+      imply.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1232,6 +1239,9 @@ underlyings:
   name: Russell 2000
   asset_class: index
   sector: US Small Cap
+  description:
+    en: Russell 2000 small-cap exposure via IWM ETF and RTY CME futures. June
+      Russell reconstitution can create unusual index and ETF flow.
   patterns:
   - exchange: polygon
     match_type: exact
