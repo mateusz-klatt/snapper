@@ -209,6 +209,7 @@ from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.data import UnderlyingAssetData
 from snapper.messaging.schemas.data import UnderlyingInstrumentData
 from snapper.messaging.schemas.data import VenueFeeScheduleData
+from snapper.server._locale_utils import resolve_caller_default_language
 from snapper.server.ai_delegate_routes import AiIntegrationDisabledError
 from snapper.server.ai_delegate_routes import ai_integration_disabled_handler
 from snapper.server.ai_delegate_routes import router as ai_delegate_router
@@ -2368,7 +2369,11 @@ def _get_rest_data_response_metadata(
     )
 
 
-def _build_underlying_asset_items(assets: list[UnderlyingAssetRow]) -> list[UnderlyingAssetData]:
+def _build_underlying_asset_items(
+    assets: list[UnderlyingAssetRow],
+    repo: Repository,
+    locale: str,
+) -> list[UnderlyingAssetData]:
     """Project underlying rows into API payload items."""
     return [
         UnderlyingAssetData(
@@ -2380,6 +2385,7 @@ def _build_underlying_asset_items(assets: list[UnderlyingAssetRow]) -> list[Unde
             name=asset["name"],
             asset_class=asset["asset_class"],
             sector=asset["sector"],
+            description=repo.resolve_underlying_description(asset, locale),
             instrument_count=asset["instrument_count"],
         )
         for asset in assets
@@ -2462,7 +2468,7 @@ def _build_continuous_candle_items(
 
 async def _get_underlyings(
     request: Request,
-    _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+    principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
@@ -2470,10 +2476,11 @@ async def _get_underlyings(
     """Return all underlying assets with instrument counts."""
     try:
         assets = await repo.get_underlying_assets(as_of=_resolve_underlying_query_time(as_of))
+        locale = await resolve_caller_default_language(repo, principal)
         _tracker, session_id, sequence_id, timestamp, public_id = _get_rest_data_response_metadata(
             request
         )
-        items = _build_underlying_asset_items(assets)
+        items = _build_underlying_asset_items(assets, repo, locale)
         return UnderlyingAssetListResponse(
             session_id=session_id,
             sequence_id=sequence_id,
@@ -2622,7 +2629,7 @@ async def _get_related_instruments(
     request: Request,
     exchange: str,
     native_symbol: str,
-    _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+    principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
@@ -2640,6 +2647,7 @@ async def _get_related_instruments(
         underlying_row, related_rows = await repo.get_related_instruments_for_symbol(
             exchange, native_symbol, now
         )
+        locale = await resolve_caller_default_language(repo, principal)
         tracker, session_id, sequence_id, timestamp, public_id = _get_rest_data_response_metadata(
             request
         )
@@ -2654,6 +2662,7 @@ async def _get_related_instruments(
                 name=underlying_row["name"],
                 asset_class=underlying_row["asset_class"],
                 sector=underlying_row["sector"],
+                description=repo.resolve_underlying_description(underlying_row, locale),
             )
         )
         payload = RelatedInstrumentsPayloadData(

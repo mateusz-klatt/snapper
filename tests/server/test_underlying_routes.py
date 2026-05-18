@@ -1,11 +1,14 @@
 """Tests for underlying asset REST API endpoints."""
 
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime
-from typing import Any
+from typing import cast
 from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -13,13 +16,17 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.data.repository import Repository
 from snapper.data.repository_types import InstrumentRelatedRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import UnderlyingAssetRow
+from snapper.server._locale_utils import resolve_caller_default_language
+from snapper.server.app import _build_underlying_asset_items
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
 
 
+@asynccontextmanager
 async def _noop_lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     """Disable application lifespan for endpoint-only tests."""
     yield
@@ -29,14 +36,18 @@ def _ts() -> datetime:
     return datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _make_underlying(ticker: str = "SPX", name: str = "S&P 500") -> UnderlyingAssetRow:
+def _make_underlying(
+    ticker: str = "SPX",
+    name: str = "S&P 500",
+    description: dict[str, str] | None = None,
+) -> UnderlyingAssetRow:
     return UnderlyingAssetRow(
         public_id="ua-1",
         ticker=ticker,
         name=name,
         asset_class="index",
         sector="US Large Cap",
-        description=None,
+        description=description,
         timestamp=_ts(),
         session_id="s1",
         sequence_id=1,
@@ -63,15 +74,36 @@ def _make_instrument_row(
     )
 
 
-def _create_client(mock_repo: Any) -> TestClient:
+def _principal(user_public_id: str = "user-alpha") -> AuthPrincipal:
+    """Build an authenticated market-data caller principal."""
+    return AuthPrincipal(
+        username="test_user",
+        role=UserRole.ADMIN,
+        user_public_id=user_public_id,
+    )
+
+
+def _create_client(mock_repo: AsyncMock, principal: AuthPrincipal | None = None) -> TestClient:
     """Create test client with auth bypassed and mock repository injected."""
     app = create_app()
     app.router.lifespan_context = _noop_lifespan
+
+    def resolve_description(row: UnderlyingAssetRow, locale: str) -> str | None:
+        description = row["description"]
+        if description is None:
+            return None
+        if locale in description:
+            return description[locale]
+        return description.get("en")
+
+    mock_repo.resolve_underlying_description = MagicMock(side_effect=resolve_description)
 
     def skip_csrf() -> None:
         return None
 
     def skip_auth() -> AuthPrincipal:
+        if principal is not None:
+            return principal
         return AuthPrincipal(username="test_user", role=UserRole.ADMIN)
 
     app.dependency_overrides[validate_csrf_token] = skip_csrf
@@ -115,6 +147,27 @@ class TestGetUnderlyings:
         client = _create_client(repo)
         response = client.get("/api/underlyings")
         assert response.status_code == 500
+        client.close()
+
+    def test_underlyings_list_endpoint_resolves_per_caller_locale(self) -> None:
+        """Given PL caller, When listing underlyings, Then PL description returns."""
+        repo = AsyncMock()
+        repo.get_underlying_assets = AsyncMock(
+            return_value=[
+                _make_underlying(
+                    description={
+                        "en": "English description.",
+                        "pl": "Polish description.",
+                    }
+                )
+            ]
+        )
+        repo.get_default_languages_for_users = AsyncMock(return_value={"user-alpha": "pl"})
+        client = _create_client(repo, _principal())
+        response = client.get("/api/underlyings")
+        assert response.status_code == 200
+        payload = response.json()["payload"]
+        assert payload[0]["description"] == "Polish description."
         client.close()
 
 
@@ -227,6 +280,77 @@ class TestGetRelatedInstruments:
         assert exact_items[0]["native_symbol"] == "BTC-USD"
         assert exact_items[0]["is_selected"] is True
         client.close()
+
+    def test_related_endpoint_returns_localized_description_for_pl_user(self) -> None:
+        """Given PL caller and PL description, When requesting, Then PL text returns."""
+        underlying = _make_underlying(
+            "BTC",
+            "Bitcoin",
+            {
+                "en": "English description.",
+                "pl": "Polish description.",
+            },
+        )
+        repo = AsyncMock()
+        repo.get_related_instruments_for_symbol = AsyncMock(return_value=(underlying, []))
+        repo.get_default_languages_for_users = AsyncMock(return_value={"user-alpha": "pl"})
+        client = _create_client(repo, _principal())
+        response = client.get("/api/instruments/kraken/BTC-USD/related")
+        assert response.status_code == 200
+        assert response.json()["payload"]["underlying"]["description"] == "Polish description."
+        client.close()
+
+    def test_related_endpoint_falls_back_to_en_when_locale_missing(self) -> None:
+        """Given missing caller locale entry, When requesting, Then EN fallback returns."""
+        underlying = _make_underlying(
+            "BTC",
+            "Bitcoin",
+            {
+                "en": "English description.",
+            },
+        )
+        repo = AsyncMock()
+        repo.get_related_instruments_for_symbol = AsyncMock(return_value=(underlying, []))
+        repo.get_default_languages_for_users = AsyncMock(return_value={"user-alpha": "de"})
+        client = _create_client(repo, _principal())
+        response = client.get("/api/instruments/kraken/BTC-USD/related")
+        assert response.status_code == 200
+        assert response.json()["payload"]["underlying"]["description"] == "English description."
+        client.close()
+
+    def test_related_endpoint_returns_null_description_when_underlying_has_none(self) -> None:
+        """Given no stored description, When requesting, Then API field is null."""
+        underlying = _make_underlying("BTC", "Bitcoin", None)
+        repo = AsyncMock()
+        repo.get_related_instruments_for_symbol = AsyncMock(return_value=(underlying, []))
+        repo.get_default_languages_for_users = AsyncMock(return_value={"user-alpha": "pl"})
+        client = _create_client(repo, _principal())
+        response = client.get("/api/instruments/kraken/BTC-USD/related")
+        assert response.status_code == 200
+        assert response.json()["payload"]["underlying"]["description"] is None
+        client.close()
+
+    @pytest.mark.asyncio
+    async def test_unauthenticated_caller_gets_en_description(self) -> None:
+        """Unauthenticated guard paths resolve EN before auth-gated endpoints run."""
+        repo = AsyncMock()
+
+        def resolve_description(row: UnderlyingAssetRow, locale: str) -> str | None:
+            description = row["description"]
+            if description is None:
+                return None
+            if locale in description:
+                return description[locale]
+            return description.get("en")
+
+        repo.resolve_underlying_description = MagicMock(side_effect=resolve_description)
+        locale = await resolve_caller_default_language(cast(Repository, repo), None)
+        items = _build_underlying_asset_items(
+            [_make_underlying(description={"en": "English description."})],
+            cast(Repository, repo),
+            locale,
+        )
+        assert items[0].description == "English description."
 
     def test_derivative_group_sorted_by_contract_family_then_symbol(self) -> None:
         """Given mixed derivative siblings, When requesting, Then sorted deterministically."""
