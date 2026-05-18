@@ -350,6 +350,7 @@ def test_server_runs_without_reload(monkeypatch: pytest.MonkeyPatch, cli_runner:
         log_config: Any,
         proxy_headers: bool,
         forwarded_allow_ips: str,
+        loop: str,
     ) -> None:
         captured.update(
             {
@@ -359,6 +360,7 @@ def test_server_runs_without_reload(monkeypatch: pytest.MonkeyPatch, cli_runner:
                 "reload": reload,
                 "proxy_headers": proxy_headers,
                 "forwarded_allow_ips": forwarded_allow_ips,
+                "loop": loop,
             }
         )
 
@@ -374,6 +376,7 @@ def test_server_runs_without_reload(monkeypatch: pytest.MonkeyPatch, cli_runner:
         "reload": False,
         "proxy_headers": True,
         "forwarded_allow_ips": "127.0.0.1",
+        "loop": "uvloop",
     }
 
 
@@ -396,6 +399,7 @@ def test_server_runs_with_reload(monkeypatch: pytest.MonkeyPatch, cli_runner: Cl
         log_config: Any,
         proxy_headers: bool,
         forwarded_allow_ips: str,
+        loop: str,
     ) -> None:
         captured.update(
             {
@@ -406,6 +410,7 @@ def test_server_runs_with_reload(monkeypatch: pytest.MonkeyPatch, cli_runner: Cl
                 "reload": reload,
                 "proxy_headers": proxy_headers,
                 "forwarded_allow_ips": forwarded_allow_ips,
+                "loop": loop,
             }
         )
 
@@ -418,6 +423,7 @@ def test_server_runs_with_reload(monkeypatch: pytest.MonkeyPatch, cli_runner: Cl
     assert captured["reload"] is True
     assert captured["proxy_headers"] is True
     assert captured["forwarded_allow_ips"] == "127.0.0.1"
+    assert captured["loop"] == "uvloop"
 
 
 def test_broker_starts_and_stops(monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner) -> None:
@@ -1471,6 +1477,48 @@ class TestServerCommands:
                 assert call_kwargs["port"] == 9000
                 assert call_kwargs["proxy_headers"] is True
                 assert call_kwargs["forwarded_allow_ips"] == "127.0.0.1"
+
+    def test_server_command_uses_uvloop(self, cli_runner: CliRunner) -> None:
+        """Server explicitly opts in to uvloop instead of the asyncio default.
+
+        Given: production server config (no --reload),
+        When: ``server`` is invoked,
+        Then: ``uvicorn.run`` receives ``loop="uvloop"`` so the asyncio
+            main thread runs on the faster libuv-based loop. Falling
+            back to ``_UnixSelectorEventLoop`` under prod tick volume
+            (~1500 msgs/s + PG tick-writer) saturated the event loop
+            and made even simple endpoints ~200ms+; uvloop is the
+            cheapest mitigation that doesn't require restructuring the
+            publisher pipeline.
+        """
+        with patch("snapper.cli.app.get_settings") as mock_get_settings:
+            mock_settings = create_mock_settings()
+            mock_get_settings.return_value = mock_settings
+            with patch("snapper.cli.app.uvicorn.run") as mock_uvicorn_run:
+                result = cli_runner.invoke(app, ["server"])
+                assert result.exit_code == 0
+                call_kwargs = mock_uvicorn_run.call_args[1]
+                assert call_kwargs["loop"] == "uvloop"
+
+    def test_server_command_reload_uses_uvloop(self, cli_runner: CliRunner) -> None:
+        """The reload branch also routes through uvloop.
+
+        Given: ``server_reload`` is True,
+        When: ``server`` is invoked,
+        Then: ``uvicorn.run`` still receives ``loop="uvloop"`` — the
+            faster loop is desired in both prod and developer-reload
+            modes; the only difference between the two branches is
+            ``factory=True`` for hot reload.
+        """
+        with patch("snapper.cli.app.get_settings") as mock_get_settings:
+            mock_settings = create_mock_settings()
+            mock_settings.server_reload = True
+            mock_get_settings.return_value = mock_settings
+            with patch("snapper.cli.app.uvicorn.run") as mock_uvicorn_run:
+                result = cli_runner.invoke(app, ["server"])
+                assert result.exit_code == 0
+                call_kwargs = mock_uvicorn_run.call_args[1]
+                assert call_kwargs["loop"] == "uvloop"
 
 
 class TestUserCommands:

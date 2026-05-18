@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import subprocess
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -5062,6 +5063,64 @@ async def test_get_core_health_api_only_returns_healthy() -> None:
     settings.db_url = "sqlite:///:memory:"
     factory = ProcessLauncherService(settings)
     assert await factory.get_core_health() == "healthy"
+
+
+@pytest.mark.asyncio()
+async def test_get_core_health_caches_result_within_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-warmed cache short-circuits the DB scan.
+
+    Given: ``_core_health_cache`` already holds a fresh healthy
+        entry (timestamp == current monotonic clock),
+    When: ``get_core_health`` is called,
+    Then: ``get_process_configs`` is NOT invoked — the cache hit
+        avoids the Postgres roundtrip that otherwise stalls under
+        tick-writer pool contention.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    configs_mock = mock.AsyncMock(return_value=[])
+    monkeypatch.setattr(factory, "get_process_configs", configs_mock)
+    factory._core_health_cache = (time.monotonic(), "healthy")
+    assert await factory.get_core_health() == "healthy"
+    assert configs_mock.await_count == 0
+
+
+@pytest.mark.asyncio()
+async def test_get_core_health_refreshes_after_ttl_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale cache entry is bypassed and refreshed.
+
+    Given: ``_core_health_cache`` holds a healthy entry timestamped
+        far enough in the past to exceed ``_CORE_HEALTH_CACHE_TTL_S``,
+    When: ``get_core_health`` is called with no enabled CORE
+        processes in ``started_processes``,
+    Then: ``get_process_configs`` is invoked and the fresh "error"
+        result replaces the cached "healthy" entry — proving the TTL
+        gate works and that the result is re-cached for the next
+        window.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    config = ProcessConfigModel(
+        name="zmq_broker",
+        enabled=True,
+        mode="thread",
+        class_path="test.Broker",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+    )
+    configs_mock = mock.AsyncMock(return_value=[config])
+    monkeypatch.setattr(factory, "get_process_configs", configs_mock)
+    factory._core_health_cache = (time.monotonic() - 3600.0, "healthy")
+    assert await factory.get_core_health() == "error"
+    assert configs_mock.await_count == 1
+    assert factory._core_health_cache is not None
+    assert factory._core_health_cache[1] == "error"
 
 
 def test_validate_parameters_with_model(monkeypatch: pytest.MonkeyPatch) -> None:

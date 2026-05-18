@@ -16,11 +16,13 @@ import asyncio
 import contextlib
 import inspect
 import json
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from typing import Final
 from uuid import uuid7
 
 from loguru import logger
@@ -77,6 +79,7 @@ _PROCESSES_CONFIGURED_STREAM = "processes.events.configured"
 _PROCESSES_RUNS_STREAM = "processes.events.runs"
 _STRATEGIES_LIST_STREAM = "strategies.events.list"
 _BROADCAST_FAILURE_TEMPLATE = "Failed to broadcast {}: {}"
+_CORE_HEALTH_CACHE_TTL_S: Final[float] = 5.0
 
 
 class CoreProcessStartupError(RuntimeError):
@@ -148,6 +151,7 @@ class ProcessLauncherService:
         self._registry_syncer = ProcessRegistrySyncer(settings)
         self._market_persist_policy: MarketPersistPolicy | None = None
         self._msg_publisher: MessagePublisher | None = None
+        self._core_health_cache: tuple[float, HealthStatus] | None = None
 
     def set_msg_publisher(self, publisher: MessagePublisher | None) -> None:
         """Inject the bus publisher used for processes/strategies fanout.
@@ -1828,10 +1832,27 @@ class ProcessLauncherService:
 
         Returns:
             "healthy" or "error" as HealthStatus string.
+
+        The result of the configs scan is cached for
+        ``_CORE_HEALTH_CACHE_TTL_S`` seconds on a monotonic clock to
+        avoid a Postgres roundtrip on every probe — the endpoint is
+        hit by the frontend market-data poll, the Docker healthcheck,
+        and operator dashboards, and ``process_configs`` shares the
+        connection pool with the kraken tick-writer which can stall
+        the query up to ~1.5s under prod load. Cache staleness of up
+        to ``_CORE_HEALTH_CACHE_TTL_S`` is acceptable: container
+        orchestrators probe every 30s and operator dashboards refresh
+        every 5-10s, both within tolerance for noticing a freshly-
+        died CORE process.
         """
         if self.settings.server_api_only:
             return HealthStatusEnum.HEALTHY
+        now = time.monotonic()
+        cached = self._core_health_cache
+        if cached is not None and (now - cached[0]) < _CORE_HEALTH_CACHE_TTL_S:
+            return cached[1]
         configs = await self.get_process_configs()
+        status: HealthStatus = HealthStatusEnum.HEALTHY
         for config in configs:
             if is_executor_template(config.name):
                 continue
@@ -1841,8 +1862,10 @@ class ProcessLauncherService:
                 and config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
                 and config.name not in self.started_processes
             ):
-                return HealthStatusEnum.ERROR
-        return HealthStatusEnum.HEALTHY
+                status = HealthStatusEnum.ERROR
+                break
+        self._core_health_cache = (now, status)
+        return status
 
     async def sync_registry_to_database(self) -> None:
         """Delegate to registry_syncer.sync_registry_to_database."""

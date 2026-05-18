@@ -439,6 +439,7 @@ def server(
                 log_config=None,
                 proxy_headers=server_proxy_headers,
                 forwarded_allow_ips=server_forwarded_allow_ips,
+                loop="uvloop",
             )
         else:
             uvicorn.run(
@@ -450,6 +451,7 @@ def server(
                 log_config=None,
                 proxy_headers=server_proxy_headers,
                 forwarded_allow_ips=server_forwarded_allow_ips,
+                loop="uvloop",
             )
     except KeyboardInterrupt:
         typer.echo("\nShutting down gracefully...")
