@@ -1308,6 +1308,10 @@ underlyings:
   name: Silver
   asset_class: commodity
   sector: Precious Metals
+  description:
+    en: Silver exposure via SLV ETF and SI/SIL/QI COMEX futures. Industrial demand
+      is material, so it can diverge from gold even when precious metals trade
+      together.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1336,6 +1340,9 @@ underlyings:
   name: Platinum
   asset_class: commodity
   sector: Precious Metals
+  description:
+    en: Platinum exposure via PL NYMEX futures. Auto catalyst demand links it to
+      emissions rules; diesel vehicles historically mattered more than gasoline.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1347,6 +1354,9 @@ underlyings:
   name: Palladium
   asset_class: commodity
   sector: Precious Metals
+  description:
+    en: Palladium exposure via PALL ETF and PA NYMEX futures. Auto catalyst demand
+      is central, historically tied more to gasoline vehicles than diesel.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1363,6 +1373,10 @@ underlyings:
   name: Copper
   asset_class: commodity
   sector: Industrial Metals
+  description:
+    en: Copper exposure via CPER ETF and HG/MHG/QC COMEX futures. Dr. Copper
+      reputation comes from sensitivity to global manufacturing and construction
+      demand.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1391,6 +1405,9 @@ underlyings:
   name: WTI Crude Oil
   asset_class: commodity
   sector: Energy
+  description:
+    en: West Texas Intermediate crude exposure via USO ETF and CL/MCL/QM NYMEX
+      futures. USO rolls futures, so contango can drag returns versus spot crude.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1419,6 +1436,9 @@ underlyings:
   name: Brent Crude Oil
   asset_class: commodity
   sector: Energy
+  description:
+    en: Brent crude exposure via BZ NYMEX futures. It is the global seaborne oil
+      benchmark, so local WTI storage shocks may not map one-for-one.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1430,6 +1450,9 @@ underlyings:
   name: Heating Oil
   asset_class: commodity
   sector: Energy
+  description:
+    en: Heating oil exposure via HO/QH NYMEX futures. Distillate demand has winter
+      seasonality, so cold-weather forecasts can move front contracts quickly.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1447,6 +1470,9 @@ underlyings:
   name: RBOB Gasoline
   asset_class: commodity
   sector: Energy
+  description:
+    en: RBOB gasoline exposure via RB NYMEX futures. Demand is tied to the US
+      summer driving season, with refinery outages adding short-term spread risk.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1458,6 +1484,9 @@ underlyings:
   name: Natural Gas
   asset_class: commodity
   sector: Energy
+  description:
+    en: Natural gas exposure via UNG ETF and NG/MNG/QG NYMEX futures. UNG rolls
+      front-month Henry Hub futures, so contango can dominate returns.
   patterns:
   - exchange: polygon
     match_type: exact
@@ -1486,6 +1515,9 @@ underlyings:
   name: Soybean Oil
   asset_class: commodity
   sector: Agriculture
+  description:
+    en: Soybean oil exposure via ZL/MZL CBOT futures. Biodiesel demand and the
+      soybean crush spread link it to soybean meal and bean prices.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1503,6 +1535,10 @@ underlyings:
   name: Soybean Meal
   asset_class: commodity
   sector: Agriculture
+  description:
+    en: Soybean meal exposure via ZM/MZM CBOT futures. It is livestock feed, so
+      crush spreads versus soybean oil can matter as much as outright bean
+      direction.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1520,6 +1556,9 @@ underlyings:
   name: Rough Rice
   asset_class: commodity
   sector: Agriculture
+  description:
+    en: Rough rice exposure via ZR CBOT futures. The market is small and less
+      liquid than major grain contracts, so order size and rolls need care.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1531,6 +1570,10 @@ underlyings:
   name: Lumber
   asset_class: commodity
   sector: Agriculture
+  description:
+    en: Lumber exposure via LBR CME futures. Housing starts drive demand; the
+      post-2022 contract is 27,500 board feet, smaller than the old 110,000
+      board-foot contract.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1542,6 +1585,9 @@ underlyings:
   name: Feeder Cattle
   asset_class: commodity
   sector: Livestock
+  description:
+    en: Feeder cattle exposure via GF CME futures. Contracts are cash-settled to an
+      index, unlike physically delivered livestock futures.
   patterns:
   - exchange: kraken_equities
     match_type: regex
@@ -1553,6 +1599,9 @@ underlyings:
   name: Lean Hogs
   asset_class: commodity
   sector: Livestock
+  description:
+    en: Lean hog exposure via HE CME futures. Contracts are cash-settled to the CME
+      Lean Hog Index, so cash index behavior drives expiry.
   patterns:
   - exchange: kraken_equities
     match_type: regex
