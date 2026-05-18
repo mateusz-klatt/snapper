@@ -2,6 +2,8 @@ underlyings:
 - ticker: BTC
   name: Bitcoin
   asset_class: crypto
+  description:
+    en: Bitcoin monetary asset and deepest crypto market. Halving cycles shape supply issuance; the store-of-value thesis matters more than payment throughput.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -100,6 +102,8 @@ underlyings:
 - ticker: ETH
   name: Ethereum
   asset_class: crypto
+  description:
+    en: Ethereum smart-contract L1 and settlement layer. EIP-1559 burns base fees while staking rewards compensate validators, so issuance can vary with usage.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -180,6 +184,8 @@ underlyings:
 - ticker: USDT
   name: Tether USD
   asset_class: crypto
+  description:
+    en: Tether USD centralized dollar stablecoin. It has the deepest stablecoin liquidity, but reserve transparency and de-peg risk matter.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -212,6 +218,8 @@ underlyings:
 - ticker: USDC
   name: USD Coin
   asset_class: crypto
+  description:
+    en: Circle USDC centralized dollar stablecoin. Reserve quality and banking access matter; stablecoin de-pegs can break assumed cash equivalence.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -244,6 +252,8 @@ underlyings:
 - ticker: DAI
   name: Dai Stablecoin
   asset_class: crypto
+  description:
+    en: DAI is a MakerDAO/Sky overcollateralized dollar stablecoin. Oracle prices and vault liquidations can move peg risk during market stress.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -260,6 +270,8 @@ underlyings:
 - ticker: PYUSD
   name: PayPal USD
   asset_class: crypto
+  description:
+    en: PayPal USD is a PayPal-branded dollar stablecoin. Liquidity is smaller than USDT/USDC, so venue support and redemption rails matter.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -273,6 +285,8 @@ underlyings:
 - ticker: RLUSD
   name: Ripple USD
   asset_class: crypto
+  description:
+    en: Ripple USD is a dollar stablecoin tied to Ripple payment rails. Watch issuer reserve reports and liquidity depth before treating it like cash.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -292,6 +306,8 @@ underlyings:
 - ticker: SOL
   name: Solana
   asset_class: crypto
+  description:
+    en: Solana is a high-throughput smart-contract L1. Outage history matters because validator coordination and network liveness can drive risk.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -342,6 +358,8 @@ underlyings:
 - ticker: XRP
   name: XRP
   asset_class: crypto
+  description:
+    en: XRP is the settlement asset of the XRP Ledger, linked to Ripple payment use cases. SEC litigation history still shapes liquidity and venue risk.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -399,6 +417,8 @@ underlyings:
 - ticker: DOGE
   name: Dogecoin
   asset_class: crypto
+  description:
+    en: Dogecoin is a proof-of-work meme coin. Social attention and large-holder flows matter more than protocol utility.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -434,6 +454,8 @@ underlyings:
 - ticker: LTC
   name: Litecoin
   asset_class: crypto
+  description:
+    en: Litecoin is a Bitcoin-derived proof-of-work payments coin. It is liquid and old, but utility is mostly transfer and relative-value trading.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -496,6 +518,8 @@ underlyings:
 - ticker: LINK
   name: Chainlink
   asset_class: crypto
+  description:
+    en: Chainlink is a decentralized oracle network token. DeFi price feeds and cross-chain services drive demand; oracle trust is the core risk.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -534,6 +558,8 @@ underlyings:
 - ticker: DOT
   name: Polkadot
   asset_class: crypto
+  description:
+    en: Polkadot is a shared-security and interoperability network. DOT value depends on ecosystem demand and governance, not just parachain activity.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -569,6 +595,8 @@ underlyings:
 - ticker: ADA
   name: Cardano
   asset_class: crypto
+  description:
+    en: Cardano is a proof-of-stake smart-contract L1. Development milestones and app adoption drive sentiment more than raw throughput claims.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -604,6 +632,8 @@ underlyings:
 - ticker: AVAX
   name: Avalanche
   asset_class: crypto
+  description:
+    en: Avalanche is a smart-contract L1 with subnet architecture. Throughput claims need to be checked against mainnet activity and bridge liquidity.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -627,6 +657,8 @@ underlyings:
 - ticker: UNI
   name: Uniswap
   asset_class: crypto
+  description:
+    en: Uniswap is a DEX governance token. V3+ liquidity is concentrated, so LP risk is not the same as simple spot exposure.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -650,6 +682,8 @@ underlyings:
 - ticker: AAVE
   name: Aave
   asset_class: crypto
+  description:
+    en: Aave is a decentralized lending protocol token. Borrow demand, liquidations, and flash-loan use drive protocol risk.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -681,6 +715,8 @@ underlyings:
 - ticker: ATOM
   name: Cosmos
   asset_class: crypto
+  description:
+    en: Cosmos Hub token for the IBC app-chain ecosystem. ATOM value capture can diverge from total Cosmos ecosystem activity.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -713,6 +749,8 @@ underlyings:
 - ticker: NEAR
   name: NEAR Protocol
   asset_class: crypto
+  description:
+    en: NEAR Protocol is a sharded smart-contract L1. Adoption and developer activity matter more than throughput marketing.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -730,6 +768,8 @@ underlyings:
 - ticker: ALGO
   name: Algorand
   asset_class: crypto
+  description:
+    en: Algorand is a proof-of-stake L1. Low fees and fast finality are core features; token demand depends on real app usage.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -762,6 +802,8 @@ underlyings:
 - ticker: FIL
   name: Filecoin
   asset_class: crypto
+  description:
+    en: Filecoin is a decentralized storage network token. Storage-provider economics and protocol emissions can dominate cloud-storage narratives.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -788,6 +830,8 @@ underlyings:
 - ticker: XLM
   name: Stellar
   asset_class: crypto
+  description:
+    en: Stellar is a payments network focused on fiat and asset transfer rails. Anchor quality and regulatory corridors matter for real usage.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -811,6 +855,8 @@ underlyings:
 - ticker: TRX
   name: TRON
   asset_class: crypto
+  description:
+    en: TRON is a smart-contract chain with heavy stablecoin transfer use. USDT flow is important, while governance concentration is a risk.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -837,6 +883,8 @@ underlyings:
 - ticker: ETC
   name: Ethereum Classic
   asset_class: crypto
+  description:
+    en: Ethereum Classic is the original Ethereum proof-of-work chain. It preserves pre-DAO history, but 51% attack history remains the key risk.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -860,6 +908,8 @@ underlyings:
 - ticker: APE
   name: ApeCoin
   asset_class: crypto
+  description:
+    en: ApeCoin is a governance and ecosystem token linked to BAYC/Yuga assets. NFT-cycle sentiment can dominate protocol fundamentals.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -883,6 +933,8 @@ underlyings:
 - ticker: SHIB
   name: Shiba Inu
   asset_class: crypto
+  description:
+    en: Shiba Inu is a meme-token ecosystem. Community attention, exchange liquidity, and supply concentration matter more than base utility.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -906,6 +958,8 @@ underlyings:
 - ticker: RENDER
   name: Render
   asset_class: crypto
+  description:
+    en: Render is a decentralized GPU rendering and compute network token. Usage demand and AI/GPU-cycle sentiment can diverge.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -923,6 +977,8 @@ underlyings:
 - ticker: TAO
   name: Bittensor
   asset_class: crypto
+  description:
+    en: Bittensor is a decentralized AI subnet network. Token incentives reward miners and validators, making emissions and subnet quality central.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -940,6 +996,8 @@ underlyings:
 - ticker: ZEC
   name: Zcash
   asset_class: crypto
+  description:
+    en: Zcash is a privacy-focused coin with shielded transaction support. Exchange delistings and regulatory pressure can limit liquidity.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -962,6 +1020,8 @@ underlyings:
 - ticker: ONDO
   name: Ondo
   asset_class: crypto
+  description:
+    en: Ondo is a tokenized real-world-asset and Treasury exposure project. TradFi regulation, custody, and permissioning shape the risk.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -979,6 +1039,8 @@ underlyings:
 - ticker: TIA
   name: Celestia
   asset_class: crypto
+  description:
+    en: Celestia is a modular data-availability network token. Rollup demand for blobspace matters more than generic L1 transaction counts.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -996,6 +1058,8 @@ underlyings:
 - ticker: INJ
   name: Injective
   asset_class: crypto
+  description:
+    en: Injective is a DeFi-focused app chain for exchange and derivatives use cases. Volume incentives can make activity look cyclical.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1013,6 +1077,8 @@ underlyings:
 - ticker: OP
   name: Optimism
   asset_class: crypto
+  description:
+    en: Optimism is an Ethereum optimistic-rollup ecosystem token. L2 fees are lower, but withdrawals and finality still route back to Ethereum.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1030,6 +1096,8 @@ underlyings:
 - ticker: ARB
   name: Arbitrum
   asset_class: crypto
+  description:
+    en: Arbitrum is an Ethereum optimistic-rollup ecosystem token. Lower fees come with L1 settlement lag, and ARB is governance rather than gas.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1047,6 +1115,8 @@ underlyings:
 - ticker: SUI
   name: Sui
   asset_class: crypto
+  description:
+    en: Sui is a Move-based smart-contract L1. High-throughput claims need to be judged against live app demand and token unlocks.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1072,6 +1142,8 @@ underlyings:
 - ticker: XMR
   name: Monero
   asset_class: crypto
+  description:
+    en: Monero is a privacy coin with default-obscured transactions. Regulatory pressure has led to delistings, so venue liquidity is a key risk.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1098,6 +1170,8 @@ underlyings:
 - ticker: POL
   name: Polygon
   asset_class: crypto
+  description:
+    en: Polygon ecosystem token replacing MATIC. Migration, validator incentives, and app-chain adoption drive value capture risk.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1115,6 +1189,8 @@ underlyings:
 - ticker: HYPE
   name: Hyperliquid
   asset_class: crypto
+  description:
+    en: Hyperliquid token tied to its perpetual DEX and L1 ecosystem. Exchange volume can dominate sentiment more than generic L1 metrics.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -1132,6 +1208,8 @@ underlyings:
 - ticker: PEPE
   name: Pepe
   asset_class: crypto
+  description:
+    en: Pepe is a meme coin with no core protocol cash flow. Liquidity and social attention drive price more than utility.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2310,6 +2388,8 @@ underlyings:
 - ticker: ALEO
   name: ALEO
   asset_class: crypto
+  description:
+    en: Aleo is a privacy-focused zero-knowledge L1. Proving costs, private app adoption, and compliance risk are the main gotchas.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2388,6 +2468,8 @@ underlyings:
 - ticker: FLUX
   name: FLUX
   asset_class: crypto
+  description:
+    en: Flux is a decentralized cloud and infrastructure network token. Node economics and real compute demand matter more than generic AI hype.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2402,6 +2484,8 @@ underlyings:
 - ticker: ICX
   name: ICX
   asset_class: crypto
+  description:
+    en: ICON is a smart-contract and interoperability network. Cross-chain adoption and Korean-market liquidity can drive sentiment.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2419,6 +2503,8 @@ underlyings:
 - ticker: KAVA
   name: KAVA
   asset_class: crypto
+  description:
+    en: Kava is a Cosmos/EVM DeFi chain token. App liquidity, bridge assumptions, and incentive emissions are the key risks.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2436,6 +2522,8 @@ underlyings:
 - ticker: KNC
   name: KNC
   asset_class: crypto
+  description:
+    en: KNC is the Kyber Network token for DEX liquidity and aggregation. Protocol volume and upgrade history matter for token demand.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2459,6 +2547,8 @@ underlyings:
 - ticker: LUNA
   name: LUNA
   asset_class: crypto
+  description:
+    en: LUNA is Terra 2.0, the post-collapse Terra chain token. It is distinct from original LUNC/UST history, but confidence damage remains central.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2632,6 +2722,8 @@ underlyings:
 - ticker: SGB
   name: SGB
   asset_class: crypto
+  description:
+    en: Songbird is Flare Network's canary network token. It tests upgrades before Flare, so experimental risk is part of the asset.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2669,6 +2761,8 @@ underlyings:
 - ticker: SUSHI
   name: SUSHI
   asset_class: crypto
+  description:
+    en: SUSHI is the SushiSwap DEX governance token. Liquidity incentives, fee capture, and DEX market share drive fundamentals.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2699,6 +2793,8 @@ underlyings:
 - ticker: TEL
   name: TEL
   asset_class: crypto
+  description:
+    en: Telcoin is a payments and remittance-focused token. Regulatory corridors and mobile-money adoption matter more than generic crypto beta.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2749,6 +2845,8 @@ underlyings:
 - ticker: WLD
   name: WLD
   asset_class: crypto
+  description:
+    en: Worldcoin token for the World ID proof-of-personhood network. Iris-scan onboarding and privacy controversy are the key risks.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2763,6 +2861,8 @@ underlyings:
 - ticker: XAUT
   name: XAUT
   asset_class: crypto
+  description:
+    en: Tether Gold token representing 1 fine troy ounce of physical gold. Treat it as commodity-pegged; redemption, custody, and spread matter.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2780,6 +2880,8 @@ underlyings:
 - ticker: XDC
   name: XDC
   asset_class: crypto
+  description:
+    en: XDC Network is an enterprise-focused EVM-compatible chain tied to trade-finance use cases. Adoption risk is the main gotcha.
   patterns:
   - exchange: kraken
     match_type: exact
@@ -2819,6 +2921,8 @@ underlyings:
 - ticker: XTZ
   name: XTZ
   asset_class: crypto
+  description:
+    en: Tezos is a proof-of-stake L1 with on-chain governance and baking. Upgrade cadence is strong, but app adoption drives token demand.
   patterns:
   - exchange: kraken
     match_type: exact
