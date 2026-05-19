@@ -29,7 +29,7 @@ pydantic-settings = "^2.14.1"
 sqlalchemy = {extras = ["asyncio"], version = "^2.0.49"}
 aiosqlite = "^0.22.1"
 pandas = "^3.0.3"
-numpy = "^2.4.5"
+numpy = "^2.4.6"
 typer = {extras = ["all"], version = "^0.25.1"}
 python-dotenv = "^1.2.2"
 loguru = "^0.7.3"
