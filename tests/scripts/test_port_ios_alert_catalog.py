@@ -703,3 +703,69 @@ class TestMain:
         ):
             drift.return_value = 1
             assert port.main() == 1
+
+
+class TestMergePreservingFrontendKeys:
+    """``_merge_preserving_frontend_keys`` carries forward frontend-only keys.
+
+    The merger reads the existing committed ``alerts.json`` and folds in any
+    top-level keys that the iOS payload doesn't own (e.g. the ``page``
+    subtree added for the Phase E web Alerts header). iOS-owned keys
+    always win, so the catalog never drifts.
+    """
+
+    def test_merges_existing_page_key_into_ios_payload(self, tmp_path: Path) -> None:
+        """Existing ``page`` subtree is preserved across regeneration.
+
+        Given: An existing ``alerts.json`` with a frontend-only ``page``
+            subtree alongside iOS-owned keys,
+        When: ``_merge_preserving_frontend_keys`` is invoked with a fresh
+            iOS payload,
+        Then: The returned dict contains both the iOS payload's keys AND
+            the ``page`` subtree from the existing file.
+        """
+        alerts_path = tmp_path / "alerts.json"
+        alerts_path.write_text(
+            json.dumps(
+                {
+                    "title": {"order_fill_full": "Old title"},
+                    "page": {"subtitle": "Frontend-only subtitle"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        ios_payload: dict[str, object] = {
+            "title": {"order_fill_full": "Fresh title from iOS"},
+            "body": {"order_fill_full": "Fresh body"},
+        }
+        merged = port._merge_preserving_frontend_keys(alerts_path, ios_payload)
+        assert merged["page"] == {"subtitle": "Frontend-only subtitle"}
+        assert merged["title"] == {"order_fill_full": "Fresh title from iOS"}
+        assert merged["body"] == {"order_fill_full": "Fresh body"}
+
+    def test_handles_missing_alerts_file_gracefully(self, tmp_path: Path) -> None:
+        """First-time regeneration (no committed file yet) returns the iOS payload as-is.
+
+        Given: A path that does not exist (fresh locale directory),
+        When: ``_merge_preserving_frontend_keys`` is invoked,
+        Then: Returns a dict equal to the iOS payload, with no crash.
+        """
+        alerts_path = tmp_path / "missing.json"
+        ios_payload: dict[str, object] = {"title": {"x": "y"}}
+        merged = port._merge_preserving_frontend_keys(alerts_path, ios_payload)
+        assert merged == {"title": {"x": "y"}}
+
+    def test_handles_non_dict_existing_file_gracefully(self, tmp_path: Path) -> None:
+        """A non-dict ``alerts.json`` (corrupt file) is treated as empty.
+
+        Given: An existing ``alerts.json`` containing a JSON array rather
+            than an object (corrupt / hand-edited),
+        When: ``_merge_preserving_frontend_keys`` is invoked,
+        Then: The corrupt content is discarded and the iOS payload returned
+            untouched, so the next write fixes the file shape.
+        """
+        alerts_path = tmp_path / "alerts.json"
+        alerts_path.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+        ios_payload: dict[str, object] = {"title": {"x": "y"}}
+        merged = port._merge_preserving_frontend_keys(alerts_path, ios_payload)
+        assert merged == {"title": {"x": "y"}}

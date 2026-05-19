@@ -306,6 +306,41 @@ def upsert_nav_alerts(common_path: Path, nav_label: str) -> None:
     common_path.write_text(rendered, encoding="utf-8")
 
 
+def _merge_preserving_frontend_keys(
+    alerts_path: Path,
+    ios_payload: dict[str, object],
+) -> dict[str, object]:
+    """Merge ``ios_payload`` with any existing frontend-only top-level keys.
+
+    The xcstrings catalog is the source of truth for keys it owns (e.g.
+    ``title``, ``body``, ``alertType``, ``detail``, ``priority``, ``row``,
+    ``empty``, ``error``, ``loading``, ``navTitle``, ``accessibility``).
+    Frontend-only top-level keys (e.g. ``page`` — the Alerts page header
+    subtitle that has no iOS surface) MUST be preserved across regeneration
+    runs; otherwise the drift check overwrites them on every CI sweep.
+
+    The merge rule:
+
+    - iOS-owned keys are taken from ``ios_payload`` (verbatim — iOS is the
+      single source of truth for these).
+    - Top-level keys present in the existing committed file but NOT in
+      ``ios_payload`` are carried forward unchanged.
+
+    Returns a new dict sorted by top-level key (alphabetic) for stable
+    diffs.
+    """
+    existing: dict[str, object] = {}
+    if alerts_path.exists():
+        raw = json.loads(alerts_path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            existing = raw
+    merged: dict[str, object] = dict(ios_payload)
+    for key, value in existing.items():
+        if key not in merged:
+            merged[key] = value
+    return dict(sorted(merged.items()))
+
+
 def generate(locales_dir: Path | None = None) -> None:
     """Port the iOS alerts.* xcstrings catalog into all frontend locales.
 
@@ -344,7 +379,8 @@ def generate(locales_dir: Path | None = None) -> None:
             )
         payload = build_locale_payload(raw, keys, ios_locale)
         alerts_path = target_dir / "alerts.json"
-        rendered = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        merged = _merge_preserving_frontend_keys(alerts_path, payload)
+        rendered = json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
         alerts_path.write_text(rendered, encoding="utf-8")
         nav_label_raw = extract_value(raw, NAV_LABEL_KEY, ios_locale)
         nav_label = rewrite_placeholders(nav_label_raw)
