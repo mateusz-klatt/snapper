@@ -133,3 +133,128 @@ def test_upgrade_dispatches_postgres_path(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(migration, "_upgrade_sqlite", upgrade_sqlite)
     migration.upgrade()
     assert calls == ["postgresql"]
+
+
+def _load_0003() -> object:
+    """Import the 0003 partial-indexes-pg-counterparts migration module."""
+    return importlib.import_module(
+        "snapper.data.migrations.versions.0003_partial_indexes_pg_counterparts"
+    )
+
+
+def _stub_op_index_capture(
+    monkeypatch: MonkeyPatch,
+    migration: object,
+    bind_dialect: str,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str, list[str], dict[str, object]]]]:
+    """Replace ``op.get_bind``/``drop_index``/``create_index`` with capturing stubs."""
+    drops: list[tuple[str, str]] = []
+    creates: list[tuple[str, str, list[str], dict[str, object]]] = []
+
+    def get_bind() -> _Bind:
+        return _Bind(bind_dialect)
+
+    def drop_index(name: str, table_name: str = "") -> None:
+        drops.append((name, table_name))
+
+    def create_index(
+        name: str,
+        table_name: str,
+        columns: list[str],
+        **kwargs: object,
+    ) -> None:
+        creates.append((name, table_name, columns, kwargs))
+
+    monkeypatch.setattr(migration.op, "get_bind", get_bind)
+    monkeypatch.setattr(migration.op, "drop_index", drop_index)
+    monkeypatch.setattr(migration.op, "create_index", create_index)
+    return drops, creates
+
+
+def test_0003_upgrade_on_postgres_replaces_four_indexes_with_partial(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Upgrade on PG drops 4 full indexes and recreates them as partial with PG syntax.
+
+    Given: an existing PG database where four ``sqlite_where``-only partial
+    indexes were materialised as full indexes (because no
+    ``postgresql_where`` was declared),
+    When: ``0003.upgrade()`` runs against the PG dialect,
+    Then: each index is dropped and recreated with the appropriate
+    ``postgresql_where`` predicate using PG-correct boolean syntax
+    (``can_trade = true``, not ``can_trade = 1``).
+    """
+    migration = _load_0003()
+    drops, creates = _stub_op_index_capture(monkeypatch, migration, "postgresql")
+    migration.upgrade()
+
+    assert [(name, tbl) for name, tbl in drops] == [
+        ("ix_sec_exchange_trade", "symbol_exchange_capabilities"),
+        ("ix_sec_exchange_md", "symbol_exchange_capabilities"),
+        ("uq_executions_order_exec", "executions"),
+        ("uq_executions_order_trade", "executions"),
+    ]
+    assert [(name, tbl, cols) for name, tbl, cols, _ in creates] == [
+        ("ix_sec_exchange_trade", "symbol_exchange_capabilities", ["exchange", "can_trade"]),
+        ("ix_sec_exchange_md", "symbol_exchange_capabilities", ["exchange", "can_market_data"]),
+        ("uq_executions_order_exec", "executions", ["order_public_id", "exec_id"]),
+        ("uq_executions_order_trade", "executions", ["order_public_id", "trade_id"]),
+    ]
+    where_sql = [str(kwargs["postgresql_where"]) for _, _, _, kwargs in creates]
+    assert where_sql == [
+        "can_trade = true",
+        "can_market_data = true",
+        "exec_id IS NOT NULL",
+        "trade_id IS NOT NULL",
+    ]
+    assert creates[2][3]["unique"] is True
+    assert creates[3][3]["unique"] is True
+
+
+def test_0003_upgrade_on_sqlite_is_noop(monkeypatch: MonkeyPatch) -> None:
+    """Upgrade on SQLite touches no indexes — existing partial indexes remain.
+
+    Given: a SQLite database whose four partial indexes are already
+    correct (declared via ``sqlite_where`` in 0001),
+    When: ``0003.upgrade()`` runs against the SQLite dialect,
+    Then: no DROP or CREATE INDEX statement is emitted.
+    """
+    migration = _load_0003()
+    drops, creates = _stub_op_index_capture(monkeypatch, migration, "sqlite")
+    migration.upgrade()
+    assert drops == []
+    assert creates == []
+
+
+def test_0003_downgrade_on_postgres_restores_four_full_indexes(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Downgrade on PG drops 4 partial indexes and recreates them as full.
+
+    Given: a PG database upgraded to 0003 (four partial indexes),
+    When: ``0003.downgrade()`` runs against the PG dialect,
+    Then: each index is dropped and recreated WITHOUT ``postgresql_where``
+    (restoring the pre-0003 full-index shape).
+    """
+    migration = _load_0003()
+    drops, creates = _stub_op_index_capture(monkeypatch, migration, "postgresql")
+    migration.downgrade()
+    assert len(drops) == 4
+    assert len(creates) == 4
+    for _, _, _, kwargs in creates:
+        assert "postgresql_where" not in kwargs
+
+
+def test_0003_downgrade_on_sqlite_is_noop(monkeypatch: MonkeyPatch) -> None:
+    """Downgrade on SQLite touches no indexes.
+
+    Given: a SQLite database (whose partial indexes were never modified by
+    0003 upgrade),
+    When: ``0003.downgrade()`` runs against the SQLite dialect,
+    Then: no DROP or CREATE INDEX statement is emitted.
+    """
+    migration = _load_0003()
+    drops, creates = _stub_op_index_capture(monkeypatch, migration, "sqlite")
+    migration.downgrade()
+    assert drops == []
+    assert creates == []

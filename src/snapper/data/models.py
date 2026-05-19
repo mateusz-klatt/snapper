@@ -425,6 +425,7 @@ class Execution(TemporalMixin, Base):
             "exec_id",
             unique=True,
             sqlite_where=text("exec_id IS NOT NULL"),
+            postgresql_where=text("exec_id IS NOT NULL"),
         ),
         Index(
             "uq_executions_order_trade",
@@ -432,6 +433,7 @@ class Execution(TemporalMixin, Base):
             "trade_id",
             unique=True,
             sqlite_where=text("trade_id IS NOT NULL"),
+            postgresql_where=text("trade_id IS NOT NULL"),
         ),
         Index(
             "ix_executions_public_id",
@@ -726,12 +728,14 @@ class SymbolExchangeCapability(TemporalMixin, Base):
             "exchange",
             "can_trade",
             sqlite_where=text("can_trade = 1"),
+            postgresql_where=text("can_trade = true"),
         ),
         Index(
             "ix_sec_exchange_md",
             "exchange",
             "can_market_data",
             sqlite_where=text("can_market_data = 1"),
+            postgresql_where=text("can_market_data = true"),
         ),
         Index(
             "ix_symbol_exchange_capabilities_public_id",
