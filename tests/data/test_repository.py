@@ -24,6 +24,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import select as _sa_select
 from sqlalchemy import text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6969,6 +6970,63 @@ async def test_get_positions_multiple_cycles_returns_null(tmp_path: Path) -> Non
     result = await r.get_positions(as_of=now)
     assert len(result) == 1
     assert result[0]["position_cycle_public_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_positions_compiles_against_postgres_without_uuid_aggregate(
+    tmp_path: Path,
+) -> None:
+    """Verify get_positions SQL is portable to PostgreSQL and free of UUID-ordering assumptions.
+
+    Given:
+        - PostgreSQL has no ``min(uuid)`` / ``max(uuid)`` aggregates and
+          would raise ``asyncpg.UndefinedFunctionError`` for a bare
+          aggregate over the ``UUID``-typed ``public_id`` column.
+        - Using ``min(public_id)`` to "pick one" silently assumes uuid7
+          time-ordering; if the generator ever changed (uuid4/uuid5),
+          the semantics would break without a syntax error — a latent
+          landmine.
+    When: get_positions builds its SQL for the open-cycle resolution.
+    Then: The query uses a NOT-EXISTS anti-join (not an aggregate),
+        with self-exclusion via the internal PK ``id`` so no UUID
+        comparison or ordering assumption is involved.
+
+    Regression for the live failure observed via /api/positions:
+    ``asyncpg.UndefinedFunctionError: function min(uuid) does not exist``.
+    """
+    captured: list[Any] = []
+
+    class _CaptureSession:
+        async def __aenter__(self) -> _CaptureSession:
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            return None
+
+        async def execute(self, stmt: Any) -> Any:
+            captured.append(stmt)
+            result = MagicMock()
+            result.all.return_value = []
+            return result
+
+    r, _, _ = await _seed_full_repo(tmp_path)
+
+    def _session_factory() -> _CaptureSession:
+        return _CaptureSession()
+
+    with patch.object(r, "session", _session_factory):
+        await r.get_positions(as_of=datetime.now(UTC))
+
+    assert len(captured) == 1
+    sql_lower = str(captured[0].compile(dialect=postgresql.dialect())).lower()
+    assert "min(position_cycles.public_id" not in sql_lower
+    assert "max(position_cycles.public_id" not in sql_lower
+    assert "not (exists" in sql_lower or "not exists" in sql_lower
 
 
 @pytest.mark.asyncio

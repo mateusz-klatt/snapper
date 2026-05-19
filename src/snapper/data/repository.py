@@ -74,6 +74,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import Session as SyncSession
+from sqlalchemy.orm import aliased
 from sqlalchemy.orm import sessionmaker as sync_sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -6336,32 +6337,50 @@ class SQLAlchemyRepository(Repository):
     ) -> list[PositionRow]:
         """Retrieve active positions with instrument/symbol info.
 
-        The position_cycle_public_id is resolved via a grouped subquery
-        that returns a cycle only when exactly one open cycle matches
-        the position's (instrument, exchange, mode, wallet). Multiple
-        matching cycles (e.g. paper mode with strategy tags) yield NULL
-        to prevent attaching a bracket to the wrong cycle.
+        The position_cycle_public_id is resolved via a NOT-EXISTS
+        anti-join that returns a cycle only when no other active open
+        cycle matches the position's (instrument, exchange, mode,
+        wallet). Multiple matching cycles (e.g. paper mode with
+        strategy tags) yield NULL to prevent attaching a bracket to
+        the wrong cycle.
+
+        Anti-join (not an aggregate) is the right shape here: it
+        states the actual invariant ("there is no second matching
+        cycle") without depending on any property of UUID generation.
+        An earlier MIN-based form was both PostgreSQL-incompatible
+        (``min(uuid)`` does not exist) and quietly assumed uuid7
+        time-ordering — a semantic landmine if the generator ever
+        changes. Self-exclusion uses the internal PK ``id`` so no
+        UUID comparison is involved.
         """
         async with self.session() as s:
+            other_cycle = aliased(PositionCycle)
             open_cycle_unambiguous = (
                 select(
                     PositionCycle.instrument_public_id.label("instrument_public_id"),
                     PositionCycle.exchange.label("exchange"),
                     PositionCycle.mode.label("mode"),
                     PositionCycle.wallet_public_id.label("wallet_public_id"),
-                    func.min(PositionCycle.public_id).label("position_cycle_public_id"),
+                    PositionCycle.public_id.label("position_cycle_public_id"),
                 )
                 .where(
                     PositionCycle.status == "open",
                     *where_active(PositionCycle, as_of),
+                    ~(
+                        select(1)
+                        .select_from(other_cycle)
+                        .where(
+                            other_cycle.status == "open",
+                            *where_active(other_cycle, as_of),
+                            other_cycle.instrument_public_id == PositionCycle.instrument_public_id,
+                            other_cycle.exchange == PositionCycle.exchange,
+                            other_cycle.mode == PositionCycle.mode,
+                            other_cycle.wallet_public_id == PositionCycle.wallet_public_id,
+                            other_cycle.id != PositionCycle.id,
+                        )
+                        .exists()
+                    ),
                 )
-                .group_by(
-                    PositionCycle.instrument_public_id,
-                    PositionCycle.exchange,
-                    PositionCycle.mode,
-                    PositionCycle.wallet_public_id,
-                )
-                .having(func.count(PositionCycle.public_id) == 1)
                 .subquery()
             )
 
