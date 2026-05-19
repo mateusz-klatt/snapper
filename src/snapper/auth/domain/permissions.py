@@ -124,6 +124,7 @@ CATEGORY_PERMISSIONS: dict[str, frozenset[Permission]] = {
     "admin": frozenset({Permission.MANAGE_USERS}),
     "backtest": frozenset({Permission.READ_BACKTESTS}),
     "ai_reviews": frozenset({Permission.READ_SIGNALS, Permission.CREATE_ORDERS}),
+    "notifications": frozenset({Permission.READ_NOTIFICATIONS}),
 }
 """Permission sets required for each WS topic category.
 

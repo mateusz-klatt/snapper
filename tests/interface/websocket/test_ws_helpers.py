@@ -146,6 +146,20 @@ class TestWebSocketHelpersRuntimeError:
         assert determine_topic_category("backtest.wallet-uuid.run-uuid.") == "backtest"
         assert determine_topic_category("backtest.wallet.run.started") == "backtest"
 
+    def test_determine_topic_category_alerts(self) -> None:
+        """Alerts topics resolve to ``notifications`` at every depth.
+
+        Given: An ``alerts.{user}.{type}`` topic shape as published by
+            the Phase E sidecar fanout,
+        When: ``determine_topic_category`` is invoked,
+        Then: Maps to the ``notifications`` WS category, gated by
+            ``READ_NOTIFICATIONS`` per :data:`CATEGORY_PERMISSIONS`.
+        """
+        assert determine_topic_category("alerts") == "notifications"
+        assert determine_topic_category("alerts.") == "notifications"
+        assert determine_topic_category("alerts.user-uuid.") == "notifications"
+        assert determine_topic_category("alerts.user-uuid.order_fill_full") == "notifications"
+
 
 class TestRoleCategorySecurityMatrix:
     """Role x category x topic security boundary tests.
@@ -176,6 +190,7 @@ class TestRoleCategorySecurityMatrix:
             "backtest",
             "trade_events",
             "strategies_read",
+            "notifications",
         }
 
     def test_operator_gets_full_trade_categories(self) -> None:
@@ -205,6 +220,7 @@ class TestRoleCategorySecurityMatrix:
             "ai_reviews",
             "strategies_read",
             "processes_admin",
+            "notifications",
         }
         assert "admin" not in categories
 
@@ -232,6 +248,7 @@ class TestRoleCategorySecurityMatrix:
             "ai_reviews",
             "strategies_read",
             "processes_admin",
+            "notifications",
         }
 
     def test_admin_available_topics_include_admin_prefix(self) -> None:

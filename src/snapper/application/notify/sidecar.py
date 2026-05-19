@@ -56,8 +56,10 @@ from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import NotificationDeviceRow
 from snapper.i18n import catalog
+from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
+from snapper.messaging.schemas.data import AlertEventData
 
 _RETRY_LOOP_INTERVAL_S = 30.0
 _RETRY_GIVE_UP_AFTER_ATTEMPTS = 3
@@ -113,6 +115,7 @@ class NotifySidecar(RegisterableProcess):
         apns: ApnsClientPool,
         apns_topic: str,
         tracker: SequenceTracker,
+        publisher: MessagePublisher,
         registry: RuleRegistry | None = None,
         scope_revalidator: ScopeRevalidator | None = None,
         push_beta_provider: Callable[[], PushBetaConfig] | None = None,
@@ -130,6 +133,15 @@ class NotifySidecar(RegisterableProcess):
             tracker: ``SequenceTracker`` used to stamp provenance on
                 every ``alert_events`` / ``alert_deliveries`` row
                 the sidecar writes.
+            publisher: ``MessagePublisher`` used to fan out one
+                ``AlertEventData`` frame per persisted alert onto the
+                ZMQ bus topic ``alerts.{user_public_id}.{alert_type}``.
+                Powers the Phase E web live-refresh path: the bridge
+                forwards the frame to subscribed WebSocket clients
+                with per-user scope enforcement (mirrors REST
+                ``/api/alerts/history`` scoping). Publish happens
+                BEFORE APNs fanout so web clients see updates in
+                <50ms; APNs round-trip is the slower path.
             registry: Alert rule registry — defaults to
                 ``load_default_registry()`` (the 5 P0 rules
                 + ``margin_warning``). Injected for tests that want a
@@ -152,6 +164,7 @@ class NotifySidecar(RegisterableProcess):
         self._apns = apns
         self._apns_topic = apns_topic
         self._tracker = tracker
+        self._publisher = publisher
         self._stop_event = asyncio.Event()
         self._retry_task: asyncio.Task[None] | None = None
         self._registry = registry or load_default_registry()
@@ -268,6 +281,7 @@ class NotifySidecar(RegisterableProcess):
                 pid=event_public_id,
             )
             return
+        await self._publish_alert_event_frame(event, now)
         push_beta = self._push_beta_provider() if self._push_beta_provider is not None else None
         recipients = await route_alert_to_devices(
             alert=event,
@@ -292,6 +306,49 @@ class NotifySidecar(RegisterableProcess):
                 event=event, device=device, now=now
             )
             await self._attempt_once(delivery_pid, device, event, now, user_language=user_language)
+
+    async def _publish_alert_event_frame(self, event: AlertEventRow, now: datetime) -> None:
+        """Emit an ``AlertEventData`` frame onto the ZMQ bus.
+
+        Powers the Phase E web live-refresh path. The bridge subscribes
+        to the ``alerts.`` prefix and forwards the frame to authenticated
+        WebSocket clients with per-user scope enforcement. Sequence is
+        allocated against the actual topic so consumer-side gap detection
+        is per-topic — matching the publisher convention used elsewhere
+        in the codebase (``executors/base.py``).
+
+        Args:
+            event: Active SCD2 row read back after ``_insert_alert_event``;
+                the publish frame mirrors its provenance, scope, and
+                resolved title/body.
+            now: Entry-boundary timestamp (threaded from
+                ``_persist_and_fanout_row``).
+        """
+        topic = f"alerts.{event['user_public_id']}.{event['alert_type']}"
+        tracker = self._publisher.tracker
+        seq = tracker.next_sequence(topic)
+        frame = AlertEventData.model_validate(
+            {
+                "type": "alert_event",
+                "sequence_id": seq,
+                "public_id": event["public_id"],
+                "timestamp": now,
+                "session_id": tracker.session_id,
+                "user_public_id": event["user_public_id"],
+                "operator_public_id": event["operator_public_id"],
+                "wallet_public_id": event["wallet_public_id"],
+                "alert_type": event["alert_type"],
+                "priority": event["priority"],
+                "is_safety_critical": event["is_safety_critical"],
+                "title": event["title"],
+                "body": event["body"],
+                "payload": event["payload"],
+                "dedup_key": event["dedup_key"],
+                "thread_key": event["thread_key"],
+                "source_topic": event["source_topic"],
+            }
+        )
+        await self._publisher.send(topic, frame)
 
     async def _insert_alert_event(self, alert_row: AlertEventInsertRow, now: datetime) -> str:
         """Write the SCD2 ``alert_events`` row and return its public_id."""

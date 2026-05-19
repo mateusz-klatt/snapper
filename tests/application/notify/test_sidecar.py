@@ -40,7 +40,9 @@ from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import NotificationDeviceUpsertRow
+from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import AlertEventData
 
 
 def _ts(minutes: int = 0) -> datetime:
@@ -197,13 +199,42 @@ class _RaisingRule(AlertRule):
         raise RuntimeError("rule explosion")
 
 
+class _FakeMessagePublisher:
+    """In-memory ``MessagePublisher`` stand-in that captures every send.
+
+    Mirrors the real publisher's surface area sufficiently for the
+    sidecar to publish a frame: exposes a ``tracker`` property and an
+    async ``send`` that records the (topic, data) tuple. Tests inspect
+    ``sends`` to assert the publish path ran with the expected
+    arguments and ordering relative to the APNs fanout.
+    """
+
+    def __init__(self) -> None:
+        self._tracker = SequenceTracker()
+        self.sends: list[tuple[str, AlertEventData]] = []
+
+    @property
+    def tracker(self) -> SequenceTracker:
+        return self._tracker
+
+    async def send(self, stream_key: str, data: AlertEventData) -> None:
+        self.sends.append((stream_key, data))
+
+
 def _make_sidecar(
     repo: SQLAlchemyRepository,
     *,
     send_result: ApnsSendResult | Exception | None = None,
     registry: RuleRegistry | None = None,
 ) -> tuple[NotifySidecar, MagicMock]:
-    """Construct a sidecar with a mock subscriber + mock APNs pool."""
+    """Construct a sidecar with a mock subscriber + mock APNs pool.
+
+    The injected publisher is a ``_FakeMessagePublisher`` reachable via
+    ``sidecar._publisher`` for tests that assert on the Phase E
+    web-fanout path; tests that don't care about it ignore the
+    attribute. ``_publisher`` shares its ``SequenceTracker`` with the
+    sidecar exactly like the production CLI wiring.
+    """
     subscriber = MagicMock()
     subscriber.subscribe = MagicMock()
     apns = MagicMock()
@@ -216,12 +247,14 @@ def _make_sidecar(
         apns.send = AsyncMock(side_effect=send_result)
     else:
         apns.send = AsyncMock(return_value=send_result)
+    publisher = _FakeMessagePublisher()
     sidecar = NotifySidecar(
         subscriber=subscriber,
         repo=repo,
         apns=apns,
         apns_topic="ie.klatt.snapper",
-        tracker=SequenceTracker(),
+        tracker=publisher.tracker,
+        publisher=cast(MessagePublisher, publisher),
         registry=registry,
     )
     return sidecar, apns
@@ -631,6 +664,65 @@ class TestDispatchFlow:
         history = await repo.list_recent_alerts_for_user(user, limit=10, before=None)
         assert len(history) == 1
         apns.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_publishes_alert_event_frame_before_apns(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """The Phase E web fanout publishes onto the bus before APNs delivery.
+
+        Given: A matching rule + one device for the recipient user.
+        When: ``_dispatch`` runs the persist + fanout chain.
+        Then:
+            (a) The publisher captured exactly one frame on topic
+                ``alerts.{user}.{alert_type}``.
+            (b) The frame's ``user_public_id`` / ``alert_type`` / ``title`` /
+                ``body`` mirror the persisted ``alert_events`` row, and
+                provenance is stamped (``session_id`` non-empty,
+                ``sequence_id`` allocated by the shared tracker).
+            (c) ``MessagePublisher.send`` is called before
+                ``ApnsClientPool.send`` — proves the publish step
+                landed in ``_persist_and_fanout_row`` ahead of the
+                APNs path, matching the Phase E latency-sensitivity
+                rationale.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        await _seed_device(repo, user)
+        reg = RuleRegistry()
+        reg.register(_SingleRowRule(user_public_id=user, topic_prefix="test."))
+        sidecar, apns = _make_sidecar(repo, registry=reg)
+        order_log: list[str] = []
+        publisher = cast("_FakeMessagePublisher", sidecar._publisher)
+        original_send = publisher.send
+
+        async def recording_send(stream_key: str, data: AlertEventData) -> None:
+            order_log.append("publish")
+            await original_send(stream_key, data)
+
+        publisher.send = recording_send
+
+        async def recording_apns_send(**_kwargs: object) -> ApnsSendResult:
+            order_log.append("apns")
+            return ApnsSendResult(
+                status_code=200, status="success", apns_id="apns-xyz", description=""
+            )
+
+        apns.send = AsyncMock(side_effect=recording_apns_send)
+
+        await sidecar._dispatch("test.something", b"{}", _ts())
+
+        assert len(publisher.sends) == 1
+        sent_topic, sent_frame = publisher.sends[0]
+        assert sent_topic == f"alerts.{user}.order_fill_full"
+        assert sent_frame.type == "alert_event"
+        assert sent_frame.user_public_id == user
+        assert sent_frame.alert_type == "order_fill_full"
+        assert sent_frame.title == "Fixture"
+        assert sent_frame.body == "Fixture body"
+        assert sent_frame.session_id != ""
+        assert sent_frame.sequence_id > 0
+        assert order_log == ["publish", "apns"]
 
     @pytest.mark.asyncio
     async def test_live_fanout_resolves_user_language_from_repo(

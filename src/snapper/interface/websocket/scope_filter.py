@@ -10,13 +10,16 @@ Filters have no transport coupling: each takes already-resolved data
 calls them inside ``_forward_to_clients`` per-subscription so each
 client sees only the events they have scope for.
 
-Two filters live here today:
+Three filters live here today:
 
 - :func:`enforce_ai_review_scope` — gates ``ai_reviews.*`` per-AI-delegate
   by ``(wallet, instrument)`` grant.
 - :func:`enforce_orders_events_scope` — gates ``orders.events.*`` per
   principal by accessible-wallet set, mirroring the REST
   ``/api/orders`` wallet-scope filter (the v0.7.0 RBAC symmetry fix).
+- :func:`enforce_alerts_scope` — gates ``alerts.*`` per principal by
+  exact ``user_public_id`` match (ADMIN bypass). Powers the Phase E
+  live-refresh path so a web user only sees their own alert frames.
 """
 
 from collections.abc import Mapping
@@ -31,15 +34,18 @@ from snapper.auth.scope_grant_service import ScopeGrantService
 
 __all__ = [
     "AI_REVIEWS_TOPIC_PREFIX",
+    "ALERTS_TOPIC_PREFIX",
     "ORDERS_EVENTS_TOPIC_PREFIX",
     "OrdersEventsAccessCache",
     "orders_events_access_cache_key",
     "enforce_ai_review_scope",
+    "enforce_alerts_scope",
     "enforce_orders_events_scope",
 ]
 
 
 AI_REVIEWS_TOPIC_PREFIX = "ai_reviews."
+ALERTS_TOPIC_PREFIX = "alerts."
 ORDERS_EVENTS_TOPIC_PREFIX = "orders.events."
 OrdersEventsAccessCacheKey = tuple[str, str, tuple[str, ...], str, str | None, str | None]
 OrdersEventsAccessCache = MutableMapping[OrdersEventsAccessCacheKey, frozenset[str]]
@@ -231,3 +237,60 @@ async def enforce_orders_events_scope(
             accessible_wallets_cache[cache_key] = cached_accessible
         accessible = cached_accessible
     return wallet_public_id in accessible
+
+
+async def enforce_alerts_scope(
+    *,
+    topic: str,
+    connection_principal: AuthPrincipal | None,
+    payload: Mapping[str, Any],
+) -> bool:
+    """Return ``True`` iff principal may receive this ``alerts.*`` frame.
+
+    The alerts topic family is sharded by ``user_public_id``: each
+    frame's topic encodes the recipient
+    (``alerts.{user_public_id}.{alert_type}``) and the JSON payload
+    repeats it on the envelope. The filter forwards iff the
+    destination socket's authenticated user matches that
+    ``user_public_id`` — exactly the REST scoping behaviour for
+    ``/api/alerts/history`` and ``/api/alerts/{public_id}`` (each
+    user reads their own alerts).
+
+    Pass-through rules:
+
+    - Non-``alerts.*`` topics return ``True`` immediately (every other
+      category has its own RBAC at subscribe-time + per-frame scope
+      filter where needed; this filter only owns the ``alerts.*``
+      family).
+    - Missing principal (e.g. WS pre-auth or auth dropped) returns
+      ``False`` — no frame leaks to an un-authenticated socket.
+    - ADMIN role bypass — returns ``True`` without inspecting the
+      payload; ADMIN sees every user's alerts by contract (mirrors
+      REST ADMIN bypass).
+    - Missing or non-string ``user_public_id`` in the payload returns
+      ``False``: the bridge's fail-closed parsing layer should already
+      drop these before reaching the filter, but this is the
+      belt-and-braces guard so a stale call site cannot leak.
+
+    Args:
+        topic: The full ZMQ topic string (e.g.
+            ``alerts.user-1.order_fill_full``).
+        connection_principal: The authenticated principal for the
+            destination socket; ``None`` when the WS hasn't yet
+            authenticated.
+        payload: Already-parsed JSON envelope. The filter consults
+            ``user_public_id``.
+
+    Returns:
+        ``True`` to forward the frame, ``False`` to drop it.
+    """
+    if not topic.startswith(ALERTS_TOPIC_PREFIX):
+        return True
+    if connection_principal is None:
+        return False
+    if connection_principal.role == UserRole.ADMIN:
+        return True
+    payload_user_pid = payload.get("user_public_id")
+    if not isinstance(payload_user_pid, str):
+        return False
+    return payload_user_pid == connection_principal.user_public_id

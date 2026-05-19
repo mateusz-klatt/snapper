@@ -131,8 +131,11 @@ from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.executors.walutomat import WalutomatOrderExecutor
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
 from snapper.messaging.infrastructure.logger import ZmqMessageLogger
+from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
 from snapper.messaging.infrastructure.validated_socket import HWM_ORDER_FLOW
+from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
@@ -1956,13 +1959,19 @@ def notify() -> None:
         broker_addr = bootstrap.zmq_broker_xpub
         sub_sock.connect(broker_addr)
         subscriber = ValidatedSubscriber(sub_sock)
+        pub_sock = zmq_ctx.socket(zmq.PUB)
+        apply_hwm(pub_sock, sndhwm=HWM_AUDIT)
+        pub_sock.connect(bootstrap.zmq_broker_xsub)
+        tracker = SequenceTracker()
+        publisher = MessagePublisher(ValidatedPublisher(pub_sock), tracker)
 
         sidecar = NotifySidecar(
             subscriber=subscriber,
             repo=repo,
             apns=apns_pool,
             apns_topic=apns_config.topic,
-            tracker=SequenceTracker(),
+            tracker=tracker,
+            publisher=publisher,
             push_beta_provider=lambda: parse_push_beta_config(
                 settings_svc.get_setting(PUSH_BETA_SETTING_KEY)
             ),
@@ -1978,6 +1987,7 @@ def notify() -> None:
         finally:
             await sidecar.stop()
             sub_sock.close()
+            pub_sock.close()
             zmq_ctx.term()
 
     asyncio.run(_run())

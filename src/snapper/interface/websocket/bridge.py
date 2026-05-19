@@ -37,9 +37,11 @@ from snapper.interface.websocket.models import TopicMetricSnapshot
 from snapper.interface.websocket.models import TopicSubscriptionModel
 from snapper.interface.websocket.schemas import WSErrorResponse
 from snapper.interface.websocket.scope_filter import AI_REVIEWS_TOPIC_PREFIX
+from snapper.interface.websocket.scope_filter import ALERTS_TOPIC_PREFIX
 from snapper.interface.websocket.scope_filter import ORDERS_EVENTS_TOPIC_PREFIX
 from snapper.interface.websocket.scope_filter import OrdersEventsAccessCache
 from snapper.interface.websocket.scope_filter import enforce_ai_review_scope
+from snapper.interface.websocket.scope_filter import enforce_alerts_scope
 from snapper.interface.websocket.scope_filter import enforce_orders_events_scope
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -711,6 +713,9 @@ class ZmqWebSocketBridgeService:
         orders_events_payload = self._maybe_parse_orders_events_payload(topic, message_str)
         if not self._orders_events_frame_is_valid(topic, orders_events_payload):
             return
+        alerts_payload = self._maybe_parse_alerts_payload(topic, message_str)
+        if not self._alerts_frame_is_valid(topic, alerts_payload):
+            return
         orders_events_access_cache: OrdersEventsAccessCache = {}
         orders_events_as_of = datetime.now(UTC) if orders_events_payload is not None else None
         current_time = time.time()
@@ -727,9 +732,33 @@ class ZmqWebSocketBridgeService:
                 is_trade=is_trade,
                 ai_review_payload=ai_review_payload,
                 orders_events_payload=orders_events_payload,
+                alerts_payload=alerts_payload,
                 orders_events_access_cache=orders_events_access_cache,
                 orders_events_as_of=orders_events_as_of,
             )
+
+    def _alerts_frame_is_valid(self, topic: str, alerts_payload: dict[str, Any] | None) -> bool:
+        """Return False (and log + count) when an ``alerts.*`` frame is malformed.
+
+        Non-alerts topics short-circuit to ``True``. A ``None`` payload on
+        an ``alerts.*`` topic means :meth:`_maybe_parse_alerts_payload`
+        already rejected the frame (JSON / shape / discriminator). The
+        metrics counter is bumped at this canonical drop site rather
+        than inside the parse helper to keep the parser side-effect-free.
+        """
+        if not topic.startswith(ALERTS_TOPIC_PREFIX):
+            return True
+        if alerts_payload is not None:
+            return True
+        logger.warning(
+            "Dropping malformed alerts.* frame (failed JSON / non-dict envelope / "
+            "missing or non-string user_public_id) for topic=%s — would otherwise "
+            "bypass per-frame scope filter",
+            topic,
+        )
+        if topic in self.topic_metrics:
+            self.topic_metrics[topic].invalid_messages += 1
+        return False
 
     def _orders_events_frame_is_valid(
         self, topic: str, orders_events_payload: dict[str, Any] | None
@@ -768,6 +797,7 @@ class ZmqWebSocketBridgeService:
         is_trade: bool,
         ai_review_payload: dict[str, Any] | None,
         orders_events_payload: dict[str, Any] | None,
+        alerts_payload: dict[str, Any] | None,
         orders_events_access_cache: OrdersEventsAccessCache,
         orders_events_as_of: datetime | None,
     ) -> None:
@@ -794,6 +824,12 @@ class ZmqWebSocketBridgeService:
                 as_of=orders_events_as_of,
             ):
                 return
+            if alerts_payload is not None and not await self._enforce_alerts_scope(
+                subscription=subscription,
+                topic=topic,
+                payload=alerts_payload,
+            ):
+                return
             if await self._handle_backpressure(subscription, topic, max_pending, is_trade):
                 return
             await self._try_send_message(subscription, topic, message_str, current_time)
@@ -817,6 +853,41 @@ class ZmqWebSocketBridgeService:
         except json.JSONDecodeError:
             return None
         if not isinstance(parsed, dict):
+            return None
+        return parsed
+
+    def _maybe_parse_alerts_payload(self, topic: str, message_str: str) -> dict[str, Any] | None:
+        """Parse an ``alerts.*`` frame's JSON payload exactly once.
+
+        Returns ``None`` for non-alerts topics (no per-frame scope
+        check needed) AND for malformed payloads. Fail-closed: the
+        four guards below MUST drop the frame before
+        :func:`enforce_alerts_scope` is invoked, so the filter never
+        sees malformed input.
+
+        Guards (each returns ``None``):
+
+        - JSON decode failure.
+        - Non-dict top-level payload.
+        - Missing ``user_public_id`` key.
+        - Non-string ``user_public_id`` value.
+
+        The ``user_public_id`` discriminator is what the per-frame
+        filter consults. A non-string value would otherwise reach the
+        filter and get dropped there anyway, but pre-screening at the
+        bridge keeps the filter contract clean and lets the bridge
+        increment ``invalid_messages`` at the canonical drop site.
+        """
+        if not topic.startswith(ALERTS_TOPIC_PREFIX):
+            return None
+        try:
+            parsed = json.loads(message_str)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        user_public_id = parsed.get("user_public_id")
+        if not isinstance(user_public_id, str):
             return None
         return parsed
 
@@ -856,6 +927,29 @@ class ZmqWebSocketBridgeService:
         if not isinstance(wallet_public_id, str):
             return None
         return parsed
+
+    async def _enforce_alerts_scope(
+        self,
+        *,
+        subscription: TopicSubscriptionModel,
+        topic: str,
+        payload: Mapping[str, Any],
+    ) -> bool:
+        """Per-frame scope filter for the ``alerts.*`` family.
+
+        Resolves the destination socket's principal via the
+        :class:`WebSocketAuthManager` singleton and delegates to
+        :func:`enforce_alerts_scope`. Forward iff the helper returns
+        ``True``.
+        """
+        principal = WebSocketAuthManager.get_instance().get_authenticated_user(
+            subscription.websocket
+        )
+        return await enforce_alerts_scope(
+            topic=topic,
+            connection_principal=principal,
+            payload=payload,
+        )
 
     async def _enforce_orders_events_scope(
         self,

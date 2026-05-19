@@ -3708,3 +3708,206 @@ class TestOrdersEventsTwoPrincipalLeakGuard:
         ws_primary.send_text.assert_awaited_once_with(payload)
         ws_secondary.send_text.assert_awaited_once_with(payload)
         mock_service.list_accessible_wallet_public_ids.assert_awaited_once()
+
+
+class TestAlertsFailClosedParsing:
+    """Bridge fail-closed parsing for ``alerts.*`` frames.
+
+    Four guards in :meth:`_maybe_parse_alerts_payload` must drop the
+    frame BEFORE :func:`enforce_alerts_scope` is invoked, so the filter
+    never sees malformed input. Each guard increments the bridge's
+    ``invalid_messages`` topic metric and emits a warning. Mirrors the
+    orders.events. fail-closed contract for the Phase E live-refresh path.
+    """
+
+    @pytest.fixture
+    def bridge(self) -> ZmqWebSocketBridgeService:
+        """Provide ZMQ bridge with mocked context."""
+        with patch("snapper.interface.websocket.bridge.get_settings") as mock_settings:
+            mock_settings.return_value.zmq_broker_xpub = "tcp://localhost:5556"
+            mock_settings.return_value.zmq_publisher = "tcp://localhost:5555"
+            return ZmqWebSocketBridgeService(connection_manager=MagicMock())
+
+    def _seed_alerts_subscription(self, bridge: ZmqWebSocketBridgeService) -> tuple[AsyncMock, str]:
+        """Wire one ``alerts.`` subscriber + return the mock ws."""
+        topic = "alerts."
+        mock_ws = AsyncMock()
+        sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, client_id="viewer-1")
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
+        bridge.topic_metrics[topic] = TopicMetricsModel()
+        return mock_ws, topic
+
+    @pytest.mark.asyncio
+    async def test_drops_malformed_json_payload(self, bridge: ZmqWebSocketBridgeService) -> None:
+        """Non-parsable JSON drops without forwarding."""
+        mock_ws, topic = self._seed_alerts_subscription(bridge)
+        await bridge._forward_to_clients(topic, "alerts.user-X.order_fill_full", "{not-json")
+        mock_ws.send_text.assert_not_awaited()
+        assert bridge.topic_metrics[topic].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_drops_non_dict_payload(self, bridge: ZmqWebSocketBridgeService) -> None:
+        """Top-level non-dict (list / string / number) drops."""
+        mock_ws, topic = self._seed_alerts_subscription(bridge)
+        await bridge._forward_to_clients(topic, "alerts.user-X.order_fill_full", "[1, 2, 3]")
+        mock_ws.send_text.assert_not_awaited()
+        assert bridge.topic_metrics[topic].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_drops_payload_missing_user_public_id(
+        self, bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Missing ``user_public_id`` key drops (cannot authorize)."""
+        mock_ws, topic = self._seed_alerts_subscription(bridge)
+        await bridge._forward_to_clients(
+            topic,
+            "alerts.user-X.order_fill_full",
+            '{"type": "alert_event", "title": "X"}',
+        )
+        mock_ws.send_text.assert_not_awaited()
+        assert bridge.topic_metrics[topic].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_drops_payload_with_non_string_user_public_id(
+        self, bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Non-string ``user_public_id`` (int / null / dict) drops."""
+        mock_ws, topic = self._seed_alerts_subscription(bridge)
+        await bridge._forward_to_clients(
+            topic,
+            "alerts.user-X.order_fill_full",
+            '{"type": "alert_event", "user_public_id": null}',
+        )
+        mock_ws.send_text.assert_not_awaited()
+        assert bridge.topic_metrics[topic].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_drops_malformed_frame_without_topic_metrics_entry(
+        self, bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Malformed frame on a topic missing from topic_metrics still drops cleanly.
+
+        Given: A subscription on ``alerts.`` with no ``topic_metrics`` entry,
+        When: A malformed ``alerts.*`` frame arrives,
+        Then: The frame is dropped without raising; no metric is updated.
+        """
+        topic = "alerts."
+        mock_ws = AsyncMock()
+        sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, client_id="viewer-1")
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
+        await bridge._forward_to_clients(topic, "alerts.user-X.order_fill_full", "{not-json")
+        mock_ws.send_text.assert_not_awaited()
+
+
+class TestAlertsScopeEnforcementOnBridge:
+    """End-to-end ``alerts.*`` scope check through the bridge.
+
+    Three cases: (a) matching user receives the frame; (b) mismatched
+    user is dropped; (c) ADMIN bypass forwards regardless of payload
+    user. Each case stubs :class:`WebSocketAuthManager` so the bridge
+    resolves the principal for the destination socket.
+    """
+
+    @pytest.fixture
+    def bridge(self) -> ZmqWebSocketBridgeService:
+        """Provide ZMQ bridge with mocked context."""
+        with patch("snapper.interface.websocket.bridge.get_settings") as mock_settings:
+            mock_settings.return_value.zmq_broker_xpub = "tcp://localhost:5556"
+            mock_settings.return_value.zmq_publisher = "tcp://localhost:5555"
+            return ZmqWebSocketBridgeService(connection_manager=MagicMock())
+
+    def _seed_alerts_subscription(
+        self, bridge: ZmqWebSocketBridgeService, client_id: str
+    ) -> tuple[AsyncMock, str]:
+        """Wire one ``alerts.`` subscriber + return the mock ws + topic."""
+        topic = "alerts."
+        mock_ws = AsyncMock()
+        sub = TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0, client_id=client_id)
+        bridge.topic_subscriptions[topic] = {sub.websocket: sub}
+        bridge.topic_metrics[topic] = TopicMetricsModel()
+        return mock_ws, topic
+
+    def _viewer(self, user_public_id: str) -> AuthPrincipal:
+        """VIEWER principal carrying the given ``user_public_id``."""
+        return AuthPrincipal(
+            username=f"viewer-{user_public_id}",
+            role=UserRole.VIEWER,
+            user_public_id=user_public_id,
+            operator_public_ids=["op-1"],
+            primary_operator_public_id="op-1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_forwards_when_user_public_id_matches(
+        self, bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Matching ``user_public_id`` forwards the alert frame to the subscriber."""
+        mock_ws, topic = self._seed_alerts_subscription(bridge, "viewer-X")
+        principal = self._viewer("user-X")
+        manager_stub = MagicMock()
+        manager_stub.get_authenticated_user.return_value = principal
+        with patch("snapper.interface.websocket.bridge.WebSocketAuthManager") as mock_manager_cls:
+            mock_manager_cls.get_instance.return_value = manager_stub
+            payload = json.dumps(
+                {
+                    "type": "alert_event",
+                    "user_public_id": "user-X",
+                    "alert_type": "order_fill_full",
+                    "title": "Filled",
+                    "body": "BTC 1.0",
+                }
+            )
+            await bridge._forward_to_clients(topic, "alerts.user-X.order_fill_full", payload)
+        mock_ws.send_text.assert_awaited_once_with(payload)
+
+    @pytest.mark.asyncio
+    async def test_drops_when_user_public_id_mismatches(
+        self, bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Mismatched ``user_public_id`` drops the frame — no cross-user leak."""
+        mock_ws, topic = self._seed_alerts_subscription(bridge, "viewer-Y")
+        principal = self._viewer("user-Y")
+        manager_stub = MagicMock()
+        manager_stub.get_authenticated_user.return_value = principal
+        with patch("snapper.interface.websocket.bridge.WebSocketAuthManager") as mock_manager_cls:
+            mock_manager_cls.get_instance.return_value = manager_stub
+            payload = json.dumps(
+                {
+                    "type": "alert_event",
+                    "user_public_id": "user-X",
+                    "alert_type": "order_fill_full",
+                    "title": "Filled",
+                    "body": "BTC 1.0",
+                }
+            )
+            await bridge._forward_to_clients(topic, "alerts.user-X.order_fill_full", payload)
+        mock_ws.send_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_admin_bypass_forwards_regardless_of_user_match(
+        self, bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """ADMIN sees every user's alerts — bypass forwards even on mismatch."""
+        mock_ws, topic = self._seed_alerts_subscription(bridge, "admin-1")
+        admin = AuthPrincipal(
+            username="admin-1",
+            role=UserRole.ADMIN,
+            user_public_id="user-admin",
+            operator_public_ids=["op-1"],
+            primary_operator_public_id="op-1",
+        )
+        manager_stub = MagicMock()
+        manager_stub.get_authenticated_user.return_value = admin
+        with patch("snapper.interface.websocket.bridge.WebSocketAuthManager") as mock_manager_cls:
+            mock_manager_cls.get_instance.return_value = manager_stub
+            payload = json.dumps(
+                {
+                    "type": "alert_event",
+                    "user_public_id": "user-X",
+                    "alert_type": "order_fill_full",
+                    "title": "Filled",
+                    "body": "BTC 1.0",
+                }
+            )
+            await bridge._forward_to_clients(topic, "alerts.user-X.order_fill_full", payload)
+        mock_ws.send_text.assert_awaited_once_with(payload)
