@@ -50,7 +50,7 @@ def test_ohlc_candle_as_dict_returns_floats() -> None:
         volume=12.5,
         trades=42,
         interval=1,
-        timestamp="1700000000",
+        interval_begin="2023-11-14T22:13:20.000000Z",
     )
     payload = candle.as_dict()
     assert payload["open"] == pytest.approx(50000.0)

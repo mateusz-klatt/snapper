@@ -128,9 +128,10 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
                         logger.info(f"Collected {count} market snapshots - stopping")
                         break
         except TimeoutError:
-            logger.warning(
-                f"Snapshot collection timed out after {self._COLLECTION_TIMEOUT_SECONDS}s "
-                f"with {count} snapshots collected"
+            logger.info(
+                f"Snapshot collection window closed after {self._COLLECTION_TIMEOUT_SECONDS}s "
+                f"with {count} snapshots collected (thin/closed-market pairs with no "
+                f"recent tick stay stale)"
             )
         finally:
             await self.exchange_client.disconnect_websocket()

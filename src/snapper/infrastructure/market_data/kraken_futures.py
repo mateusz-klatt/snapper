@@ -148,9 +148,10 @@ class KrakenFuturesSnapshotUpdaterService(MarketSnapshotUpdaterService):
             async with asyncio.timeout(timeout_seconds):
                 await self._collect_snapshots_loop(all_symbols, snapshots)
         except TimeoutError:
-            logger.warning(
-                f"WebSocket collection timed out after {timeout_seconds}s - "
-                f"collected {len(snapshots)}/{len(all_symbols)} symbols"
+            logger.info(
+                f"WebSocket collection window closed after {timeout_seconds}s - "
+                f"collected {len(snapshots)}/{len(all_symbols)} symbols "
+                f"(thin/closed-market futures with no recent tick stay stale)"
             )
         return snapshots
 

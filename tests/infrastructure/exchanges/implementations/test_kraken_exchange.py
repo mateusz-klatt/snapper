@@ -33,6 +33,10 @@ from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.implementations import kraken as kr
+from snapper.infrastructure.exchanges.implementations.kraken import (
+    _OHLC_DEPRECATED_TIMESTAMP_NOTICE,
+)
+from snapper.infrastructure.exchanges.implementations.kraken import _OHLC_NOTICES_LOGGED
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.implementations.kraken import _enqueue_or_drop_oldest
 
@@ -3502,6 +3506,53 @@ async def test_on_message_ohlc_subscription_with_warnings() -> None:
             "success": True,
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_ohlc_known_deprecation_notice_logged_once_then_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Known Kraken OHLC deprecation notice is logged INFO once, then DEBUG.
+
+    Given a KrakenExchangeClient and the fixed Kraken v2 informational
+    notice ``timestamp is deprecated, use interval_begin`` which Kraken
+    emits in ``result.warnings`` on every OHLC subscribe ack,
+    When the same notice arrives twice through ``_on_message``,
+    Then the first occurrence is logged once at INFO with an explanation
+    and subsequent occurrences are downgraded to DEBUG so the warning
+    stream stays meaningful per the clean-signal-log rule.
+    """
+    _OHLC_NOTICES_LOGGED.discard(_OHLC_DEPRECATED_TIMESTAMP_NOTICE)
+    client = KrakenExchangeClient("key", "secret")
+    ack_message = {
+        "method": "subscribe",
+        "result": {
+            "channel": "ohlc",
+            "symbol": "BTC/USD",
+            "interval": 1,
+            "warnings": [_OHLC_DEPRECATED_TIMESTAMP_NOTICE],
+        },
+        "success": True,
+    }
+    sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        with caplog.at_level("DEBUG"):
+            await client._on_message(ack_message)
+            await client._on_message(ack_message)
+    finally:
+        logger.remove(sink_id)
+    info_records = [r for r in caplog.records if r.levelname == "INFO"]
+    debug_records = [r for r in caplog.records if r.levelname == "DEBUG"]
+    warning_or_error = [r for r in caplog.records if r.levelname in {"WARNING", "ERROR"}]
+    assert any(
+        "timestamp is deprecated" in r.message for r in info_records
+    ), f"expected exactly one INFO-level notice, got {[r.message for r in info_records]}"
+    assert any(
+        "OHLC subscription notice" in r.message for r in debug_records
+    ), f"expected DEBUG suppression on repeat, got {[r.message for r in debug_records]}"
+    assert (
+        not warning_or_error
+    ), f"known notice must not trigger WARNING/ERROR, got {[r.message for r in warning_or_error]}"
 
 
 @pytest.mark.asyncio

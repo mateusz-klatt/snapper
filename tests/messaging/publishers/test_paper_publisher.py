@@ -371,6 +371,8 @@ class TestPaperMarketDataPublisher:
         """
         pub = PaperMarketDataPublisher(
             paper_instruments={"kraken": ["BTC-USD"], "polygon": ["AAPL"]},
+            start_time=1000.0,
+            end_time=2000.0,
         )
         started: list[str] = []
 
@@ -391,6 +393,25 @@ class TestPaperMarketDataPublisher:
         Then no publishers are created.
         """
         pub = PaperMarketDataPublisher()
+        await pub.start()
+        assert pub._publishers == []
+
+    @pytest.mark.asyncio
+    async def test_start_idle_when_no_time_range_configured(self) -> None:
+        """Verify start enters idle when paper_instruments set but time range missing.
+
+        Given paper_instruments configured but ``start_time`` / ``end_time`` unset,
+        When start is called,
+        Then no per-source publishers are spawned (the underlying
+        ``PaperExchangeClient`` would raise ``ValueError`` on every
+        ``subscribe_*`` call without a replay window; gating here keeps
+        the noise floor clean per the clean-signal-log rule).
+        """
+        pub = PaperMarketDataPublisher(
+            paper_instruments={"kraken": ["BTC-USD"], "walutomat": ["EUR-PLN"]},
+        )
+        assert pub.start_time is None
+        assert pub.end_time is None
         await pub.start()
         assert pub._publishers == []
 
@@ -417,6 +438,8 @@ class TestPaperMarketDataPublisher:
         """
         pub = PaperMarketDataPublisher(
             paper_instruments={"kraken": ["BTC-USD"]},
+            start_time=1000.0,
+            end_time=2000.0,
         )
 
         async def failing_start(self: Any) -> None:
@@ -503,6 +526,8 @@ class TestPaperMarketDataPublisher:
         """
         pub = PaperMarketDataPublisher(
             paper_instruments={"kraken": ["BTC-USD"], "polygon": ["AAPL"]},
+            start_time=1000.0,
+            end_time=2000.0,
         )
         start_order: list[str] = []
 

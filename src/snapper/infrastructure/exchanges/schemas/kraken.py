@@ -291,7 +291,15 @@ class KrakenOhlcSubscriptionAckSchema(ExchangeResponse):
 
 
 class KrakenCandleSchema(ExchangeResponse):
-    """OHLCV candle data from Kraken."""
+    """OHLCV candle data from Kraken.
+
+    Kraken v2 deprecated the ``timestamp`` field in favour of
+    ``interval_begin`` (which carries the candle bucket start, not the
+    server emission time). We use ``interval_begin`` exclusively; the
+    legacy ``timestamp`` field is not modelled here. ``ExchangeResponse``
+    is configured with ``extra="allow"`` so Kraken can keep emitting
+    ``timestamp`` for back-compat without breaking deserialization.
+    """
 
     symbol: str | None = None
     open: float
@@ -303,7 +311,6 @@ class KrakenCandleSchema(ExchangeResponse):
     volume: float | None = None
     interval_begin: str | None = None
     interval: int | None = None
-    timestamp: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Convert candle to dictionary excluding None values.

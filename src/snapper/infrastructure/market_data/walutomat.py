@@ -136,9 +136,10 @@ class WalutomatSnapshotUpdaterService(MarketSnapshotUpdaterService):
             async with asyncio.timeout(timeout_seconds):
                 await self._collect_snapshots_loop(all_symbols, snapshots)
         except TimeoutError:
-            logger.warning(
-                f"Polling collection timed out after {timeout_seconds}s - "
-                f"collected {len(snapshots)}/{len(all_symbols)} symbols"
+            logger.info(
+                f"Polling collection window closed after {timeout_seconds}s - "
+                f"collected {len(snapshots)}/{len(all_symbols)} symbols "
+                f"(thin/closed-market pairs with no recent quote stay stale)"
             )
         return snapshots
 

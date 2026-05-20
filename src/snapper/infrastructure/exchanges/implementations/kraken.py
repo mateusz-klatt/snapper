@@ -90,6 +90,25 @@ _CANDLE_SUBSCRIBE_CHUNK_DELAY_S = 0.1
 _DROP_LOG_INTERVAL_S = 1.0
 _drop_counters: dict[str, list[float]] = {}
 
+_OHLC_DEPRECATED_TIMESTAMP_NOTICE: Final[str] = "timestamp is deprecated, use interval_begin"
+"""Known Kraken WS deprecation notice for OHLC subscription ACKs.
+
+Kraken v2 emits this in ``result.warnings`` on every OHLC subscribe — we
+already parse ``interval_begin`` exclusively, so the notice is
+informational and does not require operator action. Logged once per
+process at INFO; subsequent occurrences are emitted at DEBUG. See
+``snapper.infrastructure.exchanges.implementations.kraken
+._handle_ohlc_subscription_ack``."""
+
+_OHLC_NOTICES_LOGGED: set[str] = set()
+"""Module-level set of OHLC ack warning strings already INFO-logged once.
+
+Used by ``_log_ohlc_subscription_warning`` to deduplicate known
+informational notices that Kraken emits on every subscribe. Mutating a
+set in place does not require the ``global`` statement and keeps the
+clean-signal-log behaviour without tripping Ruff's ``PLW0603`` lint
+rule."""
+
 
 def _enqueue_or_drop_oldest(queue: asyncio.Queue[Any], item: Any, label: str) -> None:
     """Put item on queue, dropping the oldest if full.
@@ -1212,12 +1231,41 @@ class KrakenExchangeClient(ExchangeClientBase):
                 )
             if ohlc_ack.result.warnings:
                 for warning in ohlc_ack.result.warnings:
-                    logger.warning(f"OHLC subscription warning: {warning}")
+                    self._log_ohlc_subscription_warning(warning)
         except ValidationError:
             logger.debug(
                 "Received non-standard OHLC control message: {}",
                 message,
             )
+
+    def _log_ohlc_subscription_warning(self, warning: str) -> None:
+        """Log an OHLC subscription warning with deduplication of known notices.
+
+        Kraken emits a fixed informational notice
+        ``timestamp is deprecated, use interval_begin`` on every OHLC
+        subscribe. We already use ``interval_begin`` exclusively, so the
+        notice is not operator-actionable. Per the clean-signal-log rule
+        we log the first occurrence at INFO with an explanation, then
+        downgrade subsequent occurrences to DEBUG so the warning stream
+        stays meaningful. Unknown warnings remain at WARNING.
+
+        Args:
+            warning: Warning string from ``result.warnings`` in the
+                OHLC subscription ACK.
+        """
+        if warning == _OHLC_DEPRECATED_TIMESTAMP_NOTICE:
+            if warning not in _OHLC_NOTICES_LOGGED:
+                logger.info(
+                    "Kraken OHLC ack carries informational notice "
+                    "'timestamp is deprecated, use interval_begin' — we "
+                    "already use interval_begin; subsequent occurrences "
+                    "suppressed to DEBUG"
+                )
+                _OHLC_NOTICES_LOGGED.add(warning)
+            else:
+                logger.debug("OHLC subscription notice: {}", warning)
+            return
+        logger.warning(f"OHLC subscription warning: {warning}")
 
     async def _handle_channel_data(self, message_dict: dict[str, Any]) -> None:
         """Dispatch channel data messages to channel-specific handlers.

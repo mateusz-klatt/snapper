@@ -170,9 +170,30 @@ class PaperMarketDataPublisher(RegisterableProcess):
         }
 
     async def start(self) -> None:
-        """Start all per-source paper publishers concurrently."""
+        """Start all per-source paper publishers concurrently.
+
+        Idle modes (return early without per-source startup):
+
+        * ``paper_instruments`` empty — nothing to replay.
+        * ``start_time``/``end_time`` unset — replay needs an explicit time
+          window. Without it the underlying :class:`PaperExchangeClient`
+          raises ``ValueError`` on every ``subscribe_*`` call (six errors
+          per startup: 2 sources × tick/trade/candle loops). The expected
+          operator pattern is to populate the time range via the
+          ``paper_feed_publisher`` parameters when a backtest replay is
+          actually being run, and otherwise leave it unset so the paper
+          process sits idle.
+        """
         if not self.paper_instruments:
-            logger.warning("PaperMarketDataPublisher: No paper instruments configured")
+            logger.info("PaperMarketDataPublisher: no paper instruments configured — idle")
+            return
+        if self.start_time is None or self.end_time is None:
+            logger.info(
+                "PaperMarketDataPublisher: idle ({} source(s) configured but no "
+                "replay window — populate start_time/end_time via parameters to "
+                "run a backtest replay)",
+                len(self.paper_instruments),
+            )
             return
         self._publishers = [
             PerSourcePaperPublisher(
