@@ -2,12 +2,17 @@
 
 Pins the per-kind contract:
 
-* EVENT tables: ``total = COUNT(*)``; ``current`` / ``closed`` = ``None``;
+* EVENT tables: ``total`` via :meth:`_count_total_estimate`
+  (dialect-aware — exact on SQLite, planner estimate on PostgreSQL);
+  ``current`` / ``closed`` = ``None``;
   ``archivable`` = half-open window count (or ``None`` when no window).
-* STATE tables: ``current = COUNT(known_to == KNOWN_TO_MAX)``;
-  ``closed = COUNT(known_to != KNOWN_TO_MAX)``;
-  ``total = current + closed`` (Python addition);
-  ``archivable`` = closed-only window count (or ``None``).
+* STATE tables: ``current = COUNT(known_to == KNOWN_TO_MAX)`` (exact,
+  partial-index scan);
+  ``total`` via :meth:`_count_total_estimate` (dialect-aware);
+  ``closed = max(0, total - current)`` (clamped to handle stale PG
+  estimates where the exact ``current`` count temporarily exceeds the
+  estimated ``total``);
+  ``archivable`` = closed-window count (or ``None``).
 
 Half-open window contract: rows AT
 ``datetime(day_start, 0, 0, UTC)`` are INCLUDED; rows AT
@@ -22,6 +27,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import update
 
+from snapper.data import repository as repo_module
 from snapper.data.db_stats_types import TableCounters
 from snapper.data.db_stats_types import TableEntry
 from snapper.data.models import KNOWN_TO_MAX
@@ -314,3 +320,135 @@ class TestKnownToMaxMatching:
         counters = await _repo.count_table_stats(_orders_entry())
         assert counters.current == 0
         assert counters.closed == 1
+
+
+class TestDialectAwareTotalEstimate:
+    """``_count_total_estimate`` dialect-specific behavior.
+
+    Pins the implementation contract:
+
+    * PostgreSQL emits a schema-safe ``pg_class JOIN pg_namespace``
+      planner-estimate query (no full table scan).
+    * SQLite emits an exact ``count(*)`` (acceptable at dev scale).
+    * Unknown dialects raise ``NotImplementedError`` (fail loud rather
+      than silently produce zero or wrong counts).
+    * ``closed`` is clamped to ``max(0, total - current)`` so a stale
+      PG estimate (``total < current``) cannot produce a negative value.
+    """
+
+    @pytest.mark.asyncio
+    async def test_postgresql_path_uses_schema_aware_pg_class_query(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PG dialect must query pg_class JOIN pg_namespace with both relname + nspname.
+
+        Catches: dropping the namespace filter (multi-schema deploys), or
+        regressing to ``SELECT count(*)`` on PG (which is the original bug).
+        """
+        captured: dict[str, object] = {}
+
+        class _StubResult:
+            def scalar_one_or_none(self) -> int:
+                return 12345
+
+        class _StubSession:
+            async def execute(
+                self, stmt: object, params: dict[str, str] | None = None
+            ) -> _StubResult:
+                captured["stmt"] = str(stmt)
+                captured["params"] = params
+                return _StubResult()
+
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+        monkeypatch.setattr(type(repo), "dialect_name", "postgresql")
+        result = await repo._count_total_estimate(_StubSession(), Order)
+        assert result == 12345
+        sql = str(captured["stmt"]).lower()
+        assert "pg_class" in sql
+        assert "pg_namespace" in sql
+        assert "n.nspname" in sql
+        assert "c.relkind = 'r'" in sql
+        assert captured["params"] == {"table": "orders", "schema": "public"}
+
+    @pytest.mark.asyncio
+    async def test_sqlite_path_runs_exact_count(self, _repo: SQLAlchemyRepository) -> None:
+        """SQLite dialect returns an exact count over the model."""
+        await _insert_telemetry_row(
+            _repo,
+            timestamp=datetime(2026, 5, 1, 0, 0, tzinfo=UTC),
+            public_id="tel-1",
+            sequence_id=1,
+        )
+        async with _repo.session() as s:
+            total = await _repo._count_total_estimate(s, Telemetry)
+        assert total == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_dialect_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Loud failure on unsupported dialect (no silent zero)."""
+
+        class _StubSession:
+            async def execute(self, *args: object, **kwargs: object) -> None:
+                raise AssertionError("execute should not be called for unknown dialect")
+
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+        monkeypatch.setattr(type(repo), "dialect_name", "mysql")
+        with pytest.raises(NotImplementedError, match="dialect=mysql"):
+            await repo._count_total_estimate(_StubSession(), Telemetry)
+
+    @pytest.mark.asyncio
+    async def test_closed_clamps_to_zero_when_estimate_below_current(
+        self, _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stale ``reltuples`` estimate must not produce negative ``closed``.
+
+        Simulates a PG state where ``current`` (exact, partial index)
+        is 10 but ``_count_total_estimate`` (autoanalyze stale) returns 5.
+        The implementation must clamp ``closed = max(0, 5 - 10) = 0``.
+        """
+        for i in range(10):
+            await _insert_active_order(
+                _repo,
+                public_id=f"ord-{i}",
+                timestamp=datetime(2026, 5, 1, 0, 0, tzinfo=UTC),
+                sequence_id=i + 1,
+            )
+
+        async def _stale_estimate(_self: object, _s: object, _model: object) -> int:
+            return 5
+
+        monkeypatch.setattr(type(_repo), "_count_total_estimate", _stale_estimate)
+        counters = await _repo.count_table_stats(_orders_entry())
+        assert counters.current == 10
+        assert counters.closed == 0
+        assert counters.total == 5
+
+    @pytest.mark.asyncio
+    async def test_sqlite_guard_warns_above_threshold(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Soft warning when SQLite count returns more rows than the guard limit.
+
+        The guard is informational — execution still completes; the
+        snapshotter's per-table timeout is the hard bound.
+        """
+
+        class _BigCountResult:
+            def scalar_one(self) -> int:
+                return repo_module._SQLITE_COUNT_GUARD_ROWS + 1
+
+        class _StubSession:
+            async def execute(self, _stmt: object) -> _BigCountResult:
+                return _BigCountResult()
+
+        warnings: list[str] = []
+
+        def _record(msg: str, *args: object, **kwargs: object) -> None:
+            warnings.append(str(msg))
+
+        monkeypatch.setattr(repo_module.logger, "warning", _record)
+
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+        result = await repo._count_total_estimate(_StubSession(), Telemetry)
+        assert result == repo_module._SQLITE_COUNT_GUARD_ROWS + 1
+        assert any("guard threshold" in w for w in warnings)

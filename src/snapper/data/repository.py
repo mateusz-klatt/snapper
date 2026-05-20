@@ -372,6 +372,7 @@ _OUTBOX_BULK_LOOKUP_CHUNK_SIZE = 200
 _PLAN_CHECKPOINT_LOOKUP_CHUNK_SIZE = 200
 DEFAULT_HIGH_CARDINALITY_LIMIT = 100_000
 _HIGH_CARDINALITY_STREAM_CHUNK_SIZE = 5_000
+_SQLITE_COUNT_GUARD_ROWS = 10_000_000
 ScopeExpansionKey = tuple[str, str | None, str | None]
 
 
@@ -12451,19 +12452,74 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             return new_version
 
+    async def _count_total_estimate(self, s: AsyncSession, model: type[Any]) -> int:
+        """Dialect-aware fast row count for monitoring.
+
+        PostgreSQL uses planner statistics from ``pg_class`` joined with
+        ``pg_namespace`` for schema safety — this is microseconds vs
+        minutes for ``count(*)`` on a multi-GB table. Accuracy is
+        bounded by ``ANALYZE`` freshness (typically within a few percent;
+        worse during high-velocity write bursts before autovacuum
+        catches up). Adequate for monitoring growth trends.
+
+        SQLite uses an exact ``count(*)`` — at dev scale (<10M rows)
+        this is bounded and matches developer expectations. The guard
+        threshold ``_SQLITE_COUNT_GUARD_ROWS`` logs a warning if a dev
+        fixture exceeds the bound; the surrounding snapshotter's
+        ``PER_TABLE_TIMEOUT_SECONDS`` still caps runtime.
+
+        Raises:
+            NotImplementedError: for dialects other than PostgreSQL
+                and SQLite (none currently supported by Snapper).
+        """
+        dialect = self.dialect_name
+        table_name = model.__tablename__
+        if dialect == "postgresql":
+            schema_name = model.__table__.schema or "public"
+            stmt = text(
+                "SELECT GREATEST(c.reltuples::bigint, 0) "
+                "FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE c.relname = :table "
+                "AND n.nspname = :schema "
+                "AND c.relkind = 'r'"
+            )
+            result = await s.execute(stmt, {"table": table_name, "schema": schema_name})
+            scalar = result.scalar_one_or_none()
+            return int(scalar) if scalar is not None else 0
+        if dialect == "sqlite":
+            count_stmt = select(func.count()).select_from(model)
+            count = int((await s.execute(count_stmt)).scalar_one())
+            if count > _SQLITE_COUNT_GUARD_ROWS:
+                logger.warning(
+                    f"SQLite count(*) on {table_name} returned {count} rows "
+                    f"(above {_SQLITE_COUNT_GUARD_ROWS} guard threshold); "
+                    "consider switching to PostgreSQL for this dataset size."
+                )
+            return count
+        raise NotImplementedError(f"_count_total_estimate not implemented for dialect={dialect}")
+
     async def count_table_stats(
         self,
         entry: TableEntry,
         *,
         archivable_window: tuple[date, date] | None = None,
     ) -> TableCounters:
-        """Per-table four-counter primitive (event + state)."""
+        """Per-table four-counter primitive (event + state).
+
+        The ``total`` count uses :meth:`_count_total_estimate` which is
+        dialect-aware: PostgreSQL returns a planner estimate (fast,
+        accurate within autovacuum drift), SQLite returns an exact
+        count. ``closed`` is derived as ``max(0, total - current)`` on
+        SCD2/state tables to skip a slow full-table scan; the clamp
+        handles stale PG estimates where ``current`` (exact, partial
+        index) temporarily exceeds the estimated ``total``.
+        """
         model = cast(Any, entry.model)
         async with self.session() as s:
             archivable_predicate = _archivable_window_predicate(entry, archivable_window)
             if entry.kind == "event":
-                total_stmt = select(func.count()).select_from(model)
-                total = int((await s.execute(total_stmt)).scalar_one())
+                total = await self._count_total_estimate(s, model)
                 archivable: int | None = None
                 if archivable_predicate is not None:
                     archivable_stmt = (
@@ -12474,11 +12530,9 @@ class SQLAlchemyRepository(Repository):
             current_stmt = (
                 select(func.count()).select_from(model).where(model.known_to == KNOWN_TO_MAX)
             )
-            closed_stmt = (
-                select(func.count()).select_from(model).where(model.known_to != KNOWN_TO_MAX)
-            )
             current = int((await s.execute(current_stmt)).scalar_one())
-            closed = int((await s.execute(closed_stmt)).scalar_one())
+            total = await self._count_total_estimate(s, model)
+            closed = max(0, total - current)
             archivable = None
             if archivable_predicate is not None:
                 archivable_stmt = (
@@ -12487,9 +12541,7 @@ class SQLAlchemyRepository(Repository):
                     .where(model.known_to != KNOWN_TO_MAX, archivable_predicate)
                 )
                 archivable = int((await s.execute(archivable_stmt)).scalar_one())
-            return TableCounters(
-                total=current + closed, current=current, closed=closed, archivable=archivable
-            )
+            return TableCounters(total=total, current=current, closed=closed, archivable=archivable)
 
 
 def _archivable_window_predicate(
