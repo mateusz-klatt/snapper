@@ -270,3 +270,124 @@ class TestBacktestComparisonUniquePairMigration:
                 run_a_public_id=run_a,
                 run_b_public_id=run_b,
             )
+
+
+def _ix_bc_public_id_exists(engine: sa.Engine) -> bool:
+    """Return True iff ``ix_bc_public_id`` is present (post-migration)."""
+    with engine.begin() as conn:
+        rows = conn.execute(
+            sa.text("SELECT name FROM sqlite_master WHERE type='index' AND name='ix_bc_public_id'")
+        ).all()
+    return len(rows) == 1
+
+
+class TestBacktestComparisonIxPublicIdPartialUnique:
+    """Coverage for Plan E Fix 4 — ``ix_bc_public_id`` is unique partial.
+
+    Before 2026-05-20 the migration created a plain non-unique index while
+    the model declared a unique partial index on active rows. Fresh installs
+    therefore got a different shape from what ``models.py`` documented and
+    could silently accept duplicate active ``public_id`` rows in
+    ``backtest_comparisons``. The migration now mirrors the model.
+    """
+
+    def test_ix_bc_public_id_present_after_migration(
+        self, migrated_db: tuple[sa.Engine, Config]
+    ) -> None:
+        """A freshly-migrated DB carries the ``ix_bc_public_id`` index."""
+        engine, _ = migrated_db
+        assert _ix_bc_public_id_exists(engine)
+
+    def test_duplicate_active_public_id_is_rejected(
+        self, migrated_db: tuple[sa.Engine, Config]
+    ) -> None:
+        """Two active rows with the same public_id raise IntegrityError.
+
+        Given:
+            One active comparison row with ``public_id=X`` and
+            ``known_to=KNOWN_TO_MAX``,
+
+        When:
+            A second insert tries to reuse ``public_id=X`` while also
+            active,
+
+        Then:
+            The second insert raises ``IntegrityError`` because the
+            partial unique index enforces at most one active row per
+            ``public_id``.
+        """
+        engine, _ = migrated_db
+        public_id = str(uuid7())
+        now = datetime.now(UTC).isoformat(sep=" ")
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "INSERT INTO backtest_comparisons "
+                    "(public_id, wallet_public_id, run_a_public_id, run_b_public_id, "
+                    "pairing_mode, session_id, sequence_id, timestamp, known_to) "
+                    "VALUES (:public_id, :wallet, :run_a, :run_b, 'manual', "
+                    ":session, 1, :ts, :known_to)"
+                ),
+                {
+                    "public_id": public_id,
+                    "wallet": str(uuid7()),
+                    "run_a": str(uuid7()),
+                    "run_b": str(uuid7()),
+                    "session": str(uuid7()),
+                    "ts": now,
+                    "known_to": KNOWN_TO_MAX_LITERAL,
+                },
+            )
+        with pytest.raises(sa.exc.IntegrityError), engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "INSERT INTO backtest_comparisons "
+                    "(public_id, wallet_public_id, run_a_public_id, run_b_public_id, "
+                    "pairing_mode, session_id, sequence_id, timestamp, known_to) "
+                    "VALUES (:public_id, :wallet, :run_a, :run_b, 'manual', "
+                    ":session, 2, :ts, :known_to)"
+                ),
+                {
+                    "public_id": public_id,
+                    "wallet": str(uuid7()),
+                    "run_a": str(uuid7()),
+                    "run_b": str(uuid7()),
+                    "session": str(uuid7()),
+                    "ts": now,
+                    "known_to": KNOWN_TO_MAX_LITERAL,
+                },
+            )
+
+
+class TestBacktestComparisonRunsDistinctCheck:
+    """Coverage for Plan F Issue 4a — ``ck_bc_runs_distinct`` CHECK.
+
+    A ``BacktestComparison`` row must reference two distinct runs. Without
+    the CHECK, a nonsense self-compare request (``run_a == run_b``)
+    reached the DB; the diff payload was meaningless and the active-pair
+    index could not catch it because the predicate is wallet-scoped, not
+    row-content-scoped. The new CHECK rejects such inserts at DB level.
+    """
+
+    def test_self_compare_is_rejected(self, migrated_db: tuple[sa.Engine, Config]) -> None:
+        """Inserting ``run_a_public_id == run_b_public_id`` raises ``IntegrityError``."""
+        engine, _ = migrated_db
+        wallet = str(uuid7())
+        same_run = str(uuid7())
+        with pytest.raises(sa.exc.IntegrityError):
+            _insert_comparison(
+                engine,
+                wallet_public_id=wallet,
+                run_a_public_id=same_run,
+                run_b_public_id=same_run,
+            )
+
+    def test_distinct_runs_are_accepted(self, migrated_db: tuple[sa.Engine, Config]) -> None:
+        """A row with ``run_a != run_b`` inserts successfully."""
+        engine, _ = migrated_db
+        _insert_comparison(
+            engine,
+            wallet_public_id=str(uuid7()),
+            run_a_public_id=str(uuid7()),
+            run_b_public_id=str(uuid7()),
+        )

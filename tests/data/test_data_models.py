@@ -11,7 +11,9 @@ import pytest
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects import sqlite
 
+from snapper.data.models import BacktestComparison
 from snapper.data.models import Candle
+from snapper.data.models import ContinuousContractConfig
 from snapper.data.models import Execution
 from snapper.data.models import ExecutionPlan
 from snapper.data.models import ExecutionPlanCheckpoint
@@ -29,10 +31,12 @@ from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import Telemetry
 from snapper.data.models import Tick
 from snapper.data.models import Trade
+from snapper.data.models import TradeCommand
 from snapper.data.models import TZDateTime
 from snapper.data.models import User
 from snapper.data.models import UUIDColumn
 from snapper.data.models import VenueFeeSchedule
+from snapper.data.models import WalletCredential
 
 
 class TestInstrumentModel:
@@ -1313,3 +1317,68 @@ class TestHighWriteBigIntegerPK:
                 "BIGINT" not in rendered
             ), f"{model.__name__}.id should NOT be BIGINT, got {rendered}"
             assert "INTEGER" in rendered, f"{model.__name__}.id should be INTEGER, got {rendered}"
+
+
+class TestExchangeColumnLengthAlignment:
+    """Plan F Issue 1a — canonical ``exchange`` column length is String(32).
+
+    Five tables previously used ``String(20)`` while the majority of
+    tables in the schema already used ``String(32)``. The mismatch could
+    truncate exchange names with length 21-32 on the narrower tables.
+    The audit standardised on the wider canonical (forward-compatible;
+    pre-prod meant no data migration was required).
+    """
+
+    def test_canonical_exchange_columns_are_string_32(self) -> None:
+        """Each canonical ``exchange`` column renders as VARCHAR(32) on PG."""
+        for model in (
+            Instrument,
+            SymbolAlias,
+            SymbolExchangeCapability,
+            ContinuousContractConfig,
+            WalletCredential,
+        ):
+            column = model.__table__.c.exchange
+            rendered = column.type.compile(dialect=postgresql.dialect()).upper()
+            assert (
+                "VARCHAR(32)" in rendered
+            ), f"{model.__name__}.exchange should be VARCHAR(32) on PG, got {rendered}"
+
+
+class TestTradeCommandClientOrderIdIsString:
+    """Plan F Issue 1b — ``TradeCommand.client_order_id`` is String(64), not UUID.
+
+    ``Order`` and ``VenueEvent`` already used ``String(64)`` for the same
+    logical client-issued identifier. ``TradeCommand`` was the outlier
+    enforcing UUID-36 format, which would block future exchange-side
+    non-UUID client IDs (Kraken / Binance accept arbitrary strings up to
+    ~64 chars). UUID7 strings (36 chars) still fit comfortably.
+    """
+
+    def test_client_order_id_renders_varchar_64(self) -> None:
+        """``TradeCommand.client_order_id`` compiles to ``VARCHAR(64)`` on PG."""
+        column = TradeCommand.__table__.c.client_order_id
+        rendered = column.type.compile(dialect=postgresql.dialect()).upper()
+        assert (
+            "VARCHAR(64)" in rendered
+        ), f"TradeCommand.client_order_id should be VARCHAR(64) on PG, got {rendered}"
+
+
+class TestBacktestComparisonRunsDistinctConstraintDeclared:
+    """Plan F Issue 4a — ``ck_bc_runs_distinct`` declared on the model.
+
+    The model-level declaration ensures the constraint is picked up by
+    SQLAlchemy introspection (e.g. reflection-based tooling, archive
+    metadata, schema dumpers) — independent of the migration covered by
+    ``test_backtest_comparison_migration``.
+    """
+
+    def test_runs_distinct_check_in_table_constraints(self) -> None:
+        """``BacktestComparison.__table__`` carries the ``ck_bc_runs_distinct`` check."""
+        check_names = {
+            c.name for c in BacktestComparison.__table__.constraints if c.name is not None
+        }
+        assert "ck_bc_runs_distinct" in check_names, (
+            "BacktestComparison must declare ck_bc_runs_distinct, "
+            f"got constraints: {sorted(check_names)}"
+        )
