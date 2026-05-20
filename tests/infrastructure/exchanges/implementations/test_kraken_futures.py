@@ -1056,18 +1056,19 @@ class TestSubscribeCandles:
     ) -> None:
         """The yield loop survives queue-empty timeouts without spinning out.
 
-        Given: The candle queue is empty and the aggregator never
-            emits anything,
+        Given: The candle queue raises ``TimeoutError`` immediately,
         When: subscribe_candles is awaited with a tight outer timeout,
-        Then: The inner ``asyncio.wait_for`` raises ``TimeoutError``,
-            the ``await asyncio.sleep(0.01)`` branch executes, and the
+        Then: The retry sleep branch executes deterministically and the
             outer ``wait_for`` is what finally bails.
         """
         real_sleep = asyncio.sleep
+        sleeps: list[float] = []
 
-        async def fast_sleep(_: float) -> None:
+        async def fast_sleep(delay: float) -> None:
+            sleeps.append(delay)
             await real_sleep(0)
 
+        client._candle_queue.get = AsyncMock(side_effect=TimeoutError())
         with patch(
             "snapper.infrastructure.exchanges.implementations.kraken_futures.asyncio.sleep",
             new=fast_sleep,
@@ -1075,6 +1076,7 @@ class TestSubscribeCandles:
             iterator = client.subscribe_candles(["BTC-USD-PERP"], "1m")
             with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+        assert 0.01 in sleeps
 
     @pytest.mark.asyncio
     async def test_emits_candle_built_from_trade_stream(
