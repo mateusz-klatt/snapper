@@ -252,7 +252,7 @@ snapper update-kraken-equities-symbols --force
 # 2. Verify the rows landed. SCD2 active rows have known_to set to the
 #    canonical sentinel (9999-12-31 23:59:59.000000 on SQLite — see
 #    _KNOWN_TO_ACTIVE_SQLITE in src/snapper/data/models.py).
-sqlite3 snapper.db \
+sqlite3 data/snapper.db \
   "SELECT COUNT(*) FROM symbol_exchange_capabilities
    WHERE exchange='kraken_equities'
          AND known_to='9999-12-31 23:59:59.000000';"
@@ -322,7 +322,7 @@ below 14 days. Rotation cadence:
    keyed by `instrument_public_id`:
 
    ```
-   sqlite3 snapper.db \
+   sqlite3 data/snapper.db \
      "SELECT sym.native_symbol, datetime(spec.expiry_at)
         FROM instruments AS i
         JOIN symbols AS sym

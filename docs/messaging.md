@@ -129,9 +129,10 @@ backend subscriber that cares about user/operator state changes.
 
 | Topic | Description |
 | ----- | ----------- |
-| `admin.user_deactivated` | A user (or AI delegate) was deactivated; revocation hook for in-process token caches |
-| `admin.user_activated` | A user was re-activated |
-| `admin.operator_membership_changed` | `user_operator_memberships` row mutation |
+| `admin.user_deactivated` | A user (or AI delegate) was deactivated; revocation hook for in-process token caches + APNs push fan-out via the notify sidecar |
+| `admin.scope_granted` | `create_grant` published a new active scope row (instrument-exclusive grant just inserted) |
+| `admin.scope_handed_over` | `handover` finalized a scope handover (old row closed, new row open, both committed) |
+| `admin.scope_revoked` | `revoke_grant` closed an active scope row; revoke hook for any subscriber holding cached principal state |
 
 Shape: `admin.{resource}` — exactly 2 segments. The validator only
 enforces the 2-segment shape; the `resource` token itself is not

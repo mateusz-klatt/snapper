@@ -269,11 +269,181 @@ from snapper.strategies.macd import MACDCrossover
 
 ### Cointegration
 
-Pairs trading strategy based on cointegration.
+Pairs trading strategy based on cointegration. Trades the spread
+between two cointegrated instruments, entering when the z-score
+crosses `entry_threshold` and exiting on mean reversion past
+`exit_threshold`.
 
 ```python
 from snapper.strategies.cointegration import CointegrationPairs
 ```
+
+`CointegrationPairs` is the canonical 2-leg consumer of
+`MultiLegSpreadMixin` — its 2-leg invariants are enforced by
+`self._init_legs(expected_count=2)` and `instrument1` / `instrument2`
+are backwards-compatible aliases for `self.legs[0]` / `self.legs[1]`.
+See the next section for the generalized N-leg API.
+
+**Parameters:**
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `beta` | 0.05 | Hedge ratio between legs (long leg − beta × short leg) |
+| `entry_threshold` | 2.0 | Z-score threshold for entry (in standard deviations) |
+| `exit_threshold` | 0.5 | Z-score threshold for mean-reversion exit |
+| `lookback_window` | 50 | Window length for rolling spread statistics |
+| `min_data_points` | 30 | Minimum buffered candles before any signal is emitted |
+
+## Multi-leg / N-leg basket strategies
+
+Snapper ships a reusable mixin for strategies that emit synchronized
+signals across N legs (pair-trades, baskets, calendar spreads,
+cross-exchange arb). The 2-leg cointegration strategy is the
+canonical consumer; the same mixin generalizes to N ≥ 2.
+
+```python
+from snapper.strategies.multi_leg import MultiLegSpreadMixin, resolve_legs
+```
+
+### Two invocation shapes
+
+`resolve_legs(config, expected_count=None)` accepts either:
+
+1.  **Live ZMQ process** — `inputs` is a length-N list of market-data
+    candle topics, one per leg. Leg instruments are parsed from each
+    topic via `parse_market_topic`.
+
+    ```python
+    config = StrategyConfig(
+        name="basket_btc_eth_sol",
+        inputs=[
+            "market.paper.kraken.BTC-USD.candles.1h",
+            "market.paper.kraken.ETH-USD.candles.1h",
+            "market.paper.kraken.SOL-USD.candles.1h",
+        ],
+        outputs=["BTC-USD", "ETH-USD", "SOL-USD"],
+        ...
+    )
+    legs = resolve_legs(config, expected_count=3)
+    ```
+
+2.  **Direct-DB backtest** — `DirectDbEngine` synthesises a single
+    `candles.{exchange}.synthetic.{timeframe}` input and passes the
+    leg instruments through `outputs`.
+
+    ```python
+    config = StrategyConfig(
+        name="basket_btc_eth_sol",
+        inputs=["candles.kraken.synthetic.1h"],
+        outputs=["BTC-USD", "ETH-USD", "SOL-USD"],
+        ...
+    )
+    legs = resolve_legs(config, expected_count=3)
+    ```
+
+`resolve_legs` raises `ValueError` if neither shape matches or if
+`expected_count` is set and the resolved tuple has the wrong length.
+
+### Mixin API
+
+Subclassing both `BaseStrategy` and `MultiLegSpreadMixin` gives you:
+
+| Attribute / method | Purpose |
+| ------------------ | ------- |
+| `self.legs: tuple[str, ...]` | Resolved leg instruments in declaration order. Populated by `self._init_legs(expected_count=N)` from `__init__`. |
+| `self._partner_legs(current)` | Tuple of leg names other than `current`, in declaration order. |
+| `self._partner_prices(current)` | `{leg: last_close}` for partners with at least one buffered candle. Partners with empty buffers are omitted (same warmup gate as 2-leg cointegration). |
+| `self._emit_partner_signals(current, builder)` | Calls `builder(leg, last_close)` for each buffered partner and queues the result via `self.emit_paired_signal`. The batch processor drains every queued entry in the same timestep. |
+
+### Worked example — 3-leg equal-weight basket
+
+```python
+from snapper.messaging.schemas.data import CandleData
+from snapper.strategies.base import BaseStrategy, StrategyConfig, StrategySignal
+from snapper.strategies.decorators import register_strategy, create_strategy_process
+from snapper.strategies.multi_leg import MultiLegSpreadMixin
+
+
+@register_strategy("EqualWeightBasket")
+@create_strategy_process(
+    process_name="basket_btc_eth_sol",
+    default_config={
+        "name": "basket_btc_eth_sol",
+        "inputs": [
+            "market.paper.kraken.BTC-USD.candles.1h",
+            "market.paper.kraken.ETH-USD.candles.1h",
+            "market.paper.kraken.SOL-USD.candles.1h",
+        ],
+        "outputs": ["BTC-USD", "ETH-USD", "SOL-USD"],
+        "exchange": "paper",
+        "params": {"lookback_window": 50, "z_entry": 2.0, "z_exit": 0.5},
+    },
+)
+class EqualWeightBasket(BaseStrategy, MultiLegSpreadMixin):
+    """Z-score each leg vs the basket mean and rebalance when it diverges."""
+
+    def __init__(self, config: StrategyConfig) -> None:
+        super().__init__(config)
+        self.lookback_window = int(self.params.get("lookback_window", 50))
+        self.z_entry = float(self.params.get("z_entry", 2.0))
+        self.z_exit = float(self.params.get("z_exit", 0.5))
+        self._init_legs(expected_count=3)
+
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
+        partner_prices = self._partner_prices(instrument)
+        if len(partner_prices) < len(self.legs) - 1:
+            return None
+
+        basket_mean = (candle.close + sum(partner_prices.values())) / len(self.legs)
+        z = (candle.close - basket_mean) / basket_mean
+
+        if abs(z) < self.z_entry:
+            return None
+
+        side: TradeSide = "sell" if z > 0 else "buy"
+        primary = StrategySignal(
+            instrument=instrument,
+            side=side,
+            strength=min(1.0, abs(z) / self.z_entry),
+            price=candle.close,
+            reason=f"basket_z={z:+.2f}",
+        )
+        opposite: TradeSide = "buy" if side == "sell" else "sell"
+        self._emit_partner_signals(
+            instrument,
+            lambda leg, price: StrategySignal(
+                instrument=leg,
+                side=opposite,
+                strength=primary.strength,
+                price=price,
+                reason=f"basket_partner_of_{instrument}",
+            ),
+        )
+        return primary
+```
+
+### Signal pairing semantics
+
+`BaseStrategy.emit_paired_signal(signal)` enqueues partner-leg signals
+on the same timestep as the primary signal returned from `on_candle`.
+The downstream batch processor (`process_time_batch`) drains the
+queue immediately after the primary signal, so trade-runtime sees
+the full N-leg basket as one synchronized rebalance — no race between
+legs.
+
+`on_tick` callbacks do not use the pairing queue; tick-level pairing
+must be implemented explicitly by the strategy.
+
+### When NOT to use the mixin
+
+- Single-leg strategies (RSI, MACD, VWAP) — there are no partners
+  to pair with; subclassing the mixin adds no value.
+- Strategies whose legs use heterogeneous timeframes — `legs` assumes
+  one timeframe per strategy process. Run one process per timeframe
+  and coordinate via signals.
+- Calendar spreads where one leg trades on a derived feed
+  (e.g. funding-rate vs spot) — the input topic shape doesn't fit
+  `resolve_legs`; subclass `BaseStrategy` directly.
 
 ## Data Access
 

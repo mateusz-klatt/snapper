@@ -83,7 +83,8 @@ Content-Type: application/json
             "created_at": "2026-01-10T08:00:00Z",
             "operator_public_ids": [],
             "primary_operator_public_id": null,
-            "active_wallet_public_id": null
+            "active_wallet_public_id": null,
+            "default_language": null
         },
         "access_token": null,
         "refresh_token": null
@@ -165,7 +166,8 @@ POST /api/auth/refresh
             "created_at": "2026-01-10T08:00:00Z",
             "operator_public_ids": [],
             "primary_operator_public_id": null,
-            "active_wallet_public_id": null
+            "active_wallet_public_id": null,
+            "default_language": null
         },
         "access_token": null,
         "refresh_token": null
@@ -293,7 +295,8 @@ wrapping the full `UserProfile` payload, which carries the multi-tenant trio:
         "created_at": "2026-01-10T08:00:00Z",
         "operator_public_ids": ["019d6ca4-..."],
         "primary_operator_public_id": "019d6ca4-...",
-        "active_wallet_public_id": "019d7e9a-..."
+        "active_wallet_public_id": "019d7e9a-...",
+        "default_language": "pl"
     }
 }
 ```
@@ -316,6 +319,48 @@ whatever wallet the refresh JWT carries (or the request hint).
 Clients should call `/api/auth/me` to get a fully-resolved
 profile.
 
+### POST /api/auth/me/update
+
+Update the authenticated caller's self-service preferences. Currently
+exposes `default_language` only; additional preference fields may
+be added later without changing the endpoint contract. Mirrors the
+admin `POST /api/users/{user_id}/update` shape (codebase convention:
+`POST + verb`, no REST `PATCH`).
+
+**Request:**
+
+```http
+POST /api/auth/me/update
+Content-Type: application/json
+X-CSRF-Token: <token>
+```
+
+```json
+{
+    "type": "update_auth_me_request",
+    "payload": {
+        "default_language": "pl"
+    }
+}
+```
+
+`default_language` is validated against the union of supported
+client codes (iOS-canonical + frontend-canonical forms accepted —
+e.g. `"zh-Hans"`, `"zh"`, `"pt-BR"`, `"pt"`, `"nb"`, `"no"`).
+`null` clears the preference.
+
+**Response (200):**
+
+Returns the same `UserResponse` envelope shape as `GET /api/auth/me`,
+with the updated `default_language` echoed in `payload`.
+
+**Errors:**
+
+- `404` — caller's user row was not found (rare; only surfaces if
+  an admin concurrently deactivates the user between auth-dep
+  resolution and the update commit).
+- `422` — `default_language` not in the supported-language allowlist.
+
 ### CSRF Protection
 
 The `csrf_token` cookie is readable by JavaScript (not HttpOnly). For
@@ -336,13 +381,25 @@ REST endpoints return the same Data schemas used by WebSocket messages
 from `messaging.schemas.data`). This means the wire format is identical
 whether data arrives via REST or the WebSocket feed.
 
-### REST = Bulk WS
+### REST envelopes — `PayloadResponse` / `PayloadListResponse`
 
-REST responses are JSON arrays of payload items. Each item carries its own
-per-item provenance (`public_id`, `session_id`, `sequence_id`) — there is
-no wrapper-level `public_id` and no custom HTTP headers for provenance.
-The shape of each array element is identical to what the WebSocket feed
-delivers for the same data type.
+REST responses are JSON objects with a typed envelope plus a
+`payload`. Two shapes ship from `src/snapper/api/schemas/base.py`:
+
+- `PayloadResponse[T, P]` — singleton response, fields:
+  `type` (Literal discriminator), envelope provenance
+  (`public_id`, `session_id`, `sequence_id`, `timestamp`, `topic`)
+  and `payload: P`.
+- `PayloadListResponse[T, P]` — list response, same envelope plus
+  `payload: list[P]` and `count: int` (always equal to
+  `len(payload)`).
+
+Per-item provenance is preserved on items that originate from a
+bitemporal DB projection (the item carries its own
+`public_id`/`session_id`/`sequence_id`); minted results share the
+envelope's provenance. Each item's data-type shape is identical to
+what the WebSocket feed delivers for the same domain object — only
+the wrapping differs.
 
 ### Provenance on Reads vs. Mutations
 
@@ -397,40 +454,49 @@ are started by design).
 
 ```json
 {
-    "type": "health_check",
-    "status": "healthy",
+    "type": "health_check_response",
+    "sequence_id": 1,
+    "public_id": "<uuid7>",
     "timestamp": "2026-01-18T12:00:00Z",
-    "version": "0.1.0",
-    "connections": {
-        "type": "connection_stats",
-        "active_connections": 5,
-        "zmq_subscribers": 12,
-        "subscriber_tasks": 12,
-        "active_topics": 8,
-        "active_clients": 3
-    },
-    "topics": {
-        "type": "health_topics",
-        "available": 7,
-        "active": 3
-    },
-    "gap_detection": {
-        "type": "gap_detection_stats",
-        "bridge": {
-            "type": "gap_stats",
-            "gaps_detected": 0,
-            "session_resets": 0,
-            "duplicates": 0,
-            "mid_stream_joins": 0,
-            "rejected_unstamped": 0
+    "session_id": "<server-session>",
+    "topic": null,
+    "payload": {
+        "type": "health_check",
+        "status": "healthy",
+        "version": "0.1.0",
+        "connections": {
+            "type": "connection_stats",
+            "active_connections": 5,
+            "zmq_subscribers": 12,
+            "subscriber_tasks": 12,
+            "active_topics": 8,
+            "active_clients": 3
         },
-        "rest_clients": {}
+        "topics": {
+            "type": "health_topics",
+            "available": 7,
+            "active": 3
+        },
+        "gap_detection": {
+            "type": "gap_detection_stats",
+            "bridge": {
+                "type": "gap_stats",
+                "gaps_detected": 0,
+                "session_resets": 0,
+                "duplicates": 0,
+                "mid_stream_joins": 0,
+                "rejected_unstamped": 0
+            },
+            "rest_clients": {}
+        }
     }
 }
 ```
 
-The `gap_detection` field provides observability into sequence gap detection
-across the ZMQ bridge and per-session REST client detectors.
+The outer `health_check_response` envelope carries server-side
+provenance; the inner `health_check` payload holds the runtime
+snapshot. `gap_detection` provides observability into sequence gap
+detection across the ZMQ bridge and per-session REST client detectors.
 
 ### GET /api/candles
 
@@ -448,12 +514,15 @@ X-CSRF-Token: <csrf_token>
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
 | `instrument` | string | yes | Instrument symbol (e.g., `BTC-USD`) |
-| `exchange` | string | yes | Exchange name (`kraken`, `walutomat`, `polygon`) |
+| `exchange` | string | yes | Exchange name (`kraken`, `kraken_futures`, `kraken_equities`, `walutomat`, `polygon`) |
 | `timeframe` | string | yes | Candle timeframe (e.g., `1m`, `5m`, `15m`, `1h`, `4h`, `1d`) |
 | `limit` | int | no | Number of candles, max 1000 (default 100) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
 
-Returns 204 No Content if the instrument is not found.
+Returns `200 OK` with an empty `payload` array when no candles match
+the query (unknown instrument, no warm-cache rows, etc.) — the
+`CandleListResponse` envelope is the canonical shape for empty
+results too.
 
 **Response (200):**
 
@@ -1426,13 +1495,14 @@ List all settings, optionally filtered by category.
 ```
 
 Note: per-wallet trading credentials (kraken, walutomat,
-kraken_futures) are NOT exposed through the settings endpoints.
-They live in the `wallet_credentials` table and are currently
-managed via seed files (`proprietary/data/seed/dev.toml` /
-`prod.toml` — see
-[Configuration / Wallet Credentials](configuration.md#wallet-credentials)).
-REST endpoints for runtime wallet credential management land with
-the upcoming frontend work.
+kraken_futures) are NOT exposed through the settings endpoints. They
+live in the `wallet_credentials` table and are managed via the
+dedicated `/api/wallets/{wallet_public_id}/credentials*` routes
+(`src/snapper/server/credential_routes.py` — `GET` for the active
+summaries, two `POST` paths for issue/revoke). Seed files
+(`proprietary/data/seed/dev.toml` / `prod.toml` — see
+[Configuration / Wallet Credentials](configuration.md#wallet-credentials))
+remain the bootstrap source for dev/prod parity.
 
 ### GET /api/settings/categories
 

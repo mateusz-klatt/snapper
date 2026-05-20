@@ -165,12 +165,12 @@ snapper feed [OPTIONS]
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
-| `--symbols` | string | `BTC/USD` | Comma-separated symbols (Kraken WebSocket native form) |
+| `--symbols` | string | `BTC-USD` | Comma-separated Snapper-native symbols (`BASE-QUOTE`); unknown natives are skipped. The Kraken WebSocket form (`XBT/USD`, `ETH/USD`) is derived internally by the publisher. |
 
 **Example:**
 
 ```bash
-snapper feed --symbols "BTC/USD,ETH/USD,SOL/USD"
+snapper feed --symbols "BTC-USD,ETH-USD,SOL-USD"
 ```
 
 ### `zmq-logger`
