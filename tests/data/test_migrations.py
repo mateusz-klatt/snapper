@@ -2,12 +2,27 @@
 
 import importlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 
+import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from pytest import MonkeyPatch
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects import sqlite
+
+from snapper.data.models import Candle
+from snapper.data.models import Execution
+from snapper.data.models import Instrument
+from snapper.data.models import MarketSnapshot
+from snapper.data.models import Order
+from snapper.data.models import Position
+from snapper.data.models import Telemetry
+from snapper.data.models import Tick
+from snapper.data.models import Trade
+from snapper.data.models import User
 
 ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
 
@@ -258,3 +273,250 @@ def test_0003_downgrade_on_sqlite_is_noop(monkeypatch: MonkeyPatch) -> None:
     migration.downgrade()
     assert drops == []
     assert creates == []
+
+
+def _load_0004() -> object:
+    """Import the 0004 bigint-pk-high-write-tables migration module."""
+    return importlib.import_module(
+        "snapper.data.migrations.versions.0004_bigint_pk_high_write_tables"
+    )
+
+
+def _stub_op_bigint_capture(
+    monkeypatch: MonkeyPatch,
+    migration: object,
+    bind_dialect: str,
+    *,
+    sequence_factory: Callable[[str], str] | None = None,
+    max_id_factory: Callable[[str], int] | None = None,
+) -> tuple[list[str], _Bind]:
+    """Capture ``op.execute`` SQL strings during a 0004 dispatch.
+
+    ``sequence_factory(table)`` returns the owned sequence name for
+    PG ``pg_get_serial_sequence`` lookups (default: ``<table>_id_seq``).
+    ``max_id_factory(table)`` returns the simulated ``max(id)`` for PG
+    downgrade safety checks (default: ``0`` so downgrade always
+    passes).
+    """
+    executed: list[str] = []
+
+    def _default_seq(table: str) -> str:
+        return f"{table}_id_seq"
+
+    def _default_max(_table: str) -> int:
+        return 0
+
+    seq_fn: Callable[[str], str] = sequence_factory or _default_seq
+    max_fn: Callable[[str], int] = max_id_factory or _default_max
+
+    class _StubBind:
+        def __init__(self) -> None:
+            self.dialect = _Dialect(bind_dialect)
+
+        def execute(self, stmt: object, params: dict[str, str] | None = None) -> object:
+            text = str(stmt)
+            if "pg_get_serial_sequence" in text:
+                table = (params or {}).get("t", "")
+                seq = seq_fn(table)
+                return _ScalarResult(seq)
+            if text.upper().startswith("SELECT MAX(ID) FROM "):
+                table = text.rsplit(maxsplit=1)[-1]
+                return _ScalarResult(max_fn(table))
+            executed.append(text)
+            return _ScalarResult(None)
+
+    class _ScalarResult:
+        def __init__(self, value: object) -> None:
+            self._value = value
+
+        def scalar(self) -> object:
+            return self._value
+
+    bind = _StubBind()
+
+    def get_bind() -> _Bind:
+        return bind
+
+    def op_execute(stmt: object) -> None:
+        executed.append(str(stmt))
+
+    monkeypatch.setattr(migration.op, "get_bind", get_bind)
+    monkeypatch.setattr(migration.op, "execute", op_execute)
+    return executed, bind
+
+
+def test_0004_upgrade_on_postgres_alters_id_and_sequence_for_each_table(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Upgrade on PG emits ANALYZE + ALTER TABLE + ALTER SEQUENCE per table.
+
+    Given: a PostgreSQL database whose high-write tables have INT4 PKs
+    sourced from ``Integer`` columns,
+    When: ``0004.upgrade()`` runs against the PG dialect,
+    Then: each table receives ``ANALYZE`` pre-rewrite,
+        ``ALTER TABLE ... ALTER COLUMN id TYPE BIGINT``,
+        ``ALTER SEQUENCE <owned_seq> AS BIGINT``,
+        and post-rewrite ``ANALYZE`` — for all 7 tables.
+    """
+    migration = _load_0004()
+    executed, _ = _stub_op_bigint_capture(monkeypatch, migration, "postgresql")
+    migration.upgrade()
+
+    expected_tables = (
+        "ticks",
+        "trades",
+        "candles",
+        "market_snapshots",
+        "executions",
+        "orders",
+        "telemetry",
+    )
+    for table in expected_tables:
+        assert any(
+            f"ALTER TABLE {table} ALTER COLUMN id TYPE BIGINT" in s for s in executed
+        ), f"missing ALTER TABLE for {table}"
+        assert any(
+            f"ALTER SEQUENCE {table}_id_seq AS BIGINT" in s for s in executed
+        ), f"missing ALTER SEQUENCE for {table}"
+    analyze_count = sum(1 for s in executed if s.startswith("ANALYZE "))
+    assert analyze_count == 2 * len(
+        expected_tables
+    ), f"expected {2 * len(expected_tables)} ANALYZE (pre + post), got {analyze_count}"
+
+
+def test_0004_upgrade_on_sqlite_is_noop(monkeypatch: MonkeyPatch) -> None:
+    """Upgrade on SQLite emits no ALTER statements.
+
+    Given: a SQLite database where INTEGER PRIMARY KEY is already 64-bit
+    rowid,
+    When: ``0004.upgrade()`` runs against the SQLite dialect,
+    Then: no ALTER TABLE / ALTER SEQUENCE is emitted.
+    """
+    migration = _load_0004()
+    executed, _ = _stub_op_bigint_capture(monkeypatch, migration, "sqlite")
+    migration.upgrade()
+    assert all("ALTER " not in s for s in executed)
+
+
+def test_0004_downgrade_on_postgres_refuses_when_max_id_exceeds_int4(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Downgrade aborts loudly if any row's id is beyond INT4 range.
+
+    Given: a PG database where ``ticks.max(id) = 3_000_000_000``
+        (above INT4 limit ``2_147_483_647``),
+    When: ``0004.downgrade()`` runs against the PG dialect,
+    Then: ``RuntimeError`` is raised before any ALTER is executed —
+        prevents silent data corruption.
+    """
+    migration = _load_0004()
+
+    def overflowing_max(table: str) -> int:
+        return 3_000_000_000 if table == "ticks" else 0
+
+    executed, _ = _stub_op_bigint_capture(
+        monkeypatch, migration, "postgresql", max_id_factory=overflowing_max
+    )
+
+    with pytest.raises(RuntimeError, match="ticks.*INT4"):
+        migration.downgrade()
+    assert all("ALTER " not in s for s in executed)
+
+
+def test_0004_downgrade_on_postgres_safe_path_reverts_each_table(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Downgrade emits ALTER SEQUENCE + ALTER TABLE per table when safe.
+
+    Given: a PG database where every table's ``max(id) <= INT4_MAX``,
+    When: ``0004.downgrade()`` runs against the PG dialect,
+    Then: per table, an ``ALTER SEQUENCE ... AS INTEGER`` precedes an
+        ``ALTER TABLE ... ALTER COLUMN id TYPE INTEGER``.
+    """
+    migration = _load_0004()
+    executed, _ = _stub_op_bigint_capture(monkeypatch, migration, "postgresql")
+    migration.downgrade()
+    for table in (
+        "ticks",
+        "trades",
+        "candles",
+        "market_snapshots",
+        "executions",
+        "orders",
+        "telemetry",
+    ):
+        assert any(
+            f"ALTER SEQUENCE {table}_id_seq AS INTEGER" in s for s in executed
+        ), f"missing ALTER SEQUENCE downgrade for {table}"
+        assert any(
+            f"ALTER TABLE {table} ALTER COLUMN id TYPE INTEGER" in s for s in executed
+        ), f"missing ALTER TABLE downgrade for {table}"
+
+
+def test_0004_downgrade_on_sqlite_is_noop(monkeypatch: MonkeyPatch) -> None:
+    """Downgrade on SQLite emits no ALTER statements."""
+    migration = _load_0004()
+    executed, _ = _stub_op_bigint_capture(monkeypatch, migration, "sqlite")
+    migration.downgrade()
+    assert all("ALTER " not in s for s in executed)
+
+
+def test_0004_resolve_owned_sequence_returns_none_when_no_sequence(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """``_resolve_owned_sequence`` returns ``None`` when pg_get_serial_sequence yields NULL.
+
+    Given: a column without an owned sequence (defensive — should not
+    happen for ``autoincrement=True`` tables),
+    When: ``_resolve_owned_sequence`` queries pg_get_serial_sequence,
+    Then: the result is ``None``, so upgrade/downgrade skip the
+    ALTER SEQUENCE step rather than fail loudly.
+    """
+    migration = _load_0004()
+
+    class _NoSequenceBind:
+        def execute(self, _stmt: object, _params: dict[str, str] | None = None) -> object:
+            class _NullResult:
+                def scalar(self) -> object:
+                    return None
+
+            return _NullResult()
+
+    result = migration._resolve_owned_sequence(_NoSequenceBind(), "telemetry")
+    assert result is None
+
+
+def test_high_write_tables_have_bigint_pk() -> None:
+    """The 7 high-write tables declare ``BigInteger().with_variant(Integer, 'sqlite')``.
+
+    Given: the model declarations in ``snapper.data.models``,
+    When: the table is rendered against a PostgreSQL dialect,
+    Then: the ``id`` column type is ``BIGINT``;
+        rendered against SQLite, it is ``INTEGER`` (so
+        ``INTEGER PRIMARY KEY ROWID`` semantics are preserved).
+    """
+    for model in (Candle, Tick, Trade, Order, Execution, MarketSnapshot, Telemetry):
+        pg_type = model.__table__.c.id.type.dialect_impl(postgresql.dialect())
+        sqlite_type = model.__table__.c.id.type.dialect_impl(sqlite.dialect())
+        assert "BIGINT" in pg_type.compile(dialect=postgresql.dialect()).upper(), (
+            f"{model.__name__}.id should be BIGINT on PG, got "
+            f"{pg_type.compile(dialect=postgresql.dialect())}"
+        )
+        assert "INTEGER" in sqlite_type.compile(dialect=sqlite.dialect()).upper(), (
+            f"{model.__name__}.id should be INTEGER on SQLite, got "
+            f"{sqlite_type.compile(dialect=sqlite.dialect())}"
+        )
+
+
+def test_other_tables_keep_integer_pk() -> None:
+    """Tables NOT in the high-write set keep ``Integer`` (INT4) PK.
+
+    Validates the explicit scoping decision: only volume-exposed
+    tables get the BigInteger override. Migrating every table would
+    be wasted DDL on tables with negligible growth (e.g. ``users``).
+    """
+    for model in (Instrument, Position, User):
+        pg_type = model.__table__.c.id.type.dialect_impl(postgresql.dialect())
+        rendered = pg_type.compile(dialect=postgresql.dialect()).upper()
+        assert "BIGINT" not in rendered, f"{model.__name__}.id should NOT be BIGINT, got {rendered}"
+        assert "INTEGER" in rendered, f"{model.__name__}.id should be INTEGER, got {rendered}"

@@ -7,6 +7,7 @@ from uuid import UUID
 from uuid import uuid7
 
 from sqlalchemy import JSON
+from sqlalchemy import BigInteger
 from sqlalchemy import Boolean
 from sqlalchemy import CheckConstraint
 from sqlalchemy import DateTime
@@ -255,7 +256,14 @@ class Instrument(TemporalMixin, Base):
 
 
 class Candle(TemporalMixin, Base):
-    """SQLAlchemy model for OHLCV candlestick data."""
+    """SQLAlchemy model for OHLCV candlestick data.
+
+    PK ``id`` is overridden to ``BigInteger`` on PostgreSQL and kept as
+    ``Integer`` on SQLite (where INTEGER PRIMARY KEY is already 64-bit
+    rowid). High-write tables would otherwise overflow the INT4
+    sequence at production write rates — see
+    ``proprietary/plans/plan_2026_05_19_bigint_pk_high_write_tables.md``.
+    """
 
     __tablename__ = "candles"
     __table_args__ = (
@@ -277,6 +285,11 @@ class Candle(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     open_at: Mapped[datetime] = mapped_column(TZDateTime())
     timeframe: Mapped[str] = mapped_column(String(8))
@@ -290,7 +303,13 @@ class Candle(TemporalMixin, Base):
 
 
 class Tick(TemporalMixin, Base):
-    """SQLAlchemy model for real-time price tick snapshots."""
+    """SQLAlchemy model for real-time price tick snapshots.
+
+    PK ``id`` is overridden to ``BigInteger`` on PostgreSQL. This is the
+    most volume-exposed table — production write rate is observed at
+    sustained 1500/s burst, with the INT4 sequence at 18% headroom
+    (2026-05-19). Without this override the sequence overflows in ~13 days.
+    """
 
     __tablename__ = "ticks"
     __table_args__ = (
@@ -302,6 +321,11 @@ class Tick(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     bid: Mapped[float | None] = mapped_column(Float)
@@ -329,6 +353,11 @@ class Trade(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     price: Mapped[float] = mapped_column(Float)
     size: Mapped[float] = mapped_column(Float)
@@ -338,7 +367,12 @@ class Trade(TemporalMixin, Base):
 
 
 class Order(TemporalMixin, Base):
-    """SQLAlchemy model for trading order records."""
+    """SQLAlchemy model for trading order records.
+
+    PK ``id`` is overridden to ``BigInteger`` on PostgreSQL for
+    consistency with the other high-write tables — see
+    ``proprietary/plans/plan_2026_05_19_bigint_pk_high_write_tables.md``.
+    """
 
     __tablename__ = "orders"
     __table_args__ = (
@@ -390,6 +424,11 @@ class Order(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     mode: Mapped[str] = mapped_column(String(8), default="live", server_default="live")
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
@@ -415,7 +454,12 @@ class Order(TemporalMixin, Base):
 
 
 class Execution(TemporalMixin, Base):
-    """SQLAlchemy model for order execution fills."""
+    """SQLAlchemy model for order execution fills.
+
+    PK ``id`` is overridden to ``BigInteger`` on PostgreSQL for
+    consistency with the other high-write tables — see
+    ``proprietary/plans/plan_2026_05_19_bigint_pk_high_write_tables.md``.
+    """
 
     __tablename__ = "executions"
     __table_args__ = (
@@ -442,6 +486,11 @@ class Execution(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
     )
     order_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
@@ -883,6 +932,11 @@ class MarketSnapshot(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     bid: Mapped[float | None] = mapped_column(Float, comment="Best bid price")
     bid_volume: Mapped[float | None] = mapped_column(Float, comment="Volume at best bid")
@@ -948,6 +1002,11 @@ class Telemetry(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index("ix_telemetry_timestamp", "timestamp"),
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
     )
     transport: Mapped[str] = mapped_column(String(10))
     direction: Mapped[str] = mapped_column(String(10))
