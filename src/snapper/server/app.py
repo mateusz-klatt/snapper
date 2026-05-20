@@ -2382,7 +2382,7 @@ def _build_underlying_asset_items(
             sequence_id=asset["sequence_id"],
             timestamp=asset["timestamp"],
             ticker=asset["ticker"],
-            name=asset["name"],
+            name=repo.resolve_underlying_name(asset, locale),
             asset_class=asset["asset_class"],
             sector=asset["sector"],
             description=repo.resolve_underlying_description(asset, locale),
@@ -2659,7 +2659,7 @@ async def _get_related_instruments(
             else RelatedInstrumentsUnderlying(
                 public_id=underlying_row["public_id"],
                 ticker=underlying_row["ticker"],
-                name=underlying_row["name"],
+                name=repo.resolve_underlying_name(underlying_row, locale),
                 asset_class=underlying_row["asset_class"],
                 sector=underlying_row["sector"],
                 description=repo.resolve_underlying_description(underlying_row, locale),

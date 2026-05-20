@@ -35,7 +35,7 @@ def _make_underlying(ticker: str = "SPX") -> UnderlyingAssetRow:
     return UnderlyingAssetRow(
         public_id="ua-1",
         ticker=ticker,
-        name="S&P 500",
+        name={"en": "S&P 500"},
         asset_class="index",
         sector=None,
         description=None,

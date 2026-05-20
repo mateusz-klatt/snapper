@@ -38,13 +38,14 @@ def _ts() -> datetime:
 
 def _make_underlying(
     ticker: str = "SPX",
-    name: str = "S&P 500",
+    name: dict[str, str] | str = "S&P 500",
     description: dict[str, str] | None = None,
 ) -> UnderlyingAssetRow:
+    name_dict: dict[str, str] = {"en": name} if isinstance(name, str) else name
     return UnderlyingAssetRow(
         public_id="ua-1",
         ticker=ticker,
-        name=name,
+        name=name_dict,
         asset_class="index",
         sector="US Large Cap",
         description=description,
@@ -96,7 +97,14 @@ def _create_client(mock_repo: AsyncMock, principal: AuthPrincipal | None = None)
             return description[locale]
         return description.get("en")
 
+    def resolve_name(row: UnderlyingAssetRow, locale: str) -> str:
+        name = row["name"]
+        if locale in name:
+            return name[locale]
+        return name["en"]
+
     mock_repo.resolve_underlying_description = MagicMock(side_effect=resolve_description)
+    mock_repo.resolve_underlying_name = MagicMock(side_effect=resolve_name)
 
     def skip_csrf() -> None:
         return None
@@ -343,7 +351,14 @@ class TestGetRelatedInstruments:
                 return description[locale]
             return description.get("en")
 
+        def resolve_name(row: UnderlyingAssetRow, locale: str) -> str:
+            name = row["name"]
+            if locale in name:
+                return name[locale]
+            return name["en"]
+
         repo.resolve_underlying_description = MagicMock(side_effect=resolve_description)
+        repo.resolve_underlying_name = MagicMock(side_effect=resolve_name)
         locale = await resolve_caller_default_language(cast(Repository, repo), None)
         items = _build_underlying_asset_items(
             [_make_underlying(description={"en": "English description."})],

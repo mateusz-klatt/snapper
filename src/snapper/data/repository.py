@@ -1372,11 +1372,32 @@ class Repository(ABC):
             return description[locale]
         return description.get("en")
 
+    def resolve_underlying_name(
+        self,
+        row: UnderlyingAssetRow,
+        locale: str,
+    ) -> str:
+        """Resolve an underlying name map for a caller locale.
+
+        Args:
+            row: Underlying asset row containing the stored locale map.
+            locale: Preferred caller language.
+
+        Returns:
+            Locale-specific name, falling back to the English entry. Names
+            are always non-empty (the English entry is required at YAML
+            load time), so this method always returns a string.
+        """
+        name = row["name"]
+        if locale in name:
+            return name[locale]
+        return name["en"]
+
     @abstractmethod
     async def upsert_underlying_asset(
         self,
         ticker: str,
-        name: str,
+        name: dict[str, str] | str,
         asset_class: str,
         session_id: str,
         sequence_id: int,
@@ -1388,7 +1409,9 @@ class Repository(ABC):
 
         Args:
             ticker: Short code (e.g. 'SPX').
-            name: Canonical name (e.g. 'S&P 500').
+            name: Locale-keyed canonical names (e.g. ``{"en": "S&P 500"}``).
+                Bare strings are accepted for back-compat and stored under
+                ``en``.
             asset_class: Asset type from AssetTypeEnum.
             session_id: Provenance session ID.
             sequence_id: Provenance sequence number.
@@ -8000,7 +8023,7 @@ class SQLAlchemyRepository(Repository):
     async def upsert_underlying_asset(
         self,
         ticker: str,
-        name: str,
+        name: dict[str, str] | str,
         asset_class: str,
         session_id: str,
         sequence_id: int,
@@ -8010,6 +8033,8 @@ class SQLAlchemyRepository(Repository):
     ) -> tuple[str, str]:
         """SCD2 upsert for an underlying asset."""
         description_json = cast(dict[str, JsonValue] | None, description)
+        name_dict: dict[str, str] = {"en": name} if isinstance(name, str) else name
+        name_json = cast(dict[str, JsonValue], name_dict)
         async with self.session() as s:
             existing = (
                 (
@@ -8028,7 +8053,7 @@ class SQLAlchemyRepository(Repository):
 
             if existing is not None:
                 changed = (
-                    existing.name != name
+                    existing.name != name_json
                     or existing.asset_class != asset_class
                     or existing.sector != sector
                     or existing.description != description_json
@@ -8044,7 +8069,7 @@ class SQLAlchemyRepository(Repository):
                 new_row = UnderlyingAsset(
                     public_id=existing.public_id,
                     ticker=ticker,
-                    name=name,
+                    name=name_json,
                     asset_class=asset_class,
                     sector=sector,
                     description=description_json,
@@ -8059,7 +8084,7 @@ class SQLAlchemyRepository(Repository):
 
             new_row = UnderlyingAsset(
                 ticker=ticker,
-                name=name,
+                name=name_json,
                 asset_class=asset_class,
                 sector=sector,
                 description=description_json,

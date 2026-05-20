@@ -1451,7 +1451,7 @@ def upgrade() -> None:
         "underlying_assets",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", _uuid_col(), nullable=False),
-        sa.Column("name", sa.String(64), nullable=False),
+        sa.Column("name", sa.JSON(), nullable=False),
         sa.Column("ticker", sa.String(16), nullable=False),
         sa.Column("asset_class", sa.String(16), nullable=False),
         sa.Column("sector", sa.String(32), nullable=True),
@@ -1471,14 +1471,6 @@ def upgrade() -> None:
         "uq_underlying_assets_active_ticker",
         "underlying_assets",
         ["ticker"],
-        unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
-    )
-    op.create_index(
-        "uq_underlying_assets_active_name",
-        "underlying_assets",
-        ["name"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
         postgresql_where=text(_KNOWN_TO_ACTIVE_PG),

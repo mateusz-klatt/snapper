@@ -653,7 +653,7 @@ class UnderlyingAssetRow(TypedDict):
 
     public_id: str
     ticker: str
-    name: str
+    name: dict[str, str]
     asset_class: str
     sector: str | None
     description: dict[str, str] | None

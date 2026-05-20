@@ -35,7 +35,7 @@ class TestUnderlyingAsset:
         """Given valid fields, When inserted, Then row persists with all columns."""
         asset = UnderlyingAsset(
             public_id="ua-001",
-            name="S&P 500",
+            name={"en": "S&P 500"},
             ticker="SPX",
             asset_class="index",
             sector="US Large Cap",
@@ -50,7 +50,7 @@ class TestUnderlyingAsset:
         rows = db_session.execute(select(UnderlyingAsset)).scalars().all()
         assert len(rows) == 1
         assert rows[0].ticker == "SPX"
-        assert rows[0].name == "S&P 500"
+        assert rows[0].name == {"en": "S&P 500"}
         assert rows[0].sector == "US Large Cap"
         assert rows[0].description == {"en": "Standard & Poor 500 Index"}
 
@@ -58,7 +58,7 @@ class TestUnderlyingAsset:
         """Given sector=None and description=None, When inserted, Then succeeds."""
         asset = UnderlyingAsset(
             public_id="ua-002",
-            name="Bitcoin",
+            name={"en": "Bitcoin"},
             ticker="BTC",
             asset_class="crypto",
             sector=None,
@@ -79,7 +79,7 @@ class TestUnderlyingAsset:
         """Given invalid asset_class, When inserted, Then CHECK constraint fails."""
         asset = UnderlyingAsset(
             public_id="ua-003",
-            name="Bad",
+            name={"en": "Bad"},
             ticker="BAD",
             asset_class="invalid_class",
             session_id="sess-1",

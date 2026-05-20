@@ -175,7 +175,7 @@ class TestUpsertUnderlyingAsset:
         row = UnderlyingAssetRow(
             public_id="ua-1",
             ticker="SPX",
-            name="S&P 500",
+            name={"en": "S&P 500"},
             asset_class="index",
             sector=None,
             description={
@@ -195,7 +195,7 @@ class TestUpsertUnderlyingAsset:
         row = UnderlyingAssetRow(
             public_id="ua-1",
             ticker="SPX",
-            name="S&P 500",
+            name={"en": "S&P 500"},
             asset_class="index",
             sector=None,
             description={"en": "English description."},
@@ -214,7 +214,7 @@ class TestUpsertUnderlyingAsset:
         row = UnderlyingAssetRow(
             public_id="ua-1",
             ticker="SPX",
-            name="S&P 500",
+            name={"en": "S&P 500"},
             asset_class="index",
             sector=None,
             description=None,
@@ -224,6 +224,40 @@ class TestUpsertUnderlyingAsset:
             instrument_count=0,
         )
         assert repo.resolve_underlying_description(row, "pl") is None
+
+    @pytest.mark.asyncio
+    async def test_resolve_name_prefers_locale(self, repo: SQLAlchemyRepository) -> None:
+        """Given locale name exists, When resolving, Then returns it."""
+        row = UnderlyingAssetRow(
+            public_id="ua-1",
+            ticker="GOLD",
+            name={"en": "Gold", "pl": "Złoto"},
+            asset_class="commodity",
+            sector=None,
+            description=None,
+            timestamp=_ts(),
+            session_id="s1",
+            sequence_id=1,
+            instrument_count=0,
+        )
+        assert repo.resolve_underlying_name(row, "pl") == "Złoto"
+
+    @pytest.mark.asyncio
+    async def test_resolve_name_falls_back_to_en(self, repo: SQLAlchemyRepository) -> None:
+        """Given locale name missing, When resolving, Then English returns."""
+        row = UnderlyingAssetRow(
+            public_id="ua-1",
+            ticker="GOLD",
+            name={"en": "Gold"},
+            asset_class="commodity",
+            sector=None,
+            description=None,
+            timestamp=_ts(),
+            session_id="s1",
+            sequence_id=1,
+            instrument_count=0,
+        )
+        assert repo.resolve_underlying_name(row, "pl") == "Gold"
 
 
 class TestUpsertInstrumentUnderlyingMapping:

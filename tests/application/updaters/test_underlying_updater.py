@@ -184,6 +184,22 @@ class TestUnderlyingMappingConfig:
                 }
             )
 
+    def test_missing_english_name_rejected(self) -> None:
+        """Given a name map without the en key, When validating, Then raises."""
+        with pytest.raises(ValueError, match="name.en"):
+            UnderlyingMappingConfig.model_validate(
+                {
+                    "underlyings": [
+                        {
+                            "ticker": "BTC",
+                            "name": {"pl": "Bitcoin"},
+                            "asset_class": "crypto",
+                            "patterns": [],
+                        },
+                    ]
+                }
+            )
+
     def test_loads_real_yaml(self) -> None:
         """Given the actual mapping file, When loading, Then validates ok."""
         yaml_path = (
@@ -328,7 +344,7 @@ class TestUnderlyingUpdater:
         by_ticker = {definition.ticker: definition for definition in expanded.underlyings}
 
         assert {"NEW", "AAPL", "BOBUSD", "ALT"} <= set(by_ticker)
-        assert by_ticker["BOBUSD"].name == "BOB / USD"
+        assert by_ticker["BOBUSD"].name == {"en": "BOB / USD"}
         assert {
             (rule.exchange.value, rule.pattern, rule.relationship_type.value)
             for rule in by_ticker["ALT"].patterns

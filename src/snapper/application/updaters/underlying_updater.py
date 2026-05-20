@@ -87,7 +87,7 @@ class UnderlyingDefinition(BaseModel):
     """Definition of an underlying asset with its matching patterns."""
 
     ticker: str
-    name: str
+    name: dict[str, str]
     asset_class: AssetTypeEnum
     sector: str | None = None
     description: dict[str, str] | None = None
@@ -112,6 +112,37 @@ class UnderlyingDefinition(BaseModel):
                 return normalized
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_name(cls, data: object) -> object:
+        """Normalize legacy scalar names to the multilingual map shape.
+
+        Args:
+            data: Raw Pydantic input before field validation.
+
+        Returns:
+            Input with legacy scalar ``name`` moved under ``en``.
+        """
+        if isinstance(data, dict):
+            name = data.get("name")
+            if isinstance(name, str):
+                normalized = dict(data)
+                normalized["name"] = {"en": name}
+                return normalized
+        return data
+
+    @model_validator(mode="after")
+    def require_english_name(self) -> Self:
+        """Reject names missing the canonical English entry.
+
+        Returns:
+            Validated definition instance.
+        """
+        if "en" not in self.name or not self.name["en"]:
+            msg = f"Underlying {self.ticker!r} must define name.en"
+            raise ValueError(msg)
+        return self
+
 
 class UnderlyingMappingConfig(BaseModel):
     """Root schema for the underlying_mappings.yaml file."""
@@ -120,13 +151,14 @@ class UnderlyingMappingConfig(BaseModel):
 
     @model_validator(mode="after")
     def unique_tickers_and_names(self) -> Self:
-        """Reject duplicate tickers or names in the mapping file.
+        """Reject duplicate tickers or canonical English names in the mapping file.
 
         Returns:
             Validated config instance.
         """
-        for attr in ("ticker", "name"):
-            values = [getattr(u, attr) for u in self.underlyings]
+        ticker_values = [u.ticker for u in self.underlyings]
+        name_values = [u.name["en"] for u in self.underlyings]
+        for attr, values in (("ticker", ticker_values), ("name", name_values)):
             if len(values) != len(set(values)):
                 seen: set[str] = set()
                 dupes: list[str] = []
@@ -581,7 +613,7 @@ class UnderlyingUpdater:
             return None
         return UnderlyingDefinition(
             ticker=ticker,
-            name=UnderlyingUpdater._fallback_name(inst, ticker),
+            name={"en": UnderlyingUpdater._fallback_name(inst, ticker)},
             asset_class=asset_class,
             patterns=[],
         )

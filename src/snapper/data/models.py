@@ -1195,13 +1195,6 @@ class UnderlyingAsset(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index(
-            "uq_underlying_assets_active_name",
-            "name",
-            unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
-            postgresql_where=_KNOWN_TO_ACTIVE_PG,
-        ),
-        Index(
             "ix_underlying_assets_public_id",
             "public_id",
             unique=True,
@@ -1213,7 +1206,7 @@ class UnderlyingAsset(TemporalMixin, Base):
             name="ck_underlying_asset_class",
         ),
     )
-    name: Mapped[str] = mapped_column(String(64))
+    name: Mapped[dict[str, JsonValue]] = mapped_column(JSON, nullable=False)
     ticker: Mapped[str] = mapped_column(String(16))
     asset_class: Mapped[str] = mapped_column(String(16))
     sector: Mapped[str | None] = mapped_column(String(32))
