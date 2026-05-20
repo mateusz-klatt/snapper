@@ -241,7 +241,7 @@ class Instrument(TemporalMixin, Base):
         Index("ix_instruments_exchange", "exchange"),
     )
     symbol_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    exchange: Mapped[str] = mapped_column(String(20))
+    exchange: Mapped[str] = mapped_column(String(32))
     requires_ai_review: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
@@ -733,7 +733,7 @@ class SymbolAlias(TemporalMixin, Base):
         ),
     )
     symbol_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    exchange: Mapped[str] = mapped_column(String(20))
+    exchange: Mapped[str] = mapped_column(String(32))
     channel: Mapped[str] = mapped_column(String(10))
     exchange_symbol: Mapped[str] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
@@ -795,7 +795,7 @@ class SymbolExchangeCapability(TemporalMixin, Base):
         ),
     )
     symbol_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    exchange: Mapped[str] = mapped_column(String(20))
+    exchange: Mapped[str] = mapped_column(String(32))
     can_market_data: Mapped[bool] = mapped_column(Boolean, default=False)
     can_trade: Mapped[bool] = mapped_column(Boolean, default=False)
     source: Mapped[str | None] = mapped_column(String(50))
@@ -1061,7 +1061,7 @@ class TradeCommand(TemporalMixin, Base):
     instrument: Mapped[str] = mapped_column(String(64))
     mode: Mapped[str] = mapped_column(String(8))
     strategy_id: Mapped[str] = mapped_column(String(64))
-    client_order_id: Mapped[str] = mapped_column(UUIDColumn())
+    client_order_id: Mapped[str] = mapped_column(String(64))
     venue_client_id: Mapped[str] = mapped_column(String(64))
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
     side: Mapped[str] = mapped_column(String(4))
@@ -1301,7 +1301,7 @@ class ContinuousContractConfig(TemporalMixin, Base):
         ),
     )
     underlying_public_id: Mapped[str] = mapped_column(UUIDColumn())
-    exchange: Mapped[str] = mapped_column(String(20))
+    exchange: Mapped[str] = mapped_column(String(32))
     contract_family: Mapped[str] = mapped_column(String(16))
     method: Mapped[str] = mapped_column(String(16))
     rollover_days_before: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
@@ -1513,7 +1513,7 @@ class WalletCredential(TemporalMixin, Base):
         ),
     )
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
-    exchange: Mapped[str] = mapped_column(String(20))
+    exchange: Mapped[str] = mapped_column(String(32))
     credential_type: Mapped[str] = mapped_column(String(32))
     encrypted_payload: Mapped[str] = mapped_column(Text)
     label: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -2288,6 +2288,10 @@ class BacktestComparison(TemporalMixin, Base):
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(
+            "run_a_public_id <> run_b_public_id",
+            name="ck_bc_runs_distinct",
         ),
     )
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
