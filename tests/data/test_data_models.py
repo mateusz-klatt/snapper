@@ -8,6 +8,8 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects import sqlite
 
 from snapper.data.models import Candle
 from snapper.data.models import Execution
@@ -16,6 +18,7 @@ from snapper.data.models import ExecutionPlanCheckpoint
 from snapper.data.models import ExecutionPlanDecision
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentOrderCapability
+from snapper.data.models import MarketSnapshot
 from snapper.data.models import Order
 from snapper.data.models import Position
 from snapper.data.models import PositionCycle
@@ -23,8 +26,11 @@ from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
+from snapper.data.models import Telemetry
+from snapper.data.models import Tick
 from snapper.data.models import Trade
 from snapper.data.models import TZDateTime
+from snapper.data.models import User
 from snapper.data.models import UUIDColumn
 from snapper.data.models import VenueFeeSchedule
 
@@ -1265,3 +1271,45 @@ class TestOrderPlanPublicId:
             timestamp=now,
         )
         assert order.plan_public_id is None
+
+
+class TestHighWriteBigIntegerPK:
+    """The 7 high-write tables declare ``BigInteger().with_variant(Integer, 'sqlite')``.
+
+    Other tables keep ``Integer`` (INT4). Explicit scoping decision:
+    only volume-exposed tables (production ticks observed 1500/s burst
+    → INT4 sequence exhaustion in weeks) get the BigInteger override.
+    Migrating every table would be wasted DDL on tables with
+    negligible growth (e.g. ``users``, ``settings``).
+    """
+
+    def test_high_write_tables_render_bigint_on_postgres(self) -> None:
+        """PG dialect emits BIGINT for each high-write table's ``id`` column."""
+        for model in (Candle, Tick, Trade, Order, Execution, MarketSnapshot, Telemetry):
+            pg_type = model.__table__.c.id.type.dialect_impl(postgresql.dialect())
+            rendered = pg_type.compile(dialect=postgresql.dialect()).upper()
+            assert (
+                "BIGINT" in rendered
+            ), f"{model.__name__}.id should be BIGINT on PG, got {rendered}"
+
+    def test_high_write_tables_render_integer_on_sqlite(self) -> None:
+        """SQLite dialect emits INTEGER (preserving ``INTEGER PRIMARY KEY ROWID``)."""
+        for model in (Candle, Tick, Trade, Order, Execution, MarketSnapshot, Telemetry):
+            sqlite_type = model.__table__.c.id.type.dialect_impl(sqlite.dialect())
+            rendered = sqlite_type.compile(dialect=sqlite.dialect()).upper()
+            assert (
+                "INTEGER" in rendered
+            ), f"{model.__name__}.id should be INTEGER on SQLite, got {rendered}"
+            assert (
+                "BIGINT" not in rendered
+            ), f"{model.__name__}.id should NOT be BIGINT on SQLite, got {rendered}"
+
+    def test_other_tables_keep_integer_pk(self) -> None:
+        """Tables NOT in the high-write set keep ``Integer`` (INT4) PK."""
+        for model in (Instrument, Position, User):
+            pg_type = model.__table__.c.id.type.dialect_impl(postgresql.dialect())
+            rendered = pg_type.compile(dialect=postgresql.dialect()).upper()
+            assert (
+                "BIGINT" not in rendered
+            ), f"{model.__name__}.id should NOT be BIGINT, got {rendered}"
+            assert "INTEGER" in rendered, f"{model.__name__}.id should be INTEGER, got {rendered}"

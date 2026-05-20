@@ -267,12 +267,14 @@ def upgrade() -> None:
         "symbol_exchange_capabilities",
         ["exchange", "can_trade"],
         sqlite_where=text("can_trade = 1"),
+        postgresql_where=text("can_trade = true"),
     )
     op.create_index(
         "ix_sec_exchange_md",
         "symbol_exchange_capabilities",
         ["exchange", "can_market_data"],
         sqlite_where=text("can_market_data = 1"),
+        postgresql_where=text("can_market_data = true"),
     )
     op.create_table(
         "instruments",
@@ -314,7 +316,12 @@ def upgrade() -> None:
     op.create_index("ix_instruments_exchange", "instruments", ["exchange"])
     op.create_table(
         "candles",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column(
+            "id",
+            sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+            autoincrement=True,
+            nullable=False,
+        ),
         sa.Column("public_id", _uuid_col(), nullable=False),
         sa.Column("instrument_public_id", _uuid_col(), nullable=False),
         sa.Column("timeframe", sa.String(8), nullable=False),
@@ -353,7 +360,12 @@ def upgrade() -> None:
     op.create_index("ix_candle_instrument_open", "candles", ["instrument_public_id", "open_at"])
     op.create_table(
         "trades",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column(
+            "id",
+            sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+            autoincrement=True,
+            nullable=False,
+        ),
         sa.Column("public_id", _uuid_col(), nullable=False),
         sa.Column("instrument_public_id", _uuid_col(), nullable=False),
         sa.Column("trade_id", sa.String(64), nullable=True),
@@ -384,7 +396,12 @@ def upgrade() -> None:
     op.create_index("ix_trade_instrument_ts", "trades", ["instrument_public_id", "timestamp"])
     op.create_table(
         "ticks",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column(
+            "id",
+            sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+            autoincrement=True,
+            nullable=False,
+        ),
         sa.Column("public_id", _uuid_col(), nullable=False),
         sa.Column("instrument_public_id", _uuid_col(), nullable=False),
         sa.Column("bid", sa.Float(), nullable=True),
@@ -410,7 +427,12 @@ def upgrade() -> None:
     op.create_index("ix_tick_instrument_ts", "ticks", ["instrument_public_id", "timestamp"])
     op.create_table(
         "orders",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column(
+            "id",
+            sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+            autoincrement=True,
+            nullable=False,
+        ),
         sa.Column("public_id", _uuid_col(), nullable=False),
         sa.Column("instrument_public_id", _uuid_col(), nullable=False),
         sa.Column("client_order_id", sa.String(64), nullable=True),
@@ -483,7 +505,12 @@ def upgrade() -> None:
     )
     op.create_table(
         "executions",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column(
+            "id",
+            sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+            autoincrement=True,
+            nullable=False,
+        ),
         sa.Column("public_id", _uuid_col(), nullable=False),
         sa.Column("order_public_id", _uuid_col(), nullable=False),
         sa.Column("exec_id", sa.String(64), nullable=True),
@@ -520,6 +547,7 @@ def upgrade() -> None:
         ["order_public_id", "exec_id"],
         unique=True,
         sqlite_where=text("exec_id IS NOT NULL"),
+        postgresql_where=text("exec_id IS NOT NULL"),
     )
     op.create_index(
         "uq_executions_order_trade",
@@ -527,6 +555,7 @@ def upgrade() -> None:
         ["order_public_id", "trade_id"],
         unique=True,
         sqlite_where=text("trade_id IS NOT NULL"),
+        postgresql_where=text("trade_id IS NOT NULL"),
     )
     op.create_table(
         "positions",
@@ -1149,7 +1178,12 @@ def upgrade() -> None:
     )
     op.create_table(
         "market_snapshots",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column(
+            "id",
+            sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+            autoincrement=True,
+            nullable=False,
+        ),
         sa.Column("public_id", _uuid_col(), nullable=False),
         sa.Column("instrument_public_id", _uuid_col(), nullable=False),
         sa.Column("bid", sa.Float(), nullable=True),
@@ -1226,7 +1260,12 @@ def upgrade() -> None:
     )
     op.create_table(
         "telemetry",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column(
+            "id",
+            sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+            autoincrement=True,
+            nullable=False,
+        ),
         sa.Column("public_id", _uuid_col(), nullable=False),
         sa.Column("transport", sa.String(10), nullable=False),
         sa.Column("direction", sa.String(10), nullable=False),
@@ -1409,7 +1448,7 @@ def upgrade() -> None:
         sa.Column("ticker", sa.String(16), nullable=False),
         sa.Column("asset_class", sa.String(16), nullable=False),
         sa.Column("sector", sa.String(32), nullable=True),
-        sa.Column("description", sa.String(256), nullable=True),
+        sa.Column("description", sa.JSON(), nullable=True),
         sa.Column("session_id", _uuid_col(), nullable=False),
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
