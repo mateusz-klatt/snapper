@@ -55,7 +55,7 @@ asyncpg = "^0.31.0"
 psycopg2-binary = "^2.9.12"
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.15.13"
+ruff = "^0.15.14"
 black = {extras = ["jupyter"], version = "^26.5.1"}
 isort = "^8.0.1"
 mypy = "^2.1.0"
