@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+import httpx
 import pytest
+from loguru import logger
 
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
@@ -306,6 +308,52 @@ class TestReconciliation:
         await ex._reconciliation_handler()
 
         ex._reconcile_with_exchange.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recon_handler_httpx_error_logs_warning_not_exception(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Transient httpx.HTTPError in reconciliation logs WARNING, not ERROR+TB.
+
+        Given: An executor whose ``_reconcile_with_exchange`` raises
+            ``httpx.ConnectTimeout`` on the first cycle and flips
+            ``running`` to False to terminate the loop,
+        When: ``_reconciliation_handler`` runs that single failing cycle,
+        Then: The transient HTTP error is logged as WARNING with
+            'transient HTTP error' and 'will retry', and no ERROR
+            record is emitted. Per the clean-signal-log rule,
+            ``logger.exception`` (ERROR + TB) is reserved for unexpected
+            non-HTTP failures so a flaky exchange API does not bury the
+            real signal in a flood of stack traces.
+        """
+        ex = _make_executor()
+        call_count = 0
+
+        async def _side_effect() -> None:
+            nonlocal call_count
+            call_count += 1
+            ex.running = False
+            raise httpx.ConnectTimeout("connect timeout")
+
+        ex._reconcile_with_exchange = AsyncMock(side_effect=_side_effect)
+        sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+        try:
+            with (
+                patch("snapper.messaging.executors.base.asyncio.sleep", new_callable=AsyncMock),
+                caplog.at_level("DEBUG"),
+            ):
+                await ex._reconciliation_handler()
+        finally:
+            logger.remove(sink_id)
+        warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+        error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert any(
+            "transient HTTP error" in r.message and "will retry" in r.message
+            for r in warning_records
+        ), f"expected transient-WARNING, got {[r.message for r in warning_records]}"
+        assert (
+            not error_records
+        ), f"httpx errors must not log ERROR+TB, got {[r.message for r in error_records]}"
 
     @pytest.mark.asyncio
     async def test_recon_handler_runs_cycle_then_stops(self) -> None:

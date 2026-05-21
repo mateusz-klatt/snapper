@@ -16,6 +16,7 @@ from typing import Any
 from typing import cast
 from uuid import uuid7
 
+import httpx
 import zmq
 import zmq.asyncio
 from loguru import logger
@@ -1037,6 +1038,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             await asyncio.sleep(interval)
             try:
                 await self._reconcile_with_exchange()
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "[{}] Reconciliation cycle transient HTTP error — will retry "
+                    "on next cycle: {}",
+                    exchange_name,
+                    exc,
+                )
             except Exception:
                 logger.exception(f"[{exchange_name}] Reconciliation cycle failed")
 

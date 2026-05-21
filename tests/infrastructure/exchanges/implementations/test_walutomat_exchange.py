@@ -15,6 +15,7 @@ import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from loguru import logger
 
 import snapper.infrastructure.exchanges.implementations.walutomat as walutomat_mod
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -963,6 +964,53 @@ def test_active_execution_helpers_detect_fill_progress() -> None:
         ExchangeOrderStatusEnum.FILLED
     )
     assert _active_execution_status(order) == ExchangeOrderStatusEnum.PARTIALLY_FILLED
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_httpx_error_logs_warning_not_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Transient httpx.HTTPError during execution poll logs WARNING, not ERROR+TB.
+
+    Given: A polling Walutomat client whose ``get_orders`` raises
+        ``httpx.ConnectTimeout`` on every call,
+    When: ``subscribe_executions`` runs the poll loop for one cycle,
+    Then: The transient HTTP error is logged as WARNING with
+        'transient HTTP error' and 'will retry', and no ERROR record is
+        emitted. Per the clean-signal-log rule, ERROR + traceback is
+        reserved for non-HTTP exceptions (real bugs) so the noise floor
+        stays low and the real signal stays visible.
+    """
+    client = _build_polling_client()
+    poll_count = 0
+
+    async def _failing_get_orders(
+        symbol: str | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count > 1:
+            client._running = False
+        raise httpx.ConnectTimeout("connect timeout to walutomat")
+
+    client.get_orders = _failing_get_orders
+    sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        with caplog.at_level("DEBUG"):
+            async for _ in client.subscribe_executions():
+                pass
+    finally:
+        logger.remove(sink_id)
+    warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+    error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert any(
+        "transient HTTP error" in r.message and "will retry" in r.message for r in warning_records
+    ), f"expected transient-WARNING, got {[r.message for r in warning_records]}"
+    assert (
+        not error_records
+    ), f"httpx errors must not log ERROR+TB, got {[r.message for r in error_records]}"
 
 
 @pytest.mark.asyncio()
@@ -3525,6 +3573,39 @@ async def test_polling_loop_http_error_max_consecutive(
     await client._polling_loop(["EUR-PLN"])
     assert not client._running
     assert client._error_count >= 2
+
+
+def test_handle_http_error_in_flight_retry_logs_warning_not_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """In-flight retry (n/max where n < max) logs WARNING, not ERROR.
+
+    Given: A client with max_consecutive_errors=5 and zero prior errors,
+    When: _handle_http_error is called once with an httpx.HTTPError,
+    Then: The error counter increments to 1, the method returns False
+        (do not stop polling), the log records a WARNING with
+        'will retry', and no ERROR record is emitted. Per the
+        clean-signal-log rule, ERROR is reserved for terminal retry
+        exhaustion so the operator-actionable signal stays meaningful.
+    """
+    client = WalutomatExchangeClient(polling_interval=0.01)
+    client._max_consecutive_errors = 5
+    sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        with caplog.at_level("DEBUG"):
+            stop = client._handle_http_error(httpx.HTTPError("connect timeout"))
+    finally:
+        logger.remove(sink_id)
+    assert stop is False
+    assert client._error_count == 1
+    warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+    error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert any(
+        "will retry" in r.message for r in warning_records
+    ), f"expected WARNING with 'will retry', got {[r.message for r in warning_records]}"
+    assert (
+        not error_records
+    ), f"in-flight retry must not log ERROR, got {[r.message for r in error_records]}"
 
 
 @pytest.mark.asyncio()

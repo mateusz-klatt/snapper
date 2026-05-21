@@ -404,7 +404,11 @@ class WalutomatExchangeClient(ExchangeClientBase):
     def _handle_http_error(self, error: httpx.HTTPError) -> bool:
         """Handle an HTTP error during polling.
 
-        Increments error count and checks threshold.
+        Increments error count and checks threshold. Per the
+        clean-signal-log rule, transient retries log as WARNING (the
+        next poll cycle will retry within ``polling_interval``);
+        ERROR is reserved for terminal exhaustion when the polling
+        loop is about to stop.
 
         Args:
             error: The HTTP error that occurred.
@@ -413,13 +417,22 @@ class WalutomatExchangeClient(ExchangeClientBase):
             True if polling should stop (max errors exceeded), False otherwise.
         """
         self._error_count += 1
-        logger.error(
-            f"Walutomat API error ({self._error_count}/{self._max_consecutive_errors}): {error}"
-        )
         if self._error_count >= self._max_consecutive_errors:
-            logger.error("Max consecutive errors reached - stopping polling")
+            logger.error(
+                "Walutomat API error ({}/{}) — max consecutive errors reached, "
+                "stopping polling: {}",
+                self._error_count,
+                self._max_consecutive_errors,
+                error,
+            )
             self._running = False
             return True
+        logger.warning(
+            "Walutomat API error ({}/{}) — will retry: {}",
+            self._error_count,
+            self._max_consecutive_errors,
+            error,
+        )
         return False
 
     async def _polling_loop(self, symbols: list[str]) -> None:
@@ -723,6 +736,13 @@ class WalutomatExchangeClient(ExchangeClientBase):
 
                 first_poll = False
 
+            except httpx.HTTPError as exc:
+                first_poll = False
+                logger.warning(
+                    "Walutomat execution poll transient HTTP error — will retry "
+                    "on next cycle: {}",
+                    exc,
+                )
             except Exception:
                 first_poll = False
                 logger.exception("Walutomat execution poll failed")
