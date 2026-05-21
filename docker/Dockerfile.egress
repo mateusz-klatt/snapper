@@ -1,0 +1,52 @@
+FROM python:3.14-slim AS egress-build
+ARG POETRY_VERSION=2.3.4
+
+ENV PIP_NO_CACHE_DIR=1
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml poetry.lock README.md ./
+COPY src/ ./src/
+
+RUN python -m venv /opt/poetry \
+ && /opt/poetry/bin/pip install --only-binary :all: "poetry==${POETRY_VERSION}" \
+ && python -m venv /opt/appenv \
+ && /opt/poetry/bin/poetry config virtualenvs.create false \
+ && /opt/poetry/bin/poetry config installer.only-binary :all: \
+ && VIRTUAL_ENV=/opt/appenv PATH="/opt/appenv/bin:$PATH" /opt/poetry/bin/poetry install --only=main,cloud --no-root \
+ && VIRTUAL_ENV=/opt/appenv PATH="/opt/appenv/bin:$PATH" /opt/appenv/bin/pip wheel --no-deps --wheel-dir /wheels . \
+ && VIRTUAL_ENV=/opt/appenv PATH="/opt/appenv/bin:$PATH" /opt/appenv/bin/pip install \
+    --no-index \
+    --find-links=/wheels \
+    --only-binary :all: \
+    --no-deps \
+    --no-compile \
+    snapper==0.1.0
+
+FROM python:3.14-slim AS egress
+LABEL org.opencontainers.image.title="snapper-egress"
+LABEL org.opencontainers.image.description="snapper-egress sidecar — multi-tunnel WireGuard + asyncio SOCKS5"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PATH=/opt/appenv/bin:$PATH
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=egress-build /opt/appenv /opt/appenv
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=5 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/ready', timeout=2).read()" || exit 1
+
+EXPOSE 8081
+
+ENTRYPOINT ["python", "-m", "snapper.egress"]

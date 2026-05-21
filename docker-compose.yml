@@ -9,6 +9,27 @@ services:
       - ./data:/app/data
       - ./reports:/app/reports
     command: [ "server" ]
+    networks:
+      - snapper-internal
+    depends_on:
+      snapper-egress:
+        condition: service_healthy
+  snapper-egress:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.egress
+    env_file: .env
+    expose:
+      - "8081"
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: 1
+    volumes:
+      - /lib/modules:/lib/modules:ro
+    networks:
+      - snapper-internal
+    restart: unless-stopped
   postgres:
     image: postgres:16
     environment:
@@ -19,5 +40,11 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - snapper-internal
 volumes:
   pgdata:
+networks:
+  snapper-internal:
+    driver: bridge
+    internal: false

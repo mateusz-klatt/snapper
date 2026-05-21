@@ -275,7 +275,7 @@ cov-serial: $(TEST_DB_FILE)
 cov-xml:
 	$(PYRUN) coverage xml -o coverage.xml
 
-check: fmt lint typecheck check-docstrings check-no-comments check-main-guard check-init-files check-temporal-mutations check-vendor-neutral check-pydantic-routes
+check: fmt lint typecheck check-docstrings check-no-comments check-main-guard check-init-files check-temporal-mutations check-vendor-neutral check-pydantic-routes check-egress-compose
 
 fix: fmt-fix lint-fix move-imports
 
@@ -293,6 +293,9 @@ check-docstrings:
 
 check-no-comments:
 	$(VENV_PY) scripts/check_no_comments.py --strict
+
+check-egress-compose:
+	$(VENV_PY) scripts/check_egress_compose.py
 
 check-main-guard:
 	$(VENV_PY) scripts/check_main_guard.py --strict
