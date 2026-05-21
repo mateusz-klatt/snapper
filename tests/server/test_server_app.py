@@ -42,6 +42,7 @@ from snapper.server.app import _build_user_service_publisher
 from snapper.server.app import _clear_runtime_singletons
 from snapper.server.app import _reconcile_stale_backtests
 from snapper.server.app import _safe_get_caps_enforcer
+from snapper.server.app import _safely_initialize_egress_pool
 from snapper.server.app import _shutdown_user_service_publisher
 from snapper.server.app import _warn_on_tradfi_near_expiry
 from snapper.server.app import create_api_router
@@ -4326,3 +4327,48 @@ class TestWarnOnTradfiNearExpiry:
         settings = MagicMock()
         settings.instruments = {"kraken_equities": ["MNQM6-CME"]}
         await _warn_on_tradfi_near_expiry(settings)
+
+
+class TestSafelyInitializeEgressPool:
+    """Phase B'.3 — lifespan integration tests for the egress-pool preflight.
+
+    ``_safely_initialize_egress_pool`` is the lifespan-side wrapper around
+    ``initialize_egress_pool``. It must call the preflight with the
+    initialised settings service AND swallow exceptions so a failed
+    preflight does not bring down the whole API.
+    """
+
+    @pytest.mark.asyncio
+    @patch("snapper.server.app.initialize_egress_pool")
+    async def test_invokes_initialize_egress_pool(
+        self,
+        mock_initialize: AsyncMock,
+    ) -> None:
+        """Spec — calls initialize_egress_pool with the settings_service.
+
+        Given a SettingsService instance and a successful preflight,
+        When _safely_initialize_egress_pool is awaited,
+        Then initialize_egress_pool is awaited exactly once with the
+        same settings_service argument.
+        """
+        mock_initialize.return_value = None
+        mock_settings_service = MagicMock()
+        await _safely_initialize_egress_pool(mock_settings_service)
+        mock_initialize.assert_awaited_once_with(mock_settings_service)
+
+    @pytest.mark.asyncio
+    @patch("snapper.server.app.initialize_egress_pool")
+    async def test_swallows_preflight_exception(
+        self,
+        mock_initialize: AsyncMock,
+    ) -> None:
+        """Spec — preflight failure is logged but does not propagate.
+
+        Given initialize_egress_pool raises RuntimeError,
+        When _safely_initialize_egress_pool is awaited,
+        Then no exception escapes (the lifespan continues with an
+        empty pool, so the connect shim short-circuits to the
+        existing Phase A path).
+        """
+        mock_initialize.side_effect = RuntimeError("simulated preflight failure")
+        await _safely_initialize_egress_pool(MagicMock())

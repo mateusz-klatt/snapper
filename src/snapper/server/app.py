@@ -178,6 +178,7 @@ from snapper.data.repository_types import InstrumentContractRow
 from snapper.data.repository_types import InstrumentRelatedRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import UnderlyingAssetRow
+from snapper.infrastructure.network.egress_pool import initialize_egress_pool
 from snapper.infrastructure.rest.tracker import get_rest_call_tracker
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
@@ -286,6 +287,31 @@ async def _initialize_settings_service(settings: AppSettings) -> SettingsService
     )
     logger.info("AppSettings initialized with database access (cached, ZMQ-synced)")
     return settings_service
+
+
+async def _safely_initialize_egress_pool(settings_service: SettingsService) -> None:
+    """Run the egress-pool preflight without crashing the lifespan on failure.
+
+    Phase B'.3 of plan_2026_05_21_phase_b_prime_egress_multiplexer. The
+    preflight reads the ``egress_pool`` setting (defaults to disabled),
+    validates the schema, runs async DNS resolution for SOCKS5 routes,
+    and installs the module-level singleton. Errors (malformed JSON,
+    Pydantic mismatch, DNS timeouts) are logged but never propagate —
+    the pool is best-effort infrastructure and a failed preflight just
+    leaves the pool empty so the connect shim short-circuits to the
+    existing Phase A path.
+
+    Args:
+        settings_service: Initialized SettingsService whose cache
+            holds the ``egress_pool`` setting.
+    """
+    try:
+        await initialize_egress_pool(settings_service)
+    except Exception:
+        logger.exception(
+            "egress_pool: preflight failed; pool disabled and "
+            "publishers fall back to direct egress"
+        )
 
 
 def _configure_auth_services(settings_service: SettingsService) -> None:
@@ -656,6 +682,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         settings = get_settings_with_service(settings_service)
         app.state.settings = settings
         app.state.settings_service = settings_service
+        await _safely_initialize_egress_pool(settings_service)
         _configure_auth_services(settings_service)
         user_publisher, user_publisher_context = _build_user_service_publisher(
             settings.zmq_broker_xsub

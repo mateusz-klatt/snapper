@@ -563,13 +563,30 @@ class TestExtractProxyHost:
 class TestPreflightRoutes:
     """Async preflight tests — DNS lookup, python-socks check, route override."""
 
-    async def test_direct_routes_pass_through_unchanged(self) -> None:
+    async def test_direct_routes_pass_through_unchanged(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Spec — direct routes need no preflight work.
 
-        Given a config with one direct route,
+        Given a config with one direct route AND a SOCKS5 route
+            whose DNS is mocked to succeed (so the preflight does
+            not hit the real network and tests stay
+            hermetic now that python-socks is installed),
         When _preflight_routes runs,
-        Then the route survives untouched.
+        Then the direct route survives untouched (enabled=True).
         """
+
+        async def fake_getaddrinfo(*args: object, **kwargs: object) -> list[object]:
+            return [("af_inet", "sock_stream", 0, "", ("127.0.0.1", 1081))]
+
+        loop = MagicMock()
+        loop.getaddrinfo = fake_getaddrinfo
+
+        def fake_get_running_loop() -> MagicMock:
+            return loop
+
+        monkeypatch.setattr(pool_module.asyncio, "get_running_loop", fake_get_running_loop)
         config = _two_route_config()
         effective = await _preflight_routes(config)
         direct_route = next(r for r in effective.routes if r.kind == "direct")
@@ -662,6 +679,33 @@ class TestPreflightRoutes:
         effective = await _preflight_routes(config)
         socks_route = next(r for r in effective.routes if r.kind == "socks5")
         assert socks_route.enabled is True
+
+    async def test_no_warning_when_socks5_missing_and_no_socks_routes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Spec — pure-direct config with python-socks missing is silent.
+
+        Given python_socks is not importable AND the config has no
+            SOCKS5 routes,
+        When _preflight_routes runs,
+        Then no warning is logged and the direct routes survive.
+            Covers the branch where ``any_socks`` is False so the
+            warning block is skipped.
+        """
+
+        def fake_find_spec(name: str) -> object | None:
+            if name == "python_socks":
+                return None
+            return MagicMock()
+
+        monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
+        config = EgressPoolConfig(
+            enabled=True,
+            routes=[RouteConfig(id="d", kind="direct")],
+        )
+        effective = await _preflight_routes(config)
+        assert all(r.enabled for r in effective.routes)
 
     async def test_already_disabled_route_passes_through(self) -> None:
         """Spec — preflight does not re-enable explicitly disabled routes.
