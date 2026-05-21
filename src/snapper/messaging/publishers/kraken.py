@@ -27,7 +27,11 @@ Register and run via process manager::
     await publisher.start()
 """
 
+import asyncio
+import time
+from collections import deque
 from typing import Any
+from typing import Final
 
 from loguru import logger
 
@@ -39,8 +43,24 @@ from snapper.core.types import MarketDataExchange
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_WINDOW_S
+from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 from snapper.messaging.publishers.base import MarketDataPublisherService
+
+apply_kraken_retry_after_honoring()
+"""Install kraken-sdk Retry-After honoring + watchdog patches at module import.
+
+Idempotent — calling multiple times is a no-op. Importing this module from
+the process_manager startup path is the documented installation point per
+the Phase A rollout of
+``proprietary/plans/plan_2026_05_21_kraken_429_retry_after_egress_pool.md``.
+"""
+
+_FORCE_WS_RESTART_BACKOFF_S: Final[float] = 5.0
+"""Sleep between disconnect and reconnect during in-process WS restart."""
 
 
 @register_process(
@@ -157,3 +177,77 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         if self.symbols == ["*"]:
             return 0
         return 20
+
+    def __init__(self, symbols: list[str]) -> None:
+        """Initialise the publisher with reconnect-storm watchdog state.
+
+        Args:
+            symbols: Native symbols to subscribe to, or ``["*"]`` for
+                wildcard subscribe-all.
+        """
+        super().__init__(symbols)
+        self._reconnect_timestamps: deque[float] = deque(maxlen=_RECONNECT_LIMIT * 2)
+        self._restart_lock = asyncio.Lock()
+
+    async def start(self) -> None:
+        """Start the publisher within a connector-registration context.
+
+        Stamps ``_CURRENT_PUBLISHER`` so each ``ConnectSpotWebsocketBase``
+        instance constructed during startup is registered against this
+        publisher via the patched ``__init__``. The token is reset in
+        the ``finally`` clause so the ContextVar does not leak across
+        publisher restarts.
+        """
+        token = _CURRENT_PUBLISHER.set(self)
+        try:
+            await super().start()
+        finally:
+            _CURRENT_PUBLISHER.reset(token)
+
+    def _on_sdk_reconnect_attempt(self) -> None:
+        """Hook called by the patched SDK reconnect path on every attempt.
+
+        Records the reconnect timestamp and schedules an in-process WS
+        restart when more than ``_RECONNECT_LIMIT`` attempts fall inside
+        the rolling ``_RECONNECT_WINDOW_S`` window. The publisher process
+        itself stays alive; only the WebSocket client is torn down and
+        rebuilt via the existing
+        ``KrakenExchangeClient.disconnect_websocket`` +
+        ``_ensure_ws_connected`` cycle. Per the clean-signal-log rule the
+        timestamp deque is cleared after a restart trigger so back-to-back
+        storms do not double-fire.
+        """
+        now = time.monotonic()
+        self._reconnect_timestamps.append(now)
+        cutoff = now - _RECONNECT_WINDOW_S
+        recent = [t for t in self._reconnect_timestamps if t >= cutoff]
+        if len(recent) >= _RECONNECT_LIMIT:
+            logger.error(
+                "kraken publisher: {} reconnects in {}s — forcing WS restart",
+                len(recent),
+                _RECONNECT_WINDOW_S,
+            )
+            self._reconnect_timestamps.clear()
+            asyncio.create_task(self._force_ws_restart())
+
+    async def _force_ws_restart(self) -> None:
+        """Tear down the WS client and re-establish via existing lifecycle.
+
+        Uses ``KrakenExchangeClient.disconnect_websocket`` for teardown
+        and ``_ensure_ws_connected`` for the rebuild — both are pre-existing
+        methods on the exchange client, so no new public surface is
+        introduced. A 5-second back-off between disconnect and reconnect
+        gives the SDK a moment to settle internal state and gives
+        Cloudflare time to release any in-flight 429 tracking against
+        the same source IP.
+        """
+        async with self._restart_lock:
+            client = self._exchange_client
+            if client is None:
+                return
+            try:
+                await client.disconnect_websocket()
+            except Exception:
+                logger.exception("kraken publisher: disconnect_websocket failed during restart")
+            await asyncio.sleep(_FORCE_WS_RESTART_BACKOFF_S)
+            await client._ensure_ws_connected()

@@ -140,6 +140,7 @@ convention = "google"
 "src/snapper/infrastructure/exchanges/schemas/zonda.py" = ["E741"]
 # Must mock weasyprint before importing - requires imports after sys.modules manipulation
 "tests/scripts/test_build_docs_pdf.py" = ["E402"]
+"src/snapper/infrastructure/exchanges/kraken_sdk_patches.py" = ["B009", "B010"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"

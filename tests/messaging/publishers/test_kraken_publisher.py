@@ -1,7 +1,11 @@
 """Unit tests for KrakenMarketDataPublisher."""
 
+from collections import deque
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
+
+import pytest
 
 from snapper.config.app import AppSettings
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
@@ -132,3 +136,144 @@ class TestKrakenMarketDataPublisher:
         mock_settings.instruments = {"walutomat": ["EUR-PLN"]}
         kwargs = KrakenMarketDataPublisher.get_default_parameters(mock_settings)
         assert kwargs == {"symbols": []}
+
+
+class TestKrakenReconnectWatchdog:
+    """Tests for the publisher-side reconnect-storm watchdog.
+
+    Phase A.2 of the Kraken 429 plan adds an in-process WS-restart
+    mechanism so the publisher recovers from reconnect cascades without
+    leaving the SDK to silently exhaust ``MAX_RECONNECT_NUM`` and die.
+    """
+
+    def test_init_creates_reconnect_state(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given a fresh publisher,
+        When constructed with explicit symbols,
+        Then the reconnect-storm deque and lock are initialised empty.
+        """
+        from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
+
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        assert list(pub._reconnect_timestamps) == []
+        assert pub._restart_lock is not None
+
+    def test_storm_under_limit_does_not_schedule_restart(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given fewer than ``_RECONNECT_LIMIT`` attempts in the window,
+        When ``_on_sdk_reconnect_attempt`` is called,
+        Then no restart task is scheduled.
+        """
+        from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
+        from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
+
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        for _ in range(_RECONNECT_LIMIT - 1):
+            pub._on_sdk_reconnect_attempt()
+        assert len(pub._reconnect_timestamps) == _RECONNECT_LIMIT - 1
+
+    @pytest.mark.asyncio
+    async def test_storm_over_limit_schedules_restart(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given ``_RECONNECT_LIMIT`` attempts in the window,
+        When ``_on_sdk_reconnect_attempt`` is called for the Nth time,
+        Then a restart task is scheduled and the deque is cleared so
+        back-to-back storms do not double-fire.
+        """
+        import asyncio
+
+        from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
+        from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
+
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        pub._force_ws_restart = AsyncMock()
+        for _ in range(_RECONNECT_LIMIT):
+            pub._on_sdk_reconnect_attempt()
+        await asyncio.sleep(0)
+        assert pub._reconnect_timestamps == deque(maxlen=_RECONNECT_LIMIT * 2)
+        pub._force_ws_restart.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_force_ws_restart_calls_disconnect_then_ensure(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given a publisher with an attached exchange client,
+        When ``_force_ws_restart`` is awaited,
+        Then ``disconnect_websocket`` is called, the back-off sleep runs,
+        and ``_ensure_ws_connected`` is called afterwards.
+        """
+        from snapper.messaging.publishers import kraken as kraken_module
+        from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
+
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        client = MagicMock()
+        client.disconnect_websocket = AsyncMock()
+        client._ensure_ws_connected = AsyncMock()
+        pub._exchange_client = client
+
+        with patch.object(kraken_module.asyncio, "sleep", new=AsyncMock()) as sleep_mock:
+            await pub._force_ws_restart()
+        client.disconnect_websocket.assert_called_once()
+        sleep_mock.assert_called_once()
+        client._ensure_ws_connected.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_force_ws_restart_skips_when_no_client(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given a publisher whose exchange client has not been created,
+        When ``_force_ws_restart`` is awaited,
+        Then the method returns immediately without raising.
+        """
+        from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
+
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        pub._exchange_client = None
+        await pub._force_ws_restart()
+
+    @pytest.mark.asyncio
+    async def test_force_ws_restart_swallows_disconnect_exception(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given a disconnect that raises an exception,
+        When ``_force_ws_restart`` runs,
+        Then the exception is logged and the rebuild path still proceeds.
+        """
+        from snapper.messaging.publishers import kraken as kraken_module
+        from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
+
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        client = MagicMock()
+        client.disconnect_websocket = AsyncMock(side_effect=RuntimeError("boom"))
+        client._ensure_ws_connected = AsyncMock()
+        pub._exchange_client = client
+        with patch.object(kraken_module.asyncio, "sleep", new=AsyncMock()):
+            await pub._force_ws_restart()
+        client._ensure_ws_connected.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_start_sets_current_publisher_context_var(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given ``KrakenMarketDataPublisher.start``,
+        When invoked,
+        Then ``_CURRENT_PUBLISHER`` carries ``self`` during the super call
+        and is reset to ``None`` afterwards.
+        """
+        from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+        from snapper.messaging.publishers.base import MarketDataPublisherService
+        from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
+
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        observed: dict[str, object] = {}
+
+        async def fake_super_start(self_obj: object) -> None:
+            observed["during"] = _CURRENT_PUBLISHER.get()
+
+        with patch.object(MarketDataPublisherService, "start", fake_super_start):
+            await pub.start()
+        assert observed["during"] is pub
+        assert _CURRENT_PUBLISHER.get() is None
