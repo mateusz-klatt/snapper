@@ -15,6 +15,7 @@ clears them on entry to keep the suite order-independent.
 """
 
 import asyncio
+import contextlib
 import gc
 from typing import Any
 from unittest.mock import MagicMock
@@ -746,3 +747,833 @@ class TestUnregisterClearsAllStashes:
         assert cid not in _CONNECTOR_PUBLISHERS
         assert cid not in _PENDING_RETRY_AFTER_S
         assert cid not in _LAST_CLOSE_CODE
+
+
+class TestPhaseBPrimeShim:
+    """Phase B' shim integration tests — pool reserve + 429 + 1015 paths.
+
+    The shim now consults ``get_egress_pool()`` and, when a pool is
+    configured, reserves a route, injects the proxy kwarg, and routes
+    429 / 1015 captures to ``reservation.quarantine`` instead of the
+    legacy global stash. With pool disabled, the original Phase A.1
+    behaviour is preserved byte-for-byte.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_pool(self) -> Any:
+        """Clear the egress-pool singleton + Phase A stashes before/after each test."""
+        from snapper.infrastructure.network.egress_pool import reset_egress_pool
+
+        reset_egress_pool()
+        _PENDING_RETRY_AFTER_S.clear()
+        _LAST_CLOSE_CODE.clear()
+        _CONNECTOR_PUBLISHERS.clear()
+        yield
+        reset_egress_pool()
+        _PENDING_RETRY_AFTER_S.clear()
+        _LAST_CLOSE_CODE.clear()
+        _CONNECTOR_PUBLISHERS.clear()
+
+    @staticmethod
+    def _enable_pool(
+        *,
+        on_all_quarantined: str = "wait",
+        with_socks5: bool = False,
+    ) -> Any:
+        """Helper — configure the singleton with one or two routes."""
+        from snapper.infrastructure.network.egress_models import EgressPoolConfig
+        from snapper.infrastructure.network.egress_models import RouteConfig
+        from snapper.infrastructure.network.egress_pool import configure_egress_pool
+
+        routes = [RouteConfig(id="default", kind="direct", priority=0)]
+        if with_socks5:
+            routes.append(
+                RouteConfig(
+                    id="wg-uk-1",
+                    kind="socks5",
+                    proxy_url="socks5h://snapper-egress:1081",
+                    priority=10,
+                )
+            )
+        config = EgressPoolConfig(
+            enabled=True,
+            on_all_quarantined=on_all_quarantined,
+            routes=routes,
+        )
+        return configure_egress_pool(config)
+
+    def test_shim_no_pool_preserves_phase_a_kwargs(self) -> None:
+        """Spec — pool disabled passes kwargs through unchanged.
+
+        Given get_egress_pool() returns None,
+        When _ConnectShim is constructed with arbitrary kwargs,
+        Then original_connect is called with those kwargs verbatim —
+        no proxy override, no new keys (preserves the Phase A.1
+        default of websockets-16 ``proxy=True`` env auto-detect).
+        """
+        seen_kwargs: dict[str, Any] = {}
+
+        def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
+            seen_kwargs.update(kwargs)
+            return MagicMock()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim_cls("wss://kraken", ping_interval=20)
+        assert seen_kwargs == {"ping_interval": 20}
+
+    def test_shim_direct_route_injects_proxy_none(self) -> None:
+        """Spec — direct route forces ``proxy=None`` to override env detection.
+
+        Given the pool is enabled with only a direct route,
+        When _ConnectShim is constructed,
+        Then original_connect is called with ``proxy=None`` injected.
+        The explicit None overrides the websockets-16 default of
+        ``proxy=True`` so an inadvertently-set HTTPS_PROXY cannot
+        activate.
+        """
+        self._enable_pool()
+        seen_kwargs: dict[str, Any] = {}
+
+        def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
+            seen_kwargs.update(kwargs)
+            return MagicMock()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim_cls("wss://kraken")
+        assert seen_kwargs == {"proxy": None}
+
+    def test_shim_socks5_route_injects_proxy_url(self) -> None:
+        """Spec — when socks5 is preferred, proxy=socks5h://... is injected.
+
+        Given a pool with a SOCKS5 route at lower priority than direct,
+        And the direct route is quarantined so socks5 wins selection,
+        When the shim runs,
+        Then original_connect receives ``proxy="socks5h://..."``.
+        """
+        pool = self._enable_pool(with_socks5=True)
+        from datetime import UTC
+        from datetime import datetime
+        from datetime import timedelta
+
+        pool._quarantine_route(
+            "default",
+            datetime.now(UTC) + timedelta(seconds=600),
+            "http-429",
+        )
+        seen_kwargs: dict[str, Any] = {}
+
+        def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
+            seen_kwargs.update(kwargs)
+            return MagicMock()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim_cls("wss://kraken")
+        assert seen_kwargs == {"proxy": "socks5h://snapper-egress:1081"}
+
+    def test_shim_sync_construct_failure_releases_reservation(self) -> None:
+        """Spec — original_connect raising in __init__ releases the reservation.
+
+        Given the pool is enabled,
+        When original_connect raises synchronously,
+        Then the reservation's in_use_count returns to 0 before the
+        exception propagates.
+        """
+        pool = self._enable_pool()
+
+        def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
+            raise RuntimeError("simulated sync raise")
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        with pytest.raises(RuntimeError, match="simulated sync raise"):
+            shim_cls("wss://kraken")
+        snap = pool.snapshot()[0]
+        assert snap.in_use_count == 0
+
+    @pytest.mark.asyncio
+    async def test_shim_429_quarantines_active_route_pool_path(self) -> None:
+        """Spec — 429 quarantines the borrowed route, NOT the global stash.
+
+        Given the pool is enabled and one direct route is borrowed,
+        When the handshake raises InvalidStatus 429 with Retry-After=600,
+        Then the borrowed route is quarantined for 600 s with
+        reason="http-429" AND ``_PENDING_RETRY_AFTER_S`` is NOT
+        populated (the v4 acceptance criterion — pool quarantine
+        replaces the global stash when pool is enabled).
+        """
+        pool = self._enable_pool()
+        response = Response(
+            status_code=429,
+            reason_phrase="Too Many Requests",
+            headers=Headers([("Retry-After", "600")]),
+            body=b"",
+        )
+        exc = InvalidStatus(response=response)
+
+        async def fake_aenter(_: Any) -> Any:
+            raise exc
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        token = _CURRENT_CONNECTOR_ID.set(424242)
+        try:
+            with pytest.raises(InvalidStatus):
+                await shim.__aenter__()
+        finally:
+            _CURRENT_CONNECTOR_ID.reset(token)
+        snap = pool.snapshot()[0]
+        assert snap.quarantine_until is not None
+        assert snap.last_handshake_429_at is not None
+        assert 424242 not in _PENDING_RETRY_AFTER_S
+
+    @pytest.mark.asyncio
+    async def test_shim_429_legacy_stash_path_when_pool_disabled(self) -> None:
+        """Spec — pool disabled keeps Phase A.1 stash behaviour.
+
+        Given get_egress_pool() returns None,
+        When the handshake raises InvalidStatus 429 with Retry-After=600,
+        Then ``_PENDING_RETRY_AFTER_S[connector_id]`` is set to 600.
+        """
+        response = Response(
+            status_code=429,
+            reason_phrase="Too Many Requests",
+            headers=Headers([("Retry-After", "600")]),
+            body=b"",
+        )
+        exc = InvalidStatus(response=response)
+
+        async def fake_aenter(_: Any) -> Any:
+            raise exc
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        token = _CURRENT_CONNECTOR_ID.set(555555)
+        try:
+            with pytest.raises(InvalidStatus):
+                await shim.__aenter__()
+        finally:
+            _CURRENT_CONNECTOR_ID.reset(token)
+        assert _PENDING_RETRY_AFTER_S[555555] == 600.0
+
+    @pytest.mark.asyncio
+    async def test_shim_429_releases_reservation_via_aenter(self) -> None:
+        """Spec — 429 release path keeps in_use_count at 0 post-handshake.
+
+        Given the pool is enabled and a route is reserved,
+        When the handshake raises 429,
+        Then in_use_count is back to 0 after the exception propagates.
+        """
+        pool = self._enable_pool()
+        response = Response(
+            status_code=429,
+            reason_phrase="Too Many Requests",
+            headers=Headers([("Retry-After", "600")]),
+            body=b"",
+        )
+        exc = InvalidStatus(response=response)
+
+        async def fake_aenter(_: Any) -> Any:
+            raise exc
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        with pytest.raises(InvalidStatus):
+            await shim.__aenter__()
+        assert pool.snapshot()[0].in_use_count == 0
+
+    @pytest.mark.asyncio
+    async def test_shim_non_429_invalid_status_releases_reservation(self) -> None:
+        """Spec — non-429 InvalidStatus also releases the reservation.
+
+        Given the pool is enabled,
+        When the handshake raises InvalidStatus with status_code=503,
+        Then in_use_count is back to 0 AND no quarantine is recorded
+        (only 429 quarantines the route).
+        """
+        pool = self._enable_pool()
+        response = Response(
+            status_code=503,
+            reason_phrase="Service Unavailable",
+            headers=Headers([]),
+            body=b"",
+        )
+        exc = InvalidStatus(response=response)
+
+        async def fake_aenter(_: Any) -> Any:
+            raise exc
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        with pytest.raises(InvalidStatus):
+            await shim.__aenter__()
+        snap = pool.snapshot()[0]
+        assert snap.in_use_count == 0
+        assert snap.quarantine_until is None
+
+    @pytest.mark.asyncio
+    async def test_shim_non_invalid_status_exception_releases(self) -> None:
+        """Spec — arbitrary exception in __aenter__ releases the reservation.
+
+        Given the pool is enabled,
+        When the handshake raises OSError,
+        Then in_use_count is back to 0.
+        """
+        pool = self._enable_pool()
+
+        async def fake_aenter(_: Any) -> Any:
+            raise OSError("net unreachable")
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        with pytest.raises(OSError):
+            await shim.__aenter__()
+        assert pool.snapshot()[0].in_use_count == 0
+
+    @pytest.mark.asyncio
+    async def test_shim_clean_handshake_releases_on_aexit(self) -> None:
+        """Spec — successful enter + exit releases via __aexit__ finally.
+
+        Given the pool is enabled and the handshake succeeds,
+        When the caller's async-with body exits cleanly,
+        Then in_use_count is back to 0 after __aexit__.
+        """
+        pool = self._enable_pool()
+        ws_mock = MagicMock()
+
+        async def fake_aenter(_: Any) -> Any:
+            return ws_mock
+
+        async def fake_aexit(_self: Any, *_args: Any) -> None:
+            return None
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+            __aexit__ = fake_aexit
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        ws = await shim.__aenter__()
+        assert ws is ws_mock
+        await shim.__aexit__(None, None, None)
+        assert pool.snapshot()[0].in_use_count == 0
+
+    @pytest.mark.asyncio
+    async def test_shim_close_1015_quarantines_route_on_aexit(self) -> None:
+        """Spec — ConnectionClosed(rcvd.code=1015) quarantines the route.
+
+        Given the pool is enabled and the handshake succeeded,
+        When the async-with body exits with a ConnectionClosedError
+        carrying rcvd.code=1015 (Cloudflare close-after-handshake),
+        Then the route is quarantined for ``_CLOSE_1015_QUARANTINE_S``
+        seconds AND last_close_1015_at is recorded.
+        """
+        pool = self._enable_pool()
+
+        async def fake_aenter(_: Any) -> Any:
+            return MagicMock()
+
+        async def fake_aexit(_self: Any, *_args: Any) -> None:
+            return None
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+            __aexit__ = fake_aexit
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        await shim.__aenter__()
+        close = Close(code=1015, reason="rate-limited")
+        exc = ConnectionClosedError(rcvd=close, sent=None)
+        await shim.__aexit__(type(exc), exc, exc.__traceback__)
+        snap = pool.snapshot()[0]
+        assert snap.quarantine_until is not None
+        assert snap.last_close_1015_at is not None
+        assert snap.last_handshake_429_at is None
+        assert snap.in_use_count == 0
+
+    @pytest.mark.asyncio
+    async def test_shim_close_1012_does_not_quarantine_route(self) -> None:
+        """Spec — close code 1012 leaves the route healthy.
+
+        Given the pool is enabled,
+        When the async-with body exits with ConnectionClosed(rcvd.code=1012),
+        Then quarantine is NOT applied (1012 is Kraken graceful
+        restart; Phase A.3's per-close-code backoff owns the recovery).
+        """
+        pool = self._enable_pool()
+
+        async def fake_aenter(_: Any) -> Any:
+            return MagicMock()
+
+        async def fake_aexit(_self: Any, *_args: Any) -> None:
+            return None
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+            __aexit__ = fake_aexit
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        await shim.__aenter__()
+        close = Close(code=1012, reason="restart")
+        exc = ConnectionClosedError(rcvd=close, sent=None)
+        await shim.__aexit__(type(exc), exc, exc.__traceback__)
+        snap = pool.snapshot()[0]
+        assert snap.quarantine_until is None
+        assert snap.last_close_1015_at is None
+
+    @pytest.mark.asyncio
+    async def test_shim_clean_close_does_not_quarantine_route(self) -> None:
+        """Spec — exit with no exception leaves the route healthy.
+
+        Given the pool is enabled,
+        When the async-with body exits normally,
+        Then no quarantine is applied.
+        """
+        pool = self._enable_pool()
+
+        async def fake_aenter(_: Any) -> Any:
+            return MagicMock()
+
+        async def fake_aexit(_self: Any, *_args: Any) -> None:
+            return None
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+            __aexit__ = fake_aexit
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        await shim.__aenter__()
+        await shim.__aexit__(None, None, None)
+        snap = pool.snapshot()[0]
+        assert snap.quarantine_until is None
+
+
+class TestPhaseBPrimeGetReconnectWait:
+    """Phase B' precedence tests for ``_patched_get_reconnect_wait``.
+
+    The v4 design splits behaviour on ``get_egress_pool()``:
+
+    * Pool=None — Phase A.3 path: Retry-After stash → close-code → SDK exponential.
+    * Pool enabled — close-code → pool wait → SDK exponential. The
+      legacy Retry-After stash is intentionally NOT consulted; the
+      shim routes 429 captures to ``reservation.quarantine`` instead.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_pool(self) -> Any:
+        """Clear pool + stashes between tests."""
+        from snapper.infrastructure.network.egress_pool import reset_egress_pool
+
+        reset_egress_pool()
+        _PENDING_RETRY_AFTER_S.clear()
+        _LAST_CLOSE_CODE.clear()
+        yield
+        reset_egress_pool()
+        _PENDING_RETRY_AFTER_S.clear()
+        _LAST_CLOSE_CODE.clear()
+
+    @staticmethod
+    def _enable_pool(*, with_socks5: bool = False) -> Any:
+        """Helper — same as TestPhaseBPrimeShim._enable_pool."""
+        from snapper.infrastructure.network.egress_models import EgressPoolConfig
+        from snapper.infrastructure.network.egress_models import RouteConfig
+        from snapper.infrastructure.network.egress_pool import configure_egress_pool
+
+        routes = [RouteConfig(id="default", kind="direct", priority=0)]
+        if with_socks5:
+            routes.append(
+                RouteConfig(
+                    id="wg-uk-1",
+                    kind="socks5",
+                    proxy_url="socks5h://x:1081",
+                    priority=10,
+                )
+            )
+        config = EgressPoolConfig(enabled=True, routes=routes)
+        return configure_egress_pool(config)
+
+    def test_pool_disabled_honors_retry_after_stash(self) -> None:
+        """Spec — pool disabled + stash present → return stashed value (Phase A.1).
+
+        Given pool is None and ``_PENDING_RETRY_AFTER_S`` holds 600,
+        When _patched_get_reconnect_wait runs,
+        Then it returns 600.0 and pops the stash.
+        """
+        connector = MagicMock(spec=ConnectSpotWebsocketBase)
+        connector_id = id(connector)
+        _PENDING_RETRY_AFTER_S[connector_id] = 600.0
+        wait = _patched_get_reconnect_wait(connector, 1)
+        assert wait == 600.0
+        assert connector_id not in _PENDING_RETRY_AFTER_S
+
+    def test_pool_enabled_ignores_retry_after_stash(self) -> None:
+        """Spec — pool enabled + stash present → pool wins (close-code-first then pool).
+
+        Given pool is enabled and ``_PENDING_RETRY_AFTER_S`` somehow
+        holds 600 (legacy state from a pre-pool reconnect),
+        When _patched_get_reconnect_wait runs and the pool has a
+        healthy route,
+        Then it returns ``_RETRY_AFTER_MIN_SECONDS`` (1.0) and the
+        legacy stash is NOT consumed.
+        """
+        self._enable_pool()
+        connector = MagicMock(spec=ConnectSpotWebsocketBase)
+        connector_id = id(connector)
+        _PENDING_RETRY_AFTER_S[connector_id] = 600.0
+        wait = _patched_get_reconnect_wait(connector, 1)
+        assert wait == _RETRY_AFTER_MIN_SECONDS
+        assert _PENDING_RETRY_AFTER_S[connector_id] == 600.0
+
+    def test_pool_enabled_with_close_code_still_takes_precedence(self) -> None:
+        """Spec — close-code stash beats pool wait when pool is enabled.
+
+        Given pool is enabled AND ``_LAST_CLOSE_CODE`` has 1012,
+        When _patched_get_reconnect_wait runs,
+        Then it returns 30.0 (the 1012 backoff) and pops the stash.
+        """
+        self._enable_pool()
+        connector = MagicMock(spec=ConnectSpotWebsocketBase)
+        connector_id = id(connector)
+        _LAST_CLOSE_CODE[connector_id] = 1012
+        wait = _patched_get_reconnect_wait(connector, 1)
+        assert wait == _CLOSE_CODE_BACKOFF_S[1012]
+        assert connector_id not in _LAST_CLOSE_CODE
+
+    def test_pool_enabled_any_route_healthy_returns_min(self) -> None:
+        """Spec — pool with at least one healthy route returns 1.0.
+
+        Given pool is enabled with a healthy direct route,
+        When _patched_get_reconnect_wait runs with no stashes,
+        Then it returns ``_RETRY_AFTER_MIN_SECONDS``.
+        """
+        self._enable_pool()
+        connector = MagicMock(spec=ConnectSpotWebsocketBase)
+        wait = _patched_get_reconnect_wait(connector, 1)
+        assert wait == _RETRY_AFTER_MIN_SECONDS
+
+    def test_pool_enabled_all_quarantined_returns_earliest_release(self) -> None:
+        """Spec — all routes quarantined returns earliest release deadline.
+
+        Given pool is enabled and the direct route is quarantined for 600 s,
+        When _patched_get_reconnect_wait runs,
+        Then it returns approximately 600 (allow ±5 s for test latency).
+        """
+        from datetime import UTC
+        from datetime import datetime
+        from datetime import timedelta
+
+        pool = self._enable_pool()
+        pool._quarantine_route(
+            "default",
+            datetime.now(UTC) + timedelta(seconds=600),
+            "http-429",
+        )
+        connector = MagicMock(spec=ConnectSpotWebsocketBase)
+        wait = _patched_get_reconnect_wait(connector, 1)
+        assert 595.0 <= wait <= 600.5
+
+    def test_pool_enabled_all_quarantined_clamps_to_min(self) -> None:
+        """Spec — earliest release < 1.0 is clamped to ``_RETRY_AFTER_MIN_SECONDS``.
+
+        Given pool with a quarantine deadline already passed,
+        When _patched_get_reconnect_wait runs,
+        Then the return value is at least ``_RETRY_AFTER_MIN_SECONDS``
+        so the SDK does not no-op-sleep.
+        """
+        from datetime import UTC
+        from datetime import datetime
+        from datetime import timedelta
+
+        pool = self._enable_pool()
+        pool._quarantine_route(
+            "default",
+            datetime.now(UTC) - timedelta(seconds=10),
+            "http-429",
+        )
+        connector = MagicMock(spec=ConnectSpotWebsocketBase)
+        wait = _patched_get_reconnect_wait(connector, 1)
+        assert wait == _RETRY_AFTER_MIN_SECONDS
+
+    def test_pool_empty_falls_through_to_sdk_exponential(self) -> None:
+        """Spec — pool size==0 falls through to SDK exponential.
+
+        Given an EgressPool configured with no routes (defensive — the
+        Pydantic validator forbids this, but the runtime branch must
+        also be safe),
+        When _patched_get_reconnect_wait runs,
+        Then the SDK exponential is invoked.
+        """
+        from snapper.infrastructure.network.egress_models import EgressPoolConfig
+        from snapper.infrastructure.network.egress_pool import configure_egress_pool
+
+        configure_egress_pool(EgressPoolConfig(enabled=False, routes=[]))
+        original = kraken_sdk_patches._ORIGINAL_GET_RECONNECT_WAIT
+        captured = MagicMock(return_value=42.5)
+        kraken_sdk_patches._ORIGINAL_GET_RECONNECT_WAIT = captured
+        try:
+            connector = MagicMock(spec=ConnectSpotWebsocketBase)
+            wait = _patched_get_reconnect_wait(connector, 3)
+        finally:
+            kraken_sdk_patches._ORIGINAL_GET_RECONNECT_WAIT = original
+        assert wait == 42.5
+
+    def test_429_failover_in_one_second_when_healthy_route_available(self) -> None:
+        """Spec — Phase B' acceptance test (Codex v3→v4 critical).
+
+        Given pool enabled with direct (priority=0) + socks5 (priority=10),
+        When the shim drives a 429 with Retry-After=600 on direct,
+        Then:
+          (a) direct.quarantine_until is set ~now+600s,
+          (b) ``_PENDING_RETRY_AFTER_S`` is NOT populated,
+          (c) ``_patched_get_reconnect_wait`` returns ~1.0 (not 600),
+          (d) the next reservation picks the socks5 route.
+
+        This is the central Phase B' guarantee: a route-scoped 429
+        produces fast failover, not the legacy full-Retry-After wait.
+        """
+        from datetime import UTC
+        from datetime import datetime
+        from datetime import timedelta
+
+        pool = self._enable_pool(with_socks5=True)
+        response = Response(
+            status_code=429,
+            reason_phrase="Too Many Requests",
+            headers=Headers([("Retry-After", "600")]),
+            body=b"",
+        )
+        exc = InvalidStatus(response=response)
+
+        async def fake_aenter(_: Any) -> Any:
+            raise exc
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        token = _CURRENT_CONNECTOR_ID.set(999999)
+        try:
+            asyncio.run(_raise_through_aenter(shim))
+        finally:
+            _CURRENT_CONNECTOR_ID.reset(token)
+        direct_snap = next(s for s in pool.snapshot() if s.id == "default")
+        assert direct_snap.quarantine_until is not None
+        assert direct_snap.quarantine_until > datetime.now(UTC) + timedelta(seconds=590)
+        assert 999999 not in _PENDING_RETRY_AFTER_S
+        connector = MagicMock(spec=ConnectSpotWebsocketBase)
+        wait = _patched_get_reconnect_wait(connector, 1)
+        assert wait == _RETRY_AFTER_MIN_SECONDS
+        next_reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        assert next_reservation.route_id == "wg-uk-1"
+        next_reservation.release()
+
+
+async def _raise_through_aenter(shim: Any) -> None:
+    """Helper — drive shim.__aenter__ and expect InvalidStatus to propagate."""
+    with contextlib.suppress(InvalidStatus):
+        await shim.__aenter__()
+
+
+class TestPhaseBPrimeBranchCoverage:
+    """Branch-coverage tests for shim + reconnect_wait defensive paths.
+
+    These pin behaviour for code paths the v4 design must support but
+    that don't fire on the happy paths: pool-disabled exceptions
+    (no-reservation release branches), missing connector ContextVar
+    in the legacy 429 stash, and the empty-pool fallback in
+    _patched_get_reconnect_wait.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_pool(self) -> Any:
+        """Clear pool + stashes between tests."""
+        from snapper.infrastructure.network.egress_pool import reset_egress_pool
+
+        reset_egress_pool()
+        _PENDING_RETRY_AFTER_S.clear()
+        _LAST_CLOSE_CODE.clear()
+        yield
+        reset_egress_pool()
+        _PENDING_RETRY_AFTER_S.clear()
+        _LAST_CLOSE_CODE.clear()
+
+    def test_shim_sync_construct_failure_with_no_pool(self) -> None:
+        """Spec — pool disabled + sync raise propagates without reservation work.
+
+        Given pool is None and original_connect raises in __init__,
+        When the shim is constructed,
+        Then the exception propagates without calling
+        ``reservation.release`` (no reservation exists). Pinned to
+        cover the branch where ``self._reservation is None`` at the
+        sync-raise site.
+        """
+
+        def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
+            raise RuntimeError("simulated sync raise")
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        with pytest.raises(RuntimeError, match="simulated sync raise"):
+            shim_cls("wss://kraken")
+
+    @pytest.mark.asyncio
+    async def test_shim_aenter_exception_with_no_pool(self) -> None:
+        """Spec — pool disabled + arbitrary exception in __aenter__ propagates.
+
+        Given pool is None and the handshake raises OSError,
+        When shim.__aenter__ is awaited,
+        Then the exception propagates. Pinned to cover the branch
+        where ``self._reservation is None`` at the
+        non-InvalidStatus exception site.
+        """
+
+        async def fake_aenter(_: Any) -> Any:
+            raise OSError("net down")
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        with pytest.raises(OSError):
+            await shim.__aenter__()
+
+    @pytest.mark.asyncio
+    async def test_shim_429_legacy_stash_with_no_connector_var(self) -> None:
+        """Spec — pool disabled + 429 + missing connector id is a no-op.
+
+        Given pool is None, the handshake raises 429 with valid
+        Retry-After, but ``_CURRENT_CONNECTOR_ID`` is unset,
+        When _handle_handshake_429 runs,
+        Then ``_PENDING_RETRY_AFTER_S`` stays empty (defensive — the
+        SDK's ``__run`` normally stamps the ContextVar, but a stale
+        path could miss it).
+        """
+        response = Response(
+            status_code=429,
+            reason_phrase="Too Many Requests",
+            headers=Headers([("Retry-After", "600")]),
+            body=b"",
+        )
+        exc = InvalidStatus(response=response)
+
+        async def fake_aenter(_: Any) -> Any:
+            raise exc
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        assert _CURRENT_CONNECTOR_ID.get() is None
+        with pytest.raises(InvalidStatus):
+            await shim.__aenter__()
+        assert _PENDING_RETRY_AFTER_S == {}
+
+    def test_get_reconnect_wait_pool_enabled_but_no_routes(self) -> None:
+        """Spec — pool enabled with size==0 falls through to SDK exponential.
+
+        Given a pool object whose ``size()`` returns 0 (defensive —
+        the Pydantic validator prevents this for enabled=True configs,
+        but the branch must still be safe),
+        When _patched_get_reconnect_wait runs,
+        Then ``has_available()`` returns False AND
+        ``earliest_release_in_seconds()`` returns None, so the
+        function falls through to SDK exponential.
+        """
+        from snapper.infrastructure.network.egress_models import EgressPoolConfig
+        from snapper.infrastructure.network.egress_pool import _POOL_HOLDER
+        from snapper.infrastructure.network.egress_pool import EgressPool
+
+        empty_pool = EgressPool(EgressPoolConfig(enabled=False, routes=[]))
+        _POOL_HOLDER[0] = empty_pool
+        try:
+            original = kraken_sdk_patches._ORIGINAL_GET_RECONNECT_WAIT
+            captured = MagicMock(return_value=17.5)
+            kraken_sdk_patches._ORIGINAL_GET_RECONNECT_WAIT = captured
+            try:
+                connector = MagicMock(spec=ConnectSpotWebsocketBase)
+                wait = _patched_get_reconnect_wait(connector, 2)
+            finally:
+                kraken_sdk_patches._ORIGINAL_GET_RECONNECT_WAIT = original
+        finally:
+            from snapper.infrastructure.network.egress_pool import reset_egress_pool
+
+            reset_egress_pool()
+        assert wait == 17.5
