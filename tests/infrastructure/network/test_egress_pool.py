@@ -1,9 +1,11 @@
 """Unit tests for ``EgressPool`` selection, quarantine, and singleton state."""
 
+import asyncio
 import json
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,6 +16,7 @@ from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_pool import EgressPool
 from snapper.infrastructure.network.egress_pool import _extract_proxy_host
+from snapper.infrastructure.network.egress_pool import _extract_proxy_port
 from snapper.infrastructure.network.egress_pool import _parse_egress_pool_setting
 from snapper.infrastructure.network.egress_pool import _preflight_one_route
 from snapper.infrastructure.network.egress_pool import _preflight_routes
@@ -570,9 +573,7 @@ class TestPreflightRoutes:
         """Spec — direct routes need no preflight work.
 
         Given a config with one direct route AND a SOCKS5 route
-            whose DNS is mocked to succeed (so the preflight does
-            not hit the real network and tests stay
-            hermetic now that python-socks is installed),
+            whose DNS + SOCKS5 greeting are mocked to succeed,
         When _preflight_routes runs,
         Then the direct route survives untouched (enabled=True).
         """
@@ -586,7 +587,21 @@ class TestPreflightRoutes:
         def fake_get_running_loop() -> MagicMock:
             return loop
 
+        async def fake_open_connection(host: object, port: object) -> tuple[Any, Any]:
+            class _R:
+                async def readexactly(self, _n: int) -> bytes:
+                    return b"\x05\x00"
+
+            class _W:
+                def write(self, _d: bytes) -> None: ...
+                async def drain(self) -> None: ...
+                def close(self) -> None: ...
+                async def wait_closed(self) -> None: ...
+
+            return _R(), _W()
+
         monkeypatch.setattr(pool_module.asyncio, "get_running_loop", fake_get_running_loop)
+        monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
         config = _two_route_config()
         effective = await _preflight_routes(config)
         direct_route = next(r for r in effective.routes if r.kind == "direct")
@@ -652,9 +667,10 @@ class TestPreflightRoutes:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Spec — resolvable SOCKS5 host with python_socks available keeps enabled=True.
+        r"""Spec — resolvable SOCKS5 host + healthy listener keeps enabled=True.
 
-        Given a successful getaddrinfo AND python_socks importable,
+        Given successful getaddrinfo + SOCKS5 greeting (b"\x05\x00")
+            + python_socks importable,
         When _preflight_routes runs,
         Then the socks5 route stays enabled.
         """
@@ -673,8 +689,22 @@ class TestPreflightRoutes:
                 return MagicMock()
             return None
 
+        async def fake_open_connection(host: object, port: object) -> tuple[Any, Any]:
+            class _R:
+                async def readexactly(self, _n: int) -> bytes:
+                    return b"\x05\x00"
+
+            class _W:
+                def write(self, _d: bytes) -> None: ...
+                async def drain(self) -> None: ...
+                def close(self) -> None: ...
+                async def wait_closed(self) -> None: ...
+
+            return _R(), _W()
+
         monkeypatch.setattr(pool_module.asyncio, "get_running_loop", fake_get_running_loop)
         monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
+        monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
         config = _two_route_config()
         effective = await _preflight_routes(config)
         socks_route = next(r for r in effective.routes if r.kind == "socks5")
@@ -727,6 +757,302 @@ class TestPreflightRoutes:
         )
         effective = await _preflight_routes(config)
         assert effective.routes[0].enabled is False
+
+
+@pytest.mark.asyncio
+class TestSocks5GreetingProbe:
+    """Tests for the SOCKS5 listener reachability probe (v4 plan).
+
+    Closes the degraded-ready gap: even when DNS resolves to the
+    sidecar host, the pool must NOT admit a route whose TCP listener
+    is absent or doesn't speak SOCKS5.
+    """
+
+    async def test_socks5_route_with_reachable_listener_stays_enabled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        r"""Spec — when the SOCKS5 listener responds correctly, route stays enabled.
+
+        Given a SOCKS5 route whose listener replies with the canonical
+            ``\x05\x00`` greeting reply,
+        When _preflight_one_route runs,
+        Then the route's enabled flag stays True.
+        """
+
+        async def fake_open_connection(host: object, port: object) -> tuple[Any, Any]:
+            class _R:
+                async def readexactly(self, n: int) -> bytes:
+                    return b"\x05\x00"
+
+            class _W:
+                def write(self, _data: bytes) -> None: ...
+                async def drain(self) -> None: ...
+                def close(self) -> None: ...
+                async def wait_closed(self) -> None: ...
+
+            return _R(), _W()
+
+        async def fake_getaddrinfo(*_a: object, **_kw: object) -> list[object]:
+            return [("af_inet", "sock_stream", 0, "", ("127.0.0.1", 1081))]
+
+        loop = MagicMock()
+        loop.getaddrinfo = fake_getaddrinfo
+
+        def fake_get_running_loop() -> MagicMock:
+            return loop
+
+        def fake_find_spec(name: str) -> object | None:
+            if name == "python_socks":
+                return MagicMock()
+            return None
+
+        monkeypatch.setattr(pool_module.asyncio, "get_running_loop", fake_get_running_loop)
+        monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
+        monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
+        config = _two_route_config()
+        effective = await _preflight_routes(config)
+        socks_route = next(r for r in effective.routes if r.kind == "socks5")
+        assert socks_route.enabled is True
+
+    async def test_socks5_route_auto_disabled_when_listener_refused(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Spec — TCP connection refused → route auto-disabled.
+
+        Given asyncio.open_connection raises ConnectionRefusedError on
+            the SOCKS5 probe AND DNS resolves AND python_socks installed,
+        When _preflight_one_route runs,
+        Then the route's enabled flag is False (closes v4 gap).
+        """
+
+        async def fake_open_connection(host: object, port: object) -> tuple[Any, Any]:
+            raise ConnectionRefusedError("simulated closed listener")
+
+        async def fake_getaddrinfo(*_a: object, **_kw: object) -> list[object]:
+            return [("af_inet", "sock_stream", 0, "", ("127.0.0.1", 1081))]
+
+        loop = MagicMock()
+        loop.getaddrinfo = fake_getaddrinfo
+
+        def fake_get_running_loop() -> MagicMock:
+            return loop
+
+        def fake_find_spec(name: str) -> object | None:
+            if name == "python_socks":
+                return MagicMock()
+            return None
+
+        monkeypatch.setattr(pool_module.asyncio, "get_running_loop", fake_get_running_loop)
+        monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
+        monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
+        config = _two_route_config()
+        effective = await _preflight_routes(config)
+        socks_route = next(r for r in effective.routes if r.kind == "socks5")
+        assert socks_route.enabled is False
+
+    async def test_socks5_route_auto_disabled_on_probe_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Spec — open_connection timeout → route auto-disabled.
+
+        Given asyncio.open_connection never returns (hangs past
+            _SOCKS5_PROBE_TIMEOUT_S),
+        When _preflight_one_route runs,
+        Then the route is auto-disabled.
+        """
+
+        async def fake_open_connection(host: object, port: object) -> tuple[Any, Any]:
+            await asyncio.sleep(10.0)
+            return MagicMock(), MagicMock()
+
+        async def fake_getaddrinfo(*_a: object, **_kw: object) -> list[object]:
+            return [("af_inet", "sock_stream", 0, "", ("127.0.0.1", 1081))]
+
+        loop = MagicMock()
+        loop.getaddrinfo = fake_getaddrinfo
+
+        def fake_get_running_loop() -> MagicMock:
+            return loop
+
+        def fake_find_spec(name: str) -> object | None:
+            if name == "python_socks":
+                return MagicMock()
+            return None
+
+        monkeypatch.setattr(pool_module.asyncio, "get_running_loop", fake_get_running_loop)
+        monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
+        monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
+        monkeypatch.setattr(pool_module, "_SOCKS5_PROBE_TIMEOUT_S", 0.01)
+        config = _two_route_config()
+        effective = await _preflight_routes(config)
+        socks_route = next(r for r in effective.routes if r.kind == "socks5")
+        assert socks_route.enabled is False
+
+    async def test_socks5_route_auto_disabled_on_wrong_greeting_reply(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        r"""Spec — non-SOCKS5 reply → route auto-disabled.
+
+        Given the listener accepts the TCP connection but replies with
+            something other than ``\x05\x00`` (e.g. an HTTP server
+            mistakenly listening on the SOCKS5 port),
+        When _preflight_one_route runs,
+        Then the route is auto-disabled.
+        """
+
+        async def fake_open_connection(host: object, port: object) -> tuple[Any, Any]:
+            class _R:
+                async def readexactly(self, n: int) -> bytes:
+                    return b"HT"
+
+            class _W:
+                def write(self, _data: bytes) -> None: ...
+                async def drain(self) -> None: ...
+                def close(self) -> None: ...
+                async def wait_closed(self) -> None: ...
+
+            return _R(), _W()
+
+        async def fake_getaddrinfo(*_a: object, **_kw: object) -> list[object]:
+            return [("af_inet", "sock_stream", 0, "", ("127.0.0.1", 1081))]
+
+        loop = MagicMock()
+        loop.getaddrinfo = fake_getaddrinfo
+
+        def fake_get_running_loop() -> MagicMock:
+            return loop
+
+        def fake_find_spec(name: str) -> object | None:
+            if name == "python_socks":
+                return MagicMock()
+            return None
+
+        monkeypatch.setattr(pool_module.asyncio, "get_running_loop", fake_get_running_loop)
+        monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
+        monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
+        config = _two_route_config()
+        effective = await _preflight_routes(config)
+        socks_route = next(r for r in effective.routes if r.kind == "socks5")
+        assert socks_route.enabled is False
+
+    async def test_socks5_route_auto_disabled_on_short_greeting_reply(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Spec — listener closes mid-greeting → route auto-disabled.
+
+        Given the listener accepts the TCP connection but closes before
+            sending the full 2-byte greeting reply,
+        When _preflight_one_route runs,
+        Then the route is auto-disabled (IncompleteReadError path).
+        """
+
+        async def fake_open_connection(host: object, port: object) -> tuple[Any, Any]:
+            class _R:
+                async def readexactly(self, n: int) -> bytes:
+                    raise asyncio.IncompleteReadError(partial=b"\x05", expected=n)
+
+            class _W:
+                def write(self, _data: bytes) -> None: ...
+                async def drain(self) -> None: ...
+                def close(self) -> None: ...
+                async def wait_closed(self) -> None: ...
+
+            return _R(), _W()
+
+        async def fake_getaddrinfo(*_a: object, **_kw: object) -> list[object]:
+            return [("af_inet", "sock_stream", 0, "", ("127.0.0.1", 1081))]
+
+        loop = MagicMock()
+        loop.getaddrinfo = fake_getaddrinfo
+
+        def fake_get_running_loop() -> MagicMock:
+            return loop
+
+        def fake_find_spec(name: str) -> object | None:
+            if name == "python_socks":
+                return MagicMock()
+            return None
+
+        monkeypatch.setattr(pool_module.asyncio, "get_running_loop", fake_get_running_loop)
+        monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
+        monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
+        config = _two_route_config()
+        effective = await _preflight_routes(config)
+        socks_route = next(r for r in effective.routes if r.kind == "socks5")
+        assert socks_route.enabled is False
+
+    async def test_socks5_route_auto_disabled_when_proxy_url_has_no_port(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Spec — proxy_url without explicit port → route auto-disabled.
+
+        We require an explicit port because the sidecar binds per-tunnel
+        port numbers; defaulting would mask operator misconfig. We can't
+        construct a portless URL through RouteConfig validation, so this
+        test mutates the route post-construction.
+
+        Given a socks5h URL whose extracted port is None,
+        When _preflight_one_route runs,
+        Then the route is auto-disabled with a logged warning.
+        """
+
+        def fake_find_spec(name: str) -> object | None:
+            if name == "python_socks":
+                return MagicMock()
+            return None
+
+        monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
+        monkeypatch.setattr(pool_module, "_extract_proxy_port", lambda _url: None)
+        config = _two_route_config()
+        effective = await _preflight_routes(config)
+        socks_route = next(r for r in effective.routes if r.kind == "socks5")
+        assert socks_route.enabled is False
+
+
+class TestExtractProxyPort:
+    """Tests for ``_extract_proxy_port`` URL parsing."""
+
+    def test_extract_explicit_port(self) -> None:
+        """Spec — extract numeric port from standard socks5h URL.
+
+        Given proxy_url="socks5h://snapper-egress:1081",
+        When _extract_proxy_port is called,
+        Then 1081 is returned.
+        """
+        assert _extract_proxy_port("socks5h://snapper-egress:1081") == 1081
+
+    def test_extract_returns_none_when_no_port(self) -> None:
+        """Spec — URL without explicit port returns None.
+
+        Given proxy_url="socks5h://host",
+        When _extract_proxy_port is called,
+        Then None is returned (operator must specify the port).
+        """
+        assert _extract_proxy_port("socks5h://host") is None
+
+    def test_extract_returns_none_on_invalid_port(self) -> None:
+        """Spec — invalid (out-of-range) port → None.
+
+        Given proxy_url with a port value urllib cannot parse,
+        When _extract_proxy_port is called,
+        Then None is returned.
+        """
+        assert _extract_proxy_port("socks5h://host:99999999999999999") is None
+
+    def test_extract_returns_none_on_urlsplit_error(self) -> None:
+        """Spec — URL that triggers urlsplit ValueError → None.
+
+        Given an invalid IPv6 URL (urlsplit raises ValueError),
+        When _extract_proxy_port is called,
+        Then None is returned (the except path is taken).
+        """
+        assert _extract_proxy_port("socks5h://[invalid::ipv6") is None
 
 
 @pytest.mark.asyncio

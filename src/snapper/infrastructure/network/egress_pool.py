@@ -18,11 +18,13 @@ critical sections are bookkeeping-only (microseconds).
 """
 
 import asyncio
+import contextlib
 import importlib.util
 import json
 import threading
 from datetime import UTC
 from datetime import datetime
+from typing import Final
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -456,12 +458,28 @@ async def _preflight_routes(config: EgressPoolConfig) -> EgressPoolConfig:
     )
 
 
+_SOCKS5_PROBE_TIMEOUT_S: Final[float] = 2.0
+"""Per-route TCP+SOCKS5 probe timeout used during startup preflight."""
+
+_SOCKS5_PROBE_GREETING: Final[bytes] = b"\x05\x01\x00"
+"""SOCKS5 greeting: version=5, nmethods=1, methods=[NO_AUTH]."""
+
+_SOCKS5_PROBE_EXPECTED_REPLY: Final[bytes] = b"\x05\x00"
+"""Expected SOCKS5 greeting reply: version=5, method=NO_AUTH selected."""
+
+
 async def _preflight_one_route(
     loop: asyncio.AbstractEventLoop,
     route: RouteConfig,
     python_socks_ok: bool,
 ) -> RouteConfig:
-    """Run async DNS + python-socks checks for one route.
+    """Run async DNS + python-socks + SOCKS5-greeting checks for one route.
+
+    The SOCKS5 greeting probe (added in v4 of the egress sidecar plan)
+    closes a gap where the sidecar container was healthy but a tunnel's
+    listener was absent — DNS would resolve, the pool would admit the
+    route, and the shim would keep picking the broken route because
+    generic proxy-connection failures do not quarantine.
 
     Returns a new ``RouteConfig`` with ``enabled=False`` if the route
     failed preflight; otherwise the input route (frozen Pydantic
@@ -482,6 +500,13 @@ async def _preflight_one_route(
             route.id,
         )
         return route.model_copy(update={"enabled": False})
+    port = _extract_proxy_port(route.proxy_url)
+    if port is None:
+        logger.warning(
+            "egress_pool: route '{}' proxy_url has no parseable port — auto-disabling",
+            route.id,
+        )
+        return route.model_copy(update={"enabled": False})
     try:
         await loop.getaddrinfo(host, None)
     except OSError as exc:
@@ -492,7 +517,89 @@ async def _preflight_one_route(
             exc,
         )
         return route.model_copy(update={"enabled": False})
+    socks5_reachable = await _probe_socks5_greeting(host, port, route.id)
+    if not socks5_reachable:
+        return route.model_copy(update={"enabled": False})
     return route
+
+
+async def _probe_socks5_greeting(host: str, port: int, route_id: str) -> bool:
+    r"""Verify a SOCKS5 listener actually speaks SOCKS5 with NO_AUTH.
+
+    Opens a TCP socket to ``(host, port)`` with a short timeout, sends
+    the canonical SOCKS5 greeting (``\x05\x01\x00`` — version 5, one
+    method offered: NO_AUTH), and waits for the matching reply
+    (``\x05\x00`` — version 5, NO_AUTH selected). Any other reply or
+    any IO failure means the listener is either absent, broken, or
+    not SOCKS5-NO_AUTH.
+
+    Returns ``True`` on success, ``False`` on any failure (with a
+    logged warning identifying the route).
+    """
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=_SOCKS5_PROBE_TIMEOUT_S,
+        )
+    except (TimeoutError, OSError) as exc:
+        logger.warning(
+            "egress_pool: route '{}' SOCKS5 listener unreachable at {}:{} "
+            "— auto-disabling. error={}",
+            route_id,
+            host,
+            port,
+            exc,
+        )
+        return False
+    try:
+        writer.write(_SOCKS5_PROBE_GREETING)
+        try:
+            await asyncio.wait_for(writer.drain(), timeout=_SOCKS5_PROBE_TIMEOUT_S)
+            reply = await asyncio.wait_for(reader.readexactly(2), timeout=_SOCKS5_PROBE_TIMEOUT_S)
+        except (TimeoutError, OSError, asyncio.IncompleteReadError) as exc:
+            logger.warning(
+                "egress_pool: route '{}' SOCKS5 greeting failed at {}:{} "
+                "— auto-disabling. error={}",
+                route_id,
+                host,
+                port,
+                exc,
+            )
+            return False
+        if reply != _SOCKS5_PROBE_EXPECTED_REPLY:
+            logger.warning(
+                "egress_pool: route '{}' SOCKS5 listener at {}:{} returned "
+                "unexpected greeting {!r} — auto-disabling",
+                route_id,
+                host,
+                port,
+                reply,
+            )
+            return False
+        return True
+    finally:
+        writer.close()
+        with contextlib.suppress(OSError, ConnectionError):
+            await writer.wait_closed()
+
+
+def _extract_proxy_port(proxy_url: str) -> int | None:
+    """Extract the port from a ``socks5h://host:port`` URL.
+
+    Returns ``None`` if the URL has no explicit port. We require an
+    explicit port because the sidecar's SOCKS5 listeners are bound
+    to per-tunnel port numbers; defaulting to anything would mask
+    operator misconfiguration.
+    """
+    try:
+        parts = urlsplit(proxy_url)
+    except ValueError:
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    return port
 
 
 def _extract_proxy_host(proxy_url: str) -> str | None:
