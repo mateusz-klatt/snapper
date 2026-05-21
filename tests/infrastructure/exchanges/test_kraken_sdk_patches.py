@@ -17,6 +17,9 @@ clears them on entry to keep the suite order-independent.
 import asyncio
 import contextlib
 import gc
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -47,6 +50,12 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _unregister_conn
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _wrap_connect_factory
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
 from snapper.infrastructure.exchanges.kraken_sdk_patches import get_registered_publisher
+from snapper.infrastructure.network.egress_models import EgressPoolConfig
+from snapper.infrastructure.network.egress_models import RouteConfig
+from snapper.infrastructure.network.egress_pool import _POOL_HOLDER
+from snapper.infrastructure.network.egress_pool import EgressPool
+from snapper.infrastructure.network.egress_pool import configure_egress_pool
+from snapper.infrastructure.network.egress_pool import reset_egress_pool
 
 
 def _make_429_response(retry_after: str = "412") -> Response:
@@ -762,8 +771,6 @@ class TestPhaseBPrimeShim:
     @pytest.fixture(autouse=True)
     def _reset_pool(self) -> Any:
         """Clear the egress-pool singleton + Phase A stashes before/after each test."""
-        from snapper.infrastructure.network.egress_pool import reset_egress_pool
-
         reset_egress_pool()
         _PENDING_RETRY_AFTER_S.clear()
         _LAST_CLOSE_CODE.clear()
@@ -781,10 +788,6 @@ class TestPhaseBPrimeShim:
         with_socks5: bool = False,
     ) -> Any:
         """Helper — configure the singleton with one or two routes."""
-        from snapper.infrastructure.network.egress_models import EgressPoolConfig
-        from snapper.infrastructure.network.egress_models import RouteConfig
-        from snapper.infrastructure.network.egress_pool import configure_egress_pool
-
         routes = [RouteConfig(id="default", kind="direct", priority=0)]
         if with_socks5:
             routes.append(
@@ -851,9 +854,6 @@ class TestPhaseBPrimeShim:
         Then original_connect receives ``proxy="socks5h://..."``.
         """
         pool = self._enable_pool(with_socks5=True)
-        from datetime import UTC
-        from datetime import datetime
-        from datetime import timedelta
 
         pool._quarantine_route(
             "default",
@@ -1220,8 +1220,6 @@ class TestPhaseBPrimeGetReconnectWait:
     @pytest.fixture(autouse=True)
     def _reset_pool(self) -> Any:
         """Clear pool + stashes between tests."""
-        from snapper.infrastructure.network.egress_pool import reset_egress_pool
-
         reset_egress_pool()
         _PENDING_RETRY_AFTER_S.clear()
         _LAST_CLOSE_CODE.clear()
@@ -1233,10 +1231,6 @@ class TestPhaseBPrimeGetReconnectWait:
     @staticmethod
     def _enable_pool(*, with_socks5: bool = False) -> Any:
         """Helper — same as TestPhaseBPrimeShim._enable_pool."""
-        from snapper.infrastructure.network.egress_models import EgressPoolConfig
-        from snapper.infrastructure.network.egress_models import RouteConfig
-        from snapper.infrastructure.network.egress_pool import configure_egress_pool
-
         routes = [RouteConfig(id="default", kind="direct", priority=0)]
         if with_socks5:
             routes.append(
@@ -1316,10 +1310,6 @@ class TestPhaseBPrimeGetReconnectWait:
         When _patched_get_reconnect_wait runs,
         Then it returns approximately 600 (allow ±5 s for test latency).
         """
-        from datetime import UTC
-        from datetime import datetime
-        from datetime import timedelta
-
         pool = self._enable_pool()
         pool._quarantine_route(
             "default",
@@ -1338,10 +1328,6 @@ class TestPhaseBPrimeGetReconnectWait:
         Then the return value is at least ``_RETRY_AFTER_MIN_SECONDS``
         so the SDK does not no-op-sleep.
         """
-        from datetime import UTC
-        from datetime import datetime
-        from datetime import timedelta
-
         pool = self._enable_pool()
         pool._quarantine_route(
             "default",
@@ -1361,9 +1347,6 @@ class TestPhaseBPrimeGetReconnectWait:
         When _patched_get_reconnect_wait runs,
         Then the SDK exponential is invoked.
         """
-        from snapper.infrastructure.network.egress_models import EgressPoolConfig
-        from snapper.infrastructure.network.egress_pool import configure_egress_pool
-
         configure_egress_pool(EgressPoolConfig(enabled=False, routes=[]))
         original = kraken_sdk_patches._ORIGINAL_GET_RECONNECT_WAIT
         captured = MagicMock(return_value=42.5)
@@ -1389,10 +1372,6 @@ class TestPhaseBPrimeGetReconnectWait:
         This is the central Phase B' guarantee: a route-scoped 429
         produces fast failover, not the legacy full-Retry-After wait.
         """
-        from datetime import UTC
-        from datetime import datetime
-        from datetime import timedelta
-
         pool = self._enable_pool(with_socks5=True)
         response = Response(
             status_code=429,
@@ -1452,8 +1431,6 @@ class TestPhaseBPrimeBranchCoverage:
     @pytest.fixture(autouse=True)
     def _reset_pool(self) -> Any:
         """Clear pool + stashes between tests."""
-        from snapper.infrastructure.network.egress_pool import reset_egress_pool
-
         reset_egress_pool()
         _PENDING_RETRY_AFTER_S.clear()
         _LAST_CLOSE_CODE.clear()
@@ -1557,10 +1534,6 @@ class TestPhaseBPrimeBranchCoverage:
         ``earliest_release_in_seconds()`` returns None, so the
         function falls through to SDK exponential.
         """
-        from snapper.infrastructure.network.egress_models import EgressPoolConfig
-        from snapper.infrastructure.network.egress_pool import _POOL_HOLDER
-        from snapper.infrastructure.network.egress_pool import EgressPool
-
         empty_pool = EgressPool(EgressPoolConfig(enabled=False, routes=[]))
         _POOL_HOLDER[0] = empty_pool
         try:
