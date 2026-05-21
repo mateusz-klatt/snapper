@@ -50,6 +50,7 @@ aioapns = "^4.0"
 psutil = "^7.2.2"
 statsmodels = "^0.14.6"
 python-socks = {extras = ["asyncio"], version = "^2.7.2"}
+pyroute2 = "^0.9.6"
 
 [tool.poetry.group.cloud.dependencies]
 asyncpg = "^0.31.0"

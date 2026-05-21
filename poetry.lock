@@ -4976,6 +4976,26 @@ files = [
 ]
 
 [[package]]
+name = "pyroute2"
+version = "0.9.6"
+description = "Python Netlink library"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "pyroute2-0.9.6-py3-none-any.whl", hash = "sha256:3334091326e560a506635449af03b26920d22d4e5a7996aed354363d106fcef8"},
+    {file = "pyroute2-0.9.6.tar.gz", hash = "sha256:6bc5e2ea9a372ded682b4ede4028ba00236bd6e35b42d833f39a96b219ef1db2"},
+]
+
+[package.dependencies]
+win_inet_pton = {version = "*", markers = "platform_system == \"Windows\""}
+
+[package.extras]
+dev = ["build", "findimports", "flake8", "netaddr", "pre-commit", "pytest", "pytest-asyncio (==0.26.0)", "pytest-cov", "pytest-profiling", "pytest-timeout", "twine"]
+docs = ["aafigure", "build", "docutils", "pre-commit", "pytest", "pytest-asyncio (==0.26.0)", "sphinx", "sphinx-code-include", "twine"]
+repo = ["nox", "pytest", "pytest-cov", "pytest-html", "pytest-timeout", "setuptools"]
+
+[[package]]
 name = "pytest"
 version = "9.0.3"
 description = "pytest: simple powerful testing with Python"
@@ -6992,6 +7012,19 @@ files = [
 ]
 
 [[package]]
+name = "win-inet-pton"
+version = "1.1.0"
+description = "Native inet_pton and inet_ntop implementation for Python on Windows (with ctypes)."
+optional = false
+python-versions = "*"
+groups = ["main"]
+markers = "platform_system == \"Windows\""
+files = [
+    {file = "win_inet_pton-1.1.0-py2.py3-none-any.whl", hash = "sha256:eaf0193cbe7152ac313598a0da7313fb479f769343c0c16c5308f64887dc885b"},
+    {file = "win_inet_pton-1.1.0.tar.gz", hash = "sha256:dd03d942c0d3e2b1cf8bab511844546dfa5f74cb61b241699fa379ad707dea4f"},
+]
+
+[[package]]
 name = "win32-setctime"
 version = "1.2.0"
 description = "A small Python utility to set file creation time on Windows"
@@ -7324,4 +7357,4 @@ test = ["pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "23e8df72b672c09273916081596a4279c7c78560b5e06b867382424ed1b8b9ab"
+content-hash = "934b5f8241bd78b7a574848128bda611074ef77b32728b036ec9d4f80fa5ae30"
