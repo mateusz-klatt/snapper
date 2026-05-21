@@ -781,6 +781,9 @@ class TestSettingsEncryption:
         assert SettingsEncryptionService.is_sensitive_setting("csrf_secret_key")
         assert SettingsEncryptionService.is_sensitive_setting("KRAKEN_API_SECRET")
         assert SettingsEncryptionService.is_sensitive_setting("private_key")
+        assert SettingsEncryptionService.is_sensitive_setting(
+            "egress_tunnel_eset_ie1_preshared_key"
+        )
         assert not SettingsEncryptionService.is_sensitive_setting("server_host")
         assert not SettingsEncryptionService.is_sensitive_setting("port")
         assert not SettingsEncryptionService.is_sensitive_setting("timeout")

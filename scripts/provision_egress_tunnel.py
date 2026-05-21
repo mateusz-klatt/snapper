@@ -76,6 +76,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--pool-host", default="snapper-egress", help="Docker DNS name of sidecar (for proxy_url)"
     )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate descriptor + private key, then print plan without writing DB",
+    )
     return p.parse_args(argv)
 
 
@@ -110,15 +115,15 @@ async def _amain(args: argparse.Namespace) -> int:
     print(f"[1/3] writing {desc_key} (descriptor)")
     await service.update_setting(desc_key, descriptor)
 
-    print(f"[2/3] writing {priv_key_key} (encrypted private key)")
-    await service.update_setting(priv_key_key, private_key, encrypted=True)
+    print(f"[2/3] writing {priv_key_key} (auto-encrypted via '_private_key' suffix)")
+    await service.update_setting(priv_key_key, private_key)
     if args.preshared_key:
         psk_key = f"egress_tunnel_{args.tunnel_id}_preshared_key"
-        print(f"     and {psk_key} (encrypted PSK)")
-        await service.update_setting(psk_key, args.preshared_key, encrypted=True)
+        print(f"     and {psk_key} (auto-encrypted via '_preshared_key' suffix)")
+        await service.update_setting(psk_key, args.preshared_key)
 
     print("[3/3] merging route into egress_pool")
-    pool = await service.get_setting("egress_pool")
+    pool = service.get_setting("egress_pool")
     if pool is None:
         pool = {"enabled": True, "on_all_quarantined": "wait", "routes": []}
     routes = list(pool.get("routes", []))

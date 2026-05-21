@@ -184,6 +184,7 @@ class SettingsEncryptionService:
             "password",
             "secret_key",
             "private_key",
+            "preshared_key",
             "credential",
         ]
         key_lower = key.lower()
