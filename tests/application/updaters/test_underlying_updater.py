@@ -209,7 +209,7 @@ class TestUnderlyingMappingConfig:
             / "data"
             / "underlying_mappings.yaml"
         )
-        with open(yaml_path) as f:
+        with open(yaml_path, encoding="utf-8") as f:
             raw = yaml.safe_load(f)
         config = UnderlyingMappingConfig.model_validate(raw)
         assert len(config.underlyings) >= 10

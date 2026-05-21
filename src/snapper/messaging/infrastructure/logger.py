@@ -315,7 +315,7 @@ class ZmqMessageLogger(RegisterableProcess):
         Args:
             audit_entry: Dictionary to serialize and append.
         """
-        with self.audit_path.open("a") as f:
+        with self.audit_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(audit_entry) + "\n")
 
     def get_statistics(self) -> LoggerStatistics:

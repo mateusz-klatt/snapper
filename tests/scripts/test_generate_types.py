@@ -2140,7 +2140,7 @@ class TestExportWsSchemas:
             result = export_ws_schemas(tmp_path)
 
             assert result.exists()
-            with result.open() as f:
+            with result.open(encoding="utf-8") as f:
                 data = json.load(f)
             assert "definitions" in data
 
@@ -2163,7 +2163,7 @@ class TestExportWsSchemas:
             result = export_ws_schemas(tmp_path)
 
             assert result.exists()
-            with result.open() as f:
+            with result.open(encoding="utf-8") as f:
                 data = json.load(f)
             assert "definitions" in data
             assert "NestedType" in data["definitions"]
@@ -2185,7 +2185,7 @@ class TestExportWsSchemas:
             result = export_ws_schemas(tmp_path)
 
             assert result.exists()
-            with result.open() as f:
+            with result.open(encoding="utf-8") as f:
                 data = json.load(f)
             assert "definitions" in data
 
@@ -2296,7 +2296,7 @@ class TestExportOpenapiSchemas:
         result = export_openapi_schemas(tmp_path)
 
         assert result.exists()
-        with result.open() as f:
+        with result.open(encoding="utf-8") as f:
             data = json.load(f)
         assert "definitions" in data
         assert "User" in data["definitions"]

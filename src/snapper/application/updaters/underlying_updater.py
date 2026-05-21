@@ -387,7 +387,7 @@ class UnderlyingUpdater:
     def _load_config(self) -> UnderlyingMappingConfig:
         """Load and validate the YAML mapping file."""
         logger.info(f"Loading mapping config from {self._yaml_path}")
-        with open(self._yaml_path) as f:
+        with open(self._yaml_path, encoding="utf-8") as f:
             raw = yaml.safe_load(f)
         return UnderlyingMappingConfig.model_validate(raw)
 

@@ -118,6 +118,8 @@ help:
 	@:
 
 ifeq ($(OS),Windows_NT)
+  SHELL      := cmd.exe
+  .SHELLFLAGS := /c
   PYTHON   := python
   VENV_PY  := .venv\Scripts\python
   DEVNULL  := NUL

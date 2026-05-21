@@ -118,7 +118,7 @@ class TestZmqMessageLogger:
         assert logger.message_count >= 1
         assert logger.bytes_received > 0
         if audit_file.exists():
-            with audit_file.open() as f:
+            with audit_file.open(encoding="utf-8") as f:
                 lines = f.readlines()
                 assert len(lines) >= 1
                 entry = json.loads(lines[0])
@@ -213,6 +213,6 @@ class TestZmqMessageLogger:
         }
         logger._append_to_file(test_entry)
         assert audit_file.exists()
-        with audit_file.open() as f:
+        with audit_file.open(encoding="utf-8") as f:
             content = f.read()
             assert "test" in content
