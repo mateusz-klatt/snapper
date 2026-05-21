@@ -411,7 +411,6 @@ class TestRunSidecar:
         server_instance.start = AsyncMock()
         server_instance.stop = AsyncMock()
         with (
-            patch.object(egress_sidecar.wg_control, "probe_kernel_wireguard"),
             patch.object(egress_sidecar.wg_control, "bring_up", new=AsyncMock()),
             patch.object(egress_sidecar.wg_control, "bring_down", new=AsyncMock()),
             patch.object(
@@ -451,7 +450,6 @@ class TestRunSidecar:
         server_instance.stop = AsyncMock()
         bring_down_mock = AsyncMock()
         with (
-            patch.object(egress_sidecar.wg_control, "probe_kernel_wireguard"),
             patch.object(egress_sidecar.wg_control, "bring_up", new=AsyncMock()),
             patch.object(egress_sidecar.wg_control, "bring_down", new=bring_down_mock),
             patch.object(
@@ -498,22 +496,6 @@ class TestRunSidecar:
         ):
             await egress_sidecar._start_healthcheck_app(state, "127.0.0.1", 0)
         runner_instance.cleanup.assert_awaited_once()
-
-    async def test_run_sidecar_probe_exits_propagates_systemexit(self) -> None:
-        """Spec — probe_kernel_wireguard raising SystemExit propagates.
-
-        Given the probe exits 1,
-        When run_sidecar runs,
-        Then SystemExit propagates (the entrypoint sees the exit code).
-        """
-        service = MagicMock()
-        with patch.object(
-            egress_sidecar.wg_control,
-            "probe_kernel_wireguard",
-            side_effect=SystemExit(1),
-        ), pytest.raises(SystemExit) as excinfo:
-            await run_sidecar(service)
-        assert excinfo.value.code == 1
 
 
 class TestInstallSignalHandlers:

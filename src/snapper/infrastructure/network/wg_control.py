@@ -62,8 +62,20 @@ _RULE_PRIORITY_BASE: Final[int] = 5000
 _PERSISTENT_KEEPALIVE: Final[int] = 25
 """WireGuard keepalive period in seconds — keeps NAT mapping warm."""
 
-_PROBE_INTERFACE_NAME: Final[str] = "wg-probe-snapper"
-"""Throw-away interface name used by :func:`probe_kernel_wireguard`."""
+_PROBE_INTERFACE_NAME: Final[str] = "wg-probe"
+"""Throw-away interface name used by :func:`probe_kernel_wireguard`.
+
+Length matters: Linux ``IFNAMSIZ = 15`` chars hard limit. Anything
+longer triggers ``NetlinkError(errno=34)`` (ERANGE) on ``link add``
+— silently, with no message naming the field. The previous value
+``wg-probe-snapper`` (16 chars) caused exactly this in deploy. The
+module-level assert below catches the regression at import time.
+"""
+
+assert len(_PROBE_INTERFACE_NAME) <= 15, (
+    f"_PROBE_INTERFACE_NAME {_PROBE_INTERFACE_NAME!r} exceeds Linux "
+    f"IFNAMSIZ=15; the kernel returns ERANGE on link add."
+)
 
 _MAX_TUNNEL_INDEX: Final[int] = 999
 """Maximum allowed tunnel_index so the derived table + priority stay

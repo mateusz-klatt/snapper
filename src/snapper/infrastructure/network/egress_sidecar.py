@@ -109,20 +109,23 @@ async def run_sidecar(
 
     Bootstrap (per plan §4 sidecar flow):
 
-    1. ``probe_kernel_wireguard()`` — exits 1 with a clear log on
-       EOPNOTSUPP / EPERM. Other NetlinkErrors propagate.
-    2. ``load_declared_tunnels(settings_service)`` enumerates
-       declared tunnels + decrypts their keys.
-    3. For each successfully loaded tunnel (sorted by id):
+    1. ``load_declared_tunnels(settings_service)`` enumerates
+       declared tunnels + decrypts their keys. (``probe_kernel_wireguard``
+       runs BEFORE the asyncio loop in the sync ``main`` wrapper —
+       pyroute2 0.9.x cannot construct ``IPRoute()`` from inside a
+       running asyncio loop without ``asyncio.to_thread`` indirection;
+       the probe is a precondition check with no async dependency so
+       moving it to sync context is cleaner.)
+    2. For each successfully loaded tunnel (sorted by id):
          * ``wg_control.bring_up(...)`` — create wg interface,
            configure peer, source-based route.
          * ``Socks5Server.start()`` — bind on the Docker network.
        Per-tunnel failures are caught and turned into ``_FailedTunnel``
        entries on the shared state so the orchestrator stays alive.
-    4. Start aiohttp app exposing /ready, /tunnels, /readyz.
-    5. Wait for ``shutdown_event`` (set by the SIGTERM/SIGINT
+    3. Start aiohttp app exposing /ready, /tunnels, /readyz.
+    4. Wait for ``shutdown_event`` (set by the SIGTERM/SIGINT
        handlers wired in ``snapper.egress.__main__``).
-    6. Reverse the bring-up: stop each Socks5Server, then bring
+    5. Reverse the bring-up: stop each Socks5Server, then bring
        down each WG interface.
 
     Args:
@@ -145,7 +148,6 @@ async def run_sidecar(
         ``0`` for a clean shutdown. A non-zero return is reserved
         for future fail-closed configurations.
     """
-    wg_control.probe_kernel_wireguard()
     state = _SidecarState()
     load_result = await load_declared_tunnels(settings_service)
     runner: web.AppRunner | None = None

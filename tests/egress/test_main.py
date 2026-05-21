@@ -109,6 +109,60 @@ class TestAsyncMain:
 class TestMain:
     """Sync wrapper called by Docker CMD."""
 
+    def test_main_calls_probe_before_asyncio_run(self) -> None:
+        """Spec — probe_kernel_wireguard runs BEFORE asyncio.run.
+
+        Given the sync main wrapper,
+        When invoked,
+        Then wg_control.probe_kernel_wireguard is called BEFORE
+            asyncio.run starts the event loop. pyroute2 0.9.x cannot
+            construct IPRoute from inside a running asyncio loop, so
+            the probe must run in sync context.
+        """
+        observed_order: list[str] = []
+
+        def fake_probe() -> None:
+            observed_order.append("probe")
+
+        def fake_run(coro: Any) -> int:
+            observed_order.append("asyncio.run")
+            coro.close()
+            return 0
+
+        with (
+            patch.object(
+                egress_main.wg_control,
+                "probe_kernel_wireguard",
+                side_effect=fake_probe,
+            ),
+            patch.object(egress_main, "_async_main", new=AsyncMock(return_value=0)),
+            patch.object(egress_main.asyncio, "run", side_effect=fake_run),
+        ):
+            egress_main.main(["--instance-id", "x"])
+        assert observed_order == ["probe", "asyncio.run"]
+
+    def test_main_propagates_probe_systemexit(self) -> None:
+        """Spec — probe SystemExit propagates from main() without asyncio.run.
+
+        Given probe raises SystemExit(1) (kernel WG missing),
+        When main runs,
+        Then SystemExit propagates AND asyncio.run is NOT called
+            (we never enter the event loop).
+        """
+        run_mock = MagicMock()
+        with (
+            patch.object(
+                egress_main.wg_control,
+                "probe_kernel_wireguard",
+                side_effect=SystemExit(1),
+            ),
+            patch.object(egress_main.asyncio, "run", side_effect=run_mock),
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            egress_main.main([])
+        assert excinfo.value.code == 1
+        run_mock.assert_not_called()
+
     def test_main_dispatches_to_asyncio_run(self) -> None:
         """Spec — main() parses argv + dispatches via asyncio.run.
 
@@ -135,6 +189,7 @@ class TestMain:
 
         async_main_mock = AsyncMock(return_value=42)
         with (
+            patch.object(egress_main.wg_control, "probe_kernel_wireguard"),
             patch.object(egress_main, "_async_main", new=async_main_mock),
             patch.object(egress_main.asyncio, "run", side_effect=fake_run),
         ):
@@ -155,6 +210,7 @@ class TestMain:
             return 0
 
         with (
+            patch.object(egress_main.wg_control, "probe_kernel_wireguard"),
             patch.object(egress_main, "_async_main", new=fake_async_main),
             patch.object(egress_main.sys, "argv", ["prog", "--instance-id", "z"]),
         ):
