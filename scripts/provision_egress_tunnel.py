@@ -85,8 +85,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 async def _amain(args: argparse.Namespace) -> int:
-    """Async core — performs the three DB writes + pool merge."""
+    """Async core — performs the three DB writes + pool merge.
+
+    The ``--dry-run`` flag short-circuits AFTER descriptor Pydantic
+    validation but BEFORE any DB write or sidecar restart, so the
+    operator can sanity-check the schema mapping (especially the
+    ``id`` regex and ``interface`` length constraints) without
+    polluting the live service.
+    """
     from snapper.application.services.settings import get_settings_service
+    from snapper.infrastructure.network.egress_tunnel_models import TunnelDescriptor
 
     db_url = os.environ["DB_URL"]
     zmq_broker = os.environ.get("ZMQ_BROKER_XSUB", "tcp://snapper-zmq-broker:7500")
@@ -96,7 +104,7 @@ async def _amain(args: argparse.Namespace) -> int:
         print(f"!! private key length={len(private_key)} (expected 44) — aborting", file=sys.stderr)
         return 2
 
-    descriptor = {
+    descriptor_payload = {
         "id": args.tunnel_id,
         "interface": args.interface,
         "address": args.address,
@@ -107,13 +115,25 @@ async def _amain(args: argparse.Namespace) -> int:
         "socks5_listen_port": args.socks5_listen_port,
         "priority": args.priority,
     }
+    descriptor_model = TunnelDescriptor(**descriptor_payload)
+    print(f"[ok] descriptor validates: {descriptor_model.id} -> {descriptor_model.interface}")
+
+    proxy_url = f"socks5h://{args.pool_host}:{args.socks5_listen_port}"
+    if args.dry_run:
+        print("[dry-run] would write:")
+        print(f"  - egress_tunnel_{args.tunnel_id} = <descriptor>")
+        print(f"  - egress_tunnel_{args.tunnel_id}_private_key = <encrypted 44B>")
+        if args.preshared_key:
+            print(f"  - egress_tunnel_{args.tunnel_id}_preshared_key = <encrypted>")
+        print(f"  - egress_pool: append route id={args.tunnel_id} proxy={proxy_url}")
+        return 0
 
     service = await get_settings_service(db_url, zmq_broker)
 
     desc_key = f"egress_tunnel_{args.tunnel_id}"
     priv_key_key = f"egress_tunnel_{args.tunnel_id}_private_key"
     print(f"[1/3] writing {desc_key} (descriptor)")
-    await service.update_setting(desc_key, descriptor)
+    await service.update_setting(desc_key, descriptor_payload)
 
     print(f"[2/3] writing {priv_key_key} (auto-encrypted via '_private_key' suffix)")
     await service.update_setting(priv_key_key, private_key)
@@ -127,7 +147,6 @@ async def _amain(args: argparse.Namespace) -> int:
     if pool is None:
         pool = {"enabled": True, "on_all_quarantined": "wait", "routes": []}
     routes = list(pool.get("routes", []))
-    proxy_url = f"socks5h://{args.pool_host}:{args.socks5_listen_port}"
     new_route = {
         "id": args.tunnel_id,
         "kind": "socks5",

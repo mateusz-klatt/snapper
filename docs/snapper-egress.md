@@ -85,13 +85,23 @@ Edit the `egress_pool` setting to add the new route:
   "enabled": true,
   "on_all_quarantined": "wait",
   "routes": [
-    {"id": "default", "kind": "direct", "priority": 0, "enabled": true},
+    {"id": "default", "kind": "direct", "priority": 100, "enabled": true},
     {"id": "wg-uk-1", "kind": "socks5",
      "proxy_url": "socks5h://snapper-egress:1081",
      "priority": 10, "enabled": true}
   ]
 }
 ```
+
+**Priority semantics:** `EgressPool.reserve()` sorts by
+`(priority, in_use_count)` and picks the **lowest** number first.
+For SOCKS5 to actually win selection, its priority MUST be less
+than the `default` route's priority. Bootstrap configurations
+that ship `default: priority=0` and a new tunnel at
+`priority=10` would silently keep using direct egress because
+`0 < 10`. Set the direct route to a high number (e.g. `100`)
+when you want it to act as fallback only, or set
+`"enabled": false` on it to disable direct egress entirely.
 
 Then restart snapper-api so the lifespan re-runs the egress-pool
 preflight:
