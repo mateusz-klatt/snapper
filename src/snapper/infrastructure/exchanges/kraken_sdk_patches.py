@@ -45,6 +45,7 @@ import kraken.spot.websocket.connectors as _kraken_connectors
 import websockets.asyncio.client as _ws_client
 from kraken.spot.websocket.connectors import ConnectSpotWebsocketBase
 from loguru import logger
+from websockets.exceptions import ConnectionClosed
 from websockets.exceptions import InvalidStatus
 
 _RETRY_AFTER_MIN_SECONDS: Final[float] = 1.0
@@ -59,11 +60,47 @@ _RECONNECT_WINDOW_S: Final[float] = 60.0
 _RECONNECT_LIMIT: Final[int] = 5
 """Maximum allowed reconnect attempts within ``_RECONNECT_WINDOW_S``."""
 
+_CLOSE_CODE_BACKOFF_S: Final[dict[int, float]] = {
+    1008: 15.0,
+    1011: 10.0,
+    1012: 30.0,
+    1013: 60.0,
+}
+"""Custom reconnect backoff (seconds) keyed by WebSocket close code.
+
+Kraken-specific close codes observed in production (2026-05-21 incident):
+
+* ``1008`` — Policy Violation; Kraken's per-user WebSocket rate limit
+  fired after the SDK cascaded reconnects too aggressively. 15 s.
+* ``1011`` — Internal Server Error from the WS endpoint; back off
+  10 s and retry.
+* ``1012`` — Service Restart; Kraken WebSocket infrastructure is doing
+  a graceful restart. Documented behaviour, occurs periodically. The
+  SDK's default exponential is too aggressive here and triggers the
+  1008 cascade. 30 s lets Kraken finish restarting cleanly.
+* ``1013`` — Try Again Later; Kraken's "trading engine unavailable"
+  signal. Longer back-off because it usually indicates an internal
+  Kraken outage. 60 s.
+
+Any other code falls back to the SDK's original exponential backoff.
+"""
+
 _PATCH_APPLIED: list[bool] = [False]
 """Single-element list flag tracking whether the patch is installed."""
 
 _PENDING_RETRY_AFTER_S: dict[int, float] = {}
 """Maps ``id(connector_self)`` to its pending Retry-After deadline in seconds."""
+
+_LAST_CLOSE_CODE: dict[int, int] = {}
+"""Maps ``id(connector_self)`` to the close code from the last received Close frame.
+
+Populated by :func:`_patched_run` when ``websockets.exceptions.ConnectionClosed``
+bubbles out of the SDK's run loop. Consumed and popped by
+:func:`_patched_get_reconnect_wait` so each disconnect informs exactly one
+reconnect backoff decision. ``ConnectionClosed.rcvd.code`` carries the
+server-sent close code (Kraken's 1012 service-restart, 1008 rate limit,
+1013 trading-engine-unavailable, etc.).
+"""
 
 _CONNECTOR_PUBLISHERS: dict[int, Any] = {}
 """Maps ``id(ConnectSpotWebsocketBase)`` to the owning publisher instance.
@@ -134,8 +171,15 @@ def get_registered_publisher(connector_id: int) -> Any:
 
 
 def _unregister_connector(connector_id: int) -> None:
-    """Drop the registry entry. Wired via ``weakref.finalize``."""
+    """Drop the registry entries for a connector. Wired via ``weakref.finalize``.
+
+    Clears every dict keyed by the connector id so a long-running
+    publisher cannot accumulate stale entries across reconnect-and-rebuild
+    cycles.
+    """
     _CONNECTOR_PUBLISHERS.pop(connector_id, None)
+    _PENDING_RETRY_AFTER_S.pop(connector_id, None)
+    _LAST_CLOSE_CODE.pop(connector_id, None)
 
 
 def _wrap_connect_factory(original_connect: Any) -> Any:
@@ -193,22 +237,58 @@ def _wrap_connect_factory(original_connect: Any) -> Any:
 
 
 async def _patched_run(self: ConnectSpotWebsocketBase, event: asyncio.Event) -> None:
-    """Stamp ``_CURRENT_CONNECTOR_ID`` for the lifetime of the run coroutine.
+    """Stamp ``_CURRENT_CONNECTOR_ID`` and capture WebSocket close codes.
 
     The connect shim reads the ContextVar inside its ``__aenter__`` to
     attribute the 429 response to the right connector. Resetting the
     token in the ``finally`` clause guarantees the ContextVar does not
     leak across coroutine restarts.
+
+    Beyond the ContextVar work this also intercepts
+    ``websockets.exceptions.ConnectionClosed`` (including subclasses
+    ``ConnectionClosedError`` and ``ConnectionClosedOK``) and stashes
+    the server-sent close code in ``_LAST_CLOSE_CODE`` keyed by
+    ``id(self)``. The patched ``__get_reconnect_wait`` reads the stash
+    to pick a Kraken-aware backoff: code 1012 (service restart) →
+    30 s, 1008 (rate limit) → 15 s, 1013 (trading engine unavailable)
+    → 60 s. The exception is re-raised so the SDK's reconnect path
+    continues to fire.
     """
     token = _CURRENT_CONNECTOR_ID.set(id(self))
     try:
         await _ORIGINAL_RUN(self, event)
+    except ConnectionClosed as exc:
+        rcvd = getattr(exc, "rcvd", None)
+        code = getattr(rcvd, "code", None)
+        if isinstance(code, int):
+            _LAST_CLOSE_CODE[id(self)] = code
+            logger.info(
+                "kraken WS closed by server: code={} reason={!r} (connector={})",
+                code,
+                getattr(rcvd, "reason", ""),
+                id(self),
+            )
+        raise
     finally:
         _CURRENT_CONNECTOR_ID.reset(token)
 
 
 def _patched_get_reconnect_wait(self: ConnectSpotWebsocketBase, attempts: int) -> float:
-    """Honor stashed Retry-After before falling back to the SDK exponential.
+    """Pick reconnect backoff with Kraken-aware overrides.
+
+    Backoff selection order, highest priority first:
+
+    1. **Cloudflare 429 Retry-After** stash from the handshake shim —
+       honor the server-sent deadline exactly.
+    2. **Kraken WebSocket close code** stash from the last
+       ``ConnectionClosed`` exception. Codes 1008/1011/1012/1013 get
+       Kraken-tuned constant backoffs from ``_CLOSE_CODE_BACKOFF_S``;
+       any other code falls through to the SDK's exponential.
+    3. **SDK exponential** — original ``random() * min(180, 2**n - 1)
+       + 1`` formula, preserved as last-resort behaviour.
+
+    Both stashes are popped on consumption so the next reconnect makes
+    a fresh decision.
 
     Args:
         self: The ``ConnectSpotWebsocketBase`` instance.
@@ -216,9 +296,6 @@ def _patched_get_reconnect_wait(self: ConnectSpotWebsocketBase, attempts: int) -
 
     Returns:
         The number of seconds to sleep before the next reconnect.
-        When a Retry-After is stashed for this connector the stashed
-        value is popped and returned. Otherwise the SDK's original
-        exponential backoff is preserved.
     """
     connector_id = id(self)
     if connector_id in _PENDING_RETRY_AFTER_S:
@@ -229,6 +306,16 @@ def _patched_get_reconnect_wait(self: ConnectSpotWebsocketBase, attempts: int) -
             connector_id,
         )
         return retry_after
+    last_code = _LAST_CLOSE_CODE.pop(connector_id, None)
+    if last_code is not None and last_code in _CLOSE_CODE_BACKOFF_S:
+        wait = _CLOSE_CODE_BACKOFF_S[last_code]
+        logger.info(
+            "kraken WS close code {} -> backoff {}s (connector={})",
+            last_code,
+            wait,
+            connector_id,
+        )
+        return wait
     fallback: float = _ORIGINAL_GET_RECONNECT_WAIT(self, attempts)
     return fallback
 

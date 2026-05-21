@@ -1,5 +1,6 @@
 """Unit tests for KrakenMarketDataPublisher."""
 
+import asyncio
 from collections import deque
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -9,6 +10,10 @@ import pytest
 
 from snapper.config.app import AppSettings
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
+from snapper.messaging.publishers import kraken as kraken_module
+from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 
 
@@ -153,8 +158,6 @@ class TestKrakenReconnectWatchdog:
         When constructed with explicit symbols,
         Then the reconnect-storm deque and lock are initialised empty.
         """
-        from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
-
         pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         assert list(pub._reconnect_timestamps) == []
         assert pub._restart_lock is not None
@@ -166,9 +169,6 @@ class TestKrakenReconnectWatchdog:
         When ``_on_sdk_reconnect_attempt`` is called,
         Then no restart task is scheduled.
         """
-        from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
-        from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
-
         pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         for _ in range(_RECONNECT_LIMIT - 1):
             pub._on_sdk_reconnect_attempt()
@@ -183,11 +183,6 @@ class TestKrakenReconnectWatchdog:
         Then a restart task is scheduled and the deque is cleared so
         back-to-back storms do not double-fire.
         """
-        import asyncio
-
-        from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
-        from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
-
         pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         pub._force_ws_restart = AsyncMock()
         for _ in range(_RECONNECT_LIMIT):
@@ -205,9 +200,6 @@ class TestKrakenReconnectWatchdog:
         Then ``disconnect_websocket`` is called, the back-off sleep runs,
         and ``_ensure_ws_connected`` is called afterwards.
         """
-        from snapper.messaging.publishers import kraken as kraken_module
-        from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
-
         pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         client = MagicMock()
         client.disconnect_websocket = AsyncMock()
@@ -228,8 +220,6 @@ class TestKrakenReconnectWatchdog:
         When ``_force_ws_restart`` is awaited,
         Then the method returns immediately without raising.
         """
-        from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
-
         pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         pub._exchange_client = None
         await pub._force_ws_restart()
@@ -242,9 +232,6 @@ class TestKrakenReconnectWatchdog:
         When ``_force_ws_restart`` runs,
         Then the exception is logged and the rebuild path still proceeds.
         """
-        from snapper.messaging.publishers import kraken as kraken_module
-        from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
-
         pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         client = MagicMock()
         client.disconnect_websocket = AsyncMock(side_effect=RuntimeError("boom"))
@@ -263,10 +250,6 @@ class TestKrakenReconnectWatchdog:
         Then ``_CURRENT_PUBLISHER`` carries ``self`` during the super call
         and is reset to ``None`` afterwards.
         """
-        from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
-        from snapper.messaging.publishers.base import MarketDataPublisherService
-        from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
-
         pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         observed: dict[str, object] = {}
 

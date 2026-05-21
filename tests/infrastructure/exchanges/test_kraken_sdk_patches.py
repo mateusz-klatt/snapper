@@ -21,14 +21,18 @@ from unittest.mock import MagicMock
 
 import pytest
 from kraken.spot.websocket.connectors import ConnectSpotWebsocketBase
+from websockets.exceptions import ConnectionClosedError
 from websockets.exceptions import InvalidStatus
+from websockets.frames import Close
 from websockets.http11 import Headers
 from websockets.http11 import Response
 
 from snapper.infrastructure.exchanges import kraken_sdk_patches
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _CLOSE_CODE_BACKOFF_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CONNECTOR_PUBLISHERS
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_CONNECTOR_ID
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _LAST_CLOSE_CODE
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _PATCH_APPLIED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _PENDING_RETRY_AFTER_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RETRY_AFTER_MAX_SECONDS
@@ -511,3 +515,234 @@ class TestPatchedReconnect:
         finally:
             kraken_sdk_patches._ORIGINAL_RECONNECT = original
         assert delegate_called["called"] is True
+
+
+class TestCloseCodeBackoff:
+    """Phase A.3 — Kraken WebSocket close codes drive custom reconnect backoff.
+
+    Captures the production cascade observed 2026-05-21 07:00-07:14: Kraken
+    sent code 1012 'service restart', SDK's exponential backoff was too
+    aggressive, Kraken responded with code 1008 'rate limit exceeded',
+    and Cloudflare eventually banned the source IP with HTTP 429. The
+    per-code backoff prevents the cascade origin.
+    """
+
+    def test_1012_returns_30s_backoff_and_pops_stash(self) -> None:
+        """Close code 1012 picks the Kraken-service-restart backoff.
+
+        Given a connector with last close code 1012 stashed,
+        When ``_patched_get_reconnect_wait`` runs,
+        Then the stash returns 30 seconds and is popped.
+        """
+        connector = MagicMock()
+        connector_id = id(connector)
+        _LAST_CLOSE_CODE[connector_id] = 1012
+        _PENDING_RETRY_AFTER_S.pop(connector_id, None)
+        try:
+            wait = _patched_get_reconnect_wait(connector, attempts=1)
+            assert wait == pytest.approx(30.0)
+            assert connector_id not in _LAST_CLOSE_CODE
+        finally:
+            _LAST_CLOSE_CODE.pop(connector_id, None)
+
+    def test_1008_returns_15s_backoff(self) -> None:
+        """Close code 1008 picks the per-user-rate-limit backoff.
+
+        Given a connector with last close code 1008 stashed,
+        When ``_patched_get_reconnect_wait`` runs,
+        Then the stash returns 15 seconds.
+        """
+        connector = MagicMock()
+        connector_id = id(connector)
+        _LAST_CLOSE_CODE[connector_id] = 1008
+        _PENDING_RETRY_AFTER_S.pop(connector_id, None)
+        try:
+            wait = _patched_get_reconnect_wait(connector, attempts=1)
+            assert wait == pytest.approx(15.0)
+        finally:
+            _LAST_CLOSE_CODE.pop(connector_id, None)
+
+    def test_1013_returns_60s_backoff(self) -> None:
+        """Close code 1013 picks the trading-engine-unavailable backoff.
+
+        Given a connector with last close code 1013 stashed,
+        When ``_patched_get_reconnect_wait`` runs,
+        Then the stash returns 60 seconds.
+        """
+        connector = MagicMock()
+        connector_id = id(connector)
+        _LAST_CLOSE_CODE[connector_id] = 1013
+        _PENDING_RETRY_AFTER_S.pop(connector_id, None)
+        try:
+            wait = _patched_get_reconnect_wait(connector, attempts=1)
+            assert wait == pytest.approx(60.0)
+        finally:
+            _LAST_CLOSE_CODE.pop(connector_id, None)
+
+    def test_1011_returns_10s_backoff(self) -> None:
+        """Close code 1011 picks the internal-server-error backoff.
+
+        Given a connector with last close code 1011 stashed,
+        When ``_patched_get_reconnect_wait`` runs,
+        Then the stash returns 10 seconds.
+        """
+        connector = MagicMock()
+        connector_id = id(connector)
+        _LAST_CLOSE_CODE[connector_id] = 1011
+        _PENDING_RETRY_AFTER_S.pop(connector_id, None)
+        try:
+            wait = _patched_get_reconnect_wait(connector, attempts=1)
+            assert wait == pytest.approx(10.0)
+        finally:
+            _LAST_CLOSE_CODE.pop(connector_id, None)
+
+    def test_unknown_close_code_falls_back_to_original(self) -> None:
+        """Unknown close codes do not match the table.
+
+        Given a connector with a close code not in ``_CLOSE_CODE_BACKOFF_S``,
+        When ``_patched_get_reconnect_wait`` runs,
+        Then the SDK's exponential backoff is used and the stash is still popped.
+        """
+        connector = MagicMock()
+        connector_id = id(connector)
+        _LAST_CLOSE_CODE[connector_id] = 1006
+        _PENDING_RETRY_AFTER_S.pop(connector_id, None)
+        try:
+            wait = _patched_get_reconnect_wait(connector, attempts=2)
+            assert wait >= 1
+            assert connector_id not in _LAST_CLOSE_CODE
+        finally:
+            _LAST_CLOSE_CODE.pop(connector_id, None)
+
+    def test_429_outranks_close_code(self) -> None:
+        """Cloudflare 429 Retry-After wins over a close-code stash.
+
+        Given a connector with both a stashed Retry-After AND a stashed close code,
+        When ``_patched_get_reconnect_wait`` runs,
+        Then the Retry-After value is returned (handshake 429 is more specific).
+        """
+        connector = MagicMock()
+        connector_id = id(connector)
+        _PENDING_RETRY_AFTER_S[connector_id] = 412.0
+        _LAST_CLOSE_CODE[connector_id] = 1012
+        try:
+            wait = _patched_get_reconnect_wait(connector, attempts=1)
+            assert wait == pytest.approx(412.0)
+        finally:
+            _PENDING_RETRY_AFTER_S.pop(connector_id, None)
+            _LAST_CLOSE_CODE.pop(connector_id, None)
+
+    def test_backoff_table_is_finite_and_documented(self) -> None:
+        """The close-code backoff table covers the four documented Kraken codes.
+
+        Given the production cascade (1012 → 1008 → 1013, with 1011 as a
+        speculative add for internal-server-error),
+        When the module is imported,
+        Then ``_CLOSE_CODE_BACKOFF_S`` contains exactly those four codes
+        with sensible positive durations.
+        """
+        assert set(_CLOSE_CODE_BACKOFF_S.keys()) == {1008, 1011, 1012, 1013}
+        assert all(v > 0 for v in _CLOSE_CODE_BACKOFF_S.values())
+
+
+class TestPatchedRunCapturesCloseCode:
+    """``_patched_run`` records the server-sent close code for the watchdog."""
+
+    @pytest.mark.asyncio
+    async def test_connection_closed_with_code_stashes(self) -> None:
+        """The wrapper records ``exc.rcvd.code`` on ConnectionClosed.
+
+        Given an underlying ``__run`` that raises ``ConnectionClosed`` with a
+        ``Close`` frame whose ``code`` is 1012,
+        When the patched ``__run`` is awaited,
+        Then ``_LAST_CLOSE_CODE`` carries 1012 for ``id(self)`` and the
+        exception is re-raised so the SDK's reconnect path still fires.
+        """
+        connector = MagicMock()
+        connector_id = id(connector)
+        _LAST_CLOSE_CODE.pop(connector_id, None)
+        close_frame = Close(code=1012, reason="Kraken websockets restarting")
+
+        async def raising_run(self_obj: Any, event_obj: asyncio.Event) -> None:
+            raise ConnectionClosedError(rcvd=close_frame, sent=None)
+
+        original = kraken_sdk_patches._ORIGINAL_RUN
+        kraken_sdk_patches._ORIGINAL_RUN = raising_run
+        try:
+            with pytest.raises(ConnectionClosedError):
+                await kraken_sdk_patches._patched_run(connector, asyncio.Event())
+        finally:
+            kraken_sdk_patches._ORIGINAL_RUN = original
+        assert _LAST_CLOSE_CODE.get(connector_id) == 1012
+        _LAST_CLOSE_CODE.pop(connector_id, None)
+
+    @pytest.mark.asyncio
+    async def test_connection_closed_without_rcvd_does_not_stash(self) -> None:
+        """A ``ConnectionClosed`` with no ``rcvd`` frame is left unstashed.
+
+        Given an underlying ``__run`` that raises ``ConnectionClosed`` with
+        ``rcvd=None`` (client-side abort or other corner case),
+        When the patched ``__run`` is awaited,
+        Then no entry is added to ``_LAST_CLOSE_CODE`` (the SDK exponential
+        backoff is the correct response in that case).
+        """
+        connector = MagicMock()
+        connector_id = id(connector)
+        _LAST_CLOSE_CODE.pop(connector_id, None)
+
+        async def raising_run(self_obj: Any, event_obj: asyncio.Event) -> None:
+            raise ConnectionClosedError(rcvd=None, sent=None)
+
+        original = kraken_sdk_patches._ORIGINAL_RUN
+        kraken_sdk_patches._ORIGINAL_RUN = raising_run
+        try:
+            with pytest.raises(ConnectionClosedError):
+                await kraken_sdk_patches._patched_run(connector, asyncio.Event())
+        finally:
+            kraken_sdk_patches._ORIGINAL_RUN = original
+        assert connector_id not in _LAST_CLOSE_CODE
+
+    @pytest.mark.asyncio
+    async def test_normal_completion_does_not_stash(self) -> None:
+        """A clean return from ``__run`` leaves no close-code state behind.
+
+        Given an underlying ``__run`` that returns normally,
+        When the patched ``__run`` is awaited,
+        Then ``_LAST_CLOSE_CODE`` is unchanged and the ContextVar is reset.
+        """
+        connector = MagicMock()
+        connector_id = id(connector)
+        _LAST_CLOSE_CODE.pop(connector_id, None)
+
+        async def clean_run(self_obj: Any, event_obj: asyncio.Event) -> None:
+            return None
+
+        original = kraken_sdk_patches._ORIGINAL_RUN
+        kraken_sdk_patches._ORIGINAL_RUN = clean_run
+        try:
+            await kraken_sdk_patches._patched_run(connector, asyncio.Event())
+        finally:
+            kraken_sdk_patches._ORIGINAL_RUN = original
+        assert connector_id not in _LAST_CLOSE_CODE
+        assert _CURRENT_CONNECTOR_ID.get() is None
+
+
+class TestUnregisterClearsAllStashes:
+    """``_unregister_connector`` cleans up every per-connector dict."""
+
+    def test_clears_publisher_retry_after_and_close_code(self) -> None:
+        """Single call drops all three stashes for a connector id.
+
+        Given a connector id present in ``_CONNECTOR_PUBLISHERS``,
+        ``_PENDING_RETRY_AFTER_S``, AND ``_LAST_CLOSE_CODE``,
+        When ``_unregister_connector`` runs,
+        Then every dict no longer contains that id.
+        """
+        cid = 424242
+        _CONNECTOR_PUBLISHERS[cid] = MagicMock()
+        _PENDING_RETRY_AFTER_S[cid] = 50.0
+        _LAST_CLOSE_CODE[cid] = 1012
+        _unregister_connector(cid)
+        assert cid not in _CONNECTOR_PUBLISHERS
+        assert cid not in _PENDING_RETRY_AFTER_S
+        assert cid not in _LAST_CLOSE_CODE
