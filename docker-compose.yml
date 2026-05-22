@@ -1,6 +1,7 @@
 version: '3.8'
 services:
   snapper:
+    image: klattm/snapper:latest
     build: .
     env_file: .env
     ports:
@@ -15,6 +16,7 @@ services:
       snapper-egress:
         condition: service_healthy
   snapper-egress:
+    image: klattm/snapper-egress:latest
     build:
       context: .
       dockerfile: docker/Dockerfile.egress
@@ -32,6 +34,8 @@ services:
     restart: unless-stopped
   postgres:
     image: postgres:16
+    profiles:
+      - dev
     environment:
       POSTGRES_PASSWORD: example
       POSTGRES_DB: snapper
