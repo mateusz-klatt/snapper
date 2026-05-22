@@ -343,17 +343,20 @@ snapper db-downgrade
 ```bash
 make docker-build-dev    # Development image
 make docker-build-prod   # Production image
+make docker-migrate-dev  # Initialize and seed the Docker SQLite database
 ```
 
 ### Run
 
 ```bash
+make docker-migrate-dev
 make docker-run
 ```
 
 ### Docker Compose
 
 ```bash
+make docker-migrate-dev
 docker compose up -d
 ```
 

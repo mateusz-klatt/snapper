@@ -237,6 +237,115 @@ class TestBringUpTunnels:
 
 
 @pytest.mark.asyncio
+class TestLoadDeclaredTunnelsAfterKernelProbe:
+    """Settings load + optional kernel probe coordination."""
+
+    async def test_skips_kernel_probe_when_no_tunnels_load(self) -> None:
+        """Spec — empty/default settings do not require host WireGuard.
+
+        Given load_declared_tunnels returns no loaded tunnels,
+        When the sidecar runtime loader runs,
+        Then probe_kernel_wireguard is not called and the result is
+            returned unchanged.
+        """
+        service = MagicMock()
+        load_result = LoadResult(tunnels=[], failures=[])
+        probe_mock = MagicMock()
+        with (
+            patch.object(
+                egress_sidecar,
+                "load_declared_tunnels",
+                new=AsyncMock(return_value=load_result),
+            ),
+            patch.object(egress_sidecar.wg_control, "probe_kernel_wireguard", new=probe_mock),
+        ):
+            result = await egress_sidecar._load_declared_tunnels_after_kernel_probe(service)
+        assert result == load_result
+        probe_mock.assert_not_called()
+
+    async def test_keeps_loaded_tunnels_when_probe_succeeds(self) -> None:
+        """Spec — a successful kernel probe preserves loaded tunnels.
+
+        Given load_declared_tunnels returns one valid tunnel,
+        When probe_kernel_wireguard succeeds,
+        Then the returned LoadResult still contains that tunnel.
+        """
+        service = MagicMock()
+        loaded = _make_loaded("up-1")
+        load_result = LoadResult(tunnels=[loaded], failures=[])
+        probe_mock = MagicMock()
+        with (
+            patch.object(
+                egress_sidecar,
+                "load_declared_tunnels",
+                new=AsyncMock(return_value=load_result),
+            ),
+            patch.object(egress_sidecar.wg_control, "probe_kernel_wireguard", new=probe_mock),
+        ):
+            result = await egress_sidecar._load_declared_tunnels_after_kernel_probe(service)
+        assert result == load_result
+        probe_mock.assert_called_once()
+
+    async def test_converts_probe_systemexit_to_tunnel_failure(self) -> None:
+        """Spec — kernel probe SystemExit becomes a per-tunnel failure.
+
+        Given a loaded tunnel but probe_kernel_wireguard exits,
+        When the sidecar runtime loader runs,
+        Then the tunnel is not brought up and /ready can still expose
+            the failure through the normal failed_tunnels path.
+        """
+        service = MagicMock()
+        loaded = _make_loaded("up-1")
+        load_result = LoadResult(tunnels=[loaded], failures=[])
+        with (
+            patch.object(
+                egress_sidecar,
+                "load_declared_tunnels",
+                new=AsyncMock(return_value=load_result),
+            ),
+            patch.object(
+                egress_sidecar.wg_control,
+                "probe_kernel_wireguard",
+                side_effect=SystemExit(1),
+            ),
+        ):
+            result = await egress_sidecar._load_declared_tunnels_after_kernel_probe(service)
+        assert result.tunnels == []
+        assert len(result.failures) == 1
+        assert result.failures[0].tunnel_id == "up-1"
+        assert result.failures[0].reason == "kernel_probe: exited with code 1"
+
+    async def test_converts_probe_exception_to_tunnel_failure(self) -> None:
+        """Spec — unexpected probe exceptions become per-tunnel failures.
+
+        Given a loaded tunnel but the active kernel probe raises,
+        When the sidecar runtime loader runs,
+        Then the returned LoadResult records the failed tunnel and
+            suppresses bring-up for that boot cycle.
+        """
+        service = MagicMock()
+        loaded = _make_loaded("up-1")
+        load_result = LoadResult(tunnels=[loaded], failures=[])
+        with (
+            patch.object(
+                egress_sidecar,
+                "load_declared_tunnels",
+                new=AsyncMock(return_value=load_result),
+            ),
+            patch.object(
+                egress_sidecar.wg_control,
+                "probe_kernel_wireguard",
+                side_effect=RuntimeError("netlink boom"),
+            ),
+        ):
+            result = await egress_sidecar._load_declared_tunnels_after_kernel_probe(service)
+        assert result.tunnels == []
+        assert len(result.failures) == 1
+        assert result.failures[0].tunnel_id == "up-1"
+        assert result.failures[0].reason == "kernel_probe: netlink boom"
+
+
+@pytest.mark.asyncio
 class TestShutdownTunnels:
     """Reverse-order shutdown semantics."""
 
@@ -411,6 +520,7 @@ class TestRunSidecar:
         server_instance.start = AsyncMock()
         server_instance.stop = AsyncMock()
         with (
+            patch.object(egress_sidecar.wg_control, "probe_kernel_wireguard"),
             patch.object(egress_sidecar.wg_control, "bring_up", new=AsyncMock()),
             patch.object(egress_sidecar.wg_control, "bring_down", new=AsyncMock()),
             patch.object(
@@ -450,6 +560,7 @@ class TestRunSidecar:
         server_instance.stop = AsyncMock()
         bring_down_mock = AsyncMock()
         with (
+            patch.object(egress_sidecar.wg_control, "probe_kernel_wireguard"),
             patch.object(egress_sidecar.wg_control, "bring_up", new=AsyncMock()),
             patch.object(egress_sidecar.wg_control, "bring_down", new=bring_down_mock),
             patch.object(

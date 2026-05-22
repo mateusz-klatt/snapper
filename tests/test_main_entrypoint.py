@@ -5,7 +5,6 @@ import runpy
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -24,13 +23,13 @@ def test_main_invokes_setup_and_app(monkeypatch: pytest.MonkeyPatch) -> None:
     When main() is called,
     Then setup_logging is called with INFO level and app is invoked.
     """
-    setup_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-    app_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    app_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
-    def _fake_setup_logging(*args: Any, **kwargs: Any) -> None:
+    def _fake_setup_logging(*args: object, **kwargs: object) -> None:
         setup_calls.append((args, kwargs))
 
-    def _fake_app(*args: Any, **kwargs: Any) -> None:
+    def _fake_app(*args: object, **kwargs: object) -> None:
         app_calls.append((args, kwargs))
 
     monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
@@ -54,17 +53,17 @@ def test_run_module_executes_main(monkeypatch: pytest.MonkeyPatch) -> None:
     When snapper.__main__ is run as __main__,
     Then both setup_logging and app are called.
     """
-    setup_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-    app_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    app_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
-    def _fake_setup_logging(*args: Any, **kwargs: Any) -> None:
+    def _fake_setup_logging(*args: object, **kwargs: object) -> None:
         setup_calls.append((args, kwargs))
 
-    def _fake_app(*args: Any, **kwargs: Any) -> None:
+    def _fake_app(self: object, *args: object, **kwargs: object) -> None:
         app_calls.append((args, kwargs))
 
     monkeypatch.setattr("snapper.utils.logging.setup_logging", _fake_setup_logging)
-    monkeypatch.setattr("snapper.cli.app.app", _fake_app)
+    monkeypatch.setattr(type(app), "__call__", _fake_app)
     monkeypatch.delitem(sys.modules, "snapper.__main__", raising=False)
     with pytest.raises(SystemExit) as exc_info:
         runpy.run_module("snapper.__main__", run_name="__main__", alter_sys=True)

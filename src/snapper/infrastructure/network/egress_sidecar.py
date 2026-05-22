@@ -5,9 +5,9 @@ SC.4 of ``proprietary/plans/plan_2026_05_21_snapper_egress_sidecar.md``.
 Ties together the per-tunnel pieces shipped in earlier slices:
 
 * SC.0 — ``Socks5Server`` (per-tunnel listener bound to the WG IP).
-* SC.1 — ``wg_control.probe_kernel_wireguard`` (startup probe) and
-  ``wg_control.bring_up`` / ``bring_down`` (per-tunnel WireGuard
-  interface + source-based routing).
+* SC.1 — ``wg_control.probe_kernel_wireguard`` (runtime probe when
+  tunnels are declared) and ``wg_control.bring_up`` / ``bring_down``
+  (per-tunnel WireGuard interface + source-based routing).
 * SC.2 — ``load_declared_tunnels(service)`` (settings → validated
   descriptors + decrypted keys).
 
@@ -23,10 +23,10 @@ operator + Compose healthcheck observability:
   with a ``failed`` array otherwise. Available for stricter Compose
   configs that prefer hard-fail semantics.
 
-Bootstrap order is fixed (probe → settings load → per-tunnel
-bring-up → start listeners → expose HTTP → wait for signal).
-Per-tunnel failures are recorded in the tunnel state map and
-surfaced on ``/tunnels``; they do NOT crash the orchestrator.
+Bootstrap order is fixed (settings load → optional kernel probe →
+per-tunnel bring-up → start listeners → expose HTTP → wait for
+signal). Per-tunnel failures are recorded in the tunnel state map
+and surfaced on ``/tunnels``; they do NOT crash the orchestrator.
 """
 
 import asyncio
@@ -42,6 +42,7 @@ from snapper.application.services.settings import SettingsService
 from snapper.infrastructure.network import wg_control
 from snapper.infrastructure.network.egress_tunnel_models import LoadedTunnel
 from snapper.infrastructure.network.egress_tunnel_models import LoadResult
+from snapper.infrastructure.network.egress_tunnel_models import TunnelLoadFailure
 from snapper.infrastructure.network.egress_tunnel_models import load_declared_tunnels
 from snapper.infrastructure.network.socks5_server import Socks5Server
 
@@ -110,12 +111,11 @@ async def run_sidecar(
     Bootstrap (per plan §4 sidecar flow):
 
     1. ``load_declared_tunnels(settings_service)`` enumerates
-       declared tunnels + decrypts their keys. (``probe_kernel_wireguard``
-       runs BEFORE the asyncio loop in the sync ``main`` wrapper —
-       pyroute2 0.9.x cannot construct ``IPRoute()`` from inside a
-       running asyncio loop without ``asyncio.to_thread`` indirection;
-       the probe is a precondition check with no async dependency so
-       moving it to sync context is cleaner.)
+       declared tunnels + decrypts their keys. If at least one tunnel
+       loads, the kernel WireGuard probe runs via ``asyncio.to_thread``
+       before the first bring-up. Empty default deployments skip the
+       probe so CI and local smoke tests can expose ``/ready`` without
+       host WireGuard.
     2. For each successfully loaded tunnel (sorted by id):
          * ``wg_control.bring_up(...)`` — create wg interface,
            configure peer, source-based route.
@@ -149,7 +149,7 @@ async def run_sidecar(
         for future fail-closed configurations.
     """
     state = _SidecarState()
-    load_result = await load_declared_tunnels(settings_service)
+    load_result = await _load_declared_tunnels_after_kernel_probe(settings_service)
     runner: web.AppRunner | None = None
     try:
         await _bring_up_tunnels(load_result, state)
@@ -160,6 +160,46 @@ async def run_sidecar(
             await runner.cleanup()
         await _shutdown_tunnels(state)
     return 0
+
+
+async def _load_declared_tunnels_after_kernel_probe(
+    settings_service: SettingsService,
+) -> LoadResult:
+    """Load declared tunnels and gate real tunnel bring-up on the WG probe.
+
+    Empty/default deployments have no kernel work to do, so they do
+    not need WireGuard support just to make ``/ready`` available for
+    Docker smoke tests. When at least one tunnel loads, the probe runs
+    in a worker thread because pyroute2 0.9.x cannot safely construct
+    ``IPRoute`` inside the active asyncio event-loop thread.
+    """
+    load_result = await load_declared_tunnels(settings_service)
+    if not load_result.tunnels:
+        return load_result
+    failure_reason = await _probe_kernel_wireguard_for_loaded_tunnels()
+    if failure_reason is None:
+        return load_result
+    probe_failures = [
+        TunnelLoadFailure(tunnel_id=loaded.descriptor.id, reason=failure_reason)
+        for loaded in load_result.tunnels
+    ]
+    return LoadResult(tunnels=[], failures=[*load_result.failures, *probe_failures])
+
+
+async def _probe_kernel_wireguard_for_loaded_tunnels() -> str | None:
+    """Return a failure reason when the active kernel WireGuard probe fails."""
+    try:
+        await asyncio.to_thread(wg_control.probe_kernel_wireguard)
+    except SystemExit as exc:
+        logger.error(
+            "sidecar: kernel WireGuard probe exited before tunnel bring-up (code={})",
+            exc.code,
+        )
+        return f"kernel_probe: exited with code {exc.code}"
+    except Exception as exc:
+        logger.exception("sidecar: kernel WireGuard probe failed before tunnel bring-up")
+        return f"kernel_probe: {exc}"
+    return None
 
 
 async def _bring_up_tunnels(load_result: LoadResult, state: _SidecarState) -> None:

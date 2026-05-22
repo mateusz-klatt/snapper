@@ -14,10 +14,12 @@ APPROVED) for the full design.
 
 - **Docker Compose v2.** `depends_on.condition: service_healthy` is
   Compose v2 syntax. Compose v1 silently ignores it.
-- **Kernel WireGuard on the host.** Verify with `lsmod | grep
-  wireguard` or `modprobe wireguard`. The sidecar bind-mounts
-  `/lib/modules` and uses the host kernel module via netlink (no
-  userspace WireGuard).
+- **Kernel WireGuard on the host when tunnels are configured.**
+  Verify with `lsmod | grep wireguard` or `modprobe wireguard`. The
+  sidecar bind-mounts `/lib/modules` and uses the host kernel module
+  via netlink (no userspace WireGuard). Empty/default deployments
+  with no declared tunnels still expose `/ready` without probing
+  WireGuard.
 - **`MASTER_PASSWORD`** in the same `.env` the snapper-api container
   uses. The sidecar reads encrypted `egress_tunnel_*_private_key`
   settings via the same Fernet path; mismatched master passwords

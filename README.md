@@ -331,6 +331,7 @@ make ui-format   # Prettier
 ```bash
 make docker-build-dev    # Build dev image
 make docker-build-prod   # Build production image
+make docker-migrate-dev  # Initialize and seed the Docker SQLite database
 make docker-run          # Run container
 make docker-stop         # Stop container
 ```
@@ -338,6 +339,7 @@ make docker-stop         # Stop container
 Or with docker compose:
 
 ```bash
+make docker-migrate-dev
 docker compose up -d
 ```
 
