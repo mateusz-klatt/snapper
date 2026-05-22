@@ -148,7 +148,7 @@ DOCKER_RUN := $(DOCKER_BASE) --rm $(IMAGE_NAME):$(IMAGE_TAG)
 GENSCRIPT := @$(VENV_PY) scripts/generate_types.py
 PNPM := @cd $(UI_DIR) && pnpm
 PRETTIER := $(PNPM) exec prettier --write
-PYTEST_PARALLEL := -n $(shell $(PYTHON) -c "import math,os; print(min(6, max(1, math.ceil((os.cpu_count() or 1)/2))))")
+PYTEST_PARALLEL := $(shell $(PYTHON) -c "import math,os; cpus = os.cpu_count() or 1; print('' if cpus <= 1 else '-n ' + str(min(6, max(1, math.ceil(cpus / 2)))))")
 PY_DIRS := src tests scripts $(wildcard proprietary/src) $(wildcard proprietary/tests)
 
 system-deps:
