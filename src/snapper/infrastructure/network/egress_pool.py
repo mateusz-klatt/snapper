@@ -162,7 +162,7 @@ class EgressPool(EgressPoolBase):
         """
         now = datetime.now(UTC)
         with self._lock:
-            selection = self._pick_locked(preferred_route, now)
+            selection = self._pick_locked(preferred_route, exchange, now)
             if selection is None:
                 if self._config.on_all_quarantined == "raise":
                     raise AllRoutesQuarantinedError(
@@ -255,21 +255,47 @@ class EgressPool(EgressPoolBase):
     def _pick_locked(
         self,
         preferred_route: str | None,
+        exchange: str,
         now: datetime,
     ) -> RouteSelection | None:
-        """Return the best available route or None.
+        """Return the best available route for this exchange or None.
+
+        Filters by ``allowed_exchanges`` so routes pinned to specific
+        exchanges (e.g. ``["walutomat"]``) are skipped when the caller
+        is reserving for a different exchange. ``allowed_exchanges=()``
+        means the route serves any exchange (back-compatible default).
 
         Pool lock MUST be held.
         """
         if preferred_route is not None:
             preferred = self._states.get(preferred_route)
-            if preferred is not None and self._is_available_locked(preferred, now):
+            if (
+                preferred is not None
+                and self._is_available_locked(preferred, now)
+                and self._exchange_allows_locked(preferred, exchange)
+            ):
                 return RouteSelection(state=preferred, is_fallback=False)
-        available = [s for s in self._states.values() if self._is_available_locked(s, now)]
+        available = [
+            s
+            for s in self._states.values()
+            if self._is_available_locked(s, now) and self._exchange_allows_locked(s, exchange)
+        ]
         if not available:
             return None
         available.sort(key=lambda s: (s.config.priority, s.in_use_count))
         return RouteSelection(state=available[0], is_fallback=False)
+
+    @staticmethod
+    def _exchange_allows_locked(state: RouteState, exchange: str) -> bool:
+        """Return True if ``state``'s ``allowed_exchanges`` permits ``exchange``.
+
+        Empty ``allowed_exchanges`` (the back-compatible default) means
+        the route serves any exchange. Non-empty means strict allow-list.
+
+        Pool lock MUST be held (called only from ``_pick_locked``).
+        """
+        allowed = state.config.allowed_exchanges
+        return not allowed or exchange in allowed
 
     def _fallback_direct_locked(self) -> RouteState | None:
         """Return the first enabled direct route, even if quarantined.

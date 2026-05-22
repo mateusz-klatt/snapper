@@ -103,6 +103,39 @@ that ship `default: priority=0` and a new tunnel at
 when you want it to act as fallback only, or set
 `"enabled": false` on it to disable direct egress entirely.
 
+### Per-exchange routing — pinning a tunnel to one exchange
+
+To restrict a SOCKS5 route to specific exchanges, add an
+`allowed_exchanges` field listing the exchange names (matching
+`ExchangeEnum` *values* — `"walutomat"`, `"kraken"`,
+`"kraken_futures"`, `"kraken_equities"`, `"polygon"`):
+
+```json
+{
+  "id": "eset-pl1", "kind": "socks5",
+  "proxy_url": "socks5h://snapper-egress:1084",
+  "priority": 10,
+  "allowed_exchanges": ["walutomat"],
+  "enabled": true
+}
+```
+
+A non-empty `allowed_exchanges` restricts the pool: when
+`pool.reserve(exchange=...)` is called with an exchange name not in
+the list, this route is filtered out before the
+`(priority, in_use_count)` sort. An empty `allowed_exchanges`
+(the default) means the route serves any exchange — the
+back-compatible path for existing pool entries.
+
+**The direct fallback path IGNORES `allowed_exchanges` by design.**
+When every preferred route is quarantined, `EgressPool` returns the
+direct route as a last resort regardless of any exchange pin. If you
+want to deny direct egress for a specific exchange, set
+`"enabled": false` on the direct route instead. Unknown exchange
+names (typos) are rejected by `EgressPoolConfig` at config-load
+time, so a `"krakeen"` typo never silently makes a route
+unreachable.
+
 Then restart snapper-api so the lifespan re-runs the egress-pool
 preflight:
 

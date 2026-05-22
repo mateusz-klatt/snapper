@@ -166,7 +166,13 @@ async def _amain(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    """Sync wrapper used by Docker exec."""
+    """Sync wrapper used by Docker exec.
+
+    Returns:
+        Process exit code: ``0`` on success, ``2`` for an invalid
+        private key, ``3`` when the optional ``--restart-sidecar``
+        docker call fails.
+    """
     args = _parse_args(sys.argv[1:])
     rc = asyncio.run(_amain(args))
     if rc != 0:

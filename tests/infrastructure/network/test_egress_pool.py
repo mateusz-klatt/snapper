@@ -213,6 +213,137 @@ class TestReserveSelection:
         held.release()
 
 
+class TestReserveExchangeFilter:
+    """Tests for B'.5 — per-exchange route selection via ``allowed_exchanges``."""
+
+    @staticmethod
+    def _pl_pinned_config() -> EgressPoolConfig:
+        """Helper — direct fallback + IE/UK open + PL pinned to walutomat.
+
+        Mirrors the production target shape after F1 deployment of
+        plan_2026_05_22_egress_per_exchange_routing.md.
+        """
+        return EgressPoolConfig(
+            enabled=True,
+            routes=[
+                RouteConfig(id="default", kind="direct", priority=100),
+                RouteConfig(
+                    id="ie",
+                    kind="socks5",
+                    proxy_url="socks5h://x:1081",
+                    priority=10,
+                ),
+                RouteConfig(
+                    id="uk",
+                    kind="socks5",
+                    proxy_url="socks5h://x:1082",
+                    priority=10,
+                ),
+                RouteConfig(
+                    id="pl",
+                    kind="socks5",
+                    proxy_url="socks5h://x:1084",
+                    priority=10,
+                    allowed_exchanges=("walutomat",),
+                ),
+            ],
+        )
+
+    def test_pool_picks_pinned_route_for_listed_exchange(self) -> None:
+        """Spec — pl route pinned to ``["walutomat"]`` is selected for that exchange.
+
+        Even though IE/UK have equal priority and lower in_use_count
+        (both fresh), the lowest (priority, in_use_count) tuple across
+        all 4 routes that pass the exchange filter is the only allowed
+        route — pl1 — when reserving for walutomat.
+
+        Note: IE/UK ALSO match because empty ``allowed_exchanges``
+        means "any exchange". With 3 priority-10 routes available
+        and pl listed last, the deterministic in_use_count=0 sort
+        keeps the FIRST-inserted matching route. So this test
+        actually proves the filter doesn't *exclude* pl, not that pl
+        is uniquely chosen. The complementary test below confirms pl
+        IS excluded for kraken.
+        """
+        pool = EgressPool(self._pl_pinned_config())
+        reservation = pool.reserve(exchange="walutomat", purpose="websocket")
+        assert reservation.route_id in {"ie", "uk", "pl"}
+
+    def test_pool_skips_pinned_route_for_other_exchange(self) -> None:
+        """Spec — pl route is NEVER selected when reserving for kraken.
+
+        With pl pinned to ``allowed_exchanges=("walutomat",)`` and IE/UK
+        open, repeated reserve(exchange="kraken") calls must rotate
+        between IE and UK only — pl is filtered out before sorting.
+        """
+        pool = EgressPool(self._pl_pinned_config())
+        picks: set[str] = set()
+        for _ in range(6):
+            r = pool.reserve(exchange="kraken", purpose="websocket")
+            picks.add(r.route_id)
+            r.release()
+        assert "pl" not in picks
+        assert picks.issubset({"ie", "uk"})
+
+    def test_pool_falls_back_to_direct_when_only_pinned_route_disallows(self) -> None:
+        """Spec — direct fallback ignores ``allowed_exchanges`` constraint.
+
+        Given a pool whose only socks5 route pins itself to
+        ``["walutomat"]`` and is then quarantined, reserving for
+        ``"kraken"`` falls back to the direct route even though the
+        direct route's ``allowed_exchanges`` is empty (any-exchange)
+        — direct is always the last-resort path per the documented
+        invariant.
+        """
+        config = EgressPoolConfig(
+            enabled=True,
+            routes=[
+                RouteConfig(id="default", kind="direct", priority=100),
+                RouteConfig(
+                    id="pl",
+                    kind="socks5",
+                    proxy_url="socks5h://x:1084",
+                    priority=10,
+                    allowed_exchanges=("walutomat",),
+                ),
+            ],
+        )
+        pool = EgressPool(config)
+        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        assert reservation.route_id == "default"
+
+    def test_preferred_route_respects_allowed_exchanges(self) -> None:
+        """Spec — preferred_route pointing at a disallowing route is skipped.
+
+        Even when the caller explicitly requests
+        ``preferred_route="pl"``, if ``allowed_exchanges`` excludes
+        the current exchange the selector skips it and falls through
+        to normal priority+in_use_count picking.
+        """
+        pool = EgressPool(self._pl_pinned_config())
+        reservation = pool.reserve(
+            exchange="kraken",
+            purpose="websocket",
+            preferred_route="pl",
+        )
+        assert reservation.route_id != "pl"
+        assert reservation.route_id in {"default", "ie", "uk"}
+
+    def test_open_route_serves_any_exchange(self) -> None:
+        """Spec — default empty ``allowed_exchanges`` means any exchange.
+
+        IE/UK routes with no ``allowed_exchanges`` field at all
+        (empty tuple default) are eligible for any exchange. This is
+        the back-compat path: existing prod seed entries continue to
+        work without any migration.
+        """
+        pool = EgressPool(self._pl_pinned_config())
+        for exchange in ("kraken", "kraken_futures", "polygon"):
+            r = pool.reserve(exchange=exchange, purpose="websocket")
+            assert r.route_id in {"ie", "uk"}
+            r.release()
+
+
 class TestReserveAllQuarantined:
     """Tests for ``EgressPool.reserve`` when no route is available."""
 

@@ -17,13 +17,38 @@ shapes live here:
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
+from typing import Annotated
 from typing import Literal
 from typing import Self
 
 from pydantic import BaseModel
+from pydantic import BeforeValidator
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import model_validator
+
+from snapper.core.types import ExchangeEnum
+
+
+def _coerce_str_sequence_to_tuple(value: object) -> tuple[str, ...] | object:
+    """Pydantic before-validator for ``tuple[str, ...]`` fed from JSON.
+
+    Operators write ``egress_pool`` as JSON; ``json.loads`` produces
+    Python ``list`` for JSON arrays. With ``ConfigDict(strict=True)``
+    Pydantic would reject ``list`` for a ``tuple[str, ...]`` field.
+    Coerces ``list[str]`` (or ``tuple[str, ...]``) into the expected
+    ``tuple[str, ...]`` and lets anything else fall through so Pydantic
+    emits its standard error. Mirrors the helper in
+    ``egress_tunnel_models.py`` rather than importing it to keep the
+    network-layer module graph acyclic (sibling files, no upward dep).
+    """
+    if isinstance(value, list | tuple) and all(isinstance(item, str) for item in value):
+        return tuple(value)
+    return value
+
+
+StringSequence = Annotated[tuple[str, ...], BeforeValidator(_coerce_str_sequence_to_tuple)]
+"""Type alias for route fields that accept JSON arrays of strings."""
 
 
 class RouteConfig(BaseModel):
@@ -48,6 +73,19 @@ class RouteConfig(BaseModel):
     proxy_url: str | None = None
     priority: int = 0
     enabled: bool = True
+    allowed_exchanges: StringSequence = Field(
+        default=(),
+        description=(
+            "Exchanges this route may serve. Empty tuple = any exchange "
+            "(back-compatible default). Non-empty restricts the pool to "
+            "this route only when ``reserve(exchange=...)`` is called with "
+            "a matching value. The direct-fallback path in "
+            "``EgressPool._fallback_direct_locked()`` IGNORES this "
+            "constraint by design — direct egress is always the "
+            "last-resort route. Operators who want per-exchange deny on "
+            "direct should set ``enabled=false``, not ``allowed_exchanges``."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_proxy_url(self) -> Self:
@@ -159,6 +197,27 @@ class EgressPoolConfig(BaseModel):
                 "egress_pool with enabled=True requires at least one "
                 "enabled direct route as fallback"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_allowed_exchanges_membership(self) -> Self:
+        """Reject typo'd exchange names in any route's allowed_exchanges.
+
+        Every entry across every route's ``allowed_exchanges`` must
+        match an ``ExchangeEnum`` *value* (e.g. ``"walutomat"``, not
+        ``"WALUTOMAT"``). Catches operator typos like ``"krakeen"`` at
+        config-load time instead of silently rendering a route
+        unreachable (which would then quietly fall back to direct).
+        """
+        known = {member.value for member in ExchangeEnum}
+        for route in self.routes:
+            for name in route.allowed_exchanges:
+                if name not in known:
+                    raise ValueError(
+                        f"route {route.id!r} declares unknown exchange "
+                        f"{name!r} in allowed_exchanges; must be one of "
+                        f"{sorted(known)}"
+                    )
         return self
 
 

@@ -143,6 +143,44 @@ class TestRouteConfig:
         with pytest.raises(ValidationError):
             RouteConfig.model_validate({"id": "d", "kind": "direct", "wibble": 1})
 
+    def test_default_allowed_exchanges_is_empty(self) -> None:
+        """Spec — RouteConfig.allowed_exchanges defaults to ().
+
+        Empty tuple is the back-compatible default: pool selection
+        treats it as "any exchange". Existing prod seed entries
+        without the field continue to work without migration.
+        """
+        route = RouteConfig(id="d", kind="direct")
+        assert route.allowed_exchanges == ()
+
+    def test_allowed_exchanges_non_sequence_input_falls_through(self) -> None:
+        """Spec — non-list/tuple input falls through the BeforeValidator.
+
+        The StringSequence helper only coerces ``list[str]`` /
+        ``tuple[str, ...]`` shapes; any other value (e.g. ``int``) is
+        returned unchanged so Pydantic's own strict validator emits the
+        standard "input must be a tuple" error. This guards against
+        the helper silently accepting malformed JSON like ``42``.
+        """
+        with pytest.raises(ValidationError):
+            RouteConfig.model_validate({"id": "d", "kind": "direct", "allowed_exchanges": 42})
+
+    def test_allowed_exchanges_coerces_list_to_tuple(self) -> None:
+        """Spec — JSON ``list`` is coerced to ``tuple`` via BeforeValidator.
+
+        Operators write ``egress_pool`` as JSON; ``json.loads``
+        produces a Python ``list``. The StringSequence helper turns
+        that into the strict ``tuple[str, ...]`` field type so
+        Pydantic's strict=True mode accepts the input.
+        """
+        route = RouteConfig(
+            id="s",
+            kind="socks5",
+            proxy_url="socks5h://x:1",
+            allowed_exchanges=["walutomat"],
+        )
+        assert route.allowed_exchanges == ("walutomat",)
+
 
 class TestEgressPoolConfig:
     """Tests for the top-level EgressPoolConfig model."""
@@ -246,6 +284,29 @@ class TestEgressPoolConfig:
                 enabled=True,
                 on_all_quarantined="explode",
                 routes=[RouteConfig(id="d", kind="direct")],
+            )
+
+    def test_rejects_unknown_exchange_name_in_allowed_exchanges(self) -> None:
+        """Spec — typo'd exchange name in allowed_exchanges raises at construction.
+
+        ``allowed_exchanges`` values must be ``ExchangeEnum`` *values*
+        (e.g. ``"walutomat"``, not ``"WALUTOMAT"``). A typo like
+        ``"krakeen"`` would silently make the route unreachable for
+        any reserve() call, then fall back to direct. The validator
+        surfaces this at config-load time instead.
+        """
+        with pytest.raises(ValidationError, match="unknown exchange"):
+            EgressPoolConfig(
+                enabled=True,
+                routes=[
+                    RouteConfig(id="d", kind="direct", priority=100),
+                    RouteConfig(
+                        id="bad",
+                        kind="socks5",
+                        proxy_url="socks5h://x:1",
+                        allowed_exchanges=("krakeen",),
+                    ),
+                ],
             )
 
     def test_model_validate_accepts_dict_input(self) -> None:
