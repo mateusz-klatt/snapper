@@ -67,7 +67,35 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_equities_w
 
 _NOT_IMPLEMENTED_MSG = "Order execution not available for Kraken Equities (market data only)"
 _QUEUE_DRAIN_TIMEOUT = 0.1
-_QUEUE_MAX_SIZE = 10000
+_QUEUE_MAX_SIZE = 30000
+"""Per-channel producer queue cap.
+
+Tuned 2026-05-22 from 10000 → 30000 to absorb the ``snapshot=True``
+burst at subscribe time (187 instruments × 3 channels = ~561 frames in
+under 1s when Kraken WS delivers the initial state) plus reconnect
+storms after CloudFlare WS-proxy restarts. The consumer side (one
+async task per channel popping at ~56/s) cannot pop faster than
+``_process_tick`` allows (~17ms/tick including Pydantic build + ZMQ
+publish + instrument cache lookup); 30k buys ~9 minutes of head-room
+at the observed steady-state drop rate of 57/s before the original
+10k overflowed in ~3 minutes. The complementary change in this commit
+is bumping the WS server-side ``throttle`` from 1000ms to 5000ms which
+reduces sustained arrival from ~113/s to ~37/s — well within consumer
+capacity — so the bigger queue mostly serves the initial-snapshot
+window now, not steady state.
+"""
+
+_WS_THROTTLE_MS = 5000
+"""Kraken WS server-side throttle for ticker / trade subscriptions.
+
+Tuned 2026-05-22 from 1000ms → 5000ms. The server then batches updates
+per symbol into a 5-second window before forwarding, capping arrival
+at ~187 frames / 5s ≈ 37 frames/s for the full Equities universe.
+Below the consumer's ~56/s capacity → producer queue stays drained.
+Trade-off: tick freshness drops to <=5s — acceptable for Equities
+(slow-moving prices, no HFT clients), unacceptable for Kraken Spot
+(no throttle there).
+"""
 _WS_URL = "wss://ws-equities.kraken.com"
 _IAPI_BASE_URL = "https://iapi.kraken.com/api/internal/markets"
 _INSTRUMENTS_URL = f"{_IAPI_BASE_URL}/all/futures-contracts"
@@ -496,7 +524,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                 "channel": "ticker",
                 "symbol": ws_symbols,
                 "snapshot": True,
-                "throttle": 1000,
+                "throttle": _WS_THROTTLE_MS,
                 "asset_class": "futures_contract",
             }
         )
@@ -518,7 +546,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                             "channel": "ticker",
                             "symbol": ws_symbols,
                             "snapshot": True,
-                            "throttle": 1000,
+                            "throttle": _WS_THROTTLE_MS,
                             "asset_class": "futures_contract",
                         }
                     )
@@ -646,7 +674,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                 "channel": "trade",
                 "symbol": ws_symbols,
                 "snapshot": True,
-                "throttle": 1000,
+                "throttle": _WS_THROTTLE_MS,
                 "asset_class": "futures_contract",
             }
         )
@@ -668,7 +696,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                             "channel": "trade",
                             "symbol": ws_symbols,
                             "snapshot": True,
-                            "throttle": 1000,
+                            "throttle": _WS_THROTTLE_MS,
                             "asset_class": "futures_contract",
                         }
                     )
