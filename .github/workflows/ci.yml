@@ -69,7 +69,7 @@ jobs:
           sed -i 's/^SERVER_API_ONLY=.*/SERVER_API_ONLY=true/' .env
           mkdir -p data
           make docker-migrate-dev
-          make docker-run
+          docker compose up -d --no-deps snapper
 
       - name: Docker health check
         run: make server-check

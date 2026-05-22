@@ -27,12 +27,16 @@ Two categories of rules enforced on the snapper-egress service block:
          unprivileged even though it shares the image).
        - snapper service MUST NOT declare ``user:`` (inherits secure
          default ``USER snapper`` from the image).
+       - if snapper mounts SQLite data at ``/app/data``,
+         snapper-egress MUST mount the same target so it can read
+         the shared settings database.
 
 The script exits with code 1 if any rule is violated. Invoked by
 ``make check-egress-compose`` and (transitively) ``make check-all``.
 """
 
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
@@ -95,6 +99,9 @@ NET_ADMIN capability already granted. R7 of B'.6 v9.
 _REQUIRED_EGRESS_CAP: Final[str] = "NET_ADMIN"
 """Sidecar must have CAP_NET_ADMIN. Kernel WG via pyroute2 needs it."""
 
+_SQLITE_DATA_VOLUME_TARGET: Final[str] = "/app/data"
+"""Shared SQLite data directory target used by the monolith and sidecar."""
+
 _INTERPOLATION_MARKER: Final[str] = "${"
 """Compose variable-interpolation prefix.
 
@@ -155,6 +162,28 @@ def _check_service(service: dict[str, object], compose_path: Path) -> list[str]:
     return errors
 
 
+def _volume_target(volume: object) -> str | None:
+    """Return the container target path from a Compose volume entry."""
+    if isinstance(volume, str):
+        parts = volume.split(":")
+        if len(parts) >= 2:
+            return parts[1]
+        return None
+    if isinstance(volume, Mapping):
+        target = volume.get("target")
+        if isinstance(target, str):
+            return target
+    return None
+
+
+def _has_volume_target(service: dict[str, object], target: str) -> bool:
+    """Return whether ``service.volumes`` contains the requested target."""
+    volumes = service.get("volumes") or []
+    if not isinstance(volumes, list):
+        return False
+    return any(_volume_target(volume) == target for volume in volumes)
+
+
 def _check_unified_image_invariants(services: dict[str, object], compose_path: Path) -> list[str]:
     """Return errors for the B'.6 unified-image cross-service invariants.
 
@@ -211,6 +240,17 @@ def _check_unified_image_invariants(services: dict[str, object], compose_path: P
             f"{compose_path}: '{_EGRESS_SERVICE_NAME}.cap_add' must "
             f"include {_REQUIRED_EGRESS_CAP!r}, got {egress_caps!r}. "
             "Kernel WireGuard needs CAP_NET_ADMIN."
+        )
+    if _has_volume_target(monolith, _SQLITE_DATA_VOLUME_TARGET) and not _has_volume_target(
+        egress,
+        _SQLITE_DATA_VOLUME_TARGET,
+    ):
+        errors.append(
+            f"{compose_path}: '{_EGRESS_SERVICE_NAME}.volumes' must include "
+            f"a volume targeting {_SQLITE_DATA_VOLUME_TARGET!r} when "
+            f"'{_MONOLITH_SERVICE_NAME}.volumes' uses that target. The "
+            "sidecar reads the same SQLite settings database during "
+            "local/default deployments."
         )
     if monolith.get("cap_add"):
         errors.append(

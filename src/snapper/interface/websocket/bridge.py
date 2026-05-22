@@ -824,7 +824,7 @@ class ZmqWebSocketBridgeService:
                 as_of=orders_events_as_of,
             ):
                 return
-            if alerts_payload is not None and not await self._enforce_alerts_scope(
+            if alerts_payload is not None and not self._enforce_alerts_scope(
                 subscription=subscription,
                 topic=topic,
                 payload=alerts_payload,
@@ -928,7 +928,7 @@ class ZmqWebSocketBridgeService:
             return None
         return parsed
 
-    async def _enforce_alerts_scope(
+    def _enforce_alerts_scope(
         self,
         *,
         subscription: TopicSubscriptionModel,

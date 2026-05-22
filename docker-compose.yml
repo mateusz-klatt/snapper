@@ -26,6 +26,7 @@ services:
     sysctls:
       net.ipv4.conf.all.src_valid_mark: 1
     volumes:
+      - ./data:/app/data
       - /lib/modules:/lib/modules:ro
     networks:
       - snapper-internal

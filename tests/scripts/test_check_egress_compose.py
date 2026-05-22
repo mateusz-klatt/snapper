@@ -293,6 +293,134 @@ def test_unified_image_invariants_pass_on_correct_compose(tmp_path: Path) -> Non
     assert check_egress_compose.main(root=tmp_path) == 0
 
 
+def test_fails_when_sqlite_data_volume_not_shared_with_egress(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Spec — sidecar shares the monolith's SQLite data target.
+
+    Given snapper mounts ``./data`` at ``/app/data`` but snapper-egress
+        does not,
+    When main runs,
+    Then it returns 1 and names the missing sidecar volume target.
+    """
+    _write(
+        tmp_path / "docker-compose.yml",
+        """
+        services:
+          snapper:
+            image: klattm/snapper:latest
+            command: ["server"]
+            volumes:
+              - ./data:/app/data
+          snapper-egress:
+            image: klattm/snapper:latest
+            command: ["egress"]
+            user: "0:0"
+            cap_add:
+              - NET_ADMIN
+            expose:
+              - "8081"
+        """,
+    )
+    assert check_egress_compose.main(root=tmp_path) == 1
+    captured = capsys.readouterr()
+    assert "snapper-egress.volumes" in captured.err
+    assert "/app/data" in captured.err
+
+
+def test_passes_when_sqlite_data_volume_is_shared_with_egress(tmp_path: Path) -> None:
+    """Spec — matching ``/app/data`` targets satisfy the SQLite invariant.
+
+    Given both snapper and snapper-egress mount a volume at
+        ``/app/data``,
+    When main runs,
+    Then it returns 0.
+    """
+    _write(
+        tmp_path / "docker-compose.yml",
+        """
+        services:
+          snapper:
+            image: klattm/snapper:latest
+            command: ["server"]
+            volumes:
+              - ./data:/app/data
+          snapper-egress:
+            image: klattm/snapper:latest
+            command: ["egress"]
+            user: "0:0"
+            cap_add:
+              - NET_ADMIN
+            expose:
+              - "8081"
+            volumes:
+              - ./data:/app/data
+        """,
+    )
+    assert check_egress_compose.main(root=tmp_path) == 0
+
+
+def test_volume_target_handles_short_syntax_without_target() -> None:
+    """Spec — short volume syntax without ``:target`` has no target.
+
+    Given a named volume entry with no container target,
+    When _volume_target parses it,
+    Then it returns None.
+    """
+    assert check_egress_compose._volume_target("named-volume") is None
+
+
+def test_volume_target_handles_long_syntax_target() -> None:
+    """Spec — Compose long-syntax volume target is detected.
+
+    Given a long-syntax bind volume with target ``/app/data``,
+    When _volume_target parses it,
+    Then it returns the target path.
+    """
+    assert (
+        check_egress_compose._volume_target(
+            {
+                "type": "bind",
+                "source": "./data",
+                "target": "/app/data",
+            }
+        )
+        == "/app/data"
+    )
+
+
+def test_volume_target_handles_long_syntax_without_string_target() -> None:
+    """Spec — long-syntax volume without string target has no target.
+
+    Given a long-syntax volume with a non-string target,
+    When _volume_target parses it,
+    Then it returns None.
+    """
+    assert check_egress_compose._volume_target({"target": 123}) is None
+
+
+def test_volume_target_handles_unknown_volume_shape() -> None:
+    """Spec — unsupported volume entry shape has no target.
+
+    Given a volume entry that is neither string nor mapping,
+    When _volume_target parses it,
+    Then it returns None.
+    """
+    assert check_egress_compose._volume_target(123) is None
+
+
+def test_has_volume_target_ignores_non_list_volumes() -> None:
+    """Spec — malformed non-list ``volumes`` does not satisfy target checks.
+
+    Given a service whose ``volumes`` field is not a list,
+    When _has_volume_target checks for ``/app/data``,
+    Then it returns False.
+    """
+    service: dict[str, object] = {"volumes": {"target": "/app/data"}}
+    assert not check_egress_compose._has_volume_target(service, "/app/data")
+
+
 def test_fails_when_image_tags_differ(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Spec — different ``image:`` per service → exit 1.
 
