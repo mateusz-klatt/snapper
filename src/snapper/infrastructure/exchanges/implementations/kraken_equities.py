@@ -67,22 +67,39 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_equities_w
 
 _NOT_IMPLEMENTED_MSG = "Order execution not available for Kraken Equities (market data only)"
 _QUEUE_DRAIN_TIMEOUT = 0.1
-_QUEUE_MAX_SIZE = 30000
-"""Per-channel producer queue cap.
+_TICK_QUEUE_MAX_SIZE = 30000
+"""Tick (ticker) producer queue cap.
 
-Tuned 2026-05-22 from 10000 → 30000 to absorb the ``snapshot=True``
-burst at subscribe time (187 instruments × 3 channels = ~561 frames in
-under 1s when Kraken WS delivers the initial state) plus reconnect
-storms after CloudFlare WS-proxy restarts. The consumer side (one
-async task per channel popping at ~56/s) cannot pop faster than
-``_process_tick`` allows (~17ms/tick including Pydantic build + ZMQ
-publish + instrument cache lookup); 30k buys ~9 minutes of head-room
-at the observed steady-state drop rate of 57/s before the original
-10k overflowed in ~3 minutes. The complementary change in this commit
-is bumping the WS server-side ``throttle`` from 1000ms to 5000ms which
-reduces sustained arrival from ~113/s to ~37/s — well within consumer
-capacity — so the bigger queue mostly serves the initial-snapshot
-window now, not steady state.
+Tuned 2026-05-22 from the shared 10000 → 30000. Tickers benefit
+materially from the server-side ``_WS_THROTTLE_MS`` parameter (one
+update per symbol per throttle-window), so 30k is plenty for the
+snapshot=True burst at subscribe time (178 instruments × 1 frame in
+<1s) plus reconnect storms. Post-deploy verified zero ticker drops.
+"""
+
+_TRADE_QUEUE_MAX_SIZE = 100000
+"""Trade producer queue cap.
+
+Tuned 2026-05-22 from the shared 10000 → 100000 — much bigger than
+the tick queue. Empirically the Kraken WS ``throttle`` parameter
+does NOT effectively limit trade-channel flow (verified post 5000ms
+throttle deploy: tickers stopped dropping but trades continued at
+49/s sustained drop rate over 30min). Reasonable hypothesis: Kraken
+batches trades into time windows but each batch may still carry
+many trade events per symbol — so the per-symbol rate cap doesn't
+translate into a global frame rate cap the same way it does for
+tickers. Pending deeper investigation (Phase B'.8 candidate), the
+100k cap buys ~30min of head-room before steady-state overflow,
+which covers a full Cloudflare WS-proxy restart cycle. Trades feed
+``TradeCandleBuilder`` (candle aggregation); some drop is tolerable
+for candle accuracy without affecting real-time ticker pricing.
+"""
+
+_CANDLE_QUEUE_MAX_SIZE = 30000
+"""Candle producer queue cap (kept at the tick-queue size).
+
+Candles are derived/aggregated at lower frequency than raw trades;
+the same 30k headroom that works for tickers works for candles.
 """
 
 _WS_THROTTLE_MS = 5000
@@ -199,9 +216,11 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         """
         super().__init__(repository=repository, exchange_name=ExchangeEnum.KRAKEN_EQUITIES)
         self._ws_client: SpotWSClient | None = None
-        self._tick_queue: asyncio.Queue[TickerUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
-        self._trade_queue: asyncio.Queue[TradeUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
-        self._candle_queue: asyncio.Queue[CandleUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+        self._tick_queue: asyncio.Queue[TickerUpdate] = asyncio.Queue(maxsize=_TICK_QUEUE_MAX_SIZE)
+        self._trade_queue: asyncio.Queue[TradeUpdate] = asyncio.Queue(maxsize=_TRADE_QUEUE_MAX_SIZE)
+        self._candle_queue: asyncio.Queue[CandleUpdate] = asyncio.Queue(
+            maxsize=_CANDLE_QUEUE_MAX_SIZE
+        )
         self._candle_builder = TradeCandleBuilder(interval_seconds=60)
         self._candle_aggregator_task: asyncio.Task[None] | None = None
 
