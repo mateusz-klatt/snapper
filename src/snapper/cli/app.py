@@ -44,6 +44,7 @@ import json as json_mod
 import os
 import signal
 import threading
+from collections.abc import Callable
 from datetime import UTC
 from datetime import date as date_type
 from datetime import datetime
@@ -121,7 +122,6 @@ from snapper.data.repository import where_active_now
 from snapper.data.repository_types import BacktestResultInsertRow
 from snapper.data.repository_types import BacktestRunRow
 from snapper.data.seed.loader import run_seed
-from snapper.egress.__main__ import main as _egress_main
 from snapper.infrastructure.market_data.kraken import run_snapshot_update
 from snapper.infrastructure.market_data.kraken_equities import run_kraken_equities_snapshot_update
 from snapper.infrastructure.market_data.kraken_futures import run_kraken_futures_snapshot_update
@@ -144,6 +144,13 @@ from snapper.server.app import create_app
 from snapper.strategies.cointegration import CointegrationPairs
 from snapper.strategies.macd import MACDCrossover
 from snapper.strategies.rsi import RSIReversion
+
+_egress_main: Callable[[list[str] | None], int] | None = None
+_egress_import_error: ImportError | None = None
+try:
+    from snapper.egress.__main__ import main as _egress_main
+except ImportError as exc:
+    _egress_import_error = exc
 
 _REGISTERED_STRATEGIES = (RSIReversion, MACDCrossover, CointegrationPairs)
 
@@ -2030,4 +2037,11 @@ def egress(ctx: typer.Context) -> None:
             return code so Typer propagates it as the process exit
             code. A bare ``return rc`` would NOT propagate.
     """
+    if _egress_main is None:
+        typer.echo(
+            f"snapper egress is unavailable in this environment: {_egress_import_error}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     raise typer.Exit(code=_egress_main(list(ctx.args)))

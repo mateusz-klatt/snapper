@@ -1,7 +1,10 @@
 """Tests for Snapper CLI application."""
 
 import asyncio
+import builtins
+import importlib
 import signal
+import sys
 import threading
 from collections.abc import Callable
 from datetime import UTC
@@ -4355,3 +4358,64 @@ class TestEgressCommand:
         result = cli_runner.invoke(app_module.app, ["egress"])
 
         assert result.exit_code == 0
+
+    def test_cli_module_import_tolerates_missing_egress_dependency(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spec — CLI import survives when the egress dependency is unavailable.
+
+        Given importing ``snapper.egress.__main__`` raises ``ImportError``,
+        When ``snapper.cli.app`` is imported fresh,
+        Then the module still imports and stores the error for deferred
+            reporting by the ``egress`` command path.
+        """
+        real_import = builtins.__import__
+        original_module = sys.modules.get("snapper.cli.app")
+        sys.modules.pop("snapper.cli.app", None)
+        sys.modules.pop("snapper.egress.__main__", None)
+
+        def guarded_import(
+            name: str,
+            globals_dict: dict[str, object] | None = None,
+            locals_dict: dict[str, object] | None = None,
+            fromlist: tuple[str, ...] = (),
+            level: int = 0,
+        ) -> object:
+            if name == "snapper.egress.__main__":
+                raise ImportError("No module named 'fcntl'")
+            return real_import(name, globals_dict, locals_dict, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+        try:
+            imported_module = importlib.import_module("snapper.cli.app")
+        finally:
+            if original_module is None:
+                sys.modules.pop("snapper.cli.app", None)
+            else:
+                sys.modules["snapper.cli.app"] = original_module
+
+        assert imported_module._egress_main is None
+        assert isinstance(imported_module._egress_import_error, ImportError)
+
+    def test_egress_command_reports_unavailable_dependency(
+        self, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spec — egress command reports deferred import failure cleanly.
+
+        Given the optional egress import failed during module import,
+        When the operator invokes ``snapper egress``,
+        Then the CLI prints the stored import error and exits with code 1.
+        """
+        monkeypatch.setattr(app_module, "_egress_main", None)
+        monkeypatch.setattr(
+            app_module,
+            "_egress_import_error",
+            ImportError("No module named 'fcntl'"),
+        )
+
+        result = cli_runner.invoke(app_module.app, ["egress"])
+
+        assert result.exit_code == 1
+        assert "snapper egress is unavailable in this environment" in result.output
+        assert "No module named 'fcntl'" in result.output
