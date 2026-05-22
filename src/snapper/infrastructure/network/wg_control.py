@@ -21,10 +21,11 @@ routing).
 
 Operational notes:
 
-* ``probe_kernel_wireguard`` is called once at sidecar startup. It
-  performs an actual ``ip link add type wireguard`` round-trip and
-  exits with a clear error on either missing kernel module (EOPNOTSUPP)
-  or missing NET_ADMIN capability (EPERM).
+* ``check_kernel_wireguard`` performs an actual ``ip link add type
+  wireguard`` round-trip and returns a clear failure reason on either
+  missing kernel module (EOPNOTSUPP) or missing NET_ADMIN capability
+  (EPERM). ``probe_kernel_wireguard`` is the CLI-facing wrapper that
+  exits on those failures.
 * ``bring_up`` is idempotent — it always calls ``bring_down`` first
   to clean stale state from a previous sidecar crash. ``bring_down``
   cleans by routing-table id (not by address) so a rotated tunnel IP
@@ -82,21 +83,25 @@ _MAX_TUNNEL_INDEX: Final[int] = 999
 inside the reserved range ``[5000, 5999]``."""
 
 
-def probe_kernel_wireguard() -> None:
-    """Active round-trip probe for kernel WireGuard + NET_ADMIN availability.
+def check_kernel_wireguard() -> str | None:
+    """Return a failure reason when kernel WireGuard or NET_ADMIN is unavailable.
 
     Performs an ``ip link add type wireguard`` followed by ``ip link
     del`` to verify the kernel module is loaded AND the sidecar
-    container has the capabilities to manipulate it. Calls
-    ``sys.exit(1)`` with a clear log line on either EOPNOTSUPP
-    (kernel module missing) or EPERM (NET_ADMIN missing). Any
-    other ``NetlinkError`` propagates so the operator sees the
-    underlying cause.
+    container has the capabilities to manipulate it. Returns a clear
+    reason on either EOPNOTSUPP (kernel module missing) or EPERM
+    (NET_ADMIN missing). Any other ``NetlinkError`` propagates so the
+    operator sees the underlying cause.
 
     Tolerates a stale ``wg-probe-snapper`` interface from a previous
     crashed run: the probe deletes any pre-existing interface of that
     name before the create attempt so EEXIST cannot mask the real
     state of the kernel module.
+
+    Returns:
+        ``None`` when the kernel round-trip succeeds; otherwise a
+        human-readable failure reason for expected operator-fixable
+        probe failures.
     """
     ipr = IPRoute()
     try:
@@ -105,23 +110,31 @@ def probe_kernel_wireguard() -> None:
             ipr.link("add", ifname=_PROBE_INTERFACE_NAME, kind="wireguard")
         except NetlinkError as exc:
             if exc.code == errno.EOPNOTSUPP:
-                logger.error(
-                    "wg_control: kernel WireGuard not available — "
+                return (
+                    "kernel WireGuard not available — "
                     "run `modprobe wireguard` on the Docker host"
                 )
-                sys.exit(1)
             if exc.code == errno.EPERM:
-                logger.error(
-                    "wg_control: snapper-egress missing NET_ADMIN "
-                    "capability — check Compose cap_add: [NET_ADMIN]"
+                return (
+                    "snapper-egress missing NET_ADMIN capability — "
+                    "check Compose cap_add: [NET_ADMIN]"
                 )
-                sys.exit(1)
             raise
         idx = ipr.link_lookup(ifname=_PROBE_INTERFACE_NAME)
         if idx:
             ipr.link("del", index=idx[0])
     finally:
         ipr.close()
+    return None
+
+
+def probe_kernel_wireguard() -> None:
+    """Exit with a clear log line when the active WireGuard probe fails."""
+    failure_reason = check_kernel_wireguard()
+    if failure_reason is None:
+        return
+    logger.error("wg_control: {}", failure_reason)
+    sys.exit(1)
 
 
 def _delete_probe_if_present(ipr: IPRoute) -> None:

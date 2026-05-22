@@ -5,7 +5,7 @@ SC.4 of ``proprietary/plans/plan_2026_05_21_snapper_egress_sidecar.md``.
 Ties together the per-tunnel pieces shipped in earlier slices:
 
 * SC.0 — ``Socks5Server`` (per-tunnel listener bound to the WG IP).
-* SC.1 — ``wg_control.probe_kernel_wireguard`` (runtime probe when
+* SC.1 — ``wg_control.check_kernel_wireguard`` (runtime probe when
   tunnels are declared) and ``wg_control.bring_up`` / ``bring_down``
   (per-tunnel WireGuard interface + source-based routing).
 * SC.2 — ``load_declared_tunnels(service)`` (settings → validated
@@ -189,16 +189,16 @@ async def _load_declared_tunnels_after_kernel_probe(
 async def _probe_kernel_wireguard_for_loaded_tunnels() -> str | None:
     """Return a failure reason when the active kernel WireGuard probe fails."""
     try:
-        await asyncio.to_thread(wg_control.probe_kernel_wireguard)
-    except SystemExit as exc:
-        logger.error(
-            "sidecar: kernel WireGuard probe exited before tunnel bring-up (code={})",
-            exc.code,
-        )
-        return f"kernel_probe: exited with code {exc.code}"
+        failure_reason = await asyncio.to_thread(wg_control.check_kernel_wireguard)
     except Exception as exc:
         logger.exception("sidecar: kernel WireGuard probe failed before tunnel bring-up")
         return f"kernel_probe: {exc}"
+    if failure_reason is not None:
+        logger.error(
+            "sidecar: kernel WireGuard probe failed before tunnel bring-up: {}",
+            failure_reason,
+        )
+        return f"kernel_probe: {failure_reason}"
     return None
 
 
