@@ -6,6 +6,7 @@ is async + driven by a mocked ``SettingsService`` so the tests are
 hermetic (no DB, no encryption setup needed).
 """
 
+import dataclasses
 import json
 from typing import Any
 from unittest.mock import AsyncMock
@@ -595,8 +596,6 @@ class TestLoadResultDataclass:
         When a field is reassigned,
         Then dataclasses.FrozenInstanceError fires.
         """
-        import dataclasses
-
         d = TunnelDescriptor(id="eset-de1", **_valid_descriptor_dict())
         loaded = LoadedTunnel(descriptor=d, private_key="K", preshared_key=None)
         with pytest.raises(dataclasses.FrozenInstanceError):
