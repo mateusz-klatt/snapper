@@ -945,7 +945,7 @@ class ZmqWebSocketBridgeService:
         principal = WebSocketAuthManager.get_instance().get_authenticated_user(
             subscription.websocket
         )
-        return await enforce_alerts_scope(
+        return enforce_alerts_scope(
             topic=topic,
             connection_principal=principal,
             payload=payload,

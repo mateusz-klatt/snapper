@@ -194,181 +194,121 @@ deadline is recorded on ``RouteState.last_close_1015_at``.
 """
 
 
-def _wrap_connect_factory(original_connect: Any) -> Any:
-    """Return a connect-shaped factory that consults the egress pool and 429s.
+class _ConnectShim:
+    """Async context manager wrapping the SDK's ``connect(...)`` call.
 
-    ``websockets.asyncio.client.connect`` is an async context manager
-    factory. To preserve that API the factory returns a ``_ConnectShim``
-    exposing ``__aenter__`` / ``__aexit__`` that delegates to the original
-    context manager.
+    Reservation lifecycle for a single handshake:
 
-    The shim integrates with two distinct facilities:
-
-    * **Phase A.1 (Retry-After honoring)** — when the egress pool is
-      disabled (``get_egress_pool() is None``), the shim runs the
-      original Phase A behaviour byte-for-byte: an HTTP 429 stashes
-      the Retry-After deadline in ``_PENDING_RETRY_AFTER_S`` keyed by
-      ``_CURRENT_CONNECTOR_ID`` so ``_patched_get_reconnect_wait``
-      consumes it on the next reconnect.
-    * **Phase B'.1 (route-scoped quarantine)** — when the pool is
-      enabled, ``__init__`` reserves a route via
-      ``pool.reserve(exchange="kraken", purpose="websocket")``, merges
-      the reservation's ``websocket_kwargs()`` (``{"proxy": None}``
-      for direct, ``{"proxy": "socks5h://..."}`` for SOCKS5) into the
-      caller's kwargs, and on 429 calls
-      ``reservation.quarantine(retry_after_s, reason="http-429")``
-      WITHOUT touching the global stash. The pool's quarantine state
-      becomes the source of truth for retry timing so a healthy
-      alternate route can be picked on the very next handshake
-      (~1 s) instead of waiting the full Retry-After. The
-      ``__aexit__`` finally path also quarantines the route on
-      Cloudflare close-frame 1015 (``reason="close-1015"``).
-
-    The reservation is released in three sites — synchronous-raise
-    inside ``__init__``, any exception in ``__aenter__``, and finally
-    in ``__aexit__``. ``EgressReservation.release()`` is idempotent
-    so the multi-site dispatch cannot double-decrement.
-
-    Args:
-        original_connect: The ``websockets.asyncio.client.connect``
-            callable to delegate to.
-
-    Returns:
-        A class with the same constructor signature suitable for
-        rebinding as ``kraken.spot.websocket.connectors.connect``.
+    1. ``__init__`` (sync): reserve a route from the pool when
+       enabled, merge proxy kwarg, then build the underlying
+       ``original_connect(...)`` context manager. Synchronous
+       failure of ``original_connect`` releases the reservation.
+    2. ``__aenter__``: opens the handshake. On HTTP 429,
+       quarantine the active route (pool path) or stash the
+       Retry-After (legacy path), release, re-raise.
+    3. Caller's ``async with`` body runs.
+    4. ``__aexit__``: if the exit carries
+       ``ConnectionClosed(rcvd.code=1015)`` (Cloudflare
+       close-after-handshake), quarantine the route with
+       ``reason="close-1015"``. Other close codes do NOT
+       quarantine — those are Phase A.3's job (1008/1011/1012/1013
+       → per-close-code backoff, not egress-route fault).
+       Then release the reservation in ``finally``.
     """
 
-    class _ConnectShim:
-        """Async context manager wrapping the SDK's ``connect(...)`` call.
-
-        Reservation lifecycle for a single handshake:
-
-        1. ``__init__`` (sync): reserve a route from the pool when
-           enabled, merge proxy kwarg, then build the underlying
-           ``original_connect(...)`` context manager. Synchronous
-           failure of ``original_connect`` releases the reservation.
-        2. ``__aenter__``: opens the handshake. On HTTP 429,
-           quarantine the active route (pool path) or stash the
-           Retry-After (legacy path), release, re-raise.
-        3. Caller's ``async with`` body runs.
-        4. ``__aexit__``: if the exit carries
-           ``ConnectionClosed(rcvd.code=1015)`` (Cloudflare
-           close-after-handshake), quarantine the route with
-           ``reason="close-1015"``. Other close codes do NOT
-           quarantine — those are Phase A.3's job (1008/1011/1012/1013
-           → per-close-code backoff, not egress-route fault).
-           Then release the reservation in ``finally``.
-        """
-
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            self._reservation: EgressReservation | None = None
-            pool = get_egress_pool()
-            if pool is not None and pool.size() > 0:
-                self._reservation = pool.reserve(
-                    exchange="kraken",
-                    purpose="websocket",
-                )
-                kwargs = {**kwargs, **self._reservation.websocket_kwargs()}
-            try:
-                self._cm = original_connect(*args, **kwargs)
-            except BaseException:
-                if self._reservation is not None:
-                    self._reservation.release()
-                    self._reservation = None
-                raise
-
-        async def __aenter__(self) -> Any:
-            try:
-                return await self._cm.__aenter__()
-            except InvalidStatus as exc:
-                self._handle_handshake_429(exc)
-                if self._reservation is not None:
-                    self._reservation.release()
-                    self._reservation = None
-                raise
-            except BaseException:
-                if self._reservation is not None:
-                    self._reservation.release()
-                    self._reservation = None
-                raise
-
-        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
-            try:
-                return await self._cm.__aexit__(exc_type, exc, tb)
-            finally:
-                self._maybe_quarantine_on_close(exc)
-                if self._reservation is not None:
-                    self._reservation.release()
-                    self._reservation = None
-
-        def _handle_handshake_429(self, exc: InvalidStatus) -> None:
-            """Record Retry-After on 429 — route-scoped or legacy global.
-
-            Branches on ``self._reservation``:
-
-            * When non-None (pool enabled) → quarantine the active
-              route with ``reason="http-429"``. The legacy global
-              ``_PENDING_RETRY_AFTER_S`` stash is NOT written so the
-              SDK's next reconnect can pick a healthy alternate route
-              in ~1 s instead of waiting full Retry-After (Phase B'
-              acceptance criterion).
-            * When None (pool disabled) → write the legacy stash
-              keyed by ``_CURRENT_CONNECTOR_ID``. Preserves Phase A.1
-              byte-for-byte so the disabled-pool deployment is
-              unchanged.
-            """
-            response = getattr(exc, "response", None)
-            if response is None or getattr(response, "status_code", None) != 429:
-                return
-            retry_after = _parse_retry_after(getattr(response, "headers", None))
-            if retry_after is None:
-                return
+    def __init__(self, original_connect: Any, *args: Any, **kwargs: Any) -> None:
+        self._reservation: EgressReservation | None = None
+        pool = get_egress_pool()
+        if pool is not None and pool.size() > 0:
+            self._reservation = pool.reserve(
+                exchange="kraken",
+                purpose="websocket",
+            )
+            kwargs = {**kwargs, **self._reservation.websocket_kwargs()}
+        try:
+            self._cm = original_connect(*args, **kwargs)
+        except BaseException:
             if self._reservation is not None:
-                logger.warning(
-                    "kraken WS handshake 429 on route '{}'; "
-                    "Retry-After={}s (pool-scoped quarantine)",
-                    self._reservation.route_id,
-                    retry_after,
-                )
-                self._reservation.quarantine(retry_after, reason="http-429")
-                return
-            connector_id = _CURRENT_CONNECTOR_ID.get()
-            if connector_id is None:
-                return
-            logger.warning(
-                "kraken WS handshake 429; Retry-After={}s (connector={})",
-                retry_after,
-                connector_id,
-            )
-            _PENDING_RETRY_AFTER_S[connector_id] = retry_after
+                self._reservation.release()
+                self._reservation = None
+            raise
 
-        def _maybe_quarantine_on_close(self, exc: BaseException | None) -> None:
-            """Quarantine the active route on Cloudflare close-frame 1015.
+    async def __aenter__(self) -> Any:
+        try:
+            return await self._cm.__aenter__()
+        except InvalidStatus as exc:
+            self._handle_handshake_429(exc)
+            if self._reservation is not None:
+                self._reservation.release()
+                self._reservation = None
+            raise
+        except BaseException:
+            if self._reservation is not None:
+                self._reservation.release()
+                self._reservation = None
+            raise
 
-            Reads the close frame from ``ConnectionClosed.rcvd.code``.
-            Only acts when the pool is enabled (reservation is
-            non-None) and the code is 1015 — other Kraken-specific
-            close codes (1008/1011/1012/1013) are handled by Phase
-            A.3's per-close-code backoff in
-            ``_patched_get_reconnect_wait`` and would only spuriously
-            quarantine the route here.
-            """
-            if self._reservation is None:
-                return
-            if not isinstance(exc, ConnectionClosed):
-                return
-            rcvd = getattr(exc, "rcvd", None)
-            code = getattr(rcvd, "code", None)
-            if code != 1015:
-                return
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> Any:
+        try:
+            return await self._cm.__aexit__(exc_type, exc, tb)
+        finally:
+            self._maybe_quarantine_on_close(exc)
+            if self._reservation is not None:
+                self._reservation.release()
+                self._reservation = None
+
+    def _handle_handshake_429(self, exc: InvalidStatus) -> None:
+        """Record Retry-After on 429 — route-scoped or legacy global."""
+        response = getattr(exc, "response", None)
+        if response is None or getattr(response, "status_code", None) != 429:
+            return
+        retry_after = _parse_retry_after(getattr(response, "headers", None))
+        if retry_after is None:
+            return
+        if self._reservation is not None:
             logger.warning(
-                "kraken WS close 1015 on route '{}'; quarantining for {}s",
+                "kraken WS handshake 429 on route '{}'; "
+                "Retry-After={}s (pool-scoped quarantine)",
                 self._reservation.route_id,
-                _CLOSE_1015_QUARANTINE_S,
+                retry_after,
             )
-            self._reservation.quarantine(_CLOSE_1015_QUARANTINE_S, reason="close-1015")
+            self._reservation.quarantine(retry_after, reason="http-429")
+            return
+        connector_id = _CURRENT_CONNECTOR_ID.get()
+        if connector_id is None:
+            return
+        logger.warning(
+            "kraken WS handshake 429; Retry-After={}s (connector={})",
+            retry_after,
+            connector_id,
+        )
+        _PENDING_RETRY_AFTER_S[connector_id] = retry_after
 
-    return _ConnectShim
+    def _maybe_quarantine_on_close(self, exc: BaseException | None) -> None:
+        """Quarantine the active route on Cloudflare close-frame 1015."""
+        if self._reservation is None:
+            return
+        if not isinstance(exc, ConnectionClosed):
+            return
+        rcvd = getattr(exc, "rcvd", None)
+        code = getattr(rcvd, "code", None)
+        if code != 1015:
+            return
+        logger.warning(
+            "kraken WS close 1015 on route '{}'; quarantining for {}s",
+            self._reservation.route_id,
+            _CLOSE_1015_QUARANTINE_S,
+        )
+        self._reservation.quarantine(_CLOSE_1015_QUARANTINE_S, reason="close-1015")
+
+
+def _wrap_connect_factory(original_connect: Any) -> Any:
+    """Return a connect-shaped factory that consults the egress pool and 429s."""
+
+    def _connect_shim(*args: Any, **kwargs: Any) -> _ConnectShim:
+        return _ConnectShim(original_connect, *args, **kwargs)
+
+    return _connect_shim
 
 
 async def _patched_run(self: ConnectSpotWebsocketBase, event: asyncio.Event) -> None:
@@ -458,15 +398,14 @@ def _patched_get_reconnect_wait(self: ConnectSpotWebsocketBase, attempts: int) -
     """
     connector_id = id(self)
     pool = get_egress_pool()
-    if pool is None:
-        if connector_id in _PENDING_RETRY_AFTER_S:
-            retry_after = _PENDING_RETRY_AFTER_S.pop(connector_id)
-            logger.info(
-                "kraken WS honoring Retry-After: sleeping {}s (connector={})",
-                retry_after,
-                connector_id,
-            )
-            return retry_after
+    if pool is None and connector_id in _PENDING_RETRY_AFTER_S:
+        retry_after = _PENDING_RETRY_AFTER_S.pop(connector_id)
+        logger.info(
+            "kraken WS honoring Retry-After: sleeping {}s (connector={})",
+            retry_after,
+            connector_id,
+        )
+        return retry_after
     last_code = _LAST_CLOSE_CODE.pop(connector_id, None)
     if last_code is not None and last_code in _CLOSE_CODE_BACKOFF_S:
         wait = _CLOSE_CODE_BACKOFF_S[last_code]

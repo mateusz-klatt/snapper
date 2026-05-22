@@ -31,7 +31,7 @@ from collections.abc import Sequence
 _SUPPORTED_SPEC_RE: re.Pattern[str] = re.compile(r"%(@|lld)")
 """Matches the two specs used by the alerts.* catalog today."""
 
-_ANY_PERCENT_RE: re.Pattern[str] = re.compile(r"%[^@lld%]?")
+_ANY_PERCENT_RE: re.Pattern[str] = re.compile(r"%[^@ld%]?")
 """Sentinel for unsupported specs.
 
 Applied AFTER stripping the supported set; any remaining ``%X`` means

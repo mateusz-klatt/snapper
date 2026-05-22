@@ -188,6 +188,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         super().__init__(symbols)
         self._reconnect_timestamps: deque[float] = deque(maxlen=_RECONNECT_LIMIT * 2)
         self._restart_lock = asyncio.Lock()
+        self._force_ws_restart_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         """Start the publisher within a connector-registration context.
@@ -228,7 +229,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
                 _RECONNECT_WINDOW_S,
             )
             self._reconnect_timestamps.clear()
-            asyncio.create_task(self._force_ws_restart())
+            self._force_ws_restart_task = asyncio.create_task(self._force_ws_restart())
 
     async def _force_ws_restart(self) -> None:
         """Tear down the WS client and re-establish via existing lifecycle.

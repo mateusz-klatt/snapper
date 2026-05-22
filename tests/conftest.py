@@ -42,6 +42,7 @@ import socket
 import sqlite3
 import sys
 import tracemalloc
+import types
 import weakref
 from collections.abc import AsyncGenerator
 from collections.abc import Generator
@@ -78,6 +79,57 @@ from snapper.infrastructure.security.encryption import SettingsEncryptionService
 from snapper.infrastructure.symbols.mapper import CapabilityInfo
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.server.rate_limiting import limiter
+
+
+def _install_windows_pyroute2_stub() -> None:
+    """Install a minimal pyroute2 import shim for Windows test collection.
+
+    The snapper-egress unit tests mock every kernel-facing pyroute2
+    handle, but importing pyroute2 itself pulls in the POSIX-only
+    ``fcntl`` module on Windows. This shim preserves the import surface
+    those tests need while making accidental runtime use fail loudly.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        __import__("pyroute2")
+    except ModuleNotFoundError as exc:
+        if exc.name != "fcntl":
+            raise
+    else:
+        return
+
+    class _StubNetlinkError(Exception):
+        """Small replacement for pyroute2.netlink.exceptions.NetlinkError."""
+
+        def __init__(self, code: int) -> None:
+            """Store the numeric netlink errno used by wg_control."""
+            super().__init__(code)
+            self.code = code
+
+    class _UnavailablePyroute2Handle:
+        """Failing stand-in for unpatched pyroute2 handles on Windows."""
+
+        def __init__(self) -> None:
+            """Raise if a test accidentally reaches the real handle path."""
+            raise RuntimeError("pyroute2 kernel handles are unavailable on Windows")
+
+    pyroute2_module = types.ModuleType("pyroute2")
+    netlink_module = types.ModuleType("pyroute2.netlink")
+    exceptions_module = types.ModuleType("pyroute2.netlink.exceptions")
+
+    pyroute2_module.__dict__["IPRoute"] = _UnavailablePyroute2Handle
+    pyroute2_module.__dict__["WireGuard"] = _UnavailablePyroute2Handle
+    pyroute2_module.__dict__["netlink"] = netlink_module
+    netlink_module.__dict__["exceptions"] = exceptions_module
+    exceptions_module.__dict__["NetlinkError"] = _StubNetlinkError
+
+    sys.modules["pyroute2"] = pyroute2_module
+    sys.modules["pyroute2.netlink"] = netlink_module
+    sys.modules["pyroute2.netlink.exceptions"] = exceptions_module
+
+
+_install_windows_pyroute2_stub()
 
 _ORIGINAL_SQLALCHEMY_CREATE_ALL = SQLAlchemyRepository.create_all
 _ORIGINAL_DATABASE_CREATE_ALL = DatabaseRepository.create_all

@@ -500,8 +500,7 @@ async def test_orders_events_default_as_of_uses_datetime_now_utc() -> None:
     assert before <= list_mock.await_args.kwargs["as_of"] <= after
 
 
-@pytest.mark.asyncio
-async def test_alerts_passes_through_non_alerts_topic() -> None:
+def test_alerts_passes_through_non_alerts_topic() -> None:
     """Non-``alerts.*`` topics short-circuit to True.
 
     Given: A non-alerts topic (e.g. ``market.kraken.BTC-USD.tick``)
@@ -511,30 +510,28 @@ async def test_alerts_passes_through_non_alerts_topic() -> None:
     Then: Returns True — the filter only owns the alerts family and
         must not spuriously drop frames belonging to other categories.
     """
-    assert await enforce_alerts_scope(
+    assert enforce_alerts_scope(
         topic="market.kraken.BTC-USD.tick",
         connection_principal=_viewer_principal(user_public_id="user-X"),
         payload={"user_public_id": "user-Y"},
     )
 
 
-@pytest.mark.asyncio
-async def test_alerts_drops_when_principal_missing() -> None:
+def test_alerts_drops_when_principal_missing() -> None:
     """No frame leaks to an un-authenticated socket.
 
     Given: A WS connection without an authenticated principal,
     When: The alerts scope filter is invoked,
     Then: Returns False so the bridge drops the frame.
     """
-    assert not await enforce_alerts_scope(
+    assert not enforce_alerts_scope(
         topic="alerts.user-X.order_fill_full",
         connection_principal=None,
         payload={"user_public_id": "user-X"},
     )
 
 
-@pytest.mark.asyncio
-async def test_alerts_admin_bypasses_user_match_check() -> None:
+def test_alerts_admin_bypasses_user_match_check() -> None:
     """ADMIN sees every user's alerts by contract — mirrors REST.
 
     Given: An ADMIN principal whose ``user_public_id`` differs from
@@ -542,15 +539,14 @@ async def test_alerts_admin_bypasses_user_match_check() -> None:
     When: The alerts scope filter is invoked,
     Then: Returns True without inspecting the payload mismatch.
     """
-    assert await enforce_alerts_scope(
+    assert enforce_alerts_scope(
         topic="alerts.user-X.order_fill_full",
         connection_principal=_admin_principal(),
         payload={"user_public_id": "user-X"},
     )
 
 
-@pytest.mark.asyncio
-async def test_alerts_drops_when_payload_user_field_missing() -> None:
+def test_alerts_drops_when_payload_user_field_missing() -> None:
     """Belt-and-braces fail-closed when the parser layer is bypassed.
 
     Given: A non-ADMIN principal + a payload missing ``user_public_id``,
@@ -558,15 +554,14 @@ async def test_alerts_drops_when_payload_user_field_missing() -> None:
     Then: Returns False — the bridge's parser should have already
         dropped this frame; the filter is the defensive last gate.
     """
-    assert not await enforce_alerts_scope(
+    assert not enforce_alerts_scope(
         topic="alerts.user-X.order_fill_full",
         connection_principal=_viewer_principal(user_public_id="user-X"),
         payload={},
     )
 
 
-@pytest.mark.asyncio
-async def test_alerts_drops_when_payload_user_field_non_string() -> None:
+def test_alerts_drops_when_payload_user_field_non_string() -> None:
     """Non-string ``user_public_id`` (e.g. ``None``) fails-closed.
 
     Given: A non-ADMIN principal + a payload whose ``user_public_id``
@@ -574,37 +569,35 @@ async def test_alerts_drops_when_payload_user_field_non_string() -> None:
     When: The alerts scope filter is invoked,
     Then: Returns False.
     """
-    assert not await enforce_alerts_scope(
+    assert not enforce_alerts_scope(
         topic="alerts.user-X.order_fill_full",
         connection_principal=_viewer_principal(user_public_id="user-X"),
         payload={"user_public_id": None},
     )
 
 
-@pytest.mark.asyncio
-async def test_alerts_forwards_when_user_public_id_matches() -> None:
+def test_alerts_forwards_when_user_public_id_matches() -> None:
     """Matching ``user_public_id`` forwards the frame.
 
     Given: A VIEWER whose ``user_public_id`` equals the frame's,
     When: The alerts scope filter is invoked,
     Then: Returns True so the frame reaches the subscriber.
     """
-    assert await enforce_alerts_scope(
+    assert enforce_alerts_scope(
         topic="alerts.user-X.order_fill_full",
         connection_principal=_viewer_principal(user_public_id="user-X"),
         payload={"user_public_id": "user-X"},
     )
 
 
-@pytest.mark.asyncio
-async def test_alerts_drops_when_user_public_id_mismatches() -> None:
+def test_alerts_drops_when_user_public_id_mismatches() -> None:
     """Mismatched ``user_public_id`` drops the frame — no cross-user leak.
 
     Given: A VIEWER whose ``user_public_id`` differs from the frame's,
     When: The alerts scope filter is invoked,
     Then: Returns False so the bridge drops the frame.
     """
-    assert not await enforce_alerts_scope(
+    assert not enforce_alerts_scope(
         topic="alerts.user-X.order_fill_full",
         connection_principal=_viewer_principal(user_public_id="user-Y"),
         payload={"user_public_id": "user-X"},

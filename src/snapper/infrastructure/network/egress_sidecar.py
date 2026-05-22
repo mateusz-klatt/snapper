@@ -288,6 +288,7 @@ async def _handle_ready(request: web.Request) -> web.Response:
     snapper-api can start when the sidecar container is alive,
     regardless of whether a single tunnel failed.
     """
+    await asyncio.sleep(0)
     state = request.app[_STATE_KEY]
     return web.json_response(
         {
@@ -305,6 +306,7 @@ async def _handle_tunnels(request: web.Request) -> web.Response:
     For operator dashboards. Returns 200 unconditionally; the
     operator interprets the per-tunnel statuses.
     """
+    await asyncio.sleep(0)
     state = request.app[_STATE_KEY]
     payload: dict[str, dict[str, str | None]] = {}
     for running in state.running:
@@ -328,6 +330,7 @@ async def _handle_readyz(request: web.Request) -> web.Response:
     Compose's default healthcheck targets — provided for operators
     who want hard-fail semantics on their Compose configuration.
     """
+    await asyncio.sleep(0)
     state = request.app[_STATE_KEY]
     if state.failed:
         return web.json_response(

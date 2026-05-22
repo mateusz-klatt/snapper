@@ -215,7 +215,7 @@ class Socks5Server:
                 self._negotiate_and_open(client_reader, client_writer),
                 timeout=_NEGOTIATION_TIMEOUT_S + _CONNECT_TIMEOUT_S,
             )
-        except (TimeoutError, ConnectionError, OSError, _Socks5Error) as exc:
+        except (OSError, _Socks5Error) as exc:
             logger.debug("socks5: client negotiation ended: {}", exc)
             client_writer.close()
             with contextlib.suppress(OSError, ConnectionError):
@@ -224,7 +224,7 @@ class Socks5Server:
         try:
             await self._reply_success(client_writer)
             await self._relay(client_reader, client_writer, upstream_reader, upstream_writer)
-        except (ConnectionError, OSError) as exc:
+        except OSError as exc:
             logger.debug("socks5: relay ended: {}", exc)
         finally:
             upstream_writer.close()
@@ -476,7 +476,7 @@ class Socks5Server:
                     break
                 writer.write(data)
                 await writer.drain()
-        except (ConnectionError, OSError):
+        except OSError:
             return
         with contextlib.suppress(OSError, AttributeError, NotImplementedError):
             if half_close_target.can_write_eof():

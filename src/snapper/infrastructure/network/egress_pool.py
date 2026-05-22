@@ -595,7 +595,7 @@ async def _probe_socks5_greeting(host: str, port: int, route_id: str) -> bool:
             asyncio.open_connection(host, port),
             timeout=_SOCKS5_PROBE_TIMEOUT_S,
         )
-    except (TimeoutError, OSError) as exc:
+    except OSError as exc:
         logger.warning(
             "egress_pool: route '{}' SOCKS5 listener unreachable at {}:{} "
             "— auto-disabling. error={}",
@@ -610,7 +610,7 @@ async def _probe_socks5_greeting(host: str, port: int, route_id: str) -> bool:
         try:
             await asyncio.wait_for(writer.drain(), timeout=_SOCKS5_PROBE_TIMEOUT_S)
             reply = await asyncio.wait_for(reader.readexactly(2), timeout=_SOCKS5_PROBE_TIMEOUT_S)
-        except (TimeoutError, OSError, asyncio.IncompleteReadError) as exc:
+        except (OSError, asyncio.IncompleteReadError) as exc:
             logger.warning(
                 "egress_pool: route '{}' SOCKS5 greeting failed at {}:{} "
                 "— auto-disabling. error={}",

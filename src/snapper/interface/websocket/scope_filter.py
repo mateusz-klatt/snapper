@@ -239,7 +239,7 @@ async def enforce_orders_events_scope(
     return wallet_public_id in accessible
 
 
-async def enforce_alerts_scope(
+def enforce_alerts_scope(
     *,
     topic: str,
     connection_principal: AuthPrincipal | None,
