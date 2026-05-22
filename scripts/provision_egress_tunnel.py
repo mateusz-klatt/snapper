@@ -40,6 +40,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from snapper.application.services.settings import get_settings_service
+from snapper.infrastructure.network.egress_tunnel_models import TunnelDescriptor
+
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     """CLI parser — all fields are required to avoid silent provider drift."""
@@ -93,9 +96,6 @@ async def _amain(args: argparse.Namespace) -> int:
     ``id`` regex and ``interface`` length constraints) without
     polluting the live service.
     """
-    from snapper.application.services.settings import get_settings_service
-    from snapper.infrastructure.network.egress_tunnel_models import TunnelDescriptor
-
     db_url = os.environ["DB_URL"]
     zmq_broker = os.environ.get("ZMQ_BROKER_XSUB", "tcp://snapper-zmq-broker:7500")
 
