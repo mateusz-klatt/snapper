@@ -454,10 +454,22 @@ def _patched_init(self: ConnectSpotWebsocketBase, *args: Any, **kwargs: Any) -> 
 
 
 async def _patched_reconnect(self: ConnectSpotWebsocketBase) -> None:
-    """Notify the registered publisher before delegating to the SDK reconnect."""
+    """Notify the registered publisher before delegating to the SDK reconnect.
+
+    The publisher hook ``_on_sdk_reconnect_attempt`` is optional —
+    only ``KrakenMarketDataPublisher`` (Spot) implements the
+    reconnect-storm watchdog. Other Kraken publishers
+    (``KrakenEquitiesMarketDataPublisher`` etc.) register themselves
+    via ``_CURRENT_PUBLISHER`` for egress-pool exchange tagging but
+    do not need the watchdog and intentionally omit the hook.
+    Calling unconditionally would raise ``AttributeError`` and break
+    every reconnect cycle for those publishers.
+    """
     publisher = _CONNECTOR_PUBLISHERS.get(id(self))
     if publisher is not None:
-        publisher._on_sdk_reconnect_attempt()
+        hook = getattr(publisher, "_on_sdk_reconnect_attempt", None)
+        if hook is not None:
+            hook()
     await _ORIGINAL_RECONNECT(self)
 
 

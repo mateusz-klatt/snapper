@@ -526,6 +526,38 @@ class TestPatchedReconnect:
             kraken_sdk_patches._ORIGINAL_RECONNECT = original
         assert delegate_called["called"] is True
 
+    @pytest.mark.asyncio
+    async def test_publisher_without_reconnect_hook_still_delegates(self) -> None:
+        """Spec — publishers without ``_on_sdk_reconnect_attempt`` do not break reconnect.
+
+        Given a connector registered against a publisher that lacks
+        the optional ``_on_sdk_reconnect_attempt`` watchdog hook
+        (e.g. ``KrakenEquitiesMarketDataPublisher`` — which sets
+        ``_CURRENT_PUBLISHER`` for egress tagging but does not need
+        the reconnect-storm watchdog),
+        When ``_patched_reconnect`` is awaited,
+        Then no AttributeError is raised and the SDK reconnect still
+        runs. Regression guard for the live failure where adding
+        Equities to _CURRENT_PUBLISHER broke every reconnect cycle
+        because the patch was calling the hook unconditionally.
+        """
+        connector = MagicMock()
+        publisher_without_hook = MagicMock(spec=[])
+        _CONNECTOR_PUBLISHERS[id(connector)] = publisher_without_hook
+        delegate_called: dict[str, bool] = {"called": False}
+
+        async def fake_original(self_obj: Any) -> None:
+            delegate_called["called"] = True
+
+        original = kraken_sdk_patches._ORIGINAL_RECONNECT
+        kraken_sdk_patches._ORIGINAL_RECONNECT = fake_original
+        try:
+            await _patched_reconnect(connector)
+        finally:
+            kraken_sdk_patches._ORIGINAL_RECONNECT = original
+            _CONNECTOR_PUBLISHERS.pop(id(connector), None)
+        assert delegate_called["called"] is True
+
 
 class TestCloseCodeBackoff:
     """Phase A.3 — Kraken WebSocket close codes drive custom reconnect backoff.
