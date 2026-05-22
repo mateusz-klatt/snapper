@@ -29,9 +29,13 @@ from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_futures_pool_routing
 from snapper.infrastructure.symbols.functions import get_available_kraken_futures_symbols
 from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
+
+apply_kraken_futures_pool_routing()
 
 
 @register_process(
@@ -90,6 +94,31 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
             "kraken_futures" exchange name.
         """
         return ExchangeEnum.KRAKEN_FUTURES
+
+    async def start(self) -> None:
+        """Start the publisher within a connector-registration context.
+
+        Stamps ``_CURRENT_PUBLISHER`` so the patched
+        ``kraken.futures.websocket.connect`` shim reads
+        ``_get_exchange_name()`` ("kraken_futures") when reserving an
+        egress-pool route. This lets ``egress_pool``'s
+        ``allowed_exchanges`` filter pin Futures to a specific tunnel
+        (e.g. NYC alongside Equities) without affecting Spot.
+
+        Without this override the shim falls back to the legacy
+        hardcoded ``"kraken"`` tag — pool routing still works, but
+        routes pinned to ``["kraken_futures"]`` would silently
+        reject every Futures reservation and force fallback to a
+        wildcard EU tunnel.
+
+        The token is reset in ``finally`` so the ContextVar does not
+        leak across publisher restarts.
+        """
+        token = _CURRENT_PUBLISHER.set(self)
+        try:
+            await super().start()
+        finally:
+            _CURRENT_PUBLISHER.reset(token)
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:
         """Validate and filter symbols for Kraken Futures.

@@ -41,6 +41,7 @@ import weakref
 from typing import Any
 from typing import Final
 
+import kraken.futures.websocket as _kraken_futures_ws
 import kraken.spot.websocket.connectors as _kraken_connectors
 import websockets.asyncio.client as _ws_client
 from kraken.spot.websocket.connectors import ConnectSpotWebsocketBase
@@ -90,6 +91,9 @@ Any other code falls back to the SDK's original exponential backoff.
 
 _PATCH_APPLIED: list[bool] = [False]
 """Single-element list flag tracking whether the patch is installed."""
+
+_FUTURES_PATCH_APPLIED: list[bool] = [False]
+"""Single-element list flag tracking whether the Futures pool-routing rebind is installed."""
 
 _PENDING_RETRY_AFTER_S: dict[int, float] = {}
 """Maps ``id(connector_self)`` to its pending Retry-After deadline in seconds."""
@@ -508,3 +512,46 @@ def apply_kraken_retry_after_honoring() -> None:
     setattr(_kraken_connectors, "connect", _wrap_connect_factory(_ws_client.connect))
     _PATCH_APPLIED[0] = True
     logger.info("kraken-sdk Retry-After honoring applied")
+
+
+def apply_kraken_futures_pool_routing() -> None:
+    """Rebind ``kraken.futures.websocket.connect`` so Futures WS opts into the egress pool.
+
+    Idempotent — safe to call multiple times.
+
+    Unlike the Spot patch this is a narrower rebind: only the
+    ``connect`` reference inside ``kraken.futures.websocket`` (which
+    ``ConnectFuturesWebsocket.__run`` uses as ``async with
+    connect(...)``) is wrapped in the ``_ConnectShim`` factory. The
+    Retry-After / close-code / reconnect-storm machinery from the
+    Spot patch is NOT mirrored here:
+
+    * The Futures SDK has its own ``ConnectFuturesWebsocket`` class
+      with a separate ``__get_reconnect_wait`` and reconnect loop
+      that is not subject to the same Cloudflare 429 cascade pattern
+      observed on the Spot path (Phase A.3 incident 2026-05-21).
+    * The Futures publisher does not implement the
+      ``_on_sdk_reconnect_attempt`` watchdog hook, so registering
+      Futures connectors via ``_patched_init`` would add no benefit.
+
+    What this rebind DOES give the Futures path:
+
+    * The connect shim consults ``get_egress_pool()`` and reserves a
+      route when the pool is enabled, then merges ``{"proxy": None}``
+      (direct) or ``{"proxy": "socks5h://..."}`` (SOCKS5) into the
+      kwargs passed to ``websockets.connect``.
+    * The reservation tag is read from the ``_CURRENT_PUBLISHER``
+      ContextVar (set by ``KrakenFuturesMarketDataPublisher.start``),
+      so per-exchange ``allowed_exchanges`` pins on egress_pool
+      routes apply to Futures the same way they apply to Spot and
+      Equities.
+    * The 429-on-handshake quarantine path through
+      ``__aenter__`` ➜ ``_handle_handshake_429`` is shared. A
+      Cloudflare 429 on the Futures handshake will quarantine the
+      borrowed route, NOT poison a global retry-after stash.
+    """
+    if _FUTURES_PATCH_APPLIED[0]:
+        return
+    setattr(_kraken_futures_ws, "connect", _wrap_connect_factory(_ws_client.connect))
+    _FUTURES_PATCH_APPLIED[0] = True
+    logger.info("kraken-sdk futures pool routing applied")

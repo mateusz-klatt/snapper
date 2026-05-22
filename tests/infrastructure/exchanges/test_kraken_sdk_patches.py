@@ -36,11 +36,13 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _CLOSE_CODE_BACK
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CONNECTOR_PUBLISHERS
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_CONNECTOR_ID
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _FUTURES_PATCH_APPLIED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _LAST_CLOSE_CODE
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _PATCH_APPLIED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _PENDING_RETRY_AFTER_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RETRY_AFTER_MAX_SECONDS
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RETRY_AFTER_MIN_SECONDS
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _kraken_futures_ws
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _parse_retry_after
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_get_reconnect_wait
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_init
@@ -48,6 +50,8 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_reconne
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_run
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _unregister_connector
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _wrap_connect_factory
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _ws_client
+from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_futures_pool_routing
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
 from snapper.infrastructure.exchanges.kraken_sdk_patches import get_registered_publisher
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
@@ -173,6 +177,42 @@ class TestApplyIdempotent:
         apply_kraken_retry_after_honoring()
         assert _PATCH_APPLIED[0] is True
         assert before is True
+
+
+class TestApplyKrakenFuturesPoolRouting:
+    """Installation of the Futures pool-routing rebind must be safe to call repeatedly."""
+
+    def test_apply_rebinds_futures_connect(self) -> None:
+        """Spec — first call installs the rebind.
+
+        Given ``_FUTURES_PATCH_APPLIED[0]`` is False (or already True
+            from a previous test — the rebind is idempotent),
+        When ``apply_kraken_futures_pool_routing`` is called,
+        Then ``_FUTURES_PATCH_APPLIED[0]`` is True AND
+            ``kraken.futures.websocket.connect`` is now a
+            ``_ConnectShim`` factory (not the bare
+            ``websockets.connect``).
+        """
+        apply_kraken_futures_pool_routing()
+        assert _FUTURES_PATCH_APPLIED[0] is True
+        rebound = getattr(_kraken_futures_ws, "connect")
+        assert callable(rebound)
+        assert rebound is not _ws_client.connect
+
+    def test_second_apply_is_noop(self) -> None:
+        """Spec — second call is a no-op.
+
+        Given the Futures rebind is already installed,
+        When ``apply_kraken_futures_pool_routing`` is called again,
+        Then the flag stays True and the function returns without
+            re-wrapping (which would otherwise wrap the already-wrapped
+            shim and break the shim's signature assumptions).
+        """
+        apply_kraken_futures_pool_routing()
+        before = getattr(_kraken_futures_ws, "connect")
+        apply_kraken_futures_pool_routing()
+        assert _FUTURES_PATCH_APPLIED[0] is True
+        assert getattr(_kraken_futures_ws, "connect") is before
 
 
 class TestPatchedGetReconnectWait:
