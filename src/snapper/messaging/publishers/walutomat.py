@@ -15,6 +15,7 @@ from snapper.core.types import MarketDataExchange
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
 from snapper.infrastructure.symbols.functions import native_to_walutomat_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
 
@@ -56,6 +57,33 @@ class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeC
 
     def _get_exchange_name(self) -> MarketDataExchange:
         return ExchangeEnum.WALUTOMAT
+
+    async def start(self) -> None:
+        """Start the publisher within a connector-registration context.
+
+        Stamps ``_CURRENT_PUBLISHER`` so the per-request egress-pool
+        reservation in
+        :class:`snapper.infrastructure.network.pooled_httpx_transport.PooledAsyncTransport`
+        reads ``"walutomat"`` as the exchange tag. The
+        ``allowed_exchanges=["walutomat"]`` filter on the
+        ``eset-pl1`` route then pins this publisher's HTTP polling
+        to the Polish ESET tunnel (egress IP 45.134.212.77 Warsaw).
+
+        Without this override the pooled transport's
+        ``default_exchange_tag="walutomat"`` fallback would still
+        produce the same effect — this override is kept for
+        symmetry with the Kraken Spot / Equities / Futures
+        publishers and to keep the source of truth for the exchange
+        tag at the publisher rather than the transport's default.
+
+        The token is reset in ``finally`` so the ContextVar does not
+        leak across publisher restarts.
+        """
+        token = _CURRENT_PUBLISHER.set(self)
+        try:
+            await super().start()
+        finally:
+            _CURRENT_PUBLISHER.reset(token)
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:
         """Validate and filter symbols for Walutomat.

@@ -1,8 +1,12 @@
 """Unit tests for WalutomatMarketDataPublisher."""
 
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+import pytest
+
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
 from snapper.messaging.publishers.walutomat import WalutomatMarketDataPublisher
 
 
@@ -151,3 +155,60 @@ class TestWalutomatPublisher:
         mock_get_settings.return_value = mock_settings
         kwargs = WalutomatMarketDataPublisher.get_default_parameters(mock_settings)
         assert kwargs == {"symbols": ["EUR-PLN", "USD-PLN"]}
+
+    @pytest.mark.asyncio
+    async def test_start_sets_and_resets_current_publisher_context_var(self) -> None:
+        """Start override registers this publisher in the SDK-patch ContextVar.
+
+        Given: A WalutomatMarketDataPublisher instance with a patched
+            base ``start`` that observes the ContextVar.
+        When: ``start()`` is awaited,
+        Then: ``_CURRENT_PUBLISHER`` resolves to the publisher during
+            ``super().start()`` execution, then resets to ``None`` after
+            ``start()`` returns.
+
+        Required so the
+        :class:`snapper.infrastructure.network.pooled_httpx_transport.PooledAsyncTransport`
+        wired into ``WalutomatExchangeClient._http_client`` reads
+        ``"walutomat"`` as the reservation tag. The pool's
+        ``eset-pl1`` route with ``allowed_exchanges=["walutomat"]``
+        then accepts the reservation and pins HTTP polling to the
+        Polish ESET tunnel.
+        """
+        publisher = WalutomatMarketDataPublisher(symbols=["EUR-PLN"])
+        observed: list[WalutomatMarketDataPublisher | None] = []
+
+        async def fake_super_start(self: WalutomatMarketDataPublisher) -> None:
+            observed.append(_CURRENT_PUBLISHER.get())
+
+        with patch(
+            "snapper.messaging.publishers.base.MarketDataPublisherService.start",
+            new=fake_super_start,
+        ):
+            await publisher.start()
+
+        assert observed == [publisher]
+        assert _CURRENT_PUBLISHER.get() is None
+
+    @pytest.mark.asyncio
+    async def test_start_resets_context_var_even_if_super_raises(self) -> None:
+        """Token reset must occur in ``finally`` so failures do not leak the ContextVar.
+
+        Given: ``super().start()`` raises an arbitrary RuntimeError,
+        When: ``start()`` is awaited,
+        Then: The exception propagates AND ``_CURRENT_PUBLISHER`` is
+            restored to its prior value (``None``).
+        """
+        publisher = WalutomatMarketDataPublisher(symbols=["EUR-PLN"])
+        fake_super = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with (
+            patch(
+                "snapper.messaging.publishers.base.MarketDataPublisherService.start",
+                new=fake_super,
+            ),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            await publisher.start()
+
+        assert _CURRENT_PUBLISHER.get() is None

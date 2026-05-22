@@ -28,7 +28,7 @@ from typing import Literal
 
 from loguru import logger
 
-QuarantineReason = Literal["http-429", "close-1015"]
+QuarantineReason = Literal["http-429", "close-1015", "http-connect-error"]
 
 
 class EgressPoolBase(ABC):
@@ -155,7 +155,9 @@ class EgressReservation:
                 picked again. Negative or zero values are clamped to
                 a minimum of 1 s to avoid no-op quarantines.
             reason: ``http-429`` for handshake 429,
-                ``close-1015`` for WS close-frame 1015.
+                ``close-1015`` for WS close-frame 1015,
+                ``http-connect-error`` for HTTP connect-level
+                failure raised by ``PooledAsyncTransport``.
         """
         if retry_after_s < 1.0:
             retry_after_s = 1.0

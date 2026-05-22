@@ -61,6 +61,7 @@ from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketPair
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketResponse
+from snapper.infrastructure.network.pooled_httpx_transport import PooledAsyncTransport
 from snapper.infrastructure.symbols.functions import native_to_walutomat_rest
 from snapper.infrastructure.symbols.functions import native_to_walutomat_ws
 from snapper.infrastructure.symbols.functions import walutomat_rest_to_native
@@ -246,6 +247,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             return
         logger.info("Connecting to Walutomat API...")
         self._http_client = httpx.AsyncClient(
+            transport=PooledAsyncTransport(),
             timeout=httpx.Timeout(self.timeout),
             follow_redirects=True,
         )
