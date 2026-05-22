@@ -137,8 +137,6 @@ endif
 DOCKER_NAME := snapper
 IMAGE_NAME := klattm/snapper
 IMAGE_TAG := latest
-EGRESS_IMAGE_NAME := klattm/snapper-egress
-EGRESS_IMAGE_TAG := latest
 PYRUN := $(VENV_PY) -m
 PYTEST_TIMEOUT := --timeout=15 --timeout-method=thread
 ROOT_DIR := $(CURDIR)
@@ -559,11 +557,9 @@ endif
 
 docker-build-dev:
 	docker build --build-arg UID=$(DOCKER_DEV_UID) -t $(IMAGE_NAME):$(IMAGE_TAG) .
-	docker build --build-arg UID=$(DOCKER_DEV_UID) -t $(EGRESS_IMAGE_NAME):$(EGRESS_IMAGE_TAG) -f docker/Dockerfile.egress .
 
 docker-build-prod:
 	docker build --build-arg UID=$(DOCKER_PROD_UID) -t $(IMAGE_NAME):$(IMAGE_TAG) .
-	docker build --build-arg UID=$(DOCKER_PROD_UID) -t $(EGRESS_IMAGE_NAME):$(EGRESS_IMAGE_TAG) -f docker/Dockerfile.egress .
 
 docker-migrate-dev:
 	$(DOCKER_RUN) db-init
@@ -575,7 +571,6 @@ docker-migrate-prod:
 
 docker-push:
 	docker push $(IMAGE_NAME):$(IMAGE_TAG)
-	docker push $(EGRESS_IMAGE_NAME):$(EGRESS_IMAGE_TAG)
 
 docker-run:
 	docker compose up -d

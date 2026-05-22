@@ -121,6 +121,7 @@ from snapper.data.repository import where_active_now
 from snapper.data.repository_types import BacktestResultInsertRow
 from snapper.data.repository_types import BacktestRunRow
 from snapper.data.seed.loader import run_seed
+from snapper.egress.__main__ import main as _egress_main
 from snapper.infrastructure.market_data.kraken import run_snapshot_update
 from snapper.infrastructure.market_data.kraken_equities import run_kraken_equities_snapshot_update
 from snapper.infrastructure.market_data.kraken_futures import run_kraken_futures_snapshot_update
@@ -1994,3 +1995,39 @@ def notify() -> None:
 
 
 app.command(name="dev-mint-pat")(dev_mint_pat)
+
+
+@app.command(
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+    }
+)
+def egress(ctx: typer.Context) -> None:
+    """Run the snapper-egress sidecar (kernel WireGuard + SOCKS5).
+
+    Extra args after ``snapper egress`` are forwarded verbatim to the
+    egress entrypoint's argparse parser. Currently supports
+    ``--instance-id <name>`` (see ``src/snapper/egress/__main__.py``).
+    The CLI subcommand is the unified-image dispatch path: under
+    ``ENTRYPOINT ["snapper"]``, the sidecar service runs
+    ``command: ["egress"]`` in compose and lands here, while the
+    legacy ``python -m snapper.egress`` entrypoint still works for
+    bare-shell invocations.
+
+    Args:
+        ctx: Typer context with ``allow_extra_args=True``; ``ctx.args``
+            carries the operator-supplied argv tail (e.g.
+            ``["--instance-id", "snapper-egress-prod"]``) and is
+            forwarded as the ``argv`` parameter to
+            :func:`snapper.egress.__main__.main`. Passing the explicit
+            list (instead of ``argv=None``) prevents the egress parser
+            from accidentally receiving the literal ``"egress"`` token
+            via ``sys.argv[1:]`` fallback.
+
+    Raises:
+        typer.Exit: Always — wraps the egress entrypoint's integer
+            return code so Typer propagates it as the process exit
+            code. A bare ``return rc`` would NOT propagate.
+    """
+    raise typer.Exit(code=_egress_main(list(ctx.args)))

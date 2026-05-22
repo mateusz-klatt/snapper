@@ -1,0 +1,1 @@
+"""Docker image structural tests."""

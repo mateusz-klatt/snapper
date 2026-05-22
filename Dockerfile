@@ -43,7 +43,9 @@ RUN python -m venv /opt/poetry \
     --no-compile \
     snapper==0.1.0
 
-FROM python:3.14-slim AS api
+FROM python:3.14-slim AS runtime
+LABEL org.opencontainers.image.title="snapper"
+LABEL org.opencontainers.image.description="snapper — market data + execution platform. Modes selected at runtime via the snapper CLI: 'snapper server' (monolith) or 'snapper egress' (sidecar)."
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -57,6 +59,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     unixodbc \
+    iproute2 \
+    wireguard-tools \
     && rm -rf /var/lib/apt/lists/*
 
 ARG UID=888
@@ -77,6 +81,6 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 USER snapper
 
-EXPOSE 8000
+EXPOSE 8000 8081
 ENTRYPOINT ["snapper"]
 CMD ["server"]

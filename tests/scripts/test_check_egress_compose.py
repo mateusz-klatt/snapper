@@ -261,3 +261,239 @@ def test_main_module_invocation_returns_systemexit(
     """
     monkeypatch.chdir(tmp_path)
     assert check_egress_compose.main() == 0
+
+
+_UNIFIED_IMAGE_COMPOSE_OK = """
+services:
+  snapper:
+    image: klattm/snapper:latest
+    command: ["server"]
+  snapper-egress:
+    image: klattm/snapper:latest
+    command: ["egress"]
+    user: "0:0"
+    cap_add:
+      - NET_ADMIN
+    expose:
+      - "8081"
+"""
+"""Reference compose fragment satisfying every B'.6 unified-image invariant."""
+
+
+def test_unified_image_invariants_pass_on_correct_compose(tmp_path: Path) -> None:
+    """Spec — B'.6 reference compose passes the unified-image lint.
+
+    Given a compose declaring both services with matching ``image:``,
+    sidecar command/user/cap_add set, and monolith having neither
+    cap_add nor user override,
+    When main runs,
+    Then it returns 0.
+    """
+    _write(tmp_path / "docker-compose.yml", _UNIFIED_IMAGE_COMPOSE_OK)
+    assert check_egress_compose.main(root=tmp_path) == 0
+
+
+def test_fails_when_image_tags_differ(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Spec — different ``image:`` per service → exit 1.
+
+    Given snapper service with one image and snapper-egress with a
+        different one,
+    When main runs,
+    Then it returns 1 and the error names both image strings so the
+        operator can fix the mismatch.
+    """
+    _write(
+        tmp_path / "docker-compose.yml",
+        """
+        services:
+          snapper:
+            image: klattm/snapper:latest
+            command: ["server"]
+          snapper-egress:
+            image: klattm/snapper-egress:latest
+            command: ["egress"]
+            user: "0:0"
+            cap_add:
+              - NET_ADMIN
+        """,
+    )
+    assert check_egress_compose.main(root=tmp_path) == 1
+    err = capsys.readouterr().err
+    assert "must match" in err
+
+
+def test_fails_when_egress_command_is_wrong(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Spec — sidecar ``command`` != ``["egress"]`` → exit 1.
+
+    Given a compose with the sidecar still using the legacy
+        ``["python", "-m", "snapper.egress"]`` command,
+    When main runs,
+    Then it returns 1 and the error names the wrong command. Locks
+        the CLI-dispatch invariant against accidental regression.
+    """
+    _write(
+        tmp_path / "docker-compose.yml",
+        """
+        services:
+          snapper:
+            image: klattm/snapper:latest
+            command: ["server"]
+          snapper-egress:
+            image: klattm/snapper:latest
+            command: ["python", "-m", "snapper.egress"]
+            user: "0:0"
+            cap_add:
+              - NET_ADMIN
+        """,
+    )
+    assert check_egress_compose.main(root=tmp_path) == 1
+    assert "command" in capsys.readouterr().err
+
+
+def test_fails_when_egress_user_is_not_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Spec — sidecar ``user:`` != ``"0:0"`` → exit 1.
+
+    Given a compose with the sidecar running as a non-root UID,
+    When main runs,
+    Then it returns 1. The R7 invariant from B'.6 v9 — without root,
+        ``pyroute2`` netlink writes fail even with CAP_NET_ADMIN
+        granted.
+    """
+    _write(
+        tmp_path / "docker-compose.yml",
+        """
+        services:
+          snapper:
+            image: klattm/snapper:latest
+            command: ["server"]
+          snapper-egress:
+            image: klattm/snapper:latest
+            command: ["egress"]
+            user: "888:888"
+            cap_add:
+              - NET_ADMIN
+        """,
+    )
+    assert check_egress_compose.main(root=tmp_path) == 1
+    assert "user" in capsys.readouterr().err
+
+
+def test_fails_when_egress_missing_net_admin(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Spec — sidecar missing ``cap_add: NET_ADMIN`` → exit 1.
+
+    Given a compose where the sidecar service has no NET_ADMIN cap,
+    When main runs,
+    Then it returns 1. Kernel WireGuard requires CAP_NET_ADMIN for
+        ``ip link add type wireguard``; missing this cap silently
+        breaks tunnel bring-up at startup.
+    """
+    _write(
+        tmp_path / "docker-compose.yml",
+        """
+        services:
+          snapper:
+            image: klattm/snapper:latest
+            command: ["server"]
+          snapper-egress:
+            image: klattm/snapper:latest
+            command: ["egress"]
+            user: "0:0"
+        """,
+    )
+    assert check_egress_compose.main(root=tmp_path) == 1
+    assert "NET_ADMIN" in capsys.readouterr().err
+
+
+def test_fails_when_monolith_declares_cap_add(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Spec — monolith ``cap_add:`` present → exit 1.
+
+    Given a compose where the monolith service declares cap_add,
+    When main runs,
+    Then it returns 1. The monolith runs unprivileged even though it
+        shares the image with the sidecar — granting it any cap is a
+        security regression.
+    """
+    _write(
+        tmp_path / "docker-compose.yml",
+        """
+        services:
+          snapper:
+            image: klattm/snapper:latest
+            command: ["server"]
+            cap_add:
+              - NET_ADMIN
+          snapper-egress:
+            image: klattm/snapper:latest
+            command: ["egress"]
+            user: "0:0"
+            cap_add:
+              - NET_ADMIN
+        """,
+    )
+    assert check_egress_compose.main(root=tmp_path) == 1
+    assert "must NOT be declared" in capsys.readouterr().err
+
+
+def test_fails_when_monolith_declares_user_override(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Spec — monolith ``user:`` present → exit 1.
+
+    Given a compose where the monolith service declares a user override,
+    When main runs,
+    Then it returns 1. The monolith inherits secure default
+        ``USER snapper`` (UID 888) from the image; operator override
+        (especially to root) would erase the security default.
+    """
+    _write(
+        tmp_path / "docker-compose.yml",
+        """
+        services:
+          snapper:
+            image: klattm/snapper:latest
+            command: ["server"]
+            user: "0:0"
+          snapper-egress:
+            image: klattm/snapper:latest
+            command: ["egress"]
+            user: "0:0"
+            cap_add:
+              - NET_ADMIN
+        """,
+    )
+    assert check_egress_compose.main(root=tmp_path) == 1
+    assert "must NOT be declared" in capsys.readouterr().err
+
+
+def test_unified_image_check_skipped_when_monolith_absent(tmp_path: Path) -> None:
+    """Spec — partial overrides (sidecar only) don't trigger cross-service check.
+
+    Given a partial override compose declaring only the sidecar
+        service (no `snapper:` block),
+    When main runs,
+    Then it returns 0. The B'.6 unified-image cross-check is
+        skipped silently when either service is missing — allows
+        partial overrides without forcing every file to redeclare
+        the monolith.
+    """
+    _write(
+        tmp_path / "docker-compose.override.yml",
+        """
+        services:
+          snapper-egress:
+            image: snapper-egress:latest
+            expose:
+              - "8081"
+            cap_add:
+              - NET_ADMIN
+        """,
+    )
+    assert check_egress_compose.main(root=tmp_path) == 0

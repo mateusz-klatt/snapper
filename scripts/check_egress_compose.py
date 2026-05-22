@@ -1,18 +1,35 @@
-"""Lint hook: enforce snapper-egress sidecar has NO host port mapping.
+"""Lint hook: enforce snapper-egress sidecar safety + unified-image invariants.
 
-SC.3 of ``proprietary/plans/plan_2026_05_21_snapper_egress_sidecar.md``.
+SC.3 of ``proprietary/plans/plan_2026_05_21_snapper_egress_sidecar.md``
++ B'.6 §6 of ``proprietary/plans/plan_2026_05_22_unified_dockerfile_kernel_wg.md``.
 
-The sidecar runs an unauthenticated SOCKS5 listener and the
-healthcheck HTTP endpoint on port 8081. Isolation comes entirely
-from the Docker private network — there must be NO ``ports:``
-entry on the snapper-egress service (which would publish the
-listener to the host) and NO ``network_mode: host``.
+Two categories of rules enforced on the snapper-egress service block:
 
-The script exits with code 1 if the constraint is violated. Invoked
-by ``make check-egress-compose`` and (transitively) ``make
-check-all``. Operators who genuinely need to expose the sidecar
-(testing only) must remove this hook explicitly — silent override
-is intentionally not supported.
+1. **SC.3 isolation rules** (original): no ``ports:`` host publish
+   (the SOCKS5 listener has NO authentication), no ``network_mode:
+   host``, no env-interpolated bypass of either field.
+
+2. **B'.6 unified-image rules** (added 2026-05-22): when the
+   monolith + sidecar share one image, certain compose attributes
+   MUST be present or absent to keep the runtime contract correct.
+   Specifically:
+       - snapper-egress MUST use the same ``image:`` string as the
+         snapper service (single-image deployment invariant).
+       - snapper-egress MUST declare ``command: ["egress"]`` (locks
+         the CLI dispatch for ``ENTRYPOINT ["snapper"]``).
+       - snapper-egress MUST declare ``cap_add: [NET_ADMIN]``
+         (required for kernel WG netlink writes).
+       - snapper-egress MUST declare ``user: "0:0"`` (root) — the
+         unified image defaults to ``USER snapper`` (UID 888), which
+         would fail ``pyroute2.WireGuard`` syscalls even with
+         NET_ADMIN. This is the R7 invariant from B'.6 v9.
+       - snapper service MUST NOT declare ``cap_add`` (monolith stays
+         unprivileged even though it shares the image).
+       - snapper service MUST NOT declare ``user:`` (inherits secure
+         default ``USER snapper`` from the image).
+
+The script exits with code 1 if any rule is violated. Invoked by
+``make check-egress-compose`` and (transitively) ``make check-all``.
 """
 
 import sys
@@ -47,6 +64,36 @@ output — documented in the SC.5 operator runbook.
 
 _EGRESS_SERVICE_NAME: Final[str] = "snapper-egress"
 """Service name pinned by the sidecar plan; the lint hook matches on this exactly."""
+
+_MONOLITH_SERVICE_NAME: Final[str] = "snapper"
+"""Monolith (FastAPI + bootstrap) service name used for unified-image cross-checks.
+
+B'.6 enforces that this service shares its ``image:`` with the
+sidecar and that the monolith does NOT declare ``cap_add`` or
+``user:`` overrides (the image's secure default USER snapper inherits).
+"""
+
+_REQUIRED_EGRESS_COMMAND: Final[tuple[str, ...]] = ("egress",)
+"""Sidecar command must be exactly ``["egress"]`` post-B'.6.
+
+Under the unified ``ENTRYPOINT ["snapper"]`` the sidecar is
+dispatched via the new ``snapper egress`` CLI subcommand. Any
+deviation (e.g. ``["python", "-m", "snapper.egress"]``) would still
+work today but breaks the lint invariant + the documented operator
+contract.
+"""
+
+_REQUIRED_EGRESS_USER: Final[str] = "0:0"
+"""Sidecar must run as root under the unified image.
+
+The image defaults to ``USER snapper`` (UID 888) for the monolith
+path. Sidecar overrides via ``user: "0:0"`` so ``pyroute2`` netlink
+syscalls + ``ip link add type wireguard`` succeed even with the
+NET_ADMIN capability already granted. R7 of B'.6 v9.
+"""
+
+_REQUIRED_EGRESS_CAP: Final[str] = "NET_ADMIN"
+"""Sidecar must have CAP_NET_ADMIN. Kernel WG via pyroute2 needs it."""
 
 _INTERPOLATION_MARKER: Final[str] = "${"
 """Compose variable-interpolation prefix.
@@ -108,6 +155,80 @@ def _check_service(service: dict[str, object], compose_path: Path) -> list[str]:
     return errors
 
 
+def _check_unified_image_invariants(services: dict[str, object], compose_path: Path) -> list[str]:
+    """Return errors for the B'.6 unified-image cross-service invariants.
+
+    Runs after the per-service SC.3 isolation check. Skipped silently
+    when either service is absent (allows partial-override compose
+    files that don't redeclare every service).
+
+    Args:
+        services: The ``services:`` block of one compose file, already
+            parsed by ``yaml.safe_load``.
+        compose_path: Path to the compose file (used in error messages
+            for operator legibility).
+
+    Returns:
+        List of human-readable violation strings; empty when the
+        invariants hold (or when the relevant services are absent).
+    """
+    errors: list[str] = []
+    monolith = services.get(_MONOLITH_SERVICE_NAME)
+    egress = services.get(_EGRESS_SERVICE_NAME)
+    if not isinstance(monolith, dict) or not isinstance(egress, dict):
+        return errors
+    monolith_image = monolith.get("image")
+    egress_image = egress.get("image")
+    if monolith_image != egress_image:
+        errors.append(
+            f"{compose_path}: '{_MONOLITH_SERVICE_NAME}.image' "
+            f"({monolith_image!r}) must match "
+            f"'{_EGRESS_SERVICE_NAME}.image' ({egress_image!r}) — "
+            "the unified-image deployment requires both services to "
+            "consume the same image tag."
+        )
+    egress_command = egress.get("command")
+    if egress_command != list(_REQUIRED_EGRESS_COMMAND):
+        errors.append(
+            f"{compose_path}: '{_EGRESS_SERVICE_NAME}.command' must "
+            f"be {list(_REQUIRED_EGRESS_COMMAND)!r}, got "
+            f"{egress_command!r}. Under ``ENTRYPOINT ['snapper']`` "
+            "the sidecar dispatches via the ``snapper egress`` CLI "
+            "subcommand."
+        )
+    egress_user = egress.get("user")
+    if egress_user != _REQUIRED_EGRESS_USER:
+        errors.append(
+            f"{compose_path}: '{_EGRESS_SERVICE_NAME}.user' must be "
+            f"{_REQUIRED_EGRESS_USER!r}, got {egress_user!r}. The "
+            "unified image defaults to USER snapper (UID 888); "
+            "pyroute2 + kernel WG syscalls require root even with "
+            "CAP_NET_ADMIN."
+        )
+    egress_caps = egress.get("cap_add") or []
+    if _REQUIRED_EGRESS_CAP not in egress_caps:
+        errors.append(
+            f"{compose_path}: '{_EGRESS_SERVICE_NAME}.cap_add' must "
+            f"include {_REQUIRED_EGRESS_CAP!r}, got {egress_caps!r}. "
+            "Kernel WireGuard needs CAP_NET_ADMIN."
+        )
+    if monolith.get("cap_add"):
+        errors.append(
+            f"{compose_path}: '{_MONOLITH_SERVICE_NAME}.cap_add' must "
+            f"NOT be declared (got {monolith.get('cap_add')!r}); the "
+            "monolith service runs unprivileged even though it shares "
+            "the image with the sidecar."
+        )
+    if "user" in monolith:
+        errors.append(
+            f"{compose_path}: '{_MONOLITH_SERVICE_NAME}.user' must "
+            f"NOT be declared (got {monolith.get('user')!r}); the "
+            "monolith inherits the secure default USER snapper from "
+            "the image."
+        )
+    return errors
+
+
 def main(root: Path | None = None) -> int:
     """Scan known Compose files for snapper-egress safety violations.
 
@@ -136,6 +257,7 @@ def main(root: Path | None = None) -> int:
         if egress is None:
             continue
         errors.extend(_check_service(egress, compose_path))
+        errors.extend(_check_unified_image_invariants(services, compose_path))
     if not found_any:
         print("check_egress_compose: no compose file found — nothing to lint")
         return 0

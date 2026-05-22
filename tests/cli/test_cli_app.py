@@ -4257,3 +4257,101 @@ class TestNotifyCommand:
 
         assert result.exit_code == 0
         assert "stopped by user" in result.output
+
+
+class TestEgressCommand:
+    """Tests for the `snapper egress` CLI subcommand (B'.6 §1).
+
+    The subcommand is a thin shim that forwards extra args to
+    :func:`snapper.egress.__main__.main` and propagates its integer
+    return code as the Typer process exit code. Tests lock the four
+    invariants the Codex Plan Reviewer flagged across 9 rounds:
+
+    1. Default invocation passes ``argv=[]`` (NOT ``argv=None``) so
+       the egress argparse parser doesn't receive the literal
+       ``"egress"`` token via ``sys.argv[1:]`` fallback.
+    2. Extra flags (e.g. ``--instance-id``) are forwarded verbatim.
+    3. Non-zero return propagates as the process exit code via
+       ``typer.Exit(code=...)``; a bare ``return rc`` would NOT.
+    4. Zero return propagates symmetrically.
+
+    The shim patches the IMPORTED alias ``snapper.cli.app._egress_main``,
+    not ``snapper.egress.__main__.main``, because the shim binds to the
+    alias at import time (see ``src/snapper/cli/app.py``).
+    """
+
+    def test_egress_command_passes_empty_argv_by_default(
+        self, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spec — no extras → ``_egress_main`` called with ``argv=[]``.
+
+        Given the operator runs ``snapper egress`` with no extra args,
+        When the CLI dispatches,
+        Then ``_egress_main`` is invoked with ``argv=[]``, NOT
+            ``argv=None``. This protects against the ``sys.argv[1:]``
+            fallback in ``snapper.egress.__main__.main`` that would
+            otherwise receive the literal ``"egress"`` token under
+            the unified ``ENTRYPOINT ["snapper"]``.
+        """
+        mock_egress_main = MagicMock(return_value=0)
+        monkeypatch.setattr(app_module, "_egress_main", mock_egress_main)
+
+        result = cli_runner.invoke(app_module.app, ["egress"])
+
+        assert result.exit_code == 0
+        mock_egress_main.assert_called_once_with([])
+
+    def test_egress_command_forwards_instance_id_flag(
+        self, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spec — extras forwarded to ``_egress_main`` verbatim.
+
+        Given the operator runs ``snapper egress --instance-id name``,
+        When the CLI dispatches,
+        Then ``_egress_main`` is invoked with
+            ``argv=["--instance-id", "name"]``. Locks the
+            ``allow_extra_args=True`` + ``ignore_unknown_options=True``
+            context-settings invariant — without them Typer would
+            consume ``--instance-id`` into its own parser and reject
+            it as an unknown option.
+        """
+        mock_egress_main = MagicMock(return_value=0)
+        monkeypatch.setattr(app_module, "_egress_main", mock_egress_main)
+
+        result = cli_runner.invoke(app_module.app, ["egress", "--instance-id", "custom-name"])
+
+        assert result.exit_code == 0
+        mock_egress_main.assert_called_once_with(["--instance-id", "custom-name"])
+
+    def test_egress_command_propagates_nonzero_exit(
+        self, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spec — non-zero return from ``_egress_main`` → CLI exit code.
+
+        Given ``_egress_main`` returns ``2`` (invalid private key),
+        When the CLI dispatches,
+        Then the CliRunner result exit_code is ``2``. Locks the
+            ``raise typer.Exit(code=...)`` invariant — a bare
+            ``return rc`` would NOT propagate the exit code through
+            Typer's invocation machinery.
+        """
+        mock_egress_main = MagicMock(return_value=2)
+        monkeypatch.setattr(app_module, "_egress_main", mock_egress_main)
+
+        result = cli_runner.invoke(app_module.app, ["egress"])
+
+        assert result.exit_code == 2
+
+    def test_egress_command_propagates_zero_exit(
+        self, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Spec — zero return from ``_egress_main`` → CLI exit code 0.
+
+        Symmetric to the non-zero test, locking the success path.
+        """
+        mock_egress_main = MagicMock(return_value=0)
+        monkeypatch.setattr(app_module, "_egress_main", mock_egress_main)
+
+        result = cli_runner.invoke(app_module.app, ["egress"])
+
+        assert result.exit_code == 0
