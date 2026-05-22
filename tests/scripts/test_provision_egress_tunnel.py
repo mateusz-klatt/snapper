@@ -135,10 +135,7 @@ class TestAmainDryRun:
         monkeypatch.setenv("DB_URL", "sqlite+aiosqlite:///:memory:")
         ns = provision._parse_args([*_required_args(privkey_file), "--dry-run"])
         get_service_mock = AsyncMock()
-        with patch(
-            "snapper.application.services.settings.get_settings_service",
-            get_service_mock,
-        ):
+        with patch.object(provision, "get_settings_service", get_service_mock):
             rc = await provision._amain(ns)
         assert rc == 0
         get_service_mock.assert_not_called()
@@ -166,10 +163,7 @@ class TestAmainDryRun:
                 "psk-value-base64=",
             ]
         )
-        with patch(
-            "snapper.application.services.settings.get_settings_service",
-            AsyncMock(),
-        ):
+        with patch.object(provision, "get_settings_service", AsyncMock()):
             rc = await provision._amain(ns)
         assert rc == 0
         captured = capsys.readouterr()
@@ -233,10 +227,7 @@ class TestAmainLiveWrite:
         service.update_setting = AsyncMock()
         service.get_setting = MagicMock(return_value=live_pool)
         get_service = AsyncMock(return_value=service)
-        with patch(
-            "snapper.application.services.settings.get_settings_service",
-            get_service,
-        ):
+        with patch.object(provision, "get_settings_service", get_service):
             rc = await provision._amain(ns)
         assert rc == 0
         assert service.update_setting.await_count == 3
@@ -269,10 +260,7 @@ class TestAmainLiveWrite:
         service.update_setting = AsyncMock()
         service.get_setting = MagicMock(return_value=None)
         get_service = AsyncMock(return_value=service)
-        with patch(
-            "snapper.application.services.settings.get_settings_service",
-            get_service,
-        ):
+        with patch.object(provision, "get_settings_service", get_service):
             rc = await provision._amain(ns)
         assert rc == 0
         keys_written = [call.args[0] for call in service.update_setting.await_args_list]
@@ -308,10 +296,7 @@ class TestAmainLiveWrite:
         service = MagicMock()
         service.update_setting = AsyncMock()
         service.get_setting = MagicMock(return_value=live_pool)
-        with patch(
-            "snapper.application.services.settings.get_settings_service",
-            AsyncMock(return_value=service),
-        ):
+        with patch.object(provision, "get_settings_service", AsyncMock(return_value=service)):
             await provision._amain(ns)
         merged_pool = service.update_setting.await_args_list[2].args[1]
         pl_routes = [r for r in merged_pool["routes"] if r["id"] == "eset-pl1"]

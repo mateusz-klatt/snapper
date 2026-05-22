@@ -478,13 +478,13 @@ def _patched_get_reconnect_wait(self: ConnectSpotWebsocketBase, attempts: int) -
         )
         return wait
     if pool is not None and pool.size() > 0:
-        if pool.has_available():
+        if pool.has_available(exchange="kraken"):
             logger.info(
                 "kraken WS pool-aware reconnect: healthy route available (connector={})",
                 connector_id,
             )
             return _RETRY_AFTER_MIN_SECONDS
-        earliest = pool.earliest_release_in_seconds() or 0.0
+        earliest = pool.earliest_release_in_seconds(exchange="kraken") or 0.0
         logger.warning(
             "kraken WS pool-aware reconnect: all routes quarantined; "
             "sleeping {}s until earliest release (connector={})",

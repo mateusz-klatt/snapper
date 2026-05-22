@@ -82,33 +82,61 @@ class EgressPool(EgressPoolBase):
         with self._lock:
             return sum(1 for s in self._states.values() if s.enabled)
 
-    def has_available(self) -> bool:
-        """Return True if any route is enabled and not quarantined.
+    def has_available(self, exchange: str | None = None) -> bool:
+        """Return True if any route is enabled, not quarantined, and serves ``exchange``.
+
+        Args:
+            exchange: When set, only consider routes whose
+                ``allowed_exchanges`` is empty or contains this name.
+                When ``None`` (legacy callers / observability code),
+                every enabled+healthy route counts regardless of
+                ``allowed_exchanges``. Phase B'.5 callers that gate
+                retry timing on per-exchange availability (e.g. the
+                Kraken connect shim's ``_patched_get_reconnect_wait``)
+                MUST pass the exchange so a Walutomat-pinned route
+                cannot falsely look healthy to Kraken.
 
         Returns:
-            ``True`` when at least one route is enabled and either
-            never quarantined or its quarantine deadline is already
-            in the past. ``False`` when every enabled route is still
-            inside its quarantine window.
+            ``True`` when at least one matching route is enabled and
+            either never quarantined or its quarantine deadline is
+            already in the past. ``False`` when every matching route
+            is still inside its quarantine window — or when no route
+            serves ``exchange`` at all.
         """
         now = datetime.now(UTC)
         with self._lock:
-            return any(self._is_available_locked(s, now) for s in self._states.values())
+            return any(
+                self._is_available_locked(s, now)
+                and (exchange is None or self._exchange_allows_locked(s, exchange))
+                for s in self._states.values()
+            )
 
-    def earliest_release_in_seconds(self) -> float | None:
+    def earliest_release_in_seconds(self, exchange: str | None = None) -> float | None:
         """Minimum seconds until any quarantine deadline expires.
 
+        Args:
+            exchange: When set, only consider routes whose
+                ``allowed_exchanges`` is empty or contains this name.
+                Mirrors :meth:`has_available` — callers gating retry
+                wait on per-exchange release time MUST pass the
+                exchange so the deadline reflects an
+                exchange-eligible release, not a release for a
+                differently-pinned route.
+
         Returns:
-            ``None`` if no route is currently quarantined.
-            ``0.0`` if the earliest deadline is already in the past.
-            Otherwise the positive number of seconds until release.
+            ``None`` if no matching route is currently quarantined.
+            ``0.0`` if the earliest matching deadline is already in
+            the past. Otherwise the positive number of seconds until
+            release.
         """
         now = datetime.now(UTC)
         with self._lock:
             deadlines = [
                 s.quarantine_until
                 for s in self._states.values()
-                if s.enabled and s.quarantine_until is not None
+                if s.enabled
+                and s.quarantine_until is not None
+                and (exchange is None or self._exchange_allows_locked(s, exchange))
             ]
         if not deadlines:
             return None

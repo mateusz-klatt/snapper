@@ -249,25 +249,32 @@ class TestReserveExchangeFilter:
             ],
         )
 
-    def test_pool_picks_pinned_route_for_listed_exchange(self) -> None:
-        """Spec — pl route pinned to ``["walutomat"]`` is selected for that exchange.
+    def test_pool_picks_pinned_route_when_only_match(self) -> None:
+        """Spec — pl1 is the unique allowed route → it must be picked.
 
-        Even though IE/UK have equal priority and lower in_use_count
-        (both fresh), the lowest (priority, in_use_count) tuple across
-        all 4 routes that pass the exchange filter is the only allowed
-        route — pl1 — when reserving for walutomat.
-
-        Note: IE/UK ALSO match because empty ``allowed_exchanges``
-        means "any exchange". With 3 priority-10 routes available
-        and pl listed last, the deterministic in_use_count=0 sort
-        keeps the FIRST-inserted matching route. So this test
-        actually proves the filter doesn't *exclude* pl, not that pl
-        is uniquely chosen. The complementary test below confirms pl
-        IS excluded for kraken.
+        Pool has direct(p=100) + pl(p=10, allowed=["walutomat"]).
+        Reserve(walutomat): IE/UK absent, direct is higher priority,
+        so pl MUST be the selection. Proves the filter actually
+        admits pinned routes for their listed exchange (the original
+        v1 test only proved the filter didn't exclude pl, per Codex
+        review).
         """
-        pool = EgressPool(self._pl_pinned_config())
+        config = EgressPoolConfig(
+            enabled=True,
+            routes=[
+                RouteConfig(id="default", kind="direct", priority=100),
+                RouteConfig(
+                    id="pl",
+                    kind="socks5",
+                    proxy_url="socks5h://x:1084",
+                    priority=10,
+                    allowed_exchanges=("walutomat",),
+                ),
+            ],
+        )
+        pool = EgressPool(config)
         reservation = pool.reserve(exchange="walutomat", purpose="websocket")
-        assert reservation.route_id in {"ie", "uk", "pl"}
+        assert reservation.route_id == "pl"
 
     def test_pool_skips_pinned_route_for_other_exchange(self) -> None:
         """Spec — pl route is NEVER selected when reserving for kraken.
@@ -448,6 +455,34 @@ class TestHasAvailable:
         pool = EgressPool(config)
         assert pool.has_available() is False
 
+    def test_filters_by_exchange_for_pinned_routes(self) -> None:
+        """Spec — has_available(exchange='kraken') ignores Walutomat-pinned routes.
+
+        Pool has direct(disabled) + pl(socks5, healthy, allowed=['walutomat']).
+        Without an exchange filter, has_available() reports True
+        because pl is healthy. With exchange='kraken', the filter
+        excludes pl → False, which is the correct signal to the
+        Kraken reconnect path that there is NO healthy Kraken-eligible
+        route and it should sleep until release, not retry in 1s.
+        """
+        config = EgressPoolConfig(
+            enabled=False,
+            routes=[
+                RouteConfig(id="d", kind="direct", enabled=False),
+                RouteConfig(
+                    id="pl",
+                    kind="socks5",
+                    proxy_url="socks5h://x:1084",
+                    priority=10,
+                    allowed_exchanges=("walutomat",),
+                ),
+            ],
+        )
+        pool = EgressPool(config)
+        assert pool.has_available() is True
+        assert pool.has_available(exchange="kraken") is False
+        assert pool.has_available(exchange="walutomat") is True
+
 
 class TestDefensiveBranches:
     """Tests for defensive ``state is None`` early returns.
@@ -547,6 +582,40 @@ class TestEarliestReleaseInSeconds:
         )
         result = pool.earliest_release_in_seconds()
         assert result == 0.0
+
+    def test_filters_by_exchange_for_pinned_routes(self) -> None:
+        """Spec — earliest_release_in_seconds(exchange) ignores other-exchange pins.
+
+        When a Walutomat-pinned route is quarantined and the only
+        Kraken-eligible direct fallback has no deadline, asking for
+        the Kraken-eligible release time must return ``None`` (no
+        Kraken-eligible route in quarantine), NOT the pl deadline.
+        The Kraken reconnect path needs this so it doesn't sleep
+        until a Walutomat route releases when that release has no
+        bearing on Kraken availability.
+        """
+        config = EgressPoolConfig(
+            enabled=True,
+            routes=[
+                RouteConfig(id="default", kind="direct", priority=100),
+                RouteConfig(
+                    id="pl",
+                    kind="socks5",
+                    proxy_url="socks5h://x:1084",
+                    priority=10,
+                    allowed_exchanges=("walutomat",),
+                ),
+            ],
+        )
+        pool = EgressPool(config)
+        pool._quarantine_route(
+            "pl",
+            datetime.now(UTC) + timedelta(seconds=120),
+            "http-429",
+        )
+        assert pool.earliest_release_in_seconds() is not None
+        assert pool.earliest_release_in_seconds(exchange="walutomat") is not None
+        assert pool.earliest_release_in_seconds(exchange="kraken") is None
 
 
 class TestModuleSingletonState:
