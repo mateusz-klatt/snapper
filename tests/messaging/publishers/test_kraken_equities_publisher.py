@@ -1,5 +1,6 @@
 """Unit tests for KrakenEquitiesMarketDataPublisher."""
 
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from snapper.config.settings import AppSettings
 from snapper.infrastructure.exchanges.implementations.kraken_equities import (
     KrakenEquitiesExchangeClient,
 )
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
 from snapper.messaging.publishers.kraken_equities import KrakenEquitiesMarketDataPublisher
 
 
@@ -156,3 +158,60 @@ class TestKrakenEquitiesMarketDataPublisher:
         """
         publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
         await publisher._candle_loop(["CLM6-NYMEX"], "1m")
+
+    @pytest.mark.asyncio
+    async def test_start_sets_and_resets_current_publisher_context_var(self) -> None:
+        """Start override registers this publisher in the SDK-patch ContextVar.
+
+        Given: A KrakenEquitiesMarketDataPublisher instance with a
+            patched base ``start`` that observes the ContextVar.
+        When: ``start()`` is awaited,
+        Then: ``_CURRENT_PUBLISHER`` resolves to the publisher
+            during ``super().start()`` execution, then resets to
+            ``None`` after ``start()`` returns.
+
+        This proves the SDK connect shim will read this publisher's
+        ``_get_exchange_name()`` ("kraken_equities") instead of the
+        legacy hardcoded ``"kraken"`` tag when reserving an
+        egress-pool route — required so the Phase B'.5
+        ``allowed_exchanges=["kraken_equities"]`` filter pins this
+        publisher to the dedicated NYC tunnel.
+        """
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        observed: list[KrakenEquitiesMarketDataPublisher | None] = []
+
+        async def fake_super_start(self: KrakenEquitiesMarketDataPublisher) -> None:
+            observed.append(_CURRENT_PUBLISHER.get())
+
+        with patch(
+            "snapper.messaging.publishers.base.MarketDataPublisherService.start",
+            new=fake_super_start,
+        ):
+            await publisher.start()
+
+        assert observed == [publisher]
+        assert _CURRENT_PUBLISHER.get() is None
+
+    @pytest.mark.asyncio
+    async def test_start_resets_context_var_even_if_super_raises(self) -> None:
+        """Token reset must occur in ``finally`` so failures do not leak the ContextVar.
+
+        Given: ``super().start()`` raises an arbitrary RuntimeError,
+        When: ``start()`` is awaited,
+        Then: The exception propagates AND ``_CURRENT_PUBLISHER``
+            is restored to its prior value (``None``) — no leak
+            across publisher restarts.
+        """
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        fake_super = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with (
+            patch(
+                "snapper.messaging.publishers.base.MarketDataPublisherService.start",
+                new=fake_super,
+            ),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            await publisher.start()
+
+        assert _CURRENT_PUBLISHER.get() is None

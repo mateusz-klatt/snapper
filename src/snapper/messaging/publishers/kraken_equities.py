@@ -26,6 +26,7 @@ from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.kraken_equities import (
     KrakenEquitiesExchangeClient,
 )
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
 from snapper.infrastructure.symbols.functions import get_available_kraken_equities_symbols
 from snapper.infrastructure.symbols.functions import native_to_kraken_equities_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
@@ -86,6 +87,28 @@ class KrakenEquitiesMarketDataPublisher(
             "kraken_equities" exchange name.
         """
         return ExchangeEnum.KRAKEN_EQUITIES
+
+    async def start(self) -> None:
+        """Start the publisher within a connector-registration context.
+
+        Stamps ``_CURRENT_PUBLISHER`` so each ``ConnectSpotWebsocketBase``
+        instance (the patched kraken-SDK class reused by Equities)
+        carries the publisher's ``_get_exchange_name()`` when reserving
+        an egress-pool route. This lets ``egress_pool``'s
+        ``allowed_exchanges`` filter pin Equities to a specific tunnel
+        (e.g. NYC) without affecting Spot or other Kraken publishers.
+
+        Without this override the connector falls back to the
+        hardcoded ``"kraken"`` tag (back-compat for Spot, which sets
+        its own publisher via ``KrakenMarketDataPublisher.start``).
+        The token is reset in ``finally`` to keep the ContextVar from
+        leaking across publisher restarts.
+        """
+        token = _CURRENT_PUBLISHER.set(self)
+        try:
+            await super().start()
+        finally:
+            _CURRENT_PUBLISHER.reset(token)
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:
         """Validate and filter symbols for Kraken Equities.

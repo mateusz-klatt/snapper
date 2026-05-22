@@ -1205,6 +1205,81 @@ class TestPhaseBPrimeShim:
         snap = pool.snapshot()[0]
         assert snap.quarantine_until is None
 
+    def test_shim_uses_publisher_exchange_name_via_context_var(self) -> None:
+        """Spec — when ``_CURRENT_PUBLISHER`` is set, its ``_get_exchange_name()`` becomes the reservation tag.
+
+        Given the pool has a SOCKS5 route pinned to ``allowed_exchanges=("kraken_equities",)``,
+        And the only other route (``default``, direct) is quarantined,
+        And ``_CURRENT_PUBLISHER`` is set to a publisher whose
+        ``_get_exchange_name()`` returns ``"kraken_equities"``,
+        When the shim runs,
+        Then the SOCKS5 route is picked (the allow-list permits it)
+        and the proxy URL is injected.
+
+        This proves the connect-shim consults the publisher-scoped
+        ContextVar rather than the legacy hardcoded ``"kraken"`` tag,
+        which would have been rejected by the allow-list.
+        """
+        routes = [
+            RouteConfig(id="default", kind="direct", priority=0),
+            RouteConfig(
+                id="wg-us-1",
+                kind="socks5",
+                proxy_url="socks5h://snapper-egress:1085",
+                priority=10,
+                allowed_exchanges=("kraken_equities",),
+            ),
+        ]
+        config = EgressPoolConfig(enabled=True, routes=routes, on_all_quarantined="wait")
+        pool = configure_egress_pool(config)
+        assert pool is not None
+        pool._quarantine_route(
+            "default",
+            datetime.now(UTC) + timedelta(seconds=600),
+            "http-429",
+        )
+
+        mock_publisher = MagicMock()
+        mock_publisher._get_exchange_name.return_value = "kraken_equities"
+        token = _CURRENT_PUBLISHER.set(mock_publisher)
+        try:
+            seen_kwargs: dict[str, Any] = {}
+
+            def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
+                seen_kwargs.update(kwargs)
+                return MagicMock()
+
+            shim_cls = _wrap_connect_factory(fake_connect)
+            shim_cls("wss://kraken")
+        finally:
+            _CURRENT_PUBLISHER.reset(token)
+
+        assert seen_kwargs == {"proxy": "socks5h://snapper-egress:1085"}
+
+    def test_shim_falls_back_to_kraken_when_no_publisher_context(self) -> None:
+        """Spec — when ``_CURRENT_PUBLISHER`` is None, reservation tag falls back to ``"kraken"``.
+
+        Given the pool is enabled with a SOCKS5 route,
+        And ``_CURRENT_PUBLISHER`` is NOT set (default ``None``),
+        When the shim runs,
+        Then the reservation uses the legacy ``"kraken"`` tag,
+        preserving back-compat for the Spot publisher path where
+        ``KrakenMarketDataPublisher.start`` sets the ContextVar
+        explicitly. (Other Kraken publishers that have not yet been
+        migrated to set ``_CURRENT_PUBLISHER`` still get pool routing
+        under the legacy tag.)
+        """
+        self._enable_pool(with_socks5=True)
+        seen_kwargs: dict[str, Any] = {}
+
+        def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
+            seen_kwargs.update(kwargs)
+            return MagicMock()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim_cls("wss://kraken")
+        assert "proxy" in seen_kwargs
+
 
 class TestPhaseBPrimeGetReconnectWait:
     """Phase B' precedence tests for ``_patched_get_reconnect_wait``.

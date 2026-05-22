@@ -220,8 +220,10 @@ class _ConnectShim:
         self._reservation: EgressReservation | None = None
         pool = get_egress_pool()
         if pool is not None and pool.size() > 0:
+            publisher = _CURRENT_PUBLISHER.get()
+            exchange_name = publisher._get_exchange_name() if publisher is not None else "kraken"
             self._reservation = pool.reserve(
-                exchange="kraken",
+                exchange=exchange_name,
                 purpose="websocket",
             )
             kwargs = {**kwargs, **self._reservation.websocket_kwargs()}
