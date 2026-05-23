@@ -517,7 +517,9 @@ class TestOnWsMessage:
         assert update == expected_update
 
     @pytest.mark.asyncio
-    async def test_trade_message_routed_to_queue(self, client: KrakenFuturesExchangeClient) -> None:
+    async def test_on_message_passes_live_trade_feed(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
         """Route a live ``feed=trade`` WS message (single-trade-per-envelope) to trade_queue.
 
         Given: WS message with ``feed=trade`` and trade fields directly on
@@ -543,17 +545,15 @@ class TestOnWsMessage:
         assert update.symbol == "BTC-USD-PERP"
 
     @pytest.mark.asyncio
-    async def test_trade_snapshot_routed_to_queue(
+    async def test_on_message_drops_trade_snapshot_feed(
         self, client: KrakenFuturesExchangeClient
     ) -> None:
-        """Route a ``feed=trade_snapshot`` WS message (array form) to trade_queue.
+        """Drop a ``feed=trade_snapshot`` WS message before enqueue.
 
         Given: WS message with ``feed=trade_snapshot`` and ``trades: [...]``
             (the initial-state batch shape),
         When: _on_ws_message is called,
-        Then: Each entry in ``trades`` is parsed and enqueued separately.
-            Confirms the dual-format branch handles both the live single
-            envelope (``feed=trade``) and the batched snapshot envelope.
+        Then: No TradeUpdate is placed in _trade_queue.
         """
         msg = {
             "feed": "trade_snapshot",
@@ -564,11 +564,8 @@ class TestOnWsMessage:
             ],
         }
         await client._on_ws_message(msg)
-        assert client._trade_queue.qsize() == 2
-        first = client._trade_queue.get_nowait()
-        second = client._trade_queue.get_nowait()
-        assert first.symbol == "BTC-USD-PERP"
-        assert second.symbol == "BTC-USD-PERP"
+        assert client._trade_queue.empty()
+        assert client._candle_builder.active_buckets() == 0
 
     @pytest.mark.asyncio
     async def test_trade_message_also_folds_into_candle_builder(
@@ -598,30 +595,35 @@ class TestOnWsMessage:
         assert client._candle_builder.active_buckets() == 1
 
     @pytest.mark.asyncio
-    async def test_trade_snapshot_also_folds_each_into_candle_builder(
+    async def test_live_trade_messages_fold_each_into_candle_builder(
         self, client: KrakenFuturesExchangeClient
     ) -> None:
-        """Every trade in a ``trade_snapshot`` batch folds into the builder.
+        """Every live trade envelope folds into the builder.
 
-        Given: A batch ``feed=trade_snapshot`` envelope with two trades,
-        When: ``_on_ws_message`` is called,
+        Given: Two live ``feed=trade`` messages,
+        When: ``_on_ws_message`` is called for each,
         Then: The candle bucket for the current minute holds 2 trades
-            in its ``trades`` counter — confirming each batch entry is
-            individually folded, not just the first. (The two trades
-            land in the same bucket because the adapter stamps both
-            with the current bus-time minute regardless of message-level
-            timestamps, so ``active_buckets() == 1`` here.)
+            in its ``trades`` counter.
         """
         assert client._candle_builder.active_buckets() == 0
-        msg = {
-            "feed": "trade_snapshot",
+        first_msg = {
+            "feed": "trade",
             "product_id": "PI_XBTUSD",
-            "trades": [
-                {"time": 1640995200000, "qty": 1.0, "price": 66600.0, "side": "buy"},
-                {"time": 1640995320000, "qty": 1.0, "price": 66601.0, "side": "buy"},
-            ],
+            "time": 1640995200000,
+            "qty": 1.0,
+            "price": 66600.0,
+            "side": "buy",
         }
-        await client._on_ws_message(msg)
+        second_msg = {
+            "feed": "trade",
+            "product_id": "PI_XBTUSD",
+            "time": 1640995320000,
+            "qty": 1.0,
+            "price": 66601.0,
+            "side": "buy",
+        }
+        await client._on_ws_message(first_msg)
+        await client._on_ws_message(second_msg)
         assert client._candle_builder.active_buckets() == 1
         candles = client._candle_builder.pop_completed(datetime.now(UTC) + timedelta(minutes=2))
         assert len(candles) == 1

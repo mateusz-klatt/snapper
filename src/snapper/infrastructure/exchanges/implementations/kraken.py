@@ -1302,6 +1302,13 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         channel = message_dict["channel"]
         data = message_dict["data"]
+        msg_type = message_dict.get("type")
+        if channel in {"ticker", "trade"} and msg_type == "snapshot":
+            logger.debug(
+                "Skipping {} snapshot frame because it is a replay artifact",
+                channel,
+            )
+            return
         data_handlers: dict[str, Callable[[Any], None]] = {
             "ohlc": self._handle_ohlc_data,
             "ticker": self._handle_ticker_data,

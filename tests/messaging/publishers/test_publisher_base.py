@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.process_manager.registry import get_registered_processes
+from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import TickUpsertRow
@@ -29,6 +30,7 @@ from snapper.data.repository_types import TradeUpsertRow
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.messaging.publishers.base import _TRADE_ID_LRU_MAX_PER_SYMBOL
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.base import _candle_writer_drop_counters
 from snapper.messaging.publishers.base import _cleanup_pending_future
@@ -90,6 +92,58 @@ class DummyPublisher(MarketDataPublisherService[Any]):
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:
         return symbols
+
+
+def _ticker_update(
+    *,
+    symbol: str = "BTC-USD",
+    volume: float = 10.0,
+    is_delayed: bool = False,
+    is_extended_hours: bool | None = None,
+) -> TickerUpdate:
+    """Build a ticker update for publisher dedup tests."""
+    return TickerUpdate(
+        symbol=symbol,
+        bid=100.0,
+        bid_qty=1.0,
+        ask=101.0,
+        ask_qty=1.5,
+        last=100.5,
+        volume=volume,
+        vwap=100.25,
+        low=99.0,
+        high=102.0,
+        change=0.5,
+        change_pct=0.25,
+        is_delayed=is_delayed,
+        is_extended_hours=is_extended_hours,
+    )
+
+
+def _trade_update(
+    *,
+    symbol: str = "BTC-USD",
+    trade_id: str | None = "trade-1",
+) -> TradeUpdate:
+    """Build a trade update for publisher dedup tests."""
+    return TradeUpdate(
+        symbol=symbol,
+        side="buy",
+        quantity=0.5,
+        price=100.0,
+        ord_type="market",
+        trade_id=trade_id,
+        timestamp=datetime.now(UTC),
+    )
+
+
+def _dedup_publisher(symbols: list[str] | None = None) -> tuple[DummyPublisher, AsyncMock]:
+    """Build a publisher with outbound effects mocked for dedup tests."""
+    publisher = DummyPublisher(symbols=symbols or ["BTC-USD"])
+    publish_mock = AsyncMock()
+    publisher._publish_message = publish_mock
+    publisher._ensure_instrument = AsyncMock(return_value=None)
+    return publisher, publish_mock
 
 
 class StubValidatedPublisher(SimpleNamespace):
@@ -1102,15 +1156,7 @@ async def test_tick_loop_processes_message(monkeypatch: pytest.MonkeyPatch) -> N
     pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
 
     async def gen() -> AsyncIterator[Any]:
-        yield SimpleNamespace(
-            symbol="BTC-USD",
-            last=10.0,
-            volume=5.0,
-            bid=1.0,
-            ask=2.0,
-            is_delayed=False,
-            is_extended_hours=None,
-        )
+        yield _ticker_update()
         pub.running = False
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
@@ -1871,6 +1917,256 @@ async def test_handle_settings_update_no_instance(monkeypatch: pytest.MonkeyPatc
         lambda: None,
     )
     pub._handle_settings_update(payload, "kraken")
+
+
+class TestPublisherDedup:
+    """Tests for tick payload and trade-id deduplication."""
+
+    @pytest.mark.asyncio
+    async def test_process_tick_drops_payload_identical_consecutive_ticks_for_same_symbol(
+        self,
+    ) -> None:
+        """Drop identical consecutive ticks.
+
+        Given: A publisher that already processed a BTC tick,
+        When: The same BTC payload is processed again,
+        Then: The duplicate tick is not published.
+        """
+        publisher, publish_mock = _dedup_publisher()
+        tick = _ticker_update()
+
+        await publisher._process_tick(tick, ExchangeEnum.KRAKEN)
+        await publisher._process_tick(tick, ExchangeEnum.KRAKEN)
+
+        assert publish_mock.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_process_tick_publishes_when_volume_changes_alone(self) -> None:
+        """Publish when only volume changes.
+
+        Given: A publisher that processed a BTC tick,
+        When: A second BTC tick differs only by volume,
+        Then: The second tick is published.
+        """
+        publisher, publish_mock = _dedup_publisher()
+
+        await publisher._process_tick(_ticker_update(volume=10.0), ExchangeEnum.KRAKEN)
+        await publisher._process_tick(_ticker_update(volume=11.0), ExchangeEnum.KRAKEN)
+
+        assert publish_mock.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_process_tick_publishes_when_is_delayed_flips_to_true(self) -> None:
+        """Publish when is_delayed changes.
+
+        Given: A publisher that processed a non-delayed BTC tick,
+        When: A second BTC tick has is_delayed set to true,
+        Then: The second tick is published.
+        """
+        publisher, publish_mock = _dedup_publisher()
+
+        await publisher._process_tick(_ticker_update(is_delayed=False), ExchangeEnum.KRAKEN)
+        await publisher._process_tick(_ticker_update(is_delayed=True), ExchangeEnum.KRAKEN)
+
+        assert publish_mock.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_process_tick_publishes_when_is_extended_hours_flips_to_false(self) -> None:
+        """Publish when is_extended_hours changes.
+
+        Given: A publisher that processed an extended-hours BTC tick,
+        When: A second BTC tick flips is_extended_hours to false,
+        Then: The second tick is published.
+        """
+        publisher, publish_mock = _dedup_publisher()
+
+        await publisher._process_tick(_ticker_update(is_extended_hours=True), ExchangeEnum.KRAKEN)
+        await publisher._process_tick(_ticker_update(is_extended_hours=False), ExchangeEnum.KRAKEN)
+
+        assert publish_mock.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_process_tick_cache_per_symbol_not_global(self) -> None:
+        """Keep tick dedup state per symbol.
+
+        Given: A publisher that processed a BTC tick,
+        When: An identical ETH payload is processed,
+        Then: The ETH tick is published independently of BTC state.
+        """
+        publisher, publish_mock = _dedup_publisher(symbols=["BTC-USD", "ETH-USD"])
+
+        await publisher._process_tick(_ticker_update(symbol="BTC-USD"), ExchangeEnum.KRAKEN)
+        await publisher._process_tick(_ticker_update(symbol="ETH-USD"), ExchangeEnum.KRAKEN)
+        await publisher._process_tick(_ticker_update(symbol="BTC-USD"), ExchangeEnum.KRAKEN)
+
+        assert publish_mock.await_count == 2
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
+    async def test_process_tick_cache_survives_reconnect(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        """Keep tick dedup state across a forced reconnect.
+
+        Given: A Kraken publisher that processed a BTC tick,
+        When: Its websocket client is force-restarted,
+        Then: The same BTC payload remains cached and is dropped.
+        """
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_get_settings.return_value = mock_settings
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publish_mock = AsyncMock()
+        publisher._publish_message = publish_mock
+        publisher._ensure_instrument = AsyncMock(return_value=None)
+        client = MagicMock()
+        client.disconnect_websocket = AsyncMock()
+        client._ensure_ws_connected = AsyncMock()
+        publisher._exchange_client = client
+        tick = _ticker_update()
+
+        await publisher._process_tick(tick, ExchangeEnum.KRAKEN)
+        with patch(
+            "snapper.messaging.publishers.kraken.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            await publisher._force_ws_restart()
+        await publisher._process_tick(tick, ExchangeEnum.KRAKEN)
+
+        assert publish_mock.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_process_tick_updates_last_message_at_before_dedup_return(self) -> None:
+        """Refresh liveness state before dropping a duplicate tick.
+
+        Given: A publisher with a cached BTC tick payload,
+        When: The duplicate payload is processed after last_message_at is reset,
+        Then: last_message_at and last_data_timestamps are updated before return.
+        """
+        publisher, publish_mock = _dedup_publisher()
+        tick = _ticker_update()
+        await publisher._process_tick(tick, ExchangeEnum.KRAKEN)
+        publisher._last_message_at = 0.0
+        publisher._last_data_timestamps.clear()
+
+        await publisher._process_tick(tick, ExchangeEnum.KRAKEN)
+
+        assert publisher._last_message_at > 0.0
+        assert "BTC-USD" in publisher._last_data_timestamps
+        assert publish_mock.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_process_trade_drops_already_seen_trade_id(self) -> None:
+        """Drop a repeated trade id for the same symbol.
+
+        Given: A publisher that processed trade id trade-1 for BTC,
+        When: The same trade id is processed again for BTC,
+        Then: The duplicate trade is not published.
+        """
+        publisher, publish_mock = _dedup_publisher()
+        trade = _trade_update(trade_id="trade-1")
+
+        await publisher._process_trade(trade, ExchangeEnum.KRAKEN)
+        await publisher._process_trade(trade, ExchangeEnum.KRAKEN)
+
+        assert publish_mock.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_process_trade_publishes_new_trade_id(self) -> None:
+        """Publish a new trade id for the same symbol.
+
+        Given: A publisher that processed trade id trade-1 for BTC,
+        When: Trade id trade-2 is processed for BTC,
+        Then: The second trade is published.
+        """
+        publisher, publish_mock = _dedup_publisher()
+
+        await publisher._process_trade(_trade_update(trade_id="trade-1"), ExchangeEnum.KRAKEN)
+        await publisher._process_trade(_trade_update(trade_id="trade-2"), ExchangeEnum.KRAKEN)
+
+        assert publish_mock.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_process_trade_with_none_trade_id_always_publishes(self) -> None:
+        """Publish trades that have no trade id.
+
+        Given: A publisher receives two BTC trades with no trade id,
+        When: Both trades are processed,
+        Then: Both trades are published because they cannot be deduplicated.
+        """
+        publisher, publish_mock = _dedup_publisher()
+
+        await publisher._process_trade(_trade_update(trade_id=None), ExchangeEnum.KRAKEN)
+        await publisher._process_trade(_trade_update(trade_id=None), ExchangeEnum.KRAKEN)
+
+        assert publish_mock.await_count == 2
+        assert "BTC-USD" not in publisher._seen_trade_ids
+
+    @pytest.mark.asyncio
+    async def test_process_trade_lru_evicts_oldest_at_cap(self) -> None:
+        """Evict oldest trade ids at the per-symbol cap.
+
+        Given: A publisher sees more unique BTC trade ids than the LRU cap,
+        When: The oldest id appears again after eviction,
+        Then: The oldest id is treated as new and published.
+        """
+        publisher, publish_mock = _dedup_publisher()
+
+        for index in range(_TRADE_ID_LRU_MAX_PER_SYMBOL + 1):
+            await publisher._process_trade(
+                _trade_update(trade_id=f"trade-{index}"),
+                ExchangeEnum.KRAKEN,
+            )
+        await publisher._process_trade(_trade_update(trade_id="trade-0"), ExchangeEnum.KRAKEN)
+
+        assert len(publisher._seen_trade_ids["BTC-USD"]) == _TRADE_ID_LRU_MAX_PER_SYMBOL
+        assert publish_mock.await_count == _TRADE_ID_LRU_MAX_PER_SYMBOL + 2
+
+    @pytest.mark.asyncio
+    async def test_process_trade_lru_per_symbol_independent(self) -> None:
+        """Keep trade-id dedup state per symbol.
+
+        Given: A publisher processed trade id shared for BTC,
+        When: Trade id shared is processed for ETH,
+        Then: The ETH trade is published independently of BTC state.
+        """
+        publisher, publish_mock = _dedup_publisher(symbols=["BTC-USD", "ETH-USD"])
+
+        await publisher._process_trade(
+            _trade_update(symbol="BTC-USD", trade_id="shared"),
+            ExchangeEnum.KRAKEN,
+        )
+        await publisher._process_trade(
+            _trade_update(symbol="ETH-USD", trade_id="shared"),
+            ExchangeEnum.KRAKEN,
+        )
+        await publisher._process_trade(
+            _trade_update(symbol="BTC-USD", trade_id="shared"),
+            ExchangeEnum.KRAKEN,
+        )
+
+        assert publish_mock.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_process_trade_updates_last_message_at_before_dedup_return(self) -> None:
+        """Refresh liveness state before dropping a duplicate trade.
+
+        Given: A publisher with a cached BTC trade id,
+        When: The duplicate trade is processed after last_message_at is reset,
+        Then: last_message_at is updated before return.
+        """
+        publisher, publish_mock = _dedup_publisher()
+        trade = _trade_update(trade_id="trade-1")
+        await publisher._process_trade(trade, ExchangeEnum.KRAKEN)
+        publisher._last_message_at = 0.0
+        publisher._last_data_timestamps.clear()
+
+        await publisher._process_trade(trade, ExchangeEnum.KRAKEN)
+
+        assert publisher._last_message_at > 0.0
+        assert "BTC-USD" in publisher._last_data_timestamps
+        assert publish_mock.await_count == 1
 
 
 class TestFeedPublisherCoverage:
@@ -3303,15 +3599,7 @@ async def test_tick_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) ->
     pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
 
     async def gen() -> AsyncIterator[Any]:
-        yield SimpleNamespace(
-            symbol="BTC-USD",
-            last=10.0,
-            volume=5.0,
-            bid=1.0,
-            ask=2.0,
-            is_delayed=False,
-            is_extended_hours=None,
-        )
+        yield _ticker_update()
         pub.running = False
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
@@ -3475,15 +3763,7 @@ async def test_tick_loop_does_not_flush_directly() -> None:
     pub._batch_max_age_s = 0.01
 
     async def gen() -> AsyncIterator[Any]:
-        yield SimpleNamespace(
-            symbol="BTC-USD",
-            last=10.0,
-            volume=5.0,
-            bid=1.0,
-            ask=2.0,
-            is_delayed=False,
-            is_extended_hours=None,
-        )
+        yield _ticker_update()
         await asyncio.sleep(0.05)
         pub.running = False
 
@@ -3512,15 +3792,7 @@ async def test_tick_loop_enqueues_every_tick_for_writer() -> None:
 
     async def gen() -> AsyncIterator[Any]:
         for i in range(3):
-            yield SimpleNamespace(
-                symbol="BTC-USD",
-                last=10.0 + i,
-                volume=5.0,
-                bid=1.0,
-                ask=2.0,
-                is_delayed=False,
-                is_extended_hours=None,
-            )
+            yield _ticker_update(volume=5.0 + i)
         pub.running = False
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
@@ -3545,15 +3817,7 @@ async def test_tick_loop_skips_db_when_instrument_is_none() -> None:
     pub._ensure_instrument = AsyncMock(return_value=None)
 
     async def gen() -> AsyncIterator[Any]:
-        yield SimpleNamespace(
-            symbol="BTC-USD",
-            last=10.0,
-            volume=5.0,
-            bid=1.0,
-            ask=2.0,
-            is_delayed=False,
-            is_extended_hours=None,
-        )
+        yield _ticker_update()
         pub.running = False
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
@@ -3593,24 +3857,8 @@ async def test_tick_loop_cancelled_error() -> None:
     pub.msg_publisher.send = publish_then_cancel
 
     async def gen() -> AsyncIterator[Any]:
-        yield SimpleNamespace(
-            symbol="BTC-USD",
-            last=10.0,
-            volume=5.0,
-            bid=1.0,
-            ask=2.0,
-            is_delayed=False,
-            is_extended_hours=None,
-        )
-        yield SimpleNamespace(
-            symbol="BTC-USD",
-            last=11.0,
-            volume=6.0,
-            bid=1.1,
-            ask=2.1,
-            is_delayed=False,
-            is_extended_hours=None,
-        )
+        yield _ticker_update(volume=5.0)
+        yield _ticker_update(volume=6.0)
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
     with pytest.raises(asyncio.CancelledError):

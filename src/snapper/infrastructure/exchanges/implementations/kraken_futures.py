@@ -308,8 +308,13 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             except (ValueError, KeyError) as exc:
                 logger.debug(f"Skipping unparseable ticker WS message: {exc}")
         elif feed in ("trade", "trade_snapshot"):
+            if feed == "trade_snapshot":
+                logger.debug(
+                    "Skipping Futures trade_snapshot batch because it is a replay artifact"
+                )
+                return
             product_id = message.get("product_id", "")
-            raw_trades = message.get("trades", []) if feed == "trade_snapshot" else [message]
+            raw_trades = [message]
             for raw_trade in raw_trades:
                 try:
                     trade = parse_kraken_futures_trade({**raw_trade, "product_id": product_id})

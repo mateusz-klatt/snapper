@@ -265,6 +265,8 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             return
         channel = message.get("channel", "")
         msg_type = message.get("type", "")
+        if channel == "ticker" and msg_type == "snapshot":
+            return
         if channel == "ticker" and msg_type in ("snapshot", "update"):
             raw_delayed = message.get("delayed", False)
             if isinstance(raw_delayed, bool):
@@ -277,6 +279,8 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                 )
                 envelope_delayed = False
             self._handle_ticker_message(message, envelope_delayed=envelope_delayed)
+            return
+        if channel == "trade" and msg_type == "snapshot":
             return
         if channel == "trade" and msg_type in ("snapshot", "update"):
             self._handle_trade_message(message)

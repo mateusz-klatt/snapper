@@ -5,6 +5,7 @@ real-time market data from exchanges.
 """
 
 import asyncio
+import collections
 import contextlib
 import math
 from abc import ABC
@@ -87,6 +88,8 @@ _TRADE_WRITE_QUEUE_MAX = 5_000
 _TRADE_WRITER_DROP_LOG_INTERVAL_S = 1.0
 _TRADE_WRITER_SHUTDOWN_POLL_S = 0.5
 _trade_writer_drop_counters: dict[str, list[float]] = {}
+_TRADE_ID_LRU_MAX_PER_SYMBOL: int = 1000
+"""Bounded per-symbol LRU cache size for trade-id deduplication."""
 
 _CONSUMER_RESTART_BACKOFF_S = 2.0
 _LIVENESS_RECOVERY_THRESHOLD_S_DEFAULT = 300
@@ -106,6 +109,9 @@ _DATA_TYPES_FOR_RAIL: tuple[PersistDataType, ...] = ("ticks", "trades", "candles
 _WriterQueue = (
     asyncio.Queue[TickUpsertRow] | asyncio.Queue[CandleUpsertRow] | asyncio.Queue[TradeUpsertRow]
 )
+
+type TickPayloadValue = float | bool | None
+"""Union of every value type in the tick payload deduplication tuple."""
 
 
 def _enqueue_or_drop_oldest_tick_write(
@@ -266,6 +272,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self.running = False
         self.heartbeat_seq = 0
         self._last_data_timestamps: dict[str, float] = {}
+        self._last_tick_payload: dict[str, tuple[TickPayloadValue, ...]] = {}
+        self._seen_trade_ids: dict[str, collections.OrderedDict[str, None]] = {}
         self._last_message_at: float = monotonic()
         self._recovery_lock: asyncio.Lock = asyncio.Lock()
         self._last_recovery_at: float = 0.0
@@ -1244,8 +1252,27 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         probe = get_probe()
         t_start = perf_counter_ns()
         native_symbol = message.symbol
-        topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TICKS)
         received_at = datetime.now(UTC)
+        self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
+        payload_key: tuple[TickPayloadValue, ...] = (
+            message.bid,
+            message.bid_qty,
+            message.ask,
+            message.ask_qty,
+            message.last,
+            message.volume,
+            message.vwap,
+            message.low,
+            message.high,
+            message.change,
+            message.change_pct,
+            message.is_delayed,
+            message.is_extended_hours,
+        )
+        if self._last_tick_payload.get(native_symbol) == payload_key:
+            return None
+        self._last_tick_payload[native_symbol] = payload_key
+        topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TICKS)
         t_after_topic = perf_counter_ns()
         probe.record("build_topic", t_after_topic - t_start)
         tick_msg = TickData(
@@ -1265,7 +1292,6 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         t_after_build = perf_counter_ns()
         probe.record("build_tick_model", t_after_build - t_after_topic)
         await self._publish_message(topic, tick_msg)
-        self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
         t_before_instr = perf_counter_ns()
         instrument_public_id = await self._ensure_instrument(native_symbol)
         t_after_instr = perf_counter_ns()
@@ -1424,8 +1450,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         self._last_message_at = monotonic()
         native_symbol = trade.symbol
-        topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TRADES)
         received_at = datetime.now(UTC)
+        self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
+        if self._is_duplicate_trade(trade):
+            return None
+        topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TRADES)
         trade_msg = TradeData(
             public_id=str(uuid7()),
             timestamp=received_at,
@@ -1440,11 +1469,26 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             trade_id=trade.trade_id,
         )
         await self._publish_message(topic, trade_msg)
-        self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
         instrument_public_id = await self._ensure_instrument(native_symbol)
         if instrument_public_id is None:
             return None
         return self._build_trade_row(trade_msg, instrument_public_id)
+
+    def _is_duplicate_trade(self, trade: TradeUpdate) -> bool:
+        """Return True when a trade id was already seen for the same symbol."""
+        if trade.trade_id is None:
+            return False
+        cache = self._seen_trade_ids.get(trade.symbol)
+        if cache is None:
+            cache = collections.OrderedDict[str, None]()
+            self._seen_trade_ids[trade.symbol] = cache
+        if trade.trade_id in cache:
+            cache.move_to_end(trade.trade_id)
+            return True
+        cache[trade.trade_id] = None
+        while len(cache) > _TRADE_ID_LRU_MAX_PER_SYMBOL:
+            cache.popitem(last=False)
+        return False
 
     async def _publish_message(
         self, topic: str, message: MarketDataMessage

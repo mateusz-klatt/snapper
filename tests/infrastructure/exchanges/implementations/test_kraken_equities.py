@@ -343,14 +343,14 @@ class TestOnWsMessage:
             yield
 
     @pytest.mark.asyncio
-    async def test_ticker_snapshot_routed_to_queue(
+    async def test_on_ws_message_drops_ticker_snapshot(
         self, client: KrakenEquitiesExchangeClient
     ) -> None:
-        """Route ticker snapshot WS message to tick_queue.
+        """Drop ticker snapshot WS message before enqueue.
 
         Given: WS message with channel=ticker and type=snapshot,
         When: _on_ws_message is called,
-        Then: Parsed TickerUpdate is placed in _tick_queue.
+        Then: No TickerUpdate is placed in _tick_queue.
         """
         msg = {
             "channel": "ticker",
@@ -358,12 +358,10 @@ class TestOnWsMessage:
             "data": [{"symbol": "CLM6.NYMEX", "bid": 90.10}],
         }
         await client._on_ws_message(msg)
-        assert not client._tick_queue.empty()
-        update = client._tick_queue.get_nowait()
-        assert update.symbol == "CLM6-NYMEX"
+        assert client._tick_queue.empty()
 
     @pytest.mark.asyncio
-    async def test_ticker_update_routed_to_queue(
+    async def test_on_ws_message_passes_ticker_update(
         self, client: KrakenEquitiesExchangeClient
     ) -> None:
         """Route ticker update WS message to tick_queue.
@@ -381,14 +379,14 @@ class TestOnWsMessage:
         assert not client._tick_queue.empty()
 
     @pytest.mark.asyncio
-    async def test_trade_snapshot_routed_to_queue(
+    async def test_on_ws_message_drops_trade_snapshot(
         self, client: KrakenEquitiesExchangeClient
     ) -> None:
-        """Route trade snapshot WS message to trade_queue.
+        """Drop trade snapshot WS message before enqueue.
 
         Given: WS message with channel=trade and type=snapshot,
         When: _on_ws_message is called,
-        Then: Parsed TradeUpdate is placed in _trade_queue.
+        Then: No TradeUpdate is placed in _trade_queue.
         """
         msg = {
             "channel": "trade",
@@ -406,9 +404,8 @@ class TestOnWsMessage:
             ],
         }
         await client._on_ws_message(msg)
-        assert not client._trade_queue.empty()
-        update = client._trade_queue.get_nowait()
-        assert update.symbol == "CLM6-NYMEX"
+        assert client._trade_queue.empty()
+        assert client._candle_builder.active_buckets() == 0
 
     @pytest.mark.asyncio
     async def test_trade_message_also_folds_into_candle_builder(
@@ -416,7 +413,7 @@ class TestOnWsMessage:
     ) -> None:
         """Every parsed trade is also routed into ``_candle_builder``.
 
-        Given: A trade WS message arrives via the equities channel,
+        Given: A trade update WS message arrives via the equities channel,
         When: ``_on_ws_message`` is called,
         Then: ``_candle_builder.active_buckets()`` becomes 1 —
             confirming the trade-handler path wires the builder, not
@@ -427,7 +424,7 @@ class TestOnWsMessage:
         assert client._candle_builder.active_buckets() == 0
         msg = {
             "channel": "trade",
-            "type": "snapshot",
+            "type": "update",
             "data": [
                 {
                     "symbol": "CLM6.NYMEX",
@@ -1809,7 +1806,7 @@ class TestWsEnvelopeDelayedPropagation:
         ) as parse_mock:
             msg = {
                 "channel": "ticker",
-                "type": "snapshot",
+                "type": "update",
                 "data": [{"symbol": "MNQM6.CME"}],
             }
             await client._on_ws_message(msg)
@@ -1848,7 +1845,7 @@ class TestWsEnvelopeDelayedPropagation:
         ) as parse_mock:
             msg = {
                 "channel": "ticker",
-                "type": "snapshot",
+                "type": "update",
                 "delayed": "false",
                 "data": [{"symbol": "MNQM6.CME"}],
             }

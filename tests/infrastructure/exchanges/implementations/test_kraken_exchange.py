@@ -81,6 +81,76 @@ def _client() -> KrakenExchangeClient:
     return client
 
 
+@pytest.mark.asyncio
+async def test_handle_channel_data_drops_ticker_snapshot_envelope() -> None:
+    """Ticker snapshot envelope is dropped.
+
+    Given: A Kraken ticker frame marked as a snapshot,
+    When: _handle_channel_data dispatches the frame,
+    Then: The ticker handler is not called.
+    """
+    client = _client()
+    client._handle_ticker_data = MagicMock()
+
+    await client._handle_channel_data(
+        {"channel": "ticker", "type": "snapshot", "data": [{"symbol": "BTC/USD"}]}
+    )
+
+    client._handle_ticker_data.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_channel_data_drops_trade_snapshot_envelope() -> None:
+    """Trade snapshot envelope is dropped.
+
+    Given: A Kraken trade frame marked as a snapshot,
+    When: _handle_channel_data dispatches the frame,
+    Then: The trade handler is not called.
+    """
+    client = _client()
+    client._handle_trade_data = MagicMock()
+
+    await client._handle_channel_data(
+        {"channel": "trade", "type": "snapshot", "data": [{"symbol": "BTC/USD"}]}
+    )
+
+    client._handle_trade_data.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_channel_data_passes_ticker_update_envelope() -> None:
+    """Ticker update envelope reaches the ticker handler.
+
+    Given: A Kraken ticker frame marked as an update,
+    When: _handle_channel_data dispatches the frame,
+    Then: The ticker handler receives the frame data.
+    """
+    client = _client()
+    client._handle_ticker_data = MagicMock()
+    data = [{"symbol": "BTC/USD"}]
+
+    await client._handle_channel_data({"channel": "ticker", "type": "update", "data": data})
+
+    client._handle_ticker_data.assert_called_once_with(data)
+
+
+@pytest.mark.asyncio
+async def test_handle_channel_data_passes_ohlc_snapshot_envelope() -> None:
+    """OHLC snapshot envelope reaches the OHLC handler.
+
+    Given: A Kraken OHLC frame marked as a snapshot,
+    When: _handle_channel_data dispatches the frame,
+    Then: The OHLC handler receives the frame data.
+    """
+    client = _client()
+    client._handle_ohlc_data = MagicMock()
+    data = [{"symbol": "BTC/USD", "interval": 1}]
+
+    await client._handle_channel_data({"channel": "ohlc", "type": "snapshot", "data": data})
+
+    client._handle_ohlc_data.assert_called_once_with(data)
+
+
 def test_get_ccxt_client_returns_ccxt_instance() -> None:
     """CCXT client accessor.
 
@@ -3939,11 +4009,11 @@ class TestKrakenAdditionalCoverage:
             assert isinstance(ticker_data, TickerUpdate)
             assert ticker_data.symbol == "BTC-USD"
 
-    async def test_on_message_trade_snapshot(self, kraken_client: KrakenExchangeClient) -> None:
-        """Verify on message trade snapshot."""
+    async def test_on_message_trade_update(self, kraken_client: KrakenExchangeClient) -> None:
+        """Verify on message trade update."""
         trade_message = {
             "channel": "trade",
-            "type": "snapshot",
+            "type": "update",
             "data": [
                 {
                     "symbol": "BTC/USD",
