@@ -52,16 +52,19 @@ PHASE_PREFIXES: Final[tuple[str, ...]] = (
     "assetClass.",
     "sector.",
     "related.",
+    "pairStats.",
+    "cacheBanner.",
 )
 """Frontend ``market.*`` sub-namespaces this script ports.
 
 Phase 1 landed the banner + locale-persist infrastructure
-(``description.`` / ``assetClass.`` / ``sector.``). Phase 2 adds
+(``description.`` / ``assetClass.`` / ``sector.``). Phase 2 added
 ``related.`` (cluster headers + chip exchange separator + empty
-state). Phase 3 will add ``pairStats.`` + ``cacheBanner.``. Each
-phase extends this tuple in the same commit as the iOS view that
-consumes the keys, so the catalog parity gate fails loudly if
-either side drifts.
+state). Phase 3 adds ``pairStats.`` (cointegration row label +
+metric + accessibility) and ``cacheBanner.`` (cache-warming notice
++ data-source caption). Each phase extends this tuple in the same
+commit as the iOS view that consumes the keys, so the catalog
+parity gate fails loudly if either side drifts.
 """
 
 CATALOG_NAMESPACE: Final[str] = "market"

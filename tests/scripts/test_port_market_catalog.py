@@ -23,6 +23,8 @@ class TestIsPhaseKey:
         assert port._is_phase_key("assetClass") is True
         assert port._is_phase_key("sector") is True
         assert port._is_phase_key("related") is True
+        assert port._is_phase_key("pairStats") is True
+        assert port._is_phase_key("cacheBanner") is True
 
     def test_leaf_under_phase_prefix(self) -> None:
         """Standard leaf paths under each phase prefix match."""
@@ -32,13 +34,17 @@ class TestIsPhaseKey:
         assert port._is_phase_key("sector.precious-metals") is True
         assert port._is_phase_key("related.labelSeparator") is True
         assert port._is_phase_key("related.relationshipType.derivative") is True
+        assert port._is_phase_key("pairStats.label") is True
+        assert port._is_phase_key("pairStats.chipAriaLabel") is True
+        assert port._is_phase_key("cacheBanner.message") is True
+        assert port._is_phase_key("cacheBanner.sources.cache") is True
 
     def test_outside_phase_prefix_rejected(self) -> None:
         """Keys outside the phase namespaces are filtered out."""
         assert port._is_phase_key("page.title") is False
         assert port._is_phase_key("controls.exchange") is False
-        assert port._is_phase_key("pairStats.label") is False
-        assert port._is_phase_key("cacheBanner.message") is False
+        assert port._is_phase_key("chart.title") is False
+        assert port._is_phase_key("stats.currentPrice") is False
         assert port._is_phase_key("") is False
 
 
@@ -111,6 +117,37 @@ class TestWalkAndFlatten:
             "related.relationshipType.derivative": "Derivatives",
             "related.relationshipType.proxy": "Proxies",
         }
+
+    def test_flatten_phase3_namespaces_with_empty_source_preserved(self) -> None:
+        """Phase 3 namespaces flatten incl. empty-string source leaf.
+
+        The ``cacheBanner.sources.cache`` leaf carries the empty string
+        in the EN catalog — must round-trip without being filtered out.
+        """
+        payload = {
+            "pairStats": {
+                "label": "Cointegration:",
+                "metric": "ρ {{pearson}} · p {{pvalue}}",
+                "chipAriaLabel": "Pair stats with {{symbol}} on {{exchange}}: Pearson {{pearson}}, p-value {{pvalue}}",
+            },
+            "cacheBanner": {
+                "message": "Cache warming up: {{sampleCount}} / {{expected}} candles available {{sourceLabel}}",
+                "sources": {
+                    "cache": "",
+                    "derived": "(derived from 1m)",
+                    "db": "(from DB)",
+                },
+            },
+        }
+        flat = port._flatten_market_payload(payload)
+        assert flat["pairStats.label"] == "Cointegration:"
+        assert flat["pairStats.metric"] == "ρ {{pearson}} · p {{pvalue}}"
+        assert flat["cacheBanner.message"] == (
+            "Cache warming up: {{sampleCount}} / {{expected}} candles available {{sourceLabel}}"
+        )
+        assert flat["cacheBanner.sources.cache"] == ""
+        assert flat["cacheBanner.sources.derived"] == "(derived from 1m)"
+        assert flat["cacheBanner.sources.db"] == "(from DB)"
 
 
 class TestMapLocale:
