@@ -6,14 +6,15 @@ services:
       target: runtime
     container_name: snapper
     env_file: .env
-    ports:
-      - "127.0.0.1:8000:8000"
+    expose:
+      - "8000"
     volumes:
       - ./data:/app/data
       - ./reports:/app/reports
     command: ["server"]
     networks:
       - snapper-internal
+    restart: unless-stopped
     depends_on:
       snapper-egress:
         condition: service_healthy
@@ -47,8 +48,8 @@ services:
       context: .
       target: web-runtime
     container_name: snapper-web
-    expose:
-      - "8000"
+    ports:
+      - "127.0.0.1:8000:8000"
     depends_on:
       snapper:
         condition: service_healthy
@@ -75,6 +76,7 @@ services:
       - pgdata:/var/lib/postgresql/data
     networks:
       - snapper-internal
+    restart: unless-stopped
 volumes:
   pgdata:
 networks:
