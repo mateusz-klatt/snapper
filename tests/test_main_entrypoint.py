@@ -20,8 +20,10 @@ def test_main_invokes_setup_and_app(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify main() initializes logging and starts CLI app.
 
     Given mocked setup_logging and app functions,
+    And argv with no sub-command (i.e. plain ``snapper`` invocation),
     When main() is called,
-    Then setup_logging is called with INFO level and app is invoked.
+    Then setup_logging is called with INFO level + default API
+    container logfile and app is invoked.
     """
     setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
     app_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
@@ -34,6 +36,7 @@ def test_main_invokes_setup_and_app(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
     monkeypatch.setattr("snapper.__main__.app", _fake_app)
+    monkeypatch.setattr(sys, "argv", ["snapper"])
     main()
     assert setup_calls
     args, kwargs = setup_calls[0]
@@ -44,6 +47,87 @@ def test_main_invokes_setup_and_app(monkeypatch: pytest.MonkeyPatch) -> None:
         "logfile": "data/snapper.log",
     }
     assert app_calls == [((), {})]
+
+
+def test_main_egress_subcommand_uses_egress_logfile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify ``snapper egress`` switches the logfile to ``data/snapper-egress.log``.
+
+    Given mocked setup_logging and app,
+    And argv whose first positional arg is ``"egress"`` (matching
+        the docker-compose CMD for the sidecar service),
+    When main() is called,
+    Then setup_logging receives ``logfile="data/snapper-egress.log"``.
+
+    This prevents the sidecar (which runs as ``root`` for
+    ``CAP_NET_ADMIN``) from taking ownership of the API container's
+    log file. Before this dispatch the API container (running as
+    ``snapper:snapper`` uid 888) could not append to its own log if
+    the sidecar had already opened it first.
+    """
+    setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def _fake_setup_logging(*args: object, **kwargs: object) -> None:
+        setup_calls.append((args, kwargs))
+
+    monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.app", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["snapper", "egress"])
+    main()
+    assert setup_calls
+    _, kwargs = setup_calls[0]
+    assert kwargs["logfile"] == "data/snapper-egress.log"
+
+
+def test_main_egress_with_extra_args_still_uses_egress_logfile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec — ``snapper egress --instance-id foo`` still goes to the egress log.
+
+    Given argv whose first positional arg is ``"egress"`` followed by
+        additional trailing flags forwarded to the sidecar entrypoint,
+    When main() is called,
+    Then setup_logging still receives ``logfile="data/snapper-egress.log"``
+        — only the first positional arg is inspected by the dispatch
+        in ``_resolve_logfile``.
+    """
+    setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def _fake_setup_logging(*args: object, **kwargs: object) -> None:
+        setup_calls.append((args, kwargs))
+
+    monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.app", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["snapper", "egress", "--instance-id", "snapper-egress"])
+    main()
+    _, kwargs = setup_calls[0]
+    assert kwargs["logfile"] == "data/snapper-egress.log"
+
+
+def test_main_non_egress_subcommand_uses_default_logfile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec — every other sub-command keeps the shared ``data/snapper.log``.
+
+    Given argv whose first positional arg is a non-egress
+        sub-command (e.g. ``"server"``),
+    When main() is called,
+    Then setup_logging receives ``logfile="data/snapper.log"`` — only
+        ``egress`` is dispatched to a dedicated file today;
+        ``server``, ``broker``, ``feed`` etc. share the API
+        container's log because they all run under the same
+        ``snapper:snapper`` uid.
+    """
+    setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def _fake_setup_logging(*args: object, **kwargs: object) -> None:
+        setup_calls.append((args, kwargs))
+
+    monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.app", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["snapper", "server"])
+    main()
+    _, kwargs = setup_calls[0]
+    assert kwargs["logfile"] == "data/snapper.log"
 
 
 def test_run_module_executes_main(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,13 +165,16 @@ class TestMain:
         self,
         mock_setup_logging: MagicMock,
         mock_app: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Verify main() calls setup_logging then app exactly once.
 
         Given mocked setup_logging and app,
+        And argv with no sub-command (default API container path),
         When main() is called,
         Then setup_logging is called with expected args and app is invoked once.
         """
+        monkeypatch.setattr(sys, "argv", ["snapper"])
         main()
         mock_setup_logging.assert_called_once_with(
             level="INFO",
