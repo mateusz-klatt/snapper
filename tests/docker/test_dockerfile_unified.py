@@ -24,19 +24,23 @@ _LEGACY_EGRESS_DOCKERFILE: Final[Path] = _REPO_ROOT / "docker" / "Dockerfile.egr
 
 
 def _runtime_stage_lines() -> list[str]:
-    """Return the lines belonging to the final (runtime) build stage.
+    """Return the lines belonging to the ``runtime`` build stage.
 
-    The unified Dockerfile has three stages: ``ui-build``, ``py-build``,
-    and ``runtime``. The runtime stage is everything after the last
-    ``FROM`` directive. Tests against the runtime layer use this
-    helper instead of scanning the whole file so they don't falsely
-    pass on contents copied INTO an earlier stage (e.g. unixodbc-dev
-    in py-build).
+    The unified Dockerfile carries multiple ``FROM ... AS <name>``
+    stages: ``ui-build``, ``py-build``, ``runtime`` (the snapper Python
+    runtime that serves the REST + WS surface, runs the egress
+    sidecar, etc.), and ``web-runtime`` (the Caddy nginx image that
+    serves the React dashboard as a separate container). Tests
+    against the snapper runtime layer match the ``runtime`` stage
+    explicitly by name so the harness keeps working when additional
+    stages land at the end of the file.
     """
     text = _DOCKERFILE.read_text()
-    last_from = text.rfind("\nFROM ")
-    assert last_from != -1, "Dockerfile must have at least one FROM directive"
-    runtime_block = text[last_from:]
+    runtime_marker = "FROM python:3.14-slim AS runtime"
+    start = text.find(runtime_marker)
+    assert start != -1, f"Dockerfile must contain `{runtime_marker}` stage"
+    next_from = text.find("\nFROM ", start + len(runtime_marker))
+    runtime_block = text[start:next_from] if next_from != -1 else text[start:]
     return runtime_block.splitlines()
 
 
