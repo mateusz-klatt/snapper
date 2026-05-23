@@ -106,9 +106,9 @@ help:
 	$(info docker-polygon-aggregates     Backfill Polygon OHLCV in Docker [settings symbols; ["*"] = all mapped])
 	$(info docker-polygon-grouped        Backfill Polygon grouped daily in Docker)
 	$(info docker-stop                   Stop Docker container)
-	$(info restart-frontend              Rebuild snapper-web image + recreate Caddy sidecar [no tick drop])
+	$(info restart-frontend              Rebuild snapper image + recreate Caddy sidecar [no backend restart])
 	$(info restart-backend               Rebuild snapper image + recreate backend [WARNING: drops ticks 30-90s])
-	$(info restart-all                   Rebuild both images + recreate full stack [WARNING: drops ticks])
+	$(info restart-all                   Rebuild image + recreate full stack [WARNING: drops ticks])
 	$(info server-check                  Health check server [cross-platform])
 	$(info )
 	$(info Docs:)
@@ -140,7 +140,6 @@ endif
 
 DOCKER_NAME := snapper
 IMAGE_NAME := klattm/snapper
-IMAGE_NAME_WEB := klattm/snapper-web
 IMAGE_TAG := latest
 PYRUN := $(VENV_PY) -m
 PYTEST_TIMEOUT := --timeout=15 --timeout-method=thread
@@ -565,11 +564,9 @@ endif
 
 docker-build-dev:
 	docker build --build-arg UID=$(DOCKER_DEV_UID) --target runtime -t $(IMAGE_NAME):$(IMAGE_TAG) .
-	docker build --build-arg UID=$(DOCKER_DEV_UID) --target web-runtime -t $(IMAGE_NAME_WEB):$(IMAGE_TAG) .
 
 docker-build-prod:
 	docker build --build-arg UID=$(DOCKER_PROD_UID) --target runtime -t $(IMAGE_NAME):$(IMAGE_TAG) .
-	docker build --build-arg UID=$(DOCKER_PROD_UID) --target web-runtime -t $(IMAGE_NAME_WEB):$(IMAGE_TAG) .
 
 docker-migrate-dev:
 	$(DOCKER_RUN) db-init
@@ -581,7 +578,6 @@ docker-migrate-prod:
 
 docker-push:
 	docker push $(IMAGE_NAME):$(IMAGE_TAG)
-	docker push $(IMAGE_NAME_WEB):$(IMAGE_TAG)
 
 docker-run:
 	docker compose up -d
@@ -612,8 +608,8 @@ docker-stop:
 	$(info Containers stopped)
 
 restart-frontend:
-	$(info Rebuilding snapper-web image and restarting web sidecar with latest build...)
-	docker build --build-arg UID=$(DOCKER_DEV_UID) --target web-runtime -t $(IMAGE_NAME_WEB):$(IMAGE_TAG) .
+	$(info Rebuilding snapper image and restarting web sidecar with latest build...)
+	docker build --build-arg UID=$(DOCKER_DEV_UID) --target runtime -t $(IMAGE_NAME):$(IMAGE_TAG) .
 	docker compose up -d --no-deps --force-recreate snapper-web
 
 restart-backend:
@@ -622,7 +618,7 @@ restart-backend:
 	docker compose up -d --no-deps --force-recreate snapper
 
 restart-all:
-	$(info Rebuilding both images and restarting full stack...)
+	$(info Rebuilding image and restarting full stack...)
 	$(MAKE) docker-build-dev
 	docker compose up -d --force-recreate
 

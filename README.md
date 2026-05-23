@@ -329,8 +329,8 @@ make ui-format   # Prettier
 ## Docker
 
 ```bash
-make docker-build-dev    # Build dev images (backend + web sidecar)
-make docker-build-prod   # Build production images
+make docker-build-dev    # Build dev image (backend + caddy binary baked in)
+make docker-build-prod   # Build production image
 make docker-migrate-dev  # Initialize and seed the Docker SQLite database
 make docker-run          # Run container
 make docker-stop         # Stop containers
@@ -346,16 +346,20 @@ docker compose up -d
 ### Compose topology
 
 The compose stack runs three long-running services on the internal
-`snapper-internal` bridge network:
+`snapper-internal` bridge network, all from a **single image**
+(`klattm/snapper:latest`) that bundles the python runtime + the Caddy
+binary. Each service overrides `entrypoint` / `command` to launch the
+right process:
 
 - `snapper` — FastAPI backend + publishers (Kraken Spot/Futures/Equities,
-  Walutomat). Only `expose: 8000` internally.
+  Walutomat). `command: ["server"]`. Only `expose: 8000` internally.
 - `snapper-egress` — WireGuard + SOCKS5 sidecar for outbound publisher
-  traffic. `cap_add: NET_ADMIN`, kernel module bind.
-- `snapper-web` — Caddy 2-alpine serving the React SPA from `/srv/dist`
-  and reverse-proxying `/api/*`, `/api/ws`, `/api/mcp`, `/docs`, `/redoc`,
-  `/openapi.json` to `snapper:8000`. Owns the host `127.0.0.1:8000:8000`
-  bind.
+  traffic. `command: ["egress"]`, `cap_add: NET_ADMIN`, kernel module bind.
+- `snapper-web` — Caddy serving the React SPA from `/srv/dist` and
+  reverse-proxying `/api/*`, `/api/ws`, `/api/mcp`, `/docs`, `/redoc`,
+  `/openapi.json` to `snapper:8000`. `entrypoint: ["/usr/bin/caddy"]`,
+  `command: ["run", "--config", "/etc/caddy/Caddyfile"]`. Owns the host
+  `127.0.0.1:8000:8000` bind.
 
 All three are `restart: unless-stopped` so they come back automatically
 after a host reboot (assuming `systemctl is-enabled docker` returns
@@ -365,10 +369,24 @@ stopped.
 ### Targeted restarts (no tick-stream drop)
 
 ```bash
-make restart-frontend    # Rebuild snapper-web + recreate Caddy [does NOT touch backend]
-make restart-backend     # Rebuild snapper + recreate backend [drops ticks 30-90s]
-make restart-all         # Rebuild both + recreate full stack [drops ticks]
+make restart-frontend    # Rebuild image + recreate Caddy container [does NOT touch backend]
+make restart-backend     # Rebuild image + recreate backend [drops ticks 30-90s]
+make restart-all         # Rebuild image + recreate full stack [drops ticks]
 ```
+
+`make restart-frontend` is the new fast path for shipping UI changes
+without restarting publishers. The image is rebuilt (Vite production
+build runs again, dist gets baked in fresh) and only the Caddy container
+is recreated. WS clients reconnect within ~3 s but the backend snapper
+container's PID is unchanged and the Kraken / Walutomat tick streams
+continue uninterrupted.
+
+**Footgun**: after `make restart-frontend`, the image tag points to a
+new SHA. A plain `docker compose up -d` (without `--no-deps`) would then
+see the snapper container running an older SHA than the tag and recreate
+it too — restarting the backend. Use the targeted Makefile commands for
+selective restarts, and reserve `docker compose up -d` for full-stack
+restarts when both should restart anyway.
 
 `make restart-frontend` is the new fast path for shipping UI changes
 without restarting publishers. The Caddy container is recreated (WS

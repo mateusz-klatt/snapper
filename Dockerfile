@@ -1,3 +1,6 @@
+ARG CADDY_TAG=2-alpine
+FROM caddy:${CADDY_TAG} AS caddy-source
+
 FROM node:26-alpine AS ui-build
 ARG COREPACK_VERSION=0.34.0
 WORKDIR /app
@@ -69,6 +72,10 @@ RUN adduser --disabled-password --gecos '' --no-create-home --uid "$UID" snapper
 COPY --from=py-build /opt/appenv /opt/appenv
 
 COPY --from=ui-build /app/frontend/dist ./frontend/dist
+COPY --from=ui-build /app/frontend/dist /srv/dist
+
+COPY --from=caddy-source /usr/bin/caddy /usr/bin/caddy
+COPY docker/web/Caddyfile /etc/caddy/Caddyfile
 
 COPY alembic.ini ./
 COPY src/snapper/data/migrations ./src/snapper/data/migrations
@@ -84,12 +91,3 @@ USER snapper
 EXPOSE 8000 8081
 ENTRYPOINT ["snapper"]
 CMD ["server"]
-
-FROM caddy:2-alpine AS web-runtime
-LABEL org.opencontainers.image.title="snapper-web"
-LABEL org.opencontainers.image.description="snapper static frontend served by Caddy with reverse-proxy to the snapper backend on the snapper-internal docker network."
-
-COPY docker/web/Caddyfile /etc/caddy/Caddyfile
-COPY --from=ui-build /app/frontend/dist /srv/dist
-
-EXPOSE 8000
