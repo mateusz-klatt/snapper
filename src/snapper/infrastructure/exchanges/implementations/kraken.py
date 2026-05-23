@@ -26,6 +26,7 @@ patterns for real-time data streaming.
 
 import asyncio
 import inspect
+import json
 import time
 from collections.abc import AsyncIterator
 from collections.abc import Callable
@@ -42,9 +43,12 @@ from loguru import logger
 from pydantic import ValidationError
 
 from snapper.config.settings import get_settings
+from snapper.core.json_types import JsonValue
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import TradeSideEnum
 from snapper.data.repository import Repository
+from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
+from snapper.infrastructure.exchanges._subscription_request import canonicalise_parameters
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_candle_list
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_execution_list
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_instrument
@@ -86,6 +90,7 @@ _TRADE_SUBSCRIBE_CHUNK_SIZE = 100
 _TRADE_SUBSCRIBE_CHUNK_DELAY_S = 0.1
 _CANDLE_SUBSCRIBE_CHUNK_SIZE = 100
 _CANDLE_SUBSCRIBE_CHUNK_DELAY_S = 0.1
+_RESUBSCRIBE_CHUNK_DELAY_S = 5.0
 
 _DROP_LOG_INTERVAL_S = 1.0
 _drop_counters: dict[str, list[float]] = {}
@@ -235,6 +240,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             maxsize=_QUEUE_MAX_SIZE
         )
         self._raw_ticker_capture: dict[str, dict[str, Any]] | None = None
+        self._subscription_cache: dict[tuple[str, frozenset[str], str], SubscriptionRequest] = {}
         self._circuit_failures = 0
         self._circuit_open_until = 0.0
         self._max_failures = 5
@@ -734,6 +740,12 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.info(f"Subscribing to ticks: {symbols} -> {ws_symbols}")
             async with self._ws_client as ws:
                 params = KrakenTickerSubscribeParamsSchema(symbol=ws_symbols).as_params()
+                req = SubscriptionRequest(
+                    channel="ticker",
+                    symbols=tuple(ws_symbols),
+                    parameters_json=canonicalise_parameters(cast(dict[str, JsonValue], params)),
+                )
+                self._subscription_cache[req.key()] = req
                 await ws.subscribe(params=params, req_id=req_id)
                 while not hasattr(ws, "exception_occur") or not ws.exception_occur:
                     try:
@@ -888,8 +900,15 @@ class KrakenExchangeClient(ExchangeClientBase):
                     subscribe_params = KrakenOhlcSubscribeParamsSchema(
                         symbol=chunk, interval=interval
                     )
+                    params = subscribe_params.as_params()
+                    req = SubscriptionRequest(
+                        channel="ohlc",
+                        symbols=tuple(chunk),
+                        parameters_json=canonicalise_parameters(cast(dict[str, JsonValue], params)),
+                    )
+                    self._subscription_cache[req.key()] = req
                     chunk_req_id = req_id if i == 0 else None
-                    await ws.subscribe(params=subscribe_params.as_params(), req_id=chunk_req_id)
+                    await ws.subscribe(params=params, req_id=chunk_req_id)
                     if i + _CANDLE_SUBSCRIBE_CHUNK_SIZE < len(ws_symbols):
                         await asyncio.sleep(_CANDLE_SUBSCRIBE_CHUNK_DELAY_S)
                 while not hasattr(ws, "exception_occur") or not ws.exception_occur:
@@ -975,6 +994,14 @@ class KrakenExchangeClient(ExchangeClientBase):
                 for i in range(0, len(ws_symbols), _TRADE_SUBSCRIBE_CHUNK_SIZE):
                     chunk = ws_symbols[i : i + _TRADE_SUBSCRIBE_CHUNK_SIZE]
                     trade_params = KrakenTradeSubscribeParamsSchema(symbol=chunk).as_params()
+                    req = SubscriptionRequest(
+                        channel="trade",
+                        symbols=tuple(chunk),
+                        parameters_json=canonicalise_parameters(
+                            cast(dict[str, JsonValue], trade_params)
+                        ),
+                    )
+                    self._subscription_cache[req.key()] = req
                     chunk_req_id = req_id if i == 0 else None
                     await ws.subscribe(params=trade_params, req_id=chunk_req_id)
                     if i + _TRADE_SUBSCRIBE_CHUNK_SIZE < len(ws_symbols):
@@ -1435,7 +1462,24 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.info("Kraken WebSocket client initialized")
             await self._ws_client.start()
             logger.info("Kraken WebSocket client started")
+            if self._subscription_cache:
+                await self._replay_subscriptions()
         self._ws_connected = True
+
+    async def _replay_subscriptions(self) -> None:
+        """Replay cached public market-data subscriptions after reconnect."""
+        if self._ws_client is None:
+            raise RuntimeError(_WS_CLIENT_CONNECTED_MSG)
+        requests = list(self._subscription_cache.values())
+        for index, req in enumerate(requests):
+            params = {
+                "channel": req.channel,
+                "symbol": list(req.symbols),
+                **cast(dict[str, JsonValue], json.loads(req.parameters_json)),
+            }
+            await self._ws_client.subscribe(params=params)
+            if index < len(requests) - 1:
+                await asyncio.sleep(_RESUBSCRIBE_CHUNK_DELAY_S)
 
     def _get_trade_client(self) -> Trade:
         if not self.api_key or not self.api_secret:

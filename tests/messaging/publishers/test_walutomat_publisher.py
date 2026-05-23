@@ -1,5 +1,6 @@
 """Unit tests for WalutomatMarketDataPublisher."""
 
+import asyncio
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -189,6 +190,55 @@ class TestWalutomatPublisher:
 
         assert observed == [publisher]
         assert _CURRENT_PUBLISHER.get() is None
+
+    @pytest.mark.asyncio
+    async def test_attempt_liveness_recovery_sets_wakeup_and_resets_counters(self) -> None:
+        """Walutomat liveness recovery wakes polling backoff.
+
+        Given: A Walutomat publisher with a client in backoff,
+        When: Liveness recovery is attempted,
+        Then: Error counters reset and the wakeup event is set.
+        """
+        publisher = WalutomatMarketDataPublisher(symbols=["EUR-PLN"])
+        client = MagicMock()
+        client._consecutive_error_count = 5
+        client._backoff_attempts = 2
+        client._backoff_wakeup_event = asyncio.Event()
+        publisher._exchange_client = client
+        await publisher._attempt_liveness_recovery("stale")
+        assert client._consecutive_error_count == 0
+        assert client._backoff_attempts == 0
+        assert client._backoff_wakeup_event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_attempt_liveness_recovery_resets_counters_without_wakeup(self) -> None:
+        """Walutomat liveness recovery tolerates absent wakeup event.
+
+        Given: A Walutomat client whose polling loop has not created a wakeup event,
+        When: Liveness recovery is attempted,
+        Then: Error counters reset without raising.
+        """
+        publisher = WalutomatMarketDataPublisher(symbols=["EUR-PLN"])
+        client = MagicMock()
+        client._consecutive_error_count = 5
+        client._backoff_attempts = 2
+        client._backoff_wakeup_event = None
+        publisher._exchange_client = client
+        await publisher._attempt_liveness_recovery("stale")
+        assert client._consecutive_error_count == 0
+        assert client._backoff_attempts == 0
+
+    @pytest.mark.asyncio
+    async def test_attempt_liveness_recovery_skips_without_client(self) -> None:
+        """Walutomat liveness recovery tolerates missing client.
+
+        Given: A Walutomat publisher without an exchange client,
+        When: Liveness recovery is attempted,
+        Then: It completes without raising.
+        """
+        publisher = WalutomatMarketDataPublisher(symbols=["EUR-PLN"])
+        publisher._exchange_client = None
+        await publisher._attempt_liveness_recovery("stale")
 
     @pytest.mark.asyncio
     async def test_start_resets_context_var_even_if_super_raises(self) -> None:

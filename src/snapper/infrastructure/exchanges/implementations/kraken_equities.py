@@ -32,18 +32,23 @@ Limitations:
 
 import asyncio
 import contextlib
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
 from time import monotonic
 from typing import Any
+from typing import cast
 
 import httpx
 from kraken.spot import SpotWSClient
 from loguru import logger
 
+from snapper.core.json_types import JsonValue
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
+from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
+from snapper.infrastructure.exchanges._subscription_request import canonicalise_parameters
 from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
 from snapper.infrastructure.exchanges._trade_candle_builder import enqueue_or_drop_oldest_candle
 from snapper.infrastructure.exchanges.adapters.kraken_equities import (
@@ -130,6 +135,7 @@ _TIMEFRAME_TO_INTERVAL: dict[str, int] = {
     "1h": 60,
     "1d": 1440,
 }
+_RESUBSCRIBE_CHUNK_DELAY_S = 5.0
 
 
 def _timeframe_to_interval(timeframe: str) -> int:
@@ -223,6 +229,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         )
         self._candle_builder = TradeCandleBuilder(interval_seconds=60)
         self._candle_aggregator_task: asyncio.Task[None] | None = None
+        self._subscription_cache: dict[tuple[str, frozenset[str], str], SubscriptionRequest] = {}
 
     async def connect(self) -> None:
         """Establish connection (no-op until WS subscription).
@@ -326,6 +333,23 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         )
         await self._ws_client.start()
         logger.info("Kraken Equities WebSocket connected")
+        if self._subscription_cache:
+            await self._replay_subscriptions()
+
+    async def _replay_subscriptions(self) -> None:
+        """Replay cached public subscriptions after reconnect."""
+        if self._ws_client is None:
+            raise RuntimeError("WebSocket client not connected")
+        requests = list(self._subscription_cache.values())
+        for index, req in enumerate(requests):
+            params = {
+                "channel": req.channel,
+                "symbol": list(req.symbols),
+                **cast(dict[str, JsonValue], json.loads(req.parameters_json)),
+            }
+            await self._ws_client.subscribe(params=params)
+            if index < len(requests) - 1:
+                await asyncio.sleep(_RESUBSCRIBE_CHUNK_DELAY_S)
 
     async def get_ticker(self, symbol: str) -> TickerSnapshot:
         """Fetch current ticker (not implemented for equities REST).
@@ -538,15 +562,21 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         if self._ws_client is None:
             raise RuntimeError("WebSocket client not connected")
         ws_symbols = [native_to_kraken_equities_ws(s) for s in symbols]
-        await self._ws_client.subscribe(
-            params={
-                "channel": "ticker",
-                "symbol": ws_symbols,
-                "snapshot": True,
-                "throttle": _WS_THROTTLE_MS,
-                "asset_class": "futures_contract",
-            }
+        symbols_json = cast(list[JsonValue], list(ws_symbols))
+        params: dict[str, JsonValue] = {
+            "channel": "ticker",
+            "symbol": symbols_json,
+            "snapshot": True,
+            "throttle": _WS_THROTTLE_MS,
+            "asset_class": "futures_contract",
+        }
+        req = SubscriptionRequest(
+            channel="ticker",
+            symbols=tuple(ws_symbols),
+            parameters_json=canonicalise_parameters(params),
         )
+        self._subscription_cache[req.key()] = req
+        await self._ws_client.subscribe(params=params)
         logger.info(f"Subscribed to Kraken Equities tickers: {symbols} -> {ws_symbols}")
         try:
             while True:
@@ -688,15 +718,21 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         if self._ws_client is None:
             raise RuntimeError("WebSocket client not connected")
         ws_symbols = [native_to_kraken_equities_ws(s) for s in symbols]
-        await self._ws_client.subscribe(
-            params={
-                "channel": "trade",
-                "symbol": ws_symbols,
-                "snapshot": True,
-                "throttle": _WS_THROTTLE_MS,
-                "asset_class": "futures_contract",
-            }
+        symbols_json = cast(list[JsonValue], list(ws_symbols))
+        params: dict[str, JsonValue] = {
+            "channel": "trade",
+            "symbol": symbols_json,
+            "snapshot": True,
+            "throttle": _WS_THROTTLE_MS,
+            "asset_class": "futures_contract",
+        }
+        req = SubscriptionRequest(
+            channel="trade",
+            symbols=tuple(ws_symbols),
+            parameters_json=canonicalise_parameters(params),
         )
+        self._subscription_cache[req.key()] = req
+        await self._ws_client.subscribe(params=params)
         logger.info(f"Subscribed to Kraken Equities trades: {symbols} -> {ws_symbols}")
         try:
             while True:

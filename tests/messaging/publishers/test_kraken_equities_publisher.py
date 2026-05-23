@@ -1,5 +1,7 @@
 """Unit tests for KrakenEquitiesMarketDataPublisher."""
 
+from datetime import UTC
+from datetime import datetime
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -11,7 +13,9 @@ from snapper.infrastructure.exchanges.implementations.kraken_equities import (
     KrakenEquitiesExchangeClient,
 )
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+from snapper.messaging.publishers import kraken_equities as equities_module
 from snapper.messaging.publishers.kraken_equities import KrakenEquitiesMarketDataPublisher
+from snapper.messaging.publishers.kraken_equities import _is_cme_closed
 
 
 class TestKrakenEquitiesMarketDataPublisher:
@@ -158,6 +162,84 @@ class TestKrakenEquitiesMarketDataPublisher:
         """
         publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
         await publisher._candle_loop(["CLM6-NYMEX"], "1m")
+
+    def test_threshold_zero_during_cme_closure(self) -> None:
+        """Equities liveness recovery is disabled during CME closure.
+
+        Given: The CME schedule helper reports a closure,
+        When: The liveness threshold is read,
+        Then: The publisher returns zero to disable recovery.
+        """
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        with patch.object(equities_module, "_is_cme_closed", return_value=True):
+            assert publisher._get_liveness_recovery_threshold_s() == 0
+
+    def test_threshold_300_during_cme_open(self) -> None:
+        """Equities liveness recovery uses the default threshold while open.
+
+        Given: The CME schedule helper reports an open market,
+        When: The liveness threshold is read,
+        Then: The publisher returns the base 300 second threshold.
+        """
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        with patch.object(equities_module, "_is_cme_closed", return_value=False):
+            assert publisher._get_liveness_recovery_threshold_s() == 300
+
+    @pytest.mark.parametrize(
+        ("now_utc", "expected"),
+        [
+            (datetime(2026, 5, 23, 12, 0, tzinfo=UTC), True),
+            (datetime(2026, 5, 24, 21, 59, tzinfo=UTC), True),
+            (datetime(2026, 5, 24, 22, 1, tzinfo=UTC), False),
+            (datetime(2026, 5, 25, 20, 59, tzinfo=UTC), False),
+            (datetime(2026, 5, 25, 21, 1, tzinfo=UTC), True),
+            (datetime(2026, 5, 25, 21, 59, tzinfo=UTC), True),
+            (datetime(2026, 5, 25, 22, 1, tzinfo=UTC), False),
+            (datetime(2026, 5, 22, 21, 59, tzinfo=UTC), False),
+            (datetime(2026, 5, 22, 22, 1, tzinfo=UTC), True),
+        ],
+    )
+    def test_is_cme_closed_for_each_window_boundary(
+        self,
+        now_utc: datetime,
+        expected: bool,
+    ) -> None:
+        """CME schedule helper matches weekend and daily-break boundaries.
+
+        Given: Representative UTC datetimes around the CME closure windows,
+        When: _is_cme_closed is evaluated,
+        Then: It reports closed only inside the approved windows.
+        """
+        assert _is_cme_closed(now_utc) is expected
+
+    @pytest.mark.asyncio
+    async def test_attempt_liveness_recovery_disconnects_and_ensures(self) -> None:
+        """Equities liveness recovery rebuilds the websocket client.
+
+        Given: An Equities publisher with an attached exchange client,
+        When: Liveness recovery is attempted,
+        Then: The client disconnects and reconnects its websocket.
+        """
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        client = MagicMock()
+        client.disconnect = AsyncMock()
+        client._ensure_ws_connected = AsyncMock()
+        publisher._exchange_client = client
+        await publisher._attempt_liveness_recovery("stale")
+        client.disconnect.assert_awaited_once()
+        client._ensure_ws_connected.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_attempt_liveness_recovery_skips_without_client(self) -> None:
+        """Equities liveness recovery tolerates missing client.
+
+        Given: An Equities publisher without an exchange client,
+        When: Liveness recovery is attempted,
+        Then: It completes without raising.
+        """
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        publisher._exchange_client = None
+        await publisher._attempt_liveness_recovery("stale")
 
     @pytest.mark.asyncio
     async def test_start_sets_and_resets_current_publisher_context_var(self) -> None:

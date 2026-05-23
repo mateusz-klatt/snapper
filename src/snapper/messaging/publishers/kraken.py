@@ -252,3 +252,8 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
                 logger.exception("kraken publisher: disconnect_websocket failed during restart")
             await asyncio.sleep(_FORCE_WS_RESTART_BACKOFF_S)
             await client._ensure_ws_connected()
+
+    async def _attempt_liveness_recovery(self, reason: str) -> None:
+        """Recover stale market data by forcing a WS restart."""
+        logger.error("kraken publisher: liveness recovery triggered ({})", reason)
+        await self._force_ws_restart()

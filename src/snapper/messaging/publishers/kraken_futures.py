@@ -170,3 +170,11 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
             0 (unlimited) — Kraken Futures WS does not document a per-connection limit.
         """
         return 0
+
+    async def _attempt_liveness_recovery(self, reason: str) -> None:
+        """Recover stale market data by rebuilding the public WS client."""
+        logger.error("kraken_futures publisher: liveness recovery triggered ({})", reason)
+        client = self._exchange_client
+        if client is not None:
+            await client.disconnect()
+            await client._ensure_ws_connected()

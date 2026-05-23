@@ -154,6 +154,35 @@ class TestKrakenFuturesMarketDataPublisher:
         assert "_candle_loop" not in KrakenFuturesMarketDataPublisher.__dict__
 
     @pytest.mark.asyncio
+    async def test_attempt_liveness_recovery_disconnects_and_ensures(self) -> None:
+        """Futures liveness recovery rebuilds the websocket client.
+
+        Given: A Futures publisher with an attached exchange client,
+        When: Liveness recovery is attempted,
+        Then: The client disconnects and reconnects its websocket.
+        """
+        publisher = KrakenFuturesMarketDataPublisher(symbols=["BTC-USD-PERP"])
+        client = MagicMock()
+        client.disconnect = AsyncMock()
+        client._ensure_ws_connected = AsyncMock()
+        publisher._exchange_client = client
+        await publisher._attempt_liveness_recovery("stale")
+        client.disconnect.assert_awaited_once()
+        client._ensure_ws_connected.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_attempt_liveness_recovery_skips_without_client(self) -> None:
+        """Futures liveness recovery tolerates missing client.
+
+        Given: A Futures publisher without an exchange client,
+        When: Liveness recovery is attempted,
+        Then: It completes without raising.
+        """
+        publisher = KrakenFuturesMarketDataPublisher(symbols=["BTC-USD-PERP"])
+        publisher._exchange_client = None
+        await publisher._attempt_liveness_recovery("stale")
+
+    @pytest.mark.asyncio
     async def test_start_sets_and_resets_current_publisher_context_var(self) -> None:
         """Start override registers this publisher in the SDK-patch ContextVar.
 

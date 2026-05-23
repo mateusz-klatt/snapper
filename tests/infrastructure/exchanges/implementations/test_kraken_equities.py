@@ -14,6 +14,7 @@ import httpx
 import pytest
 from loguru import logger
 
+from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
@@ -49,6 +50,153 @@ class TestClientInit:
         assert c._tick_queue.empty()
         assert c._trade_queue.empty()
         assert c._ws_client is None
+
+
+@pytest.mark.asyncio
+async def test_subscribe_ticks_caches_asset_class_and_throttle(
+    client: KrakenEquitiesExchangeClient,
+) -> None:
+    """Ticker subscription cache preserves Equities-specific parameters.
+
+    Given: An Equities client with an active websocket,
+    When: A ticker subscription starts,
+    Then: The cache records asset_class and throttle in parameters_json.
+    """
+    client._ws_client = AsyncMock()
+    await client._tick_queue.put(
+        TickerUpdate(
+            symbol="CLM6-NYMEX",
+            bid=90.0,
+            bid_qty=1.0,
+            ask=90.1,
+            ask_qty=1.0,
+            last=90.05,
+            volume=10.0,
+            vwap=90.0,
+            low=89.0,
+            high=91.0,
+            change=0.1,
+            change_pct=0.1,
+        )
+    )
+    gen = client.subscribe_ticks(["CLM6-NYMEX"])
+    with patch(
+        "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
+        return_value="CLM6.NYMEX",
+    ):
+        await anext(gen)
+    await gen.aclose()
+    req = next(iter(client._subscription_cache.values()))
+    assert req.channel == "ticker"
+    assert req.symbols == ("CLM6.NYMEX",)
+    assert '"asset_class": "futures_contract"' in req.parameters_json
+    assert '"throttle": 5000' in req.parameters_json
+
+
+@pytest.mark.asyncio
+async def test_subscribe_trades_caches_trade_channel(
+    client: KrakenEquitiesExchangeClient,
+) -> None:
+    """Trade subscription cache records the trade channel.
+
+    Given: An Equities client with an active websocket,
+    When: A trade subscription starts,
+    Then: The cache records a trade subscription for the WS symbol.
+    """
+    client._ws_client = AsyncMock()
+    await client._trade_queue.put(
+        TradeUpdate(
+            symbol="CLM6-NYMEX",
+            price=90.0,
+            quantity=1.0,
+            side="buy",
+            ord_type="fill",
+            trade_id="trade-1",
+            timestamp=_dt.now(_UTC),
+        )
+    )
+    gen = client.subscribe_trades(["CLM6-NYMEX"])
+    with patch(
+        "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
+        return_value="CLM6.NYMEX",
+    ):
+        await anext(gen)
+    await gen.aclose()
+    req = next(iter(client._subscription_cache.values()))
+    assert req.channel == "trade"
+    assert req.symbols == ("CLM6.NYMEX",)
+
+
+@pytest.mark.asyncio
+async def test_replay_iterates_cache_in_insertion_order_with_5s_delay(
+    client: KrakenEquitiesExchangeClient,
+) -> None:
+    """Equities replay reconstructs Spot-style params payloads.
+
+    Given: An Equities client with cached subscriptions,
+    When: Subscriptions are replayed,
+    Then: Subscribe is called with reconstructed params and a 5s inter-request delay.
+    """
+    ws = AsyncMock()
+    client._ws_client = ws
+    first = SubscriptionRequest(
+        channel="ticker",
+        symbols=("CLM6.NYMEX",),
+        parameters_json='{"asset_class": "futures_contract", "snapshot": true, "throttle": 5000}',
+    )
+    second = SubscriptionRequest(
+        channel="trade",
+        symbols=("GCQ6.COMEX",),
+        parameters_json='{"asset_class": "futures_contract", "snapshot": true, "throttle": 5000}',
+    )
+    client._subscription_cache[first.key()] = first
+    client._subscription_cache[second.key()] = second
+    with patch(
+        "snapper.infrastructure.exchanges.implementations.kraken_equities.asyncio.sleep",
+        new_callable=AsyncMock,
+    ) as sleep_mock:
+        await client._replay_subscriptions()
+    assert ws.subscribe.await_args_list[0].kwargs["params"]["channel"] == "ticker"
+    assert ws.subscribe.await_args_list[0].kwargs["params"]["symbol"] == ["CLM6.NYMEX"]
+    assert ws.subscribe.await_args_list[1].kwargs["params"]["channel"] == "trade"
+    assert ws.subscribe.await_args_list[1].kwargs["params"]["symbol"] == ["GCQ6.COMEX"]
+    sleep_mock.assert_awaited_once_with(5.0)
+
+
+@pytest.mark.asyncio
+async def test_replay_requires_ws_client(client: KrakenEquitiesExchangeClient) -> None:
+    """Equities replay fails without a websocket client.
+
+    Given: An Equities client without a websocket,
+    When: Subscriptions are replayed,
+    Then: RuntimeError is raised.
+    """
+    client._ws_client = None
+    with pytest.raises(RuntimeError):
+        await client._replay_subscriptions()
+
+
+@pytest.mark.asyncio
+async def test_ensure_ws_connected_auto_replays_after_reconnect(
+    client: KrakenEquitiesExchangeClient,
+) -> None:
+    """Equities reconnect automatically replays cached subscriptions.
+
+    Given: An Equities client with a cached subscription,
+    When: _ensure_ws_connected creates a websocket,
+    Then: The replay hook is awaited.
+    """
+    req = SubscriptionRequest(channel="ticker", symbols=("CLM6.NYMEX",), parameters_json="{}")
+    client._subscription_cache[req.key()] = req
+    with (
+        patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient"
+        ) as ws_cls,
+        patch.object(client, "_replay_subscriptions", new_callable=AsyncMock) as replay_mock,
+    ):
+        ws_cls.return_value.start = AsyncMock()
+        await client._ensure_ws_connected()
+    replay_mock.assert_awaited_once()
 
 
 class TestEnqueueOrDropOldest:

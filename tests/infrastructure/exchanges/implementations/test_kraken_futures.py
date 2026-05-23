@@ -18,6 +18,7 @@ import pytest
 from loguru import logger
 
 import snapper.infrastructure.exchanges.implementations.kraken_futures as mod
+from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
@@ -150,6 +151,109 @@ class TestClientInit:
         assert c.supports_websocket_executions is False
         assert c._trade_client is None
         assert c._user_client is None
+
+
+@pytest.mark.asyncio
+async def test_subscribe_ticks_caches_products_not_symbols(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Futures cache stores products in the replayable symbols field.
+
+    Given: A Futures client with an active websocket,
+    When: A ticker feed is subscribed in chunks,
+    Then: The cache records products and an empty parameters JSON payload.
+    """
+    client._ws_client = AsyncMock()
+    await client._subscribe_in_chunks("ticker", ["PF_XBTUSD"])
+    req = next(iter(client._subscription_cache.values()))
+    assert req.channel == "ticker"
+    assert req.symbols == ("PF_XBTUSD",)
+    assert req.parameters_json == "{}"
+
+
+@pytest.mark.asyncio
+async def test_subscribe_dedup_distinguishes_ticker_and_trade_feeds_with_same_products(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Futures cache keys include the feed name.
+
+    Given: The same Futures product subscribed to ticker and trade feeds,
+    When: Both subscriptions are cached,
+    Then: The cache keeps two entries.
+    """
+    client._ws_client = AsyncMock()
+    await client._subscribe_in_chunks("ticker", ["PF_XBTUSD"])
+    await client._subscribe_in_chunks("trade", ["PF_XBTUSD"])
+    assert len(client._subscription_cache) == 2
+    assert {req.channel for req in client._subscription_cache.values()} == {"ticker", "trade"}
+
+
+@pytest.mark.asyncio
+async def test_replay_uses_subscribe_with_feed_and_products_kwargs(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Futures replay uses feed/products kwargs rather than Spot params.
+
+    Given: A Futures client with cached subscriptions,
+    When: Subscriptions are replayed,
+    Then: The SDK subscribe calls receive feed and products keyword arguments.
+    """
+    ws = AsyncMock()
+    client._ws_client = ws
+    first = SubscriptionRequest(channel="ticker", symbols=("PF_XBTUSD",), parameters_json="{}")
+    second = SubscriptionRequest(channel="trade", symbols=("PF_ETHUSD",), parameters_json="{}")
+    client._subscription_cache[first.key()] = first
+    client._subscription_cache[second.key()] = second
+    with patch(
+        "snapper.infrastructure.exchanges.implementations.kraken_futures.asyncio.sleep",
+        new_callable=AsyncMock,
+    ) as sleep_mock:
+        await client._replay_subscriptions()
+    assert ws.subscribe.await_args_list[0].kwargs == {
+        "feed": "ticker",
+        "products": ["PF_XBTUSD"],
+    }
+    assert ws.subscribe.await_args_list[1].kwargs == {
+        "feed": "trade",
+        "products": ["PF_ETHUSD"],
+    }
+    sleep_mock.assert_awaited_once_with(5.0)
+
+
+@pytest.mark.asyncio
+async def test_replay_requires_public_ws_client(client: KrakenFuturesExchangeClient) -> None:
+    """Replay fails when the public websocket client is absent.
+
+    Given: A Futures client without a public websocket,
+    When: Subscriptions are replayed,
+    Then: RuntimeError is raised.
+    """
+    client._ws_client = None
+    with pytest.raises(RuntimeError):
+        await client._replay_subscriptions()
+
+
+@pytest.mark.asyncio
+async def test_ensure_ws_connected_auto_replays_after_reconnect(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Futures reconnect automatically replays cached subscriptions.
+
+    Given: A Futures client with a cached public subscription,
+    When: _ensure_ws_connected creates a websocket,
+    Then: The replay hook is awaited.
+    """
+    req = SubscriptionRequest(channel="ticker", symbols=("PF_XBTUSD",), parameters_json="{}")
+    client._subscription_cache[req.key()] = req
+    with (
+        patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
+        ) as ws_cls,
+        patch.object(client, "_replay_subscriptions", new_callable=AsyncMock) as replay_mock,
+    ):
+        ws_cls.return_value.start = AsyncMock()
+        await client._ensure_ws_connected()
+    replay_mock.assert_awaited_once()
 
 
 class TestRequireAuthenticated:

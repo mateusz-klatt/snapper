@@ -10,8 +10,11 @@ import math
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
+from functools import partial
 from time import monotonic
 from time import perf_counter_ns
 from typing import Any
@@ -84,6 +87,11 @@ _TRADE_WRITE_QUEUE_MAX = 5_000
 _TRADE_WRITER_DROP_LOG_INTERVAL_S = 1.0
 _TRADE_WRITER_SHUTDOWN_POLL_S = 0.5
 _trade_writer_drop_counters: dict[str, list[float]] = {}
+
+_CONSUMER_RESTART_BACKOFF_S = 2.0
+_LIVENESS_RECOVERY_THRESHOLD_S_DEFAULT = 300
+_MIN_RECOVERY_INTERVAL_S = 60.0
+_RECOVERY_TIMEOUT_S = 30.0
 
 _PERSIST_SKIPPED_LOG_INTERVAL_S = 60.0
 """Cadence for the rate-limited ``persist_skipped_total`` log line.
@@ -258,6 +266,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self.running = False
         self.heartbeat_seq = 0
         self._last_data_timestamps: dict[str, float] = {}
+        self._last_message_at: float = monotonic()
+        self._recovery_lock: asyncio.Lock = asyncio.Lock()
+        self._last_recovery_at: float = 0.0
+        self._recovery_tasks: set[asyncio.Task[None]] = set()
         self._unknown_symbols_logged: set[str] = set()
         self.repository: Repository | None = None
         self._instrument_cache: dict[str, str] = {}
@@ -496,24 +508,33 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         await self._exchange_client.connect()
         logger.info(f"{process_name}: Exchange client connected (anonymous, public data)")
         self.running = True
-        tasks: list[asyncio.Task[Any]] = []
+        tasks: list[asyncio.Task[None]] = []
         tasks.append(asyncio.create_task(self._heartbeat_loop()))
         tasks.append(asyncio.create_task(self._symbol_aliases_loop()))
         symbols_to_subscribe = self.symbols[:max_symbols] if max_symbols > 0 else self.symbols
         timeframes = self.settings.timeframes
         self._candle_consumer_tasks = [
-            asyncio.create_task(self._candle_loop(symbols_to_subscribe, timeframe))
+            asyncio.create_task(
+                self._supervise_consumer(
+                    f"candle:{timeframe}",
+                    partial(self._candle_loop, symbols_to_subscribe, timeframe),
+                )
+            )
             for timeframe in timeframes
         ]
         tasks.extend(self._candle_consumer_tasks)
         self._candle_writer_task = asyncio.create_task(self._candle_writer_loop())
         tasks.append(self._candle_writer_task)
-        self._tick_consumer_task = asyncio.create_task(self._tick_loop(symbols_to_subscribe))
+        self._tick_consumer_task = asyncio.create_task(
+            self._supervise_consumer("tick", partial(self._tick_loop, symbols_to_subscribe))
+        )
         tasks.append(self._tick_consumer_task)
         self._tick_writer_task = asyncio.create_task(self._tick_writer_loop())
         tasks.append(self._tick_writer_task)
         if self._supports_public_trades():
-            self._trade_consumer_task = asyncio.create_task(self._trade_loop(symbols_to_subscribe))
+            self._trade_consumer_task = asyncio.create_task(
+                self._supervise_consumer("trade", partial(self._trade_loop, symbols_to_subscribe))
+            )
             tasks.append(self._trade_consumer_task)
             self._trade_writer_task = asyncio.create_task(self._trade_writer_loop())
             tasks.append(self._trade_writer_task)
@@ -549,9 +570,19 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         publisher (e.g. start failure during setup) still gets a chance
         to drain.
         """
-        if not self.running and not self._has_pending_writer_shutdown():
+        if (
+            not self.running
+            and not self._has_pending_writer_shutdown()
+            and not self._recovery_tasks
+        ):
             return
         self.running = False
+        recovery_tasks = list(self._recovery_tasks)
+        for task in recovery_tasks:
+            task.cancel()
+        if recovery_tasks:
+            await asyncio.gather(*recovery_tasks, return_exceptions=True)
+            self._recovery_tasks.difference_update(recovery_tasks)
         await self._stop_tick_pipeline()
         await self._stop_candle_pipeline()
         await self._stop_trade_pipeline()
@@ -594,6 +625,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
 
     async def _stop_tick_pipeline(self) -> None:
         """Stop and drain the tick consumer and writer pipeline."""
+        if self._tick_consumer_task is not None:
+            self._tick_consumer_task.cancel()
         await self._await_shutdown_task(self._tick_consumer_task)
         self._tick_consumer_task = None
         await self._join_shutdown_queue(self._tick_write_queue)
@@ -602,6 +635,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
 
     async def _stop_candle_pipeline(self) -> None:
         """Stop and drain candle consumers and the candle writer pipeline."""
+        for task in self._candle_consumer_tasks:
+            task.cancel()
         await self._await_shutdown_tasks(self._candle_consumer_tasks)
         self._candle_consumer_tasks = []
         await self._join_shutdown_queue(self._candle_write_queue)
@@ -610,6 +645,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
 
     async def _stop_trade_pipeline(self) -> None:
         """Stop and drain the trade consumer and writer pipeline."""
+        if self._trade_consumer_task is not None:
+            self._trade_consumer_task.cancel()
         await self._await_shutdown_task(self._trade_consumer_task)
         self._trade_consumer_task = None
         await self._join_shutdown_queue(self._trade_write_queue)
@@ -640,6 +677,74 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             True if the exchange supports public trade subscriptions.
         """
         return True
+
+    async def _supervise_consumer(
+        self,
+        name: str,
+        factory: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Restart a consumer loop while the publisher is running."""
+        while self.running:
+            try:
+                await factory()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if not self.running:
+                    return
+                logger.warning(
+                    f"{self._get_exchange_name()}: consumer '{name}' raised {exc!r}; "
+                    f"restarting in {_CONSUMER_RESTART_BACKOFF_S}s"
+                )
+            else:
+                if not self.running:
+                    return
+                logger.warning(
+                    f"{self._get_exchange_name()}: consumer '{name}' returned cleanly; "
+                    f"restarting in {_CONSUMER_RESTART_BACKOFF_S}s"
+                )
+            await asyncio.sleep(_CONSUMER_RESTART_BACKOFF_S)
+
+    def _get_liveness_recovery_threshold_s(self) -> int:
+        """Return message-silence threshold before recovery is attempted."""
+        return _LIVENESS_RECOVERY_THRESHOLD_S_DEFAULT
+
+    def _spawn_recovery(self, reason: str) -> None:
+        """Schedule a tracked liveness recovery task with deduplication."""
+        if monotonic() - self._last_recovery_at < _MIN_RECOVERY_INTERVAL_S:
+            return
+        if self._recovery_lock.locked():
+            return
+        self._last_recovery_at = monotonic()
+        task = asyncio.create_task(self._run_recovery_under_lock(reason))
+        self._recovery_tasks.add(task)
+        task.add_done_callback(self._recovery_tasks.discard)
+
+    async def _run_recovery_under_lock(self, reason: str) -> None:
+        """Run one recovery attempt under the publisher-level recovery lock."""
+        async with self._recovery_lock:
+            try:
+                await asyncio.wait_for(
+                    self._attempt_liveness_recovery(reason),
+                    timeout=_RECOVERY_TIMEOUT_S,
+                )
+            except TimeoutError:
+                logger.error(
+                    f"{self._get_exchange_name()}: liveness recovery timed out after "
+                    f"{_RECOVERY_TIMEOUT_S}s (reason={reason})"
+                )
+            except Exception as exc:
+                logger.exception(
+                    f"{self._get_exchange_name()}: liveness recovery raised {exc!r} "
+                    f"(reason={reason})"
+                )
+
+    async def _attempt_liveness_recovery(self, reason: str) -> None:
+        """Default liveness recovery hook used by publishers without recovery."""
+        logger.error(
+            f"{self._get_exchange_name()}: liveness exceeded ({reason}); "
+            "no recovery handler configured"
+        )
 
     def _get_max_symbols_per_connection(self) -> int:
         """Return maximum symbols per WebSocket connection (0 = unlimited).
@@ -929,6 +1034,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             ``CandleUpsertRow`` ready for the writer queue, or
             ``None`` when the instrument could not be resolved.
         """
+        self._last_message_at = monotonic()
         native_symbol = candle.symbol
         instrument_public_id = await self._ensure_instrument(native_symbol)
         if instrument_public_id is None:
@@ -1134,6 +1240,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             message: Raw ticker update from exchange client.
             exchange: Exchange name for message provenance.
         """
+        self._last_message_at = monotonic()
         probe = get_probe()
         t_start = perf_counter_ns()
         native_symbol = message.symbol
@@ -1315,6 +1422,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             trade: Raw trade update from exchange client.
             exchange: Exchange name for message provenance.
         """
+        self._last_message_at = monotonic()
         native_symbol = trade.symbol
         topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TRADES)
         received_at = datetime.now(UTC)
@@ -1379,6 +1487,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     last_data_time = self._last_data_timestamps.get(symbol, current_time)
                     lag_ms = int(current_time - last_data_time)
                     max_lag_ms = max(max_lag_ms, lag_ms)
+                threshold_s = self._get_liveness_recovery_threshold_s()
+                if threshold_s > 0:
+                    stale_for = monotonic() - self._last_message_at
+                    if stale_for > threshold_s:
+                        self._spawn_recovery(reason=f"no_messages_for_{stale_for:.0f}s")
                 hb_topic = heartbeat_topic_from_component(component_name)
                 hb_msg = HeartbeatData(
                     public_id=str(uuid7()),

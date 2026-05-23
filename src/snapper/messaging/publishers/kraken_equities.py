@@ -12,6 +12,9 @@ The publisher uses public (anonymous) WebSocket connections.
 Data is delayed (~10 minutes).
 """
 
+from datetime import UTC
+from datetime import datetime
+from datetime import time as datetime_time
 from typing import Any
 
 from loguru import logger
@@ -30,6 +33,24 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISH
 from snapper.infrastructure.symbols.functions import get_available_kraken_equities_symbols
 from snapper.infrastructure.symbols.functions import native_to_kraken_equities_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
+
+_CME_DAILY_BREAK_START = datetime_time(hour=21)
+_CME_DAILY_BREAK_END = datetime_time(hour=22)
+
+
+def _is_cme_closed(now_utc: datetime) -> bool:
+    """Return whether CME FCM contracts are in a scheduled closure window."""
+    current = now_utc if now_utc.tzinfo is not None else now_utc.replace(tzinfo=UTC)
+    current = current.astimezone(UTC)
+    weekday = current.weekday()
+    current_time = current.time()
+    if weekday == 5:
+        return True
+    if weekday == 6:
+        return current_time < _CME_DAILY_BREAK_END
+    if weekday == 4:
+        return current_time >= _CME_DAILY_BREAK_END
+    return _CME_DAILY_BREAK_START <= current_time < _CME_DAILY_BREAK_END
 
 
 @register_process(
@@ -180,3 +201,17 @@ class KrakenEquitiesMarketDataPublisher(
             timeframe: Snapper-style candle interval. Must be ``1m``.
         """
         await super()._candle_loop(symbols, timeframe)
+
+    def _get_liveness_recovery_threshold_s(self) -> int:
+        """Disable liveness recovery during scheduled CME closure windows."""
+        if _is_cme_closed(datetime.now(UTC)):
+            return 0
+        return super()._get_liveness_recovery_threshold_s()
+
+    async def _attempt_liveness_recovery(self, reason: str) -> None:
+        """Recover stale market data by rebuilding the public WS client."""
+        logger.error("kraken_equities publisher: liveness recovery triggered ({})", reason)
+        client = self._exchange_client
+        if client is not None:
+            await client.disconnect()
+            await client._ensure_ws_connected()

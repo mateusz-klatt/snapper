@@ -189,6 +189,7 @@ async def test_start_warns_on_symbol_limit(monkeypatch: pytest.MonkeyPatch) -> N
     pub.settings.write_buffer_flush_ms = 50
     pub._heartbeat_loop = AsyncMock()
     pub._symbol_aliases_loop = AsyncMock()
+    pub._supervise_consumer = AsyncMock()
     pub._tick_loop = AsyncMock()
     pub._tick_writer_loop = AsyncMock()
     pub._trade_loop = AsyncMock()
@@ -197,6 +198,345 @@ async def test_start_warns_on_symbol_limit(monkeypatch: pytest.MonkeyPatch) -> N
     pub._candle_writer_loop = AsyncMock()
     await pub.start()
     await pub.stop()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_restarts_consumer_after_iterator_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Supervisor restarts when a consumer returns cleanly.
+
+    Given: A running publisher and a consumer factory that returns,
+    When: The supervisor runs,
+    Then: The factory is called again after the restart backoff.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    calls = 0
+
+    async def factory() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            pub.running = False
+
+    with patch(
+        "snapper.messaging.publishers.base.asyncio.sleep",
+        new_callable=AsyncMock,
+    ) as sleep_mock:
+        await pub._supervise_consumer("tick", factory)
+    assert calls == 2
+    sleep_mock.assert_awaited_once_with(2.0)
+
+
+@pytest.mark.asyncio
+async def test_supervisor_restarts_consumer_after_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Supervisor restarts when a consumer raises.
+
+    Given: A running publisher and a consumer factory that raises once,
+    When: The supervisor runs,
+    Then: The factory is retried after the restart backoff.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    calls = 0
+
+    async def factory() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("boom")
+        pub.running = False
+
+    with patch(
+        "snapper.messaging.publishers.base.asyncio.sleep",
+        new_callable=AsyncMock,
+    ) as sleep_mock:
+        await pub._supervise_consumer("tick", factory)
+    assert calls == 2
+    sleep_mock.assert_awaited_once_with(2.0)
+
+
+@pytest.mark.asyncio
+async def test_supervisor_stops_after_exception_when_running_flips_false() -> None:
+    """Supervisor does not restart exceptions raised during shutdown.
+
+    Given: A consumer factory that flips running false before raising,
+    When: The supervisor catches the exception,
+    Then: It returns without scheduling another restart.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+
+    async def factory() -> None:
+        pub.running = False
+        raise RuntimeError("shutdown")
+
+    with patch(
+        "snapper.messaging.publishers.base.asyncio.sleep",
+        new_callable=AsyncMock,
+    ) as sleep_mock:
+        await pub._supervise_consumer("tick", factory)
+    sleep_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_respects_cancellation_during_stop() -> None:
+    """Supervisor propagates cancellation.
+
+    Given: A running publisher and a consumer factory cancelled by shutdown,
+    When: The supervisor awaits the factory,
+    Then: CancelledError propagates.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+
+    async def factory() -> None:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await pub._supervise_consumer("tick", factory)
+
+
+@pytest.mark.asyncio
+async def test_supervisor_does_not_restart_after_running_flips_false() -> None:
+    """Supervisor exits when running flips false.
+
+    Given: A running publisher and a consumer factory that stops the publisher,
+    When: The factory returns,
+    Then: The supervisor exits without sleeping for a restart.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+
+    async def factory() -> None:
+        pub.running = False
+
+    with patch(
+        "snapper.messaging.publishers.base.asyncio.sleep",
+        new_callable=AsyncMock,
+    ) as sleep_mock:
+        await pub._supervise_consumer("tick", factory)
+    sleep_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_pipeline_awaits_supervisor_task_to_completion() -> None:
+    """Stop pipelines cancel consumer supervisors before draining writers.
+
+    Given: Tick, candle, and trade consumer tasks that are sleeping,
+    When: The stop pipeline helpers run,
+    Then: Each consumer task is cancelled and awaited.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._tick_consumer_task = asyncio.create_task(asyncio.sleep(60))
+    pub._candle_consumer_tasks = [asyncio.create_task(asyncio.sleep(60))]
+    pub._trade_consumer_task = asyncio.create_task(asyncio.sleep(60))
+    await pub._stop_tick_pipeline()
+    await pub._stop_candle_pipeline()
+    await pub._stop_trade_pipeline()
+    assert pub._tick_consumer_task is None
+    assert pub._candle_consumer_tasks == []
+    assert pub._trade_consumer_task is None
+
+
+def test_get_liveness_recovery_threshold_s_returns_300_default() -> None:
+    """Default liveness threshold is five minutes.
+
+    Given: A base publisher,
+    When: The liveness threshold is read,
+    Then: It returns 300 seconds.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    assert pub._get_liveness_recovery_threshold_s() == 300
+
+
+@pytest.mark.asyncio
+async def test_spawn_recovery_tracks_and_runs_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recovery spawning tracks the scheduled task.
+
+    Given: A publisher with an old recovery timestamp,
+    When: Recovery is spawned,
+    Then: The recovery hook runs and the task is discarded after completion.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    attempt = AsyncMock()
+    pub._attempt_liveness_recovery = attempt
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    pub._spawn_recovery("stale")
+    assert len(pub._recovery_tasks) == 1
+    await asyncio.gather(*pub._recovery_tasks)
+    await asyncio.sleep(0)
+    attempt.assert_awaited_once_with("stale")
+    assert pub._recovery_tasks == set()
+
+
+def test_recovery_respects_60s_min_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recovery spawning is rate-limited.
+
+    Given: A publisher that recently spawned recovery,
+    When: Recovery is spawned again within 60 seconds,
+    Then: No task is created.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._last_recovery_at = 1000.0
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1059.0)
+    pub._spawn_recovery("stale")
+    assert pub._recovery_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_recovery_lock_prevents_concurrent_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery spawning is deduplicated while the lock is held.
+
+    Given: A publisher whose recovery lock is already held,
+    When: Recovery is spawned,
+    Then: No task is created.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
+    await pub._recovery_lock.acquire()
+    try:
+        pub._spawn_recovery("stale")
+    finally:
+        pub._recovery_lock.release()
+    assert pub._recovery_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_recovery_timeout_logs_error_and_releases_lock() -> None:
+    """Recovery timeout is handled inside the recovery task.
+
+    Given: A recovery hook that raises TimeoutError,
+    When: Recovery runs under the lock,
+    Then: The lock is released after the timeout path.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._attempt_liveness_recovery = AsyncMock(side_effect=TimeoutError)
+    await pub._run_recovery_under_lock("stale")
+    assert not pub._recovery_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_recovery_exception_logs_and_releases_lock() -> None:
+    """Recovery exceptions are contained inside the recovery task.
+
+    Given: A recovery hook that raises RuntimeError,
+    When: Recovery runs under the lock,
+    Then: The exception is swallowed and the lock is released.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub._attempt_liveness_recovery = AsyncMock(side_effect=RuntimeError("boom"))
+    await pub._run_recovery_under_lock("stale")
+    assert not pub._recovery_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_pending_recovery_tasks() -> None:
+    """Stop cancels tracked recovery tasks before pipeline shutdown.
+
+    Given: A publisher with a pending recovery task,
+    When: stop is called,
+    Then: The recovery task is cancelled and removed.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    task = asyncio.create_task(asyncio.sleep(60))
+    pub._recovery_tasks.add(task)
+    await pub.stop()
+    assert task.cancelled()
+    assert pub._recovery_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_default_attempt_liveness_recovery_logs_error_only() -> None:
+    """Default liveness recovery does not raise.
+
+    Given: A base publisher without a recovery override,
+    When: The default recovery hook runs,
+    Then: It completes without raising.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    await pub._attempt_liveness_recovery("stale")
+
+
+@pytest.mark.asyncio
+async def test_liveness_fires_recovery_within_one_heartbeat_after_threshold_crossed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Heartbeat spawns recovery when message silence exceeds threshold.
+
+    Given: A running publisher whose last message is stale,
+    When: One heartbeat iteration runs,
+    Then: Recovery is spawned with a no_messages reason.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.settings.zmq_heartbeat_interval_ms = 0
+    pub._last_message_at = 0.0
+    pub._get_liveness_recovery_threshold_s = Mock(return_value=10)
+    pub._spawn_recovery = Mock()
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 11.0)
+
+    async def publish_once(_topic: str, _message: HeartbeatData) -> None:
+        pub.running = False
+
+    pub._publish_heartbeat = publish_once
+    await pub._heartbeat_loop()
+    pub._spawn_recovery.assert_called_once()
+    assert pub._spawn_recovery.call_args.kwargs["reason"] == "no_messages_for_11s"
+
+
+@pytest.mark.asyncio
+async def test_liveness_does_not_fire_when_messages_arriving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Heartbeat does not recover while messages are fresh.
+
+    Given: A running publisher whose last message is below threshold,
+    When: One heartbeat iteration runs,
+    Then: Recovery is not spawned.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.settings.zmq_heartbeat_interval_ms = 0
+    pub._last_message_at = 9.0
+    pub._get_liveness_recovery_threshold_s = Mock(return_value=10)
+    pub._spawn_recovery = Mock()
+    monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 11.0)
+
+    async def publish_once(_topic: str, _message: HeartbeatData) -> None:
+        pub.running = False
+
+    pub._publish_heartbeat = publish_once
+    await pub._heartbeat_loop()
+    pub._spawn_recovery.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_liveness_check_skipped_when_threshold_is_zero() -> None:
+    """Heartbeat skips recovery when the threshold hook disables it.
+
+    Given: A running publisher whose threshold hook returns zero,
+    When: One heartbeat iteration runs,
+    Then: Recovery is not spawned.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.settings.zmq_heartbeat_interval_ms = 0
+    pub._get_liveness_recovery_threshold_s = Mock(return_value=0)
+    pub._spawn_recovery = Mock()
+
+    async def publish_once(_topic: str, _message: HeartbeatData) -> None:
+        pub.running = False
+
+    pub._publish_heartbeat = publish_once
+    await pub._heartbeat_loop()
+    pub._spawn_recovery.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1302,6 +1642,7 @@ async def test_start_skips_trade_loop_when_unsupported(monkeypatch: pytest.Monke
     pub.settings.write_buffer_flush_ms = 50
     pub._heartbeat_loop = AsyncMock()
     pub._symbol_aliases_loop = AsyncMock()
+    pub._supervise_consumer = AsyncMock()
     pub._tick_loop = AsyncMock()
     pub._tick_writer_loop = AsyncMock()
     pub._trade_loop = AsyncMock()
@@ -1615,6 +1956,7 @@ class TestFeedPublisherCoverage:
         with (
             patch.object(publisher, "_heartbeat_loop", new=AsyncMock()),
             patch.object(publisher, "_symbol_aliases_loop", new=AsyncMock()),
+            patch.object(publisher, "_supervise_consumer", new=AsyncMock()),
             patch(
                 "snapper.application.services.settings.zmq.asyncio.Context",
                 return_value=mock_context,

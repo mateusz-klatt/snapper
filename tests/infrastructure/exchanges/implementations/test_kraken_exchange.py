@@ -22,6 +22,7 @@ from loguru import logger
 from pydantic import ValidationError
 from pytest import MonkeyPatch
 
+from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
@@ -71,6 +72,7 @@ def _client() -> KrakenExchangeClient:
     client._tick_queue = asyncio.Queue[TickerUpdate]()
     client._candle_queues = {}
     client._ccxt_client = SimpleNamespace()
+    client._subscription_cache = {}
 
     async def _with_retry(fn: Any, *args: Any, **kwargs: Any) -> Any:
         return await fn(*args, **kwargs)
@@ -230,6 +232,150 @@ async def test_subscribe_candles_yields_per_interval(monkeypatch: pytest.MonkeyP
     assert isinstance(first, CandleUpdate)
     with pytest.raises(StopAsyncIteration):
         await anext(gen)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_candles_appends_one_entry_per_interval() -> None:
+    """Candle subscription cache keeps intervals distinct.
+
+    Given: A Kraken client subscribing to the same symbol with two candle intervals,
+    When: Both subscriptions are started,
+    Then: The cache contains separate OHLC entries for each interval.
+    """
+    client = _client()
+
+    async def _noop() -> None:
+        return None
+
+    client._ensure_ws_connected = _noop
+    ws = _DummyWs(asyncio.Queue[object]())
+    client._ws_client = ws
+    for timeframe, interval in (("1m", 1), ("5m", 5)):
+        gen = client.subscribe_candles(["BTC-USD"], timeframe=timeframe)
+        await client._candle_queues.setdefault(interval, asyncio.Queue[CandleUpdate]()).put(
+            CandleUpdate(
+                symbol="BTC/USD",
+                open=1.0,
+                high=2.0,
+                low=0.5,
+                close=1.5,
+                vwap=1.5,
+                trades=1,
+                volume=1.0,
+                interval_begin=datetime.fromtimestamp(0, UTC),
+                interval=interval,
+            )
+        )
+        await anext(gen)
+        await gen.aclose()
+    encoded = {req.parameters_json for req in client._subscription_cache.values()}
+    assert any('"interval": 1' in value for value in encoded)
+    assert any('"interval": 5' in value for value in encoded)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_dedup_replaces_entry_with_same_key() -> None:
+    """Repeated subscriptions replace the same cache key.
+
+    Given: A Kraken client subscribing twice to the same tick channel and symbol,
+    When: Both subscriptions run,
+    Then: The cache has one ticker entry for that logical subscription.
+    """
+    client = _client()
+
+    async def _noop() -> None:
+        return None
+
+    client._ensure_ws_connected = _noop
+    ws = _DummyWs(client._tick_queue)
+    client._ws_client = ws
+    for _ in range(2):
+        await client._tick_queue.put(
+            TickerUpdate(
+                symbol="BTC/USD",
+                bid=1.0,
+                bid_qty=0.1,
+                ask=2.0,
+                ask_qty=0.2,
+                last=1.5,
+                volume=1.0,
+                vwap=1.5,
+                low=1.0,
+                high=2.0,
+                change=0.5,
+                change_pct=1.0,
+            )
+        )
+        gen = client.subscribe_ticks(["BTC-USD"])
+        await anext(gen)
+        await gen.aclose()
+    ticker_entries = [req for req in client._subscription_cache.values() if req.channel == "ticker"]
+    assert len(ticker_entries) == 1
+
+
+@pytest.mark.asyncio
+async def test_replay_iterates_cache_in_insertion_order_with_5s_delay() -> None:
+    """Replay resubscribes cached requests in insertion order with delay.
+
+    Given: A Kraken client with two cached subscriptions,
+    When: Subscriptions are replayed,
+    Then: The websocket receives subscribe calls in insertion order with one 5s sleep.
+    """
+    client = _client()
+    ws = AsyncMock()
+    client._ws_client = ws
+    first = SubscriptionRequest(channel="ticker", symbols=("BTC/USD",), parameters_json="{}")
+    second = SubscriptionRequest(channel="trade", symbols=("ETH/USD",), parameters_json="{}")
+    client._subscription_cache[first.key()] = first
+    client._subscription_cache[second.key()] = second
+    with patch(
+        "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+        new_callable=AsyncMock,
+    ) as sleep_mock:
+        await client._replay_subscriptions()
+    assert ws.subscribe.await_args_list[0].kwargs["params"] == {
+        "channel": "ticker",
+        "symbol": ["BTC/USD"],
+    }
+    assert ws.subscribe.await_args_list[1].kwargs["params"] == {
+        "channel": "trade",
+        "symbol": ["ETH/USD"],
+    }
+    sleep_mock.assert_awaited_once_with(5.0)
+
+
+@pytest.mark.asyncio
+async def test_replay_requires_connected_ws_client() -> None:
+    """Replay fails when no websocket client exists.
+
+    Given: A Kraken client with no websocket client,
+    When: Subscriptions are replayed,
+    Then: RuntimeError is raised.
+    """
+    client = _client()
+    client._ws_client = None
+    with pytest.raises(RuntimeError):
+        await client._replay_subscriptions()
+
+
+@pytest.mark.asyncio
+async def test_ensure_ws_connected_auto_replays_after_reconnect() -> None:
+    """Websocket reconnect automatically replays cached subscriptions.
+
+    Given: A Kraken client with a cached subscription and no active websocket,
+    When: _ensure_ws_connected creates a new client,
+    Then: The replay hook is awaited.
+    """
+    client = KrakenExchangeClient(api_key="key", api_secret="secret")
+    req = SubscriptionRequest(channel="ticker", symbols=("BTC/USD",), parameters_json="{}")
+    client._subscription_cache[req.key()] = req
+    with (
+        patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient") as ws_cls,
+        patch.object(client, "_replay_subscriptions", new_callable=AsyncMock) as replay_mock,
+    ):
+        ws_cls.return_value.start = AsyncMock()
+        await client._ensure_ws_connected()
+    replay_mock.assert_awaited_once()
 
 
 class TestKrakenExchangeClient:

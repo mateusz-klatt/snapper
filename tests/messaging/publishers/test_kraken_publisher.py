@@ -242,6 +242,19 @@ class TestKrakenReconnectWatchdog:
         client._ensure_ws_connected.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_attempt_liveness_recovery_calls_force_ws_restart(self) -> None:
+        """Liveness recovery delegates to the existing restart helper.
+
+        Given: A Kraken publisher with a patched force restart helper,
+        When: Liveness recovery is attempted,
+        Then: The force restart helper is awaited once.
+        """
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        pub._force_ws_restart = AsyncMock()
+        await pub._attempt_liveness_recovery("stale")
+        pub._force_ws_restart.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_start_sets_current_publisher_context_var(self) -> None:
         """Spec — full Given/When/Then below.
 

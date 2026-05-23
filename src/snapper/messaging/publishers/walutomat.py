@@ -118,3 +118,13 @@ class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeC
             seen_symbols.add(symbol)
             native_symbols.append(symbol)
         return native_symbols
+
+    async def _attempt_liveness_recovery(self, reason: str) -> None:
+        """Recover stale polling by breaking backoff sleep and resetting counters."""
+        logger.error("walutomat publisher: liveness recovery triggered ({})", reason)
+        client = self._exchange_client
+        if client is not None:
+            client._consecutive_error_count = 0
+            client._backoff_attempts = 0
+            if client._backoff_wakeup_event is not None:
+                client._backoff_wakeup_event.set()

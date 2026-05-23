@@ -26,6 +26,7 @@ from datetime import UTC
 from datetime import datetime
 from time import monotonic
 from typing import Any
+from typing import Literal
 from typing import cast
 
 import ccxt
@@ -37,6 +38,7 @@ from loguru import logger
 
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
+from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
 from snapper.infrastructure.exchanges._trade_candle_builder import enqueue_or_drop_oldest_candle
 from snapper.infrastructure.exchanges.adapters.kraken_futures import _ORDER_TYPE_MAP
@@ -71,6 +73,7 @@ _QUEUE_DRAIN_TIMEOUT = 0.1
 _QUEUE_MAX_SIZE = 10000
 _SUBSCRIBE_CHUNK_SIZE = 50
 _SUBSCRIBE_CHUNK_DELAY_S = 0.1
+_RESUBSCRIBE_CHUNK_DELAY_S = 5.0
 
 _TIMEFRAME_SECONDS: dict[str, int] = {
     "1m": 60,
@@ -215,6 +218,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         self._candle_queue: asyncio.Queue[CandleUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
         self._candle_builder = TradeCandleBuilder(interval_seconds=60)
         self._candle_aggregator_task: asyncio.Task[None] | None = None
+        self._subscription_cache: dict[tuple[str, frozenset[str], str], SubscriptionRequest] = {}
         self._execution_queue: asyncio.Queue[ExecutionUpdate] = asyncio.Queue(
             maxsize=_QUEUE_MAX_SIZE
         )
@@ -346,6 +350,18 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         self._ws_client = FuturesWSClient(callback=self._on_ws_message, sandbox=self.sandbox)
         await self._ws_client.start()
         logger.info("Kraken Futures WebSocket connected")
+        if self._subscription_cache:
+            await self._replay_subscriptions()
+
+    async def _replay_subscriptions(self) -> None:
+        """Replay cached public subscriptions after reconnect."""
+        if self._ws_client is None:
+            raise RuntimeError(_PUBLIC_WS_NOT_CONNECTED_MSG)
+        requests = list(self._subscription_cache.values())
+        for index, req in enumerate(requests):
+            await self._ws_client.subscribe(feed=req.channel, products=list(req.symbols))
+            if index < len(requests) - 1:
+                await asyncio.sleep(_RESUBSCRIBE_CHUNK_DELAY_S)
 
     async def _ensure_private_ws_connected(self) -> None:
         """Connect the authenticated FuturesWSClient if not already connected.
@@ -942,7 +958,9 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         return self._subscribe_ticks_impl(symbols)
 
-    async def _subscribe_in_chunks(self, feed: str, ws_symbols: list[str]) -> None:
+    async def _subscribe_in_chunks(
+        self, feed: Literal["ticker", "trade"], ws_symbols: list[str]
+    ) -> None:
         """Subscribe to a Kraken Futures feed in bounded product chunks.
 
         Sending all ~330 perpetuals + dated contracts in a single
@@ -963,6 +981,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             raise RuntimeError(_PUBLIC_WS_NOT_CONNECTED_MSG)
         for i in range(0, len(ws_symbols), _SUBSCRIBE_CHUNK_SIZE):
             chunk = ws_symbols[i : i + _SUBSCRIBE_CHUNK_SIZE]
+            req = SubscriptionRequest(channel=feed, symbols=tuple(chunk), parameters_json="{}")
+            self._subscription_cache[req.key()] = req
             await self._ws_client.subscribe(feed=feed, products=chunk)
             if i + _SUBSCRIBE_CHUNK_SIZE < len(ws_symbols):
                 await asyncio.sleep(_SUBSCRIBE_CHUNK_DELAY_S)

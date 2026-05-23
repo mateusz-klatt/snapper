@@ -409,23 +409,20 @@ async def test_subscribe_instruments_yields_pairs(monkeypatch: pytest.MonkeyPatc
     assert items and items[0]["native_symbol"] == "EUR-PLN"
 
 
-@pytest.mark.asyncio()
-async def test_polling_loop_stops_on_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify polling loop stops after max errors.
+def test_polling_loop_backoff_error_does_not_stop_running() -> None:
+    """Verify HTTP error backoff does not stop the client.
 
     Given: A client with max_consecutive_errors=1,
-    When: Polling encounters HTTP error,
-    Then: Running flag is set to False.
+    When: An HTTP error reaches the threshold,
+    Then: Running remains True and backoff state is set.
     """
     client = WalutomatExchangeClient(polling_interval=0.0)
     client._running = True
     client._max_consecutive_errors = 1
-    client._http_client = AsyncMock()
-    monkeypatch.setattr(
-        client, "_fetch_market_data", AsyncMock(side_effect=httpx.HTTPError("fail"))
-    )
-    await client._polling_loop(["EUR-PLN"])
-    assert client._running is False
+    stop = client._handle_http_error(httpx.HTTPError("fail"))
+    assert stop is False
+    assert client._running is True
+    assert client._backoff_until > 0.0
 
 
 @pytest.mark.asyncio()
@@ -3127,28 +3124,20 @@ async def test_polling_loop_skips_missing_symbol(monkeypatch: pytest.MonkeyPatch
     assert "EUR-PLN" in client._tick_buffers
 
 
-@pytest.mark.asyncio()
-async def test_polling_loop_stops_after_http_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify polling loop stops after max HTTP errors.
+def test_handle_http_error_threshold_sets_backoff_without_stopping() -> None:
+    """Verify threshold HTTP errors enter backoff without stopping.
 
     Given: A client with max_consecutive_errors=1,
     When: HTTP error occurs,
-    Then: Running flag is set to False.
+    Then: Backoff is scheduled and running remains True.
     """
     client = WalutomatExchangeClient()
     client._running = True
     client._max_consecutive_errors = 1
-    client._fetch_market_data = AsyncMock(side_effect=httpx.HTTPError("boom"))
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(_seconds: float) -> None:
-        await real_sleep(0)
-
-    monkeypatch.setattr(
-        "snapper.infrastructure.exchanges.implementations.walutomat.asyncio.sleep", fast_sleep
-    )
-    await client._polling_loop(["EUR-PLN"])
-    assert client._running is False
+    assert client._handle_http_error(httpx.HTTPError("boom")) is False
+    assert client._running is True
+    assert client._backoff_attempts == 1
+    assert client._backoff_until > 0.0
 
 
 @pytest.mark.asyncio()
@@ -3551,28 +3540,21 @@ async def test_polling_loop_adds_to_new_tick_buffer(monkeypatch: pytest.MonkeyPa
     assert len(client._tick_buffers["EUR-PLN"]) > 0
 
 
-@pytest.mark.asyncio()
-async def test_polling_loop_http_error_max_consecutive(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify polling loop stops after max consecutive HTTP errors.
+def test_polling_loop_http_error_max_consecutive_sets_backoff() -> None:
+    """Verify max consecutive HTTP errors set backoff.
 
     Given: A client with max_consecutive_errors=2,
     When: Two consecutive HTTP errors occur,
-    Then: Running flag is set to False.
+    Then: Running stays True and the first backoff attempt is recorded.
     """
     client = WalutomatExchangeClient(polling_interval=0.01)
     client._max_consecutive_errors = 2
-    error_responses = [
-        httpx.HTTPError("Connection failed"),
-        httpx.HTTPError("Connection failed"),
-    ]
-    stub_client = StubAsyncClient(get_responses=error_responses)
-    client._http_client = cast(httpx.AsyncClient, stub_client)
     client._running = True
-    await client._polling_loop(["EUR-PLN"])
-    assert not client._running
-    assert client._error_count >= 2
+    client._handle_http_error(httpx.HTTPError("Connection failed"))
+    client._handle_http_error(httpx.HTTPError("Connection failed"))
+    assert client._running is True
+    assert client._consecutive_error_count == 2
+    assert client._backoff_attempts == 1
 
 
 def test_handle_http_error_in_flight_retry_logs_warning_not_error(
@@ -3597,7 +3579,7 @@ def test_handle_http_error_in_flight_retry_logs_warning_not_error(
     finally:
         logger.remove(sink_id)
     assert stop is False
-    assert client._error_count == 1
+    assert client._consecutive_error_count == 1
     warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
     error_records = [r for r in caplog.records if r.levelname == "ERROR"]
     assert any(
@@ -3606,6 +3588,232 @@ def test_handle_http_error_in_flight_retry_logs_warning_not_error(
     assert (
         not error_records
     ), f"in-flight retry must not log ERROR, got {[r.message for r in error_records]}"
+
+
+def test_handle_http_error_below_threshold_sets_no_backoff() -> None:
+    """Below-threshold HTTP errors do not enter backoff.
+
+    Given: A client below its max consecutive error threshold,
+    When: _handle_http_error is called,
+    Then: No backoff is scheduled.
+    """
+    client = WalutomatExchangeClient()
+    client._max_consecutive_errors = 5
+    assert client._handle_http_error(httpx.HTTPError("timeout")) is False
+    assert client._consecutive_error_count == 1
+    assert client._backoff_attempts == 0
+    assert client._backoff_until == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio()
+async def test_handle_http_error_at_threshold_sets_backoff_60s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Threshold HTTP errors schedule the first 60s backoff.
+
+    Given: A client at the first threshold and a wakeup event already set,
+    When: _handle_http_error is called,
+    Then: Backoff is set for 60 seconds and the wakeup event is cleared.
+    """
+    client = WalutomatExchangeClient()
+    client._running = True
+    client._max_consecutive_errors = 1
+    client._backoff_wakeup_event = asyncio.Event()
+    client._backoff_wakeup_event.set()
+    monkeypatch.setattr(walutomat_mod.time, "monotonic", lambda: 1000.0)
+    assert client._handle_http_error(httpx.HTTPError("timeout")) is False
+    assert client._running is True
+    assert client._backoff_attempts == 1
+    assert client._backoff_until == pytest.approx(1060.0)
+    assert not client._backoff_wakeup_event.is_set()
+
+
+def test_handle_http_error_grows_backoff_exponentially_capped_at_1800s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTP error backoff grows exponentially up to the cap.
+
+    Given: A client whose error threshold is one,
+    When: Multiple threshold errors are handled,
+    Then: Backoff reaches the 1800 second cap.
+    """
+    client = WalutomatExchangeClient()
+    client._max_consecutive_errors = 1
+    monkeypatch.setattr(walutomat_mod.time, "monotonic", lambda: 1000.0)
+    for _ in range(6):
+        client._handle_http_error(httpx.HTTPError("timeout"))
+    assert client._backoff_attempts == 6
+    assert client._backoff_until == pytest.approx(2800.0)
+
+
+def test_handle_http_error_never_sets_running_false() -> None:
+    """HTTP errors never stop the polling client.
+
+    Given: A running client at its error threshold,
+    When: _handle_http_error is called,
+    Then: _running remains True.
+    """
+    client = WalutomatExchangeClient()
+    client._running = True
+    client._max_consecutive_errors = 1
+    client._handle_http_error(httpx.HTTPError("timeout"))
+    assert client._running is True
+
+
+def test_handle_http_error_always_returns_false() -> None:
+    """HTTP error handling keeps the legacy bool signature.
+
+    Given: A client below and at its threshold,
+    When: _handle_http_error is called repeatedly,
+    Then: It always returns False.
+    """
+    client = WalutomatExchangeClient()
+    client._max_consecutive_errors = 2
+    assert client._handle_http_error(httpx.HTTPError("timeout")) is False
+    assert client._handle_http_error(httpx.HTTPError("timeout")) is False
+
+
+@pytest.mark.asyncio()
+async def test_polling_loop_wakeup_event_breaks_sleep_early() -> None:
+    """The polling loop can be woken while in HTTP backoff.
+
+    Given: A running client in backoff,
+    When: The wakeup event is set,
+    Then: Backoff clears and polling resumes immediately.
+    """
+    client = WalutomatExchangeClient(polling_interval=0.0)
+    client._running = True
+    client._consecutive_error_count = 5
+    client._backoff_attempts = 1
+    client._backoff_until = walutomat_mod.time.monotonic() + 60.0
+    pair = WalutomatMarketPair.model_validate(
+        {"pair": "EUR_PLN", "bestOffers": {"bid_now": 4.0, "ask_now": 4.1, "forex_now": 4.05}}
+    )
+
+    async def fake_fetch() -> dict[str, WalutomatMarketPair]:
+        client._running = False
+        return {"EUR_PLN": pair}
+
+    client._fetch_market_data = AsyncMock(side_effect=fake_fetch)
+    task = asyncio.create_task(client._polling_loop(["EUR-PLN"]))
+    while client._backoff_wakeup_event is None:
+        await asyncio.sleep(0)
+    client._backoff_wakeup_event.set()
+    await asyncio.wait_for(task, timeout=0.5)
+    assert client._backoff_until == pytest.approx(0.0)
+    assert client._backoff_attempts == 0
+    assert client._consecutive_error_count == 0
+    ticker = await client._tick_queue.get()
+    assert ticker.symbol == "EUR-PLN"
+
+
+@pytest.mark.asyncio()
+async def test_polling_loop_sleeps_during_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The polling loop honors scheduled backoff before polling.
+
+    Given: A running client in backoff,
+    When: The backoff sleep completes,
+    Then: Polling resumes and backoff state is cleared.
+    """
+    client = WalutomatExchangeClient(polling_interval=0.0)
+    client._running = True
+    client._consecutive_error_count = 5
+    client._backoff_attempts = 1
+    client._backoff_until = walutomat_mod.time.monotonic() + 60.0
+    pair = WalutomatMarketPair.model_validate(
+        {"pair": "EUR_PLN", "bestOffers": {"bid_now": 4.0, "ask_now": 4.1, "forex_now": 4.05}}
+    )
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_seconds: float) -> None:
+        await real_sleep(0)
+
+    async def fake_fetch() -> dict[str, WalutomatMarketPair]:
+        client._running = False
+        return {"EUR_PLN": pair}
+
+    monkeypatch.setattr(walutomat_mod.asyncio, "sleep", fast_sleep)
+    client._fetch_market_data = AsyncMock(side_effect=fake_fetch)
+    await client._polling_loop(["EUR-PLN"])
+    assert client._backoff_until == pytest.approx(0.0)
+    assert client._backoff_attempts == 0
+    assert client._consecutive_error_count == 0
+
+
+@pytest.mark.asyncio()
+async def test_polling_loop_cancellation_during_backoff_does_not_leak_tasks() -> None:
+    """Backoff child tasks are cancelled when the polling loop is cancelled.
+
+    Given: A polling loop suspended in backoff,
+    When: The polling task is cancelled,
+    Then: Cancellation propagates without leaving the tracked backoff wait active.
+    """
+    client = WalutomatExchangeClient(polling_interval=0.0)
+    client._running = True
+    client._backoff_until = walutomat_mod.time.monotonic() + 60.0
+    task = asyncio.create_task(client._polling_loop(["EUR-PLN"]))
+    while client._backoff_wakeup_event is None:
+        await asyncio.sleep(0)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert task.done()
+
+
+@pytest.mark.asyncio()
+async def test_successful_poll_after_backoff_resets_consecutive_and_attempt_counters() -> None:
+    """Successful polling clears error and backoff counters.
+
+    Given: A client with stale error and backoff counters,
+    When: The next poll succeeds,
+    Then: Consecutive error count and backoff attempts reset to zero.
+    """
+    client = WalutomatExchangeClient(polling_interval=0.0)
+    client._running = True
+    client._consecutive_error_count = 3
+    client._backoff_attempts = 2
+    pair = WalutomatMarketPair.model_validate(
+        {"pair": "EUR_PLN", "bestOffers": {"bid_now": 4.0, "ask_now": 4.1, "forex_now": 4.05}}
+    )
+
+    async def fake_fetch() -> dict[str, WalutomatMarketPair]:
+        client._running = False
+        return {"EUR_PLN": pair}
+
+    client._fetch_market_data = AsyncMock(side_effect=fake_fetch)
+    await client._polling_loop(["EUR-PLN"])
+    assert client._consecutive_error_count == 0
+    assert client._backoff_attempts == 0
+
+
+@pytest.mark.asyncio()
+async def test_polling_loop_handles_http_error_without_breaking() -> None:
+    """HTTP errors are handled without breaking the polling loop.
+
+    Given: A running client whose first poll raises HTTPError and second poll succeeds,
+    When: The polling loop runs,
+    Then: The loop calls the HTTP error handler and continues to the successful poll.
+    """
+    client = WalutomatExchangeClient(polling_interval=0.0)
+    client._running = True
+    client._max_consecutive_errors = 5
+    pair = WalutomatMarketPair.model_validate(
+        {"pair": "EUR_PLN", "bestOffers": {"bid_now": 4.0, "ask_now": 4.1, "forex_now": 4.05}}
+    )
+    calls = 0
+
+    async def fake_fetch() -> dict[str, WalutomatMarketPair]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.HTTPError("timeout")
+        client._running = False
+        return {"EUR_PLN": pair}
+
+    client._fetch_market_data = AsyncMock(side_effect=fake_fetch)
+    await client._polling_loop(["EUR-PLN"])
+    assert calls == 2
+    assert client._consecutive_error_count == 0
 
 
 @pytest.mark.asyncio()
