@@ -10,10 +10,13 @@ Why a separate script rather than reusing
 ``{key: template}`` map for the Python resolver, whereas iOS xcstrings
 is a nested document keyed by ``market.<namespace>.<leaf>`` with one
 ``stringUnit`` per language. Placeholders translate from i18next's
-named tokens (``{{name}}`` / ``{{assetClass}}`` / ``{{sampleCount}}``)
-to xcstrings positional codes (``%1$@``, ``%2$@``, ``%1$lld``) based on
-appearance order in the English template — the English template is the
-source of truth for placeholder ordering across the 45 locales.
+named tokens (``{{name}}`` / ``{{assetClass}}``) to xcstrings positional
+string codes (``%1$@`` / ``%2$@``) based on appearance order in the
+English template — the English template is the source of truth for
+placeholder ordering across the 45 locales. Numeric placeholders
+(``%lld`` / ``%d``) are NOT emitted; every i18next named token lowers
+to a string-typed xcstrings placeholder regardless of how the value
+is consumed at runtime.
 
 Drift between the source JSONs and the committed xcstrings is enforced
 by ``make ui-i18n-check-market`` (re-runs the script and ``diff``s the
@@ -276,6 +279,9 @@ def generate(xcstrings_path: Path | None = None) -> None:
     }
 
     frontend_locales = _list_frontend_locales(FRONTEND_LOCALES_DIR)
+    locale_payloads: dict[str, dict[str, str]] = {
+        locale_name: _read_locale_payload(locale_name) for locale_name in frontend_locales
+    }
     written_keys = 0
     for short_key in _iter_phase_keys(en_payload):
         full_key = _full_catalog_key(short_key)
@@ -287,7 +293,7 @@ def generate(xcstrings_path: Path | None = None) -> None:
         if not isinstance(localizations, dict):
             raise SystemExit(f"xcstrings entry {full_key!r} has non-dict localizations")
         for locale_name in frontend_locales:
-            payload = _read_locale_payload(locale_name)
+            payload = locale_payloads[locale_name]
             value = payload.get(short_key)
             if value is None:
                 raise SystemExit(
