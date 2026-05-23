@@ -304,6 +304,44 @@ make ui-fix   # lint-fix + format-fix + dead-code-fix
 make ui-gen-types   # OpenAPI types, WebSocket types, Zod schemas, entity aliases, permissions
 ```
 
+## Internationalization
+
+The frontend i18n catalogs in `frontend/src/locales/<lang>/*.json` are
+the source of truth for translated UI strings across 45 locales. iOS
+mirrors the subset of strings used on the native client by porting
+them into `ios/Snapper/Resources/Localization/Localizable.xcstrings`.
+
+### Market catalog (description / asset class / sector)
+
+The `market.description.*`, `market.assetClass.*`, and `market.sector.*`
+namespaces are ported from the frontend JSON into the iOS xcstrings
+by `scripts/port_market_catalog.py`. Run after editing any
+`frontend/src/locales/<lang>/market.json` file under one of those
+namespaces:
+
+```bash
+python scripts/port_market_catalog.py        # write
+python scripts/port_market_catalog.py --check  # CI parity gate
+```
+
+The `--check` mode is wired into `make ui-check` via
+`ui-i18n-check-market`, so a forgotten regeneration fails the
+backend + frontend quality gate. Placeholder tokens
+(`{{name}}` / `{{assetClass}}`) are rewritten to xcstrings positional
+codes (`%1$@`, `%2$@`) based on appearance order in the EN template.
+
+iOS-side coverage of the resulting catalog is enforced by
+`CatalogParityTests` (45 locales × every key declared in
+`SnapperTests/I18n/ExpectedKeys.swift`); adding a new key to the
+catalog requires adding it to `ExpectedKeys.swift` in the same iOS PR.
+
+### Alerts catalog (legacy direction: xcstrings → JSON)
+
+Historically the iOS alerts catalog was the source of truth and
+frontend caught up via `scripts/port_ios_alert_catalog.py`. That
+direction is preserved for back-compatibility; new namespaces should
+flow frontend → iOS via the market-catalog pattern above.
+
 ## Database Migrations
 
 ### Dev DB Location
