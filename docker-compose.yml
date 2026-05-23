@@ -4,6 +4,7 @@ services:
     build:
       context: .
       target: runtime
+    container_name: snapper
     env_file: .env
     ports:
       - "127.0.0.1:8000:8000"
@@ -18,6 +19,7 @@ services:
         condition: service_healthy
   snapper-egress:
     image: klattm/snapper:latest
+    container_name: snapper-egress
     env_file: .env
     expose:
       - "8081"
@@ -38,6 +40,26 @@ services:
       interval: 10s
       timeout: 3s
       start_period: 15s
+      retries: 5
+  snapper-web:
+    image: klattm/snapper-web:latest
+    build:
+      context: .
+      target: web-runtime
+    container_name: snapper-web
+    expose:
+      - "8000"
+    depends_on:
+      snapper:
+        condition: service_healthy
+    networks:
+      - snapper-internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/ | grep -q 'id=\"root\"' || exit 1"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
       retries: 5
   postgres:
     image: postgres:16
