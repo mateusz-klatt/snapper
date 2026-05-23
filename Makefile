@@ -136,6 +136,7 @@ endif
 
 DOCKER_NAME := snapper
 IMAGE_NAME := klattm/snapper
+IMAGE_NAME_WEB := klattm/snapper-web
 IMAGE_TAG := latest
 PYRUN := $(VENV_PY) -m
 PYTEST_TIMEOUT := --timeout=15 --timeout-method=thread
@@ -556,10 +557,12 @@ else
 endif
 
 docker-build-dev:
-	docker build --build-arg UID=$(DOCKER_DEV_UID) -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	docker build --build-arg UID=$(DOCKER_DEV_UID) --target runtime -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	docker build --build-arg UID=$(DOCKER_DEV_UID) --target web-runtime -t $(IMAGE_NAME_WEB):$(IMAGE_TAG) .
 
 docker-build-prod:
-	docker build --build-arg UID=$(DOCKER_PROD_UID) -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	docker build --build-arg UID=$(DOCKER_PROD_UID) --target runtime -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	docker build --build-arg UID=$(DOCKER_PROD_UID) --target web-runtime -t $(IMAGE_NAME_WEB):$(IMAGE_TAG) .
 
 docker-migrate-dev:
 	$(DOCKER_RUN) db-init
@@ -571,6 +574,7 @@ docker-migrate-prod:
 
 docker-push:
 	docker push $(IMAGE_NAME):$(IMAGE_TAG)
+	docker push $(IMAGE_NAME_WEB):$(IMAGE_TAG)
 
 docker-run:
 	docker compose up -d

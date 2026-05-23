@@ -84,3 +84,12 @@ USER snapper
 EXPOSE 8000 8081
 ENTRYPOINT ["snapper"]
 CMD ["server"]
+
+FROM caddy:2-alpine AS web-runtime
+LABEL org.opencontainers.image.title="snapper-web"
+LABEL org.opencontainers.image.description="snapper static frontend served by Caddy with reverse-proxy to the snapper backend on the snapper-internal docker network."
+
+COPY docker/web/Caddyfile /etc/caddy/Caddyfile
+COPY --from=ui-build /app/frontend/dist /srv/dist
+
+EXPOSE 8000
