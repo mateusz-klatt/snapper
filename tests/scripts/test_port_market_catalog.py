@@ -22,6 +22,7 @@ class TestIsPhaseKey:
         assert port._is_phase_key("description") is True
         assert port._is_phase_key("assetClass") is True
         assert port._is_phase_key("sector") is True
+        assert port._is_phase_key("related") is True
 
     def test_leaf_under_phase_prefix(self) -> None:
         """Standard leaf paths under each phase prefix match."""
@@ -29,12 +30,15 @@ class TestIsPhaseKey:
         assert port._is_phase_key("description.fallback") is True
         assert port._is_phase_key("assetClass.crypto") is True
         assert port._is_phase_key("sector.precious-metals") is True
+        assert port._is_phase_key("related.labelSeparator") is True
+        assert port._is_phase_key("related.relationshipType.derivative") is True
 
     def test_outside_phase_prefix_rejected(self) -> None:
         """Keys outside the phase namespaces are filtered out."""
         assert port._is_phase_key("page.title") is False
         assert port._is_phase_key("controls.exchange") is False
-        assert port._is_phase_key("related.labelSeparator") is False
+        assert port._is_phase_key("pairStats.label") is False
+        assert port._is_phase_key("cacheBanner.message") is False
         assert port._is_phase_key("") is False
 
 
@@ -80,6 +84,33 @@ class TestWalkAndFlatten:
         }
         flat = port._flatten_market_payload(payload)
         assert flat == {"sector.extra.deeply-nested": "X"}
+
+    def test_flatten_related_namespace(self) -> None:
+        """Phase 2 ``related.*`` keys (incl. nested relationshipType) flatten."""
+        payload = {
+            "related": {
+                "labelSeparator": "{{label}}:",
+                "exchangeSeparator": "· {{exchange}}",
+                "empty": "No related instruments configured for {{instrument}} on {{exchange}}.",
+                "relationshipType": {
+                    "exact": "Same underlying",
+                    "derivative": "Derivatives",
+                    "proxy": "Proxies",
+                },
+            },
+            "page": {"title": "skip"},
+        }
+        flat = port._flatten_market_payload(payload)
+        assert flat == {
+            "related.labelSeparator": "{{label}}:",
+            "related.exchangeSeparator": "· {{exchange}}",
+            "related.empty": (
+                "No related instruments configured for {{instrument}} on {{exchange}}."
+            ),
+            "related.relationshipType.exact": "Same underlying",
+            "related.relationshipType.derivative": "Derivatives",
+            "related.relationshipType.proxy": "Proxies",
+        }
 
 
 class TestMapLocale:

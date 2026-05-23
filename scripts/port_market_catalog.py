@@ -47,14 +47,21 @@ REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 XCSTRINGS_PATH: Final[Path] = REPO_ROOT / "ios/Snapper/Resources/Localization/Localizable.xcstrings"
 FRONTEND_LOCALES_DIR: Final[Path] = REPO_ROOT / "frontend/src/locales"
 
-PHASE_PREFIXES: Final[tuple[str, ...]] = ("description.", "assetClass.", "sector.")
+PHASE_PREFIXES: Final[tuple[str, ...]] = (
+    "description.",
+    "assetClass.",
+    "sector.",
+    "related.",
+)
 """Frontend ``market.*`` sub-namespaces this script ports.
 
-Phase 1 lands the banner + locale-persist infrastructure. Phase 2 will
-extend with ``related.`` (cluster headers + chip exchange separator).
-Phase 3 adds ``pairStats.`` + ``cacheBanner.``. Each phase extends this
-tuple in the same commit as the iOS view that consumes the keys, so the
-catalog parity gate fails loudly if either side drifts.
+Phase 1 landed the banner + locale-persist infrastructure
+(``description.`` / ``assetClass.`` / ``sector.``). Phase 2 adds
+``related.`` (cluster headers + chip exchange separator + empty
+state). Phase 3 will add ``pairStats.`` + ``cacheBanner.``. Each
+phase extends this tuple in the same commit as the iOS view that
+consumes the keys, so the catalog parity gate fails loudly if
+either side drifts.
 """
 
 CATALOG_NAMESPACE: Final[str] = "market"
