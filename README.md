@@ -386,7 +386,7 @@ Detailed documentation in [docs/](docs/) directory:
 - [Strategies](docs/strategies.md) — Creating trading strategies
 - [API](docs/api.md) — REST API and WebSocket
 - [Messaging](docs/messaging.md) — ZeroMQ architecture
-- [Development](docs/development.md) — Developer guidelines
+- [Development](docs/development.md) — Developer guidelines (incl. [Internationalization](docs/development.md#internationalization))
 
 ## License
 

@@ -87,6 +87,7 @@ help:
 	$(info ui-cov             Run UI tests with coverage)
 	$(info ui-cov-serial      Run UI tests with coverage sequentially [debugging])
 	$(info ui-i18n-check      Check for hardcoded user-facing strings in frontend)
+	$(info ui-i18n-check-market Verify iOS market.* catalog matches frontend JSON)
 	$(info ui-check           UI quality checks [lint + format + dead-code + i18n])
 	$(info ui-fix             UI quality fixes)
 	$(info )
@@ -444,8 +445,11 @@ ui-i18n-check:
 ui-i18n-check-alerts:
 	$(VENV_PY) scripts/port_ios_alert_catalog.py --check
 
-ui-check: ui-lint ui-format ui-dead-code ui-typecheck ui-i18n-check ui-i18n-check-alerts
-	$(info UI quality checks passed [lint + format + dead code + typecheck + i18n + alerts])
+ui-i18n-check-market:
+	$(VENV_PY) scripts/port_market_catalog.py --check
+
+ui-check: ui-lint ui-format ui-dead-code ui-typecheck ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market
+	$(info UI quality checks passed [lint + format + dead code + typecheck + i18n + alerts + market])
 
 ui-fix: ui-lint-fix ui-format-fix ui-dead-code-fix
 	$(info UI quality fixes applied [lint + format + dead code])
