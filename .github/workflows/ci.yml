@@ -69,14 +69,14 @@ jobs:
           sed -i 's/^SERVER_API_ONLY=.*/SERVER_API_ONLY=true/' .env
           mkdir -p data
           make docker-migrate-dev
-          docker compose up -d --no-deps snapper
+          docker compose up -d --no-deps --wait snapper snapper-web
 
       - name: Docker health check
         run: make server-check
 
       - name: Docker logs (on failure)
         if: failure()
-        run: docker compose logs snapper snapper-egress || true
+        run: docker compose logs snapper snapper-web snapper-egress || true
 
       - name: Docker stop
         if: always()
