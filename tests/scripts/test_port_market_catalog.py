@@ -143,7 +143,9 @@ class TestRewritePlaceholders:
         )
         assert result == "%2$@: %1$@"
 
-    def test_unknown_placeholder_left_as_is_with_warning(self, capsys) -> None:
+    def test_unknown_placeholder_left_as_is_with_warning(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """A token in a translated template that isn't in the EN order is preserved verbatim and a warning is printed to stderr."""
         result = port._rewrite_placeholders(
             "{{name}} extra {{rogue}}",
@@ -212,7 +214,7 @@ class TestEnsureStringsObject:
 
     def test_existing_dict_returned(self) -> None:
         """An xcstrings doc with a ``strings`` dict returns it verbatim."""
-        doc = {"strings": {"alerts.x": {}}}
+        doc: dict[str, object] = {"strings": {"alerts.x": {}}}
         strings = port._ensure_strings_object(doc)
         assert strings is doc["strings"]
 
@@ -369,7 +371,7 @@ class TestGenerateE2E:
         assert target.read_bytes() == first_bytes
 
     def test_writes_phase_keys_with_positional_placeholders(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """All 3 phase namespaces land in the catalog; placeholders port from ``{{name}}`` to ``%1$@`` based on EN order."""
         self._setup_frontend(
@@ -582,7 +584,7 @@ class TestCheckDrift:
         return target
 
     def test_no_drift_returns_zero(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """When the committed xcstrings already matches a fresh run, check_drift exits 0 quietly."""
         target = self._setup(
@@ -600,7 +602,7 @@ class TestCheckDrift:
         assert port.check_drift() == 0
 
     def test_drift_returns_one_with_stderr(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """A committed xcstrings that diverges produces exit 1 + diff summary on stderr."""
         self._setup(
@@ -620,7 +622,7 @@ class TestCheckDrift:
         assert "Re-run `python scripts/port_market_catalog.py`" in err
 
     def test_missing_xcstrings_returns_one(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """check_drift() exits 1 cleanly when the target xcstrings is absent rather than the file-system error escaping."""
         monkeypatch.setattr(port, "XCSTRINGS_PATH", tmp_path / "absent.xcstrings")

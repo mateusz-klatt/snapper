@@ -346,7 +346,13 @@ def check_drift() -> int:
 
 
 def main() -> int:
-    """Entry point for ``scripts/port_market_catalog.py``."""
+    """Entry point for ``scripts/port_market_catalog.py``.
+
+    Returns:
+        ``0`` on success. ``generate()`` raises ``SystemExit(...)`` on
+        every failure path, and ``check_drift()`` returns ``1`` with a
+        diff summary on drift.
+    """
     parser = argparse.ArgumentParser(description=__doc__ or "")
     parser.add_argument(
         "--check",
