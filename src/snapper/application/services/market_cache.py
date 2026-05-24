@@ -357,43 +357,90 @@ class MarketCacheService:
         """Backfill the cache from the DB for every persisted instrument.
 
         Iterates the policy's persisted set for the ``"candles"`` data
-        type, fetches up to ``_CACHE_CANDLE_LIMIT`` most-recent 1m
-        rows per instrument, and seeds the deque in chronological
+        type, expands wildcard entries (``"*"`` meaning "every symbol
+        on this exchange") via :meth:`Repository.get_exchange_instruments`,
+        then fetches up to ``_CACHE_CANDLE_LIMIT`` most-recent 1m rows
+        per resolved instrument and seeds the deque in chronological
         order. Per-instrument failures are logged + skipped so one
         bad symbol cannot block warmup.
+
+        Wildcard expansion was added 2026-05-24 after the live restart
+        observation that operator-configured persist settings like
+        ``market_persist_candles = {"mode":"explicit","exchanges":
+        {"kraken":["*"]}}`` produced 0-instruments warm: the prior
+        implementation called ``repository.get_candles(instrument="*")``
+        verbatim and trivially matched zero rows. Wildcards now route
+        through the per-exchange symbol enumeration.
         """
         as_of = datetime.now(UTC)
         warmed = 0
         for exchange, native_symbol in self.persist_policy.iter_persisted_instruments("candles"):
-            try:
-                rows = await self.repository.get_candles(
-                    instrument=native_symbol,
-                    timeframe=_TARGET_TIMEFRAME,
-                    start=None,
-                    end=None,
-                    exchange=exchange,
-                    as_of=as_of,
-                    limit=_CACHE_CANDLE_LIMIT,
-                    order="desc",
-                )
-            except Exception as exc:
-                logger.warning(
-                    "MarketCacheService prewarm failed for {} {}: {}",
-                    exchange,
-                    native_symbol,
-                    exc,
-                )
-                continue
-            if not rows:
-                continue
-            chronological: Iterable[CandleRow] = reversed(rows)
-            snaps = [_snap_from_candle_row(row) for row in chronological]
-            key = (exchange, native_symbol)
-            async with self._lock:
-                self._candles[key] = deque(snaps, maxlen=_CACHE_CANDLE_LIMIT)
-                self._last_seen_at[key] = asyncio.get_event_loop().time()
-            warmed += 1
+            if native_symbol == "*":
+                try:
+                    expanded = await self.repository.get_exchange_instruments(
+                        exchange=str(exchange), as_of=as_of
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "MarketCacheService prewarm wildcard expansion failed for {}: {}",
+                        exchange,
+                        exc,
+                    )
+                    continue
+            else:
+                expanded = [native_symbol]
+            for symbol in expanded:
+                if await self._prewarm_one(exchange, symbol, as_of):
+                    warmed += 1
         logger.info("MarketCacheService prewarm complete: {} instruments warmed", warmed)
+
+    async def _prewarm_one(
+        self,
+        exchange: AllExchange,
+        native_symbol: str,
+        as_of: datetime,
+    ) -> bool:
+        """Backfill the cache for a single instrument.
+
+        Args:
+            exchange: Source exchange identifier.
+            native_symbol: Native-format symbol resolved by the
+                persist policy (never the literal ``"*"``).
+            as_of: Snapshot time threading the temporal query.
+
+        Returns:
+            ``True`` when at least one candle row seeded the deque;
+            ``False`` when the symbol has no 1m history or the DB
+            call failed (warning is logged before returning False).
+        """
+        try:
+            rows = await self.repository.get_candles(
+                instrument=native_symbol,
+                timeframe=_TARGET_TIMEFRAME,
+                start=None,
+                end=None,
+                exchange=exchange,
+                as_of=as_of,
+                limit=_CACHE_CANDLE_LIMIT,
+                order="desc",
+            )
+        except Exception as exc:
+            logger.warning(
+                "MarketCacheService prewarm failed for {} {}: {}",
+                exchange,
+                native_symbol,
+                exc,
+            )
+            return False
+        if not rows:
+            return False
+        chronological: Iterable[CandleRow] = reversed(rows)
+        snaps = [_snap_from_candle_row(row) for row in chronological]
+        key = (exchange, native_symbol)
+        async with self._lock:
+            self._candles[key] = deque(snaps, maxlen=_CACHE_CANDLE_LIMIT)
+            self._last_seen_at[key] = asyncio.get_event_loop().time()
+        return True
 
     async def _ingest_loop(self) -> None:
         """Consume market.* frames, filter to closed 1m candles, dispatch."""

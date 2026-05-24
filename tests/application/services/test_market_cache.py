@@ -89,16 +89,23 @@ def _build_service(
     *,
     persist_pairs: list[tuple[Any, str]] | None = None,
     candles_by_instrument: dict[str, list[CandleRow]] | None = None,
+    instruments_by_exchange: dict[str, list[str]] | None = None,
 ) -> tuple[MarketCacheService, MagicMock, MagicMock]:
     """Build a :class:`MarketCacheService` against AsyncMock repo + stub policy."""
     repo = MagicMock()
     candles_by_instrument = candles_by_instrument or {}
+    instruments_by_exchange = instruments_by_exchange or {}
 
     async def _fake_get_candles(*, instrument: str, **kwargs: Any) -> list[CandleRow]:
         del kwargs
         return candles_by_instrument.get(instrument, [])
 
+    async def _fake_get_exchange_instruments(*, exchange: str, **kwargs: Any) -> list[str]:
+        del kwargs
+        return list(instruments_by_exchange.get(exchange, []))
+
     repo.get_candles = AsyncMock(side_effect=_fake_get_candles)
+    repo.get_exchange_instruments = AsyncMock(side_effect=_fake_get_exchange_instruments)
     policy = MagicMock()
     policy.iter_persisted_instruments.return_value = iter(persist_pairs or [])
     service = MarketCacheService(
@@ -288,6 +295,63 @@ class TestPrewarm:
         good = await service.get_1m_candles(ExchangeEnum.KRAKEN, "GOOD", limit=10)
         assert bad == []
         assert len(good) == 1
+
+    @pytest.mark.asyncio
+    async def test_prewarm_expands_wildcard_via_exchange_instruments(self) -> None:
+        """A `*` persist entry resolves to per-exchange symbols + warms each.
+
+        Given: A persist policy yielding ``(KRAKEN, "*")``,
+        When: prewarm runs against a repo that lists BTC-USD + ETH-USD on KRAKEN,
+        Then: Both symbols are warmed and ``get_exchange_instruments`` is consulted.
+        """
+        base = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
+        rows = [_row(open_at=base, close=10.0)]
+        service, repo, _ = _build_service(
+            persist_pairs=[(ExchangeEnum.KRAKEN, "*")],
+            instruments_by_exchange={ExchangeEnum.KRAKEN: ["BTC-USD", "ETH-USD"]},
+            candles_by_instrument={"BTC-USD": rows, "ETH-USD": rows},
+        )
+
+        await service._prewarm()
+
+        repo.get_exchange_instruments.assert_awaited_once()
+        btc = await service.get_1m_candles(ExchangeEnum.KRAKEN, "BTC-USD", limit=10)
+        eth = await service.get_1m_candles(ExchangeEnum.KRAKEN, "ETH-USD", limit=10)
+        assert [s.close for s in btc] == [10.0]
+        assert [s.close for s in eth] == [10.0]
+
+    @pytest.mark.asyncio
+    async def test_prewarm_wildcard_expansion_failure_skips_exchange(self) -> None:
+        """A wildcard expansion DB error is logged + skipped, others still warm.
+
+        Given: A persist policy yielding wildcards for two exchanges,
+        When: ``get_exchange_instruments`` raises for the first,
+        Then: The first exchange is skipped and the second still resolves.
+        """
+        base = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
+        rows = [_row(open_at=base, close=20.0)]
+
+        async def _expand(*, exchange: str, **kwargs: Any) -> list[str]:
+            del kwargs
+            if exchange == ExchangeEnum.KRAKEN:
+                raise RuntimeError("symbols query failed")
+            return ["FOO-BAR"]
+
+        service, repo, _ = _build_service(
+            persist_pairs=[
+                (ExchangeEnum.KRAKEN, "*"),
+                (ExchangeEnum.WALUTOMAT, "*"),
+            ],
+            candles_by_instrument={"FOO-BAR": rows},
+        )
+        repo.get_exchange_instruments = AsyncMock(side_effect=_expand)
+
+        await service._prewarm()
+
+        kraken_btc = await service.get_1m_candles(ExchangeEnum.KRAKEN, "BTC-USD", limit=10)
+        walutomat = await service.get_1m_candles(ExchangeEnum.WALUTOMAT, "FOO-BAR", limit=10)
+        assert kraken_btc == []
+        assert [s.close for s in walutomat] == [20.0]
 
 
 class TestPrune:
