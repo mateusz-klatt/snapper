@@ -2,7 +2,7 @@ underlyings:
 - ticker: BTC
   name:
     en: Bitcoin
-    ar: Bitcoin
+    ar: ‏Bitcoin
     bn: Bitcoin
     bs: Bitcoin
     cs: Bitcoin
@@ -55,7 +55,7 @@ underlyings:
   description:
     en: Bitcoin monetary asset and deepest crypto market. Halving cycles shape supply issuance; the store-of-value thesis matters more than payment throughput.
     pl: Bitcoin to aktywo monetarne i najgłębszy rynek krypto. Cykle halvingu kształtują emisję podaży; teza magazynu wartości waży bardziej niż przepustowość płatności.
-    ar: Bitcoin أصل نقدي وأعمق أسواق العملات المشفرة. تشكل دورات التنصيف إصدار المعروض؛ وتبقى أطروحة مخزن القيمة أهم من إنتاجية المدفوعات.
+    ar: ‏Bitcoin أصل نقدي وأعمق أسواق العملات المشفرة. تشكل دورات التنصيف إصدار المعروض؛ وتبقى أطروحة مخزن القيمة أهم من إنتاجية المدفوعات.
     bn: Bitcoin একটি monetary asset এবং crypto market-এর সবচেয়ে গভীর বাজার। Halving cycles supply issuance গড়ে দেয়; store-of-value thesis payment throughput-এর চেয়ে বেশি গুরুত্বপূর্ণ।
     bs: Bitcoin je monetarna imovina i najdublje kripto tržište. Ciklusi halvinga oblikuju emisiju ponude; teza čuvanja vrijednosti važnija je od propusnosti plaćanja.
     cs: Bitcoin je monetární aktivum a nejhlubší kryptotrh. Emisi nabídky formují cykly halvingu; teze uchovatele hodnoty je důležitější než platební propustnost.
@@ -68,7 +68,7 @@ underlyings:
     fil: Bitcoin ay monetary asset at pinakamalalim na crypto market. Hinuhubog ng halving cycles ang supply issuance; mas mahalaga ang store-of-value thesis kaysa payment throughput.
     fr: Bitcoin est un actif monétaire et le marché crypto le plus profond. Les cycles de halving structurent l'émission; la thèse de réserve de valeur compte davantage que le débit de paiement.
     ga: Is sócmhainn airgeadaíochta é Bitcoin agus an margadh crypto is doimhne. Múnlaíonn timthriallta halving eisiúint soláthair; is tábhachtaí tráchtas stór-luacha ná tréchur íocaíochtaí.
-    he: Bitcoin הוא נכס מוניטרי והשוק העמוק ביותר בקריפטו. מחזורי החצייה מעצבים את הנפקת ההיצע; תזת שמירת הערך חשובה יותר מתפוקת תשלומים.
+    he: ‏Bitcoin הוא נכס מוניטרי והשוק העמוק ביותר בקריפטו. מחזורי החצייה מעצבים את הנפקת ההיצע; תזת שמירת הערך חשובה יותר מתפוקת תשלומים.
     hi: Bitcoin एक monetary asset और crypto का सबसे गहरा market है। Halving cycles supply issuance को आकार देते हैं; store-of-value thesis payment throughput से ज्यादा मायने रखती है।
     hr: Bitcoin je monetarno sredstvo i najdublje kripto tržište. Ciklusi halvinga oblikuju emisiju ponude; teza pohrane vrijednosti važnija je od propusnosti plaćanja.
     hu: A Bitcoin monetáris eszköz és a legmélyebb kriptopiac. A felezési ciklusok alakítják a kínálat kibocsátását; az értéktárolási tézis fontosabb, mint a fizetési áteresztőképesség.
@@ -201,7 +201,7 @@ underlyings:
 - ticker: ETH
   name:
     en: Ethereum
-    ar: Ethereum
+    ar: ‏Ethereum
     bn: Ethereum
     bs: Ethereum
     cs: Ethereum
@@ -254,7 +254,7 @@ underlyings:
   description:
     en: Ethereum smart-contract L1 and settlement layer. EIP-1559 burns base fees while staking rewards compensate validators, so issuance can vary with usage.
     pl: Ethereum to L1 smart kontraktów i warstwa rozliczeniowa. EIP-1559 spala opłaty bazowe, a staking wynagradza walidatorów, więc emisja zmienia się z użyciem.
-    ar: Ethereum هو L1 للعقود الذكية وطبقة تسوية. يحرق EIP-1559 الرسوم الأساسية، بينما تعوض مكافآت الرهن المدققين، لذلك قد تختلف الإصدارات بحسب الاستخدام.
+    ar: ‏Ethereum هو L1 للعقود الذكية وطبقة تسوية. يحرق EIP-1559 الرسوم الأساسية، بينما تعوض مكافآت الرهن المدققين، لذلك قد تختلف الإصدارات بحسب الاستخدام.
     bn: Ethereum smart-contract L1 এবং settlement layer। EIP-1559 base fees burn করে, আর staking rewards validators-কে ক্ষতিপূরণ দেয়, তাই usage অনুযায়ী issuance বদলাতে পারে।
     bs: Ethereum je smart-contract L1 i sloj za poravnanje. EIP-1559 spaljuje osnovne naknade, dok staking nagrade kompenziraju validatore, pa se emisija može mijenjati s upotrebom.
     cs: Ethereum je smart-contract L1 a vypořádací vrstva. EIP-1559 pálí základní poplatky, zatímco staking odměňuje validátory, takže emise se může měnit podle využití.
@@ -267,7 +267,7 @@ underlyings:
     fil: Ethereum ay smart-contract L1 at settlement layer. Sinusunog ng EIP-1559 ang base fees habang binabayaran ng staking rewards ang validators, kaya nag-iiba ang issuance ayon sa usage.
     fr: Ethereum est une L1 de smart contracts et une couche de règlement. EIP-1559 brûle les frais de base tandis que le staking rémunère les validateurs, si bien que l'émission varie avec l'usage.
     ga: Is L1 smart-contract agus ciseal socraíochta é Ethereum. Dónn EIP-1559 bun-táillí agus cúitíonn staking validators, mar sin is féidir leis an eisiúint athrú de réir úsáide.
-    he: Ethereum היא L1 לחוזים חכמים ושכבת סליקה. EIP-1559 שורפת עמלות בסיס, ותגמולי סטייקינג מפצים את המאמתים, כך שההנפקה יכולה להשתנות עם השימוש.
+    he: ‏Ethereum היא L1 לחוזים חכמים ושכבת סליקה. EIP-1559 שורפת עמלות בסיס, ותגמולי סטייקינג מפצים את המאמתים, כך שההנפקה יכולה להשתנות עם השימוש.
     hi: Ethereum smart-contract L1 और settlement layer है। EIP-1559 base fees burn करता है, जबकि staking rewards validators को compensate करते हैं, इसलिए usage के साथ issuance बदल सकता है।
     hr: Ethereum je L1 za smart-contracte i sloj namire. EIP-1559 spaljuje osnovne naknade, dok staking nagrade kompenziraju validatore, pa se emisija može mijenjati s uporabom.
     hu: Az Ethereum smart-contract L1 és elszámolási réteg. Az EIP-1559 elégeti az alapdíjakat, míg a staking jutalmak kompenzálják a validátorokat, ezért a kibocsátás a használattal változhat.
@@ -382,7 +382,7 @@ underlyings:
 - ticker: USDT
   name:
     en: Tether USD
-    ar: Tether USD
+    ar: ‏Tether USD
     bn: Tether USD
     bs: Tether USD
     cs: Tether USD
@@ -395,7 +395,7 @@ underlyings:
     fil: Tether USD
     fr: Tether USD
     ga: Tether USD
-    he: Tether USD
+    he: ‏Tether USD
     hi: Tether USD
     hr: Tether USD
     hu: Tether USD
@@ -435,7 +435,7 @@ underlyings:
   description:
     en: Tether USD centralized dollar stablecoin. It has the deepest stablecoin liquidity, but reserve transparency and de-peg risk matter.
     pl: Tether USD to scentralizowany stablecoin dolarowy. Ma największą płynność stablecoinów, ale przejrzystość rezerw i ryzyko de-peg są kluczowe.
-    ar: Tether USD عملة مستقرة دولارية مركزية. تتمتع بأعمق سيولة بين العملات المستقرة، لكن شفافية الاحتياطيات وخطر فقدان الربط مهمان.
+    ar: ‏Tether USD عملة مستقرة دولارية مركزية. تتمتع بأعمق سيولة بين العملات المستقرة، لكن شفافية الاحتياطيات وخطر فقدان الربط مهمان.
     bn: Tether USD একটি centralized dollar stablecoin। এর stablecoin liquidity সবচেয়ে গভীর, তবে reserve transparency এবং de-peg risk গুরুত্বপূর্ণ।
     bs: Tether USD je centralizirani dolarski stablecoin. Ima najdublju stablecoin likvidnost, ali transparentnost rezervi i rizik de-peg-a su bitni.
     cs: Tether USD je centralizovaný dolarový stablecoin. Má nejhlubší stablecoinovou likviditu, ale zásadní jsou transparentnost rezerv a riziko de-pegu.
@@ -448,7 +448,7 @@ underlyings:
     fil: Tether USD ay centralized dollar stablecoin. Ito ang may pinakamalalim na stablecoin liquidity, pero mahalaga ang reserve transparency at de-peg risk.
     fr: Tether USD est un stablecoin dollar centralisé. Il offre la liquidité la plus profonde parmi les stablecoins, mais la transparence des réserves et le risque de de-peg restent déterminants.
     ga: Is stablecoin dollar lárnaithe é Tether USD. Tá an leachtacht stablecoin is doimhne aige, ach tá trédhearcacht cúlchistí agus riosca de-peg tábhachtach.
-    he: Tether USD הוא סטייבלקוין דולרי ריכוזי. יש לו את הנזילות העמוקה ביותר בין סטייבלקוינים, אך שקיפות הרזרבות וסיכון ניתוק מהעוגן חשובים.
+    he: ‏Tether USD הוא סטייבלקוין דולרי ריכוזי. יש לו את הנזילות העמוקה ביותר בין סטייבלקוינים, אך שקיפות הרזרבות וסיכון ניתוק מהעוגן חשובים.
     hi: Tether USD एक centralized dollar stablecoin है। इसकी stablecoin liquidity सबसे गहरी है, लेकिन reserve transparency और de-peg risk मायने रखते हैं।
     hr: Tether USD je centralizirani dolarski stablecoin. Ima najdublju likvidnost među stablecoinima, ali važni su transparentnost rezervi i rizik de-peg.
     hu: A Tether USD centralizált dollár stablecoin. A legmélyebb stablecoin-likviditással rendelkezik, de a tartalékok átláthatósága és a de-peg kockázat fontos.
@@ -515,7 +515,7 @@ underlyings:
 - ticker: USDC
   name:
     en: USD Coin
-    ar: USD Coin
+    ar: ‏USD Coin
     bn: USD Coin
     bs: USD Coin
     cs: USD Coin
@@ -528,7 +528,7 @@ underlyings:
     fil: USD Coin
     fr: USD Coin
     ga: USD Coin
-    he: USD Coin
+    he: ‏USD Coin
     hi: USD Coin
     hr: USD Coin
     hu: USD Coin
@@ -568,7 +568,7 @@ underlyings:
   description:
     en: Circle USDC centralized dollar stablecoin. Reserve quality and banking access matter; stablecoin de-pegs can break assumed cash equivalence.
     pl: Circle USDC to scentralizowany stablecoin dolarowy. Jakość rezerw i dostęp do banków są ważne; de-pegi stablecoinów mogą łamać założenie równowartości gotówki.
-    ar: Circle USDC عملة مستقرة دولارية مركزية. جودة الاحتياطيات والوصول إلى البنوك مهمان؛ فقدان ربط العملة المستقرة قد يكسر افتراض التكافؤ مع النقد.
+    ar: ‏Circle USDC عملة مستقرة دولارية مركزية. جودة الاحتياطيات والوصول إلى البنوك مهمان؛ فقدان ربط العملة المستقرة قد يكسر افتراض التكافؤ مع النقد.
     bn: Circle USDC একটি centralized dollar stablecoin। Reserve quality এবং banking access গুরুত্বপূর্ণ; stablecoin de-peg cash equivalence ধারণা ভেঙে দিতে পারে।
     bs: Circle USDC je centralizirani dolarski stablecoin. Kvalitet rezervi i pristup bankama su važni; stablecoin de-peg može narušiti pretpostavljenu jednakost s gotovinom.
     cs: Circle USDC je centralizovaný dolarový stablecoin. Důležitá je kvalita rezerv a přístup k bankám; de-pegy stablecoinů mohou narušit předpoklad ekvivalence hotovosti.
@@ -581,7 +581,7 @@ underlyings:
     fil: Circle USDC ay centralized dollar stablecoin. Mahalaga ang reserve quality at banking access; kayang sirain ng stablecoin de-pegs ang inaakalang cash equivalence.
     fr: Circle USDC est un stablecoin dollar centralisé. La qualité des réserves et l'accès bancaire comptent; les de-pegs de stablecoins peuvent remettre en cause l'équivalence supposée avec le cash.
     ga: Is stablecoin dollar lárnaithe é Circle USDC. Tá cáilíocht cúlchistí agus rochtain bainc tábhachtach; is féidir le de-pegs stablecoin an chomhionannas airgid thirim ceaptha a bhriseadh.
-    he: Circle USDC הוא סטייבלקוין דולרי ריכוזי. איכות הרזרבות והגישה לבנקים חשובות; ניתוקי עוגן בסטייבלקוינים עלולים לשבור את הנחת שקילות המזומן.
+    he: ‏Circle USDC הוא סטייבלקוין דולרי ריכוזי. איכות הרזרבות והגישה לבנקים חשובות; ניתוקי עוגן בסטייבלקוינים עלולים לשבור את הנחת שקילות המזומן.
     hi: Circle USDC एक centralized dollar stablecoin है। Reserve quality और banking access अहम हैं; stablecoin de-pegs cash equivalence की धारणा तोड़ सकते हैं।
     hr: Circle USDC je centralizirani dolarski stablecoin. Važni su kvaliteta rezervi i pristup bankama; de-peg stablecoina može narušiti pretpostavljenu ekvivalenciju gotovine.
     hu: A Circle USDC centralizált dollár stablecoin. A tartalékok minősége és a banki hozzáférés fontos; a stablecoin de-peg megtörheti a feltételezett készpénz-egyenértékűséget.
@@ -661,7 +661,7 @@ underlyings:
     fil: Dai Stablecoin
     fr: Dai Stablecoin
     ga: Dai Stablecoin
-    he: Dai Stablecoin
+    he: ‏Dai Stablecoin
     hi: Dai Stablecoin
     hr: Dai Stablecoin
     hu: Dai Stablecoin
@@ -701,7 +701,7 @@ underlyings:
   description:
     en: DAI is a MakerDAO/Sky overcollateralized dollar stablecoin. Oracle prices and vault liquidations can move peg risk during market stress.
     pl: DAI to nadzabezpieczony stablecoin dolarowy MakerDAO/Sky. Ceny z oracle i likwidacje vaultów mogą ruszać ryzyko pegu w stresie rynku.
-    ar: DAI عملة مستقرة دولارية مفرطة الضمان من MakerDAO/Sky. يمكن لأسعار الأوراكل وتسييلات الخزائن أن تحرك خطر الربط أثناء ضغط السوق.
+    ar: ‏DAI عملة مستقرة دولارية مفرطة الضمان من MakerDAO/Sky. يمكن لأسعار الأوراكل وتسييلات الخزائن أن تحرك خطر الربط أثناء ضغط السوق.
     bn: DAI MakerDAO/Sky-এর overcollateralized dollar stablecoin। Oracle prices এবং vault liquidations market stress-এর সময় peg risk বদলে দিতে পারে।
     bs: DAI je MakerDAO/Sky prezabezbijeđeni dolarski stablecoin. Oracle cijene i likvidacije vaultova mogu pomjeriti rizik peg-a tokom tržišnog stresa.
     cs: DAI je nadměrně zajištěný dolarový stablecoin MakerDAO/Sky. Ceny z oracle a likvidace vaultů mohou při tržním stresu hýbat rizikem pegu.
@@ -714,7 +714,7 @@ underlyings:
     fil: DAI ay MakerDAO/Sky overcollateralized dollar stablecoin. Maaaring galawin ng oracle prices at vault liquidations ang peg risk kapag may market stress.
     fr: DAI est un stablecoin dollar surcollatéralisé de MakerDAO/Sky. Les prix d'oracle et les liquidations de vaults peuvent déplacer le risque d'ancrage en période de stress de marché.
     ga: Is stablecoin dollar ró-chomhthaobhaithe de chuid MakerDAO/Sky é DAI. Is féidir le praghsanna oracle agus leachtuithe vaultanna riosca peg a bhogadh le linn strus margaidh.
-    he: DAI הוא סטייבלקוין דולרי בביטחונות יתר של MakerDAO/Sky. מחירי oracle וחיסולי כספות יכולים להזיז את סיכון העוגן בזמן לחץ בשוק.
+    he: ‏DAI הוא סטייבלקוין דולרי בביטחונות יתר של MakerDAO/Sky. מחירי oracle וחיסולי כספות יכולים להזיז את סיכון העוגן בזמן לחץ בשוק.
     hi: DAI MakerDAO/Sky का overcollateralized dollar stablecoin है। Oracle prices और vault liquidations market stress में peg risk को बदल सकते हैं।
     hr: DAI je prekomjerno kolateralizirani dolarski stablecoin MakerDAO/Sky. Cijene iz oraclea i likvidacije vaultova mogu tijekom tržišnog stresa pomicati rizik pega.
     hu: A DAI a MakerDAO/Sky túlfedezett dollár stablecoinja. Az oracle árak és a vault likvidálások piaci stressz idején mozgathatják a peg kockázatát.
@@ -765,7 +765,7 @@ underlyings:
 - ticker: PYUSD
   name:
     en: PayPal USD
-    ar: PayPal USD
+    ar: ‏PayPal USD
     bn: PayPal USD
     bs: PayPal USD
     cs: PayPal USD
@@ -778,7 +778,7 @@ underlyings:
     fil: PayPal USD
     fr: PayPal USD
     ga: PayPal USD
-    he: PayPal USD
+    he: ‏PayPal USD
     hi: PayPal USD
     hr: PayPal USD
     hu: PayPal USD
@@ -818,7 +818,7 @@ underlyings:
   description:
     en: PayPal USD is a PayPal-branded dollar stablecoin. Liquidity is smaller than USDT/USDC, so venue support and redemption access matter.
     pl: PayPal USD to dolarowy stablecoin marki PayPal. Płynność jest mniejsza niż USDT/USDC, więc wsparcie venue i dostęp do wykupu są ważne.
-    ar: PayPal USD عملة مستقرة دولارية تحمل علامة PayPal. سيولتها أصغر من USDT/USDC، لذلك يهم دعم المنصات وإتاحة الاسترداد.
+    ar: ‏PayPal USD عملة مستقرة دولارية تحمل علامة PayPal. سيولتها أصغر من USDT/USDC، لذلك يهم دعم المنصات وإتاحة الاسترداد.
     bn: PayPal USD একটি PayPal-branded dollar stablecoin। Liquidity USDT/USDC-এর চেয়ে কম, তাই venue support এবং redemption access গুরুত্বপূর্ণ।
     bs: PayPal USD je dolarski stablecoin s PayPal brendom. Likvidnost je manja nego kod USDT/USDC, pa su podrška venue-a i pristup otkupu važni.
     cs: PayPal USD je dolarový stablecoin značky PayPal. Likvidita je menší než u USDT/USDC, takže záleží na podpoře obchodních míst a přístupu k odkupu.
@@ -831,7 +831,7 @@ underlyings:
     fil: PayPal USD ay dollar stablecoin na may PayPal brand. Mas maliit ang liquidity kaysa USDT/USDC, kaya mahalaga ang venue support at redemption access.
     fr: PayPal USD est un stablecoin dollar sous marque PayPal. Sa liquidité est inférieure à celle d'USDT/USDC, ce qui rend le support des plateformes et l'accès au remboursement importants.
     ga: Is stablecoin dollar faoi bhranda PayPal é PayPal USD. Tá leachtacht níos lú aige ná USDT/USDC, mar sin tá tacaíocht venue agus rochtain fuascailte tábhachtach.
-    he: PayPal USD הוא סטייבלקוין דולרי ממותג PayPal. הנזילות קטנה יותר מ-USDT/USDC, לכן תמיכת זירות וגישה לפדיון חשובות.
+    he: ‏PayPal USD הוא סטייבלקוין דולרי ממותג PayPal. הנזילות קטנה יותר מ-USDT/USDC, לכן תמיכת זירות וגישה לפדיון חשובות.
     hi: PayPal USD, PayPal-branded dollar stablecoin है। इसकी liquidity USDT/USDC से कम है, इसलिए venue support और redemption access अहम हैं।
     hr: PayPal USD je dolarski stablecoin pod brendom PayPal. Likvidnost je manja nego kod USDT/USDC, pa su važni podrška platformi i pristup otkupu.
     hu: A PayPal USD PayPal-márkájú dollár stablecoin. Likviditása kisebb, mint az USDT/USDC esetében, ezért a venue-támogatás és a visszaváltási hozzáférés fontos.
@@ -879,7 +879,7 @@ underlyings:
 - ticker: RLUSD
   name:
     en: Ripple USD
-    ar: Ripple USD
+    ar: ‏Ripple USD
     bn: Ripple USD
     bs: Ripple USD
     cs: Ripple USD
@@ -892,7 +892,7 @@ underlyings:
     fil: Ripple USD
     fr: Ripple USD
     ga: Ripple USD
-    he: Ripple USD
+    he: ‏Ripple USD
     hi: Ripple USD
     hr: Ripple USD
     hu: Ripple USD
@@ -932,7 +932,7 @@ underlyings:
   description:
     en: Ripple USD is a dollar stablecoin tied to Ripple's payment network. Issuer reserve reports and liquidity depth matter before treating it as cash-equivalent.
     pl: Ripple USD to dolarowy stablecoin powiązany z siecią płatniczą Ripple. Raporty rezerw emitenta i głębokość płynności są ważne, zanim uzna się go za ekwiwalent gotówki.
-    ar: Ripple USD عملة مستقرة دولارية مرتبطة بشبكة مدفوعات Ripple. تهم تقارير احتياطيات المصدر وعمق السيولة قبل التعامل معها كمكافئ للنقد.
+    ar: ‏Ripple USD عملة مستقرة دولارية مرتبطة بشبكة مدفوعات Ripple. تهم تقارير احتياطيات المصدر وعمق السيولة قبل التعامل معها كمكافئ للنقد.
     bn: Ripple USD Ripple-এর payment network-এর সঙ্গে যুক্ত একটি dollar stablecoin। Cash-equivalent ধরার আগে issuer reserve reports এবং liquidity depth গুরুত্বপূর্ণ।
     bs: Ripple USD je dolarski stablecoin vezan za Rippleovu platnu mrežu. Izvještaji emitenta o rezervama i dubina likvidnosti važni su prije nego što se tretira kao ekvivalent gotovine.
     cs: Ripple USD je dolarový stablecoin napojený na platební síť Ripple. Než se s ním zachází jako s ekvivalentem hotovosti, záleží na zprávách emitenta o rezervách a hloubce likvidity.
@@ -945,7 +945,7 @@ underlyings:
     fil: Ripple USD ay dollar stablecoin na nakakabit sa payment network ng Ripple. Mahalaga ang issuer reserve reports at liquidity depth bago ito ituring na cash-equivalent.
     fr: Ripple USD est un stablecoin dollar lié au réseau de paiement de Ripple. Les rapports de réserves de l'émetteur et la profondeur de liquidité comptent avant de le traiter comme équivalent cash.
     ga: Is stablecoin dollar é Ripple USD atá ceangailte le líonra íocaíochta Ripple. Tá tuarascálacha cúlchiste an eisitheora agus doimhneacht leachtachta tábhachtach sula gcaitear leis mar choibhéis airgid thirim.
-    he: Ripple USD הוא סטייבלקוין דולרי הקשור לרשת התשלומים של Ripple. דוחות הרזרבות של המנפיק ועומק הנזילות חשובים לפני שמתייחסים אליו כשווה מזומן.
+    he: ‏Ripple USD הוא סטייבלקוין דולרי הקשור לרשת התשלומים של Ripple. דוחות הרזרבות של המנפיק ועומק הנזילות חשובים לפני שמתייחסים אליו כשווה מזומן.
     hi: Ripple USD, Ripple के payment network से जुड़ा dollar stablecoin है। इसे cash-equivalent मानने से पहले issuer reserve reports और liquidity depth मायने रखते हैं।
     hr: Ripple USD je dolarski stablecoin vezan uz Rippleovu platnu mrežu. Izvješća izdavatelja o rezervama i dubina likvidnosti važni su prije tretiranja kao gotovinskog ekvivalenta.
     hu: A Ripple USD a Ripple fizetési hálózatához kötődő dollár stablecoin. A kibocsátói tartalékjelentések és a likviditási mélység fontos, mielőtt készpénz-egyenértékűként kezelnék.
@@ -999,7 +999,7 @@ underlyings:
 - ticker: SOL
   name:
     en: Solana
-    ar: Solana
+    ar: ‏Solana
     bn: Solana
     bs: Solana
     cs: Solana
@@ -1052,7 +1052,7 @@ underlyings:
   description:
     en: Solana is a high-throughput smart-contract L1. Outage history matters because validator coordination and network liveness can drive risk.
     pl: Solana to wysokoprzepustowy L1 smart kontraktów. Historia awarii ma znaczenie, bo koordynacja walidatorów i ciągłość sieci mogą napędzać ryzyko.
-    ar: Solana هو L1 للعقود الذكية عالي الإنتاجية. يهم تاريخ الانقطاعات لأن تنسيق المدققين واستمرارية الشبكة قد يقودان المخاطر.
+    ar: ‏Solana هو L1 للعقود الذكية عالي الإنتاجية. يهم تاريخ الانقطاعات لأن تنسيق المدققين واستمرارية الشبكة قد يقودان المخاطر.
     bn: Solana একটি high-throughput smart-contract L1। Outage history গুরুত্বপূর্ণ, কারণ validator coordination এবং network liveness risk বাড়াতে পারে।
     bs: Solana je smart-contract L1 visoke propusnosti. Historija prekida rada je važna jer koordinacija validatora i živost mreže mogu pokretati rizik.
     cs: Solana je vysoce propustný smart-contract L1. Historie výpadků je důležitá, protože koordinace validátorů a živost sítě mohou řídit riziko.
@@ -1065,7 +1065,7 @@ underlyings:
     fil: Solana ay high-throughput smart-contract L1. Mahalaga ang outage history dahil ang validator coordination at network liveness ay maaaring magdala ng risk.
     fr: Solana est une L1 de smart contracts à haut débit. L'historique des pannes compte, car la coordination des validateurs et la disponibilité du réseau peuvent porter le risque.
     ga: Is L1 smart-contract ard-tréchur í Solana. Tá stair bristí tábhachtach mar is féidir le comhordú validators agus beocht líonra riosca a thiomáint.
-    he: Solana היא L1 לחוזים חכמים עם תפוקה גבוהה. היסטוריית ההשבתות חשובה, כי תיאום מאמתים וחיות הרשת יכולים להניע סיכון.
+    he: ‏Solana היא L1 לחוזים חכמים עם תפוקה גבוהה. היסטוריית ההשבתות חשובה, כי תיאום מאמתים וחיות הרשת יכולים להניע סיכון.
     hi: Solana high-throughput smart-contract L1 है। Outage history अहम है क्योंकि validator coordination और network liveness risk बढ़ा सकते हैं।
     hr: Solana je visokopropusni smart-contract L1. Povijest ispada važna je jer koordinacija validatora i neprekidnost rada mreže mogu pokretati rizik.
     hu: A Solana nagy áteresztőképességű smart-contract L1. A leállások története fontos, mert a validátori koordináció és a hálózat működőképessége kockázatot hajthat.
@@ -1150,7 +1150,7 @@ underlyings:
 - ticker: XRP
   name:
     en: XRP
-    ar: XRP
+    ar: ‏XRP
     bn: XRP
     bs: XRP
     cs: XRP
@@ -1163,7 +1163,7 @@ underlyings:
     fil: XRP
     fr: XRP
     ga: XRP
-    he: XRP
+    he: ‏XRP
     hi: XRP
     hr: XRP
     hu: XRP
@@ -1203,7 +1203,7 @@ underlyings:
   description:
     en: XRP is the settlement asset of the XRP Ledger, linked to Ripple payment use cases. SEC litigation history still shapes liquidity and venue risk.
     pl: XRP to aktywo rozliczeniowe XRP Ledger, powiązane z zastosowaniami płatniczymi Ripple. Historia sporów z SEC nadal kształtuje płynność i ryzyko venue.
-    ar: XRP هو أصل التسوية في XRP Ledger، ومرتبط بحالات استخدام مدفوعات Ripple. ما زال تاريخ التقاضي مع SEC يشكل السيولة ومخاطر المنصات.
+    ar: ‏XRP هو أصل التسوية في XRP Ledger، ومرتبط بحالات استخدام مدفوعات Ripple. ما زال تاريخ التقاضي مع SEC يشكل السيولة ومخاطر المنصات.
     bn: XRP হলো XRP Ledger-এর settlement asset, Ripple payment use cases-এর সঙ্গে যুক্ত। SEC litigation history এখনও liquidity এবং venue risk গড়ে দেয়।
     bs: XRP je obračunska imovina XRP Ledger-a, povezana s Rippleovim platnim slučajevima upotrebe. Historija sporova sa SEC-om i dalje oblikuje likvidnost i venue rizik.
     cs: XRP je vypořádací aktivum XRP Ledger spojené s platebními případy užití Ripple. Historie sporů se SEC stále formuje likviditu a riziko obchodních míst.
@@ -1216,7 +1216,7 @@ underlyings:
     fil: XRP ay settlement asset ng XRP Ledger, na kaugnay sa payment use cases ng Ripple. Patuloy na hinuhubog ng SEC litigation history ang liquidity at venue risk.
     fr: XRP est l'actif de règlement du XRP Ledger, lié aux cas d'usage de paiement de Ripple. L'historique du contentieux avec la SEC continue d'influencer la liquidité et le risque de plateforme.
     ga: Is é XRP sócmhainn socraíochta an XRP Ledger, ceangailte le cásanna úsáide íocaíochta Ripple. Múnlaíonn stair dlíthíochta SEC leachtacht agus riosca venue fós.
-    he: XRP הוא נכס הסליקה של XRP Ledger, הקשור לשימושי תשלומים של Ripple. היסטוריית ההתדיינות מול SEC עדיין מעצבת נזילות וסיכון זירה.
+    he: ‏XRP הוא נכס הסליקה של XRP Ledger, הקשור לשימושי תשלומים של Ripple. היסטוריית ההתדיינות מול SEC עדיין מעצבת נזילות וסיכון זירה.
     hi: XRP, XRP Ledger का settlement asset है और Ripple payment use cases से जुड़ा है। SEC litigation history अब भी liquidity और venue risk को आकार देती है।
     hr: XRP je namirbeno sredstvo XRP Ledger, povezano s Rippleovim platnim primjenama. Povijest sporova sa SEC-om i dalje oblikuje likvidnost i rizik mjesta trgovanja.
     hu: Az XRP az XRP Ledger elszámolási eszköze, Ripple fizetési felhasználási esetekhez kötve. Az SEC-pereskedés története továbbra is alakítja a likviditási és venue-kockázatot.
@@ -1308,7 +1308,7 @@ underlyings:
 - ticker: DOGE
   name:
     en: Dogecoin
-    ar: Dogecoin
+    ar: ‏Dogecoin
     bn: Dogecoin
     bs: Dogecoin
     cs: Dogecoin
@@ -1361,7 +1361,7 @@ underlyings:
   description:
     en: Dogecoin is a proof-of-work meme coin. Social attention and large-holder flows matter more than protocol utility.
     pl: Dogecoin to memecoin proof-of-work. Uwaga społeczności i przepływy dużych posiadaczy ważą bardziej niż użyteczność protokołu.
-    ar: Dogecoin عملة ميم تعمل بإثبات العمل. الاهتمام الاجتماعي وتدفقات كبار الحائزين أهم من منفعة البروتوكول.
+    ar: ‏Dogecoin عملة ميم تعمل بإثبات العمل. الاهتمام الاجتماعي وتدفقات كبار الحائزين أهم من منفعة البروتوكول.
     bn: Dogecoin একটি proof-of-work meme coin। Social attention এবং large-holder flows protocol utility-এর চেয়ে বেশি গুরুত্বপূর্ণ।
     bs: Dogecoin je proof-of-work meme coin. Društvena pažnja i tokovi velikih vlasnika važniji su od korisnosti protokola.
     cs: Dogecoin je proof-of-work meme coin. Sociální pozornost a toky velkých držitelů mají větší váhu než užitečnost protokolu.
@@ -1374,7 +1374,7 @@ underlyings:
     fil: Dogecoin ay proof-of-work meme coin. Mas mahalaga ang social attention at large-holder flows kaysa protocol utility.
     fr: Dogecoin est une meme coin proof-of-work. L'attention sociale et les flux des grands détenteurs comptent davantage que l'utilité du protocole.
     ga: Is meme coin proof-of-work é Dogecoin. Tá aird shóisialta agus sreafaí sealbhóirí móra níos tábhachtaí ná fóntas prótacail.
-    he: Dogecoin הוא מטבע meme במנגנון proof-of-work. תשומת לב חברתית וזרימות של מחזיקים גדולים חשובות יותר מתועלת הפרוטוקול.
+    he: ‏Dogecoin הוא מטבע meme במנגנון proof-of-work. תשומת לב חברתית וזרימות של מחזיקים גדולים חשובות יותר מתועלת הפרוטוקול.
     hi: Dogecoin एक proof-of-work meme coin है। Social attention और large-holder flows, protocol utility से ज्यादा मायने रखते हैं।
     hr: Dogecoin je proof-of-work meme coin. Društvena pozornost i tokovi velikih držatelja važniji su od korisnosti protokola.
     hu: A Dogecoin proof-of-work meme coin. A közösségi figyelem és a nagy tulajdonosok áramlásai fontosabbak, mint a protokoll hasznossága.
@@ -1444,7 +1444,7 @@ underlyings:
 - ticker: LTC
   name:
     en: Litecoin
-    ar: Litecoin
+    ar: ‏Litecoin
     bn: Litecoin
     bs: Litecoin
     cs: Litecoin
@@ -1497,7 +1497,7 @@ underlyings:
   description:
     en: Litecoin is a Bitcoin-derived proof-of-work payments coin. It is liquid and established, but utility is mostly transfer and relative-value trading.
     pl: Litecoin to płatnicza moneta proof-of-work wywodząca się z Bitcoina. Jest płynny i ugruntowany, ale użyteczność to głównie transfery i relative-value trading.
-    ar: Litecoin عملة مدفوعات بإثبات العمل مشتقة من Bitcoin. هي سائلة وراسخة، لكن فائدتها تتركز غالبا في التحويل وتداول القيمة النسبية.
+    ar: ‏Litecoin عملة مدفوعات بإثبات العمل مشتقة من Bitcoin. هي سائلة وراسخة، لكن فائدتها تتركز غالبا في التحويل وتداول القيمة النسبية.
     bn: Litecoin একটি Bitcoin-derived proof-of-work payments coin। এটি liquid এবং established, কিন্তু utility মূলত transfer ও relative-value trading-এ।
     bs: Litecoin je proof-of-work platni coin izveden iz Bitcoina. Likvidan je i etabliran, ali korisnost je uglavnom u transferima i relative-value trgovanju.
     cs: Litecoin je proof-of-work platební coin odvozený od Bitcoinu. Je likvidní a zavedený, ale užitečnost spočívá hlavně v převodech a relative-value tradingu.
@@ -1510,7 +1510,7 @@ underlyings:
     fil: Litecoin ay Bitcoin-derived proof-of-work payments coin. Liquid at established ito, pero ang utility ay kadalasang transfers at relative-value trading.
     fr: Litecoin est une monnaie de paiement proof-of-work dérivée de Bitcoin. Elle est liquide et établie, mais son utilité relève surtout du transfert et du relative-value trading.
     ga: Is bonn íocaíochtaí proof-of-work díorthaithe ó Bitcoin é Litecoin. Tá sé leachtach agus seanbhunaithe, ach is iad aistriú agus relative-value trading an príomhfhóntas.
-    he: Litecoin הוא מטבע תשלומים proof-of-work שמקורו ב-Bitcoin. הוא נזיל ומבוסס, אך התועלת היא בעיקר העברות ומסחר ערך יחסי.
+    he: ‏Litecoin הוא מטבע תשלומים proof-of-work שמקורו ב-Bitcoin. הוא נזיל ומבוסס, אך התועלת היא בעיקר העברות ומסחר ערך יחסי.
     hi: Litecoin, Bitcoin-derived proof-of-work payments coin है। यह liquid और established है, लेकिन utility मुख्यतः transfer और relative-value trading में है।
     hr: Litecoin je platni proof-of-work coin izveden iz Bitcoina. Likvidan je i etabliran, ali korisnost je uglavnom u transferima i relative-value tradingu.
     hu: A Litecoin Bitcoinból származó proof-of-work fizetési coin. Likvid és régóta jelen van, de hasznossága főként átutalásokból és relatív értékű kereskedésből áll.
@@ -1607,7 +1607,7 @@ underlyings:
 - ticker: LINK
   name:
     en: Chainlink
-    ar: Chainlink
+    ar: ‏Chainlink
     bn: Chainlink
     bs: Chainlink
     cs: Chainlink
@@ -1620,7 +1620,7 @@ underlyings:
     fil: Chainlink
     fr: Chainlink
     ga: Chainlink
-    he: Chainlink
+    he: ‏Chainlink
     hi: Chainlink
     hr: Chainlink
     hu: Chainlink
@@ -1660,7 +1660,7 @@ underlyings:
   description:
     en: Chainlink is a decentralized oracle network token. DeFi price feeds and cross-chain services drive demand; oracle trust is the core risk.
     pl: Chainlink to zdecentralizowana sieć oracle. Feedy cenowe DeFi i usługi cross-chain napędzają popyt; zaufanie do oracle to główne ryzyko.
-    ar: Chainlink رمز شبكة أوراكل لامركزية. تغذيات أسعار DeFi والخدمات العابرة للسلاسل تقود الطلب؛ والثقة في الأوراكل هي الخطر الأساسي.
+    ar: ‏Chainlink رمز شبكة أوراكل لامركزية. تغذيات أسعار DeFi والخدمات العابرة للسلاسل تقود الطلب؛ والثقة في الأوراكل هي الخطر الأساسي.
     bn: Chainlink একটি decentralized oracle network token। DeFi price feeds এবং cross-chain services demand চালায়; oracle trust হলো core risk।
     bs: Chainlink je token decentralizirane oracle mreže. DeFi cjenovni feedovi i cross-chain usluge pokreću potražnju; povjerenje u oracle je ključni rizik.
     cs: Chainlink je token decentralizované oracle sítě. Cenové feedy DeFi a cross-chain služby podporují poptávku; důvěra v oracle je hlavní riziko.
@@ -1673,7 +1673,7 @@ underlyings:
     fil: Chainlink ay decentralized oracle network token. DeFi price feeds at cross-chain services ang nagtutulak ng demand; oracle trust ang core risk.
     fr: Chainlink est un token de réseau d'oracles décentralisé. Les flux de prix DeFi et les services cross-chain soutiennent la demande; la confiance dans les oracles est le risque central.
     ga: Is token líonra oracle díláraithe é Chainlink. Tiomáineann price feeds DeFi agus seirbhísí cross-chain éileamh; is é muinín san oracle an croíriosca.
-    he: Chainlink הוא טוקן של רשת oracle מבוזרת. פידי מחירים ב-DeFi ושירותי cross-chain מניעים ביקוש; אמון ב-oracle הוא הסיכון המרכזי.
+    he: ‏Chainlink הוא טוקן של רשת oracle מבוזרת. פידי מחירים ב-DeFi ושירותי cross-chain מניעים ביקוש; אמון ב-oracle הוא הסיכון המרכזי.
     hi: Chainlink decentralized oracle network token है। DeFi price feeds और cross-chain services demand चलाते हैं; oracle trust core risk है।
     hr: Chainlink je token decentralizirane oracle mreže. DeFi feedovi cijena i cross-chain usluge pokreću potražnju; povjerenje u oracle ključni je rizik.
     hu: A Chainlink decentralizált oracle-hálózati token. A DeFi árfolyamfeedek és a cross-chain szolgáltatások hajtják a keresletet; az oracle-bizalom a fő kockázat.
@@ -1746,7 +1746,7 @@ underlyings:
 - ticker: DOT
   name:
     en: Polkadot
-    ar: Polkadot
+    ar: ‏Polkadot
     bn: Polkadot
     bs: Polkadot
     cs: Polkadot
@@ -1759,7 +1759,7 @@ underlyings:
     fil: Polkadot
     fr: Polkadot
     ga: Polkadot
-    he: Polkadot
+    he: ‏Polkadot
     hi: Polkadot
     hr: Polkadot
     hu: Polkadot
@@ -1799,7 +1799,7 @@ underlyings:
   description:
     en: Polkadot is a shared-security and interoperability network. DOT value depends on ecosystem demand and governance, not just parachain activity.
     pl: Polkadot to sieć współdzielonego bezpieczeństwa i interoperacyjności. Wartość DOT zależy od popytu ekosystemu i governance, nie tylko aktywności parachainów.
-    ar: Polkadot شبكة للأمان المشترك والتشغيل البيني. تعتمد قيمة DOT على طلب النظام البيئي والحوكمة، لا على نشاط السلاسل الموازية وحده.
+    ar: ‏Polkadot شبكة للأمان المشترك والتشغيل البيني. تعتمد قيمة DOT على طلب النظام البيئي والحوكمة، لا على نشاط السلاسل الموازية وحده.
     bn: Polkadot shared-security এবং interoperability network। DOT value ecosystem demand এবং governance-এর ওপর নির্ভর করে, শুধু parachain activity নয়।
     bs: Polkadot je mreža zajedničke sigurnosti i interoperabilnosti. Vrijednost DOT-a zavisi od potražnje ekosistema i governance-a, ne samo od aktivnosti parachainova.
     cs: Polkadot je síť pro sdílené zabezpečení a interoperabilitu. Hodnota DOT závisí na poptávce ekosystému a governance, ne jen na aktivitě parachainů.
@@ -1812,7 +1812,7 @@ underlyings:
     fil: Polkadot ay shared-security at interoperability network. Ang value ng DOT ay nakadepende sa ecosystem demand at governance, hindi lang sa parachain activity.
     fr: Polkadot est un réseau de sécurité partagée et d'interopérabilité. La valeur de DOT dépend de la demande de l'écosystème et de la gouvernance, pas seulement de l'activité des parachains.
     ga: Is líonra shared-security agus idir-inoibritheachta é Polkadot. Braitheann luach DOT ar éileamh an éiceachórais agus governance, ní ar ghníomhaíocht parachain amháin.
-    he: Polkadot היא רשת לביטחון משותף ולאינטרופרביליות. ערך DOT תלוי בביקוש האקוסיסטם וב-governance, לא רק בפעילות parachain.
+    he: ‏Polkadot היא רשת לביטחון משותף ולאינטרופרביליות. ערך DOT תלוי בביקוש האקוסיסטם וב-governance, לא רק בפעילות parachain.
     hi: Polkadot shared-security और interoperability network है। DOT value सिर्फ parachain activity नहीं, ecosystem demand और governance पर भी निर्भर करती है।
     hr: Polkadot je mreža dijeljene sigurnosti i interoperabilnosti. Vrijednost DOT-a ovisi o potražnji ekosustava i governanceu, ne samo o aktivnosti parachainova.
     hu: A Polkadot megosztott biztonságú és interoperabilitási hálózat. A DOT értéke az ökoszisztéma keresletétől és a governance-től függ, nem csak a parachain-aktivitástól.
@@ -1882,7 +1882,7 @@ underlyings:
 - ticker: ADA
   name:
     en: Cardano
-    ar: Cardano
+    ar: ‏Cardano
     bn: Cardano
     bs: Cardano
     cs: Cardano
@@ -1895,7 +1895,7 @@ underlyings:
     fil: Cardano
     fr: Cardano
     ga: Cardano
-    he: Cardano
+    he: ‏Cardano
     hi: Cardano
     hr: Cardano
     hu: Cardano
@@ -1935,7 +1935,7 @@ underlyings:
   description:
     en: Cardano is a proof-of-stake smart-contract L1. Development milestones and app adoption drive sentiment more than raw throughput claims.
     pl: Cardano to L1 smart kontraktów proof-of-stake. Kamienie milowe rozwoju i adopcja aplikacji napędzają sentyment bardziej niż surowe deklaracje przepustowości.
-    ar: Cardano هو L1 للعقود الذكية بإثبات الحصة. معالم التطوير وتبني التطبيقات يحركان المعنويات أكثر من مزاعم الإنتاجية الخام.
+    ar: ‏Cardano هو L1 للعقود الذكية بإثبات الحصة. معالم التطوير وتبني التطبيقات يحركان المعنويات أكثر من مزاعم الإنتاجية الخام.
     bn: Cardano একটি proof-of-stake smart-contract L1। Development milestones এবং app adoption raw throughput claims-এর চেয়ে বেশি sentiment চালায়।
     bs: Cardano je proof-of-stake smart-contract L1. Razvojne prekretnice i usvajanje aplikacija pokreću sentiment više nego same tvrdnje o propusnosti.
     cs: Cardano je proof-of-stake smart-contract L1. Vývojové milníky a adopce aplikací hýbou sentimentem víc než samotná tvrzení o propustnosti.
@@ -1948,7 +1948,7 @@ underlyings:
     fil: Cardano ay proof-of-stake smart-contract L1. Development milestones at app adoption ang mas nagtutulak ng sentiment kaysa raw throughput claims.
     fr: Cardano est une L1 de smart contracts proof-of-stake. Les jalons de développement et l'adoption des applications alimentent le sentiment davantage que les annonces brutes de débit.
     ga: Is L1 smart-contract proof-of-stake é Cardano. Tiomáineann garspriocanna forbartha agus glacadh appanna meon níos mó ná éilimh amh tréchuir.
-    he: Cardano היא L1 לחוזים חכמים במנגנון proof-of-stake. אבני דרך בפיתוח ואימוץ אפליקציות מניעים סנטימנט יותר מטענות תפוקה גולמית.
+    he: ‏Cardano היא L1 לחוזים חכמים במנגנון proof-of-stake. אבני דרך בפיתוח ואימוץ אפליקציות מניעים סנטימנט יותר מטענות תפוקה גולמית.
     hi: Cardano proof-of-stake smart-contract L1 है। Development milestones और app adoption, raw throughput claims से ज्यादा sentiment चलाते हैं।
     hr: Cardano je proof-of-stake smart-contract L1. Razvojne prekretnice i prihvaćanje aplikacija više pokreću sentiment nego gole tvrdnje o propusnosti.
     hu: A Cardano proof-of-stake smart-contract L1. A fejlesztési mérföldkövek és az alkalmazás-adopció jobban hajtják a hangulatot, mint a nyers áteresztőképességi állítások.
@@ -2018,7 +2018,7 @@ underlyings:
 - ticker: AVAX
   name:
     en: Avalanche
-    ar: Avalanche
+    ar: ‏Avalanche
     bn: Avalanche
     bs: Avalanche
     cs: Avalanche
@@ -2031,7 +2031,7 @@ underlyings:
     fil: Avalanche
     fr: Avalanche
     ga: Avalanche
-    he: Avalanche
+    he: ‏Avalanche
     hi: Avalanche
     hr: Avalanche
     hu: Avalanche
@@ -2071,7 +2071,7 @@ underlyings:
   description:
     en: Avalanche is a smart-contract L1 with subnet architecture. Throughput claims need to be checked against mainnet activity and bridge liquidity.
     pl: Avalanche to L1 smart kontraktów z architekturą subnetów. Deklaracje przepustowości trzeba sprawdzać wobec aktywności mainnetu i płynności bridge'y.
-    ar: Avalanche هو L1 للعقود الذكية ببنية شبكات فرعية. يجب فحص مزاعم الإنتاجية مقابل نشاط الشبكة الرئيسية وسيولة الجسور.
+    ar: ‏Avalanche هو L1 للعقود الذكية ببنية شبكات فرعية. يجب فحص مزاعم الإنتاجية مقابل نشاط الشبكة الرئيسية وسيولة الجسور.
     bn: Avalanche subnet architectureসহ smart-contract L1। Throughput claims mainnet activity এবং bridge liquidity-এর সঙ্গে মিলিয়ে যাচাই করা দরকার।
     bs: Avalanche je smart-contract L1 sa subnet arhitekturom. Tvrdnje o propusnosti treba provjeravati prema aktivnosti mainneta i bridge likvidnosti.
     cs: Avalanche je smart-contract L1 se subnet architekturou. Tvrzení o propustnosti je nutné poměřovat s aktivitou mainnetu a likviditou bridge'ů.
@@ -2084,7 +2084,7 @@ underlyings:
     fil: Avalanche ay smart-contract L1 na may subnet architecture. Kailangang i-check ang throughput claims laban sa mainnet activity at bridge liquidity.
     fr: Avalanche est une L1 de smart contracts avec architecture de subnets. Les promesses de débit doivent être confrontées à l'activité mainnet et à la liquidité des bridges.
     ga: Is L1 smart-contract é Avalanche le hailtireacht subnet. Ní mór éilimh tréchuir a sheiceáil i gcoinne gníomhaíocht mainnet agus leachtacht bridge.
-    he: Avalanche היא L1 לחוזים חכמים עם ארכיטקטורת subnet. טענות תפוקה צריך לבדוק מול פעילות mainnet ונזילות גשרים.
+    he: ‏Avalanche היא L1 לחוזים חכמים עם ארכיטקטורת subnet. טענות תפוקה צריך לבדוק מול פעילות mainnet ונזילות גשרים.
     hi: Avalanche subnet architecture वाला smart-contract L1 है। Throughput claims को mainnet activity और bridge liquidity के मुकाबले जांचना चाहिए।
     hr: Avalanche je smart-contract L1 sa subnet arhitekturom. Tvrdnje o propusnosti treba provjeravati prema aktivnosti mainneta i likvidnosti bridgeova.
     hu: Az Avalanche smart-contract L1 subnet architektúrával. Az áteresztőképességi állításokat a mainnet-aktivitáshoz és a bridge-likviditáshoz kell mérni.
@@ -2142,7 +2142,7 @@ underlyings:
 - ticker: UNI
   name:
     en: Uniswap
-    ar: Uniswap
+    ar: ‏Uniswap
     bn: Uniswap
     bs: Uniswap
     cs: Uniswap
@@ -2155,7 +2155,7 @@ underlyings:
     fil: Uniswap
     fr: Uniswap
     ga: Uniswap
-    he: Uniswap
+    he: ‏Uniswap
     hi: Uniswap
     hr: Uniswap
     hu: Uniswap
@@ -2195,7 +2195,7 @@ underlyings:
   description:
     en: Uniswap is a DEX governance token. V3+ liquidity is concentrated, so LP risk is not the same as simple spot exposure.
     pl: Uniswap to token governance DEX. Płynność V3+ jest skoncentrowana, więc ryzyko LP nie jest tym samym co prosta ekspozycja spot.
-    ar: Uniswap رمز حوكمة DEX. سيولة V3+ مركزة، لذلك لا يساوي خطر LP انكشافا فوريا بسيطا.
+    ar: ‏Uniswap رمز حوكمة DEX. سيولة V3+ مركزة، لذلك لا يساوي خطر LP انكشافا فوريا بسيطا.
     bn: Uniswap একটি DEX governance token। V3+ liquidity concentrated, তাই LP risk simple spot exposure-এর মতো নয়।
     bs: Uniswap je DEX governance token. V3+ likvidnost je koncentrirana, pa LP rizik nije isto što i jednostavna spot izloženost.
     cs: Uniswap je governance token DEX. Likvidita V3+ je koncentrovaná, takže riziko LP není stejné jako prostá spotová expozice.
@@ -2208,7 +2208,7 @@ underlyings:
     fil: Uniswap ay DEX governance token. Concentrated ang V3+ liquidity, kaya ang LP risk ay hindi pareho sa simpleng spot exposure.
     fr: Uniswap est un token de gouvernance de DEX. La liquidité V3+ est concentrée, donc le risque LP n'est pas équivalent à une simple exposition spot.
     ga: Is token governance DEX é Uniswap. Tá leachtacht V3+ comhchruinnithe, mar sin ní hionann riosca LP agus nochtadh simplí spot.
-    he: Uniswap הוא טוקן governance של DEX. הנזילות ב-V3+ מרוכזת, לכן סיכון LP אינו זהה לחשיפת spot פשוטה.
+    he: ‏Uniswap הוא טוקן governance של DEX. הנזילות ב-V3+ מרוכזת, לכן סיכון LP אינו זהה לחשיפת spot פשוטה.
     hi: Uniswap एक DEX governance token है। V3+ liquidity concentrated है, इसलिए LP risk simple spot exposure जैसा नहीं है।
     hr: Uniswap je DEX governance token. Likvidnost V3+ je koncentrirana, pa LP rizik nije isto što i jednostavna spot izloženost.
     hu: Az Uniswap DEX governance token. A V3+ likviditás koncentrált, ezért az LP-kockázat nem azonos az egyszerű spot kitettséggel.
@@ -2266,7 +2266,7 @@ underlyings:
 - ticker: AAVE
   name:
     en: Aave
-    ar: Aave
+    ar: ‏Aave
     bn: Aave
     bs: Aave
     cs: Aave
@@ -2279,7 +2279,7 @@ underlyings:
     fil: Aave
     fr: Aave
     ga: Aave
-    he: Aave
+    he: ‏Aave
     hi: Aave
     hr: Aave
     hu: Aave
@@ -2319,7 +2319,7 @@ underlyings:
   description:
     en: Aave is a decentralized lending protocol token. Borrow demand, liquidations, and flash-loan use drive protocol risk.
     pl: Aave to token zdecentralizowanego protokołu pożyczkowego. Popyt na pożyczki, likwidacje i użycie flash loanów napędzają ryzyko protokołu.
-    ar: Aave رمز بروتوكول إقراض لامركزي. طلب الاقتراض والتسييلات واستخدام القروض السريعة تقود خطر البروتوكول.
+    ar: ‏Aave رمز بروتوكول إقراض لامركزي. طلب الاقتراض والتسييلات واستخدام القروض السريعة تقود خطر البروتوكول.
     bn: Aave একটি decentralized lending protocol token। Borrow demand, liquidations এবং flash-loan use protocol risk চালায়।
     bs: Aave je token decentraliziranog protokola za pozajmljivanje. Potražnja za zaduživanjem, likvidacije i upotreba flash-loanova pokreću rizik protokola.
     cs: Aave je token decentralizovaného úvěrového protokolu. Poptávka po půjčkách, likvidace a využití flash-loanů řídí protokolové riziko.
@@ -2332,7 +2332,7 @@ underlyings:
     fil: Aave ay decentralized lending protocol token. Borrow demand, liquidations, at flash-loan use ang nagtutulak ng protocol risk.
     fr: Aave est un token de protocole de prêt décentralisé. La demande d'emprunt, les liquidations et l'usage des flash loans portent le risque du protocole.
     ga: Is token prótacail iasachta díláraithe é Aave. Tiomáineann éileamh iasachta, leachtuithe agus úsáid flash-loan riosca an phrótacail.
-    he: Aave הוא טוקן של פרוטוקול הלוואות מבוזר. ביקוש להלוואות, חיסולים ושימוש ב-flash loans מניעים את סיכון הפרוטוקול.
+    he: ‏Aave הוא טוקן של פרוטוקול הלוואות מבוזר. ביקוש להלוואות, חיסולים ושימוש ב-flash loans מניעים את סיכון הפרוטוקול.
     hi: Aave decentralized lending protocol token है। Borrow demand, liquidations और flash-loan use protocol risk चलाते हैं।
     hr: Aave je token decentraliziranog protokola za kreditiranje. Potražnja za zaduživanjem, likvidacije i uporaba flash-loanova pokreću protokolarni rizik.
     hu: Az Aave decentralizált hitelezési protokoll tokenje. A hitelkereslet, a likvidálások és a flash-loan használat hajtják a protokollkockázatot.
@@ -2398,7 +2398,7 @@ underlyings:
 - ticker: ATOM
   name:
     en: Cosmos
-    ar: Cosmos
+    ar: ‏Cosmos
     bn: Cosmos
     bs: Cosmos
     cs: Cosmos
@@ -2411,7 +2411,7 @@ underlyings:
     fil: Cosmos
     fr: Cosmos
     ga: Cosmos
-    he: Cosmos
+    he: ‏Cosmos
     hi: Cosmos
     hr: Cosmos
     hu: Cosmos
@@ -2451,7 +2451,7 @@ underlyings:
   description:
     en: Cosmos Hub token for the IBC app-chain ecosystem. ATOM value capture can diverge from total Cosmos ecosystem activity.
     pl: ATOM to token Cosmos Hub dla ekosystemu app-chainów IBC. Przechwytywanie wartości przez ATOM może odbiegać od aktywności całego ekosystemu Cosmos.
-    ar: ATOM هو رمز Cosmos Hub لنظام سلاسل التطبيقات IBC. قد يختلف التقاط قيمة ATOM عن نشاط نظام Cosmos البيئي كله.
+    ar: ‏ATOM هو رمز Cosmos Hub لنظام سلاسل التطبيقات IBC. قد يختلف التقاط قيمة ATOM عن نشاط نظام Cosmos البيئي كله.
     bn: ATOM হলো IBC app-chain ecosystem-এর জন্য Cosmos Hub token। ATOM value capture পুরো Cosmos ecosystem activity থেকে আলাদা হতে পারে।
     bs: ATOM je token Cosmos Hub-a za IBC app-chain ekosistem. Hvatanje vrijednosti kroz ATOM može odstupati od ukupne aktivnosti Cosmos ekosistema.
     cs: ATOM je token Cosmos Hub pro ekosystém IBC app-chainů. Zachycení hodnoty ATOM se může lišit od celkové aktivity ekosystému Cosmos.
@@ -2464,7 +2464,7 @@ underlyings:
     fil: Cosmos Hub token ito para sa IBC app-chain ecosystem. Maaaring humiwalay ang ATOM value capture sa kabuuang activity ng Cosmos ecosystem.
     fr: ATOM est le token du Cosmos Hub pour l'écosystème d'app-chains IBC. La capture de valeur par ATOM peut diverger de l'activité totale de l'écosystème Cosmos.
     ga: Is token Cosmos Hub é ATOM don éiceachóras app-chain IBC. Is féidir le value capture ATOM imeacht ó ghníomhaíocht iomlán éiceachóras Cosmos.
-    he: ATOM הוא טוקן Cosmos Hub לאקוסיסטם app-chain של IBC. לכידת הערך של ATOM יכולה לסטות מפעילות אקוסיסטם Cosmos הכוללת.
+    he: ‏ATOM הוא טוקן Cosmos Hub לאקוסיסטם app-chain של IBC. לכידת הערך של ATOM יכולה לסטות מפעילות אקוסיסטם Cosmos הכוללת.
     hi: ATOM, IBC app-chain ecosystem के लिए Cosmos Hub token है। ATOM value capture पूरे Cosmos ecosystem की activity से अलग हो सकता है।
     hr: ATOM je token Cosmos Hub za ekosustav IBC app-chainova. Hvatanje vrijednosti u ATOM-u može odstupati od ukupne aktivnosti ekosustava Cosmos.
     hu: Cosmos Hub token az IBC app-chain ökoszisztémához. Az ATOM értékragadása eltérhet a teljes Cosmos ökoszisztéma aktivitásától.
@@ -2544,7 +2544,7 @@ underlyings:
     fil: NEAR Protocol
     fr: NEAR Protocol
     ga: NEAR Protocol
-    he: NEAR Protocol
+    he: ‏NEAR Protocol
     hi: NEAR Protocol
     hr: NEAR Protocol
     hu: NEAR Protocol
@@ -2584,7 +2584,7 @@ underlyings:
   description:
     en: NEAR Protocol is a sharded smart-contract L1. Adoption and developer activity matter more than throughput marketing.
     pl: NEAR Protocol to shardowany L1 smart kontraktów. Adopcja i aktywność deweloperów ważą bardziej niż marketing przepustowości.
-    ar: NEAR Protocol هو L1 للعقود الذكية قائم على التجزئة. التبني ونشاط المطورين أهم من تسويق الإنتاجية.
+    ar: ‏NEAR Protocol هو L1 للعقود الذكية قائم على التجزئة. التبني ونشاط المطورين أهم من تسويق الإنتاجية.
     bn: NEAR Protocol একটি sharded smart-contract L1। Adoption এবং developer activity throughput marketing-এর চেয়ে বেশি গুরুত্বপূর্ণ।
     bs: NEAR Protocol je shardovani smart-contract L1. Usvajanje i aktivnost developera važniji su od marketinga propusnosti.
     cs: NEAR Protocol je shardovaný smart-contract L1. Adopce a aktivita vývojářů jsou důležitější než marketing propustnosti.
@@ -2597,7 +2597,7 @@ underlyings:
     fil: NEAR Protocol ay sharded smart-contract L1. Mas mahalaga ang adoption at developer activity kaysa throughput marketing.
     fr: NEAR Protocol est une L1 de smart contracts shardée. L'adoption et l'activité des développeurs comptent davantage que le marketing sur le débit.
     ga: Is L1 smart-contract shardáilte é NEAR Protocol. Tá glacadh agus gníomhaíocht forbróirí níos tábhachtaí ná marketing tréchuir.
-    he: NEAR Protocol היא L1 לחוזים חכמים עם sharding. אימוץ ופעילות מפתחים חשובים יותר משיווק סביב תפוקה.
+    he: ‏NEAR Protocol היא L1 לחוזים חכמים עם sharding. אימוץ ופעילות מפתחים חשובים יותר משיווק סביב תפוקה.
     hi: NEAR Protocol sharded smart-contract L1 है। Adoption और developer activity, throughput marketing से ज्यादा मायने रखते हैं।
     hr: NEAR Protocol je shardani smart-contract L1. Prihvaćanje i aktivnost developera važniji su od marketinga propusnosti.
     hu: A NEAR Protocol shardolt smart-contract L1. Az adopció és a fejlesztői aktivitás fontosabb, mint az áteresztőképességi marketing.
@@ -2649,7 +2649,7 @@ underlyings:
 - ticker: ALGO
   name:
     en: Algorand
-    ar: Algorand
+    ar: ‏Algorand
     bn: Algorand
     bs: Algorand
     cs: Algorand
@@ -2662,7 +2662,7 @@ underlyings:
     fil: Algorand
     fr: Algorand
     ga: Algorand
-    he: Algorand
+    he: ‏Algorand
     hi: Algorand
     hr: Algorand
     hu: Algorand
@@ -2702,7 +2702,7 @@ underlyings:
   description:
     en: Algorand is a proof-of-stake L1. Low fees and fast finality are core features; token demand depends on real app usage.
     pl: Algorand to L1 proof-of-stake. Niskie opłaty i szybka finalność są kluczowe; popyt na token zależy od realnego użycia aplikacji.
-    ar: Algorand هو L1 بإثبات الحصة. الرسوم المنخفضة والنهائية السريعة ميزتان أساسيتان؛ ويعتمد طلب الرمز على الاستخدام الفعلي للتطبيقات.
+    ar: ‏Algorand هو L1 بإثبات الحصة. الرسوم المنخفضة والنهائية السريعة ميزتان أساسيتان؛ ويعتمد طلب الرمز على الاستخدام الفعلي للتطبيقات.
     bn: Algorand একটি proof-of-stake L1। Low fees এবং fast finality core features; token demand real app usage-এর ওপর নির্ভর করে।
     bs: Algorand je proof-of-stake L1. Niske naknade i brza finalnost su ključne osobine; potražnja za tokenom zavisi od stvarne upotrebe aplikacija.
     cs: Algorand je proof-of-stake L1. Nízké poplatky a rychlá finalita jsou hlavní vlastnosti; poptávka po tokenu závisí na skutečném využití aplikací.
@@ -2715,7 +2715,7 @@ underlyings:
     fil: Algorand ay proof-of-stake L1. Core features ang low fees at fast finality; nakadepende ang token demand sa totoong app usage.
     fr: Algorand est une L1 proof-of-stake. Les frais bas et la finalité rapide sont ses atouts clés; la demande du token dépend de l'usage réel des applications.
     ga: Is L1 proof-of-stake é Algorand. Is gnéithe lárnacha iad táillí ísle agus finality thapa; braitheann éileamh token ar úsáid fhíor appanna.
-    he: Algorand היא L1 במנגנון proof-of-stake. עמלות נמוכות וסופיות מהירה הן תכונות מרכזיות; ביקוש לטוקן תלוי בשימוש אמיתי באפליקציות.
+    he: ‏Algorand היא L1 במנגנון proof-of-stake. עמלות נמוכות וסופיות מהירה הן תכונות מרכזיות; ביקוש לטוקן תלוי בשימוש אמיתי באפליקציות.
     hi: Algorand proof-of-stake L1 है। Low fees और fast finality core features हैं; token demand real app usage पर निर्भर करती है।
     hr: Algorand je proof-of-stake L1. Niske naknade i brza konačnost ključne su značajke; potražnja za tokenom ovisi o stvarnoj uporabi aplikacija.
     hu: Az Algorand proof-of-stake L1. Az alacsony díjak és a gyors véglegesség alapvető jellemzők; a tokenkereslet a valós alkalmazáshasználattól függ.
@@ -2782,7 +2782,7 @@ underlyings:
 - ticker: FIL
   name:
     en: Filecoin
-    ar: Filecoin
+    ar: ‏Filecoin
     bn: Filecoin
     bs: Filecoin
     cs: Filecoin
@@ -2795,7 +2795,7 @@ underlyings:
     fil: Filecoin
     fr: Filecoin
     ga: Filecoin
-    he: Filecoin
+    he: ‏Filecoin
     hi: Filecoin
     hr: Filecoin
     hu: Filecoin
@@ -2835,7 +2835,7 @@ underlyings:
   description:
     en: Filecoin is a decentralized storage network token. Storage-provider economics and protocol emissions can dominate cloud-storage narratives.
     pl: Filecoin to token zdecentralizowanej sieci przechowywania danych. Ekonomia dostawców storage'u i emisje protokołu mogą dominować narracje cloud storage.
-    ar: Filecoin رمز شبكة تخزين لامركزية. اقتصاديات مزودي التخزين وإصدارات البروتوكول قد تطغى على سرديات التخزين السحابي.
+    ar: ‏Filecoin رمز شبكة تخزين لامركزية. اقتصاديات مزودي التخزين وإصدارات البروتوكول قد تطغى على سرديات التخزين السحابي.
     bn: Filecoin একটি decentralized storage network token। Storage-provider economics এবং protocol emissions cloud-storage narratives-কে ছাপিয়ে যেতে পারে।
     bs: Filecoin je token decentralizirane mreže za pohranu podataka. Ekonomika storage provajdera i emisije protokola mogu nadjačati priče o cloud-storage-u.
     cs: Filecoin je token decentralizované sítě pro ukládání dat. Ekonomika poskytovatelů storage a protokolové emise mohou převážit nad narativy cloud storage.
@@ -2848,7 +2848,7 @@ underlyings:
     fil: Filecoin ay decentralized storage network token. Storage-provider economics at protocol emissions ang maaaring mangibabaw sa cloud-storage narratives.
     fr: Filecoin est un token de réseau de stockage décentralisé. L'économie des fournisseurs de stockage et les émissions du protocole peuvent dominer les récits de cloud storage.
     ga: Is token líonra stórála díláraithe é Filecoin. Is féidir le heacnamaíocht storage-provider agus eisiúintí prótacail scéalta cloud-storage a shárú.
-    he: Filecoin הוא טוקן של רשת אחסון מבוזרת. כלכלת ספקי האחסון והנפקות הפרוטוקול יכולות לגבור על נרטיבים של אחסון ענן.
+    he: ‏Filecoin הוא טוקן של רשת אחסון מבוזרת. כלכלת ספקי האחסון והנפקות הפרוטוקול יכולות לגבור על נרטיבים של אחסון ענן.
     hi: Filecoin decentralized storage network token है। Storage-provider economics और protocol emissions cloud-storage narratives पर भारी पड़ सकते हैं।
     hr: Filecoin je token decentralizirane mreže za pohranu podataka. Ekonomika pružatelja pohrane i emisije protokola mogu nadjačati narative o cloud-storageu.
     hu: A Filecoin decentralizált adattárolási hálózati token. A storage-szolgáltatói gazdaságtan és a protokollkibocsátás felülírhatja a cloud-storage narratívákat.
@@ -2909,7 +2909,7 @@ underlyings:
 - ticker: XLM
   name:
     en: Stellar
-    ar: Stellar
+    ar: ‏Stellar
     bn: Stellar
     bs: Stellar
     cs: Stellar
@@ -2922,7 +2922,7 @@ underlyings:
     fil: Stellar
     fr: Stellar
     ga: Stellar
-    he: Stellar
+    he: ‏Stellar
     hi: Stellar
     hr: Stellar
     hu: Stellar
@@ -2962,7 +2962,7 @@ underlyings:
   description:
     en: Stellar is a payments network focused on fiat and asset transfers. Anchor quality and regulatory corridors matter for real usage.
     pl: Stellar to sieć płatnicza skupiona na transferach fiat i aktywów. Jakość anchorów i korytarze regulacyjne mają znaczenie dla realnego użycia.
-    ar: Stellar شبكة مدفوعات تركز على تحويلات العملات الورقية والأصول. جودة جهات الربط والممرات التنظيمية مهمة للاستخدام الحقيقي.
+    ar: ‏Stellar شبكة مدفوعات تركز على تحويلات العملات الورقية والأصول. جودة جهات الربط والممرات التنظيمية مهمة للاستخدام الحقيقي.
     bn: Stellar fiat এবং asset transfers-কেন্দ্রিক payments network। Real usage-এর জন্য anchor quality এবং regulatory corridors গুরুত্বপূর্ণ।
     bs: Stellar je platna mreža fokusirana na fiat i transfere imovine. Kvalitet anchora i regulatorni koridori važni su za stvarnu upotrebu.
     cs: Stellar je platební síť zaměřená na fiat a převody aktiv. Kvalita anchorů a regulační koridory jsou důležité pro skutečné využití.
@@ -2975,7 +2975,7 @@ underlyings:
     fil: Stellar ay payments network na nakatuon sa fiat at asset transfers. Mahalaga ang anchor quality at regulatory corridors para sa real usage.
     fr: Stellar est un réseau de paiement axé sur les transferts de fiat et d'actifs. La qualité des anchors et les corridors réglementaires comptent pour l'usage réel.
     ga: Is líonra íocaíochtaí é Stellar atá dírithe ar aistrithe fiat agus sócmhainní. Tá cáilíocht anchors agus conairí rialála tábhachtach don úsáid fhíor.
-    he: Stellar היא רשת תשלומים המתמקדת בהעברות fiat ונכסים. איכות anchors ומסדרונות רגולטוריים חשובים לשימוש אמיתי.
+    he: ‏Stellar היא רשת תשלומים המתמקדת בהעברות fiat ונכסים. איכות anchors ומסדרונות רגולטוריים חשובים לשימוש אמיתי.
     hi: Stellar fiat और asset transfers पर केंद्रित payments network है। Real usage के लिए anchor quality और regulatory corridors मायने रखते हैं।
     hr: Stellar je platna mreža usmjerena na transfere fiata i imovine. Kvaliteta anchora i regulatorni koridori važni su za stvarnu uporabu.
     hu: A Stellar fiat- és eszközátutalásokra fókuszáló fizetési hálózat. Az anchorok minősége és a szabályozási folyosók fontosak a valós használathoz.
@@ -3033,7 +3033,7 @@ underlyings:
 - ticker: TRX
   name:
     en: TRON
-    ar: TRON
+    ar: ‏TRON
     bn: TRON
     bs: TRON
     cs: TRON
@@ -3046,7 +3046,7 @@ underlyings:
     fil: TRON
     fr: TRON
     ga: TRON
-    he: TRON
+    he: ‏TRON
     hi: TRON
     hr: TRON
     hu: TRON
@@ -3086,7 +3086,7 @@ underlyings:
   description:
     en: TRON is a smart-contract chain with heavy stablecoin transfer use. USDT flow is important, while governance concentration is a risk.
     pl: TRON to łańcuch smart kontraktów z dużym użyciem transferów stablecoinów. Przepływy USDT są ważne, a koncentracja governance jest ryzykiem.
-    ar: TRON سلسلة عقود ذكية ذات استخدام كبير في تحويلات العملات المستقرة. تدفقات USDT مهمة، بينما يمثل تركّز الحوكمة خطرا.
+    ar: ‏TRON سلسلة عقود ذكية ذات استخدام كبير في تحويلات العملات المستقرة. تدفقات USDT مهمة، بينما يمثل تركّز الحوكمة خطرا.
     bn: TRON heavy stablecoin transfer useসহ smart-contract chain। USDT flow গুরুত্বপূর্ণ, আর governance concentration একটি risk।
     bs: TRON je smart-contract lanac s velikom upotrebom stablecoin transfera. USDT tokovi su važni, dok je koncentracija governance-a rizik.
     cs: TRON je smart-contract chain s výrazným využitím pro převody stablecoinů. Toky USDT jsou důležité, zatímco koncentrace governance je rizikem.
@@ -3099,7 +3099,7 @@ underlyings:
     fil: TRON ay smart-contract chain na malakas ang stablecoin transfer use. Mahalaga ang USDT flow, habang risk ang governance concentration.
     fr: TRON est une chaîne de smart contracts fortement utilisée pour les transferts de stablecoins. Les flux USDT sont importants, tandis que la concentration de la gouvernance constitue un risque.
     ga: Is chain smart-contract é TRON le húsáid throm d'aistrithe stablecoin. Tá sreabhadh USDT tábhachtach, agus is riosca é comhchruinniú governance.
-    he: TRON היא שרשרת חוזים חכמים עם שימוש כבד בהעברות סטייבלקוינים. זרימות USDT חשובות, בעוד ריכוזיות governance היא סיכון.
+    he: ‏TRON היא שרשרת חוזים חכמים עם שימוש כבד בהעברות סטייבלקוינים. זרימות USDT חשובות, בעוד ריכוזיות governance היא סיכון.
     hi: TRON heavy stablecoin transfer use वाली smart-contract chain है। USDT flow अहम है, जबकि governance concentration एक risk है।
     hr: TRON je smart-contract chain s velikom uporabom transfera stablecoina. Tok USDT-a važan je, dok je koncentracija governancea rizik.
     hu: A TRON smart-contract lánc, jelentős stablecoin-átutalási használattal. Az USDT-áramlás fontos, miközben a governance-koncentráció kockázat.
@@ -3160,7 +3160,7 @@ underlyings:
 - ticker: ETC
   name:
     en: Ethereum Classic
-    ar: Ethereum Classic
+    ar: ‏Ethereum Classic
     bn: Ethereum Classic
     bs: Ethereum Classic
     cs: Ethereum Classic
@@ -3173,7 +3173,7 @@ underlyings:
     fil: Ethereum Classic
     fr: Ethereum Classic
     ga: Ethereum Classic
-    he: Ethereum Classic
+    he: ‏Ethereum Classic
     hi: Ethereum Classic
     hr: Ethereum Classic
     hu: Ethereum Classic
@@ -3213,7 +3213,7 @@ underlyings:
   description:
     en: Ethereum Classic is the original Ethereum proof-of-work chain. It preserves pre-DAO history, but 51% attack history remains the key risk.
     pl: Ethereum Classic to oryginalny łańcuch Ethereum proof-of-work. Zachowuje historię sprzed DAO, ale historia ataków 51% pozostaje głównym ryzykiem.
-    ar: Ethereum Classic هي سلسلة Ethereum الأصلية بإثبات العمل. تحافظ على تاريخ ما قبل DAO، لكن تاريخ هجمات 51% يبقى الخطر الرئيسي.
+    ar: ‏Ethereum Classic هي سلسلة Ethereum الأصلية بإثبات العمل. تحافظ على تاريخ ما قبل DAO، لكن تاريخ هجمات 51% يبقى الخطر الرئيسي.
     bn: Ethereum Classic হলো original Ethereum proof-of-work chain। এটি pre-DAO history রাখে, কিন্তু 51% attack history প্রধান risk রয়ে গেছে।
     bs: Ethereum Classic je originalni Ethereum proof-of-work lanac. Čuva historiju prije DAO-a, ali historija napada od 51% ostaje ključni rizik.
     cs: Ethereum Classic je původní proof-of-work chain Etherea. Zachovává historii před DAO, ale historie 51% útoků zůstává klíčovým rizikem.
@@ -3226,7 +3226,7 @@ underlyings:
     fil: Ethereum Classic ay orihinal na Ethereum proof-of-work chain. Pinapanatili nito ang pre-DAO history, pero ang 51% attack history pa rin ang key risk.
     fr: Ethereum Classic est la chaîne Ethereum proof-of-work originelle. Elle conserve l'historique pré-DAO, mais l'historique des attaques 51% reste le risque clé.
     ga: Is é Ethereum Classic an chain Ethereum proof-of-work bhunaidh. Coinníonn sé stair réamh-DAO, ach is í stair ionsaithe 51% an príomhriosca fós.
-    he: Ethereum Classic היא שרשרת proof-of-work המקורית של Ethereum. היא שומרת את ההיסטוריה שלפני DAO, אך היסטוריית מתקפות 51% נשארת הסיכון המרכזי.
+    he: ‏Ethereum Classic היא שרשרת proof-of-work המקורית של Ethereum. היא שומרת את ההיסטוריה שלפני DAO, אך היסטוריית מתקפות 51% נשארת הסיכון המרכזי.
     hi: Ethereum Classic मूल Ethereum proof-of-work chain है। यह pre-DAO history बचाए रखता है, लेकिन 51% attack history मुख्य risk बनी रहती है।
     hr: Ethereum Classic je izvorni Ethereum proof-of-work chain. Čuva povijest prije DAO-a, ali povijest 51% napada ostaje ključni rizik.
     hu: Az Ethereum Classic az eredeti Ethereum proof-of-work lánc. Megőrzi a DAO előtti történetet, de az 51%-os támadások múltja továbbra is a fő kockázat.
@@ -3284,7 +3284,7 @@ underlyings:
 - ticker: APE
   name:
     en: ApeCoin
-    ar: ApeCoin
+    ar: ‏ApeCoin
     bn: ApeCoin
     bs: ApeCoin
     cs: ApeCoin
@@ -3297,7 +3297,7 @@ underlyings:
     fil: ApeCoin
     fr: ApeCoin
     ga: ApeCoin
-    he: ApeCoin
+    he: ‏ApeCoin
     hi: ApeCoin
     hr: ApeCoin
     hu: ApeCoin
@@ -3337,7 +3337,7 @@ underlyings:
   description:
     en: ApeCoin is a governance and ecosystem token linked to BAYC/Yuga assets. NFT-cycle sentiment can dominate protocol fundamentals.
     pl: ApeCoin to token governance i ekosystemu powiązany z aktywami BAYC/Yuga. Sentyment cyklu NFT może dominować fundamenty protokołu.
-    ar: ApeCoin رمز حوكمة ونظام بيئي مرتبط بأصول BAYC/Yuga. قد تهيمن معنويات دورة NFT على أساسيات البروتوكول.
+    ar: ‏ApeCoin رمز حوكمة ونظام بيئي مرتبط بأصول BAYC/Yuga. قد تهيمن معنويات دورة NFT على أساسيات البروتوكول.
     bn: ApeCoin BAYC/Yuga assets-এর সঙ্গে যুক্ত governance ও ecosystem token। NFT-cycle sentiment protocol fundamentals-কে ছাপিয়ে যেতে পারে।
     bs: ApeCoin je governance i ekosistemski token povezan s BAYC/Yuga imovinom. Sentiment NFT ciklusa može nadjačati fundamente protokola.
     cs: ApeCoin je governance a ekosystémový token spojený s aktivy BAYC/Yuga. Sentiment cyklu NFT může dominovat protokolovým fundamentům.
@@ -3350,7 +3350,7 @@ underlyings:
     fil: ApeCoin ay governance at ecosystem token na konektado sa BAYC/Yuga assets. Maaaring mangibabaw ang NFT-cycle sentiment sa protocol fundamentals.
     fr: ApeCoin est un token de gouvernance et d'écosystème lié aux actifs BAYC/Yuga. Le sentiment du cycle NFT peut dominer les fondamentaux du protocole.
     ga: Is token governance agus éiceachórais é ApeCoin atá ceangailte le sócmhainní BAYC/Yuga. Is féidir le meon thimthriall NFT bunfhachtóirí prótacail a shárú.
-    he: ApeCoin הוא טוקן governance ואקוסיסטם הקשור לנכסי BAYC/Yuga. סנטימנט מחזור NFT יכול לגבור על יסודות הפרוטוקול.
+    he: ‏ApeCoin הוא טוקן governance ואקוסיסטם הקשור לנכסי BAYC/Yuga. סנטימנט מחזור NFT יכול לגבור על יסודות הפרוטוקול.
     hi: ApeCoin, BAYC/Yuga assets से जुड़ा governance और ecosystem token है। NFT-cycle sentiment protocol fundamentals पर हावी हो सकता है।
     hr: ApeCoin je governance i ekosustavni token povezan s BAYC/Yuga imovinom. Sentiment NFT ciklusa može nadjačati temelje protokola.
     hu: Az ApeCoin BAYC/Yuga eszközökhöz kötődő governance- és ökoszisztéma-token. Az NFT-ciklus hangulata dominálhatja a protokollfundamentumokat.
@@ -3408,7 +3408,7 @@ underlyings:
 - ticker: SHIB
   name:
     en: Shiba Inu
-    ar: Shiba Inu
+    ar: ‏Shiba Inu
     bn: Shiba Inu
     bs: Shiba Inu
     cs: Shiba Inu
@@ -3421,7 +3421,7 @@ underlyings:
     fil: Shiba Inu
     fr: Shiba Inu
     ga: Shiba Inu
-    he: Shiba Inu
+    he: ‏Shiba Inu
     hi: Shiba Inu
     hr: Shiba Inu
     hu: Shiba Inu
@@ -3461,7 +3461,7 @@ underlyings:
   description:
     en: Shiba Inu is a meme-token ecosystem. Community attention, exchange liquidity, and supply concentration matter more than base utility.
     pl: Shiba Inu to ekosystem memecoinowy. Uwaga społeczności, płynność giełdowa i koncentracja podaży ważą bardziej niż bazowa użyteczność.
-    ar: Shiba Inu نظام بيئي لرموز الميم. اهتمام المجتمع وسيولة البورصات وتركز المعروض أهم من المنفعة الأساسية.
+    ar: ‏Shiba Inu نظام بيئي لرموز الميم. اهتمام المجتمع وسيولة البورصات وتركز المعروض أهم من المنفعة الأساسية.
     bn: Shiba Inu একটি meme-token ecosystem। Community attention, exchange liquidity এবং supply concentration base utility-এর চেয়ে বেশি গুরুত্বপূর্ণ।
     bs: Shiba Inu je meme-token ekosistem. Pažnja zajednice, berzanska likvidnost i koncentracija ponude važniji su od osnovne korisnosti.
     cs: Shiba Inu je ekosystém meme-tokenů. Pozornost komunity, burzovní likvidita a koncentrace nabídky mají větší váhu než základní užitečnost.
@@ -3474,7 +3474,7 @@ underlyings:
     fil: Shiba Inu ay meme-token ecosystem. Mas mahalaga ang community attention, exchange liquidity, at supply concentration kaysa base utility.
     fr: Shiba Inu est un écosystème de meme-token. L'attention de la communauté, la liquidité d'échange et la concentration de l'offre comptent davantage que l'utilité de base.
     ga: Is éiceachóras meme-token é Shiba Inu. Tá aird phobail, leachtacht exchange agus comhchruinniú soláthair níos tábhachtaí ná bunfhóntas.
-    he: Shiba Inu הוא אקוסיסטם של טוקני meme. תשומת לב הקהילה, נזילות בבורסות וריכוז ההיצע חשובים יותר מתועלת בסיסית.
+    he: ‏Shiba Inu הוא אקוסיסטם של טוקני meme. תשומת לב הקהילה, נזילות בבורסות וריכוז ההיצע חשובים יותר מתועלת בסיסית.
     hi: Shiba Inu meme-token ecosystem है। Community attention, exchange liquidity और supply concentration base utility से ज्यादा मायने रखते हैं।
     hr: Shiba Inu je meme-token ekosustav. Pozornost zajednice, burzovna likvidnost i koncentracija ponude važniji su od osnovne korisnosti.
     hu: A Shiba Inu meme-token ökoszisztéma. A közösségi figyelem, a tőzsdei likviditás és a kínálati koncentráció fontosabb, mint az alapvető hasznosság.
@@ -3532,7 +3532,7 @@ underlyings:
 - ticker: RENDER
   name:
     en: Render
-    ar: Render
+    ar: ‏Render
     bn: Render
     bs: Render
     cs: Render
@@ -3545,7 +3545,7 @@ underlyings:
     fil: Render
     fr: Render
     ga: Render
-    he: Render
+    he: ‏Render
     hi: Render
     hr: Render
     hu: Render
@@ -3585,7 +3585,7 @@ underlyings:
   description:
     en: Render is a decentralized GPU rendering and compute network token. Usage demand and AI/GPU-cycle sentiment can diverge.
     pl: Render to token zdecentralizowanej sieci renderingu GPU i compute. Popyt na użycie i sentyment cyklu AI/GPU mogą się rozjeżdżać.
-    ar: Render رمز شبكة لامركزية لتصيير GPU والحوسبة. قد يتباعد طلب الاستخدام عن معنويات دورة AI/GPU.
+    ar: ‏Render رمز شبكة لامركزية لتصيير GPU والحوسبة. قد يتباعد طلب الاستخدام عن معنويات دورة AI/GPU.
     bn: Render একটি decentralized GPU rendering এবং compute network token। Usage demand ও AI/GPU-cycle sentiment একসঙ্গে নাও চলতে পারে।
     bs: Render je token decentralizirane mreže za GPU rendering i compute. Potražnja za upotrebom i sentiment AI/GPU ciklusa mogu se razilaziti.
     cs: Render je token decentralizované sítě pro GPU rendering a compute. Poptávka po využití a sentiment cyklu AI/GPU se mohou rozcházet.
@@ -3598,7 +3598,7 @@ underlyings:
     fil: Render ay decentralized GPU rendering at compute network token. Maaaring maghiwalay ang usage demand at AI/GPU-cycle sentiment.
     fr: Render est un token de réseau décentralisé de rendu GPU et de compute. La demande d'usage et le sentiment du cycle AI/GPU peuvent diverger.
     ga: Is token líonra díláraithe GPU rendering agus compute é Render. Is féidir le héileamh úsáide agus meon thimthriall AI/GPU scaradh óna chéile.
-    he: Render הוא טוקן של רשת מבוזרת לרינדור GPU ולמחשוב. ביקוש שימוש וסנטימנט מחזור AI/GPU יכולים לסטות זה מזה.
+    he: ‏Render הוא טוקן של רשת מבוזרת לרינדור GPU ולמחשוב. ביקוש שימוש וסנטימנט מחזור AI/GPU יכולים לסטות זה מזה.
     hi: Render decentralized GPU rendering और compute network token है। Usage demand और AI/GPU-cycle sentiment अलग-अलग चल सकते हैं।
     hr: Render je token decentralizirane mreže za GPU rendering i compute. Potražnja za uporabom i sentiment AI/GPU ciklusa mogu se razilaziti.
     hu: A Render decentralizált GPU-renderelési és compute-hálózati token. A használati kereslet és az AI/GPU-ciklus hangulata eltérhet egymástól.
@@ -3650,7 +3650,7 @@ underlyings:
 - ticker: TAO
   name:
     en: Bittensor
-    ar: Bittensor
+    ar: ‏Bittensor
     bn: Bittensor
     bs: Bittensor
     cs: Bittensor
@@ -3663,7 +3663,7 @@ underlyings:
     fil: Bittensor
     fr: Bittensor
     ga: Bittensor
-    he: Bittensor
+    he: ‏Bittensor
     hi: Bittensor
     hr: Bittensor
     hu: Bittensor
@@ -3703,7 +3703,7 @@ underlyings:
   description:
     en: Bittensor is a decentralized AI subnet network. Token incentives reward miners and validators, making emissions and subnet quality central.
     pl: Bittensor to zdecentralizowana sieć subnetów AI. Zachęty tokenowe wynagradzają minerów i walidatorów, więc emisje i jakość subnetów są kluczowe.
-    ar: Bittensor شبكة لامركزية من شبكات AI الفرعية. تكافئ حوافز الرمز المعدنين والمدققين، ما يجعل الإصدارات وجودة الشبكات الفرعية محوريتين.
+    ar: ‏Bittensor شبكة لامركزية من شبكات AI الفرعية. تكافئ حوافز الرمز المعدنين والمدققين، ما يجعل الإصدارات وجودة الشبكات الفرعية محوريتين.
     bn: Bittensor একটি decentralized AI subnet network। Token incentives miners ও validators-কে reward করে, তাই emissions এবং subnet quality কেন্দ্রীয় বিষয়।
     bs: Bittensor je decentralizirana mreža AI subnetova. Token poticaji nagrađuju minere i validatore, pa su emisije i kvalitet subnetova centralni.
     cs: Bittensor je decentralizovaná síť AI subnetů. Tokenové pobídky odměňují minery a validátory, takže emise a kvalita subnetů jsou klíčové.
@@ -3716,7 +3716,7 @@ underlyings:
     fil: Bittensor ay decentralized AI subnet network. Token incentives ang nagre-reward sa miners at validators, kaya sentral ang emissions at subnet quality.
     fr: Bittensor est un réseau décentralisé de subnets AI. Les incitations en tokens rémunèrent miners et validateurs, rendant les émissions et la qualité des subnets centrales.
     ga: Is líonra díláraithe subnets AI é Bittensor. Tugann dreasachtaí token luach saothair do miners agus validators, rud a fhágann eisiúintí agus cáilíocht subnet lárnach.
-    he: Bittensor היא רשת subnet מבוזרת ל-AI. תמריצי טוקן מתגמלים כורים ומאמתים, ולכן הנפקות ואיכות subnet הן מרכזיות.
+    he: ‏Bittensor היא רשת subnet מבוזרת ל-AI. תמריצי טוקן מתגמלים כורים ומאמתים, ולכן הנפקות ואיכות subnet הן מרכזיות.
     hi: Bittensor decentralized AI subnet network है। Token incentives miners और validators को reward देते हैं, इसलिए emissions और subnet quality central हैं।
     hr: Bittensor je decentralizirana mreža AI subnetova. Token poticaji nagrađuju rudare i validatore, pa su emisije i kvaliteta subnetova ključni.
     hu: A Bittensor decentralizált AI subnet hálózat. A tokenösztönzők minereket és validátorokat jutalmaznak, ezért a kibocsátás és a subnetek minősége központi.
@@ -3768,7 +3768,7 @@ underlyings:
 - ticker: ZEC
   name:
     en: Zcash
-    ar: Zcash
+    ar: ‏Zcash
     bn: Zcash
     bs: Zcash
     cs: Zcash
@@ -3781,7 +3781,7 @@ underlyings:
     fil: Zcash
     fr: Zcash
     ga: Zcash
-    he: Zcash
+    he: ‏Zcash
     hi: Zcash
     hr: Zcash
     hu: Zcash
@@ -3821,7 +3821,7 @@ underlyings:
   description:
     en: Zcash is a privacy-focused coin with shielded transaction support. Exchange delistings and regulatory pressure can limit liquidity.
     pl: Zcash to moneta prywatności ze wsparciem transakcji shielded. Delistingi giełdowe i presja regulacyjna mogą ograniczać płynność.
-    ar: Zcash عملة تركز على الخصوصية وتدعم المعاملات المحجوبة. إلغاء الإدراج في البورصات والضغط التنظيمي قد يحدان من السيولة.
+    ar: ‏Zcash عملة تركز على الخصوصية وتدعم المعاملات المحجوبة. إلغاء الإدراج في البورصات والضغط التنظيمي قد يحدان من السيولة.
     bn: Zcash shielded transaction supportসহ privacy-focused coin। Exchange delistings এবং regulatory pressure liquidity সীমিত করতে পারে।
     bs: Zcash je coin fokusiran na privatnost s podrškom za shielded transakcije. Delisting s berzi i regulatorni pritisak mogu ograničiti likvidnost.
     cs: Zcash je privacy coin s podporou shielded transakcí. Burzovní delistingy a regulatorní tlak mohou omezovat likviditu.
@@ -3834,7 +3834,7 @@ underlyings:
     fil: Zcash ay privacy-focused coin na may shielded transaction support. Maaaring limitahan ng exchange delistings at regulatory pressure ang liquidity.
     fr: Zcash est une monnaie axée sur la confidentialité avec support des transactions shielded. Les delistings d'exchanges et la pression réglementaire peuvent limiter la liquidité.
     ga: Is bonn príobháideachais é Zcash le tacaíocht do transactions shielded. Is féidir le delistings exchange agus brú rialála leachtacht a theorannú.
-    he: Zcash הוא מטבע ממוקד פרטיות עם תמיכה בעסקאות מוסתרות. הסרות מבורסות ולחץ רגולטורי יכולים להגביל נזילות.
+    he: ‏Zcash הוא מטבע ממוקד פרטיות עם תמיכה בעסקאות מוסתרות. הסרות מבורסות ולחץ רגולטורי יכולים להגביל נזילות.
     hi: Zcash shielded transaction support वाला privacy-focused coin है। Exchange delistings और regulatory pressure liquidity सीमित कर सकते हैं।
     hr: Zcash je coin usmjeren na privatnost s podrškom za shielded transakcije. Delistiranja s burzi i regulatorni pritisak mogu ograničiti likvidnost.
     hu: A Zcash adatvédelmi fókuszú coin shielded tranzakciós támogatással. A tőzsdei delistingek és a szabályozói nyomás korlátozhatják a likviditást.
@@ -3891,7 +3891,7 @@ underlyings:
 - ticker: ONDO
   name:
     en: Ondo
-    ar: Ondo
+    ar: ‏Ondo
     bn: Ondo
     bs: Ondo
     cs: Ondo
@@ -3904,7 +3904,7 @@ underlyings:
     fil: Ondo
     fr: Ondo
     ga: Ondo
-    he: Ondo
+    he: ‏Ondo
     hi: Ondo
     hr: Ondo
     hu: Ondo
@@ -3944,7 +3944,7 @@ underlyings:
   description:
     en: Ondo is a tokenized real-world-asset and Treasury exposure project. TradFi regulation, custody, and permissioning shape the risk.
     pl: Ondo to projekt tokenizowanych aktywów realnych i ekspozycji na Treasuries. Regulacje TradFi, custody i permissioning kształtują ryzyko.
-    ar: Ondo مشروع لأصول العالم الحقيقي المرمزة وانكشاف سندات الخزانة. تنظيم TradFi والحفظ والترخيص تشكل المخاطر.
+    ar: ‏Ondo مشروع لأصول العالم الحقيقي المرمزة وانكشاف سندات الخزانة. تنظيم TradFi والحفظ والترخيص تشكل المخاطر.
     bn: Ondo একটি tokenized real-world-asset এবং Treasury exposure project। TradFi regulation, custody এবং permissioning risk গড়ে দেয়।
     bs: Ondo je projekat tokenizirane real-world-asset imovine i izloženosti Treasuries. TradFi regulacija, custody i permissioning oblikuju rizik.
     cs: Ondo je projekt tokenizovaných real-world assets a expozice vůči Treasuries. Riziko formují regulace TradFi, custody a permissioning.
@@ -3957,7 +3957,7 @@ underlyings:
     fil: Ondo ay tokenized real-world-asset at Treasury exposure project. TradFi regulation, custody, at permissioning ang humuhubog sa risk.
     fr: Ondo est un projet d'actifs réels tokenisés et d'exposition aux Treasuries. La réglementation TradFi, la custody et le permissioning façonnent le risque.
     ga: Is tionscadal tokenized real-world-asset agus nochtadh Treasury é Ondo. Múnlaíonn rialáil TradFi, custody agus permissioning an riosca.
-    he: Ondo הוא פרויקט של נכסי עולם אמיתי מטוקננים וחשיפת Treasuries. רגולציית TradFi, custody והרשאות מעצבים את הסיכון.
+    he: ‏Ondo הוא פרויקט של נכסי עולם אמיתי מטוקננים וחשיפת Treasuries. רגולציית TradFi, custody והרשאות מעצבים את הסיכון.
     hi: Ondo tokenized real-world-asset और Treasury exposure project है। TradFi regulation, custody और permissioning risk को आकार देते हैं।
     hr: Ondo je projekt tokeniziranih real-world-asset instrumenata i izloženosti na Treasuries. TradFi regulacija, skrbništvo i permissioning oblikuju rizik.
     hu: Az Ondo tokenizált valós eszközökre és Treasury-kitettségre épülő projekt. A TradFi szabályozás, custody és permissioning alakítja a kockázatot.
@@ -4009,7 +4009,7 @@ underlyings:
 - ticker: TIA
   name:
     en: Celestia
-    ar: Celestia
+    ar: ‏Celestia
     bn: Celestia
     bs: Celestia
     cs: Celestia
@@ -4022,7 +4022,7 @@ underlyings:
     fil: Celestia
     fr: Celestia
     ga: Celestia
-    he: Celestia
+    he: ‏Celestia
     hi: Celestia
     hr: Celestia
     hu: Celestia
@@ -4062,7 +4062,7 @@ underlyings:
   description:
     en: Celestia is a modular data-availability network token. Rollup demand for blobspace matters more than generic L1 transaction counts.
     pl: Celestia to token modułowej sieci dostępności danych. Popyt rollupów na blobspace waży bardziej niż ogólne liczby transakcji L1.
-    ar: Celestia رمز شبكة معيارية لتوافر البيانات. طلب التجميعات على مساحة الكتل البيانية أهم من أعداد معاملات L1 العامة.
+    ar: ‏Celestia رمز شبكة معيارية لتوافر البيانات. طلب التجميعات على مساحة الكتل البيانية أهم من أعداد معاملات L1 العامة.
     bn: Celestia একটি modular data-availability network token। Blobspace-এর জন্য rollup demand generic L1 transaction counts-এর চেয়ে বেশি গুরুত্বপূর্ণ।
     bs: Celestia je token modularne mreže za dostupnost podataka. Potražnja rollupova za blobspace-om važnija je od općih brojeva L1 transakcija.
     cs: Celestia je token modulární sítě pro dostupnost dat. Poptávka rollupů po blobspace je důležitější než obecné počty transakcí L1.
@@ -4075,7 +4075,7 @@ underlyings:
     fil: Celestia ay modular data-availability network token. Mas mahalaga ang rollup demand para sa blobspace kaysa generic L1 transaction counts.
     fr: Celestia est un token de réseau modulaire de disponibilité des données. La demande des rollups pour le blobspace compte davantage que les simples volumes de transactions L1.
     ga: Is token líonra modúlach data-availability é Celestia. Tá éileamh rollup ar blobspace níos tábhachtaí ná comhaireamh ginearálta idirbhearta L1.
-    he: Celestia הוא טוקן של רשת מודולרית לזמינות נתונים. ביקוש rollups ל-blobspace חשוב יותר מספירת עסקאות L1 כללית.
+    he: ‏Celestia הוא טוקן של רשת מודולרית לזמינות נתונים. ביקוש rollups ל-blobspace חשוב יותר מספירת עסקאות L1 כללית.
     hi: Celestia modular data-availability network token है। Rollup demand for blobspace generic L1 transaction counts से ज्यादा मायने रखती है।
     hr: Celestia je token modularne mreže dostupnosti podataka. Potražnja rollupova za blobspaceom važnija je od općih brojeva transakcija na L1.
     hu: A Celestia moduláris data-availability hálózati token. A rollupok blobspace iránti kereslete fontosabb, mint az általános L1 tranzakciószámok.
@@ -4127,7 +4127,7 @@ underlyings:
 - ticker: INJ
   name:
     en: Injective
-    ar: Injective
+    ar: ‏Injective
     bn: Injective
     bs: Injective
     cs: Injective
@@ -4140,7 +4140,7 @@ underlyings:
     fil: Injective
     fr: Injective
     ga: Injective
-    he: Injective
+    he: ‏Injective
     hi: Injective
     hr: Injective
     hu: Injective
@@ -4180,7 +4180,7 @@ underlyings:
   description:
     en: Injective is a DeFi-focused app chain for exchange and derivatives use cases. Volume incentives can make activity look cyclical.
     pl: Injective to app-chain DeFi dla zastosowań giełdowych i pochodnych. Zachęty wolumenowe mogą sprawiać, że aktywność wygląda cyklicznie.
-    ar: Injective سلسلة تطبيقات تركز على DeFi لاستخدامات البورصات والمشتقات. قد تجعل حوافز الحجم النشاط يبدو دوريا.
+    ar: ‏Injective سلسلة تطبيقات تركز على DeFi لاستخدامات البورصات والمشتقات. قد تجعل حوافز الحجم النشاط يبدو دوريا.
     bn: Injective exchange ও derivatives use cases-এর জন্য DeFi-focused app chain। Volume incentives activity-কে cyclical দেখাতে পারে।
     bs: Injective je DeFi app chain za berzanske i derivatne slučajeve upotrebe. Poticaji za volumen mogu učiniti da aktivnost izgleda ciklično.
     cs: Injective je app chain zaměřený na DeFi pro burzovní a derivátové případy užití. Objemové pobídky mohou způsobit, že aktivita vypadá cyklicky.
@@ -4193,7 +4193,7 @@ underlyings:
     fil: Injective ay DeFi-focused app chain para sa exchange at derivatives use cases. Volume incentives ang maaaring magmukhang cyclical sa activity.
     fr: Injective est une app-chain orientée DeFi pour les cas d'usage d'exchange et de dérivés. Les incitations au volume peuvent donner à l'activité un profil cyclique.
     ga: Is app chain dírithe ar DeFi é Injective do chásanna úsáide exchange agus díorthach. Is féidir le dreasachtaí volume cuma thimthriallach a chur ar ghníomhaíocht.
-    he: Injective היא app-chain ממוקדת DeFi לשימושי בורסה ונגזרים. תמריצי נפח יכולים לגרום לפעילות להיראות מחזורית.
+    he: ‏Injective היא app-chain ממוקדת DeFi לשימושי בורסה ונגזרים. תמריצי נפח יכולים לגרום לפעילות להיראות מחזורית.
     hi: Injective exchange और derivatives use cases के लिए DeFi-focused app chain है। Volume incentives activity को cyclical दिखा सकते हैं।
     hr: Injective je DeFi app chain za burzovne i izvedeničke primjene. Poticaji volumena mogu učiniti da aktivnost izgleda ciklično.
     hu: Az Injective DeFi-fókuszú app chain tőzsdei és derivatív felhasználási esetekhez. A volumenösztönzők ciklikusnak mutathatják az aktivitást.
@@ -4245,7 +4245,7 @@ underlyings:
 - ticker: OP
   name:
     en: Optimism
-    ar: Optimism
+    ar: ‏Optimism
     bn: Optimism
     bs: Optimism
     cs: Optimism
@@ -4258,7 +4258,7 @@ underlyings:
     fil: Optimism
     fr: Optimism
     ga: Optimism
-    he: Optimism
+    he: ‏Optimism
     hi: Optimism
     hr: Optimism
     hu: Optimism
@@ -4298,7 +4298,7 @@ underlyings:
   description:
     en: Optimism is an Ethereum optimistic-rollup ecosystem token. L2 fees are lower, but withdrawals and finality still route back to Ethereum.
     pl: Optimism to token ekosystemu optimistic rollup Ethereum. Opłaty L2 są niższe, ale wypłaty i finalność nadal wracają do Ethereum.
-    ar: Optimism رمز نظام تجميع تفاؤلي على Ethereum. رسوم L2 أقل، لكن السحوبات والنهائية ما زالت تعود إلى Ethereum.
+    ar: ‏Optimism رمز نظام تجميع تفاؤلي على Ethereum. رسوم L2 أقل، لكن السحوبات والنهائية ما زالت تعود إلى Ethereum.
     bn: Optimism একটি Ethereum optimistic-rollup ecosystem token। L2 fees কম, কিন্তু withdrawals এবং finality এখনও Ethereum-এ ফিরে যায়।
     bs: Optimism je token Ethereum optimistic-rollup ekosistema. L2 naknade su niže, ali povlačenja i finalnost i dalje se vraćaju na Ethereum.
     cs: Optimism je token ekosystému Ethereum optimistic-rollupů. Poplatky L2 jsou nižší, ale výběry a finalita se stále vracejí na Ethereum.
@@ -4311,7 +4311,7 @@ underlyings:
     fil: Optimism ay Ethereum optimistic-rollup ecosystem token. Mas mababa ang L2 fees, pero withdrawals at finality ay bumabalik pa rin sa Ethereum.
     fr: Optimism est un token d'écosystème optimistic-rollup d'Ethereum. Les frais L2 sont plus bas, mais les retraits et la finalité repassent toujours par Ethereum.
     ga: Is token éiceachóras optimistic-rollup Ethereum é Optimism. Tá táillí L2 níos ísle, ach téann aistarraingtí agus finality ar ais trí Ethereum fós.
-    he: Optimism הוא טוקן אקוסיסטם של optimistic-rollup על Ethereum. עמלות L2 נמוכות יותר, אך משיכות וסופיות עדיין חוזרות דרך Ethereum.
+    he: ‏Optimism הוא טוקן אקוסיסטם של optimistic-rollup על Ethereum. עמלות L2 נמוכות יותר, אך משיכות וסופיות עדיין חוזרות דרך Ethereum.
     hi: Optimism Ethereum optimistic-rollup ecosystem token है। L2 fees कम हैं, लेकिन withdrawals और finality अब भी Ethereum पर लौटते हैं।
     hr: Optimism je token ekosustava Ethereum optimistic-rollup. L2 naknade su niže, ali povlačenja i konačnost i dalje se vraćaju na Ethereum.
     hu: Az Optimism Ethereum optimistic-rollup ökoszisztéma-token. Az L2 díjak alacsonyabbak, de a kiutalások és a véglegesség továbbra is Ethereumon keresztül futnak.
@@ -4363,7 +4363,7 @@ underlyings:
 - ticker: ARB
   name:
     en: Arbitrum
-    ar: Arbitrum
+    ar: ‏Arbitrum
     bn: Arbitrum
     bs: Arbitrum
     cs: Arbitrum
@@ -4376,7 +4376,7 @@ underlyings:
     fil: Arbitrum
     fr: Arbitrum
     ga: Arbitrum
-    he: Arbitrum
+    he: ‏Arbitrum
     hi: Arbitrum
     hr: Arbitrum
     hu: Arbitrum
@@ -4416,7 +4416,7 @@ underlyings:
   description:
     en: Arbitrum is an Ethereum optimistic-rollup ecosystem token. Lower fees come with L1 settlement lag, and ARB is governance rather than gas.
     pl: Arbitrum to token ekosystemu optimistic rollup Ethereum. Niższe opłaty mają lag rozliczenia L1, a ARB jest governance, nie gazem.
-    ar: Arbitrum رمز نظام تجميع تفاؤلي على Ethereum. الرسوم الأقل تأتي مع تأخر تسوية L1، وARB رمز حوكمة لا رمز لدفع رسوم التشغيل.
+    ar: ‏Arbitrum رمز نظام تجميع تفاؤلي على Ethereum. الرسوم الأقل تأتي مع تأخر تسوية L1، وARB رمز حوكمة لا رمز لدفع رسوم التشغيل.
     bn: Arbitrum একটি Ethereum optimistic-rollup ecosystem token। Lower fees-এর সঙ্গে L1 settlement lag থাকে, আর ARB gas নয়, governance।
     bs: Arbitrum je token Ethereum optimistic-rollup ekosistema. Niže naknade dolaze uz kašnjenje L1 poravnanja, a ARB je governance, ne gas.
     cs: Arbitrum je token ekosystému Ethereum optimistic-rollupů. Nižší poplatky jsou spojené se zpožděním vypořádání L1 a ARB je governance, ne gas.
@@ -4429,7 +4429,7 @@ underlyings:
     fil: Arbitrum ay Ethereum optimistic-rollup ecosystem token. May L1 settlement lag ang lower fees, at ang ARB ay governance, hindi gas.
     fr: Arbitrum est un token d'écosystème optimistic-rollup d'Ethereum. Les frais plus bas s'accompagnent d'un délai de règlement L1, et ARB relève de la gouvernance plutôt que du gas.
     ga: Is token éiceachóras optimistic-rollup Ethereum é Arbitrum. Tagann táillí níos ísle le moill socraíochta L1, agus is governance é ARB seachas gas.
-    he: Arbitrum הוא טוקן אקוסיסטם של optimistic-rollup על Ethereum. העמלות הנמוכות מגיעות עם השהיית סליקה ב-L1, ו-ARB הוא governance ולא gas.
+    he: ‏Arbitrum הוא טוקן אקוסיסטם של optimistic-rollup על Ethereum. העמלות הנמוכות מגיעות עם השהיית סליקה ב-L1, ו-ARB הוא governance ולא gas.
     hi: Arbitrum Ethereum optimistic-rollup ecosystem token है। Lower fees के साथ L1 settlement lag आता है, और ARB gas नहीं बल्कि governance है।
     hr: Arbitrum je token ekosustava Ethereum optimistic-rollup. Niže naknade dolaze s kašnjenjem namire na L1, a ARB je governance, ne gas.
     hu: Az Arbitrum Ethereum optimistic-rollup ökoszisztéma-token. Az alacsonyabb díjak L1 elszámolási késéssel járnak, és az ARB governance token, nem gas.
@@ -4481,7 +4481,7 @@ underlyings:
 - ticker: SUI
   name:
     en: Sui
-    ar: Sui
+    ar: ‏Sui
     bn: Sui
     bs: Sui
     cs: Sui
@@ -4494,7 +4494,7 @@ underlyings:
     fil: Sui
     fr: Sui
     ga: Sui
-    he: Sui
+    he: ‏Sui
     hi: Sui
     hr: Sui
     hu: Sui
@@ -4534,7 +4534,7 @@ underlyings:
   description:
     en: Sui is a Move-based smart-contract L1. High-throughput claims need to be judged against live app demand and token unlocks.
     pl: Sui to L1 smart kontraktów oparty na Move. Deklaracje wysokiej przepustowości trzeba oceniać wobec popytu aplikacji live i unlocków tokena.
-    ar: Sui هو L1 للعقود الذكية قائم على Move. يجب الحكم على مزاعم الإنتاجية العالية مقابل طلب التطبيقات الحية وفك قيود الرموز.
+    ar: ‏Sui هو L1 للعقود الذكية قائم على Move. يجب الحكم على مزاعم الإنتاجية العالية مقابل طلب التطبيقات الحية وفك قيود الرموز.
     bn: Sui একটি Move-based smart-contract L1। High-throughput claims live app demand এবং token unlocks-এর বিপরীতে বিচার করা দরকার।
     bs: Sui je smart-contract L1 zasnovan na Move-u. Tvrdnje o visokoj propusnosti treba ocjenjivati prema živoj potražnji aplikacija i token unlockovima.
     cs: Sui je smart-contract L1 založený na Move. Tvrzení o vysoké propustnosti je nutné posuzovat proti živé poptávce po aplikacích a token unlockům.
@@ -4547,7 +4547,7 @@ underlyings:
     fil: Sui ay Move-based smart-contract L1. Kailangang sukatin ang high-throughput claims laban sa live app demand at token unlocks.
     fr: Sui est une L1 de smart contracts basée sur Move. Les promesses de haut débit doivent être jugées face à la demande réelle des applications et aux unlocks du token.
     ga: Is L1 smart-contract bunaithe ar Move é Sui. Ní mór éilimh ard-tréchuir a mheas i gcoinne éileamh appanna live agus token unlocks.
-    he: Sui היא L1 לחוזים חכמים המבוססת על Move. טענות לתפוקה גבוהה צריך לשפוט מול ביקוש חי לאפליקציות ושחרורי טוקנים.
+    he: ‏Sui היא L1 לחוזים חכמים המבוססת על Move. טענות לתפוקה גבוהה צריך לשפוט מול ביקוש חי לאפליקציות ושחרורי טוקנים.
     hi: Sui Move-based smart-contract L1 है। High-throughput claims को live app demand और token unlocks के against देखना चाहिए।
     hr: Sui je smart-contract L1 temeljen na Moveu. Tvrdnje o visokoj propusnosti treba ocjenjivati prema živoj potražnji aplikacija i unlockovima tokena.
     hu: A Sui Move-alapú smart-contract L1. A nagy áteresztőképességi állításokat az élő alkalmazáskereslethez és a token unlockokhoz kell mérni.
@@ -4607,7 +4607,7 @@ underlyings:
 - ticker: XMR
   name:
     en: Monero
-    ar: Monero
+    ar: ‏Monero
     bn: Monero
     bs: Monero
     cs: Monero
@@ -4620,7 +4620,7 @@ underlyings:
     fil: Monero
     fr: Monero
     ga: Monero
-    he: Monero
+    he: ‏Monero
     hi: Monero
     hr: Monero
     hu: Monero
@@ -4660,7 +4660,7 @@ underlyings:
   description:
     en: Monero is a privacy coin with default-obscured transactions. Regulatory pressure has led to delistings, so venue liquidity is a key risk.
     pl: Monero to moneta prywatności z domyślnie ukrytymi transakcjami. Presja regulacyjna doprowadziła do delistingów, więc płynność venue jest kluczowym ryzykiem.
-    ar: Monero عملة خصوصية بمعاملات مخفية افتراضيا. أدى الضغط التنظيمي إلى إلغاء إدراجات، لذلك تعد سيولة المنصات خطرا أساسيا.
+    ar: ‏Monero عملة خصوصية بمعاملات مخفية افتراضيا. أدى الضغط التنظيمي إلى إلغاء إدراجات، لذلك تعد سيولة المنصات خطرا أساسيا.
     bn: Monero default-obscured transactionsসহ privacy coin। Regulatory pressure delistings ঘটিয়েছে, তাই venue liquidity key risk।
     bs: Monero je privacy coin s transakcijama koje su zadano prikrivene. Regulatorni pritisak doveo je do delistinga, pa je venue likvidnost ključni rizik.
     cs: Monero je privacy coin s ve výchozím stavu zastřenými transakcemi. Regulatorní tlak vedl k delistingům, takže likvidita obchodních míst je klíčové riziko.
@@ -4673,7 +4673,7 @@ underlyings:
     fil: Monero ay privacy coin na default-obscured ang transactions. Nagdulot ang regulatory pressure ng delistings, kaya key risk ang venue liquidity.
     fr: Monero est une privacy coin avec transactions obscurcies par défaut. La pression réglementaire a entraîné des delistings, ce qui fait de la liquidité des plateformes un risque clé.
     ga: Is privacy coin é Monero le hidirbhearta doiléirithe de réir réamhshocraithe. Tá delistings tagtha de bharr brú rialála, mar sin is príomhriosca í leachtacht venue.
-    he: Monero הוא מטבע פרטיות עם עסקאות מוסתרות כברירת מחדל. לחץ רגולטורי הוביל להסרות מבורסות, ולכן נזילות זירות היא סיכון מרכזי.
+    he: ‏Monero הוא מטבע פרטיות עם עסקאות מוסתרות כברירת מחדל. לחץ רגולטורי הוביל להסרות מבורסות, ולכן נזילות זירות היא סיכון מרכזי.
     hi: Monero default-obscured transactions वाला privacy coin है। Regulatory pressure से delistings हुए हैं, इसलिए venue liquidity key risk है।
     hr: Monero je privacy coin sa zadano prikrivenim transakcijama. Regulatorni pritisak doveo je do delistiranja, pa je likvidnost mjesta trgovanja ključni rizik.
     hu: A Monero adatvédelmi coin, alapértelmezetten elrejtett tranzakciókkal. A szabályozói nyomás delistingekhez vezetett, ezért a venue-likviditás kulcskockázat.
@@ -4734,7 +4734,7 @@ underlyings:
 - ticker: POL
   name:
     en: Polygon
-    ar: Polygon
+    ar: ‏Polygon
     bn: Polygon
     bs: Polygon
     cs: Polygon
@@ -4747,7 +4747,7 @@ underlyings:
     fil: Polygon
     fr: Polygon
     ga: Polygon
-    he: Polygon
+    he: ‏Polygon
     hi: Polygon
     hr: Polygon
     hu: Polygon
@@ -4787,7 +4787,7 @@ underlyings:
   description:
     en: Polygon ecosystem token replacing MATIC. Migration, validator incentives, and app-chain adoption drive value capture risk.
     pl: POL to token ekosystemu Polygon zastępujący MATIC. Migracja, zachęty walidatorów i adopcja app-chainów napędzają ryzyko przechwytywania wartości.
-    ar: POL رمز نظام Polygon البيئي الذي يحل محل MATIC. الهجرة وحوافز المدققين وتبني سلاسل التطبيقات تقود خطر التقاط القيمة.
+    ar: ‏POL رمز نظام Polygon البيئي الذي يحل محل MATIC. الهجرة وحوافز المدققين وتبني سلاسل التطبيقات تقود خطر التقاط القيمة.
     bn: POL হলো MATIC-কে replace করা Polygon ecosystem token। Migration, validator incentives এবং app-chain adoption value capture risk চালায়।
     bs: POL je token Polygon ekosistema koji zamjenjuje MATIC. Migracija, poticaji validatora i usvajanje app-chainova pokreću rizik hvatanja vrijednosti.
     cs: POL je ekosystémový token Polygon nahrazující MATIC. Migrace, pobídky validátorů a adopce app-chainů řídí riziko zachycení hodnoty.
@@ -4800,7 +4800,7 @@ underlyings:
     fil: Polygon ecosystem token ito na pumapalit sa MATIC. Migration, validator incentives, at app-chain adoption ang nagtutulak ng value capture risk.
     fr: POL est le token de l'écosystème Polygon qui remplace MATIC. La migration, les incitations des validateurs et l'adoption des app-chains portent le risque de capture de valeur.
     ga: Is token éiceachórais Polygon é POL a thagann in áit MATIC. Tiomáineann migration, dreasachtaí validators agus glacadh app-chain riosca value capture.
-    he: POL הוא טוקן אקוסיסטם Polygon שמחליף את MATIC. הגירה, תמריצי מאמתים ואימוץ app-chain מניעים את סיכון לכידת הערך.
+    he: ‏POL הוא טוקן אקוסיסטם Polygon שמחליף את MATIC. הגירה, תמריצי מאמתים ואימוץ app-chain מניעים את סיכון לכידת הערך.
     hi: POL, MATIC को replace करने वाला Polygon ecosystem token है। Migration, validator incentives और app-chain adoption value capture risk चलाते हैं।
     hr: POL je token ekosustava Polygon koji zamjenjuje MATIC. Migracija, poticaji validatora i prihvaćanje app-chainova pokreću rizik hvatanja vrijednosti.
     hu: A POL a MATIC-ot váltó Polygon ökoszisztéma-token. A migráció, a validátori ösztönzők és az app-chain adopció hajtják az értékragadási kockázatot.
@@ -4852,7 +4852,7 @@ underlyings:
 - ticker: HYPE
   name:
     en: Hyperliquid
-    ar: Hyperliquid
+    ar: ‏Hyperliquid
     bn: Hyperliquid
     bs: Hyperliquid
     cs: Hyperliquid
@@ -4865,7 +4865,7 @@ underlyings:
     fil: Hyperliquid
     fr: Hyperliquid
     ga: Hyperliquid
-    he: Hyperliquid
+    he: ‏Hyperliquid
     hi: Hyperliquid
     hr: Hyperliquid
     hu: Hyperliquid
@@ -4905,7 +4905,7 @@ underlyings:
   description:
     en: Hyperliquid token tied to its perpetual DEX and L1 ecosystem. Exchange volume can dominate sentiment more than generic L1 metrics.
     pl: HYPE to token powiązany z perpetual DEX Hyperliquid i ekosystemem L1. Wolumen giełdy może dominować sentyment bardziej niż ogólne metryki L1.
-    ar: HYPE رمز مرتبط بـ DEX للعقود الدائمة ونظام L1 في Hyperliquid. قد يهيمن حجم التداول في المنصة على المعنويات أكثر من مقاييس L1 العامة.
+    ar: ‏HYPE رمز مرتبط بـ DEX للعقود الدائمة ونظام L1 في Hyperliquid. قد يهيمن حجم التداول في المنصة على المعنويات أكثر من مقاييس L1 العامة.
     bn: HYPE Hyperliquid-এর perpetual DEX এবং L1 ecosystem-এর সঙ্গে যুক্ত token। Generic L1 metrics-এর চেয়ে exchange volume sentiment বেশি dominate করতে পারে।
     bs: Hyperliquid token vezan je za njegov perpetual DEX i L1 ekosistem. Berzanski volumen može dominirati sentimentom više nego generičke L1 metrike.
     cs: HYPE je token spojený s perpetual DEX Hyperliquid a jeho ekosystémem L1. Objem burzy může dominovat sentimentu víc než obecné metriky L1.
@@ -4918,7 +4918,7 @@ underlyings:
     fil: Hyperliquid token ito na nakakabit sa perpetual DEX at L1 ecosystem nito. Exchange volume ang maaaring mangibabaw sa sentiment kaysa generic L1 metrics.
     fr: HYPE est le token lié au perpetual DEX d'Hyperliquid et à son écosystème L1. Le volume d'exchange peut dominer le sentiment plus que les métriques L1 génériques.
     ga: Is token é HYPE atá ceangailte le perpetual DEX Hyperliquid agus lena éiceachóras L1. Is féidir le volume exchange meon a shárú níos mó ná metrics ghinearálta L1.
-    he: HYPE הוא טוקן הקשור ל-perpetual DEX של Hyperliquid ולאקוסיסטם L1 שלו. נפח הבורסה יכול לשלוט בסנטימנט יותר ממדדי L1 כלליים.
+    he: ‏HYPE הוא טוקן הקשור ל-perpetual DEX של Hyperliquid ולאקוסיסטם L1 שלו. נפח הבורסה יכול לשלוט בסנטימנט יותר ממדדי L1 כלליים.
     hi: HYPE Hyperliquid के perpetual DEX और L1 ecosystem से जुड़ा token है। Generic L1 metrics से ज्यादा exchange volume sentiment पर हावी हो सकता है।
     hr: HYPE je token vezan uz Hyperliquidov perpetual DEX i L1 ekosustav. Burzovni volumen može dominirati sentimentom više od općih L1 metrika.
     hu: A Hyperliquid token a perpetual DEX-hez és az L1 ökoszisztémához kötődik. A tőzsdei volumen jobban dominálhatja a hangulatot, mint az általános L1 metrikák.
@@ -4970,7 +4970,7 @@ underlyings:
 - ticker: PEPE
   name:
     en: Pepe
-    ar: Pepe
+    ar: ‏Pepe
     bn: Pepe
     bs: Pepe
     cs: Pepe
@@ -4983,7 +4983,7 @@ underlyings:
     fil: Pepe
     fr: Pepe
     ga: Pepe
-    he: Pepe
+    he: ‏Pepe
     hi: Pepe
     hr: Pepe
     hu: Pepe
@@ -5023,7 +5023,7 @@ underlyings:
   description:
     en: Pepe is a meme coin with no core protocol cash flow. Liquidity and social attention drive price more than utility.
     pl: Pepe to memecoin bez bazowego cash flow protokołu. Płynność i uwaga społeczności napędzają cenę bardziej niż użyteczność.
-    ar: Pepe عملة ميم بلا تدفق نقدي بروتوكولي أساسي. السيولة والاهتمام الاجتماعي يحركان السعر أكثر من المنفعة.
+    ar: ‏Pepe عملة ميم بلا تدفق نقدي بروتوكولي أساسي. السيولة والاهتمام الاجتماعي يحركان السعر أكثر من المنفعة.
     bn: Pepe core protocol cash flow ছাড়া একটি meme coin। Utility-এর চেয়ে liquidity এবং social attention price বেশি চালায়।
     bs: Pepe je meme coin bez osnovnog protokolskog novčanog toka. Likvidnost i društvena pažnja pokreću cijenu više nego korisnost.
     cs: Pepe je meme coin bez základního protokolového cash flow. Likvidita a sociální pozornost hýbou cenou víc než užitečnost.
@@ -5036,7 +5036,7 @@ underlyings:
     fil: Pepe ay meme coin na walang core protocol cash flow. Liquidity at social attention ang mas nagtutulak ng price kaysa utility.
     fr: Pepe est une meme coin sans cash flow de protocole sous-jacent. La liquidité et l'attention sociale tirent le prix davantage que l'utilité.
     ga: Is meme coin é Pepe gan cash flow lárnach prótacail. Tiomáineann leachtacht agus aird shóisialta praghas níos mó ná fóntas.
-    he: Pepe הוא מטבע meme ללא תזרים מזומנים ליבה של פרוטוקול. נזילות ותשומת לב חברתית מניעות מחיר יותר מתועלת.
+    he: ‏Pepe הוא מטבע meme ללא תזרים מזומנים ליבה של פרוטוקול. נזילות ותשומת לב חברתית מניעות מחיר יותר מתועלת.
     hi: Pepe core protocol cash flow के बिना meme coin है। Utility से ज्यादा liquidity और social attention price चलाते हैं।
     hr: Pepe je meme coin bez osnovnog cash flowa protokola. Likvidnost i društvena pozornost pokreću cijenu više od korisnosti.
     hu: A Pepe meme coin alapvető protokollszintű cash flow nélkül. Az árfolyamot inkább a likviditás és a közösségi figyelem hajtja, mint a hasznosság.
@@ -5097,7 +5097,7 @@ underlyings:
 - ticker: SPX
   name:
     en: S&P 500
-    ar: S&P 500
+    ar: ‏S&P 500
     bn: S&P 500
     bs: S&P 500
     cs: S&P 500
@@ -5110,7 +5110,7 @@ underlyings:
     fil: S&P 500
     fr: S&P 500
     ga: S&P 500
-    he: S&P 500
+    he: ‏S&P 500
     hi: S&P 500
     hr: S&P 500
     hu: S&P 500
@@ -5224,7 +5224,7 @@ underlyings:
 - ticker: NDX
   name:
     en: Nasdaq 100
-    ar: Nasdaq 100
+    ar: ‏Nasdaq 100
     bn: Nasdaq 100
     bs: Nasdaq 100
     cs: Nasdaq 100
@@ -5237,7 +5237,7 @@ underlyings:
     fil: Nasdaq 100
     fr: Nasdaq 100
     ga: Nasdaq 100
-    he: Nasdaq 100
+    he: ‏Nasdaq 100
     hi: Nasdaq 100
     hr: Nasdaq 100
     hu: Nasdaq 100
@@ -5360,7 +5360,7 @@ underlyings:
     fil: Dow Jones Industrial Average
     fr: Moyenne industrielle Dow Jones
     ga: Dow Jones Industrial Average
-    he: Dow Jones Industrial Average
+    he: ‏Dow Jones Industrial Average
     hi: Dow Jones Industrial Average
     hr: Dow Jones Industrial Average
     hu: Dow Jones Industrial Average
@@ -5470,7 +5470,7 @@ underlyings:
 - ticker: RUT
   name:
     en: Russell 2000
-    ar: Russell 2000
+    ar: ‏Russell 2000
     bn: Russell 2000
     bs: Russell 2000
     cs: Russell 2000
@@ -5483,7 +5483,7 @@ underlyings:
     fil: Russell 2000
     fr: Russell 2000
     ga: Russell 2000
-    he: Russell 2000
+    he: ‏Russell 2000
     hi: Russell 2000
     hr: Russell 2000
     hu: Russell 2000
@@ -13349,7 +13349,7 @@ underlyings:
 - ticker: ALEO
   name:
     en: ALEO
-    ar: ALEO
+    ar: ‏ALEO
     bn: ALEO
     bs: ALEO
     cs: ALEO
@@ -13362,7 +13362,7 @@ underlyings:
     fil: ALEO
     fr: ALEO
     ga: ALEO
-    he: ALEO
+    he: ‏ALEO
     hi: ALEO
     hr: ALEO
     hu: ALEO
@@ -13402,7 +13402,7 @@ underlyings:
   description:
     en: Aleo is a privacy-focused zero-knowledge L1. Proving costs, private app adoption, and compliance risk are the main risks.
     pl: Aleo to nastawiony na prywatność L1 zero-knowledge. Koszty dowodów, adopcja prywatnych aplikacji i ryzyko compliance to główne ryzyka.
-    ar: Aleo هو L1 يركز على الخصوصية ويستخدم المعرفة الصفرية. تكاليف الإثبات وتبني التطبيقات الخاصة وخطر الامتثال هي المخاطر الرئيسية.
+    ar: ‏Aleo هو L1 يركز على الخصوصية ويستخدم المعرفة الصفرية. تكاليف الإثبات وتبني التطبيقات الخاصة وخطر الامتثال هي المخاطر الرئيسية.
     bn: Aleo privacy-focused zero-knowledge L1। Proving costs, private app adoption এবং compliance risk প্রধান ঝুঁকি।
     bs: Aleo je zero-knowledge L1 fokusiran na privatnost. Troškovi dokazivanja, usvajanje privatnih aplikacija i compliance rizik su glavni rizici.
     cs: Aleo je zero-knowledge L1 zaměřený na soukromí. Hlavními riziky jsou náklady na proving, adopce soukromých aplikací a compliance riziko.
@@ -13415,7 +13415,7 @@ underlyings:
     fil: Aleo ay privacy-focused zero-knowledge L1. Proving costs, private app adoption, at compliance risk ang pangunahing risks.
     fr: Aleo est une L1 zero-knowledge axée sur la confidentialité. Les coûts de preuve, l'adoption des applications privées et le risque de conformité sont les principaux risques.
     ga: Is L1 zero-knowledge dírithe ar phríobháideachas é Aleo. Is iad costais proving, glacadh appanna príobháideacha agus riosca compliance na príomhrioscaí.
-    he: Aleo היא L1 ממוקדת פרטיות המבוססת על zero-knowledge. עלויות הוכחה, אימוץ אפליקציות פרטיות וסיכון compliance הם הסיכונים המרכזיים.
+    he: ‏Aleo היא L1 ממוקדת פרטיות המבוססת על zero-knowledge. עלויות הוכחה, אימוץ אפליקציות פרטיות וסיכון compliance הם הסיכונים המרכזיים.
     hi: Aleo privacy-focused zero-knowledge L1 है। Proving costs, private app adoption और compliance risk मुख्य risks हैं।
     hr: Aleo je zero-knowledge L1 usmjeren na privatnost. Troškovi dokazivanja, prihvaćanje privatnih aplikacija i compliance rizik glavne su opasnosti.
     hu: Az Aleo adatvédelmi fókuszú zero-knowledge L1. A proving költségek, a privát alkalmazások adopciója és a compliance-kockázat a fő kockázatok.
@@ -13532,7 +13532,7 @@ underlyings:
 - ticker: FLUX
   name:
     en: FLUX
-    ar: FLUX
+    ar: ‏FLUX
     bn: FLUX
     bs: FLUX
     cs: FLUX
@@ -13545,7 +13545,7 @@ underlyings:
     fil: FLUX
     fr: FLUX
     ga: FLUX
-    he: FLUX
+    he: ‏FLUX
     hi: FLUX
     hr: FLUX
     hu: FLUX
@@ -13585,7 +13585,7 @@ underlyings:
   description:
     en: Flux is a decentralized cloud and infrastructure network token. Node economics and real compute demand matter more than broad AI sentiment.
     pl: Flux to token zdecentralizowanej chmury i sieci infrastruktury. Ekonomia node'ów i realny popyt na compute ważą bardziej niż szeroki sentyment AI.
-    ar: Flux رمز شبكة سحابية وبنية تحتية لامركزية. اقتصاديات العقد والطلب الحقيقي على الحوسبة أهم من معنويات AI العامة.
+    ar: ‏Flux رمز شبكة سحابية وبنية تحتية لامركزية. اقتصاديات العقد والطلب الحقيقي على الحوسبة أهم من معنويات AI العامة.
     bn: Flux একটি decentralized cloud এবং infrastructure network token। Node economics ও real compute demand broad AI sentiment-এর চেয়ে বেশি গুরুত্বপূর্ণ।
     bs: Flux je token decentralizirane cloud i infrastrukturne mreže. Ekonomika nodeova i stvarna potražnja za compute-om važniji su od širokog AI sentimenta.
     cs: Flux je token decentralizované cloudové a infrastrukturní sítě. Ekonomika node'ů a skutečná poptávka po výpočetní kapacitě jsou důležitější než široký AI sentiment.
@@ -13598,7 +13598,7 @@ underlyings:
     fil: Flux ay decentralized cloud at infrastructure network token. Mas mahalaga ang node economics at real compute demand kaysa broad AI sentiment.
     fr: Flux est un token de réseau décentralisé de cloud et d'infrastructure. L'économie des nodes et la demande réelle de compute comptent davantage que le sentiment AI général.
     ga: Is token líonra cloud agus bonneagair díláraithe é Flux. Tá eacnamaíocht nodes agus éileamh fíor compute níos tábhachtaí ná meon leathan AI.
-    he: Flux הוא טוקן של רשת ענן ותשתית מבוזרת. כלכלת node וביקוש אמיתי למחשוב חשובים יותר מסנטימנט AI רחב.
+    he: ‏Flux הוא טוקן של רשת ענן ותשתית מבוזרת. כלכלת node וביקוש אמיתי למחשוב חשובים יותר מסנטימנט AI רחב.
     hi: Flux decentralized cloud और infrastructure network token है। Node economics और real compute demand broad AI sentiment से ज्यादा मायने रखते हैं।
     hr: Flux je token decentralizirane cloud i infrastrukturne mreže. Ekonomika nodeova i stvarna potražnja za computeom važniji su od širokog AI sentimenta.
     hu: A Flux decentralizált cloud- és infrastruktúrahálózati token. A node-gazdaságtan és a valós compute-kereslet fontosabb, mint a széles AI-hangulat.
@@ -13647,7 +13647,7 @@ underlyings:
 - ticker: ICX
   name:
     en: ICX
-    ar: ICX
+    ar: ‏ICX
     bn: ICX
     bs: ICX
     cs: ICX
@@ -13660,7 +13660,7 @@ underlyings:
     fil: ICX
     fr: ICX
     ga: ICX
-    he: ICX
+    he: ‏ICX
     hi: ICX
     hr: ICX
     hu: ICX
@@ -13700,7 +13700,7 @@ underlyings:
   description:
     en: ICON is a smart-contract and interoperability network. Cross-chain adoption and Korean-market liquidity can drive sentiment.
     pl: ICON to sieć smart kontraktów i interoperacyjności. Adopcja cross-chain i płynność rynku koreańskiego mogą napędzać sentyment.
-    ar: ICON شبكة عقود ذكية وتشغيل بيني. قد يقود التبني العابر للسلاسل وسيولة السوق الكورية المعنويات.
+    ar: ‏ICON شبكة عقود ذكية وتشغيل بيني. قد يقود التبني العابر للسلاسل وسيولة السوق الكورية المعنويات.
     bn: ICON একটি smart-contract এবং interoperability network। Cross-chain adoption এবং Korean-market liquidity sentiment চালাতে পারে।
     bs: ICON je smart-contract i interoperabilna mreža. Cross-chain usvajanje i likvidnost korejskog tržišta mogu pokretati sentiment.
     cs: ICON je síť pro smart kontrakty a interoperabilitu. Adopce cross-chain a likvidita korejského trhu mohou řídit sentiment.
@@ -13713,7 +13713,7 @@ underlyings:
     fil: ICON ay smart-contract at interoperability network. Cross-chain adoption at Korean-market liquidity ang maaaring magtulak ng sentiment.
     fr: ICON est un réseau de smart contracts et d'interopérabilité. L'adoption cross-chain et la liquidité du marché coréen peuvent alimenter le sentiment.
     ga: Is líonra smart-contract agus idir-inoibritheachta é ICON. Is féidir le glacadh cross-chain agus leachtacht mhargadh na Cóiré meon a thiomáint.
-    he: ICON היא רשת חוזים חכמים ואינטרופרביליות. אימוץ cross-chain ונזילות בשוק הקוריאני יכולים להניע סנטימנט.
+    he: ‏ICON היא רשת חוזים חכמים ואינטרופרביליות. אימוץ cross-chain ונזילות בשוק הקוריאני יכולים להניע סנטימנט.
     hi: ICON smart-contract और interoperability network है। Cross-chain adoption और Korean-market liquidity sentiment चला सकते हैं।
     hr: ICON je smart-contract i interoperabilna mreža. Cross-chain prihvaćanje i likvidnost korejskog tržišta mogu pokretati sentiment.
     hu: Az ICON smart-contract és interoperabilitási hálózat. A cross-chain adopció és a koreai piaci likviditás hajthatja a hangulatot.
@@ -13765,7 +13765,7 @@ underlyings:
 - ticker: KAVA
   name:
     en: KAVA
-    ar: KAVA
+    ar: ‏KAVA
     bn: KAVA
     bs: KAVA
     cs: KAVA
@@ -13778,7 +13778,7 @@ underlyings:
     fil: KAVA
     fr: KAVA
     ga: KAVA
-    he: KAVA
+    he: ‏KAVA
     hi: KAVA
     hr: KAVA
     hu: KAVA
@@ -13818,7 +13818,7 @@ underlyings:
   description:
     en: Kava is a Cosmos/EVM DeFi chain token. App liquidity, bridge assumptions, and incentive emissions are the key risks.
     pl: Kava to token łańcucha DeFi Cosmos/EVM. Płynność aplikacji, założenia bridge'y i emisje zachęt są kluczowymi ryzykami.
-    ar: Kava رمز سلسلة DeFi تجمع Cosmos وEVM. سيولة التطبيقات وافتراضات الجسور وإصدارات الحوافز هي المخاطر الأساسية.
+    ar: ‏Kava رمز سلسلة DeFi تجمع Cosmos وEVM. سيولة التطبيقات وافتراضات الجسور وإصدارات الحوافز هي المخاطر الأساسية.
     bn: Kava একটি Cosmos/EVM DeFi chain token। App liquidity, bridge assumptions এবং incentive emissions key risks।
     bs: Kava je Cosmos/EVM DeFi chain token. Likvidnost aplikacija, bridge pretpostavke i emisije poticaja ključni su rizici.
     cs: Kava je token DeFi chainu Cosmos/EVM. Klíčovými riziky jsou likvidita aplikací, předpoklady bridge'ů a pobídkové emise.
@@ -13831,7 +13831,7 @@ underlyings:
     fil: Kava ay Cosmos/EVM DeFi chain token. App liquidity, bridge assumptions, at incentive emissions ang key risks.
     fr: Kava est un token de chaîne DeFi Cosmos/EVM. La liquidité des applications, les hypothèses de bridges et les émissions d'incitations sont les risques clés.
     ga: Is token chain DeFi Cosmos/EVM é Kava. Is iad leachtacht appanna, toimhdí bridge agus eisiúintí dreasachta na príomhrioscaí.
-    he: Kava הוא טוקן של שרשרת DeFi מסוג Cosmos/EVM. נזילות אפליקציות, הנחות גשרים והנפקות תמריצים הם הסיכונים המרכזיים.
+    he: ‏Kava הוא טוקן של שרשרת DeFi מסוג Cosmos/EVM. נזילות אפליקציות, הנחות גשרים והנפקות תמריצים הם הסיכונים המרכזיים.
     hi: Kava Cosmos/EVM DeFi chain token है। App liquidity, bridge assumptions और incentive emissions key risks हैं।
     hr: Kava je token Cosmos/EVM DeFi chaina. Likvidnost aplikacija, pretpostavke bridgeova i emisije poticaja ključni su rizici.
     hu: A Kava Cosmos/EVM DeFi-lánc token. Az alkalmazáslikviditás, a bridge-feltételezések és az ösztönző kibocsátások a fő kockázatok.
@@ -13883,7 +13883,7 @@ underlyings:
 - ticker: KNC
   name:
     en: KNC
-    ar: KNC
+    ar: ‏KNC
     bn: KNC
     bs: KNC
     cs: KNC
@@ -13896,7 +13896,7 @@ underlyings:
     fil: KNC
     fr: KNC
     ga: KNC
-    he: KNC
+    he: ‏KNC
     hi: KNC
     hr: KNC
     hu: KNC
@@ -13936,7 +13936,7 @@ underlyings:
   description:
     en: KNC is the Kyber Network token for DEX liquidity and aggregation. Protocol volume and upgrade history matter for token demand.
     pl: KNC to token Kyber Network dla płynności DEX i agregacji. Wolumen protokołu i historia upgrade'ów mają znaczenie dla popytu na token.
-    ar: KNC رمز Kyber Network لسيولة DEX والتجميع. حجم البروتوكول وتاريخ الترقيات مهمان لطلب الرمز.
+    ar: ‏KNC رمز Kyber Network لسيولة DEX والتجميع. حجم البروتوكول وتاريخ الترقيات مهمان لطلب الرمز.
     bn: KNC হলো DEX liquidity এবং aggregation-এর জন্য Kyber Network token। Protocol volume এবং upgrade history token demand-এর জন্য গুরুত্বপূর্ণ।
     bs: KNC je Kyber Network token za DEX likvidnost i agregaciju. Volumen protokola i historija nadogradnji važni su za potražnju za tokenom.
     cs: KNC je token Kyber Network pro likviditu DEX a agregaci. Objem protokolu a historie upgradů jsou důležité pro poptávku po tokenu.
@@ -13949,7 +13949,7 @@ underlyings:
     fil: KNC ay Kyber Network token para sa DEX liquidity at aggregation. Protocol volume at upgrade history ang mahalaga para sa token demand.
     fr: KNC est le token de Kyber Network pour la liquidité DEX et l'agrégation. Le volume du protocole et l'historique des upgrades comptent pour la demande du token.
     ga: Is é KNC token Kyber Network le haghaidh leachtacht agus aggregation DEX. Tá volume prótacail agus stair upgrades tábhachtach d'éileamh token.
-    he: KNC הוא טוקן Kyber Network לנזילות DEX ולאגרגציה. נפח הפרוטוקול והיסטוריית שדרוגים חשובים לביקוש לטוקן.
+    he: ‏KNC הוא טוקן Kyber Network לנזילות DEX ולאגרגציה. נפח הפרוטוקול והיסטוריית שדרוגים חשובים לביקוש לטוקן.
     hi: KNC DEX liquidity और aggregation के लिए Kyber Network token है। Protocol volume और upgrade history token demand के लिए मायने रखते हैं।
     hr: KNC je token Kyber Network za DEX likvidnost i agregaciju. Volumen protokola i povijest nadogradnji važni su za potražnju za tokenom.
     hu: A KNC a Kyber Network tokenje DEX-likviditáshoz és aggregációhoz. A protokollvolumen és a frissítési múlt fontos a tokenkereslet szempontjából.
@@ -14008,7 +14008,7 @@ underlyings:
 - ticker: LUNA
   name:
     en: LUNA
-    ar: LUNA
+    ar: ‏LUNA
     bn: LUNA
     bs: LUNA
     cs: LUNA
@@ -14021,7 +14021,7 @@ underlyings:
     fil: LUNA
     fr: LUNA
     ga: LUNA
-    he: LUNA
+    he: ‏LUNA
     hi: LUNA
     hr: LUNA
     hu: LUNA
@@ -14061,7 +14061,7 @@ underlyings:
   description:
     en: LUNA is Terra 2.0, the post-collapse Terra chain token. It is distinct from original LUNC/UST history, but confidence damage remains central.
     pl: LUNA to Terra 2.0, token łańcucha Terra po upadku. Jest odrębna od historii pierwotnych LUNC/UST, ale szkoda zaufania pozostaje centralna.
-    ar: LUNA هو رمز Terra 2.0، سلسلة Terra التي تلت الانهيار. هو مميز عن تاريخ LUNC/UST الأصلي، لكن ضرر الثقة يبقى محوريا.
+    ar: ‏LUNA هو رمز Terra 2.0، سلسلة Terra التي تلت الانهيار. هو مميز عن تاريخ LUNC/UST الأصلي، لكن ضرر الثقة يبقى محوريا.
     bn: LUNA হলো Terra 2.0, post-collapse Terra chain token। এটি original LUNC/UST history থেকে আলাদা, তবে confidence damage এখনও central।
     bs: LUNA je Terra 2.0, token Terra lanca nakon kolapsa. Razlikuje se od originalne LUNC/UST historije, ali šteta po povjerenje ostaje centralna.
     cs: LUNA je Terra 2.0, token chainu Terra po kolapsu. Je odlišná od původní historie LUNC/UST, ale poškození důvěry zůstává ústřední.
@@ -14074,7 +14074,7 @@ underlyings:
     fil: LUNA ay Terra 2.0, ang post-collapse Terra chain token. Iba ito sa original LUNC/UST history, pero sentral pa rin ang confidence damage.
     fr: LUNA est Terra 2.0, le token de la chaîne Terra post-effondrement. Il est distinct de l'historique original LUNC/UST, mais l'atteinte à la confiance reste centrale.
     ga: Is é LUNA Terra 2.0, token chain Terra tar éis an collapse. Tá sé éagsúil ó stair bhunaidh LUNC/UST, ach tá damáiste muiníne lárnach fós.
-    he: LUNA היא Terra 2.0, טוקן שרשרת Terra שלאחר הקריסה. היא נבדלת מההיסטוריה המקורית של LUNC/UST, אך נזק האמון נשאר מרכזי.
+    he: ‏LUNA היא Terra 2.0, טוקן שרשרת Terra שלאחר הקריסה. היא נבדלת מההיסטוריה המקורית של LUNC/UST, אך נזק האמון נשאר מרכזי.
     hi: LUNA Terra 2.0 है, post-collapse Terra chain token। यह original LUNC/UST history से अलग है, लेकिन confidence damage अब भी central है।
     hr: LUNA je Terra 2.0, token Terra chaina nakon kolapsa. Razlikuje se od izvorne povijesti LUNC/UST, ali šteta povjerenju ostaje središnja.
     hu: A LUNA a Terra 2.0, az összeomlás utáni Terra-lánc tokenje. Különbözik az eredeti LUNC/UST történettől, de a bizalmi kár továbbra is központi.
@@ -14295,7 +14295,7 @@ underlyings:
 - ticker: SGB
   name:
     en: SGB
-    ar: SGB
+    ar: ‏SGB
     bn: SGB
     bs: SGB
     cs: SGB
@@ -14308,7 +14308,7 @@ underlyings:
     fil: SGB
     fr: SGB
     ga: SGB
-    he: SGB
+    he: ‏SGB
     hi: SGB
     hr: SGB
     hu: SGB
@@ -14348,7 +14348,7 @@ underlyings:
   description:
     en: Songbird is Flare Network's canary network token. It tests upgrades before Flare, so experimental risk is part of the asset.
     pl: Songbird to token canary network Flare Network. Testuje upgrade'y przed Flare, więc ryzyko eksperymentalne jest częścią aktywa.
-    ar: Songbird رمز شبكة كناري التجريبية التابعة لـ Flare. تختبر الترقيات قبل Flare، لذلك يشكل الخطر التجريبي جزءا من الأصل.
+    ar: ‏Songbird رمز شبكة كناري التجريبية التابعة لـ Flare. تختبر الترقيات قبل Flare، لذلك يشكل الخطر التجريبي جزءا من الأصل.
     bn: Songbird হলো Flare Network-এর canary network token। এটি Flare-এর আগে upgrades test করে, তাই experimental risk asset-এর অংশ।
     bs: Songbird je canary network token Flare Network-a. Testira nadogradnje prije Flare-a, pa je eksperimentalni rizik dio ove imovine.
     cs: Songbird je token canary sítě Flare Network. Testuje upgrady před Flare, takže experimentální riziko je součástí aktiva.
@@ -14361,7 +14361,7 @@ underlyings:
     fil: Songbird ay canary network token ng Flare Network. Dito tine-test ang upgrades bago ang Flare, kaya bahagi ng asset ang experimental risk.
     fr: Songbird est le token du canary network de Flare Network. Il teste les upgrades avant Flare, donc le risque expérimental fait partie de l'actif.
     ga: Is é Songbird token canary network Flare Network. Tástálann sé upgrades roimh Flare, mar sin tá riosca turgnamhach mar chuid den tsócmhainn.
-    he: Songbird הוא טוקן רשת canary של Flare Network. היא בוחנת שדרוגים לפני Flare, לכן סיכון ניסיוני הוא חלק מהנכס.
+    he: ‏Songbird הוא טוקן רשת canary של Flare Network. היא בוחנת שדרוגים לפני Flare, לכן סיכון ניסיוני הוא חלק מהנכס.
     hi: Songbird, Flare Network का canary network token है। यह Flare से पहले upgrades test करता है, इसलिए experimental risk asset का हिस्सा है।
     hr: Songbird je canary network token Flare Network. Testira nadogradnje prije Flarea, pa je eksperimentalni rizik dio imovine.
     hu: A Songbird a Flare Network canary network tokenje. A frissítéseket a Flare előtt teszteli, ezért a kísérleti kockázat az eszköz része.
@@ -14435,7 +14435,7 @@ underlyings:
 - ticker: SUSHI
   name:
     en: SUSHI
-    ar: SUSHI
+    ar: ‏SUSHI
     bn: SUSHI
     bs: SUSHI
     cs: SUSHI
@@ -14448,7 +14448,7 @@ underlyings:
     fil: SUSHI
     fr: SUSHI
     ga: SUSHI
-    he: SUSHI
+    he: ‏SUSHI
     hi: SUSHI
     hr: SUSHI
     hu: SUSHI
@@ -14488,7 +14488,7 @@ underlyings:
   description:
     en: SUSHI is the SushiSwap DEX governance token. Liquidity incentives, fee capture, and DEX market share drive fundamentals.
     pl: SUSHI to token governance DEX SushiSwap. Zachęty płynnościowe, przechwytywanie opłat i udział DEX w rynku napędzają fundamenty.
-    ar: SUSHI رمز حوكمة DEX الخاص بـ SushiSwap. حوافز السيولة والتقاط الرسوم وحصة سوق DEX تقود الأساسيات.
+    ar: ‏SUSHI رمز حوكمة DEX الخاص بـ SushiSwap. حوافز السيولة والتقاط الرسوم وحصة سوق DEX تقود الأساسيات.
     bn: SUSHI হলো SushiSwap DEX governance token। Liquidity incentives, fee capture এবং DEX market share fundamentals চালায়।
     bs: SUSHI je SushiSwap DEX governance token. Poticaji za likvidnost, hvatanje naknada i DEX tržišni udio pokreću fundamente.
     cs: SUSHI je governance token DEX SushiSwap. Pobídky likvidity, zachycení poplatků a tržní podíl DEX řídí fundamenty.
@@ -14501,7 +14501,7 @@ underlyings:
     fil: SUSHI ay SushiSwap DEX governance token. Liquidity incentives, fee capture, at DEX market share ang nagtutulak ng fundamentals.
     fr: SUSHI est le token de gouvernance du DEX SushiSwap. Les incitations de liquidité, la capture des frais et la part de marché DEX pilotent les fondamentaux.
     ga: Is é SUSHI token governance SushiSwap DEX. Tiomáineann dreasachtaí leachtachta, fee capture agus sciar margaidh DEX bunfhachtóirí.
-    he: SUSHI הוא טוקן governance של SushiSwap DEX. תמריצי נזילות, לכידת עמלות ונתח שוק DEX מניעים את היסודות.
+    he: ‏SUSHI הוא טוקן governance של SushiSwap DEX. תמריצי נזילות, לכידת עמלות ונתח שוק DEX מניעים את היסודות.
     hi: SUSHI SushiSwap DEX governance token है। Liquidity incentives, fee capture और DEX market share fundamentals चलाते हैं।
     hr: SUSHI je SushiSwap DEX governance token. Poticaji likvidnosti, hvatanje naknada i tržišni udio DEX-a pokreću temelje.
     hu: A SUSHI a SushiSwap DEX governance tokenje. A likviditási ösztönzők, a díjmegragadás és a DEX piaci részesedése hajtják a fundamentumokat.
@@ -14567,7 +14567,7 @@ underlyings:
 - ticker: TEL
   name:
     en: TEL
-    ar: TEL
+    ar: ‏TEL
     bn: TEL
     bs: TEL
     cs: TEL
@@ -14580,7 +14580,7 @@ underlyings:
     fil: TEL
     fr: TEL
     ga: TEL
-    he: TEL
+    he: ‏TEL
     hi: TEL
     hr: TEL
     hu: TEL
@@ -14620,7 +14620,7 @@ underlyings:
   description:
     en: Telcoin is a payments and remittance-focused token. Regulatory corridors and mobile-money adoption matter more than generic crypto beta.
     pl: Telcoin to token płatności i przekazów pieniężnych. Korytarze regulacyjne i adopcja mobile money ważą bardziej niż ogólna beta krypto.
-    ar: Telcoin رمز يركز على المدفوعات والتحويلات. الممرات التنظيمية وتبني الأموال عبر الهاتف المحمول أهم من بيتا العملات المشفرة العامة.
+    ar: ‏Telcoin رمز يركز على المدفوعات والتحويلات. الممرات التنظيمية وتبني الأموال عبر الهاتف المحمول أهم من بيتا العملات المشفرة العامة.
     bn: Telcoin payments এবং remittance-focused token। Regulatory corridors ও mobile-money adoption generic crypto beta-এর চেয়ে বেশি গুরুত্বপূর্ণ।
     bs: Telcoin je token fokusiran na plaćanja i doznake. Regulatorni koridori i usvajanje mobile-money-a važniji su od generičke kripto bete.
     cs: Telcoin je token zaměřený na platby a remitence. Regulační koridory a adopce mobile money jsou důležitější než obecná krypto beta.
@@ -14633,7 +14633,7 @@ underlyings:
     fil: Telcoin ay payments at remittance-focused token. Mas mahalaga ang regulatory corridors at mobile-money adoption kaysa generic crypto beta.
     fr: Telcoin est un token axé sur les paiements et les remittances. Les corridors réglementaires et l'adoption du mobile-money comptent davantage que le bêta crypto générique.
     ga: Is token dírithe ar íocaíochtaí agus remittance é Telcoin. Tá conairí rialála agus glacadh mobile-money níos tábhachtaí ná beta crypto ginearálta.
-    he: Telcoin הוא טוקן ממוקד תשלומים והעברות כספים. מסדרונות רגולטוריים ואימוץ mobile money חשובים יותר מ-beta קריפטו כללית.
+    he: ‏Telcoin הוא טוקן ממוקד תשלומים והעברות כספים. מסדרונות רגולטוריים ואימוץ mobile money חשובים יותר מ-beta קריפטו כללית.
     hi: Telcoin payments और remittance-focused token है। Regulatory corridors और mobile-money adoption generic crypto beta से ज्यादा मायने रखते हैं।
     hr: Telcoin je token usmjeren na plaćanja i doznake. Regulatorni koridori i prihvaćanje mobile-moneyja važniji su od opće kripto bete.
     hu: A Telcoin fizetésekre és átutalásokra fókuszáló token. A szabályozási folyosók és a mobile-money adopció fontosabb, mint az általános kripto béta.
@@ -14722,7 +14722,7 @@ underlyings:
 - ticker: WLD
   name:
     en: WLD
-    ar: WLD
+    ar: ‏WLD
     bn: WLD
     bs: WLD
     cs: WLD
@@ -14735,7 +14735,7 @@ underlyings:
     fil: WLD
     fr: WLD
     ga: WLD
-    he: WLD
+    he: ‏WLD
     hi: WLD
     hr: WLD
     hu: WLD
@@ -14775,7 +14775,7 @@ underlyings:
   description:
     en: Worldcoin token for the World ID proof-of-personhood network. Iris-scan onboarding and privacy controversy are the key risks.
     pl: WLD to token Worldcoin dla sieci World ID proof-of-personhood. Onboarding przez skan tęczówki i spór o prywatność są kluczowymi ryzykami.
-    ar: Worldcoin رمز شبكة World ID لإثبات الشخصية. إدخال المستخدمين عبر مسح القزحية وجدال الخصوصية هما الخطران الأساسيان.
+    ar: ‏Worldcoin رمز شبكة World ID لإثبات الشخصية. إدخال المستخدمين عبر مسح القزحية وجدال الخصوصية هما الخطران الأساسيان.
     bn: Worldcoin হলো World ID proof-of-personhood network-এর token। Iris-scan onboarding এবং privacy controversy key risks।
     bs: Worldcoin token pripada World ID proof-of-personhood mreži. Onboarding skeniranjem šarenice i kontroverze oko privatnosti ključni su rizici.
     cs: Worldcoin token pro síť World ID proof-of-personhood. Onboarding skenem duhovky a kontroverze kolem soukromí jsou klíčová rizika.
@@ -14788,7 +14788,7 @@ underlyings:
     fil: Worldcoin token ito para sa World ID proof-of-personhood network. Iris-scan onboarding at privacy controversy ang key risks.
     fr: WLD est le token Worldcoin du réseau World ID proof-of-personhood. L'onboarding par scan de l'iris et la controverse sur la confidentialité sont les risques clés.
     ga: Token Worldcoin don líonra proof-of-personhood World ID. Is iad onboarding iris-scan agus conspóid phríobháideachais na príomhrioscaí.
-    he: WLD הוא טוקן Worldcoin לרשת World ID של proof-of-personhood. הצטרפות באמצעות סריקת קשתית ומחלוקת פרטיות הם הסיכונים המרכזיים.
+    he: ‏WLD הוא טוקן Worldcoin לרשת World ID של proof-of-personhood. הצטרפות באמצעות סריקת קשתית ומחלוקת פרטיות הם הסיכונים המרכזיים.
     hi: Worldcoin, World ID proof-of-personhood network का token है। Iris-scan onboarding और privacy controversy key risks हैं।
     hr: Worldcoin token je za World ID proof-of-personhood mrežu. Onboarding skeniranjem šarenice i spor oko privatnosti ključni su rizici.
     hu: Worldcoin token a World ID proof-of-personhood hálózathoz. Az íriszszkenneléses onboarding és az adatvédelmi vita a fő kockázatok.
@@ -14837,7 +14837,7 @@ underlyings:
 - ticker: XAUT
   name:
     en: XAUT
-    ar: XAUT
+    ar: ‏XAUT
     bn: XAUT
     bs: XAUT
     cs: XAUT
@@ -14850,7 +14850,7 @@ underlyings:
     fil: XAUT
     fr: XAUT
     ga: XAUT
-    he: XAUT
+    he: ‏XAUT
     hi: XAUT
     hr: XAUT
     hu: XAUT
@@ -14890,7 +14890,7 @@ underlyings:
   description:
     en: Tether Gold token representing 1 fine troy ounce of physical gold. Treat it as commodity-pegged; redemption, custody, and spread matter.
     pl: XAUT to token Tether Gold reprezentujący 1 uncję trojańską fizycznego złota. Traktuj go jako powiązany z towarem; wykup, custody i spread mają znaczenie.
-    ar: Tether Gold رمز يمثل 1 أونصة تروية نقية من الذهب المادي. تعامل معه كمرتبط بسلعة؛ فالاسترداد والحفظ والفارق مهمة.
+    ar: ‏Tether Gold رمز يمثل 1 أونصة تروية نقية من الذهب المادي. تعامل معه كمرتبط بسلعة؛ فالاسترداد والحفظ والفارق مهمة.
     bn: Tether Gold token physical gold-এর 1 fine troy ounce represent করে। এটিকে commodity-pegged হিসেবে ধরুন; redemption, custody এবং spread গুরুত্বপূর্ণ।
     bs: Tether Gold token predstavlja 1 finu trojsku uncu fizičkog zlata. Tretiraj ga kao commodity-pegged; otkup, custody i spread su važni.
     cs: Tether Gold token představuje 1 trojskou unci ryzího fyzického zlata. Berte ho jako navázaný na komoditu; záleží na odkupu, úschově a spreadu.
@@ -14903,7 +14903,7 @@ underlyings:
     fil: Tether Gold token ito na kumakatawan sa 1 fine troy ounce ng physical gold. Ituring ito na commodity-pegged; mahalaga ang redemption, custody, at spread.
     fr: XAUT est un token Tether Gold représentant 1 fine troy ounce d'or physique. Traitez-le comme indexé sur une matière première; le remboursement, la custody et le spread comptent.
     ga: Token Tether Gold a léiríonn 1 fine troy ounce d'ór fisiciúil. Caith leis mar commodity-pegged; tá fuascailt, custody agus spread tábhachtach.
-    he: XAUT הוא טוקן Tether Gold המייצג 1 אונקיית טרוי נקייה של זהב פיזי. יש להתייחס אליו כצמוד לסחורה; פדיון, custody ו-spread חשובים.
+    he: ‏XAUT הוא טוקן Tether Gold המייצג 1 אונקיית טרוי נקייה של זהב פיזי. יש להתייחס אליו כצמוד לסחורה; פדיון, custody ו-spread חשובים.
     hi: Tether Gold token physical gold के 1 fine troy ounce को represent करता है। इसे commodity-pegged मानें; redemption, custody और spread मायने रखते हैं।
     hr: Tether Gold token predstavlja 1 finu trojsku uncu fizičkog zlata. Tretirajte ga kao vezanog uz robu; važni su otkup, skrbništvo i spread.
     hu: A Tether Gold token 1 fine troy ounce fizikai aranyat képvisel. Kezeld commodity-pegként; a visszaváltás, a custody és a spread fontos.
@@ -14955,7 +14955,7 @@ underlyings:
 - ticker: XDC
   name:
     en: XDC
-    ar: XDC
+    ar: ‏XDC
     bn: XDC
     bs: XDC
     cs: XDC
@@ -14968,7 +14968,7 @@ underlyings:
     fil: XDC
     fr: XDC
     ga: XDC
-    he: XDC
+    he: ‏XDC
     hi: XDC
     hr: XDC
     hu: XDC
@@ -15008,7 +15008,7 @@ underlyings:
   description:
     en: XDC Network is an enterprise-focused EVM-compatible chain tied to trade-finance use cases. Adoption is the key risk.
     pl: XDC Network to korporacyjny łańcuch zgodny z EVM, powiązany z trade finance. Adopcja pozostaje kluczowym ryzykiem.
-    ar: XDC Network سلسلة متوافقة مع EVM وموجهة للمؤسسات ومرتبطة باستخدامات تمويل التجارة. التبني هو الخطر الأساسي.
+    ar: ‏XDC Network سلسلة متوافقة مع EVM وموجهة للمؤسسات ومرتبطة باستخدامات تمويل التجارة. التبني هو الخطر الأساسي.
     bn: XDC Network একটি enterprise-focused EVM-compatible chain, trade-finance use cases-এর সঙ্গে যুক্ত। Adoption key risk।
     bs: XDC Network je EVM-kompatibilan lanac fokusiran na enterprise, vezan za trade-finance slučajeve upotrebe. Usvajanje je ključni rizik.
     cs: XDC Network je podnikově zaměřený chain kompatibilní s EVM a napojený na případy užití trade finance. Adopce je klíčové riziko.
@@ -15021,7 +15021,7 @@ underlyings:
     fil: XDC Network ay enterprise-focused EVM-compatible chain na nakatali sa trade-finance use cases. Adoption ang key risk.
     fr: XDC Network est une chaîne compatible EVM orientée entreprise et liée aux cas d'usage de trade finance. L'adoption est le risque clé.
     ga: Is chain EVM-compatible dírithe ar enterprise é XDC Network atá ceangailte le cásanna úsáide trade-finance. Is é glacadh an príomhriosca.
-    he: XDC Network היא שרשרת תואמת EVM הממוקדת בארגונים וקשורה לשימושי trade-finance. אימוץ הוא הסיכון המרכזי.
+    he: ‏XDC Network היא שרשרת תואמת EVM הממוקדת בארגונים וקשורה לשימושי trade-finance. אימוץ הוא הסיכון המרכזי.
     hi: XDC Network trade-finance use cases से जुड़ी enterprise-focused EVM-compatible chain है। Adoption key risk है।
     hr: XDC Network je EVM-kompatibilan chain usmjeren na poduzeća i povezan s primjenama trgovinskog financiranja. Prihvaćanje je ključni rizik.
     hu: Az XDC Network vállalati fókuszú, EVM-kompatibilis lánc, amely trade-finance felhasználási esetekhez kötődik. Az adopció a kulcskockázat.
@@ -15097,7 +15097,7 @@ underlyings:
 - ticker: XTZ
   name:
     en: XTZ
-    ar: XTZ
+    ar: ‏XTZ
     bn: XTZ
     bs: XTZ
     cs: XTZ
@@ -15110,7 +15110,7 @@ underlyings:
     fil: XTZ
     fr: XTZ
     ga: XTZ
-    he: XTZ
+    he: ‏XTZ
     hi: XTZ
     hr: XTZ
     hu: XTZ
@@ -15150,7 +15150,7 @@ underlyings:
   description:
     en: Tezos is a proof-of-stake L1 with on-chain governance and baking. Upgrade cadence is strong, but app adoption drives token demand.
     pl: Tezos to L1 proof-of-stake z governance on-chain i bakingiem. Tempo upgrade'ów jest mocne, ale adopcja aplikacji napędza popyt na token.
-    ar: Tezos هو L1 بإثبات الحصة مع حوكمة على السلسلة وإنتاج للكتل. وتيرة الترقيات قوية، لكن تبني التطبيقات يقود طلب الرمز.
+    ar: ‏Tezos هو L1 بإثبات الحصة مع حوكمة على السلسلة وإنتاج للكتل. وتيرة الترقيات قوية، لكن تبني التطبيقات يقود طلب الرمز.
     bn: Tezos on-chain governance এবং bakingসহ proof-of-stake L1। Upgrade cadence শক্তিশালী, কিন্তু app adoption token demand চালায়।
     bs: Tezos je proof-of-stake L1 s on-chain governance-om i bakingom. Tempo nadogradnji je snažan, ali usvajanje aplikacija pokreće potražnju za tokenom.
     cs: Tezos je proof-of-stake L1 s on-chain governance a bakingem. Tempo upgradů je silné, ale adopce aplikací řídí poptávku po tokenu.
@@ -15163,7 +15163,7 @@ underlyings:
     fil: Tezos ay proof-of-stake L1 na may on-chain governance at baking. Malakas ang upgrade cadence, pero app adoption ang nagtutulak ng token demand.
     fr: Tezos est une L1 proof-of-stake avec gouvernance on-chain et baking. Le rythme des upgrades est solide, mais l'adoption des applications pilote la demande du token.
     ga: Is L1 proof-of-stake é Tezos le on-chain governance agus baking. Tá cadence upgrades láidir, ach tiomáineann glacadh appanna éileamh token.
-    he: Tezos היא L1 במנגנון proof-of-stake עם governance on-chain ו-baking. קצב השדרוגים חזק, אך אימוץ אפליקציות מניע ביקוש לטוקן.
+    he: ‏Tezos היא L1 במנגנון proof-of-stake עם governance on-chain ו-baking. קצב השדרוגים חזק, אך אימוץ אפליקציות מניע ביקוש לטוקן.
     hi: Tezos on-chain governance और baking वाला proof-of-stake L1 है। Upgrade cadence strong है, लेकिन app adoption token demand चलाता है।
     hr: Tezos je proof-of-stake L1 s on-chain governanceom i bakingom. Tempo nadogradnji je snažan, ali prihvaćanje aplikacija pokreće potražnju za tokenom.
     hu: A Tezos proof-of-stake L1 on-chain governance-szel és bakinggel. A frissítési ütem erős, de a tokenkeresletet az alkalmazás-adopció hajtja.
