@@ -21,6 +21,7 @@ established pattern).
 
 import asyncio
 import contextlib
+import time
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
@@ -72,7 +73,8 @@ _CREDENTIALS_REQUIRED_MSG = "API credentials required for authenticated operatio
 _PUBLIC_WS_NOT_CONNECTED_MSG = "WebSocket client not connected"
 _QUEUE_DRAIN_TIMEOUT = 0.1
 _QUEUE_MAX_SIZE = 10000
-_SUBSCRIBE_PER_PRODUCT_DELAY_S = 0.005
+_PUBLIC_SUBSCRIBE_MIN_INTERVAL_S = 0.075
+_RATE_LIMITED_COOLDOWN_S = 5.0
 
 _TIMEFRAME_SECONDS: dict[str, int] = {
     "1m": 60,
@@ -235,6 +237,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         self._candle_builder = TradeCandleBuilder(interval_seconds=60)
         self._candle_aggregator_task: asyncio.Task[None] | None = None
         self._subscription_cache: dict[tuple[str, frozenset[str], str], SubscriptionRequest] = {}
+        self._next_public_subscribe_at: float = 0.0
+        self._public_subscribe_lock: asyncio.Lock = asyncio.Lock()
         self._execution_queue: asyncio.Queue[ExecutionUpdate] = asyncio.Queue(
             maxsize=_QUEUE_MAX_SIZE
         )
@@ -314,7 +318,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             self._handle_subscribed_event(message)
             return
         if event == "alert":
-            self._handle_alert_event(message)
+            await self._handle_alert_event(message)
             return
         if event is not None:
             return
@@ -374,12 +378,21 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             if isinstance(product_id, str):
                 self._health_tracker.mark_confirmed(feed, product_id)
 
-    def _handle_alert_event(self, message: dict[str, Any]) -> None:
+    async def _handle_alert_event(self, message: dict[str, Any]) -> None:
         """Track an attributable Kraken Futures alert event as failed.
 
         Args:
             message: Raw event frame.
         """
+        if message.get("message") == "rate_limited":
+            async with self._public_subscribe_lock:
+                cooldown_until = time.monotonic() + _RATE_LIMITED_COOLDOWN_S
+                self._next_public_subscribe_at = max(self._next_public_subscribe_at, cooldown_until)
+            logger.warning(
+                "Kraken Futures rate_limited: pausing public subscribes for {}s",
+                _RATE_LIMITED_COOLDOWN_S,
+            )
+            return
         message_text = message.get("message")
         error = message_text if isinstance(message_text, str) else "subscription alert"
         raw_feed = message.get("feed")
@@ -435,19 +448,14 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         if self._ws_client is None:
             raise RuntimeError(_PUBLIC_WS_NOT_CONNECTED_MSG)
         requests = list(self._subscription_cache.values())
-        for index, req in enumerate(requests):
-            for symbol in req.symbols:
-                self._health_tracker.mark_pending(
-                    req.channel,
-                    symbol,
-                    preserve_retry_count=True,
+        for req in requests:
+            for product in req.symbols:
+                await self._send_public_subscribe(
+                    feed=req.channel, product=product, preserve_retry_count=True
                 )
-            await self._ws_client.subscribe(feed=req.channel, products=list(req.symbols))
-            if index < len(requests) - 1:
-                await asyncio.sleep(_SUBSCRIBE_PER_PRODUCT_DELAY_S)
 
     async def _retry_subscribe(self, channel: str, symbol: str) -> None:
-        """Retry a single Futures subscription without updating replay cache.
+        """Retry a single Futures subscription through the shared limiter.
 
         Args:
             channel: Tracker channel key to retry.
@@ -464,7 +472,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             raise RuntimeError(_PUBLIC_WS_NOT_CONNECTED_MSG)
         if channel not in {"ticker", "trade"}:
             raise ValueError(f"Unsupported subscription health channel: {channel}")
-        await self._ws_client.subscribe(feed=channel, products=[symbol])
+        await self._send_public_subscribe(feed=channel, product=symbol, preserve_retry_count=True)
 
     async def _ensure_private_ws_connected(self) -> None:
         """Connect the authenticated FuturesWSClient if not already connected.
@@ -1083,13 +1091,49 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         if self._ws_client is None:
             raise RuntimeError(_PUBLIC_WS_NOT_CONNECTED_MSG)
-        for index, product in enumerate(ws_symbols):
-            req = SubscriptionRequest(channel=feed, symbols=(product,), parameters_json="{}")
+        for product in ws_symbols:
+            await self._send_public_subscribe(feed=feed, product=product)
+
+    async def _send_public_subscribe(
+        self,
+        feed: str,
+        product: str,
+        *,
+        preserve_retry_count: bool = False,
+    ) -> None:
+        """Send one public WS subscribe with global throttle + mark_pending.
+
+        The lock serializes ticker, trade, replay, and retry paths so they
+        cannot collectively exceed the rate-limit. mark_pending is INSIDE
+        the lock and AFTER the wait so health-tracker requested_at reflects
+        actual send time, preventing false-overdue retries while requests
+        queue behind the throttle.
+
+        ``preserve_retry_count`` MUST be ``True`` when called from replay or
+        retry paths so the health-tracker retry budget is not wiped. Initial
+        subscribes leave it ``False`` so each fresh product starts with a
+        full budget.
+        """
+        if self._ws_client is None:
+            raise RuntimeError(_PUBLIC_WS_NOT_CONNECTED_MSG)
+        if feed == "ticker":
+            channel: Literal["ticker", "trade"] = "ticker"
+        elif feed == "trade":
+            channel = "trade"
+        else:
+            raise ValueError(f"Unsupported public subscription feed: {feed}")
+        async with self._public_subscribe_lock:
+            now = time.monotonic()
+            wait_s = self._next_public_subscribe_at - now
+            if wait_s > 0:
+                await asyncio.sleep(wait_s)
+            req = SubscriptionRequest(channel=channel, symbols=(product,), parameters_json="{}")
             self._subscription_cache[req.key()] = req
-            self._health_tracker.mark_pending(feed, product)
-            await self._ws_client.subscribe(feed=feed, products=[product])
-            if index < len(ws_symbols) - 1:
-                await asyncio.sleep(_SUBSCRIBE_PER_PRODUCT_DELAY_S)
+            self._health_tracker.mark_pending(
+                channel, product, preserve_retry_count=preserve_retry_count
+            )
+            await self._ws_client.subscribe(feed=channel, products=[product])
+            self._next_public_subscribe_at = time.monotonic() + _PUBLIC_SUBSCRIBE_MIN_INTERVAL_S
 
     async def _subscribe_ticks_impl(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
         """Implement ticker subscription via callback-to-queue bridge.

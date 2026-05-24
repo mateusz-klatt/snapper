@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 from loguru import logger
 
+import snapper.infrastructure.exchanges._subscription_health as health_mod
 import snapper.infrastructure.exchanges.implementations.kraken_futures as mod
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -36,6 +37,8 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
 )
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _enqueue_or_drop_oldest
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _timeframe_to_seconds
+
+_REAL_ASYNCIO_SLEEP = asyncio.sleep
 
 
 @pytest.fixture()
@@ -96,6 +99,50 @@ async def _sync_to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
 def _patch_to_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run asyncio.to_thread synchronously for coverage tracking."""
     monkeypatch.setattr(mod.asyncio, "to_thread", _sync_to_thread)
+
+
+class _DeterministicClock:
+    """Deterministic monotonic clock for public subscribe pacing tests."""
+
+    def __init__(self) -> None:
+        """Initialize clock at zero."""
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        """Return the current monotonic time."""
+        return self.now
+
+    def advance(self, delay: float) -> None:
+        """Advance the clock without scheduling."""
+        self.now += delay
+
+    async def sleep(self, delay: float) -> None:
+        """Advance the clock and yield control once."""
+        self.now += delay
+        await _REAL_ASYNCIO_SLEEP(0)
+
+
+class _RecordingWsClient:
+    """Record public subscribe calls and their send timestamps."""
+
+    def __init__(self, clock: _DeterministicClock) -> None:
+        """Bind the recorder to the shared deterministic clock."""
+        self._clock = clock
+        self.calls: list[tuple[str, tuple[str, ...], float]] = []
+
+    async def subscribe(self, *, feed: str, products: list[str]) -> None:
+        """Record the subscribe call with the current send timestamp."""
+        self.calls.append((feed, tuple(products), self._clock.monotonic()))
+        await _REAL_ASYNCIO_SLEEP(0)
+
+
+def _install_public_subscribe_clock(
+    monkeypatch: pytest.MonkeyPatch, clock: _DeterministicClock
+) -> None:
+    """Patch limiter and tracker clocks to a shared deterministic source."""
+    monkeypatch.setattr(mod.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(health_mod.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(mod.asyncio, "sleep", clock.sleep)
 
 
 class TestClientInit:
@@ -217,7 +264,10 @@ async def test_replay_uses_subscribe_with_feed_and_products_kwargs(
         "feed": "trade",
         "products": ["PF_ETHUSD"],
     }
-    sleep_mock.assert_awaited_once_with(kf._SUBSCRIBE_PER_PRODUCT_DELAY_S)
+    sleep_mock.assert_awaited_once()
+    assert sleep_mock.await_args is not None
+    sleep_arg = sleep_mock.await_args.args[0]
+    assert 0 < sleep_arg <= kf._PUBLIC_SUBSCRIBE_MIN_INTERVAL_S
 
 
 @pytest.mark.asyncio
@@ -254,6 +304,168 @@ async def test_ensure_ws_connected_auto_replays_after_reconnect(
         ws_cls.return_value.start = AsyncMock()
         await client._ensure_ws_connected()
     replay_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_public_subscribe_paced_by_min_interval(
+    client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Limiter spaces sequential public subscribes by the minimum interval.
+
+    Given: A Futures client with the shared public limiter clock patched,
+    When: Five public subscribes are sent sequentially,
+    Then: Each send is separated by at least the configured minimum interval.
+    """
+    clock = _DeterministicClock()
+    _install_public_subscribe_clock(monkeypatch, clock)
+    ws = _RecordingWsClient(clock)
+    client._ws_client = ws
+
+    for product in ("PF_A", "PF_B", "PF_C", "PF_D", "PF_E"):
+        await client._send_public_subscribe(feed="ticker", product=product)
+
+    send_times = [call[2] for call in ws.calls]
+    gaps = [curr - prev for prev, curr in zip(send_times, send_times[1:], strict=False)]
+
+    assert len(ws.calls) == 5
+    assert all(gap >= kf._PUBLIC_SUBSCRIBE_MIN_INTERVAL_S - 1e-12 for gap in gaps)
+
+
+@pytest.mark.asyncio
+async def test_public_subscribe_requires_connected_ws(client: KrakenFuturesExchangeClient) -> None:
+    """Public subscribe helper requires an active websocket client.
+
+    Given: A Futures client without a connected public websocket,
+    When: The shared public subscribe helper is called,
+    Then: It raises RuntimeError instead of silently dropping the request.
+    """
+    client._ws_client = None
+
+    with pytest.raises(RuntimeError, match="connected"):
+        await client._send_public_subscribe(feed="ticker", product="PF_XBTUSD")
+
+
+@pytest.mark.asyncio
+async def test_public_subscribe_rejects_unsupported_feed(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """Public subscribe helper rejects feeds outside ticker and trade.
+
+    Given: A Futures client with a connected public websocket,
+    When: The shared public subscribe helper receives an unsupported feed,
+    Then: It raises ValueError before touching the websocket client.
+    """
+    client._ws_client = AsyncMock()
+
+    with pytest.raises(ValueError, match="Unsupported public subscription feed"):
+        await client._send_public_subscribe(feed="book", product="PF_XBTUSD")
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_alert_triggers_cooldown(
+    client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rate-limited alerts pause later public subscribes by the cooldown window.
+
+    Given: A Futures client that already sent one public subscribe,
+    When: A rate_limited alert arrives before the next subscribe,
+    Then: The next subscribe waits at least the configured cooldown.
+    """
+    clock = _DeterministicClock()
+    _install_public_subscribe_clock(monkeypatch, clock)
+    ws = _RecordingWsClient(clock)
+    client._ws_client = ws
+
+    await client._send_public_subscribe(feed="ticker", product="PF_XBTUSD")
+    await client._on_ws_message({"event": "alert", "message": "rate_limited"})
+    await client._send_public_subscribe(feed="ticker", product="PF_ETHUSD")
+
+    assert len(ws.calls) == 2
+    assert ws.calls[1][2] - ws.calls[0][2] >= kf._RATE_LIMITED_COOLDOWN_S - 1e-12
+
+
+@pytest.mark.asyncio
+async def test_repeated_rate_limited_alerts_use_max_semantics(
+    client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated rate-limited alerts extend to the latest cooldown only once.
+
+    Given: A Futures client receiving multiple rate_limited alerts within one second,
+    When: Each alert updates the limiter state,
+    Then: The pause horizon stays at roughly now plus one cooldown, not a sum of alerts.
+    """
+    clock = _DeterministicClock()
+    _install_public_subscribe_clock(monkeypatch, clock)
+
+    await client._on_ws_message({"event": "alert", "message": "rate_limited"})
+    clock.advance(0.4)
+    await client._on_ws_message({"event": "alert", "message": "rate_limited"})
+    clock.advance(0.4)
+    await client._on_ws_message({"event": "alert", "message": "rate_limited"})
+
+    assert client._next_public_subscribe_at - clock.monotonic() == pytest.approx(
+        kf._RATE_LIMITED_COOLDOWN_S
+    )
+
+
+@pytest.mark.asyncio
+async def test_mark_pending_happens_inside_limiter(
+    client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Queued subscribes stamp requested_at at actual send time.
+
+    Given: Three concurrent public subscribes queued behind the limiter,
+    When: The third subscribe eventually acquires the lock and is sent,
+    Then: Its health-tracker requested_at matches the third actual send time.
+    """
+    clock = _DeterministicClock()
+    _install_public_subscribe_clock(monkeypatch, clock)
+    ws = _RecordingWsClient(clock)
+    client._ws_client = ws
+
+    await asyncio.gather(
+        client._send_public_subscribe(feed="ticker", product="PF_ONE"),
+        client._send_public_subscribe(feed="ticker", product="PF_TWO"),
+        client._send_public_subscribe(feed="ticker", product="PF_THREE"),
+    )
+
+    snapshot = client._health_tracker.snapshot()
+    third_send_at = ws.calls[2][2]
+
+    assert snapshot[("ticker", "PF_THREE")].requested_at == pytest.approx(third_send_at)
+    assert third_send_at >= 2 * kf._PUBLIC_SUBSCRIBE_MIN_INTERVAL_S - 1e-12
+
+
+@pytest.mark.asyncio
+async def test_replay_after_reconnect_uses_same_limiter(
+    client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replay and fresh subscribes share the same public limiter.
+
+    Given: Cached public subscriptions and one fresh subscribe queued during replay,
+    When: Replay and the fresh subscribe run concurrently,
+    Then: All sends are serialized through one paced send stream.
+    """
+    clock = _DeterministicClock()
+    _install_public_subscribe_clock(monkeypatch, clock)
+    ws = _RecordingWsClient(clock)
+    client._ws_client = ws
+
+    for product in ("PF_A", "PF_B", "PF_C", "PF_D"):
+        req = SubscriptionRequest(channel="ticker", symbols=(product,), parameters_json="{}")
+        client._subscription_cache[req.key()] = req
+
+    replay_task = asyncio.create_task(client._replay_subscriptions())
+    await _REAL_ASYNCIO_SLEEP(0)
+    fresh_task = asyncio.create_task(client._send_public_subscribe("ticker", "PF_LATE"))
+    await asyncio.gather(replay_task, fresh_task)
+
+    send_times = [call[2] for call in ws.calls]
+    gaps = [curr - prev for prev, curr in zip(send_times, send_times[1:], strict=False)]
+
+    assert len(ws.calls) == 5
+    assert {call[1][0] for call in ws.calls} == {"PF_A", "PF_B", "PF_C", "PF_D", "PF_LATE"}
+    assert all(gap >= kf._PUBLIC_SUBSCRIBE_MIN_INTERVAL_S - 1e-12 for gap in gaps)
 
 
 class TestRequireAuthenticated:
@@ -2361,7 +2573,8 @@ class TestSubscribeImplGuardPaths:
         assert [req.symbols for req in client._subscription_cache.values()] == [
             (symbol,) for symbol in ws_symbols
         ]
-        assert sleep_calls == [0.005, 0.005, 0.005]
+        assert len(sleep_calls) == 3
+        assert all(0 < delay <= kf._PUBLIC_SUBSCRIBE_MIN_INTERVAL_S for delay in sleep_calls)
 
     @pytest.mark.asyncio
     async def test_subscribe_executions_guard_ws_none(

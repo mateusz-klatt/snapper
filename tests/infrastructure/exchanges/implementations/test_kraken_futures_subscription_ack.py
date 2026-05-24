@@ -309,8 +309,8 @@ class TestKrakenFuturesSubscriptionRetry:
         client._ws_client = AsyncMock()
         await client._subscribe_in_chunks("ticker", ["PF_XBTUSD", "PF_ETHUSD"])
         assert client._health_tracker.mark_pending.call_args_list == [
-            call("ticker", "PF_XBTUSD"),
-            call("ticker", "PF_ETHUSD"),
+            call("ticker", "PF_XBTUSD", preserve_retry_count=False),
+            call("ticker", "PF_ETHUSD", preserve_retry_count=False),
         ]
         assert client._ws_client.subscribe.await_args_list == [
             call(feed="ticker", products=["PF_XBTUSD"]),
@@ -321,11 +321,12 @@ class TestKrakenFuturesSubscriptionRetry:
     async def test_replay_marks_pending_preserving_retry_count(
         self, client: KrakenFuturesExchangeClient
     ) -> None:
-        """Replay re-arms pending state without resetting retry budget.
+        """Replay re-arms pending state without wiping the retry budget.
 
-        Given: A cached Futures subscription,
-        When: _replay_subscriptions runs,
-        Then: mark_pending is called with preserve_retry_count=True.
+        Given: A cached Futures subscription that previously failed,
+        When: _replay_subscriptions runs after a WS reconnect,
+        Then: mark_pending preserves the retry_count so permanently-broken
+            products do not get a fresh retry budget on every reconnect.
         """
         client._ws_client = AsyncMock()
         req = SubscriptionRequest(channel="trade", symbols=("PF_XBTUSD",), parameters_json="{}")
@@ -339,11 +340,13 @@ class TestKrakenFuturesSubscriptionRetry:
     async def test_retry_subscribe_uses_feed_and_single_product(
         self, client: KrakenFuturesExchangeClient
     ) -> None:
-        """Retry subscribes one Futures product.
+        """Retry subscribes one Futures product and preserves retry budget.
 
         Given: A connected Futures websocket,
         When: _retry_subscribe retries ticker,
-        Then: The SDK receives feed and single-product list.
+        Then: The SDK receives feed and single-product list, and the
+            health tracker keeps the existing retry_count so the health
+            loop's increment is not wiped by the helper.
         """
         client._ws_client = AsyncMock()
         await client._retry_subscribe("ticker", "PF_XBTUSD")
@@ -351,6 +354,9 @@ class TestKrakenFuturesSubscriptionRetry:
             "feed": "ticker",
             "products": ["PF_XBTUSD"],
         }
+        client._health_tracker.mark_pending.assert_called_once_with(
+            "ticker", "PF_XBTUSD", preserve_retry_count=True
+        )
 
     @pytest.mark.asyncio
     async def test_retry_rejects_unknown_channel(self, client: KrakenFuturesExchangeClient) -> None:
