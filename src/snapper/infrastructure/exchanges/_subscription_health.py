@@ -44,6 +44,13 @@ class _SymbolEntry:
         last_error: Last failure reason reported by the exchange.
         retry_count: Number of retry attempts already consumed.
         last_seen_data_at: Monotonic time when market data last arrived.
+        stale_logged: True once the background loop has emitted a
+            "subscribed but no data" warning for this entry's current
+            stale window. Reset by ``mark_data_seen`` (data flowing
+            again) and ``mark_pending`` (fresh subscribe), so a new
+            warning fires only on transitions, not every retry tick.
+            Prevents the log spam observed on 2026-05-24 (1.9M warnings
+            in ~1h when CME weekend stalled all Equities + Futures).
     """
 
     channel: str
@@ -54,6 +61,7 @@ class _SymbolEntry:
     last_error: str | None = None
     retry_count: int = 0
     last_seen_data_at: float | None = None
+    stale_logged: bool = False
 
 
 class SubscriptionHealthTracker:
@@ -168,6 +176,7 @@ class SubscriptionHealthTracker:
         entry.status = "confirmed"
         entry.confirmed_at = now
         entry.last_error = None
+        entry.stale_logged = False
 
     def mark_failed(self, channel: str, symbol: str, error: str) -> None:
         """Mark a subscription as failed.
@@ -225,6 +234,7 @@ class SubscriptionHealthTracker:
             )
             return
         entry.last_seen_data_at = now
+        entry.stale_logged = False
         if entry.status != "confirmed":
             entry.status = "confirmed"
             entry.confirmed_at = now
@@ -279,14 +289,24 @@ class SubscriptionHealthTracker:
         ]
 
     def list_stale_data(self, now: float | None = None) -> list[_SymbolEntry]:
-        """List confirmed entries with no recent market data.
+        """List confirmed entries with no recent market data, log-once.
+
+        Entries are returned ONLY the first time they cross the stale
+        threshold. Each returned entry has its ``stale_logged`` flag set
+        so subsequent calls skip it until either fresh data arrives
+        (``mark_data_seen`` resets the flag) or the subscription is
+        re-armed (``mark_pending``/``mark_confirmed`` reset the flag).
+        Prevents the background loop from re-emitting the same warning
+        every ``retry_interval_s`` for hours during legitimate upstream
+        silence (e.g. CME weekend close, low-liquidity exotic pairs).
 
         Args:
             now: Optional monotonic timestamp for deterministic tests.
 
         Returns:
             Confirmed entries whose last data timestamp, or confirmation
-            timestamp if no data has arrived, exceeds the stale threshold.
+            timestamp if no data has arrived, exceeds the stale threshold
+            AND have not yet been logged as stale during this window.
 
         Raises:
             None.
@@ -294,10 +314,11 @@ class SubscriptionHealthTracker:
         current = time.monotonic() if now is None else now
         stale: list[_SymbolEntry] = []
         for entry in self._entries.values():
-            if entry.status != "confirmed":
+            if entry.status != "confirmed" or entry.stale_logged:
                 continue
             reference = entry.last_seen_data_at or entry.confirmed_at or entry.requested_at
             if current - reference >= self.data_stale_threshold_s:
+                entry.stale_logged = True
                 stale.append(entry)
         return stale
 

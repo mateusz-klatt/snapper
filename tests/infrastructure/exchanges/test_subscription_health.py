@@ -376,6 +376,58 @@ class TestSubscriptionHealthQueries:
         tracker.mark_data_seen("ticker", "BTC/USD")
         assert tracker.list_stale_data(now=440.0) == []
 
+    def test_list_stale_data_is_log_once_per_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A stale entry is returned at most once until its window resets.
+
+        Given: A confirmed entry that has crossed the stale threshold,
+        When: list_stale_data is called repeatedly,
+        Then: The entry surfaces only on the first call; subsequent calls
+            skip it until ``mark_data_seen`` reopens the window.
+        """
+        tracker = SubscriptionHealthTracker(data_stale_threshold_s=30.0)
+        _set_clock(monkeypatch, 500.0)
+        tracker.mark_confirmed("ticker", "BTC/USD")
+        first = tracker.list_stale_data(now=540.0)
+        second = tracker.list_stale_data(now=600.0)
+        third = tracker.list_stale_data(now=900.0)
+        assert [(entry.channel, entry.symbol) for entry in first] == [("ticker", "BTC/USD")]
+        assert second == []
+        assert third == []
+
+    def test_mark_data_seen_reopens_stale_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fresh data clears the log-once flag so a future stall warns again.
+
+        Given: A stale entry that has already been logged,
+        When: data arrives and the entry goes stale again later,
+        Then: list_stale_data surfaces it once more on the next stale check.
+        """
+        tracker = SubscriptionHealthTracker(data_stale_threshold_s=30.0)
+        _set_clock(monkeypatch, 500.0)
+        tracker.mark_confirmed("ticker", "BTC/USD")
+        assert len(tracker.list_stale_data(now=540.0)) == 1
+        _set_clock(monkeypatch, 600.0)
+        tracker.mark_data_seen("ticker", "BTC/USD")
+        assert tracker.list_stale_data(now=605.0) == []
+        re_stale = tracker.list_stale_data(now=700.0)
+        assert [(entry.channel, entry.symbol) for entry in re_stale] == [("ticker", "BTC/USD")]
+
+    def test_mark_pending_reopens_stale_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A fresh subscribe re-arms the stale log.
+
+        Given: A stale entry already surfaced once,
+        When: mark_pending then mark_confirmed re-arm the subscription,
+        Then: A subsequent stall is reported anew.
+        """
+        tracker = SubscriptionHealthTracker(data_stale_threshold_s=30.0)
+        _set_clock(monkeypatch, 500.0)
+        tracker.mark_confirmed("ticker", "BTC/USD")
+        assert len(tracker.list_stale_data(now=540.0)) == 1
+        _set_clock(monkeypatch, 600.0)
+        tracker.mark_pending("ticker", "BTC/USD")
+        tracker.mark_confirmed("ticker", "BTC/USD")
+        re_stale = tracker.list_stale_data(now=700.0)
+        assert [(entry.channel, entry.symbol) for entry in re_stale] == [("ticker", "BTC/USD")]
+
     def test_list_failed_returns_failed_entries(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Failed entries are listed separately.
 
