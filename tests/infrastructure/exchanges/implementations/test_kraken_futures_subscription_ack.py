@@ -300,17 +300,21 @@ class TestKrakenFuturesSubscriptionRetry:
     async def test_subscribe_in_chunks_marks_pending(
         self, client: KrakenFuturesExchangeClient
     ) -> None:
-        """Chunked subscribe marks each product pending.
+        """Per-product subscribe marks each product pending.
 
         Given: A Futures client with public websocket,
         When: _subscribe_in_chunks subscribes ticker products,
-        Then: mark_pending is called per product before subscribe.
+        Then: mark_pending is called once per product.
         """
         client._ws_client = AsyncMock()
         await client._subscribe_in_chunks("ticker", ["PF_XBTUSD", "PF_ETHUSD"])
         assert client._health_tracker.mark_pending.call_args_list == [
             call("ticker", "PF_XBTUSD"),
             call("ticker", "PF_ETHUSD"),
+        ]
+        assert client._ws_client.subscribe.await_args_list == [
+            call(feed="ticker", products=["PF_XBTUSD"]),
+            call(feed="ticker", products=["PF_ETHUSD"]),
         ]
 
     @pytest.mark.asyncio

@@ -72,9 +72,7 @@ _CREDENTIALS_REQUIRED_MSG = "API credentials required for authenticated operatio
 _PUBLIC_WS_NOT_CONNECTED_MSG = "WebSocket client not connected"
 _QUEUE_DRAIN_TIMEOUT = 0.1
 _QUEUE_MAX_SIZE = 10000
-_SUBSCRIBE_CHUNK_SIZE = 50
-_SUBSCRIBE_CHUNK_DELAY_S = 0.1
-_RESUBSCRIBE_CHUNK_DELAY_S = 5.0
+_SUBSCRIBE_PER_PRODUCT_DELAY_S = 0.005
 
 _TIMEFRAME_SECONDS: dict[str, int] = {
     "1m": 60,
@@ -446,7 +444,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 )
             await self._ws_client.subscribe(feed=req.channel, products=list(req.symbols))
             if index < len(requests) - 1:
-                await asyncio.sleep(_RESUBSCRIBE_CHUNK_DELAY_S)
+                await asyncio.sleep(_SUBSCRIBE_PER_PRODUCT_DELAY_S)
 
     async def _retry_subscribe(self, channel: str, symbol: str) -> None:
         """Retry a single Futures subscription without updating replay cache.
@@ -1066,17 +1064,18 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
     async def _subscribe_in_chunks(
         self, feed: Literal["ticker", "trade"], ws_symbols: list[str]
     ) -> None:
-        """Subscribe to a Kraken Futures feed in bounded product chunks.
+        """Subscribe to a Kraken Futures feed one product at a time.
 
-        Sending all ~330 perpetuals + dated contracts in a single
-        ``subscribe`` call has been observed to silently fail: the
-        SDK awaits the call (no exception), the server returns
-        ``event: subscribed`` for the first batch only, and zero
-        ticker / trade frames arrive afterwards. The exact threshold
-        is implementation-defined (frame size, internal queue limits,
-        or rate-limit), but empirically 3 products = OK and 330 =
-        silent. Chunk at ``_SUBSCRIBE_CHUNK_SIZE`` with a small
-        delay so each batch is acknowledged before the next.
+        Kraken Futures accepts a first multi-product ``subscribe`` call
+        for a feed but live observation on 2026-05-24 showed subsequent
+        chunks on the same feed are answered with ``event: alert`` and
+        ``Already subscribed to feed, re-requesting`` while the new
+        products remain unsubscribed. Use one product per call so every
+        configured product receives its own ``event: subscribed`` ACK and
+        the health tracker keeps a natural 1:1 pending-to-confirmed
+        mapping. Per-product calls also attribute invalid-product alerts
+        such as ``Couldn't subscribe to invalid product`` to the product
+        that caused them.
 
         Args:
             feed: Kraken Futures feed name (``ticker`` or ``trade``).
@@ -1084,23 +1083,21 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         if self._ws_client is None:
             raise RuntimeError(_PUBLIC_WS_NOT_CONNECTED_MSG)
-        for i in range(0, len(ws_symbols), _SUBSCRIBE_CHUNK_SIZE):
-            chunk = ws_symbols[i : i + _SUBSCRIBE_CHUNK_SIZE]
-            req = SubscriptionRequest(channel=feed, symbols=tuple(chunk), parameters_json="{}")
+        for index, product in enumerate(ws_symbols):
+            req = SubscriptionRequest(channel=feed, symbols=(product,), parameters_json="{}")
             self._subscription_cache[req.key()] = req
-            for product in chunk:
-                self._health_tracker.mark_pending(feed, product)
-            await self._ws_client.subscribe(feed=feed, products=chunk)
-            if i + _SUBSCRIBE_CHUNK_SIZE < len(ws_symbols):
-                await asyncio.sleep(_SUBSCRIBE_CHUNK_DELAY_S)
+            self._health_tracker.mark_pending(feed, product)
+            await self._ws_client.subscribe(feed=feed, products=[product])
+            if index < len(ws_symbols) - 1:
+                await asyncio.sleep(_SUBSCRIBE_PER_PRODUCT_DELAY_S)
 
     async def _subscribe_ticks_impl(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
         """Implement ticker subscription via callback-to-queue bridge.
 
         Converts native symbols (e.g., ``BTC-USD-PERP``) to Kraken Futures
-        product IDs (e.g., ``PF_XBTUSD``) before subscribing. Subscriptions
-        are batched in :data:`_SUBSCRIBE_CHUNK_SIZE`-product chunks (HV-debug
-        2026-05-12: a single 330-product subscribe call silently failed).
+        product IDs (e.g., ``PF_XBTUSD``) before subscribing. Kraken Futures
+        subscriptions are issued one product per call so each product gets
+        a server ACK and a dedicated health-tracker pending entry.
 
         Args:
             symbols: Native symbols to subscribe.
@@ -1117,9 +1114,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         ws_symbols = [native_to_kraken_futures_ws(s) for s in symbols]
         await self._subscribe_in_chunks("ticker", ws_symbols)
         logger.info(
-            f"Subscribed to Kraken Futures tickers: {len(symbols)} symbols "
-            f"in {(len(ws_symbols) + _SUBSCRIBE_CHUNK_SIZE - 1) // _SUBSCRIBE_CHUNK_SIZE} "
-            f"chunks of <={_SUBSCRIBE_CHUNK_SIZE}"
+            f"Subscribed to Kraken Futures tickers: {len(symbols)} symbols (per-product mode)"
         )
         try:
             while True:
@@ -1266,9 +1261,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         ws_symbols = [native_to_kraken_futures_ws(s) for s in symbols]
         await self._subscribe_in_chunks("trade", ws_symbols)
         logger.info(
-            f"Subscribed to Kraken Futures trades: {len(symbols)} symbols "
-            f"in {(len(ws_symbols) + _SUBSCRIBE_CHUNK_SIZE - 1) // _SUBSCRIBE_CHUNK_SIZE} "
-            f"chunks of <={_SUBSCRIBE_CHUNK_SIZE}"
+            f"Subscribed to Kraken Futures trades: {len(symbols)} symbols (per-product mode)"
         )
         try:
             while True:

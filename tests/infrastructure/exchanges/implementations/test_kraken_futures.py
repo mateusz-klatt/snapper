@@ -160,7 +160,7 @@ async def test_subscribe_ticks_caches_products_not_symbols(
     """Futures cache stores products in the replayable symbols field.
 
     Given: A Futures client with an active websocket,
-    When: A ticker feed is subscribed in chunks,
+    When: A ticker feed is subscribed per product,
     Then: The cache records products and an empty parameters JSON payload.
     """
     client._ws_client = AsyncMock()
@@ -217,7 +217,7 @@ async def test_replay_uses_subscribe_with_feed_and_products_kwargs(
         "feed": "trade",
         "products": ["PF_ETHUSD"],
     }
-    sleep_mock.assert_awaited_once_with(5.0)
+    sleep_mock.assert_awaited_once_with(kf._SUBSCRIBE_PER_PRODUCT_DELAY_S)
 
 
 @pytest.mark.asyncio
@@ -2330,34 +2330,38 @@ class TestSubscribeImplGuardPaths:
             await client._subscribe_in_chunks("ticker", ["PF_XBTUSD"])
 
     @pytest.mark.asyncio
-    async def test_subscribe_in_chunks_batches_and_sleeps(
+    async def test_subscribe_in_chunks_subscribes_each_product_and_sleeps(
         self, client: KrakenFuturesExchangeClient
     ) -> None:
-        """Multi-chunk subscribe issues batched calls with inter-chunk sleeps.
+        """Per-product subscribe issues one SDK call per product.
 
-        Given: 125 ws_symbols (> 2 * _SUBSCRIBE_CHUNK_SIZE),
+        Given: Several ws_symbols,
         When: _subscribe_in_chunks runs,
-        Then: subscribe is called 3 times (50 + 50 + 25 products) and
-            asyncio.sleep is awaited between chunks (not after the last).
+        Then: subscribe is called once per product and asyncio.sleep is
+            awaited between products, not after the last product.
         """
         mock_ws = AsyncMock()
         client._ws_client = mock_ws
-        ws_symbols = [f"PF_SYM{i:03d}USD" for i in range(125)]
+        ws_symbols = [f"PF_SYM{i:03d}USD" for i in range(4)]
         sleep_calls: list[float] = []
 
         async def _spy_sleep(delay: float) -> None:
             sleep_calls.append(delay)
 
-        with patch("asyncio.sleep", new=_spy_sleep):
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.asyncio.sleep",
+            new=_spy_sleep,
+        ):
             await client._subscribe_in_chunks("ticker", ws_symbols)
 
-        assert mock_ws.subscribe.await_count == 3
-        chunk_sizes = [
-            len(call.kwargs.get("products", call.args[1] if len(call.args) > 1 else []))
-            for call in mock_ws.subscribe.await_args_list
+        assert mock_ws.subscribe.await_count == len(ws_symbols)
+        assert [call.kwargs["products"] for call in mock_ws.subscribe.await_args_list] == [
+            [symbol] for symbol in ws_symbols
         ]
-        assert chunk_sizes == [50, 50, 25]
-        assert len(sleep_calls) == 2
+        assert [req.symbols for req in client._subscription_cache.values()] == [
+            (symbol,) for symbol in ws_symbols
+        ]
+        assert sleep_calls == [0.005, 0.005, 0.005]
 
     @pytest.mark.asyncio
     async def test_subscribe_executions_guard_ws_none(
