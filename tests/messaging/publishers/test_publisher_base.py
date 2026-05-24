@@ -65,6 +65,14 @@ class DummyClient(SimpleNamespace):
         """Disconnect from exchange."""
         ...
 
+    async def start_health_loop(self) -> None:
+        """Start subscription health loop."""
+        ...
+
+    async def stop_health_loop(self) -> None:
+        """Stop subscription health loop."""
+        ...
+
     async def subscribe_candles(self, symbols: list[str], timeframe: str) -> AsyncIterator[Any]:
         """Subscribe to candle updates."""
         if False:
@@ -973,12 +981,17 @@ async def test_stop_disconnects_and_closes() -> None:
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
     disconnect = AsyncMock()
-    pub._exchange_client = SimpleNamespace(disconnect=disconnect)
+    stop_health_loop = AsyncMock()
+    pub._exchange_client = SimpleNamespace(
+        disconnect=disconnect,
+        stop_health_loop=stop_health_loop,
+    )
     pub.publisher = zmq_socket_stub(close=Mock())
     pub.subscriber = zmq_socket_stub(close=Mock())
     term = Mock()
     pub.context = SimpleNamespace(term=term)
     await pub.stop()
+    stop_health_loop.assert_awaited_once()
     disconnect.assert_awaited_once()
     assert pub._exchange_client is None
     assert pub.publisher.close.called
@@ -2274,6 +2287,7 @@ class TestFeedPublisherCoverage:
         assert zmq.PUB in socket_calls
         assert zmq.SUB in socket_calls
         mock_exchange_client.connect.assert_awaited_once()
+        mock_exchange_client.start_health_loop.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.application.services.settings.get_settings_service")

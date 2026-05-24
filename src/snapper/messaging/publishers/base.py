@@ -514,6 +514,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         )
         self._exchange_client = self._create_exchange_client()
         await self._exchange_client.connect()
+        await self._exchange_client.start_health_loop()
         logger.info(f"{process_name}: Exchange client connected (anonymous, public data)")
         self.running = True
         tasks: list[asyncio.Task[None]] = []
@@ -591,6 +592,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if recovery_tasks:
             await asyncio.gather(*recovery_tasks, return_exceptions=True)
             self._recovery_tasks.difference_update(recovery_tasks)
+        if self._exchange_client is not None:
+            await self._exchange_client.stop_health_loop()
         await self._stop_tick_pipeline()
         await self._stop_candle_pipeline()
         await self._stop_trade_pipeline()

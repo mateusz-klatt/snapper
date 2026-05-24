@@ -213,13 +213,24 @@ class KrakenTickerSubscribeParamsSchema(ExchangeRequest):
         return self.model_dump(by_alias=True, exclude_none=True)
 
 
+class KrakenTickerSubscriptionResultSchema(ExchangeResponse):
+    """Result details from ticker subscription acknowledgement."""
+
+    channel: Literal["ticker"]
+    symbol: str
+    snapshot: bool | None = None
+    warnings: list[str] | None = None
+
+
 class KrakenTickerSubscriptionAckSchema(ExchangeResponse):
     """Subscription acknowledgement for ticker channel."""
 
-    channel: Literal["ticker"]
-    event: Literal["subscribe", "unsubscribe"]
-    status: Literal["ok", "error"]
-    message: str | None = None
+    method: Literal["subscribe"]
+    result: KrakenTickerSubscriptionResultSchema
+    success: bool
+    time_in: str | None = Field(default=None, alias="time_in")
+    time_out: str | None = Field(default=None, alias="time_out")
+    error: str | None = None
     request_id: int | None = Field(default=None, alias="reqid")
 
 
@@ -647,6 +658,7 @@ __all__ = [
     "KrakenInstrumentSnapshotSchema",
     "KrakenInstrumentEventEnvelope",
     "KrakenTickerSubscribeParamsSchema",
+    "KrakenTickerSubscriptionResultSchema",
     "KrakenTickerSubscriptionAckSchema",
     "KrakenTickerSchema",
     "KrakenTickerEventEnvelope",

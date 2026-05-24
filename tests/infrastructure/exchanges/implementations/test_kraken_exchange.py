@@ -22,6 +22,7 @@ from loguru import logger
 from pydantic import ValidationError
 from pytest import MonkeyPatch
 
+from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -73,6 +74,7 @@ def _client() -> KrakenExchangeClient:
     client._candle_queues = {}
     client._ccxt_client = SimpleNamespace()
     client._subscription_cache = {}
+    client._health_tracker = SubscriptionHealthTracker()
 
     async def _with_retry(fn: Any, *args: Any, **kwargs: Any) -> Any:
         return await fn(*args, **kwargs)

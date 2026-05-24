@@ -38,6 +38,7 @@ from loguru import logger
 
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
+from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
 from snapper.infrastructure.exchanges._trade_candle_builder import enqueue_or_drop_oldest_candle
@@ -83,6 +84,22 @@ _TIMEFRAME_SECONDS: dict[str, int] = {
     "4h": 14400,
     "1d": 86400,
 }
+
+
+def _tracker_feed_key(feed: str) -> str:
+    """Normalize Futures feed names to tracker channel keys.
+
+    Args:
+        feed: Kraken Futures feed name from a subscription or data frame.
+
+    Returns:
+        Tracker channel key.
+    """
+    if feed in {"ticker", "ticker_lite"}:
+        return "ticker"
+    if feed in {"trade", "trade_snapshot"}:
+        return "trade"
+    return feed
 
 
 def _timeframe_to_seconds(timeframe: str) -> int:
@@ -204,6 +221,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             api_secret: Kraken Futures API secret (required for order operations).
         """
         super().__init__(repository=repository, exchange_name=ExchangeEnum.KRAKEN_FUTURES)
+        self._health_tracker: SubscriptionHealthTracker = SubscriptionHealthTracker()
         self.sandbox = sandbox
         self._api_key = api_key
         self._api_secret = api_secret
@@ -293,11 +311,24 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             message: Raw WebSocket message dictionary.
         """
         await asyncio.sleep(0)
-        if "event" in message:
+        event = message.get("event")
+        if event == "subscribed":
+            self._handle_subscribed_event(message)
+            return
+        if event == "alert":
+            self._handle_alert_event(message)
+            return
+        if event is not None:
             return
         feed = message.get("feed", "")
         if feed in ("ticker", "ticker_lite"):
             try:
+                product_id = message.get("product_id")
+                if not isinstance(product_id, str):
+                    raw_symbol = message.get("symbol")
+                    product_id = raw_symbol if isinstance(raw_symbol, str) else ""
+                if product_id:
+                    self._health_tracker.mark_data_seen("ticker", product_id)
                 ticker_data = (
                     message
                     if "symbol" in message
@@ -314,6 +345,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 )
                 return
             product_id = message.get("product_id", "")
+            if isinstance(product_id, str) and product_id:
+                self._health_tracker.mark_data_seen("trade", product_id)
             raw_trades = [message]
             for raw_trade in raw_trades:
                 try:
@@ -323,6 +356,47 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                     continue
                 _enqueue_or_drop_oldest(self._trade_queue, trade, "Trade")
                 self._candle_builder.update(trade)
+
+    def _handle_subscribed_event(self, message: dict[str, Any]) -> None:
+        """Track a Kraken Futures subscribed event.
+
+        Args:
+            message: Raw event frame.
+        """
+        raw_feed = message.get("feed")
+        if not isinstance(raw_feed, str):
+            logger.debug("Received Futures subscribed event without feed: {}", message)
+            return
+        feed = _tracker_feed_key(raw_feed)
+        raw_product_ids = message.get("product_ids", [])
+        if not isinstance(raw_product_ids, list):
+            logger.debug("Received Futures subscribed event without product_ids list: {}", message)
+            return
+        for product_id in raw_product_ids:
+            if isinstance(product_id, str):
+                self._health_tracker.mark_confirmed(feed, product_id)
+
+    def _handle_alert_event(self, message: dict[str, Any]) -> None:
+        """Track an attributable Kraken Futures alert event as failed.
+
+        Args:
+            message: Raw event frame.
+        """
+        message_text = message.get("message")
+        error = message_text if isinstance(message_text, str) else "subscription alert"
+        raw_feed = message.get("feed")
+        product_id = message.get("product_id")
+        if isinstance(raw_feed, str) and isinstance(product_id, str):
+            feed = _tracker_feed_key(raw_feed)
+            self._health_tracker.mark_failed(feed, product_id, error)
+            logger.warning(
+                "Kraken Futures subscription alert feed={} product={} error={}",
+                feed,
+                product_id,
+                error,
+            )
+            return
+        logger.warning("Kraken Futures unattributed subscription alert: {}", message)
 
     async def _on_execution_message(self, message: dict[str, Any]) -> None:
         """Route private WS fill messages to the execution queue.
@@ -364,9 +438,35 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             raise RuntimeError(_PUBLIC_WS_NOT_CONNECTED_MSG)
         requests = list(self._subscription_cache.values())
         for index, req in enumerate(requests):
+            for symbol in req.symbols:
+                self._health_tracker.mark_pending(
+                    req.channel,
+                    symbol,
+                    preserve_retry_count=True,
+                )
             await self._ws_client.subscribe(feed=req.channel, products=list(req.symbols))
             if index < len(requests) - 1:
                 await asyncio.sleep(_RESUBSCRIBE_CHUNK_DELAY_S)
+
+    async def _retry_subscribe(self, channel: str, symbol: str) -> None:
+        """Retry a single Futures subscription without updating replay cache.
+
+        Args:
+            channel: Tracker channel key to retry.
+            symbol: Kraken Futures product id to retry.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If the WebSocket client is not connected.
+            ValueError: If the channel key is unsupported.
+        """
+        if self._ws_client is None:
+            raise RuntimeError(_PUBLIC_WS_NOT_CONNECTED_MSG)
+        if channel not in {"ticker", "trade"}:
+            raise ValueError(f"Unsupported subscription health channel: {channel}")
+        await self._ws_client.subscribe(feed=channel, products=[symbol])
 
     async def _ensure_private_ws_connected(self) -> None:
         """Connect the authenticated FuturesWSClient if not already connected.
@@ -988,6 +1088,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             chunk = ws_symbols[i : i + _SUBSCRIBE_CHUNK_SIZE]
             req = SubscriptionRequest(channel=feed, symbols=tuple(chunk), parameters_json="{}")
             self._subscription_cache[req.key()] = req
+            for product in chunk:
+                self._health_tracker.mark_pending(feed, product)
             await self._ws_client.subscribe(feed=feed, products=chunk)
             if i + _SUBSCRIBE_CHUNK_SIZE < len(ws_symbols):
                 await asyncio.sleep(_SUBSCRIBE_CHUNK_DELAY_S)

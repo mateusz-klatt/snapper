@@ -24,6 +24,8 @@ from snapper.infrastructure.exchanges.schemas.kraken import KrakenOhlcEventEnvel
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerEventEnvelope
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerSubscribeParamsSchema
+from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerSubscriptionAckSchema
+from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerSubscriptionResultSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeEventEnvelope
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSubscribeParamsSchema
@@ -239,6 +241,22 @@ class TestKrakenTickerSchemas:
         assert result["channel"] == "ticker"
         assert result["symbol"] == ["BTC/USD", "ETH/USD"]
         assert result["snapshot"] is False
+
+    def test_ticker_subscription_ack_v2_shape(self) -> None:
+        """Parse WS v2 ticker subscription acknowledgement.
+
+        Given: A Kraken WS v2 ticker subscription ACK,
+        When: The schema validates it,
+        Then: The nested result exposes channel and symbol.
+        """
+        ack = KrakenTickerSubscriptionAckSchema(
+            method="subscribe",
+            success=True,
+            result=KrakenTickerSubscriptionResultSchema(channel="ticker", symbol="BTC/USD"),
+            time_in="2026-05-24T09:30:00.000000Z",
+            time_out="2026-05-24T09:30:00.000123Z",
+        )
+        assert (ack.method, ack.success, ack.result.symbol) == ("subscribe", True, "BTC/USD")
 
     def test_ticker_schema_model_dump(self) -> None:
         """Export ticker schema as dictionary.

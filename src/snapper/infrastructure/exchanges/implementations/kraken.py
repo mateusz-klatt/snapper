@@ -47,6 +47,9 @@ from snapper.core.json_types import JsonValue
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import TradeSideEnum
 from snapper.data.repository import Repository
+from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
+from snapper.infrastructure.exchanges._subscription_health import interval_to_label
+from snapper.infrastructure.exchanges._subscription_health import label_to_interval
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges._subscription_request import canonicalise_parameters
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_candle_list
@@ -75,6 +78,7 @@ from snapper.infrastructure.exchanges.schemas.kraken import KrakenInstrumentSubs
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenOhlcSubscribeParamsSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenOhlcSubscriptionAckSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerSubscribeParamsSchema
+from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerSubscriptionAckSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSubscribeParamsSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSubscriptionAckSchema
 from snapper.infrastructure.symbols.functions import ccxt_to_native
@@ -91,6 +95,7 @@ _TRADE_SUBSCRIBE_CHUNK_DELAY_S = 0.1
 _CANDLE_SUBSCRIBE_CHUNK_SIZE = 100
 _CANDLE_SUBSCRIBE_CHUNK_DELAY_S = 0.1
 _RESUBSCRIBE_CHUNK_DELAY_S = 5.0
+_ALREADY_SUBSCRIBED_ERROR = "Already subscribed"
 
 _DROP_LOG_INTERVAL_S = 1.0
 _drop_counters: dict[str, list[float]] = {}
@@ -113,6 +118,20 @@ informational notices that Kraken emits on every subscribe. Mutating a
 set in place does not require the ``global`` statement and keeps the
 clean-signal-log behaviour without tripping Ruff's ``PLW0603`` lint
 rule."""
+
+
+def _subscription_ack_confirms(success: bool, error: str | None) -> bool:
+    """Return whether a subscribe ACK confirms active server-side state.
+
+    Args:
+        success: ACK success flag.
+        error: Optional ACK error string.
+
+    Returns:
+        True when the ACK is successful or reports an idempotent
+        already-subscribed condition.
+    """
+    return success or error == _ALREADY_SUBSCRIBED_ERROR
 
 
 def _enqueue_or_drop_oldest(queue: asyncio.Queue[Any], item: Any, label: str) -> None:
@@ -211,6 +230,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             repository: Database repository for order/execution logging.
         """
         super().__init__(repository=repository, exchange_name=ExchangeEnum.KRAKEN)
+        self._health_tracker: SubscriptionHealthTracker = SubscriptionHealthTracker()
         self.settings = get_settings()
         self.api_key = api_key
         self.api_secret = api_secret
@@ -746,6 +766,9 @@ class KrakenExchangeClient(ExchangeClientBase):
                     parameters_json=canonicalise_parameters(cast(dict[str, JsonValue], params)),
                 )
                 self._subscription_cache[req.key()] = req
+                if ws_symbols != ["*"]:
+                    for ws_symbol in ws_symbols:
+                        self._health_tracker.mark_pending("ticker", ws_symbol)
                 await ws.subscribe(params=params, req_id=req_id)
                 while not hasattr(ws, "exception_occur") or not ws.exception_occur:
                     try:
@@ -887,6 +910,7 @@ class KrakenExchangeClient(ExchangeClientBase):
                 "1d": 1440,
             }
             interval = interval_map.get(timeframe, 1)
+            channel_key = f"ohlc:{interval_to_label(interval)}"
             if interval not in self._candle_queues:
                 self._candle_queues[interval] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
             logger.info(
@@ -907,6 +931,8 @@ class KrakenExchangeClient(ExchangeClientBase):
                         parameters_json=canonicalise_parameters(cast(dict[str, JsonValue], params)),
                     )
                     self._subscription_cache[req.key()] = req
+                    for ws_symbol in chunk:
+                        self._health_tracker.mark_pending(channel_key, ws_symbol)
                     chunk_req_id = req_id if i == 0 else None
                     await ws.subscribe(params=params, req_id=chunk_req_id)
                     if i + _CANDLE_SUBSCRIBE_CHUNK_SIZE < len(ws_symbols):
@@ -1002,6 +1028,8 @@ class KrakenExchangeClient(ExchangeClientBase):
                         ),
                     )
                     self._subscription_cache[req.key()] = req
+                    for ws_symbol in chunk:
+                        self._health_tracker.mark_pending("trade", ws_symbol)
                     chunk_req_id = req_id if i == 0 else None
                     await ws.subscribe(params=trade_params, req_id=chunk_req_id)
                     if i + _TRADE_SUBSCRIBE_CHUNK_SIZE < len(ws_symbols):
@@ -1186,6 +1214,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         result_dict = cast(dict[str, Any], message["result"])
         channel_name = result_dict.get("channel")
         ack_handlers: dict[str, Callable[..., None]] = {
+            "ticker": lambda: self._handle_ticker_subscription_ack(message, result_dict),
             "trade": lambda: self._handle_trade_subscription_ack(message, result_dict),
             "executions": lambda: self._handle_execution_subscription_ack(message),
             "ohlc": lambda: self._handle_ohlc_subscription_ack(message),
@@ -1193,6 +1222,37 @@ class KrakenExchangeClient(ExchangeClientBase):
         handler = ack_handlers.get(channel_name or "")
         if handler:
             handler()
+
+    def _handle_ticker_subscription_ack(
+        self, message: dict[str, Any], result_dict: dict[str, Any]
+    ) -> None:
+        """Track ticker subscription acknowledgement result.
+
+        Args:
+            message: Full subscription ack message.
+            result_dict: The result sub-dict from the ack.
+        """
+        try:
+            ticker_ack = KrakenTickerSubscriptionAckSchema.model_validate(message)
+            symbol = result_dict.get("symbol")
+            if not isinstance(symbol, str):
+                logger.debug("Received ticker control message without symbol: {}", message)
+                return
+            if _subscription_ack_confirms(ticker_ack.success, ticker_ack.error):
+                self._health_tracker.mark_confirmed("ticker", symbol)
+                return
+            error = ticker_ack.error or "unknown subscription error"
+            self._health_tracker.mark_failed("ticker", symbol, error)
+            logger.warning(
+                "Ticker subscription failed symbol={} error={}",
+                symbol,
+                ticker_ack.error,
+            )
+        except ValidationError:
+            logger.debug(
+                "Received non-standard ticker control message: {}",
+                message,
+            )
 
     def _handle_trade_subscription_ack(
         self, message: dict[str, Any], result_dict: dict[str, Any]
@@ -1205,12 +1265,20 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         try:
             trade_ack = KrakenTradeSubscriptionAckSchema.model_validate(message)
-            if not trade_ack.success:
-                logger.warning(
-                    "Trade subscription failed symbol={} error={}",
-                    result_dict.get("symbol"),
-                    trade_ack.error,
-                )
+            symbol = result_dict.get("symbol")
+            if not isinstance(symbol, str):
+                logger.debug("Received trade control message without symbol: {}", message)
+                return
+            if _subscription_ack_confirms(trade_ack.success, trade_ack.error):
+                self._health_tracker.mark_confirmed("trade", symbol)
+                return
+            error = trade_ack.error or "unknown subscription error"
+            self._health_tracker.mark_failed("trade", symbol, error)
+            logger.warning(
+                "Trade subscription failed symbol={} error={}",
+                symbol,
+                trade_ack.error,
+            )
         except ValidationError:
             logger.debug(
                 "Received non-standard trade control message: {}",
@@ -1249,7 +1317,16 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         try:
             ohlc_ack = KrakenOhlcSubscriptionAckSchema.model_validate(message)
-            if not ohlc_ack.success:
+            interval = ohlc_ack.result.interval
+            if interval is None:
+                logger.debug("Received OHLC control message without interval: {}", message)
+                return
+            channel_key = f"ohlc:{interval_to_label(interval)}"
+            if _subscription_ack_confirms(ohlc_ack.success, ohlc_ack.error):
+                self._health_tracker.mark_confirmed(channel_key, ohlc_ack.result.symbol)
+            else:
+                error = ohlc_ack.error or "unknown subscription error"
+                self._health_tracker.mark_failed(channel_key, ohlc_ack.result.symbol, error)
                 logger.warning(
                     "OHLC subscription failed symbol={} interval={} error={}",
                     ohlc_ack.result.symbol,
@@ -1328,6 +1405,18 @@ class KrakenExchangeClient(ExchangeClientBase):
             data: Raw OHLC data from WebSocket.
         """
         try:
+            if isinstance(data, list):
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    wire_symbol = item.get("symbol")
+                    raw_interval = item.get("interval")
+                    if isinstance(wire_symbol, str) and isinstance(raw_interval, int):
+                        try:
+                            channel_key = f"ohlc:{interval_to_label(raw_interval)}"
+                            self._health_tracker.mark_data_seen(channel_key, wire_symbol)
+                        except ValueError:
+                            logger.debug("Skipping OHLC health mark for interval {}", raw_interval)
             candle_list = parse_kraken_candle_list(data) if isinstance(data, list) else []
             for candle_data in candle_list:
                 if candle_data.interval in self._candle_queues:
@@ -1371,6 +1460,12 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         if not isinstance(data, list):
             return
+        for frame in data:
+            if not isinstance(frame, dict):
+                continue
+            wire_symbol = frame.get("symbol")
+            if isinstance(wire_symbol, str):
+                self._health_tracker.mark_data_seen("ticker", wire_symbol)
         capture = self._raw_ticker_capture
         if capture is not None:
             for frame in data:
@@ -1391,6 +1486,13 @@ class KrakenExchangeClient(ExchangeClientBase):
             data: Raw trade data from WebSocket.
         """
         try:
+            if isinstance(data, list):
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    wire_symbol = item.get("symbol")
+                    if isinstance(wire_symbol, str):
+                        self._health_tracker.mark_data_seen("trade", wire_symbol)
             trade_list = parse_kraken_trade_list(data)
             for trade_data in trade_list:
                 _enqueue_or_drop_oldest(self._trade_queue, trade_data, "trade")
@@ -1484,9 +1586,51 @@ class KrakenExchangeClient(ExchangeClientBase):
                 "symbol": list(req.symbols),
                 **cast(dict[str, JsonValue], json.loads(req.parameters_json)),
             }
+            health_channel: str = req.channel
+            if req.channel == "ohlc":
+                raw_interval = params.get("interval", 1)
+                if isinstance(raw_interval, int):
+                    health_channel = f"ohlc:{interval_to_label(raw_interval)}"
+            for symbol in req.symbols:
+                if health_channel == "ticker" and symbol == "*":
+                    continue
+                self._health_tracker.mark_pending(
+                    health_channel,
+                    symbol,
+                    preserve_retry_count=True,
+                )
             await self._ws_client.subscribe(params=params)
             if index < len(requests) - 1:
                 await asyncio.sleep(_RESUBSCRIBE_CHUNK_DELAY_S)
+
+    async def _retry_subscribe(self, channel: str, symbol: str) -> None:
+        """Retry a single Spot subscription without updating replay cache.
+
+        Args:
+            channel: Tracker channel key to retry.
+            symbol: Kraken Spot wire-format symbol to retry.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If the WebSocket client is not connected.
+            ValueError: If the channel key is unsupported.
+        """
+        if self._ws_client is None:
+            raise RuntimeError(_WS_CLIENT_CONNECTED_MSG)
+        if channel == "ticker":
+            if symbol == "*":
+                raise ValueError("Cannot retry wildcard ticker subscription as a single symbol")
+            params = KrakenTickerSubscribeParamsSchema(symbol=[symbol]).as_params()
+        elif channel == "trade":
+            params = KrakenTradeSubscribeParamsSchema(symbol=[symbol]).as_params()
+        elif channel.startswith("ohlc:"):
+            interval = label_to_interval(channel.removeprefix("ohlc:"))
+            params = KrakenOhlcSubscribeParamsSchema(symbol=[symbol], interval=interval).as_params()
+        else:
+            raise ValueError(f"Unsupported subscription health channel: {channel}")
+        await self._ws_client.subscribe(params=params)
 
     def _get_trade_client(self) -> Trade:
         if not self.api_key or not self.api_secret:

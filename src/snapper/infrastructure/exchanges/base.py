@@ -13,6 +13,9 @@ All exchange implementations (Kraken, Walutomat, Paper, Polygon)
 must inherit from this base class and implement its abstract methods.
 """
 
+import asyncio
+import contextlib
+import time
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import AsyncIterator
@@ -26,6 +29,7 @@ from loguru import logger
 from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.data.repository import Repository
+from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
@@ -74,6 +78,9 @@ class ExchangeClientBase(ABC):
         self.repository = repository
         self.exchange_name = exchange_name
         self._tracker: SequenceTracker | None = None
+        self._health_tracker: SubscriptionHealthTracker | None = None
+        self._health_loop_running: bool = False
+        self._health_loop_task: asyncio.Task[None] | None = None
 
     def set_tracker(self, tracker: SequenceTracker) -> None:
         """Inject the component-level SequenceTracker for provenance stamping.
@@ -108,6 +115,107 @@ class ExchangeClientBase(ABC):
         ``_with_retry`` / ccxt handlers still catch upstream 429s).
         """
         await get_rest_call_tracker().acquire(self.exchange_name)
+
+    async def start_health_loop(self) -> None:
+        """Start the subscription health retry loop when a tracker exists.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+        if self._health_tracker is None or self._health_loop_task is not None:
+            return
+        self._health_loop_running = True
+        self._health_loop_task = asyncio.create_task(self._subscription_health_loop())
+
+    async def stop_health_loop(self) -> None:
+        """Stop the subscription health retry loop if it is running.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+        self._health_loop_running = False
+        task = self._health_loop_task
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        self._health_loop_task = None
+
+    async def _subscription_health_loop(self) -> None:
+        """Retry overdue pending subscribes and log stale data.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+
+        Raises:
+            asyncio.CancelledError: Propagated when the lifecycle stop
+                method cancels the background task.
+        """
+        tracker = self._health_tracker
+        if tracker is None:
+            return
+        while self._health_loop_running:
+            await asyncio.sleep(tracker.retry_interval_s)
+            for entry in tracker.list_overdue_pending():
+                if not tracker.mark_retry_attempt(entry.channel, entry.symbol):
+                    logger.error(
+                        "{}: subscribe failed permanently for {}/{} after {} retries",
+                        self.exchange_name,
+                        entry.channel,
+                        entry.symbol,
+                        entry.retry_count,
+                    )
+                    continue
+                try:
+                    await self._retry_subscribe(entry.channel, entry.symbol)
+                except Exception as exc:
+                    logger.warning(
+                        "{}: retry subscribe raised for {}/{}: {}",
+                        self.exchange_name,
+                        entry.channel,
+                        entry.symbol,
+                        exc,
+                    )
+            for entry in tracker.list_stale_data():
+                reference = entry.last_seen_data_at or entry.confirmed_at or entry.requested_at
+                logger.warning(
+                    "{}: subscribed to {}/{} but no data for {:.0f}s",
+                    self.exchange_name,
+                    entry.channel,
+                    entry.symbol,
+                    time.monotonic() - reference,
+                )
+
+    async def _retry_subscribe(self, channel: str, symbol: str) -> None:
+        """Retry one symbol subscription.
+
+        Args:
+            channel: Tracker channel key to retry.
+            symbol: Wire-format symbol or product id to retry.
+
+        Returns:
+            None.
+
+        Raises:
+            NotImplementedError: Always on the base class.
+        """
+        raise NotImplementedError(f"{type(self).__name__} must implement _retry_subscribe")
 
     @abstractmethod
     async def connect(self) -> None:

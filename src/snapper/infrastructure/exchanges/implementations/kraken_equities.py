@@ -34,6 +34,7 @@ import asyncio
 import contextlib
 import json
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from time import monotonic
@@ -43,10 +44,12 @@ from typing import cast
 import httpx
 from kraken.spot import SpotWSClient
 from loguru import logger
+from pydantic import ValidationError
 
 from snapper.core.json_types import JsonValue
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
+from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges._subscription_request import canonicalise_parameters
 from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
@@ -68,6 +71,8 @@ from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerSubscriptionAckSchema
+from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSubscriptionAckSchema
 from snapper.infrastructure.symbols.functions import native_to_kraken_equities_ws
 
 _NOT_IMPLEMENTED_MSG = "Order execution not available for Kraken Equities (market data only)"
@@ -136,6 +141,21 @@ _TIMEFRAME_TO_INTERVAL: dict[str, int] = {
     "1d": 1440,
 }
 _RESUBSCRIBE_CHUNK_DELAY_S = 5.0
+_ALREADY_SUBSCRIBED_ERROR = "Already subscribed"
+
+
+def _subscription_ack_confirms(success: bool, error: str | None) -> bool:
+    """Return whether a subscribe ACK confirms active server-side state.
+
+    Args:
+        success: ACK success flag.
+        error: Optional ACK error string.
+
+    Returns:
+        True when the ACK is successful or reports an idempotent
+        already-subscribed condition.
+    """
+    return success or error == _ALREADY_SUBSCRIBED_ERROR
 
 
 def _timeframe_to_interval(timeframe: str) -> int:
@@ -221,6 +241,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             repository: Database repository for logging (optional).
         """
         super().__init__(repository=repository, exchange_name=ExchangeEnum.KRAKEN_EQUITIES)
+        self._health_tracker: SubscriptionHealthTracker = SubscriptionHealthTracker()
         self._ws_client: SpotWSClient | None = None
         self._tick_queue: asyncio.Queue[TickerUpdate] = asyncio.Queue(maxsize=_TICK_QUEUE_MAX_SIZE)
         self._trade_queue: asyncio.Queue[TradeUpdate] = asyncio.Queue(maxsize=_TRADE_QUEUE_MAX_SIZE)
@@ -265,9 +286,12 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             return
         channel = message.get("channel", "")
         msg_type = message.get("type", "")
-        if channel == "ticker" and msg_type == "snapshot":
+        if channel in {"ticker", "trade"} and msg_type == "snapshot":
             return
-        if channel == "ticker" and msg_type in ("snapshot", "update"):
+        if message.get("method") == "subscribe" and isinstance(message.get("result"), dict):
+            self._handle_subscription_ack(message)
+            return
+        if channel == "ticker" and msg_type == "update":
             raw_delayed = message.get("delayed", False)
             if isinstance(raw_delayed, bool):
                 envelope_delayed = raw_delayed
@@ -280,10 +304,84 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                 envelope_delayed = False
             self._handle_ticker_message(message, envelope_delayed=envelope_delayed)
             return
-        if channel == "trade" and msg_type == "snapshot":
-            return
-        if channel == "trade" and msg_type in ("snapshot", "update"):
+        if channel == "trade" and msg_type == "update":
             self._handle_trade_message(message)
+
+    def _handle_subscription_ack(self, message: dict[str, Any]) -> None:
+        """Process subscription acknowledgement messages by channel type.
+
+        Args:
+            message: WebSocket subscription ack message.
+        """
+        result_dict = cast(dict[str, Any], message["result"])
+        channel_name = result_dict.get("channel")
+        ack_handlers: dict[str, Callable[..., None]] = {
+            "ticker": lambda: self._handle_ticker_subscription_ack(message, result_dict),
+            "trade": lambda: self._handle_trade_subscription_ack(message, result_dict),
+        }
+        handler = ack_handlers.get(channel_name or "")
+        if handler:
+            handler()
+
+    def _handle_ticker_subscription_ack(
+        self,
+        message: dict[str, Any],
+        result_dict: dict[str, Any],
+    ) -> None:
+        """Track ticker subscription acknowledgement result.
+
+        Args:
+            message: Full subscription ack message.
+            result_dict: The result sub-dict from the ack.
+        """
+        try:
+            ticker_ack = KrakenTickerSubscriptionAckSchema.model_validate(message)
+            symbol = result_dict.get("symbol")
+            if not isinstance(symbol, str):
+                logger.debug("Received equities ticker control message without symbol: {}", message)
+                return
+            if _subscription_ack_confirms(ticker_ack.success, ticker_ack.error):
+                self._health_tracker.mark_confirmed("ticker", symbol)
+                return
+            error = ticker_ack.error or "unknown subscription error"
+            self._health_tracker.mark_failed("ticker", symbol, error)
+            logger.warning(
+                "Kraken Equities ticker subscription failed symbol={} error={}",
+                symbol,
+                ticker_ack.error,
+            )
+        except ValidationError:
+            logger.debug("Received non-standard equities ticker control message: {}", message)
+
+    def _handle_trade_subscription_ack(
+        self,
+        message: dict[str, Any],
+        result_dict: dict[str, Any],
+    ) -> None:
+        """Track trade subscription acknowledgement result.
+
+        Args:
+            message: Full subscription ack message.
+            result_dict: The result sub-dict from the ack.
+        """
+        try:
+            trade_ack = KrakenTradeSubscriptionAckSchema.model_validate(message)
+            symbol = result_dict.get("symbol")
+            if not isinstance(symbol, str):
+                logger.debug("Received equities trade control message without symbol: {}", message)
+                return
+            if _subscription_ack_confirms(trade_ack.success, trade_ack.error):
+                self._health_tracker.mark_confirmed("trade", symbol)
+                return
+            error = trade_ack.error or "unknown subscription error"
+            self._health_tracker.mark_failed("trade", symbol, error)
+            logger.warning(
+                "Kraken Equities trade subscription failed symbol={} error={}",
+                symbol,
+                trade_ack.error,
+            )
+        except ValidationError:
+            logger.debug("Received non-standard equities trade control message: {}", message)
 
     def _handle_ticker_message(
         self,
@@ -299,6 +397,10 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                 propagated into every resulting TickerUpdate.
         """
         for item in message.get("data", []):
+            if isinstance(item, dict):
+                wire_symbol = item.get("symbol")
+                if isinstance(wire_symbol, str):
+                    self._health_tracker.mark_data_seen("ticker", wire_symbol)
             try:
                 tick = parse_kraken_equities_ticker(item, envelope_delayed=envelope_delayed)
                 _enqueue_or_drop_oldest(self._tick_queue, tick, "Tick")
@@ -318,6 +420,10 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         / IP-ban on the iapi endpoint.
         """
         for item in message.get("data", []):
+            if isinstance(item, dict):
+                wire_symbol = item.get("symbol")
+                if isinstance(wire_symbol, str):
+                    self._health_tracker.mark_data_seen("trade", wire_symbol)
             try:
                 trade = parse_kraken_equities_trade(item)
             except (ValueError, KeyError) as exc:
@@ -351,9 +457,42 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                 "symbol": list(req.symbols),
                 **cast(dict[str, JsonValue], json.loads(req.parameters_json)),
             }
+            for symbol in req.symbols:
+                self._health_tracker.mark_pending(
+                    req.channel,
+                    symbol,
+                    preserve_retry_count=True,
+                )
             await self._ws_client.subscribe(params=params)
             if index < len(requests) - 1:
                 await asyncio.sleep(_RESUBSCRIBE_CHUNK_DELAY_S)
+
+    async def _retry_subscribe(self, channel: str, symbol: str) -> None:
+        """Retry a single Equities subscription without updating replay cache.
+
+        Args:
+            channel: Tracker channel key to retry.
+            symbol: Kraken Equities wire-format symbol to retry.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If the WebSocket client is not connected.
+            ValueError: If the channel key is unsupported.
+        """
+        if self._ws_client is None:
+            raise RuntimeError("WebSocket client not connected")
+        if channel not in {"ticker", "trade"}:
+            raise ValueError(f"Unsupported subscription health channel: {channel}")
+        params: dict[str, JsonValue] = {
+            "channel": channel,
+            "symbol": cast(list[JsonValue], [symbol]),
+            "snapshot": True,
+            "throttle": _WS_THROTTLE_MS,
+            "asset_class": "futures_contract",
+        }
+        await self._ws_client.subscribe(params=params)
 
     async def get_ticker(self, symbol: str) -> TickerSnapshot:
         """Fetch current ticker (not implemented for equities REST).
@@ -580,6 +719,8 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             parameters_json=canonicalise_parameters(params),
         )
         self._subscription_cache[req.key()] = req
+        for ws_symbol in ws_symbols:
+            self._health_tracker.mark_pending("ticker", ws_symbol)
         await self._ws_client.subscribe(params=params)
         logger.info(f"Subscribed to Kraken Equities tickers: {symbols} -> {ws_symbols}")
         try:
@@ -736,6 +877,8 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             parameters_json=canonicalise_parameters(params),
         )
         self._subscription_cache[req.key()] = req
+        for ws_symbol in ws_symbols:
+            self._health_tracker.mark_pending("trade", ws_symbol)
         await self._ws_client.subscribe(params=params)
         logger.info(f"Subscribed to Kraken Equities trades: {symbols} -> {ws_symbols}")
         try:
