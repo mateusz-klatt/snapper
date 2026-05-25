@@ -597,3 +597,111 @@ def test_setup_logging_file_sink_executes(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert log_file.exists()
     content = log_file.read_text()
     assert "test-file-log" in content
+
+
+def test_is_file_sink_ready_default_false() -> None:
+    """Spec — fresh-import default is ``False`` until ``setup_logging`` runs.
+
+    Given: a process that has not yet wired the file sink,
+    When: ``is_file_sink_ready()`` is called,
+    Then: it returns the current value of ``_FILE_SINK_READY[0]`` — the
+        callers that gate boot-time INFO emission on this flag must
+        see ``False`` until ``setup_logging(..., logfile=...)`` flips
+        it. This protects against eager-import ``apply_*`` invocations
+        (publisher module top-level) emitting confirmation lines to
+        stderr-only before the file sink exists.
+    """
+    saved = log_utils._FILE_SINK_READY[0]
+    log_utils._FILE_SINK_READY[0] = False
+    try:
+        assert log_utils.is_file_sink_ready() is False
+    finally:
+        log_utils._FILE_SINK_READY[0] = saved
+
+
+def test_is_file_sink_ready_true_after_setup_with_logfile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Spec — ``setup_logging(..., logfile=path)`` flips the sink-ready flag.
+
+    Given: ``_FILE_SINK_READY[0] = False`` before the call,
+    When: ``setup_logging`` runs with a non-empty ``logfile`` argument,
+    Then: ``is_file_sink_ready()`` returns ``True`` afterwards — the
+        contract relied on by
+        :func:`snapper.infrastructure.exchanges.kraken_sdk_patches.log_kraken_sdk_patches_status`
+        for ungating boot confirmation emission.
+    """
+    saved = log_utils._FILE_SINK_READY[0]
+    log_utils._FILE_SINK_READY[0] = False
+
+    def _noop_makedirs(path: str, *, exist_ok: bool) -> None:
+        assert exist_ok
+
+    monkeypatch.setattr("snapper.utils.logging.os.makedirs", _noop_makedirs)
+    log_file: Path = tmp_path / "test-snapper.log"
+    try:
+        log_utils.setup_logging(level="INFO", json_logs=False, logfile=str(log_file))
+        assert log_utils.is_file_sink_ready() is True
+    finally:
+        log_utils._FILE_SINK_READY[0] = saved
+
+
+def test_is_file_sink_ready_unchanged_when_no_logfile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec — ``setup_logging`` without ``logfile`` does NOT flip the flag.
+
+    Given: ``_FILE_SINK_READY[0] = False`` before the call,
+    When: ``setup_logging`` runs with ``logfile=None`` (the path used
+        by tests that exercise text/JSON formatters in isolation),
+    Then: ``is_file_sink_ready()`` still returns ``False`` — only an
+        actual file sink installation counts. The boot-time
+        confirmation helpers correctly stay silent in this
+        configuration; they have no file to write to.
+    """
+    saved = log_utils._FILE_SINK_READY[0]
+    log_utils._FILE_SINK_READY[0] = False
+
+    def _noop_makedirs(path: str, *, exist_ok: bool) -> None:
+        assert exist_ok
+
+    monkeypatch.setattr("snapper.utils.logging.os.makedirs", _noop_makedirs)
+    try:
+        log_utils.setup_logging(level="INFO", json_logs=False, logfile=None)
+        assert log_utils.is_file_sink_ready() is False
+    finally:
+        log_utils._FILE_SINK_READY[0] = saved
+
+
+def test_is_file_sink_ready_resets_when_reconfigured_without_logfile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Spec — re-running ``setup_logging`` with ``logfile=None`` clears stale True.
+
+    Given: a prior ``setup_logging(..., logfile=path)`` left
+        ``_FILE_SINK_READY[0] = True``,
+    When: ``setup_logging`` is invoked again with ``logfile=None``
+        (which begins by removing every loguru sink, including the
+        previously installed file sink),
+    Then: ``is_file_sink_ready()`` returns ``False`` afterwards — the
+        flag tracks current sink reality, not the high-water mark.
+        Without this reset a later boot-time confirmation hook would
+        see ``True``, emit to a non-file sink, set the per-patch
+        LOGGED flag, and then SKIP the persistent emission once a
+        real file sink came back. Regression coverage for the Codex
+        round-2 critical finding.
+    """
+    saved = log_utils._FILE_SINK_READY[0]
+
+    def _noop_makedirs(path: str, *, exist_ok: bool) -> None:
+        assert exist_ok
+
+    monkeypatch.setattr("snapper.utils.logging.os.makedirs", _noop_makedirs)
+    log_file: Path = tmp_path / "transient.log"
+    try:
+        log_utils.setup_logging(level="INFO", json_logs=False, logfile=str(log_file))
+        assert log_utils.is_file_sink_ready() is True
+        log_utils.setup_logging(level="INFO", json_logs=False, logfile=None)
+        assert log_utils.is_file_sink_ready() is False
+    finally:
+        log_utils._FILE_SINK_READY[0] = saved

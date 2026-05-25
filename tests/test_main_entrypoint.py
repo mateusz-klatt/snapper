@@ -35,6 +35,7 @@ def test_main_invokes_setup_and_app(monkeypatch: pytest.MonkeyPatch) -> None:
         app_calls.append((args, kwargs))
 
     monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", lambda: None)
     monkeypatch.setattr("snapper.__main__.app", _fake_app)
     monkeypatch.setattr(sys, "argv", ["snapper"])
     main()
@@ -70,6 +71,7 @@ def test_main_egress_subcommand_uses_egress_logfile(monkeypatch: pytest.MonkeyPa
         setup_calls.append((args, kwargs))
 
     monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", lambda: None)
     monkeypatch.setattr("snapper.__main__.app", lambda: None)
     monkeypatch.setattr(sys, "argv", ["snapper", "egress"])
     main()
@@ -96,11 +98,47 @@ def test_main_egress_with_extra_args_still_uses_egress_logfile(
         setup_calls.append((args, kwargs))
 
     monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", lambda: None)
     monkeypatch.setattr("snapper.__main__.app", lambda: None)
     monkeypatch.setattr(sys, "argv", ["snapper", "egress", "--instance-id", "snapper-egress"])
     main()
     _, kwargs = setup_calls[0]
     assert kwargs["logfile"] == "data/snapper-egress.log"
+
+
+def test_main_calls_log_patches_status_after_setup_logging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec — setup_logging MUST run before log_kraken_sdk_patches_status.
+
+    Given mocked setup_logging, log_kraken_sdk_patches_status and app,
+    When main() is called,
+    Then the call order is setup_logging → log_kraken_sdk_patches_status
+        → app — the patch-status reporter depends on loguru's file sink
+        being live, which only happens once setup_logging has installed
+        it. Reversing this order would recreate the original bug where
+        patch confirmations were written to stderr before the file sink
+        existed and never reached ``data/snapper.log`` (see
+        ``proprietary/plans/plan_2026_05_25_log_noise_followups.md``
+        item #3).
+    """
+    call_order: list[str] = []
+
+    def _fake_setup_logging(*args: object, **kwargs: object) -> None:
+        call_order.append("setup_logging")
+
+    def _fake_log_patches_status() -> None:
+        call_order.append("log_kraken_sdk_patches_status")
+
+    def _fake_app(*args: object, **kwargs: object) -> None:
+        call_order.append("app")
+
+    monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", _fake_log_patches_status)
+    monkeypatch.setattr("snapper.__main__.app", _fake_app)
+    monkeypatch.setattr(sys, "argv", ["snapper"])
+    main()
+    assert call_order == ["setup_logging", "log_kraken_sdk_patches_status", "app"]
 
 
 def test_main_non_egress_subcommand_uses_default_logfile(
@@ -123,6 +161,7 @@ def test_main_non_egress_subcommand_uses_default_logfile(
         setup_calls.append((args, kwargs))
 
     monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", lambda: None)
     monkeypatch.setattr("snapper.__main__.app", lambda: None)
     monkeypatch.setattr(sys, "argv", ["snapper", "server"])
     main()
@@ -147,6 +186,10 @@ def test_run_module_executes_main(monkeypatch: pytest.MonkeyPatch) -> None:
         app_calls.append((args, kwargs))
 
     monkeypatch.setattr("snapper.utils.logging.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.kraken_sdk_patches.log_kraken_sdk_patches_status",
+        lambda: None,
+    )
     monkeypatch.setattr(type(app), "__call__", _fake_app)
     monkeypatch.delitem(sys.modules, "snapper.__main__", raising=False)
     with pytest.raises(SystemExit) as exc_info:
@@ -160,19 +203,22 @@ class TestMain:
     """Test suite for main() entrypoint function."""
 
     @patch("snapper.__main__.app")
+    @patch("snapper.__main__.log_kraken_sdk_patches_status")
     @patch("snapper.__main__.setup_logging")
     def test_main_configures_logging_and_runs_app(
         self,
         mock_setup_logging: MagicMock,
+        mock_log_patches_status: MagicMock,
         mock_app: MagicMock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Verify main() calls setup_logging then app exactly once.
 
-        Given mocked setup_logging and app,
+        Given mocked setup_logging, log_kraken_sdk_patches_status and app,
         And argv with no sub-command (default API container path),
         When main() is called,
-        Then setup_logging is called with expected args and app is invoked once.
+        Then setup_logging is called with expected args, the kraken-sdk
+            patch-status reporter is invoked once, and app is invoked once.
         """
         monkeypatch.setattr(sys, "argv", ["snapper"])
         main()
@@ -181,6 +227,7 @@ class TestMain:
             json_logs=False,
             logfile="data/snapper.log",
         )
+        mock_log_patches_status.assert_called_once_with()
         mock_app.assert_called_once()
         assert mock_setup_logging.call_count == 1
         assert mock_app.call_count == 1
@@ -208,10 +255,12 @@ class TestMain:
         assert callable(setup_logging)
 
     @patch("snapper.__main__.app")
+    @patch("snapper.__main__.log_kraken_sdk_patches_status")
     @patch("snapper.__main__.setup_logging")
     def test_main_executed_as_module(
         self,
         mock_setup_logging: MagicMock,
+        mock_log_patches_status: MagicMock,
         mock_app: MagicMock,
         tmp_path: Path,
     ) -> None:

@@ -35,13 +35,16 @@ from websockets.http11 import Response
 
 from snapper.infrastructure.exchanges import kraken_sdk_patches
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _ALREADY_SUBSCRIBED_PATCH_APPLIED
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _ALREADY_SUBSCRIBED_PATCH_LOGGED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CLOSE_CODE_BACKOFF_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CONNECTOR_PUBLISHERS
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_CONNECTOR_ID
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _FUTURES_PATCH_APPLIED
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _FUTURES_PATCH_LOGGED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _LAST_CLOSE_CODE
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _PATCH_APPLIED
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _PATCH_LOGGED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _PENDING_RETRY_AFTER_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RETRY_AFTER_MAX_SECONDS
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RETRY_AFTER_MIN_SECONDS
@@ -61,12 +64,14 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import (
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_futures_pool_routing
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
 from snapper.infrastructure.exchanges.kraken_sdk_patches import get_registered_publisher
+from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_patches_status
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_pool import _POOL_HOLDER
 from snapper.infrastructure.network.egress_pool import EgressPool
 from snapper.infrastructure.network.egress_pool import configure_egress_pool
 from snapper.infrastructure.network.egress_pool import reset_egress_pool
+from snapper.utils.logging import _FILE_SINK_READY
 
 
 def _make_429_response(retry_after: str = "412") -> Response:
@@ -1879,3 +1884,224 @@ class TestPatchedManageSubscriptions:
         connector._ConnectSpotWebsocket__transform_subscription.assert_not_called()
         connector._ConnectSpotWebsocket__append_subscription.assert_not_called()
         connector._ConnectSpotWebsocket__remove_subscription.assert_not_called()
+
+
+class TestLogKrakenSdkPatchesStatus:
+    """Confirmation logging is decoupled from patch installation.
+
+    The ``apply_*`` functions can run at publisher module import time,
+    BEFORE loguru's file sink is configured by ``setup_logging``. The
+    ``log_kraken_sdk_patches_status`` helper bridges the gap: it gates
+    emission on :func:`snapper.utils.logging.is_file_sink_ready` so any
+    invocation that happens too early no-ops, and it tracks per-patch
+    ``_*_PATCH_LOGGED`` flags so the explicit hook in
+    :func:`snapper.__main__.main` (and the equivalent in
+    :func:`snapper.server.process_runner.main`) plus the
+    ``apply_*``-internal call never emit duplicates. Tests cover the
+    happy paths plus the two gating mechanisms.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _save_and_restore_flags(self) -> Any:
+        """Snapshot and restore the three pairs of patch flags around each test.
+
+        The flags are process-global module state that other tests may
+        mutate; this fixture ensures each test in this class sees a
+        clean baseline (all APPLIED + LOGGED flags False, sink not
+        ready) and leaves the suite untouched on exit. ``_FILE_SINK_READY``
+        from :mod:`snapper.utils.logging` is included because the gate
+        in ``log_kraken_sdk_patches_status`` reads it.
+        """
+        saved_applied = (
+            _PATCH_APPLIED[0],
+            _FUTURES_PATCH_APPLIED[0],
+            _ALREADY_SUBSCRIBED_PATCH_APPLIED[0],
+        )
+        saved_logged = (
+            _PATCH_LOGGED[0],
+            _FUTURES_PATCH_LOGGED[0],
+            _ALREADY_SUBSCRIBED_PATCH_LOGGED[0],
+        )
+        saved_sink_ready = _FILE_SINK_READY[0]
+        _PATCH_APPLIED[0] = False
+        _FUTURES_PATCH_APPLIED[0] = False
+        _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] = False
+        _PATCH_LOGGED[0] = False
+        _FUTURES_PATCH_LOGGED[0] = False
+        _ALREADY_SUBSCRIBED_PATCH_LOGGED[0] = False
+        _FILE_SINK_READY[0] = True
+        yield
+        _PATCH_APPLIED[0] = saved_applied[0]
+        _FUTURES_PATCH_APPLIED[0] = saved_applied[1]
+        _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] = saved_applied[2]
+        _PATCH_LOGGED[0] = saved_logged[0]
+        _FUTURES_PATCH_LOGGED[0] = saved_logged[1]
+        _ALREADY_SUBSCRIBED_PATCH_LOGGED[0] = saved_logged[2]
+        _FILE_SINK_READY[0] = saved_sink_ready
+
+    def test_all_flags_false_emits_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Spec — no patches active means no log records.
+
+        Given the sink is ready and all three ``_*_PATCH_APPLIED`` flags
+            are False,
+        When ``log_kraken_sdk_patches_status`` is invoked,
+        Then no INFO log record is emitted — the helper is a pure
+            reporter; it never claims patches that are not installed.
+        """
+        handler_id = _logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            log_kraken_sdk_patches_status()
+        finally:
+            _logger.remove(handler_id)
+        assert not [r for r in caplog.records if "applied" in r.getMessage()]
+
+    def test_single_flag_emits_matching_line(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Spec — Retry-After flag drives exactly one INFO line.
+
+        Given the sink is ready and only ``_PATCH_APPLIED[0] = True``,
+        When ``log_kraken_sdk_patches_status`` is invoked,
+        Then exactly one INFO record matching
+            ``"kraken-sdk Retry-After honoring applied"`` is emitted —
+            independent reporting per flag, no cross-talk.
+        """
+        _PATCH_APPLIED[0] = True
+        handler_id = _logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            log_kraken_sdk_patches_status()
+        finally:
+            _logger.remove(handler_id)
+        messages = [r.getMessage() for r in caplog.records]
+        assert "kraken-sdk Retry-After honoring applied" in messages
+        assert "kraken-sdk futures pool routing applied" not in messages
+        assert "kraken-sdk Already-subscribed filter applied" not in messages
+        assert _PATCH_LOGGED[0] is True
+
+    def test_all_flags_emit_three_lines_in_documented_order(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Spec — all three patches active yields three INFO records.
+
+        Given the sink is ready and every patch flag is True,
+        When ``log_kraken_sdk_patches_status`` is invoked,
+        Then three INFO records are emitted in the documented order
+            (Retry-After → futures pool routing → Already-subscribed),
+            providing a deterministic boot-time observability snapshot
+            that operators can grep without worrying about order drift,
+            and all three LOGGED flags become True.
+        """
+        _PATCH_APPLIED[0] = True
+        _FUTURES_PATCH_APPLIED[0] = True
+        _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] = True
+        handler_id = _logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            log_kraken_sdk_patches_status()
+        finally:
+            _logger.remove(handler_id)
+        applied_messages = [r.getMessage() for r in caplog.records if "applied" in r.getMessage()]
+        assert applied_messages == [
+            "kraken-sdk Retry-After honoring applied",
+            "kraken-sdk futures pool routing applied",
+            "kraken-sdk Already-subscribed filter applied",
+        ]
+        assert _PATCH_LOGGED[0] is True
+        assert _FUTURES_PATCH_LOGGED[0] is True
+        assert _ALREADY_SUBSCRIBED_PATCH_LOGGED[0] is True
+
+    def test_call_does_not_mutate_applied_flags(self) -> None:
+        """Spec — the helper is read-only with respect to APPLIED flags.
+
+        Given a known starting APPLIED configuration with sink ready,
+        When ``log_kraken_sdk_patches_status`` is invoked twice,
+        Then the APPLIED flag values are unchanged after each call —
+            the helper reports installation state but never installs
+            or uninstalls patches. This protects against accidental
+            coupling: the boot-time observer must not become a hidden
+            patch source.
+        """
+        _PATCH_APPLIED[0] = True
+        _FUTURES_PATCH_APPLIED[0] = False
+        _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] = True
+        log_kraken_sdk_patches_status()
+        log_kraken_sdk_patches_status()
+        assert _PATCH_APPLIED[0] is True
+        assert _FUTURES_PATCH_APPLIED[0] is False
+        assert _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] is True
+
+    def test_skip_when_file_sink_not_ready(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Spec — pre-sink invocations are silent no-ops.
+
+        Given ``_FILE_SINK_READY[0] = False`` (the state that exists
+            before ``setup_logging`` runs) and all APPLIED flags True,
+        When ``log_kraken_sdk_patches_status`` is invoked,
+        Then NO INFO record is emitted AND no LOGGED flag is set — so
+            a later post-sink invocation will still emit each line
+            exactly once. This is the eager-import path: ``apply_*``
+            calls at publisher module import time happen before
+            ``setup_logging`` wires the file sink, and we must not let
+            those early invocations consume the LOGGED budget for the
+            real post-sink emission.
+        """
+        _FILE_SINK_READY[0] = False
+        _PATCH_APPLIED[0] = True
+        _FUTURES_PATCH_APPLIED[0] = True
+        _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] = True
+        handler_id = _logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            log_kraken_sdk_patches_status()
+        finally:
+            _logger.remove(handler_id)
+        assert not [r for r in caplog.records if "applied" in r.getMessage()]
+        assert _PATCH_LOGGED[0] is False
+        assert _FUTURES_PATCH_LOGGED[0] is False
+        assert _ALREADY_SUBSCRIBED_PATCH_LOGGED[0] is False
+
+    def test_double_call_does_not_duplicate(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Spec — LOGGED tracking suppresses duplicates across invocations.
+
+        Given the sink is ready and one APPLIED flag is True,
+        When ``log_kraken_sdk_patches_status`` is invoked twice in a row,
+        Then the INFO record is emitted exactly once — the second call
+            sees ``_PATCH_LOGGED[0] is True`` and skips the emission.
+            This is the contract that makes it safe for both the
+            ``apply_*``-internal call and the explicit post-sink hook
+            in ``main()`` to invoke the function without producing two
+            ``applied`` lines per patch.
+        """
+        _PATCH_APPLIED[0] = True
+        handler_id = _logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            log_kraken_sdk_patches_status()
+            log_kraken_sdk_patches_status()
+        finally:
+            _logger.remove(handler_id)
+        applied_messages = [r.getMessage() for r in caplog.records if "applied" in r.getMessage()]
+        assert applied_messages == ["kraken-sdk Retry-After honoring applied"]
+
+    def test_pre_sink_then_post_sink_emits_exactly_once(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Spec — eager-then-explicit flow emits each line exactly once.
+
+        Given the sink starts NOT ready and only Retry-After is APPLIED,
+        When ``log_kraken_sdk_patches_status`` is called (simulating the
+            ``apply_*``-internal call at module import time, pre-sink),
+        And THEN the sink becomes ready and the helper is invoked again
+            (simulating the explicit hook from
+            :func:`snapper.__main__.main` after ``setup_logging``),
+        Then exactly one INFO record lands in the file-bound stream and
+            the LOGGED flag is set — the canonical recovery path that
+            this whole decoupling exists to protect.
+        """
+        _FILE_SINK_READY[0] = False
+        _PATCH_APPLIED[0] = True
+        handler_id = _logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            log_kraken_sdk_patches_status()
+            assert _PATCH_LOGGED[0] is False
+            _FILE_SINK_READY[0] = True
+            log_kraken_sdk_patches_status()
+        finally:
+            _logger.remove(handler_id)
+        applied_messages = [r.getMessage() for r in caplog.records if "applied" in r.getMessage()]
+        assert applied_messages == ["kraken-sdk Retry-After honoring applied"]
+        assert _PATCH_LOGGED[0] is True

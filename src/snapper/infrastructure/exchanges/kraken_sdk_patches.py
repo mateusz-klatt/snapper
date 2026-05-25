@@ -53,6 +53,7 @@ from websockets.exceptions import InvalidStatus
 from snapper.core.json_types import JsonObject
 from snapper.infrastructure.network.egress_pool import get_egress_pool
 from snapper.infrastructure.network.egress_reservation import EgressReservation
+from snapper.utils.logging import is_file_sink_ready
 
 _RETRY_AFTER_MIN_SECONDS: Final[float] = 1.0
 """Floor on Retry-After honoring — protects against zero/negative headers."""
@@ -99,6 +100,19 @@ _FUTURES_PATCH_APPLIED: list[bool] = [False]
 
 _ALREADY_SUBSCRIBED_PATCH_APPLIED: list[bool] = [False]
 """Single-element list flag tracking whether the Already-subscribed filter is installed."""
+
+_PATCH_LOGGED: list[bool] = [False]
+"""Single-element list flag tracking whether the Retry-After patch's
+``applied`` INFO confirmation has been emitted post-sink-ready."""
+
+_FUTURES_PATCH_LOGGED: list[bool] = [False]
+"""Single-element list flag tracking whether the Futures pool-routing
+patch's ``applied`` INFO confirmation has been emitted post-sink-ready."""
+
+_ALREADY_SUBSCRIBED_PATCH_LOGGED: list[bool] = [False]
+"""Single-element list flag tracking whether the Already-subscribed
+filter patch's ``applied`` INFO confirmation has been emitted
+post-sink-ready."""
 
 _ALREADY_SUBSCRIBED_ERROR: Final[str] = "Already subscribed"
 """Kraken Spot WS server response 'error' value emitted when subscribing
@@ -525,7 +539,7 @@ def apply_kraken_retry_after_honoring() -> None:
     setattr(ConnectSpotWebsocketBase, "__init__", _patched_init)
     setattr(_kraken_connectors, "connect", _wrap_connect_factory(_ws_client.connect))
     _PATCH_APPLIED[0] = True
-    logger.info("kraken-sdk Retry-After honoring applied")
+    log_kraken_sdk_patches_status()
 
 
 def apply_kraken_futures_pool_routing() -> None:
@@ -568,7 +582,7 @@ def apply_kraken_futures_pool_routing() -> None:
         return
     setattr(_kraken_futures_ws, "connect", _wrap_connect_factory(_ws_client.connect))
     _FUTURES_PATCH_APPLIED[0] = True
-    logger.info("kraken-sdk futures pool routing applied")
+    log_kraken_sdk_patches_status()
 
 
 def _patched_manage_subscriptions(self: ConnectSpotWebsocketBase, message: JsonObject) -> None:
@@ -628,4 +642,58 @@ def apply_kraken_already_subscribed_filter() -> None:
         return
     setattr(ConnectSpotWebsocket, "_manage_subscriptions", _patched_manage_subscriptions)
     _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] = True
-    logger.info("kraken-sdk Already-subscribed filter applied")
+    log_kraken_sdk_patches_status()
+
+
+def log_kraken_sdk_patches_status() -> None:
+    """Emit ``applied`` confirmations for kraken-sdk patches that are active.
+
+    Decoupled from the ``apply_*`` functions so the boot log captures
+    one INFO record per active patch regardless of when the patch was
+    installed relative to ``setup_logging``. The eager-import path
+    (``snapper.cli.app:142`` imports
+    ``snapper.messaging.publishers.kraken`` at top-level which calls
+    ``apply_kraken_retry_after_honoring`` and
+    ``apply_kraken_already_subscribed_filter`` at module level) runs
+    BEFORE :func:`snapper.utils.logging.setup_logging` has installed
+    the loguru file sink. The lazy-import path (``importlib.import_module``
+    inside the process_manager spawner for futures / equities publishers)
+    runs AFTER it.
+
+    The function uses two levels of gating to handle both paths
+    correctly:
+
+    * ``is_file_sink_ready()`` — early return until ``setup_logging``
+      has wired the file sink. Without this guard, eager invocations
+      from ``apply_*`` would emit to stderr only and the boot log file
+      would still miss the confirmation.
+    * ``_*_PATCH_LOGGED`` flags — record per-patch emission state so
+      multiple invocations (one per ``apply_*`` call PLUS the explicit
+      hook in :func:`snapper.__main__.main`) never produce duplicate
+      ``applied`` records.
+
+    Call sites:
+
+    * :func:`snapper.__main__.main` and :func:`snapper.server.process_runner.main`
+      call this immediately after ``setup_logging`` to flush any
+      ``applied`` confirmations the eager-import path queued at module
+      load time.
+    * Each ``apply_*`` function calls this at the end of its installation
+      block, so the lazy-import path produces its confirmation
+      immediately after the patch is installed without waiting for an
+      external call.
+
+    The function is read-only with respect to ``_*_PATCH_APPLIED`` —
+    it only inspects the installation flags, never sets them.
+    """
+    if not is_file_sink_ready():
+        return
+    if _PATCH_APPLIED[0] and not _PATCH_LOGGED[0]:
+        logger.info("kraken-sdk Retry-After honoring applied")
+        _PATCH_LOGGED[0] = True
+    if _FUTURES_PATCH_APPLIED[0] and not _FUTURES_PATCH_LOGGED[0]:
+        logger.info("kraken-sdk futures pool routing applied")
+        _FUTURES_PATCH_LOGGED[0] = True
+    if _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] and not _ALREADY_SUBSCRIBED_PATCH_LOGGED[0]:
+        logger.info("kraken-sdk Already-subscribed filter applied")
+        _ALREADY_SUBSCRIBED_PATCH_LOGGED[0] = True

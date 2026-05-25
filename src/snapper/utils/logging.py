@@ -347,6 +347,7 @@ def setup_logging(level: str = "INFO", json_logs: bool = False, logfile: str | N
         json_logs: If True, output JSON instead of formatted text.
         logfile: Optional file path for additional file logging.
     """
+    _FILE_SINK_READY[0] = False
     _configure_stdlib_logging(level)
     logger.remove()
     logger.configure(extra={"context": "main"})
@@ -356,3 +357,30 @@ def setup_logging(level: str = "INFO", json_logs: bool = False, logfile: str | N
         _add_text_logging(level)
     if logfile:
         _add_file_logging(level, logfile)
+        _FILE_SINK_READY[0] = True
+
+
+_FILE_SINK_READY: list[bool] = [False]
+"""Single-element list flag tracking whether ``setup_logging`` has wired
+the file sink. Read by callers that emit boot-time confirmation logs
+which would otherwise be lost when fired before the file sink existed
+(see :func:`snapper.infrastructure.exchanges.kraken_sdk_patches.log_kraken_sdk_patches_status`).
+"""
+
+
+def is_file_sink_ready() -> bool:
+    """Return ``True`` once ``setup_logging`` has installed the file sink.
+
+    Used by boot-time confirmation helpers that must not emit until the
+    file sink is live. Calling code that has nothing to lose from
+    stderr-only emission can ignore this flag; calling code whose
+    audience is the persistent log file (i.e. anything an operator
+    greps after the fact) should gate emission on this returning
+    ``True``.
+
+    Returns:
+        ``True`` after ``setup_logging(...)`` ran with a non-empty
+        ``logfile``; ``False`` until then (or for the rare invocation
+        that disables file logging entirely).
+    """
+    return _FILE_SINK_READY[0]

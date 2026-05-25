@@ -23,6 +23,7 @@ Note:
 import sys
 
 from snapper.cli.app import app
+from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_patches_status
 from snapper.utils.logging import setup_logging
 
 
@@ -63,6 +64,7 @@ def main() -> int:
         Exit code (always 0 on success).
     """
     setup_logging(level="INFO", json_logs=False, logfile=_resolve_logfile(sys.argv))
+    log_kraken_sdk_patches_status()
     app()
     return 0
 

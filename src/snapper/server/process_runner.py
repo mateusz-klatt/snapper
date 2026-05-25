@@ -51,6 +51,7 @@ from loguru import logger
 from snapper.application.ai_review.service import _BUS_AI_REVIEW_DECISION_TOPIC
 from snapper.application.ai_review.service import get_ai_review_service
 from snapper.config.settings import get_settings
+from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_patches_status
 from snapper.utils.logging import set_log_context
 from snapper.utils.logging import setup_logging
 
@@ -142,6 +143,7 @@ def main() -> int:
         Exit code: 0 for success, 1 for configuration error or process failure.
     """
     setup_logging(level="INFO", json_logs=False, logfile="data/snapper.log")
+    log_kraken_sdk_patches_status()
     parser = argparse.ArgumentParser(description="Snapper process runner")
     parser.add_argument(
         "--config",
