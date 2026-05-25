@@ -279,11 +279,12 @@ class TestHealthLoopRetry:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Stale confirmed entries are logged but not retried.
+        """Stale confirmed entries surface as an aggregated WARNING, not per-symbol.
 
-        Given: A confirmed entry with no data for longer than threshold,
+        Given: A single confirmed entry with no data for longer than threshold,
         When: The health loop runs one tick,
-        Then: A stale-data warning is logged and no retry is called.
+        Then: One aggregated WARNING is emitted ("N stale subscription(s)") AND
+            the entry is NOT retried (stale-data path is observe-only).
         """
         client = HealthLoopClient()
         tracker = SubscriptionHealthTracker(
@@ -306,8 +307,105 @@ class TestHealthLoopRetry:
             await client._subscription_health_loop()
         finally:
             logger.remove(sink_id)
-        stale_logs = [rec for rec in caplog.records if "no data for" in rec.message]
-        assert (client.retry_calls, len(stale_logs)) == ([], 1)
+        aggregate_logs = [rec for rec in caplog.records if "stale subscription" in rec.message]
+        assert (client.retry_calls, len(aggregate_logs)) == ([], 1)
+        assert "ticker/BTC/USD" in aggregate_logs[0].message
+        assert "ticker=1" in aggregate_logs[0].message
+
+    @pytest.mark.asyncio
+    async def test_loop_aggregates_multi_entry_stale_into_single_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Many stale entries collapse into one aggregated WARNING per loop tick.
+
+        Given: Three confirmed entries (mixed channels) all past the stale threshold,
+        When: The health loop runs one tick,
+        Then: Exactly ONE WARNING is emitted containing the total count,
+            per-channel breakdown sorted by channel, AND the worst-stale
+            symbol with its silence duration.
+        """
+        client = HealthLoopClient()
+        tracker = SubscriptionHealthTracker(
+            ack_timeout_s=1.0,
+            retry_interval_s=1.0,
+            data_stale_threshold_s=5.0,
+        )
+        client._health_tracker = tracker
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 100.0)
+        tracker.mark_confirmed("ticker", "BTC/USD")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 110.0)
+        tracker.mark_confirmed("ticker", "ETH/USD")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 120.0)
+        tracker.mark_confirmed("trade", "SOL/USD")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 200.0)
+
+        async def stop_after_sleep(_: float) -> None:
+            client._health_loop_running = False
+
+        monkeypatch.setattr(exchange_base.asyncio, "sleep", stop_after_sleep)
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            client._health_loop_running = True
+            await client._subscription_health_loop()
+        finally:
+            logger.remove(sink_id)
+        aggregate_logs = [rec for rec in caplog.records if "stale subscription" in rec.message]
+        assert len(aggregate_logs) == 1
+        message = aggregate_logs[0].message
+        assert "3 stale subscription(s)" in message
+        assert "ticker=2" in message and "trade=1" in message
+        assert message.index("ticker") < message.index("trade")
+        assert "ticker/BTC/USD" in message
+
+    @pytest.mark.asyncio
+    async def test_loop_emits_per_entry_debug_records(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Per-symbol detail is preserved at DEBUG level for diagnostics.
+
+        Given: Two stale entries,
+        When: The health loop runs one tick with a DEBUG-level sink attached,
+        Then: One aggregated WARNING is emitted PLUS one DEBUG per entry
+            ("subscribed to <channel>/<symbol> but no data for Ns").
+        """
+        client = HealthLoopClient()
+        tracker = SubscriptionHealthTracker(
+            ack_timeout_s=1.0,
+            retry_interval_s=1.0,
+            data_stale_threshold_s=5.0,
+        )
+        client._health_tracker = tracker
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 50.0)
+        tracker.mark_confirmed("ticker", "AAA/USD")
+        tracker.mark_confirmed("ticker", "BBB/USD")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 80.0)
+
+        async def stop_after_sleep(_: float) -> None:
+            client._health_loop_running = False
+
+        monkeypatch.setattr(exchange_base.asyncio, "sleep", stop_after_sleep)
+        sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+        try:
+            client._health_loop_running = True
+            await client._subscription_health_loop()
+        finally:
+            logger.remove(sink_id)
+        per_entry_debugs = [
+            rec
+            for rec in caplog.records
+            if rec.levelname == "DEBUG" and "but no data for" in rec.message
+        ]
+        symbols_in_debug = {
+            symbol
+            for symbol in ("AAA/USD", "BBB/USD")
+            if any(symbol in rec.message for rec in per_entry_debugs)
+        }
+        assert len(per_entry_debugs) == 2
+        assert symbols_in_debug == {"AAA/USD", "BBB/USD"}
 
     @pytest.mark.asyncio
     async def test_loop_without_tracker_returns(self) -> None:

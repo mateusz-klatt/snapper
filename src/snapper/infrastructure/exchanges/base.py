@@ -18,6 +18,7 @@ import contextlib
 import time
 from abc import ABC
 from abc import abstractmethod
+from collections import Counter
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
@@ -192,15 +193,37 @@ class ExchangeClientBase(ABC):
                         entry.symbol,
                         exc,
                     )
-            for entry in tracker.list_stale_data():
-                reference = entry.last_seen_data_at or entry.confirmed_at or entry.requested_at
-                logger.warning(
-                    "{}: subscribed to {}/{} but no data for {:.0f}s",
-                    self.exchange_name,
-                    entry.channel,
-                    entry.symbol,
-                    time.monotonic() - reference,
+            stale_entries = tracker.list_stale_data()
+            if stale_entries:
+                now = time.monotonic()
+                by_channel: Counter[str] = Counter(entry.channel for entry in stale_entries)
+                worst = max(
+                    stale_entries,
+                    key=lambda entry: now
+                    - (entry.last_seen_data_at or entry.confirmed_at or entry.requested_at),
                 )
+                worst_ref = worst.last_seen_data_at or worst.confirmed_at or worst.requested_at
+                channel_summary = ", ".join(
+                    f"{channel}={count}" for channel, count in sorted(by_channel.items())
+                )
+                logger.warning(
+                    "{}: {} stale subscription(s) [{}]; worst: {}/{} for {:.0f}s",
+                    self.exchange_name,
+                    len(stale_entries),
+                    channel_summary,
+                    worst.channel,
+                    worst.symbol,
+                    now - worst_ref,
+                )
+                for entry in stale_entries:
+                    reference = entry.last_seen_data_at or entry.confirmed_at or entry.requested_at
+                    logger.debug(
+                        "{}: subscribed to {}/{} but no data for {:.0f}s",
+                        self.exchange_name,
+                        entry.channel,
+                        entry.symbol,
+                        now - reference,
+                    )
 
     async def _retry_subscribe(self, channel: str, symbol: str) -> None:
         """Retry one symbol subscription.
