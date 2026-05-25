@@ -21,6 +21,7 @@ established pattern).
 
 import asyncio
 import contextlib
+import math
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC
@@ -248,6 +249,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         self._candle_aggregator_task: asyncio.Task[None] | None = None
         self._subscription_cache: dict[tuple[str, frozenset[str], str], SubscriptionRequest] = {}
         self._next_public_subscribe_at: float = 0.0
+        self._last_rate_limited_log_at: float = -math.inf
         self._public_subscribe_lock: asyncio.Lock = asyncio.Lock()
         self._execution_queue: asyncio.Queue[ExecutionUpdate] = asyncio.Queue(
             maxsize=_QUEUE_MAX_SIZE
@@ -460,13 +462,19 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             message: Raw event frame.
         """
         if message.get("message") == "rate_limited":
+            should_log: bool = False
             async with self._public_subscribe_lock:
-                cooldown_until = time.monotonic() + _RATE_LIMITED_COOLDOWN_S
+                now = time.monotonic()
+                cooldown_until = now + _RATE_LIMITED_COOLDOWN_S
                 self._next_public_subscribe_at = max(self._next_public_subscribe_at, cooldown_until)
-            logger.warning(
-                "Kraken Futures rate_limited: pausing public subscribes for {}s",
-                _RATE_LIMITED_COOLDOWN_S,
-            )
+                if now - self._last_rate_limited_log_at >= _RATE_LIMITED_COOLDOWN_S:
+                    self._last_rate_limited_log_at = now
+                    should_log = True
+            if should_log:
+                logger.warning(
+                    "Kraken Futures rate_limited: pausing public subscribes for {}s",
+                    _RATE_LIMITED_COOLDOWN_S,
+                )
             return
         if message.get("message") == _ALREADY_SUBSCRIBED_FUTURES_ALERT:
             logger.debug("Kraken Futures subscribe race (already subscribed): {}", message)

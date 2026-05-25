@@ -409,6 +409,172 @@ async def test_repeated_rate_limited_alerts_use_max_semantics(
 
 
 @pytest.mark.asyncio
+async def test_rate_limited_log_is_throttled_within_cooldown(
+    client: KrakenFuturesExchangeClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Burst-arriving rate_limited alerts emit exactly one WARN per cooldown window.
+
+    Given: A Futures client receiving multiple ``rate_limited`` alerts
+        in rapid succession (the production failure mode: SDK message
+        buffer flushes N pending broker responses together during a
+        shutdown or reconnect storm — 2026-05-25 boot-1 shutdown saw
+        515 alerts in 140 ms),
+    When: ``_on_ws_message`` dispatches each alert to ``_handle_alert_event``,
+    Then: Exactly ONE WARN record is emitted (the first one); the
+        subsequent alerts within the same cooldown window flow through
+        the cooldown-update path silently. This protects the boot log
+        from buffer-flush amplification of an otherwise correct
+        rate-limit handler. Mirrors the P2 aggregate pattern (commit
+        ``05142cbf``): preserve behavioural correctness, suppress
+        per-event log spam.
+    """
+    clock = _DeterministicClock()
+    _install_public_subscribe_clock(monkeypatch, clock)
+    handler_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+    try:
+        for _ in range(5):
+            await client._on_ws_message({"event": "alert", "message": "rate_limited"})
+            clock.advance(0.1)
+    finally:
+        logger.remove(handler_id)
+    rate_limited_warnings = [
+        r for r in caplog.records if r.levelname == "WARNING" and "rate_limited" in r.getMessage()
+    ]
+    assert len(rate_limited_warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_log_re_emits_after_cooldown_window(
+    client: KrakenFuturesExchangeClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A new burst after the cooldown elapses produces a fresh WARN.
+
+    Given: A Futures client that received a ``rate_limited`` alert
+        (emitting one WARN) and then waited longer than the cooldown
+        before another alert arrives,
+    When: ``_on_ws_message`` dispatches the second alert,
+    Then: A SECOND WARN is emitted — operators must still get a
+        notification when the broker rate-limits us again after the
+        previous limit was supposed to have cleared. The throttle is
+        per-cooldown-window, not per-process. Branch coverage: the
+        ``now - self._last_rate_limited_log_at >= _RATE_LIMITED_COOLDOWN_S``
+        gate must evaluate to True on the second call.
+    """
+    clock = _DeterministicClock()
+    _install_public_subscribe_clock(monkeypatch, clock)
+    handler_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+    try:
+        await client._on_ws_message({"event": "alert", "message": "rate_limited"})
+        clock.advance(kf._RATE_LIMITED_COOLDOWN_S + 1.0)
+        await client._on_ws_message({"event": "alert", "message": "rate_limited"})
+    finally:
+        logger.remove(handler_id)
+    rate_limited_warnings = [
+        r for r in caplog.records if r.levelname == "WARNING" and "rate_limited" in r.getMessage()
+    ]
+    assert len(rate_limited_warnings) == 2
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_state_updates_on_every_alert_regardless_of_log(
+    client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cooldown state extends on each alert even when the WARN is throttled.
+
+    Given: A Futures client that already absorbed and logged one
+        ``rate_limited`` alert, then receives a second alert while
+        still inside the cooldown window (so its WARN is suppressed),
+    When: ``_on_ws_message`` dispatches the second alert,
+    Then: ``self._next_public_subscribe_at`` is bumped to the second
+        alert's deadline (``now + _RATE_LIMITED_COOLDOWN_S``) via the
+        existing ``max`` semantics — verifying that the log throttle
+        does NOT alter the behavioural rate-limit handling. Behavioural
+        correctness and log noise control are decoupled.
+    """
+    clock = _DeterministicClock()
+    _install_public_subscribe_clock(monkeypatch, clock)
+    await client._on_ws_message({"event": "alert", "message": "rate_limited"})
+    clock.advance(2.0)
+    await client._on_ws_message({"event": "alert", "message": "rate_limited"})
+    assert client._next_public_subscribe_at - clock.monotonic() == pytest.approx(
+        kf._RATE_LIMITED_COOLDOWN_S
+    )
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_log_emits_at_exact_cooldown_boundary(
+    client: KrakenFuturesExchangeClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The gate fires at ``elapsed == _RATE_LIMITED_COOLDOWN_S`` exactly.
+
+    Given: A Futures client that emitted one ``rate_limited`` WARN at
+        t=0, then waited EXACTLY ``_RATE_LIMITED_COOLDOWN_S`` seconds
+        (the boundary case),
+    When: A second ``rate_limited`` alert arrives,
+    Then: A SECOND WARN is emitted — the gate uses ``>=`` so the
+        boundary is inclusive. Without this branch coverage a future
+        switch to strict ``>`` would silently regress this edge case.
+    """
+    clock = _DeterministicClock()
+    _install_public_subscribe_clock(monkeypatch, clock)
+    handler_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+    try:
+        await client._on_ws_message({"event": "alert", "message": "rate_limited"})
+        clock.advance(kf._RATE_LIMITED_COOLDOWN_S)
+        await client._on_ws_message({"event": "alert", "message": "rate_limited"})
+    finally:
+        logger.remove(handler_id)
+    rate_limited_warnings = [
+        r for r in caplog.records if r.levelname == "WARNING" and "rate_limited" in r.getMessage()
+    ]
+    assert len(rate_limited_warnings) == 2
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_sampled_now_is_consistent_under_lock_contention(
+    client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cooldown deadline uses the actual lock-acquire time, not pre-lock time.
+
+    Given: A Futures client whose ``_public_subscribe_lock`` is held
+        externally for 3 simulated seconds (modelling the production
+        pattern where ``_send_public_subscribe`` holds the same lock
+        across an awaited ``asyncio.sleep`` / WS subscribe at lines
+        1208-1219 of the implementation),
+    When: A ``rate_limited`` alert arrives during that hold and waits
+        behind the lock,
+    Then: ``_next_public_subscribe_at`` is computed from the time
+        AFTER the lock acquisition (lock-internal sample), not from
+        the pre-lock sample. Sampling ``now`` before the lock would
+        leak a stale cooldown deadline equal to the wait duration.
+        Regression coverage for the Codex round-1 critical finding on
+        item #6 — the original throttle patch sampled ``now`` outside
+        the lock and would have under-extended the cooldown by the
+        wait duration under contention.
+    """
+    clock = _DeterministicClock()
+    _install_public_subscribe_clock(monkeypatch, clock)
+    await client._public_subscribe_lock.acquire()
+    holding_advance_s = 3.0
+    alert_task = asyncio.create_task(
+        client._handle_alert_event({"event": "alert", "message": "rate_limited"})
+    )
+    while not client._public_subscribe_lock._waiters:
+        await _REAL_ASYNCIO_SLEEP(0)
+    clock.advance(holding_advance_s)
+    client._public_subscribe_lock.release()
+    await alert_task
+    expected_deadline = holding_advance_s + kf._RATE_LIMITED_COOLDOWN_S
+    assert client._next_public_subscribe_at == pytest.approx(expected_deadline)
+
+
+@pytest.mark.asyncio
 async def test_already_subscribed_alert_logged_as_debug(
     client: KrakenFuturesExchangeClient, caplog: pytest.LogCaptureFixture
 ) -> None:
