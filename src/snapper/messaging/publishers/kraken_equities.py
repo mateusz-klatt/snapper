@@ -30,9 +30,23 @@ from snapper.infrastructure.exchanges.implementations.kraken_equities import (
     KrakenEquitiesExchangeClient,
 )
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
+from snapper.infrastructure.exchanges.kraken_sdk_patches import (
+    apply_kraken_already_subscribed_filter,
+)
 from snapper.infrastructure.symbols.functions import get_available_kraken_equities_symbols
 from snapper.infrastructure.symbols.functions import native_to_kraken_equities_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
+
+apply_kraken_already_subscribed_filter()
+"""Install the kraken-sdk Already-subscribed filter at module import.
+
+Idempotent — safe if `snapper.messaging.publishers.kraken` has already
+installed it. Required here because `KrakenEquitiesExchangeClient` reuses
+`SpotWSClient` (and therefore `ConnectSpotWebsocket._manage_subscriptions`)
+with a different ``ws_url``. An equities-only process that does not import
+`snapper.messaging.publishers.kraken` would otherwise leave the SDK warning
+flood unsuppressed for equities subscriptions.
+"""
 
 _CME_DAILY_BREAK_START = datetime_time(hour=21)
 _CME_DAILY_BREAK_END = datetime_time(hour=22)

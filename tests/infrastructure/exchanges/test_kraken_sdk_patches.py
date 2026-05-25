@@ -24,7 +24,9 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from kraken.spot.websocket.connectors import ConnectSpotWebsocket
 from kraken.spot.websocket.connectors import ConnectSpotWebsocketBase
+from loguru import logger as _logger
 from websockets.exceptions import ConnectionClosedError
 from websockets.exceptions import InvalidStatus
 from websockets.frames import Close
@@ -32,6 +34,7 @@ from websockets.http11 import Headers
 from websockets.http11 import Response
 
 from snapper.infrastructure.exchanges import kraken_sdk_patches
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _ALREADY_SUBSCRIBED_PATCH_APPLIED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CLOSE_CODE_BACKOFF_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CONNECTOR_PUBLISHERS
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_CONNECTOR_ID
@@ -46,11 +49,15 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _kraken_futures_
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _parse_retry_after
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_get_reconnect_wait
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_init
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_manage_subscriptions
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_reconnect
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_run
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _unregister_connector
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _wrap_connect_factory
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _ws_client
+from snapper.infrastructure.exchanges.kraken_sdk_patches import (
+    apply_kraken_already_subscribed_filter,
+)
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_futures_pool_routing
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
 from snapper.infrastructure.exchanges.kraken_sdk_patches import get_registered_publisher
@@ -1697,3 +1704,178 @@ class TestPhaseBPrimeBranchCoverage:
 
             reset_egress_pool()
         assert wait == 17.5
+
+
+class TestApplyKrakenAlreadySubscribedFilter:
+    """Installation of the Already-subscribed filter must be safe to call repeatedly."""
+
+    def test_apply_rebinds_manage_subscriptions(self) -> None:
+        """Spec — first call installs the rebind.
+
+        Given the filter has not been applied yet (or already True from a
+            previous test — the rebind is idempotent),
+        When ``apply_kraken_already_subscribed_filter`` is called,
+        Then ``_ALREADY_SUBSCRIBED_PATCH_APPLIED[0]`` is True AND
+            ``ConnectSpotWebsocket._manage_subscriptions`` is
+            :func:`_patched_manage_subscriptions`.
+        """
+        apply_kraken_already_subscribed_filter()
+        assert _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] is True
+        assert ConnectSpotWebsocket._manage_subscriptions is _patched_manage_subscriptions
+
+    def test_second_apply_is_noop(self) -> None:
+        """Spec — second call is a no-op.
+
+        Given the filter is already installed,
+        When ``apply_kraken_already_subscribed_filter`` is called again,
+        Then the flag stays True and the bound method is unchanged.
+        """
+        apply_kraken_already_subscribed_filter()
+        before = ConnectSpotWebsocket._manage_subscriptions
+        apply_kraken_already_subscribed_filter()
+        assert _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] is True
+        assert ConnectSpotWebsocket._manage_subscriptions is before
+
+
+class TestPatchedManageSubscriptions:
+    """``_patched_manage_subscriptions`` must downgrade benign races but keep real errors visible."""
+
+    def test_already_subscribed_logged_as_debug(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Spec — benign race is downgraded.
+
+        Given an SDK subscribe response carrying ``error == 'Already subscribed'``,
+        When ``_patched_manage_subscriptions`` is invoked,
+        Then the message is emitted at DEBUG (not WARNING) and the SDK's
+            private ``__append_subscription`` is NOT called (no result to append).
+        """
+        connector = MagicMock(spec=ConnectSpotWebsocket)
+        message: dict[str, Any] = {
+            "method": "subscribe",
+            "success": False,
+            "error": "Already subscribed",
+            "symbol": "BTC/USD",
+        }
+        handler_id = _logger.add(caplog.handler, format="{message}", level="DEBUG")
+        try:
+            _patched_manage_subscriptions(connector, message)
+        finally:
+            _logger.remove(handler_id)
+        assert any(
+            r.levelname == "DEBUG" and "already subscribed" in r.getMessage().lower()
+            for r in caplog.records
+        )
+        assert not any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_other_subscribe_error_logged_as_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Spec — genuine subscribe failure stays visible.
+
+        Given an SDK subscribe response carrying a non-``Already subscribed`` error
+            (e.g. ``Invalid arguments``),
+        When ``_patched_manage_subscriptions`` is invoked,
+        Then the message is emitted at WARNING so operators see real failures.
+        """
+        connector = MagicMock(spec=ConnectSpotWebsocket)
+        message: dict[str, Any] = {
+            "method": "subscribe",
+            "success": False,
+            "error": "Invalid arguments",
+            "symbol": "BAD/SYM",
+        }
+        handler_id = _logger.add(caplog.handler, format="{message}", level="DEBUG")
+        try:
+            _patched_manage_subscriptions(connector, message)
+        finally:
+            _logger.remove(handler_id)
+        assert any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_successful_subscribe_appends_subscription(self) -> None:
+        """Spec — successful subscribe still delegates to SDK helpers.
+
+        Given an SDK subscribe response with ``success == True`` and a ``result`` block,
+        When ``_patched_manage_subscriptions`` is invoked,
+        Then ``__transform_subscription`` is called with the raw message AND
+            ``__append_subscription`` is called with the transformed ``result``.
+        """
+        connector = MagicMock(spec=ConnectSpotWebsocket)
+        transformed_result = {"channel": "ticker", "symbol": ["BTC/USD"]}
+        connector._ConnectSpotWebsocket__transform_subscription = MagicMock(
+            return_value={"result": transformed_result}
+        )
+        connector._ConnectSpotWebsocket__append_subscription = MagicMock()
+        message: dict[str, Any] = {
+            "method": "subscribe",
+            "success": True,
+            "result": {"channel": "ticker", "symbol": "BTC/USD"},
+        }
+        _patched_manage_subscriptions(connector, message)
+        connector._ConnectSpotWebsocket__transform_subscription.assert_called_once_with(
+            subscription=message
+        )
+        connector._ConnectSpotWebsocket__append_subscription.assert_called_once_with(
+            subscription=transformed_result
+        )
+
+    def test_successful_unsubscribe_removes_subscription(self) -> None:
+        """Spec — successful unsubscribe still delegates to SDK helpers.
+
+        Given an SDK unsubscribe response with ``success == True`` and a ``result`` block,
+        When ``_patched_manage_subscriptions`` is invoked,
+        Then ``__transform_subscription`` is called AND
+            ``__remove_subscription`` is called with the transformed ``result``.
+        """
+        connector = MagicMock(spec=ConnectSpotWebsocket)
+        transformed_result = {"channel": "ticker", "symbol": ["BTC/USD"]}
+        connector._ConnectSpotWebsocket__transform_subscription = MagicMock(
+            return_value={"result": transformed_result}
+        )
+        connector._ConnectSpotWebsocket__remove_subscription = MagicMock()
+        message: dict[str, Any] = {
+            "method": "unsubscribe",
+            "success": True,
+            "result": {"channel": "ticker", "symbol": "BTC/USD"},
+        }
+        _patched_manage_subscriptions(connector, message)
+        connector._ConnectSpotWebsocket__remove_subscription.assert_called_once_with(
+            subscription=transformed_result
+        )
+
+    def test_failed_unsubscribe_logged_as_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Spec — failed unsubscribe still emits WARNING.
+
+        Given an SDK unsubscribe response with ``success == False``,
+        When ``_patched_manage_subscriptions`` is invoked,
+        Then a WARNING is emitted so operators see the failure (we have no
+            equivalent benign-race path for unsubscribes today).
+        """
+        connector = MagicMock(spec=ConnectSpotWebsocket)
+        message: dict[str, Any] = {
+            "method": "unsubscribe",
+            "success": False,
+            "error": "Not subscribed",
+        }
+        handler_id = _logger.add(caplog.handler, format="{message}", level="DEBUG")
+        try:
+            _patched_manage_subscriptions(connector, message)
+        finally:
+            _logger.remove(handler_id)
+        assert any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_unknown_method_is_ignored(self) -> None:
+        """Spec — unknown / non-subscribe methods are silently passed through.
+
+        Given an SDK message whose ``method`` is neither ``subscribe`` nor
+            ``unsubscribe`` (e.g. a heartbeat, a status frame),
+        When ``_patched_manage_subscriptions`` is invoked,
+        Then no SDK helpers are called and no log record is emitted —
+            the method is not responsible for those messages.
+        """
+        connector = MagicMock(spec=ConnectSpotWebsocket)
+        connector._ConnectSpotWebsocket__transform_subscription = MagicMock()
+        connector._ConnectSpotWebsocket__append_subscription = MagicMock()
+        connector._ConnectSpotWebsocket__remove_subscription = MagicMock()
+        _patched_manage_subscriptions(connector, {"method": "heartbeat"})
+        connector._ConnectSpotWebsocket__transform_subscription.assert_not_called()
+        connector._ConnectSpotWebsocket__append_subscription.assert_not_called()
+        connector._ConnectSpotWebsocket__remove_subscription.assert_not_called()

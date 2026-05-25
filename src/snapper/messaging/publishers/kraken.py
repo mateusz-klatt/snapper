@@ -46,17 +46,27 @@ from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchan
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_WINDOW_S
+from snapper.infrastructure.exchanges.kraken_sdk_patches import (
+    apply_kraken_already_subscribed_filter,
+)
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 from snapper.messaging.publishers.base import MarketDataPublisherService
 
 apply_kraken_retry_after_honoring()
-"""Install kraken-sdk Retry-After honoring + watchdog patches at module import.
+apply_kraken_already_subscribed_filter()
+"""Install kraken-sdk patches at module import.
 
 Idempotent — calling multiple times is a no-op. Importing this module from
 the process_manager startup path is the documented installation point per
 the Phase A rollout of
 ``proprietary/plans/plan_2026_05_21_kraken_429_retry_after_egress_pool.md``.
+
+* :func:`apply_kraken_retry_after_honoring` — 429 Retry-After honoring +
+  reconnect watchdog (Phase A).
+* :func:`apply_kraken_already_subscribed_filter` — downgrades benign
+  ``Already subscribed`` race-condition warnings from the SDK to DEBUG
+  so real subscription failures stay visible (Phase B).
 """
 
 _FORCE_WS_RESTART_BACKOFF_S: Final[float] = 5.0

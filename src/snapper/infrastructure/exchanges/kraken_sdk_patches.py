@@ -44,11 +44,13 @@ from typing import Final
 import kraken.futures.websocket as _kraken_futures_ws
 import kraken.spot.websocket.connectors as _kraken_connectors
 import websockets.asyncio.client as _ws_client
+from kraken.spot.websocket.connectors import ConnectSpotWebsocket
 from kraken.spot.websocket.connectors import ConnectSpotWebsocketBase
 from loguru import logger
 from websockets.exceptions import ConnectionClosed
 from websockets.exceptions import InvalidStatus
 
+from snapper.core.json_types import JsonObject
 from snapper.infrastructure.network.egress_pool import get_egress_pool
 from snapper.infrastructure.network.egress_reservation import EgressReservation
 
@@ -94,6 +96,18 @@ _PATCH_APPLIED: list[bool] = [False]
 
 _FUTURES_PATCH_APPLIED: list[bool] = [False]
 """Single-element list flag tracking whether the Futures pool-routing rebind is installed."""
+
+_ALREADY_SUBSCRIBED_PATCH_APPLIED: list[bool] = [False]
+"""Single-element list flag tracking whether the Already-subscribed filter is installed."""
+
+_ALREADY_SUBSCRIBED_ERROR: Final[str] = "Already subscribed"
+"""Kraken Spot WS server response 'error' value emitted when subscribing
+to a feed already present in the SDK's local subscription cache.
+
+Benign: fires on the race between our publisher health-loop's replay
+path and the SDK's existing in-memory subscription set. Real subscribe
+failures (e.g. ``Invalid arguments``, unknown symbol) use a different
+``error`` string and must remain visible at WARNING level."""
 
 _PENDING_RETRY_AFTER_S: dict[int, float] = {}
 """Maps ``id(connector_self)`` to its pending Retry-After deadline in seconds."""
@@ -555,3 +569,63 @@ def apply_kraken_futures_pool_routing() -> None:
     setattr(_kraken_futures_ws, "connect", _wrap_connect_factory(_ws_client.connect))
     _FUTURES_PATCH_APPLIED[0] = True
     logger.info("kraken-sdk futures pool routing applied")
+
+
+def _patched_manage_subscriptions(self: ConnectSpotWebsocketBase, message: JsonObject) -> None:
+    """Replacement for ``ConnectSpotWebsocket._manage_subscriptions``.
+
+    Mirrors the SDK's original logic but downgrades the benign
+    ``{'error': 'Already subscribed'}`` subscribe response from WARNING
+    to DEBUG. The SDK emits a single ``LOG.warning(message)`` for every
+    non-success subscribe response — the race between our publisher
+    health-loop's replay path and the SDK's existing subscription cache
+    drowns real failures (invalid symbol, malformed args) under tens of
+    thousands of benign races at WARNING level. Real subscription errors
+    keep their WARNING.
+
+    Name mangling on the SDK's private helpers (``__transform_subscription``,
+    ``__append_subscription``, ``__remove_subscription``) is bypassed via
+    runtime ``getattr`` against the mangled names — those helpers are
+    defined on the ``ConnectSpotWebsocket`` subclass, not the base, so
+    the typed ``self`` annotation does not surface them statically.
+    """
+    transform: Any = getattr(self, "_ConnectSpotWebsocket__transform_subscription")
+    append: Any = getattr(self, "_ConnectSpotWebsocket__append_subscription")
+    remove: Any = getattr(self, "_ConnectSpotWebsocket__remove_subscription")
+    if message.get("method") == "subscribe":
+        if message.get("success") and message.get("result"):
+            transformed = transform(subscription=message)
+            append(subscription=transformed["result"])
+        elif message.get("error") == _ALREADY_SUBSCRIBED_ERROR:
+            logger.debug("kraken-sdk subscribe race (already subscribed): {}", message)
+        else:
+            logger.warning("kraken-sdk subscribe failed: {}", message)
+    elif message.get("method") == "unsubscribe":
+        if message.get("success") and message.get("result"):
+            transformed = transform(subscription=message)
+            remove(subscription=transformed["result"])
+        else:
+            logger.warning("kraken-sdk unsubscribe failed: {}", message)
+
+
+def apply_kraken_already_subscribed_filter() -> None:
+    """Apply the Already-subscribed filter patch (idempotent).
+
+    Replaces ``ConnectSpotWebsocket._manage_subscriptions`` with
+    :func:`_patched_manage_subscriptions` so benign
+    ``Already subscribed`` race-condition warnings from the SDK become
+    DEBUG. Real subscription failures (invalid symbol, malformed args)
+    keep their WARNING level.
+
+    Background: production logs accumulated 208 866 WARNING records in
+    9 h (88 % of all WARNINGs) from the SDK's blanket ``LOG.warning``
+    on every non-success subscribe response. The publisher health loop
+    re-subscribes to feeds the SDK already has cached → server replies
+    ``{'error': 'Already subscribed'}`` → SDK warns → log noise floods
+    out real signals.
+    """
+    if _ALREADY_SUBSCRIBED_PATCH_APPLIED[0]:
+        return
+    setattr(ConnectSpotWebsocket, "_manage_subscriptions", _patched_manage_subscriptions)
+    _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] = True
+    logger.info("kraken-sdk Already-subscribed filter applied")
