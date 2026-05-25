@@ -199,6 +199,29 @@ class TestClientInit:
         assert c._trade_client is None
         assert c._user_client is None
 
+    def test_tick_queue_absorbs_boot_burst(self) -> None:
+        """Spec — the ticker producer queue is sized for boot-time replay.
+
+        Given: A fresh KrakenFuturesExchangeClient,
+        When: tick queue maxsize is compared to the standard queue
+            bound,
+        Then: tick queue maxsize is strictly greater than the
+            non-tick ``_QUEUE_MAX_SIZE`` — the Kraken Futures broker,
+            like Spot, replays a wildcard ticker snapshot on initial
+            subscribe and sends follow-on updates before the consumer
+            steady-state catches up. The 2026-05-25 post-restart
+            5-minute slice counted 5 drop-oldest WARN records on the
+            Futures tick queue (plan item #2). The larger
+            ``_TICK_QUEUE_MAX_SIZE`` absorbs the burst; the smaller
+            default applies to ``trade``/``candle``/``execution``
+            paths where no drops have been observed.
+        """
+        c = KrakenFuturesExchangeClient()
+        assert c._tick_queue.maxsize >= 50_000
+        assert c._tick_queue.maxsize == kf._TICK_QUEUE_MAX_SIZE
+        assert c._tick_queue.maxsize > c._trade_queue.maxsize
+        assert c._trade_queue.maxsize == kf._QUEUE_MAX_SIZE
+
 
 @pytest.mark.asyncio
 async def test_subscribe_ticks_caches_products_not_symbols(

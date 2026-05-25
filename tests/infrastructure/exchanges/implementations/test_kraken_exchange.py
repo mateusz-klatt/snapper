@@ -5753,6 +5753,29 @@ class TestKrakenSpotQueuesAreBounded:
         assert client._raw_instrument_queue.maxsize > 0
         assert client._instrument_queue.maxsize > 0
 
+    def test_tick_queue_absorbs_boot_burst(self) -> None:
+        """Spec — the ticker producer queue is sized for boot-time replay.
+
+        Given: A fresh KrakenExchangeClient,
+        When: tick queue maxsize is compared to the standard queue
+            bound,
+        Then: tick queue maxsize is strictly greater than the
+            non-tick ``_QUEUE_MAX_SIZE`` — the Kraken Spot broker
+            replays a wildcard ticker snapshot of every subscribed
+            pair in the first ~60 s after WS handshake, and the
+            2026-05-25 post-restart log review counted 34 drop-oldest
+            WARN records on the tick queue alone in that window
+            (plan item #2). The larger ``_TICK_QUEUE_MAX_SIZE``
+            absorbs the burst without dropping; the smaller default
+            applies to ``trade``/``candle``/``instrument``/``execution``
+            paths where no drops have been observed.
+        """
+        client = KrakenExchangeClient(api_key="k", api_secret="s", sandbox=False)
+        assert client._tick_queue.maxsize >= 50_000
+        assert client._tick_queue.maxsize == kr._TICK_QUEUE_MAX_SIZE
+        assert client._tick_queue.maxsize > client._trade_queue.maxsize
+        assert client._trade_queue.maxsize == kr._QUEUE_MAX_SIZE
+
 
 class TestInvokeFuncOffloadsSyncCalls:
     """Pin the event-loop-unblock contract for ``_invoke_func``.

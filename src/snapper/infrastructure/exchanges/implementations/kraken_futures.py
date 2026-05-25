@@ -74,6 +74,17 @@ _CREDENTIALS_REQUIRED_MSG = "API credentials required for authenticated operatio
 _PUBLIC_WS_NOT_CONNECTED_MSG = "WebSocket client not connected"
 _QUEUE_DRAIN_TIMEOUT = 0.1
 _QUEUE_MAX_SIZE = 10000
+_TICK_QUEUE_MAX_SIZE = 50000
+"""Boot-time absorption budget for the ticker producer queue.
+
+The Kraken Futures broker, like Spot, replays a wildcard snapshot of
+every subscribed instrument's ticker on initial subscribe + sends
+follow-on updates while the consumer is still ramping up. The
+2026-05-25 post-restart 5-minute slice counted 5 drop-oldest WARN
+records on the Futures tick queue. Smaller burst than Spot (fewer
+instruments), same root cause and same fix: enlarge only the tick
+producer queue, keep ``trade``/``candle``/``execution`` at the
+standard 10 k bound."""
 _PUBLIC_SUBSCRIBE_MIN_INTERVAL_S = 0.075
 _RATE_LIMITED_COOLDOWN_S = 5.0
 _ALREADY_SUBSCRIBED_FUTURES_ALERT = "Already subscribed to feed, re-requesting"
@@ -242,7 +253,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         self._user_client: User | None = None
         self._ws_client: FuturesWSClient | None = None
         self._private_ws_client: FuturesWSClient | None = None
-        self._tick_queue: asyncio.Queue[TickerUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+        self._tick_queue: asyncio.Queue[TickerUpdate] = asyncio.Queue(maxsize=_TICK_QUEUE_MAX_SIZE)
         self._trade_queue: asyncio.Queue[TradeUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
         self._candle_queue: asyncio.Queue[CandleUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
         self._candle_builder = TradeCandleBuilder(interval_seconds=60)
