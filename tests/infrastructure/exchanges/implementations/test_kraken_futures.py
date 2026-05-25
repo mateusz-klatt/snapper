@@ -409,6 +409,76 @@ async def test_repeated_rate_limited_alerts_use_max_semantics(
 
 
 @pytest.mark.asyncio
+async def test_already_subscribed_alert_logged_as_debug(
+    client: KrakenFuturesExchangeClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Benign 'Already subscribed to feed, re-requesting' alerts log at DEBUG.
+
+    Given: A Futures client receiving the Kraken Futures broker-emitted
+        race alert ``{'event': 'alert', 'message': 'Already subscribed
+        to feed, re-requesting'}`` (fires on publisher health-loop
+        replay collisions and reconnect echoes — confirmed benign in
+        production via the 2026-05-25 boot-log review),
+    When: ``_on_ws_message`` dispatches the alert to ``_handle_alert_event``,
+    Then: The handler emits a DEBUG record matching the
+        ``"Kraken Futures subscribe race (already subscribed)"`` prefix
+        and NO WARNING record fires — real subscription failures
+        retain their WARNING level via the downstream branches.
+        Mirrors the Spot-side patch in
+        :mod:`snapper.infrastructure.exchanges.kraken_sdk_patches`,
+        scoped to the Futures publisher boundary because Futures uses
+        a separate ``ConnectFuturesWebsocket`` client outside the
+        Spot SDK monkeypatch surface.
+    """
+    handler_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        await client._on_ws_message(
+            {"event": "alert", "message": "Already subscribed to feed, re-requesting"}
+        )
+    finally:
+        logger.remove(handler_id)
+    assert any(
+        r.levelname == "DEBUG" and "subscribe race (already subscribed)" in r.getMessage()
+        for r in caplog.records
+    )
+    assert not any(r.levelname == "WARNING" for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_real_subscription_alert_keeps_warning_level(
+    client: KrakenFuturesExchangeClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Real attributed subscription failures still log at WARNING.
+
+    Given: A Futures client receiving a non-race alert with a feed +
+        product_id and an explicit error message
+        (``{'event': 'alert', 'message': 'Invalid arguments', 'feed':
+        'ticker', 'product_id': 'PF_XBTUSD'}``),
+    When: ``_on_ws_message`` dispatches the alert to ``_handle_alert_event``,
+    Then: A WARNING record is emitted via the attributed-alert branch
+        (``"Kraken Futures subscription alert feed=ticker
+        product=PF_XBTUSD error=Invalid arguments"``) — verifying the
+        DEBUG downgrade is scoped exclusively to the benign race
+        message and does NOT shadow operationally significant alerts.
+    """
+    handler_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        await client._on_ws_message(
+            {
+                "event": "alert",
+                "message": "Invalid arguments",
+                "feed": "ticker",
+                "product_id": "PF_XBTUSD",
+            }
+        )
+    finally:
+        logger.remove(handler_id)
+    assert any(
+        r.levelname == "WARNING" and "subscription alert" in r.getMessage() for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_mark_pending_happens_inside_limiter(
     client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

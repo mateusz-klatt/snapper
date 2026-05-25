@@ -75,6 +75,16 @@ _QUEUE_DRAIN_TIMEOUT = 0.1
 _QUEUE_MAX_SIZE = 10000
 _PUBLIC_SUBSCRIBE_MIN_INTERVAL_S = 0.075
 _RATE_LIMITED_COOLDOWN_S = 5.0
+_ALREADY_SUBSCRIBED_FUTURES_ALERT = "Already subscribed to feed, re-requesting"
+"""Kraken Futures WS server alert text emitted when the broker detects
+that a feed/product subscription request races against an existing
+in-server subscription. Benign: fires during our publisher health-loop
+replays and on broker-side reconnect echoes. The Spot equivalent
+``'Already subscribed'`` is filtered in the SDK-level monkeypatch
+(see :mod:`snapper.infrastructure.exchanges.kraken_sdk_patches`), but
+Futures uses a separate ``ConnectFuturesWebsocket`` client that does
+not flow through that patch; the gate lives at the publisher
+``_handle_alert_event`` boundary instead."""
 
 _TIMEFRAME_SECONDS: dict[str, int] = {
     "1m": 60,
@@ -457,6 +467,9 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 "Kraken Futures rate_limited: pausing public subscribes for {}s",
                 _RATE_LIMITED_COOLDOWN_S,
             )
+            return
+        if message.get("message") == _ALREADY_SUBSCRIBED_FUTURES_ALERT:
+            logger.debug("Kraken Futures subscribe race (already subscribed): {}", message)
             return
         message_text = message.get("message")
         error = message_text if isinstance(message_text, str) else "subscription alert"
