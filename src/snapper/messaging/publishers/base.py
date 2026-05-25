@@ -514,7 +514,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         )
         self._exchange_client = self._create_exchange_client()
         await self._exchange_client.connect()
-        await self._exchange_client.start_health_loop()
+        self._exchange_client.start_health_loop()
         logger.info(f"{process_name}: Exchange client connected (anonymous, public data)")
         self.running = True
         tasks: list[asyncio.Task[None]] = []
@@ -756,6 +756,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             f"{self._get_exchange_name()}: liveness exceeded ({reason}); "
             "no recovery handler configured"
         )
+        await asyncio.sleep(0)
 
     def _get_max_symbols_per_connection(self) -> int:
         """Return maximum symbols per WebSocket connection (0 = unlimited).

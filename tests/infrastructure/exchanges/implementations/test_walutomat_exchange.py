@@ -419,8 +419,7 @@ def test_polling_loop_backoff_error_does_not_stop_running() -> None:
     client = WalutomatExchangeClient(polling_interval=0.0)
     client._running = True
     client._max_consecutive_errors = 1
-    stop = client._handle_http_error(httpx.HTTPError("fail"))
-    assert stop is False
+    client._handle_http_error(httpx.HTTPError("fail"))
     assert client._running is True
     assert client._backoff_until > 0.0
 
@@ -3134,7 +3133,7 @@ def test_handle_http_error_threshold_sets_backoff_without_stopping() -> None:
     client = WalutomatExchangeClient()
     client._running = True
     client._max_consecutive_errors = 1
-    assert client._handle_http_error(httpx.HTTPError("boom")) is False
+    client._handle_http_error(httpx.HTTPError("boom"))
     assert client._running is True
     assert client._backoff_attempts == 1
     assert client._backoff_until > 0.0
@@ -3564,9 +3563,9 @@ def test_handle_http_error_in_flight_retry_logs_warning_not_error(
 
     Given: A client with max_consecutive_errors=5 and zero prior errors,
     When: _handle_http_error is called once with an httpx.HTTPError,
-    Then: The error counter increments to 1, the method returns False
-        (do not stop polling), the log records a WARNING with
-        'will retry', and no ERROR record is emitted. Per the
+    Then: The error counter increments to 1, the client keeps polling,
+        the log records a WARNING with 'will retry', and no ERROR
+        record is emitted. Per the
         clean-signal-log rule, ERROR is reserved for terminal retry
         exhaustion so the operator-actionable signal stays meaningful.
     """
@@ -3575,10 +3574,9 @@ def test_handle_http_error_in_flight_retry_logs_warning_not_error(
     sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
     try:
         with caplog.at_level("DEBUG"):
-            stop = client._handle_http_error(httpx.HTTPError("connect timeout"))
+            client._handle_http_error(httpx.HTTPError("connect timeout"))
     finally:
         logger.remove(sink_id)
-    assert stop is False
     assert client._consecutive_error_count == 1
     warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
     error_records = [r for r in caplog.records if r.levelname == "ERROR"]
@@ -3599,7 +3597,7 @@ def test_handle_http_error_below_threshold_sets_no_backoff() -> None:
     """
     client = WalutomatExchangeClient()
     client._max_consecutive_errors = 5
-    assert client._handle_http_error(httpx.HTTPError("timeout")) is False
+    client._handle_http_error(httpx.HTTPError("timeout"))
     assert client._consecutive_error_count == 1
     assert client._backoff_attempts == 0
     assert client._backoff_until == pytest.approx(0.0)
@@ -3621,7 +3619,7 @@ async def test_handle_http_error_at_threshold_sets_backoff_60s(
     client._backoff_wakeup_event = asyncio.Event()
     client._backoff_wakeup_event.set()
     monkeypatch.setattr(walutomat_mod.time, "monotonic", lambda: 1000.0)
-    assert client._handle_http_error(httpx.HTTPError("timeout")) is False
+    client._handle_http_error(httpx.HTTPError("timeout"))
     assert client._running is True
     assert client._backoff_attempts == 1
     assert client._backoff_until == pytest.approx(1060.0)
@@ -3660,17 +3658,20 @@ def test_handle_http_error_never_sets_running_false() -> None:
     assert client._running is True
 
 
-def test_handle_http_error_always_returns_false() -> None:
-    """HTTP error handling keeps the legacy bool signature.
+def test_handle_http_error_keeps_running_control_on_client_state() -> None:
+    """HTTP error handling does not expose a loop-control return value.
 
     Given: A client below and at its threshold,
     When: _handle_http_error is called repeatedly,
-    Then: It always returns False.
+    Then: The client remains running and records backoff state.
     """
     client = WalutomatExchangeClient()
     client._max_consecutive_errors = 2
-    assert client._handle_http_error(httpx.HTTPError("timeout")) is False
-    assert client._handle_http_error(httpx.HTTPError("timeout")) is False
+    client._running = True
+    client._handle_http_error(httpx.HTTPError("timeout"))
+    client._handle_http_error(httpx.HTTPError("timeout"))
+    assert client._running is True
+    assert client._backoff_attempts == 1
 
 
 @pytest.mark.asyncio()

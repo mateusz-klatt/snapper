@@ -142,6 +142,7 @@ _TIMEFRAME_TO_INTERVAL: dict[str, int] = {
 }
 _RESUBSCRIBE_CHUNK_DELAY_S = 5.0
 _ALREADY_SUBSCRIBED_ERROR = "Already subscribed"
+_WS_CLIENT_NOT_CONNECTED_MSG = "WebSocket client not connected"
 
 
 def _subscription_ack_confirms(success: bool, error: str | None) -> bool:
@@ -449,7 +450,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
     async def _replay_subscriptions(self) -> None:
         """Replay cached public subscriptions after reconnect."""
         if self._ws_client is None:
-            raise RuntimeError("WebSocket client not connected")
+            raise RuntimeError(_WS_CLIENT_NOT_CONNECTED_MSG)
         requests = list(self._subscription_cache.values())
         for index, req in enumerate(requests):
             params = {
@@ -482,7 +483,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             ValueError: If the channel key is unsupported.
         """
         if self._ws_client is None:
-            raise RuntimeError("WebSocket client not connected")
+            raise RuntimeError(_WS_CLIENT_NOT_CONNECTED_MSG)
         if channel not in {"ticker", "trade"}:
             raise ValueError(f"Unsupported subscription health channel: {channel}")
         params: dict[str, JsonValue] = {
@@ -703,7 +704,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         """
         await self._ensure_ws_connected()
         if self._ws_client is None:
-            raise RuntimeError("WebSocket client not connected")
+            raise RuntimeError(_WS_CLIENT_NOT_CONNECTED_MSG)
         ws_symbols = [native_to_kraken_equities_ws(s) for s in symbols]
         symbols_json = cast(list[JsonValue], list(ws_symbols))
         params: dict[str, JsonValue] = {
@@ -861,7 +862,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         """
         await self._ensure_ws_connected()
         if self._ws_client is None:
-            raise RuntimeError("WebSocket client not connected")
+            raise RuntimeError(_WS_CLIENT_NOT_CONNECTED_MSG)
         ws_symbols = [native_to_kraken_equities_ws(s) for s in symbols]
         symbols_json = cast(list[JsonValue], list(ws_symbols))
         params: dict[str, JsonValue] = {

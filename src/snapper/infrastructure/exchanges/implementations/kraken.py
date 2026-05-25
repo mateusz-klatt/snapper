@@ -96,6 +96,7 @@ _CANDLE_SUBSCRIBE_CHUNK_SIZE = 100
 _CANDLE_SUBSCRIBE_CHUNK_DELAY_S = 0.1
 _RESUBSCRIBE_CHUNK_DELAY_S = 5.0
 _ALREADY_SUBSCRIBED_ERROR = "Already subscribed"
+_UNKNOWN_SUBSCRIPTION_ERROR = "unknown subscription error"
 
 _DROP_LOG_INTERVAL_S = 1.0
 _drop_counters: dict[str, list[float]] = {}
@@ -889,68 +890,202 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         try:
             await self._ensure_ws_connected()
-            assert self._ws_client is not None, _WS_CLIENT_CONNECTED_MSG
-            if symbols == ["*"]:
-                native_syms = get_available_kraken_symbols()
-                logger.info(
-                    f"Subscribing to {timeframe} candles: wildcard expansion -> "
-                    f"{len(native_syms)} native symbols (Kraken Spot ohlc channel does "
-                    f"not accept '*')"
-                )
-            else:
-                native_syms = symbols
+            ws_client = self._connected_ws_client()
+            native_syms = self._expand_spot_symbols(
+                symbols,
+                channel_label=f"{timeframe} candles",
+                wildcard_note="Kraken Spot ohlc channel does not accept '*'",
+            )
             ws_symbols = [native_to_kraken_websocket(symbol) for symbol in native_syms]
-            interval_map = {
-                "1m": 1,
-                "5m": 5,
-                "15m": 15,
-                "30m": 30,
-                "1h": 60,
-                "4h": 240,
-                "1d": 1440,
-            }
-            interval = interval_map.get(timeframe, 1)
+            interval = self._candle_interval(timeframe)
             channel_key = f"ohlc:{interval_to_label(interval)}"
-            if interval not in self._candle_queues:
-                self._candle_queues[interval] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+            self._ensure_candle_queue(interval)
             logger.info(
                 f"Subscribing to {timeframe} candles: {len(ws_symbols)} symbols in "
-                f"{(len(ws_symbols) + _CANDLE_SUBSCRIBE_CHUNK_SIZE - 1) // _CANDLE_SUBSCRIBE_CHUNK_SIZE} "
+                f"{self._chunk_count(len(ws_symbols), _CANDLE_SUBSCRIBE_CHUNK_SIZE)} "
                 f"chunks of <={_CANDLE_SUBSCRIBE_CHUNK_SIZE}"
             )
-            async with self._ws_client as ws:
-                for i in range(0, len(ws_symbols), _CANDLE_SUBSCRIBE_CHUNK_SIZE):
-                    chunk = ws_symbols[i : i + _CANDLE_SUBSCRIBE_CHUNK_SIZE]
-                    subscribe_params = KrakenOhlcSubscribeParamsSchema(
-                        symbol=chunk, interval=interval
-                    )
-                    params = subscribe_params.as_params()
-                    req = SubscriptionRequest(
-                        channel="ohlc",
-                        symbols=tuple(chunk),
-                        parameters_json=canonicalise_parameters(cast(dict[str, JsonValue], params)),
-                    )
-                    self._subscription_cache[req.key()] = req
-                    for ws_symbol in chunk:
-                        self._health_tracker.mark_pending(channel_key, ws_symbol)
-                    chunk_req_id = req_id if i == 0 else None
-                    await ws.subscribe(params=params, req_id=chunk_req_id)
-                    if i + _CANDLE_SUBSCRIBE_CHUNK_SIZE < len(ws_symbols):
-                        await asyncio.sleep(_CANDLE_SUBSCRIBE_CHUNK_DELAY_S)
-                while not hasattr(ws, "exception_occur") or not ws.exception_occur:
-                    try:
-                        message = await asyncio.wait_for(
-                            self._candle_queues[interval].get(), timeout=0.1
-                        )
-                        yield message
-                    except TimeoutError:
-                        await asyncio.sleep(0.01)
-                    except Exception as e:
-                        logger.error(f"Error receiving WebSocket message: {e}")
-                        break
+            async with ws_client as ws:
+                await self._subscribe_candle_chunks(ws, ws_symbols, interval, channel_key, req_id)
+                async for message in self._iter_candle_messages(ws, interval):
+                    yield message
         except Exception as e:
             logger.error(f"WebSocket candle subscription error: {e}")
             raise
+
+    def _expand_spot_symbols(
+        self, symbols: list[str], *, channel_label: str, wildcard_note: str
+    ) -> list[str]:
+        """Expand Kraken Spot wildcard subscriptions when the channel needs it.
+
+        Args:
+            symbols: Native symbol list, possibly ``["*"]``.
+            channel_label: Human-readable channel label for the log line.
+            wildcard_note: Operational note explaining why expansion is required.
+
+        Returns:
+            Native symbols to convert and subscribe.
+        """
+        if symbols != ["*"]:
+            return symbols
+        native_syms = get_available_kraken_symbols()
+        logger.info(
+            "Subscribing to {}: wildcard expansion -> {} native symbols ({})",
+            channel_label,
+            len(native_syms),
+            wildcard_note,
+        )
+        return native_syms
+
+    @staticmethod
+    def _candle_interval(timeframe: str) -> int:
+        """Return Kraken OHLC interval minutes for a Snapper timeframe.
+
+        Args:
+            timeframe: Snapper candle timeframe.
+
+        Returns:
+            Kraken OHLC interval minutes.
+        """
+        interval_map = {
+            "1m": 1,
+            "5m": 5,
+            "15m": 15,
+            "30m": 30,
+            "1h": 60,
+            "4h": 240,
+            "1d": 1440,
+        }
+        return interval_map.get(timeframe, 1)
+
+    @staticmethod
+    def _chunk_count(total: int, chunk_size: int) -> int:
+        """Return the number of chunks needed for ``total`` items.
+
+        Args:
+            total: Number of items to chunk.
+            chunk_size: Maximum items per chunk.
+
+        Returns:
+            Number of chunks.
+        """
+        return (total + chunk_size - 1) // chunk_size
+
+    def _ensure_candle_queue(self, interval: int) -> None:
+        """Create the interval candle queue if it does not exist.
+
+        Args:
+            interval: Kraken OHLC interval minutes.
+
+        Returns:
+            None.
+        """
+        if interval not in self._candle_queues:
+            self._candle_queues[interval] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+
+    def _connected_ws_client(self) -> SpotWSClient:
+        """Return the active WebSocket client or raise.
+
+        Returns:
+            Active Kraken Spot WebSocket client.
+
+        Raises:
+            RuntimeError: If the WebSocket client is not connected.
+        """
+        if self._ws_client is None:
+            raise RuntimeError(_WS_CLIENT_CONNECTED_MSG)
+        return self._ws_client
+
+    def _cache_subscription(
+        self,
+        channel: Literal["ticker", "trade", "ohlc", "book"],
+        symbols: list[str],
+        params: dict[str, JsonValue],
+    ) -> None:
+        """Cache one subscription request for reconnect replay.
+
+        Args:
+            channel: Kraken channel name.
+            symbols: Wire-format symbols for this request.
+            params: Canonical subscription parameters.
+
+        Returns:
+            None.
+        """
+        req = SubscriptionRequest(
+            channel=channel,
+            symbols=tuple(symbols),
+            parameters_json=canonicalise_parameters(params),
+        )
+        self._subscription_cache[req.key()] = req
+
+    async def _subscribe_candle_chunks(
+        self,
+        ws: SpotWSClient,
+        ws_symbols: list[str],
+        interval: int,
+        channel_key: str,
+        req_id: int | None,
+    ) -> None:
+        """Subscribe to OHLC symbols in bounded chunks.
+
+        Args:
+            ws: Active Kraken Spot WebSocket client.
+            ws_symbols: Kraken wire-format symbols.
+            interval: Kraken OHLC interval minutes.
+            channel_key: Health tracker channel key for this interval.
+            req_id: Optional request id for the first chunk.
+
+        Returns:
+            None.
+        """
+        for index in range(0, len(ws_symbols), _CANDLE_SUBSCRIBE_CHUNK_SIZE):
+            chunk = ws_symbols[index : index + _CANDLE_SUBSCRIBE_CHUNK_SIZE]
+            params = cast(
+                dict[str, JsonValue],
+                KrakenOhlcSubscribeParamsSchema(symbol=chunk, interval=interval).as_params(),
+            )
+            self._cache_subscription("ohlc", chunk, params)
+            for ws_symbol in chunk:
+                self._health_tracker.mark_pending(channel_key, ws_symbol)
+            chunk_req_id = req_id if index == 0 else None
+            await ws.subscribe(params=params, req_id=chunk_req_id)
+            if index + _CANDLE_SUBSCRIBE_CHUNK_SIZE < len(ws_symbols):
+                await asyncio.sleep(_CANDLE_SUBSCRIBE_CHUNK_DELAY_S)
+
+    async def _iter_candle_messages(
+        self, ws: SpotWSClient, interval: int
+    ) -> AsyncIterator[CandleUpdate]:
+        """Yield queued candle messages while the WebSocket is healthy.
+
+        Args:
+            ws: Active Kraken Spot WebSocket client.
+            interval: Kraken OHLC interval minutes.
+
+        Yields:
+            Candle updates from the interval queue.
+        """
+        while not self._ws_exception_occurred(ws):
+            try:
+                message = await asyncio.wait_for(self._candle_queues[interval].get(), timeout=0.1)
+                yield message
+            except TimeoutError:
+                await asyncio.sleep(0.01)
+            except Exception as e:
+                logger.error(f"Error receiving WebSocket message: {e}")
+                break
+
+    @staticmethod
+    def _ws_exception_occurred(ws: SpotWSClient) -> bool:
+        """Return whether the Kraken SDK WebSocket reports an exception.
+
+        Args:
+            ws: Kraken Spot WebSocket client.
+
+        Returns:
+            True when ``exception_occur`` exists and is truthy.
+        """
+        return bool(getattr(ws, "exception_occur", False))
 
     def subscribe_trades(
         self, symbols: list[str], *, req_id: int | None = None
@@ -1001,51 +1136,71 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         try:
             await self._ensure_ws_connected()
-            assert self._ws_client is not None, _WS_CLIENT_CONNECTED_MSG
-            if symbols == ["*"]:
-                native_syms = get_available_kraken_symbols()
-                logger.info(
-                    f"Subscribing to trades: wildcard expansion -> {len(native_syms)} native symbols "
-                    f"(Kraken Spot trade channel does not accept '*')"
-                )
-            else:
-                native_syms = symbols
+            ws_client = self._connected_ws_client()
+            native_syms = self._expand_spot_symbols(
+                symbols,
+                channel_label="trades",
+                wildcard_note="Kraken Spot trade channel does not accept '*'",
+            )
             ws_symbols = [native_to_kraken_websocket(symbol) for symbol in native_syms]
             logger.info(
                 f"Subscribing to trades: {len(ws_symbols)} symbols in "
-                f"{(len(ws_symbols) + _TRADE_SUBSCRIBE_CHUNK_SIZE - 1) // _TRADE_SUBSCRIBE_CHUNK_SIZE} "
+                f"{self._chunk_count(len(ws_symbols), _TRADE_SUBSCRIBE_CHUNK_SIZE)} "
                 f"chunks of <={_TRADE_SUBSCRIBE_CHUNK_SIZE}"
             )
-            async with self._ws_client as ws:
-                for i in range(0, len(ws_symbols), _TRADE_SUBSCRIBE_CHUNK_SIZE):
-                    chunk = ws_symbols[i : i + _TRADE_SUBSCRIBE_CHUNK_SIZE]
-                    trade_params = KrakenTradeSubscribeParamsSchema(symbol=chunk).as_params()
-                    req = SubscriptionRequest(
-                        channel="trade",
-                        symbols=tuple(chunk),
-                        parameters_json=canonicalise_parameters(
-                            cast(dict[str, JsonValue], trade_params)
-                        ),
-                    )
-                    self._subscription_cache[req.key()] = req
-                    for ws_symbol in chunk:
-                        self._health_tracker.mark_pending("trade", ws_symbol)
-                    chunk_req_id = req_id if i == 0 else None
-                    await ws.subscribe(params=trade_params, req_id=chunk_req_id)
-                    if i + _TRADE_SUBSCRIBE_CHUNK_SIZE < len(ws_symbols):
-                        await asyncio.sleep(_TRADE_SUBSCRIBE_CHUNK_DELAY_S)
-                while not hasattr(ws, "exception_occur") or not ws.exception_occur:
-                    try:
-                        message = await asyncio.wait_for(self._trade_queue.get(), timeout=0.1)
-                        yield message
-                    except TimeoutError:
-                        await asyncio.sleep(0.01)
-                    except Exception as e:
-                        logger.error(f"Error receiving WebSocket trade message: {e}")
-                        break
+            async with ws_client as ws:
+                await self._subscribe_trade_chunks(ws, ws_symbols, req_id)
+                async for message in self._iter_trade_messages(ws):
+                    yield message
         except Exception as e:
             logger.error(f"WebSocket trade subscription error: {e}")
             raise
+
+    async def _subscribe_trade_chunks(
+        self, ws: SpotWSClient, ws_symbols: list[str], req_id: int | None
+    ) -> None:
+        """Subscribe to trade symbols in bounded chunks.
+
+        Args:
+            ws: Active Kraken Spot WebSocket client.
+            ws_symbols: Kraken wire-format symbols.
+            req_id: Optional request id for the first chunk.
+
+        Returns:
+            None.
+        """
+        for index in range(0, len(ws_symbols), _TRADE_SUBSCRIBE_CHUNK_SIZE):
+            chunk = ws_symbols[index : index + _TRADE_SUBSCRIBE_CHUNK_SIZE]
+            params = cast(
+                dict[str, JsonValue],
+                KrakenTradeSubscribeParamsSchema(symbol=chunk).as_params(),
+            )
+            self._cache_subscription("trade", chunk, params)
+            for ws_symbol in chunk:
+                self._health_tracker.mark_pending("trade", ws_symbol)
+            chunk_req_id = req_id if index == 0 else None
+            await ws.subscribe(params=params, req_id=chunk_req_id)
+            if index + _TRADE_SUBSCRIBE_CHUNK_SIZE < len(ws_symbols):
+                await asyncio.sleep(_TRADE_SUBSCRIBE_CHUNK_DELAY_S)
+
+    async def _iter_trade_messages(self, ws: SpotWSClient) -> AsyncIterator[TradeUpdate]:
+        """Yield queued trade messages while the WebSocket is healthy.
+
+        Args:
+            ws: Active Kraken Spot WebSocket client.
+
+        Yields:
+            Trade updates from the producer queue.
+        """
+        while not self._ws_exception_occurred(ws):
+            try:
+                message = await asyncio.wait_for(self._trade_queue.get(), timeout=0.1)
+                yield message
+            except TimeoutError:
+                await asyncio.sleep(0.01)
+            except Exception as e:
+                logger.error(f"Error receiving WebSocket trade message: {e}")
+                break
 
     def subscribe_executions(
         self,
@@ -1241,7 +1396,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             if _subscription_ack_confirms(ticker_ack.success, ticker_ack.error):
                 self._health_tracker.mark_confirmed("ticker", symbol)
                 return
-            error = ticker_ack.error or "unknown subscription error"
+            error = ticker_ack.error or _UNKNOWN_SUBSCRIPTION_ERROR
             self._health_tracker.mark_failed("ticker", symbol, error)
             logger.warning(
                 "Ticker subscription failed symbol={} error={}",
@@ -1272,7 +1427,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             if _subscription_ack_confirms(trade_ack.success, trade_ack.error):
                 self._health_tracker.mark_confirmed("trade", symbol)
                 return
-            error = trade_ack.error or "unknown subscription error"
+            error = trade_ack.error or _UNKNOWN_SUBSCRIPTION_ERROR
             self._health_tracker.mark_failed("trade", symbol, error)
             logger.warning(
                 "Trade subscription failed symbol={} error={}",
@@ -1325,7 +1480,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             if _subscription_ack_confirms(ohlc_ack.success, ohlc_ack.error):
                 self._health_tracker.mark_confirmed(channel_key, ohlc_ack.result.symbol)
             else:
-                error = ohlc_ack.error or "unknown subscription error"
+                error = ohlc_ack.error or _UNKNOWN_SUBSCRIPTION_ERROR
                 self._health_tracker.mark_failed(channel_key, ohlc_ack.result.symbol, error)
                 logger.warning(
                     "OHLC subscription failed symbol={} interval={} error={}",
@@ -1405,29 +1560,63 @@ class KrakenExchangeClient(ExchangeClientBase):
             data: Raw OHLC data from WebSocket.
         """
         try:
-            if isinstance(data, list):
-                for item in data:
-                    if not isinstance(item, dict):
-                        continue
-                    wire_symbol = item.get("symbol")
-                    raw_interval = item.get("interval")
-                    if isinstance(wire_symbol, str) and isinstance(raw_interval, int):
-                        try:
-                            channel_key = f"ohlc:{interval_to_label(raw_interval)}"
-                            self._health_tracker.mark_data_seen(channel_key, wire_symbol)
-                        except ValueError:
-                            logger.debug("Skipping OHLC health mark for interval {}", raw_interval)
+            self._mark_ohlc_health_seen(data)
             candle_list = parse_kraken_candle_list(data) if isinstance(data, list) else []
             for candle_data in candle_list:
-                if candle_data.interval in self._candle_queues:
-                    _enqueue_or_drop_oldest(
-                        self._candle_queues[candle_data.interval], candle_data, "candle"
-                    )
-                else:
-                    for queue in self._candle_queues.values():
-                        _enqueue_or_drop_oldest(queue, candle_data, "candle")
+                self._enqueue_candle_data(candle_data)
         except ValueError as e:
             logger.warning(f"Failed to parse candle data: {e}")
+
+    def _mark_ohlc_health_seen(self, data: Any) -> None:
+        """Mark OHLC subscriptions as live from raw frames.
+
+        Args:
+            data: Raw OHLC data from WebSocket.
+
+        Returns:
+            None.
+        """
+        if not isinstance(data, list):
+            return
+        for item in data:
+            self._mark_ohlc_frame_health(item)
+
+    def _mark_ohlc_frame_health(self, item: object) -> None:
+        """Mark one OHLC frame as seen when it carries symbol and interval.
+
+        Args:
+            item: Raw frame item from the WebSocket payload.
+
+        Returns:
+            None.
+        """
+        if not isinstance(item, dict):
+            return
+        wire_symbol = item.get("symbol")
+        raw_interval = item.get("interval")
+        if not isinstance(wire_symbol, str) or not isinstance(raw_interval, int):
+            return
+        try:
+            channel_key = f"ohlc:{interval_to_label(raw_interval)}"
+            self._health_tracker.mark_data_seen(channel_key, wire_symbol)
+        except ValueError:
+            logger.debug("Skipping OHLC health mark for interval {}", raw_interval)
+
+    def _enqueue_candle_data(self, candle_data: CandleUpdate) -> None:
+        """Enqueue one parsed candle to the matching queues.
+
+        Args:
+            candle_data: Parsed candle update.
+
+        Returns:
+            None.
+        """
+        queue = self._candle_queues.get(candle_data.interval)
+        if queue is not None:
+            _enqueue_or_drop_oldest(queue, candle_data, "candle")
+            return
+        for fallback_queue in self._candle_queues.values():
+            _enqueue_or_drop_oldest(fallback_queue, candle_data, "candle")
 
     def _handle_ticker_data(self, data: Any) -> None:
         """Parse and enqueue ticker data.
@@ -1460,24 +1649,48 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         if not isinstance(data, list):
             return
+        self._mark_ticker_health_seen(data)
+        capture = self._raw_ticker_capture
+        if capture is not None:
+            self._capture_raw_ticker_frames(data, capture)
+            return
+        ticker_list = parse_kraken_ticker_list(data)
+        for ticker_data in ticker_list:
+            _enqueue_or_drop_oldest(self._tick_queue, ticker_data, "tick")
+
+    def _mark_ticker_health_seen(self, data: list[Any]) -> None:
+        """Mark ticker subscriptions as live from raw frames.
+
+        Args:
+            data: Raw ticker frames from WebSocket.
+
+        Returns:
+            None.
+        """
         for frame in data:
             if not isinstance(frame, dict):
                 continue
             wire_symbol = frame.get("symbol")
             if isinstance(wire_symbol, str):
                 self._health_tracker.mark_data_seen("ticker", wire_symbol)
-        capture = self._raw_ticker_capture
-        if capture is not None:
-            for frame in data:
-                if not isinstance(frame, dict):
-                    continue
-                wire_symbol = frame.get("symbol")
-                if isinstance(wire_symbol, str) and wire_symbol not in capture:
-                    capture[wire_symbol] = frame
-            return
-        ticker_list = parse_kraken_ticker_list(data)
-        for ticker_data in ticker_list:
-            _enqueue_or_drop_oldest(self._tick_queue, ticker_data, "tick")
+
+    @staticmethod
+    def _capture_raw_ticker_frames(data: list[Any], capture: dict[str, dict[str, Any]]) -> None:
+        """Capture first-seen raw ticker frames by wire symbol.
+
+        Args:
+            data: Raw ticker frames from WebSocket.
+            capture: Mutable capture dictionary keyed by wire symbol.
+
+        Returns:
+            None.
+        """
+        for frame in data:
+            if not isinstance(frame, dict):
+                continue
+            wire_symbol = frame.get("symbol")
+            if isinstance(wire_symbol, str) and wire_symbol not in capture:
+                capture[wire_symbol] = frame
 
     def _handle_trade_data(self, data: Any) -> None:
         """Parse and enqueue trade data.

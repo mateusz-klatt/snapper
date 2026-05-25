@@ -313,51 +313,116 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             message: Raw WebSocket message dictionary.
         """
         await asyncio.sleep(0)
-        event = message.get("event")
-        if event == "subscribed":
-            self._handle_subscribed_event(message)
-            return
-        if event == "alert":
-            await self._handle_alert_event(message)
-            return
-        if event is not None:
+        if await self._handle_ws_event(message):
             return
         feed = message.get("feed", "")
         if feed in ("ticker", "ticker_lite"):
-            try:
-                product_id = message.get("product_id")
-                if not isinstance(product_id, str):
-                    raw_symbol = message.get("symbol")
-                    product_id = raw_symbol if isinstance(raw_symbol, str) else ""
-                if product_id:
-                    self._health_tracker.mark_data_seen("ticker", product_id)
-                ticker_data = (
-                    message
-                    if "symbol" in message
-                    else {**message, "symbol": message.get("product_id", "")}
-                )
-                tick = parse_kraken_futures_ticker(ticker_data)
-                _enqueue_or_drop_oldest(self._tick_queue, tick, "Tick")
-            except (ValueError, KeyError) as exc:
-                logger.debug(f"Skipping unparseable ticker WS message: {exc}")
+            self._handle_ticker_feed(message)
         elif feed in ("trade", "trade_snapshot"):
-            if feed == "trade_snapshot":
-                logger.debug(
-                    "Skipping Futures trade_snapshot batch because it is a replay artifact"
-                )
-                return
-            product_id = message.get("product_id", "")
-            if isinstance(product_id, str) and product_id:
-                self._health_tracker.mark_data_seen("trade", product_id)
-            raw_trades = [message]
-            for raw_trade in raw_trades:
-                try:
-                    trade = parse_kraken_futures_trade({**raw_trade, "product_id": product_id})
-                except (ValueError, KeyError) as exc:
-                    logger.debug(f"Skipping unparseable trade WS message: {exc}")
-                    continue
-                _enqueue_or_drop_oldest(self._trade_queue, trade, "Trade")
-                self._candle_builder.update(trade)
+            self._handle_trade_feed(feed, message)
+
+    async def _handle_ws_event(self, message: dict[str, Any]) -> bool:
+        """Handle event-shaped Futures WebSocket messages.
+
+        Args:
+            message: Raw WebSocket message dictionary.
+
+        Returns:
+            True when the message was an event and no feed handling is needed.
+        """
+        event = message.get("event")
+        if event == "subscribed":
+            self._handle_subscribed_event(message)
+            return True
+        if event == "alert":
+            await self._handle_alert_event(message)
+            return True
+        return event is not None
+
+    def _handle_ticker_feed(self, message: dict[str, Any]) -> None:
+        """Parse and enqueue one ticker feed message.
+
+        Args:
+            message: Raw ticker or ticker_lite feed message.
+
+        Returns:
+            None.
+        """
+        try:
+            product_id = self._product_id_from_message(message)
+            if product_id:
+                self._health_tracker.mark_data_seen("ticker", product_id)
+            tick = parse_kraken_futures_ticker(self._ticker_parse_payload(message, product_id))
+            _enqueue_or_drop_oldest(self._tick_queue, tick, "Tick")
+        except (ValueError, KeyError) as exc:
+            logger.debug(f"Skipping unparseable ticker WS message: {exc}")
+
+    @staticmethod
+    def _product_id_from_message(message: dict[str, Any]) -> str:
+        """Return the product id or symbol from a Futures message.
+
+        Args:
+            message: Raw WebSocket message.
+
+        Returns:
+            Product id string, or an empty string when missing.
+        """
+        product_id = message.get("product_id")
+        if isinstance(product_id, str):
+            return product_id
+        raw_symbol = message.get("symbol")
+        return raw_symbol if isinstance(raw_symbol, str) else ""
+
+    @staticmethod
+    def _ticker_parse_payload(message: dict[str, Any], product_id: str) -> dict[str, Any]:
+        """Return ticker payload with the parser's expected symbol field.
+
+        Args:
+            message: Raw ticker or ticker_lite feed message.
+            product_id: Product id already resolved from the message.
+
+        Returns:
+            Parser payload containing ``symbol``.
+        """
+        if "symbol" in message:
+            return message
+        return {**message, "symbol": product_id}
+
+    def _handle_trade_feed(self, feed: object, message: dict[str, Any]) -> None:
+        """Parse and enqueue one live trade feed message.
+
+        Args:
+            feed: Raw feed discriminator.
+            message: Raw trade or trade_snapshot feed message.
+
+        Returns:
+            None.
+        """
+        if feed == "trade_snapshot":
+            logger.debug("Skipping Futures trade_snapshot batch because it is a replay artifact")
+            return
+        product_id = message.get("product_id", "")
+        if isinstance(product_id, str) and product_id:
+            self._health_tracker.mark_data_seen("trade", product_id)
+        self._enqueue_trade_message(message, product_id)
+
+    def _enqueue_trade_message(self, message: dict[str, Any], product_id: object) -> None:
+        """Parse and enqueue one normalized trade message.
+
+        Args:
+            message: Raw trade feed message.
+            product_id: Product id value to inject into the parser payload.
+
+        Returns:
+            None.
+        """
+        try:
+            trade = parse_kraken_futures_trade({**message, "product_id": product_id})
+        except (ValueError, KeyError) as exc:
+            logger.debug(f"Skipping unparseable trade WS message: {exc}")
+            return
+        _enqueue_or_drop_oldest(self._trade_queue, trade, "Trade")
+        self._candle_builder.update(trade)
 
     def _handle_subscribed_event(self, message: dict[str, Any]) -> None:
         """Track a Kraken Futures subscribed event.

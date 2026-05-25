@@ -430,6 +430,19 @@ async def test_replay_requires_connected_ws_client() -> None:
         await client._replay_subscriptions()
 
 
+def test_connected_ws_client_requires_connected_client() -> None:
+    """Connected websocket accessor fails before connection.
+
+    Given: A Kraken client with no websocket client,
+    When: _connected_ws_client is called,
+    Then: RuntimeError is raised.
+    """
+    client = _client()
+    client._ws_client = None
+    with pytest.raises(RuntimeError):
+        client._connected_ws_client()
+
+
 @pytest.mark.asyncio
 async def test_ensure_ws_connected_auto_replays_after_reconnect() -> None:
     """Websocket reconnect automatically replays cached subscriptions.

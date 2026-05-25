@@ -65,7 +65,7 @@ class DummyClient(SimpleNamespace):
         """Disconnect from exchange."""
         ...
 
-    async def start_health_loop(self) -> None:
+    def start_health_loop(self) -> None:
         """Start subscription health loop."""
         ...
 
@@ -2257,6 +2257,7 @@ class TestFeedPublisherCoverage:
         mock_context.socket.return_value = mock_socket
         mock_context_class.return_value = mock_context
         mock_exchange_client = AsyncMock()
+        mock_exchange_client.start_health_loop = MagicMock()
         mock_exchange_client_class.return_value = mock_exchange_client
         mock_repo = MagicMock()
         mock_repo.get_latest_candle_ids = AsyncMock(return_value={})
@@ -2287,7 +2288,7 @@ class TestFeedPublisherCoverage:
         assert zmq.PUB in socket_calls
         assert zmq.SUB in socket_calls
         mock_exchange_client.connect.assert_awaited_once()
-        mock_exchange_client.start_health_loop.assert_awaited_once()
+        mock_exchange_client.start_health_loop.assert_called_once()
 
     @pytest.mark.asyncio
     @patch("snapper.application.services.settings.get_settings_service")

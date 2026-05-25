@@ -31,6 +31,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
+from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
@@ -117,7 +118,7 @@ class ExchangeClientBase(ABC):
         """
         await get_rest_call_tracker().acquire(self.exchange_name)
 
-    async def start_health_loop(self) -> None:
+    def start_health_loop(self) -> None:
         """Start the subscription health retry loop when a tracker exists.
 
         Args:
@@ -173,57 +174,127 @@ class ExchangeClientBase(ABC):
             return
         while self._health_loop_running:
             await asyncio.sleep(tracker.retry_interval_s)
-            for entry in tracker.list_overdue_pending():
-                if not tracker.mark_retry_attempt(entry.channel, entry.symbol):
-                    logger.error(
-                        "{}: subscribe failed permanently for {}/{} after {} retries",
-                        self.exchange_name,
-                        entry.channel,
-                        entry.symbol,
-                        entry.retry_count,
-                    )
-                    continue
-                try:
-                    await self._retry_subscribe(entry.channel, entry.symbol)
-                except Exception as exc:
-                    logger.warning(
-                        "{}: retry subscribe raised for {}/{}: {}",
-                        self.exchange_name,
-                        entry.channel,
-                        entry.symbol,
-                        exc,
-                    )
-            stale_entries = tracker.list_stale_data()
-            if stale_entries:
-                now = time.monotonic()
-                by_channel: Counter[str] = Counter(entry.channel for entry in stale_entries)
-                worst = max(
-                    stale_entries,
-                    key=lambda entry: now
-                    - (entry.last_seen_data_at or entry.confirmed_at or entry.requested_at),
-                )
-                worst_ref = worst.last_seen_data_at or worst.confirmed_at or worst.requested_at
-                channel_summary = ", ".join(
-                    f"{channel}={count}" for channel, count in sorted(by_channel.items())
-                )
-                logger.warning(
-                    "{}: {} stale subscription(s) [{}]; worst: {}/{} for {:.0f}s",
+            await self._retry_overdue_pending_subscriptions(tracker)
+            self._log_stale_subscriptions(tracker)
+
+    async def _retry_overdue_pending_subscriptions(
+        self, tracker: SubscriptionHealthTracker
+    ) -> None:
+        """Retry every pending subscription whose ACK timer expired.
+
+        Args:
+            tracker: Health tracker that owns pending subscription state.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+        for entry in tracker.list_overdue_pending():
+            if not tracker.mark_retry_attempt(entry.channel, entry.symbol):
+                logger.error(
+                    "{}: subscribe failed permanently for {}/{} after {} retries",
                     self.exchange_name,
-                    len(stale_entries),
-                    channel_summary,
-                    worst.channel,
-                    worst.symbol,
-                    now - worst_ref,
+                    entry.channel,
+                    entry.symbol,
+                    entry.retry_count,
                 )
-                for entry in stale_entries:
-                    reference = entry.last_seen_data_at or entry.confirmed_at or entry.requested_at
-                    logger.debug(
-                        "{}: subscribed to {}/{} but no data for {:.0f}s",
-                        self.exchange_name,
-                        entry.channel,
-                        entry.symbol,
-                        now - reference,
-                    )
+                continue
+            try:
+                await self._retry_subscribe(entry.channel, entry.symbol)
+            except Exception as exc:
+                logger.warning(
+                    "{}: retry subscribe raised for {}/{}: {}",
+                    self.exchange_name,
+                    entry.channel,
+                    entry.symbol,
+                    exc,
+                )
+
+    def _log_stale_subscriptions(self, tracker: SubscriptionHealthTracker) -> None:
+        """Emit aggregate and per-entry diagnostics for stale data.
+
+        Args:
+            tracker: Health tracker that owns confirmed subscription state.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+        stale_entries = tracker.list_stale_data()
+        if not stale_entries:
+            return
+        now = time.monotonic()
+        by_channel: Counter[str] = Counter(entry.channel for entry in stale_entries)
+        worst = self._worst_stale_entry(stale_entries, now)
+        channel_summary = ", ".join(
+            f"{channel}={count}" for channel, count in sorted(by_channel.items())
+        )
+        logger.warning(
+            "{}: {} stale subscription(s) [{}]; worst: {}/{} for {:.0f}s",
+            self.exchange_name,
+            len(stale_entries),
+            channel_summary,
+            worst.channel,
+            worst.symbol,
+            self._entry_stale_age(worst, now),
+        )
+        for entry in stale_entries:
+            logger.debug(
+                "{}: subscribed to {}/{} but no data for {:.0f}s",
+                self.exchange_name,
+                entry.channel,
+                entry.symbol,
+                self._entry_stale_age(entry, now),
+            )
+
+    @staticmethod
+    def _entry_age_ref(entry: _SymbolEntry) -> float:
+        """Return the timestamp used to measure stale subscription age.
+
+        Args:
+            entry: Subscription entry to inspect.
+
+        Returns:
+            Last data timestamp, confirmation timestamp, or request timestamp.
+        """
+        return entry.last_seen_data_at or entry.confirmed_at or entry.requested_at
+
+    @classmethod
+    def _entry_stale_age(cls, entry: _SymbolEntry, now: float) -> float:
+        """Return the stale age for one subscription entry.
+
+        Args:
+            entry: Subscription entry to inspect.
+            now: Current monotonic timestamp.
+
+        Returns:
+            Seconds elapsed since the entry's data reference timestamp.
+        """
+        return now - cls._entry_age_ref(entry)
+
+    @classmethod
+    def _worst_stale_entry(cls, entries: list[_SymbolEntry], now: float) -> _SymbolEntry:
+        """Return the stale entry with the largest age.
+
+        Args:
+            entries: Non-empty stale subscription entries.
+            now: Current monotonic timestamp.
+
+        Returns:
+            Stale entry with the oldest data reference timestamp.
+        """
+        worst = entries[0]
+        worst_age = cls._entry_stale_age(worst, now)
+        for entry in entries[1:]:
+            entry_age = cls._entry_stale_age(entry, now)
+            if entry_age > worst_age:
+                worst = entry
+                worst_age = entry_age
+        return worst
 
     async def _retry_subscribe(self, channel: str, symbol: str) -> None:
         """Retry one symbol subscription.

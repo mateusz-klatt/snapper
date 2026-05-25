@@ -411,7 +411,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             self._tick_buffers[native_symbol].append((ts, mid_price))
             logger.debug(f"{native_symbol}: bid={ticker.bid:.4f} ask={ticker.ask:.4f}")
 
-    def _handle_http_error(self, error: httpx.HTTPError) -> bool:
+    def _handle_http_error(self, error: httpx.HTTPError) -> None:
         """Handle an HTTP error during polling.
 
         Increments the consecutive error counter and enters an
@@ -423,8 +423,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             error: The HTTP error that occurred.
 
         Returns:
-            Always False. The polling loop never stops because of HTTP
-            errors; only ``disconnect`` flips ``_running`` to False.
+            None.
         """
         self._consecutive_error_count += 1
         if self._consecutive_error_count < self._max_consecutive_errors:
@@ -434,7 +433,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 self._max_consecutive_errors,
                 error,
             )
-            return False
+            return
         self._backoff_attempts += 1
         backoff_s = min(60 * (2 ** (self._backoff_attempts - 1)), 1800)
         self._backoff_until = time.monotonic() + backoff_s
@@ -448,7 +447,6 @@ class WalutomatExchangeClient(ExchangeClientBase):
             self._backoff_attempts,
             error,
         )
-        return False
 
     async def _polling_loop(self, symbols: list[str]) -> None:
         """Run the market data polling loop.
@@ -460,37 +458,10 @@ class WalutomatExchangeClient(ExchangeClientBase):
         symbol_map = {native_to_walutomat_ws(s): s for s in symbols}
         while self._running:
             try:
-                if self._backoff_wakeup_event is None:
-                    self._backoff_wakeup_event = asyncio.Event()
-                now = time.monotonic()
-                if now < self._backoff_until:
-                    sleep_s = self._backoff_until - now
-                    sleep_task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(sleep_s))
-                    wakeup_task: asyncio.Task[None] = asyncio.create_task(
-                        _wait_for_wakeup(self._backoff_wakeup_event)
-                    )
-                    tasks: set[asyncio.Task[None]] = {sleep_task, wakeup_task}
-                    try:
-                        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                        if wakeup_task in done:
-                            logger.info("Walutomat: backoff sleep broken early by wakeup event")
-                    finally:
-                        for task in tasks:
-                            if not task.done():
-                                task.cancel()
-                                with contextlib.suppress(asyncio.CancelledError):
-                                    await task
-                    self._backoff_wakeup_event.clear()
-                    self._backoff_until = 0.0
+                await self._wait_for_backoff_if_needed()
                 data = await self._fetch_market_data()
                 self._last_data = data
-                if self._consecutive_error_count > 0 or self._backoff_attempts > 0:
-                    logger.info(
-                        f"Walutomat recovered after {self._backoff_attempts} backoff attempts"
-                    )
-                    self._consecutive_error_count = 0
-                    self._backoff_attempts = 0
-                    self._backoff_until = 0.0
+                self._reset_polling_error_state()
                 await self._process_polling_data(data, symbol_map)
             except httpx.HTTPError as e:
                 self._handle_http_error(e)
@@ -498,6 +469,82 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 logger.exception(f"Unexpected error in polling loop: {e}")
             await asyncio.sleep(self.polling_interval)
         logger.info("Walutomat polling stopped")
+
+    def _ensure_backoff_wakeup_event(self) -> asyncio.Event:
+        """Return the wakeup event used to interrupt HTTP backoff.
+
+        Returns:
+            The existing or newly created wakeup event.
+        """
+        if self._backoff_wakeup_event is None:
+            self._backoff_wakeup_event = asyncio.Event()
+        return self._backoff_wakeup_event
+
+    async def _wait_for_backoff_if_needed(self) -> None:
+        """Sleep until HTTP backoff expires or recovery wakes the loop.
+
+        Returns:
+            None.
+        """
+        wakeup_event = self._ensure_backoff_wakeup_event()
+        now = time.monotonic()
+        if now >= self._backoff_until:
+            return
+        await self._wait_for_backoff_sleep(self._backoff_until - now, wakeup_event)
+        wakeup_event.clear()
+        self._backoff_until = 0.0
+
+    async def _wait_for_backoff_sleep(self, sleep_s: float, wakeup_event: asyncio.Event) -> None:
+        """Wait for either the backoff timer or wakeup event.
+
+        Args:
+            sleep_s: Remaining backoff seconds.
+            wakeup_event: Event set by liveness recovery.
+
+        Returns:
+            None.
+
+        Raises:
+            asyncio.CancelledError: Propagated when the polling task is cancelled.
+        """
+        sleep_task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(sleep_s))
+        wakeup_task: asyncio.Task[None] = asyncio.create_task(_wait_for_wakeup(wakeup_event))
+        tasks: set[asyncio.Task[None]] = {sleep_task, wakeup_task}
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if wakeup_task in done:
+                logger.info("Walutomat: backoff sleep broken early by wakeup event")
+        finally:
+            await self._cancel_unfinished_backoff_tasks(tasks)
+
+    @staticmethod
+    async def _cancel_unfinished_backoff_tasks(tasks: set[asyncio.Task[None]]) -> None:
+        """Cancel pending backoff helper tasks.
+
+        Args:
+            tasks: Backoff sleep and wakeup tasks.
+
+        Returns:
+            None.
+        """
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    def _reset_polling_error_state(self) -> None:
+        """Clear HTTP error counters after a successful poll.
+
+        Returns:
+            None.
+        """
+        if self._consecutive_error_count == 0 and self._backoff_attempts == 0:
+            return
+        logger.info(f"Walutomat recovered after {self._backoff_attempts} backoff attempts")
+        self._consecutive_error_count = 0
+        self._backoff_attempts = 0
+        self._backoff_until = 0.0
 
     async def _build_candle_for_symbol(
         self,

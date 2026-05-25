@@ -131,7 +131,7 @@ class TestHealthLoopLifecycle:
         Then: No task is created.
         """
         client = HealthLoopClient()
-        await client.start_health_loop()
+        client.start_health_loop()
         assert client._health_loop_task is None
 
     @pytest.mark.asyncio
@@ -144,7 +144,7 @@ class TestHealthLoopLifecycle:
         """
         client = HealthLoopClient()
         client._health_tracker = SubscriptionHealthTracker(retry_interval_s=60.0)
-        await client.start_health_loop()
+        client.start_health_loop()
         assert client._health_loop_task is not None
         await client.stop_health_loop()
         assert client._health_loop_task is None
@@ -159,10 +159,10 @@ class TestHealthLoopLifecycle:
         """
         client = HealthLoopClient()
         client._health_tracker = SubscriptionHealthTracker(retry_interval_s=60.0)
-        await client.start_health_loop()
+        client.start_health_loop()
         first_task = client._health_loop_task
         try:
-            await client.start_health_loop()
+            client.start_health_loop()
             assert client._health_loop_task is first_task
         finally:
             await client.stop_health_loop()
@@ -431,3 +431,21 @@ class TestHealthLoopRetry:
         client = HealthLoopClient()
         with pytest.raises(NotImplementedError, match="must implement"):
             await ExchangeClientBase._retry_subscribe(client, "ticker", "BTC/USD")
+
+    def test_worst_stale_entry_prefers_oldest_reference(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Worst stale entry selection updates when a later entry is older.
+
+        Given: Two confirmed entries where the second has an older timestamp,
+        When: The worst stale entry helper is called,
+        Then: The second entry is returned.
+        """
+        tracker = SubscriptionHealthTracker()
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 100.0)
+        tracker.mark_confirmed("ticker", "recent")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 50.0)
+        tracker.mark_confirmed("ticker", "older")
+        entries = list(tracker.snapshot().values())
+        worst = ExchangeClientBase._worst_stale_entry(entries, 200.0)
+        assert worst.symbol == "older"
