@@ -428,13 +428,24 @@ def kraken_futures_ws_to_native(symbol: str) -> str:
 
 
 def get_available_kraken_futures_symbols() -> list[str]:
-    """Get all available native symbols that have Kraken Futures mappings.
+    """Get available Kraken Futures native symbols with active market-data capability.
+
+    Filters out aliases whose ``symbol_exchange_capabilities`` row carries
+    ``can_market_data = False`` — typically expired dated futures whose
+    capabilities were deactivated by the symbol updater on the next
+    ``run-static`` after expiry. The alias rows themselves remain (SCD2
+    bitemporal history); the capability flag is the source of truth for
+    "should we subscribe to this".
 
     Returns:
-        Sorted list of native symbols with Kraken Futures support.
+        Sorted list of native symbols with active Kraken Futures market data.
     """
     mapper = _get_db_mapper()
-    return sorted(mapper.native_to_kraken_futures_ws.keys())
+    return sorted(
+        sym
+        for sym in mapper.native_to_kraken_futures_ws
+        if is_market_data_available(sym, ExchangeEnum.KRAKEN_FUTURES)
+    )
 
 
 def native_to_kraken_equities_ws(native_symbol: str) -> str:
@@ -482,13 +493,20 @@ def kraken_equities_ws_to_native(symbol: str) -> str:
 
 
 def get_available_kraken_equities_symbols() -> list[str]:
-    """Get all available native symbols that have Kraken Equities mappings.
+    """Get available Kraken Equities native symbols with active market-data capability.
+
+    Filters out aliases whose ``symbol_exchange_capabilities`` row carries
+    ``can_market_data = False`` (e.g. delisted contracts).
 
     Returns:
-        Sorted list of native symbols with Kraken Equities support.
+        Sorted list of native symbols with active Kraken Equities market data.
     """
     mapper = _get_db_mapper()
-    return sorted(mapper.native_to_kraken_equities_ws.keys())
+    return sorted(
+        sym
+        for sym in mapper.native_to_kraken_equities_ws
+        if is_market_data_available(sym, ExchangeEnum.KRAKEN_EQUITIES)
+    )
 
 
 def validate_symbol(symbol: str) -> bool:
@@ -525,13 +543,20 @@ def get_available_kraken_rest_symbols() -> list[str]:
 
 
 def get_available_kraken_symbols() -> list[str]:
-    """Get all available native symbols that have Kraken mappings.
+    """Get available Kraken Spot native symbols with active market-data capability.
+
+    Filters out aliases whose ``symbol_exchange_capabilities`` row carries
+    ``can_market_data = False`` (e.g. delisted pairs).
 
     Returns:
-        Sorted list of native symbols with Kraken support.
+        Sorted list of native symbols with active Kraken market data.
     """
     mapper = _get_db_mapper()
-    return sorted(mapper.native_to_kraken_ws.keys())
+    return sorted(
+        sym
+        for sym in mapper.native_to_kraken_ws
+        if is_market_data_available(sym, ExchangeEnum.KRAKEN)
+    )
 
 
 def get_available_walutomat_rest_symbols() -> list[str]:
@@ -545,23 +570,37 @@ def get_available_walutomat_rest_symbols() -> list[str]:
 
 
 def get_available_walutomat_symbols() -> list[str]:
-    """Get all available native symbols that have Walutomat mappings.
+    """Get available Walutomat native symbols with active market-data capability.
+
+    Filters out aliases whose ``symbol_exchange_capabilities`` row carries
+    ``can_market_data = False``.
 
     Returns:
-        Sorted list of native symbols with Walutomat support.
+        Sorted list of native symbols with active Walutomat market data.
     """
     mapper = _get_db_mapper()
-    return sorted(mapper.walutomat_ws_to_native.values())
+    return sorted(
+        sym
+        for sym in mapper.walutomat_ws_to_native.values()
+        if is_market_data_available(sym, ExchangeEnum.WALUTOMAT)
+    )
 
 
 def get_available_polygon_symbols() -> list[str]:
-    """Get all available native symbols that have Polygon mappings.
+    """Get available Polygon native symbols with active market-data capability.
+
+    Filters out aliases whose ``symbol_exchange_capabilities`` row carries
+    ``can_market_data = False``.
 
     Returns:
-        Sorted list of native symbols with Polygon support.
+        Sorted list of native symbols with active Polygon market data.
     """
     mapper = _get_db_mapper()
-    return sorted(mapper.polygon_rest_to_native.values())
+    return sorted(
+        sym
+        for sym in mapper.polygon_rest_to_native.values()
+        if is_market_data_available(sym, ExchangeEnum.POLYGON)
+    )
 
 
 class _AvailableSymbolsCache:

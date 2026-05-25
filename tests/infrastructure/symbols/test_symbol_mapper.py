@@ -16,6 +16,7 @@ from sqlalchemy.exc import OperationalError
 import snapper.infrastructure.symbols.functions as functions
 import snapper.infrastructure.symbols.mapper as symbol_mapper_module
 from snapper.core.types import AllExchange
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketSubscribeExchange
 from snapper.core.types import OrderExchange
@@ -933,7 +934,16 @@ class TestDatabaseSymbolMapperFunctions:
 
     @pytest.fixture
     def mock_global_mapper(self) -> MagicMock:
-        """Create mock mapper with sample cache data."""
+        """Create mock mapper with sample cache data.
+
+        Note: ``capabilities`` is intentionally left as a default
+        ``MagicMock`` attribute. Legacy ``get_available_<exchange>_symbols``
+        tests in this class predate the capability-gating contract; they
+        rely on attribute-chain truthiness through
+        ``mapper.capabilities.get(...).can_market_data`` to keep their
+        assertions valid. Explicit gating behaviour is covered by
+        :class:`TestGetAvailableMarketDataFiltering` further down.
+        """
         mapper = MagicMock()
         mapper.native_to_kraken_ws = {"BTC-USD": "BTC-USD", "ETH-USD": "ETH-USD"}
         mapper.native_to_kraken_rest = {"BTC-USD": "XXBTZUSD", "ETH-USD": "XETHZUSD"}
@@ -1695,7 +1705,13 @@ class TestSymbolMapperEdgeCases:
 
 @pytest.fixture
 def mock_mapper() -> MagicMock:
-    """Provide mock SymbolMapperService with preconfigured mappings."""
+    """Provide mock SymbolMapperService with preconfigured mappings.
+
+    Capabilities dict is populated default-allow for every native symbol
+    referenced by the alias dicts. Tests that need to exercise the
+    market-data-disabled filter (e.g. expired contracts) overwrite the
+    relevant ``CapabilityInfo`` after consuming the fixture.
+    """
     mapper = MagicMock(spec=SymbolMapperService)
     mapper.native_to_walutomat_ws = {"EUR-PLN": "EUR_PLN", "USD-PLN": "USD_PLN"}
     mapper.walutomat_ws_to_native = {"EUR_PLN": "EUR-PLN", "USD_PLN": "USD-PLN"}
@@ -1709,6 +1725,17 @@ def mock_mapper() -> MagicMock:
     mapper.kraken_futures_ws_to_native = {"PF_XBTUSD": "BTC-USD-PERP"}
     mapper.native_to_ccxt = {"BTC-USD": "BTC/USD", "ETH-USD": "ETH/USD"}
     mapper.ccxt_to_native = {"BTC/USD": "BTC-USD", "ETH/USD": "ETH-USD"}
+    enabled = CapabilityInfo(can_market_data=True, can_trade=False, source=None, reason=None)
+    capabilities: dict[tuple[str, str], CapabilityInfo] = {}
+    for native in mapper.native_to_kraken_ws:
+        capabilities[(native, ExchangeEnum.KRAKEN)] = enabled
+    for native in mapper.native_to_kraken_futures_ws:
+        capabilities[(native, ExchangeEnum.KRAKEN_FUTURES)] = enabled
+    for native in mapper.walutomat_ws_to_native.values():
+        capabilities[(native, ExchangeEnum.WALUTOMAT)] = enabled
+    for native in mapper.polygon_rest_to_native.values():
+        capabilities[(native, ExchangeEnum.POLYGON)] = enabled
+    mapper.capabilities = capabilities
     return mapper
 
 
@@ -2045,6 +2072,139 @@ class TestKrakenFuturesHelpers:
         ):
             result = get_available_kraken_futures_symbols()
             assert result == ["BTC-USD-PERP"]
+
+
+class TestGetAvailableMarketDataFiltering:
+    """Aliases without an active market-data capability must be filtered out.
+
+    Covers the post-2026-05-25 contract that
+    ``get_available_<exchange>_symbols()`` consults
+    ``symbol_exchange_capabilities.can_market_data`` so expired or delisted
+    instruments (whose capability rows were deactivated by the symbol
+    updater on the next ``run-static`` after expiry) stop being handed to
+    publishers at process start.
+    """
+
+    @pytest.fixture
+    def mock_mapper_with_mixed_capabilities(self) -> MagicMock:
+        """Mapper with three Kraken Futures symbols, one with capability disabled.
+
+        Aliases include ``BTC-USD-260522`` (expired, capability disabled),
+        ``BTC-USD-PERP`` (live), and ``ETH-USD-PERP`` (live).
+        """
+        mapper = MagicMock(spec=SymbolMapperService)
+        mapper.native_to_kraken_futures_ws = {
+            "BTC-USD-260522": "FF_XBTUSD_260522",
+            "BTC-USD-PERP": "PF_XBTUSD",
+            "ETH-USD-PERP": "PF_ETHUSD",
+        }
+        mapper.native_to_kraken_equities_ws = {
+            "ESM6-CME": "ESM6.CME",
+            "EXPIRED-DELISTED": "EXPIRED.NYMEX",
+        }
+        mapper.native_to_kraken_ws = {
+            "BTC-USD": "BTC/USD",
+            "DELISTED-USD": "DELISTED/USD",
+        }
+        mapper.walutomat_ws_to_native = {
+            "EUR_PLN": "EUR-PLN",
+            "OLD_PAIR": "OLD-PAIR",
+        }
+        mapper.polygon_rest_to_native = {
+            "X:BTCUSD": "BTC-USD",
+            "X:DEADCOIN": "DEAD-COIN",
+        }
+        live = CapabilityInfo(can_market_data=True, can_trade=False, source=None, reason=None)
+        dead = CapabilityInfo(can_market_data=False, can_trade=False, source=None, reason="expired")
+        mapper.capabilities = {
+            ("BTC-USD-260522", ExchangeEnum.KRAKEN_FUTURES): dead,
+            ("BTC-USD-PERP", ExchangeEnum.KRAKEN_FUTURES): live,
+            ("ETH-USD-PERP", ExchangeEnum.KRAKEN_FUTURES): live,
+            ("ESM6-CME", ExchangeEnum.KRAKEN_EQUITIES): live,
+            ("EXPIRED-DELISTED", ExchangeEnum.KRAKEN_EQUITIES): dead,
+            ("BTC-USD", ExchangeEnum.KRAKEN): live,
+            ("DELISTED-USD", ExchangeEnum.KRAKEN): dead,
+            ("EUR-PLN", ExchangeEnum.WALUTOMAT): live,
+            ("OLD-PAIR", ExchangeEnum.WALUTOMAT): dead,
+            ("BTC-USD", ExchangeEnum.POLYGON): live,
+            ("DEAD-COIN", ExchangeEnum.POLYGON): dead,
+        }
+        return mapper
+
+    def test_kraken_futures_filters_disabled_capability(
+        self, mock_mapper_with_mixed_capabilities: MagicMock
+    ) -> None:
+        """Expired Kraken Futures alias is omitted.
+
+        Given: ``BTC-USD-260522`` has an alias but ``can_market_data=False``,
+        When: ``get_available_kraken_futures_symbols`` is called,
+        Then: Only the two live PERP symbols are returned.
+        """
+        with patch(
+            "snapper.infrastructure.symbols.functions._get_db_mapper",
+            return_value=mock_mapper_with_mixed_capabilities,
+        ):
+            assert get_available_kraken_futures_symbols() == ["BTC-USD-PERP", "ETH-USD-PERP"]
+
+    def test_kraken_equities_filters_disabled_capability(
+        self, mock_mapper_with_mixed_capabilities: MagicMock
+    ) -> None:
+        """Delisted Kraken Equities alias is omitted.
+
+        Given: ``EXPIRED-DELISTED`` has an alias but ``can_market_data=False``,
+        When: ``get_available_kraken_equities_symbols`` is called,
+        Then: Only the live ``ESM6-CME`` symbol is returned.
+        """
+        with patch(
+            "snapper.infrastructure.symbols.functions._get_db_mapper",
+            return_value=mock_mapper_with_mixed_capabilities,
+        ):
+            assert get_available_kraken_equities_symbols() == ["ESM6-CME"]
+
+    def test_kraken_spot_filters_disabled_capability(
+        self, mock_mapper_with_mixed_capabilities: MagicMock
+    ) -> None:
+        """Delisted Kraken Spot alias is omitted.
+
+        Given: ``DELISTED-USD`` has an alias but ``can_market_data=False``,
+        When: ``get_available_kraken_symbols`` is called,
+        Then: Only the live ``BTC-USD`` symbol is returned.
+        """
+        with patch(
+            "snapper.infrastructure.symbols.functions._get_db_mapper",
+            return_value=mock_mapper_with_mixed_capabilities,
+        ):
+            assert get_available_kraken_symbols() == ["BTC-USD"]
+
+    def test_walutomat_filters_disabled_capability(
+        self, mock_mapper_with_mixed_capabilities: MagicMock
+    ) -> None:
+        """Inactive Walutomat alias is omitted.
+
+        Given: ``OLD-PAIR`` has an alias but ``can_market_data=False``,
+        When: ``get_available_walutomat_symbols`` is called,
+        Then: Only the live ``EUR-PLN`` symbol is returned.
+        """
+        with patch(
+            "snapper.infrastructure.symbols.functions._get_db_mapper",
+            return_value=mock_mapper_with_mixed_capabilities,
+        ):
+            assert get_available_walutomat_symbols() == ["EUR-PLN"]
+
+    def test_polygon_filters_disabled_capability(
+        self, mock_mapper_with_mixed_capabilities: MagicMock
+    ) -> None:
+        """Inactive Polygon alias is omitted.
+
+        Given: ``DEAD-COIN`` has an alias but ``can_market_data=False``,
+        When: ``get_available_polygon_symbols`` is called,
+        Then: Only the live ``BTC-USD`` symbol is returned.
+        """
+        with patch(
+            "snapper.infrastructure.symbols.functions._get_db_mapper",
+            return_value=mock_mapper_with_mixed_capabilities,
+        ):
+            assert get_available_polygon_symbols() == ["BTC-USD"]
 
 
 class TestCompositeHelpers:
