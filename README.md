@@ -368,31 +368,35 @@ stopped.
 
 ### Targeted restarts (no tick-stream drop)
 
+Restart targets are now strictly recreate-only — they use whatever
+image tag exists locally. Rebuild explicitly first if you need new
+code baked in:
+
 ```bash
-make restart-frontend    # Rebuild image + recreate Caddy container [does NOT touch backend]
-make restart-backend     # Rebuild image + recreate backend [drops ticks 30-90s]
-make restart-all         # Rebuild image + recreate full stack [drops ticks]
+# Build (explicit, when you want new code in the image):
+make docker-build-dev    # caller UID (host user)
+make docker-build-prod   # UID 888 (matches log file ownership)
+
+# Recreate containers (uses current image, no rebuild):
+make restart-frontend    # Recreate Caddy sidecar [does NOT touch backend]
+make restart-backend     # Recreate backend [drops ticks 30-90s]
+make restart-all         # Recreate full stack [drops ticks]
+
+# Common idiom — build + restart in one shot:
+make docker-build-prod restart-backend
 ```
 
-`make restart-frontend` is the new fast path for shipping UI changes
-without restarting publishers. The image is rebuilt (Vite production
-build runs again, dist gets baked in fresh) and only the Caddy container
-is recreated. WS clients reconnect within ~3 s but the backend snapper
-container's PID is unchanged and the Kraken / Walutomat tick streams
-continue uninterrupted.
-
-**Footgun**: after `make restart-frontend`, the image tag points to a
-new SHA. A plain `docker compose up -d` (without `--no-deps`) would then
-see the snapper container running an older SHA than the tag and recreate
-it too — restarting the backend. Use the targeted Makefile commands for
-selective restarts, and reserve `docker compose up -d` for full-stack
-restarts when both should restart anyway.
-
-`make restart-frontend` is the new fast path for shipping UI changes
-without restarting publishers. The Caddy container is recreated (WS
-clients reconnect within ~3 s) but the backend snapper container's PID
-is unchanged and the Kraken / Walutomat tick streams continue
+`make restart-frontend` is the fast path for shipping UI changes
+without restarting publishers. Only the Caddy container is recreated;
+WS clients reconnect within ~3 s but the backend snapper container's
+PID is unchanged and the Kraken / Walutomat tick streams continue
 uninterrupted.
+
+**Footgun**: a plain `docker compose up -d` (without `--no-deps`)
+follows `depends_on` edges and may recreate the backend too. Use the
+targeted Makefile commands for selective restarts, and reserve
+`docker compose up -d` for full-stack restarts when both should
+restart anyway.
 
 ## Documentation
 

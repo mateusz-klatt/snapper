@@ -106,9 +106,9 @@ help:
 	$(info docker-polygon-aggregates     Backfill Polygon OHLCV in Docker [settings symbols; ["*"] = all mapped])
 	$(info docker-polygon-grouped        Backfill Polygon grouped daily in Docker)
 	$(info docker-stop                   Stop Docker container)
-	$(info restart-frontend              Rebuild snapper image + recreate Caddy sidecar [no backend restart])
-	$(info restart-backend               Rebuild snapper image + recreate backend [WARNING: drops ticks 30-90s])
-	$(info restart-all                   Rebuild image + recreate full stack [WARNING: drops ticks])
+	$(info restart-frontend              Recreate Caddy sidecar [uses current image; prepend docker-build-{dev,prod} to rebuild])
+	$(info restart-backend               Recreate backend [WARNING: drops ticks 30-90s; uses current image])
+	$(info restart-all                   Recreate full stack [WARNING: drops ticks; uses current image])
 	$(info server-check                  Health check server [cross-platform])
 	$(info )
 	$(info Docs:)
@@ -608,18 +608,15 @@ docker-stop:
 	$(info Containers stopped)
 
 restart-frontend:
-	$(info Rebuilding snapper image and restarting web sidecar with latest build...)
-	docker build --build-arg UID=$(DOCKER_DEV_UID) --target runtime -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	$(info Recreating Caddy sidecar (snapper-web) using current image...)
 	docker compose up -d --no-deps --force-recreate snapper-web
 
 restart-backend:
-	$(info Rebuilding snapper image and restarting backend with latest build...)
-	docker build --build-arg UID=$(DOCKER_DEV_UID) --target runtime -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	$(info Recreating backend (snapper) using current image...)
 	docker compose up -d --no-deps --force-recreate snapper
 
 restart-all:
-	$(info Rebuilding image and restarting full stack...)
-	$(MAKE) docker-build-dev
+	$(info Recreating full stack using current image...)
 	docker compose up -d --force-recreate
 
 server-check:
