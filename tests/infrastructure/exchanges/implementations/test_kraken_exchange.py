@@ -5775,6 +5775,9 @@ class TestKrakenSpotQueuesAreBounded:
         assert client._tick_queue.maxsize == kr._TICK_QUEUE_MAX_SIZE
         assert client._tick_queue.maxsize > client._trade_queue.maxsize
         assert client._trade_queue.maxsize == kr._QUEUE_MAX_SIZE
+        client._ensure_candle_queue(60)
+        assert client._candle_queues[60].maxsize >= 50_000
+        assert client._candle_queues[60].maxsize == kr._TICK_QUEUE_MAX_SIZE
 
 
 class TestInvokeFuncOffloadsSyncCalls:

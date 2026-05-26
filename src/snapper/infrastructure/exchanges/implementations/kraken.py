@@ -91,20 +91,21 @@ _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 _WS_CLIENT_CONNECTED_MSG = "WebSocket client should be connected"
 _QUEUE_MAX_SIZE = 10_000
 _TICK_QUEUE_MAX_SIZE = 50_000
-"""Boot-time absorption budget for the ticker producer queue.
+"""Boot-time absorption budget for ticker and candle producer queues.
 
 The Kraken Spot broker emits a wildcard replay/update burst in the
 first 60 s after WS handshake — every subscribed pair on every
-``ticker`` feed delivers its current snapshot, in addition to live
-updates. The 2026-05-25 post-restart log review counted 34 drop-
-oldest WARN records in that window (counters[0]==25 + 9 across two
-``label`` slots) before the consumer steady-state caught up. The
-behaviour is correct (bounded queue + drop-oldest is the right
-contract for a publisher feeding live consumers) but the boot burst
-is a known transient that the queue depth should absorb without
-dropping. ``trade``/``candle``/``instrument``/``execution`` queues
-remain at ``_QUEUE_MAX_SIZE`` (10 k) because no drops have been
-observed on those paths."""
+``ticker`` feed delivers its current snapshot, and every per-interval
+``ohlc`` feed dumps its current bar plus seed history. The 2026-05-25
+post-restart log review counted 34 drop-oldest WARN records on the
+tick path; the 2026-05-26 follow-up (after the tick fix landed)
+counted a 3 177-message candle drop burst in a single second once the
+tick queue stopped being the bottleneck. The behaviour is correct
+(bounded queue + drop-oldest is the right contract for a publisher
+feeding live consumers) but the boot burst is a known transient that
+the queue depth should absorb without dropping. ``trade``/
+``instrument``/``execution`` queues remain at ``_QUEUE_MAX_SIZE``
+(10 k) because no drops have been observed on those paths."""
 _TRADE_SUBSCRIBE_CHUNK_SIZE = 100
 _TRADE_SUBSCRIBE_CHUNK_DELAY_S = 0.1
 _CANDLE_SUBSCRIBE_CHUNK_SIZE = 100
@@ -996,7 +997,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             None.
         """
         if interval not in self._candle_queues:
-            self._candle_queues[interval] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+            self._candle_queues[interval] = asyncio.Queue(maxsize=_TICK_QUEUE_MAX_SIZE)
 
     def _connected_ws_client(self) -> SpotWSClient:
         """Return the active WebSocket client or raise.

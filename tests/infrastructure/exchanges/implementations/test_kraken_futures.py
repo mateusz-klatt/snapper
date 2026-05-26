@@ -219,6 +219,8 @@ class TestClientInit:
         c = KrakenFuturesExchangeClient()
         assert c._tick_queue.maxsize >= 50_000
         assert c._tick_queue.maxsize == kf._TICK_QUEUE_MAX_SIZE
+        assert c._candle_queue.maxsize >= 50_000
+        assert c._candle_queue.maxsize == kf._TICK_QUEUE_MAX_SIZE
         assert c._tick_queue.maxsize > c._trade_queue.maxsize
         assert c._trade_queue.maxsize == kf._QUEUE_MAX_SIZE
 
