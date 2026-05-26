@@ -18,6 +18,7 @@ import zmq.asyncio
 from loguru import logger
 from sqlalchemy import or_
 from sqlalchemy import select
+from sqlalchemy import update
 
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import get_settings_service
@@ -715,6 +716,86 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"Reconciled {exchange} capabilities: deactivated {deactivated} stale symbols"
             )
         return deactivated
+
+    @staticmethod
+    def _reconcile_aliases(session: Any, exchange: str, now: datetime) -> int:
+        """Close SCD2 aliases for symbols whose current capability is deactivated.
+
+        Sets ``known_to = now`` on every ``symbol_aliases`` row that is
+        currently active (``known_to > now``) and whose owning
+        ``symbol_public_id`` has a current ``symbol_exchange_capabilities``
+        row reporting BOTH ``can_market_data = False`` AND
+        ``can_trade = False``. Close-only — does not insert a successor
+        row; the absence of an active alias is itself the signal that
+        the alias is retired.
+
+        This is the canonical cleanup for the architectural rule that
+        the operational gate for "can we use this symbol now" is the
+        capability row, not the alias row (see
+        ``proprietary/memory/feedback_capability_gate_on_symbol_aliases.md``).
+        Without this reconcile step, ``symbol_aliases`` rows for
+        delisted / expired / retired contracts accumulate forever with
+        ``known_to = KNOWN_TO_MAX``, polluting
+        ``mapper.native_to_<exchange>_<channel>`` reverse dicts and
+        forcing every alias-consuming code path to remember the
+        capability filter (the 2026-05-25 incident root cause).
+
+        Idempotent: a second invocation with no new capability changes
+        closes zero rows because every targeted alias is already
+        closed. Safe to run in the same DB transaction as
+        :func:`_reconcile_capabilities` (both writes commit together
+        or roll back together; a crash midway leaves stores
+        consistent).
+
+        Live data consumers (publishers + WS message adapters) only
+        ever resolve currently-subscribed symbols, and the publishers
+        already exclude delisted symbols via ``can_market_data`` (see
+        commit ``c940e791``); they tolerate alias closure without
+        change. Historical backfill helpers
+        (``application/updaters/historical/*``) expand only ACTIVE
+        symbols via ``get_available_*`` and additionally use null-safe
+        ``.get()`` for reverse lookups, so they degrade gracefully on
+        a missing alias. A bitemporal AS-OF lookup helper is NOT
+        shipped today — no current caller needs one. If a future
+        replay path needs to resolve a delisted exchange symbol AT
+        the historical time of delivery, build the helper then; the
+        closed alias row's slice still covers the historical period
+        (``timestamp <= as_of < known_to``), the in-memory mapper
+        dict is just current-only.
+
+        Args:
+            session: SQLAlchemy session (shared with caller's
+                transaction).
+            exchange: Exchange name (lowercase), matches the
+                ``symbol_aliases.exchange`` column.
+            now: Current UTC timestamp; used both as the close-time
+                cutoff and the new ``known_to`` value.
+
+        Returns:
+            Number of alias rows closed by this invocation. Returns 0
+            when there is nothing to do.
+        """
+        disabled_capability_ids = select(SymbolExchangeCapability.symbol_public_id).where(
+            SymbolExchangeCapability.exchange == exchange,
+            SymbolExchangeCapability.timestamp <= now,
+            SymbolExchangeCapability.known_to > now,
+            SymbolExchangeCapability.can_market_data.is_(False),
+            SymbolExchangeCapability.can_trade.is_(False),
+        )
+        result = session.execute(
+            update(SymbolAlias)
+            .where(
+                SymbolAlias.exchange == exchange,
+                SymbolAlias.known_to > now,
+                SymbolAlias.symbol_public_id.in_(disabled_capability_ids),
+            )
+            .values(known_to=now)
+        )
+        rowcount = getattr(result, "rowcount", None)
+        closed = rowcount if isinstance(rowcount, int) and rowcount > 0 else 0
+        if closed > 0:
+            logger.info(f"Reconciled {exchange} aliases: closed {closed} retired alias rows")
+        return closed
 
     def _get_last_update_timestamp(self) -> datetime | None:
         """Retrieve the timestamp of the last symbol mapping update from database.

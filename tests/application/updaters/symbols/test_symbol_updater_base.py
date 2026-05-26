@@ -2057,3 +2057,216 @@ def test_ensure_instrument_identity_returns_existing() -> None:
     )
     assert result == "existing-inst-pid"
     session.add.assert_not_called()
+
+
+def _seed_alias(
+    updater: DummySymbolUpdater,
+    native_symbol: str,
+    exchange: str,
+    channel: str,
+    alias_value: str,
+    now: datetime,
+) -> None:
+    """Seed an active alias row (assumes catalog row already exists)."""
+    assert updater.repository is not None
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        sym = session.execute(
+            select(Symbol).where(Symbol.native_symbol == native_symbol)
+        ).scalar_one()
+        session.add(
+            SymbolAlias(
+                symbol_public_id=sym.public_id,
+                exchange=exchange,
+                channel=channel,
+                exchange_symbol=alias_value,
+                created_at=now,
+                timestamp=now,
+                session_id="test-session",
+                sequence_id=1,
+            )
+        )
+        session.commit()
+
+
+def _open_aliases_count(updater: DummySymbolUpdater, symbol_public_id: str, exchange: str) -> int:
+    """Count active alias rows (known_to == KNOWN_TO_MAX) for a symbol on an exchange."""
+    assert updater.repository is not None
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        rows = (
+            session.execute(
+                select(SymbolAlias).where(
+                    SymbolAlias.symbol_public_id == symbol_public_id,
+                    SymbolAlias.exchange == exchange,
+                    SymbolAlias.known_to == KNOWN_TO_MAX,
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return len(rows)
+
+
+def test_reconcile_aliases_closes_when_capability_deactivated(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Spec — aliases close when current capability is False/False.
+
+    Given: Two symbols on ``kraken`` — BTC-USD with capability
+        ``can_market_data=True/can_trade=True`` and active WS alias
+        ``XBT/USD``; ETH-USD with capability ``False/False`` (delisted)
+        and an open WS alias ``ETH/USD``,
+    When: ``_reconcile_aliases`` runs at a time ≥ the seeded
+        timestamps,
+    Then: Exactly ONE alias row closes (ETH-USD's WS alias) and the
+        BTC-USD alias stays open. The closure is the canonical cleanup
+        for the architectural rule that capabilities are the
+        operational gate (see feedback-capability-gate-on-symbol-aliases).
+    """
+    updater = updater_factory(3, False)
+    seed_time = datetime(2024, 6, 1, tzinfo=UTC)
+    btc_spid = _seed_catalog(updater, "BTC-USD", seed_time)
+    eth_spid = _seed_catalog(updater, "ETH-USD", seed_time)
+    _seed_capability(updater, "BTC-USD", "kraken", True, True, "kraken_updater", seed_time)
+    _seed_capability(updater, "ETH-USD", "kraken", False, False, "kraken_updater", seed_time)
+    _seed_alias(updater, "BTC-USD", "kraken", "ws", "XBT/USD", seed_time)
+    _seed_alias(updater, "ETH-USD", "kraken", "ws", "ETH/USD", seed_time)
+    reconcile_time = datetime(2024, 6, 2, tzinfo=UTC)
+    assert updater.repository is not None
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        closed = SymbolUpdaterService._reconcile_aliases(session, "kraken", reconcile_time)
+        session.commit()
+    assert closed == 1
+    assert _open_aliases_count(updater, btc_spid, "kraken") == 1
+    assert _open_aliases_count(updater, eth_spid, "kraken") == 0
+
+
+def test_reconcile_aliases_leaves_alias_when_only_one_flag_false(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Spec — aliases stay open when only one capability flag is False.
+
+    Given: ETH-USD on ``kraken`` with capability
+        ``can_market_data=True/can_trade=False`` (market-data-only,
+        e.g. a venue we read from but cannot route orders to) and an
+        active WS alias,
+    When: ``_reconcile_aliases`` runs,
+    Then: Zero aliases close — the requirement is BOTH flags False
+        (truly retired). This protects market-data-only and
+        trade-only configurations from accidental alias closure.
+    """
+    updater = updater_factory(3, False)
+    seed_time = datetime(2024, 6, 1, tzinfo=UTC)
+    eth_spid = _seed_catalog(updater, "ETH-USD", seed_time)
+    _seed_capability(updater, "ETH-USD", "kraken", True, False, "kraken_updater", seed_time)
+    _seed_alias(updater, "ETH-USD", "kraken", "ws", "ETH/USD", seed_time)
+    reconcile_time = datetime(2024, 6, 2, tzinfo=UTC)
+    assert updater.repository is not None
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        closed = SymbolUpdaterService._reconcile_aliases(session, "kraken", reconcile_time)
+        session.commit()
+    assert closed == 0
+    assert _open_aliases_count(updater, eth_spid, "kraken") == 1
+
+
+def test_reconcile_aliases_is_idempotent(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Spec — a second invocation with no new capability changes closes nothing.
+
+    Given: A symbol whose capability is False/False and whose alias
+        was just closed by an earlier reconcile invocation,
+    When: ``_reconcile_aliases`` runs a second time at a later
+        timestamp,
+    Then: Zero additional rows close — the closed alias's
+        ``known_to < now`` filter excludes it from the second
+        UPDATE. Steady-state guarantee for repeated symbol updater
+        runs and CLI backfill re-invocations.
+    """
+    updater = updater_factory(3, False)
+    seed_time = datetime(2024, 6, 1, tzinfo=UTC)
+    eth_spid = _seed_catalog(updater, "ETH-USD", seed_time)
+    _seed_capability(updater, "ETH-USD", "kraken", False, False, "kraken_updater", seed_time)
+    _seed_alias(updater, "ETH-USD", "kraken", "ws", "ETH/USD", seed_time)
+    first_run = datetime(2024, 6, 2, tzinfo=UTC)
+    second_run = datetime(2024, 6, 3, tzinfo=UTC)
+    assert updater.repository is not None
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        first_closed = SymbolUpdaterService._reconcile_aliases(session, "kraken", first_run)
+        session.commit()
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        second_closed = SymbolUpdaterService._reconcile_aliases(session, "kraken", second_run)
+        session.commit()
+    assert first_closed == 1
+    assert second_closed == 0
+    assert _open_aliases_count(updater, eth_spid, "kraken") == 0
+
+
+def test_reconcile_aliases_closes_all_channels_for_one_symbol(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Spec — every channel's alias closes when capability flips.
+
+    Given: A symbol with capability False/False and TWO alias rows
+        — one on the ``ws`` channel and one on the ``rest`` channel
+        (mirror of how the kraken updater seeds both for trading
+        pairs that need REST + WS routing),
+    When: ``_reconcile_aliases`` runs,
+    Then: BOTH alias rows close in a single UPDATE — the helper
+        operates on ``symbol_public_id IN (deactivated)`` so every
+        channel's alias for that symbol is targeted at once. Tests
+        the WHERE clause's channel-independence.
+    """
+    updater = updater_factory(3, False)
+    seed_time = datetime(2024, 6, 1, tzinfo=UTC)
+    eth_spid = _seed_catalog(updater, "ETH-USD", seed_time)
+    _seed_capability(updater, "ETH-USD", "kraken", False, False, "kraken_updater", seed_time)
+    _seed_alias(updater, "ETH-USD", "kraken", "ws", "ETH/USD", seed_time)
+    _seed_alias(updater, "ETH-USD", "kraken", "rest", "XETHZUSD", seed_time)
+    reconcile_time = datetime(2024, 6, 2, tzinfo=UTC)
+    assert updater.repository is not None
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        closed = SymbolUpdaterService._reconcile_aliases(session, "kraken", reconcile_time)
+        session.commit()
+    assert closed == 2
+    assert _open_aliases_count(updater, eth_spid, "kraken") == 0
+
+
+def test_reconcile_aliases_does_not_touch_other_exchange(
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+) -> None:
+    """Spec — exchange scoping prevents cross-exchange interference.
+
+    Given: ETH-USD on BOTH ``kraken`` (capability False/False, open
+        alias) and ``kraken_futures`` (capability False/False, open
+        alias),
+    When: ``_reconcile_aliases`` runs scoped to ``kraken_futures``,
+    Then: Only the kraken_futures alias closes; the kraken alias
+        stays open — the WHERE clause's ``exchange == ...`` is
+        respected. This is the contract that lets the CLI backfill
+        scope to one exchange without spilling into others.
+    """
+    updater = updater_factory(3, False)
+    seed_time = datetime(2024, 6, 1, tzinfo=UTC)
+    eth_spid = _seed_catalog(updater, "ETH-USD", seed_time)
+    _seed_capability(updater, "ETH-USD", "kraken", False, False, "kraken_updater", seed_time)
+    _seed_capability(
+        updater, "ETH-USD", "kraken_futures", False, False, "kraken_futures_updater", seed_time
+    )
+    _seed_alias(updater, "ETH-USD", "kraken", "ws", "ETH/USD", seed_time)
+    _seed_alias(updater, "ETH-USD", "kraken_futures", "ws", "PF_ETHUSD", seed_time)
+    reconcile_time = datetime(2024, 6, 2, tzinfo=UTC)
+    assert updater.repository is not None
+    with updater.repository.get_session() as session:
+        assert isinstance(session, Session)
+        closed = SymbolUpdaterService._reconcile_aliases(session, "kraken_futures", reconcile_time)
+        session.commit()
+    assert closed == 1
+    assert _open_aliases_count(updater, eth_spid, "kraken") == 1
+    assert _open_aliases_count(updater, eth_spid, "kraken_futures") == 0

@@ -1281,3 +1281,83 @@ async def test_update_database_creates_capability_rows(
         assert cap.can_trade is False
         assert cap.source == "polygon_updater"
         assert cap.reason is None
+
+
+@pytest.mark.asyncio()
+async def test_polygon_update_database_closes_deactivated_aliases(
+    polygon_updater: tuple[ExposedPolygonSymbolUpdater, DatabaseRepository],
+) -> None:
+    """Spec — Polygon updater closes SCD2 aliases for deactivated capabilities.
+
+    Given: A pre-existing Polygon Symbol + Capability(False/False) +
+        open alias row,
+    When: ``_update_database`` runs (even with an empty symbols list,
+        since the close path is independent of the per-symbol
+        processing loop),
+    Then: The open alias row gets ``known_to = now`` — i.e. Polygon
+        is wired through to the shared ``_reconcile_aliases`` helper
+        identically to kraken / kraken_futures / kraken_equities /
+        walutomat. Regression coverage for the Codex round-1 critical
+        finding on plan item #4 — the helper call was originally
+        missing from ``polygon._update_database`` even though
+        Polygon was in the CLI backfill exchange set.
+    """
+    updater, repository = polygon_updater
+    seed_time = datetime(2024, 6, 1, tzinfo=UTC)
+    with repository.get_session() as session:
+        assert isinstance(session, Session)
+        sym = Symbol(
+            native_symbol="DEAD-USD",
+            base="DEAD",
+            quote="USD",
+            asset_type="crypto",
+            created_at=seed_time,
+            timestamp=seed_time,
+            session_id="seed-session",
+            sequence_id=1,
+        )
+        session.add(sym)
+        session.flush()
+        symbol_public_id = sym.public_id
+        session.add(
+            SymbolExchangeCapability(
+                symbol_public_id=symbol_public_id,
+                exchange="polygon",
+                can_market_data=False,
+                can_trade=False,
+                source="seed",
+                reason="seed-delisted",
+                created_at=seed_time,
+                timestamp=seed_time,
+                session_id="seed-session",
+                sequence_id=1,
+            )
+        )
+        session.add(
+            SymbolAlias(
+                symbol_public_id=symbol_public_id,
+                exchange="polygon",
+                channel="rest",
+                exchange_symbol="X:DEADUSD",
+                created_at=seed_time,
+                timestamp=seed_time,
+                session_id="seed-session",
+                sequence_id=1,
+            )
+        )
+        session.commit()
+    await updater.update_database_public([])
+    with repository.get_session() as session:
+        assert isinstance(session, Session)
+        open_aliases = (
+            session.execute(
+                select(SymbolAlias).where(
+                    SymbolAlias.symbol_public_id == symbol_public_id,
+                    SymbolAlias.exchange == "polygon",
+                    SymbolAlias.known_to == KNOWN_TO_MAX,
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(open_aliases) == 0

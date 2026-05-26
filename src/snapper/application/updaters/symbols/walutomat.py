@@ -163,9 +163,10 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                 session_id=self._tracker.session_id,
                 next_sequence_fn=lambda: self._tracker.next_sequence("capabilities"),
             )
+            closed_aliases = self._reconcile_aliases(session, ExchangeEnum.WALUTOMAT, now)
             session.commit()
         logger.info(
             f"Walutomat update complete: {created_count} created, "
-            f"{updated_count} updated, {deactivated} deactivated "
-            f"(total: {len(symbols)})"
+            f"{updated_count} updated, {deactivated} deactivated, "
+            f"{closed_aliases} aliases closed (total: {len(symbols)})"
         )

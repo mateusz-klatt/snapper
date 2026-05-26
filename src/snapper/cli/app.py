@@ -91,6 +91,7 @@ from snapper.application.updaters.historical.kraken_futures_aggregates import (
 from snapper.application.updaters.historical.kraken_futures_funding import (
     KrakenFuturesFundingBackfillService,
 )
+from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
 from snapper.application.updaters.symbols.kraken_equities import KrakenEquitiesSymbolUpdaterService
 from snapper.application.updaters.symbols.kraken_futures import KrakenFuturesSymbolUpdaterService
@@ -2045,3 +2046,89 @@ def egress(ctx: typer.Context) -> None:
         raise typer.Exit(code=1)
 
     raise typer.Exit(code=_egress_main(list(ctx.args)))
+
+
+_RECONCILE_ALIASES_EXCHANGES: dict[str, str] = {
+    ExchangeEnum.KRAKEN: "kraken",
+    ExchangeEnum.KRAKEN_FUTURES: "kraken_futures",
+    ExchangeEnum.KRAKEN_EQUITIES: "kraken_equities",
+    ExchangeEnum.WALUTOMAT: "walutomat",
+    ExchangeEnum.POLYGON: "polygon",
+}
+"""Exchanges that the alias reconcile backfill supports.
+
+Each entry maps the ``ExchangeEnum`` value (used as the
+``symbol_aliases.exchange`` column) to the human-readable name shown
+in the CLI report. The five symbol updaters that populate aliases
+are listed here; adding a new exchange means populating its
+capabilities in the updater AND adding it to this dict so the
+backfill can flush stale aliases on first deploy."""
+
+
+@app.command(name="reconcile-symbol-aliases")
+def reconcile_symbol_aliases(
+    exchange: str = typer.Option(
+        "all",
+        "--exchange",
+        "-e",
+        help="Exchange to reconcile (kraken, kraken_futures, kraken_equities, walutomat, polygon, all).",
+    ),
+) -> None:
+    """Close SCD2 alias rows for symbols whose capability is deactivated.
+
+    One-shot backfill for plan item #4 from
+    ``proprietary/plans/plan_2026_05_25_log_noise_followups.md``.
+    Steady-state alias closure is handled by each symbol updater's
+    own ``run-static`` invocation (which calls
+    :func:`SymbolUpdaterService._reconcile_aliases` in the same DB
+    transaction as ``_reconcile_capabilities``); this CLI exists so
+    operators can flush any historical inconsistency in one shot
+    without waiting for the next scheduled symbol update.
+
+    Idempotent: re-running closes zero rows once steady state is
+    reached. Safe to run against production; the DB write is a
+    targeted ``UPDATE`` of `symbol_aliases.known_to` for rows whose
+    owning ``symbol_exchange_capabilities`` row has both
+    ``can_market_data = False`` AND ``can_trade = False`` at the
+    moment the CLI runs.
+
+    Args:
+        exchange: Exchange to reconcile. Use ``all`` to process every
+            registered exchange (the default). Use a specific
+            exchange name (``kraken``, ``kraken_futures`` etc.) to
+            restrict the scope.
+
+    Raises:
+        typer.Exit: With code 1 if the exchange name is not
+            recognised. With code 0 on success (including a
+            zero-close run).
+    """
+    bootstrap = BootstrapSettingsLoader()
+    repo = DatabaseRepository(bootstrap.db_url)
+    targets: list[tuple[str, str]] = []
+    if exchange == "all":
+        targets = list(_RECONCILE_ALIASES_EXCHANGES.items())
+    else:
+        match = next(
+            ((k, v) for k, v in _RECONCILE_ALIASES_EXCHANGES.items() if v == exchange),
+            None,
+        )
+        if match is None:
+            typer.echo(
+                f"Unknown exchange: {exchange!r}. "
+                f"Choose from {sorted(_RECONCILE_ALIASES_EXCHANGES.values())} or 'all'."
+            )
+            raise typer.Exit(code=1)
+        targets = [match]
+    now = datetime.now(UTC)
+    total_closed = 0
+    per_exchange: list[tuple[str, int]] = []
+    with repo.get_session() as session:
+        for exchange_enum, exchange_label in targets:
+            closed = SymbolUpdaterService._reconcile_aliases(session, exchange_enum, now)
+            per_exchange.append((exchange_label, closed))
+            total_closed += closed
+        session.commit()
+    for exchange_label, closed in per_exchange:
+        typer.echo(f"{exchange_label}: closed {closed} alias rows")
+    typer.echo(f"Total: closed {total_closed} alias rows across {len(targets)} exchange(s)")

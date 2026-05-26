@@ -4419,3 +4419,184 @@ class TestEgressCommand:
         assert result.exit_code == 1
         assert "snapper egress is unavailable in this environment" in result.output
         assert "No module named 'fcntl'" in result.output
+
+
+class TestReconcileSymbolAliasesCommand:
+    """Tests for the ``reconcile-symbol-aliases`` CLI backfill.
+
+    Pins the operator-facing surface for plan item #4 from
+    ``proprietary/plans/plan_2026_05_25_log_noise_followups.md``.
+    The CLI is a one-shot backfill for SCD2 alias rows whose owning
+    capability is already deactivated. Steady-state reconcile is
+    handled by each symbol updater in its own ``run-static`` flow;
+    this CLI exists for one-time historical cleanup.
+    """
+
+    def test_all_exchanges_default_reports_per_exchange_counts(
+        self,
+        cli_runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Spec — ``--exchange all`` invokes the helper once per registered exchange.
+
+        Given: A monkey-patched ``SymbolUpdaterService._reconcile_aliases``
+            that returns a non-zero count per exchange,
+        When: ``reconcile-symbol-aliases`` is invoked with no
+            ``--exchange`` flag (defaults to ``all``),
+        Then: The helper is called once per entry in
+            ``_RECONCILE_ALIASES_EXCHANGES``, the per-exchange line is
+            printed for each, the total line is emitted, and the
+            process exits 0. Verifies the iteration contract and the
+            single-transaction commit pattern.
+        """
+        call_log: list[tuple[str, object]] = []
+
+        def _fake_reconcile(session: object, exchange: str, _now: object) -> int:
+            call_log.append((exchange, session))
+            return 7
+
+        monkeypatch.setattr(app_module.SymbolUpdaterService, "_reconcile_aliases", _fake_reconcile)
+        session_holder: list[object] = []
+
+        class _StubSession:
+            def __enter__(self) -> _StubSession:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def commit(self) -> None:
+                session_holder.append(self)
+
+        class _StubRepo:
+            def __init__(self, _db_url: str) -> None:
+                pass
+
+            def get_session(self) -> _StubSession:
+                return _StubSession()
+
+        monkeypatch.setattr(app_module, "DatabaseRepository", _StubRepo)
+        monkeypatch.setattr(
+            app_module,
+            "BootstrapSettingsLoader",
+            type(
+                "_StubBootstrap",
+                (),
+                {"__init__": lambda self: None, "db_url": "sqlite:///:memory:"},
+            ),
+        )
+        result = cli_runner.invoke(app_module.app, ["reconcile-symbol-aliases"])
+        assert result.exit_code == 0
+        called_exchanges = sorted(exchange for exchange, _ in call_log)
+        registered_exchanges = sorted(app_module._RECONCILE_ALIASES_EXCHANGES.keys())
+        assert called_exchanges == registered_exchanges
+        assert "Total: closed" in result.output
+        assert f"{7 * len(registered_exchanges)} alias rows" in result.output
+        assert len(session_holder) == 1
+
+    def test_single_exchange_scopes_to_one_call(
+        self,
+        cli_runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Spec — ``--exchange kraken`` calls the helper exactly once.
+
+        Given: A monkey-patched ``_reconcile_aliases`` that returns 3
+            for ``kraken``,
+        When: ``reconcile-symbol-aliases --exchange kraken`` runs,
+        Then: The helper is invoked exactly once with
+            ``ExchangeEnum.KRAKEN`` and the per-exchange + total lines
+            both report 3. Verifies the per-exchange scoping contract
+            so operators can target a single venue without affecting
+            others.
+        """
+        call_log: list[str] = []
+
+        def _fake_reconcile(_session: object, exchange: str, _now: object) -> int:
+            call_log.append(exchange)
+            return 3
+
+        monkeypatch.setattr(app_module.SymbolUpdaterService, "_reconcile_aliases", _fake_reconcile)
+
+        class _StubSession:
+            def __enter__(self) -> _StubSession:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def commit(self) -> None:
+                return None
+
+        class _StubRepo:
+            def __init__(self, _db_url: str) -> None:
+                pass
+
+            def get_session(self) -> _StubSession:
+                return _StubSession()
+
+        monkeypatch.setattr(app_module, "DatabaseRepository", _StubRepo)
+        monkeypatch.setattr(
+            app_module,
+            "BootstrapSettingsLoader",
+            type(
+                "_StubBootstrap",
+                (),
+                {"__init__": lambda self: None, "db_url": "sqlite:///:memory:"},
+            ),
+        )
+        result = cli_runner.invoke(
+            app_module.app, ["reconcile-symbol-aliases", "--exchange", "kraken"]
+        )
+        assert result.exit_code == 0
+        assert len(call_log) == 1
+        assert call_log[0] == "kraken"
+        assert "kraken: closed 3 alias rows" in result.output
+
+    def test_unknown_exchange_exits_with_error_code(
+        self,
+        cli_runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Spec — an unrecognised ``--exchange`` value exits with code 1.
+
+        Given: A ``--exchange`` value that does not match any
+            registered entry in ``_RECONCILE_ALIASES_EXCHANGES``,
+        When: ``reconcile-symbol-aliases --exchange bogus`` runs,
+        Then: The CLI exits with code 1, the helper is never invoked,
+            and the error output names the rejected value plus the
+            list of acceptable choices. Protects against silent no-op
+            when an operator misspells an exchange name.
+        """
+        invocations: list[str] = []
+
+        def _fake_reconcile(_session: object, exchange: str, _now: object) -> int:
+            invocations.append(exchange)
+            return 0
+
+        monkeypatch.setattr(app_module.SymbolUpdaterService, "_reconcile_aliases", _fake_reconcile)
+
+        class _StubRepo:
+            def __init__(self, _db_url: str) -> None:
+                pass
+
+            def get_session(self) -> object:
+                raise AssertionError("get_session must not be called when exchange is invalid")
+
+        monkeypatch.setattr(app_module, "DatabaseRepository", _StubRepo)
+        monkeypatch.setattr(
+            app_module,
+            "BootstrapSettingsLoader",
+            type(
+                "_StubBootstrap",
+                (),
+                {"__init__": lambda self: None, "db_url": "sqlite:///:memory:"},
+            ),
+        )
+        result = cli_runner.invoke(
+            app_module.app, ["reconcile-symbol-aliases", "--exchange", "bogus"]
+        )
+        assert result.exit_code == 1
+        assert "Unknown exchange" in result.output
+        assert "'bogus'" in result.output
+        assert invocations == []

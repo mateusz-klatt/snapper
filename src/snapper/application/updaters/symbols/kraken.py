@@ -1130,12 +1130,13 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                     session_id=self._tracker.session_id,
                     next_sequence_fn=lambda: self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
                 )
+                closed_aliases = self._reconcile_aliases(session, ExchangeEnum.KRAKEN, now)
                 session.commit()
                 logger.info(
                     f"Kraken update complete: {created_count} created, "
                     f"{updated_count} updated, {ws_only_count} WS-only, "
-                    f"{btnl_count} BTNL, {deactivated} deactivated "
-                    f"(total: {len(symbols)})"
+                    f"{btnl_count} BTNL, {deactivated} deactivated, "
+                    f"{closed_aliases} aliases closed (total: {len(symbols)})"
                 )
         except Exception as e:
             logger.error(f"Error updating database: {e}")

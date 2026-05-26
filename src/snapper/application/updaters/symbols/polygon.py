@@ -277,8 +277,10 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
                     session_id=self._tracker.session_id,
                     next_sequence_fn=lambda: self._tracker.next_sequence("capabilities"),
                 )
+                closed_aliases = self._reconcile_aliases(session, ExchangeEnum.POLYGON, now)
                 session.commit()
                 stats["deactivated"] = deactivated
+                stats["closed_aliases"] = closed_aliases
                 logger.info(f"Polygon update complete: {stats}")
         except Exception as e:
             logger.error(f"Error updating database: {e}")

@@ -147,11 +147,12 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
                     session_id=self._tracker.session_id,
                     next_sequence_fn=lambda: self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
                 )
+                closed_aliases = self._reconcile_aliases(session, ExchangeEnum.KRAKEN_FUTURES, now)
                 session.commit()
                 logger.info(
                     f"Kraken Futures update complete: {created_count} processed, "
-                    f"{skipped_count} skipped, {deactivated} deactivated "
-                    f"(total: {len(symbols)})"
+                    f"{skipped_count} skipped, {deactivated} deactivated, "
+                    f"{closed_aliases} aliases closed (total: {len(symbols)})"
                 )
         except Exception as e:
             logger.error(f"Error updating Kraken Futures database: {e}")
