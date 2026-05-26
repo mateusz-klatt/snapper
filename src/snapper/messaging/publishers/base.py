@@ -56,6 +56,7 @@ from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.tick_probe import get_probe
+from snapper.messaging.infrastructure.trade_probe import get_probe as get_trade_probe
 from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
@@ -1326,16 +1327,20 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if not self._exchange_client:
             logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
+        trade_probe = get_trade_probe()
         exchange = self._get_data_exchange()
         exchange_label = self._get_exchange_name()
         iterator = self._exchange_client.subscribe_trades(symbols).__aiter__()
         next_fut: asyncio.Future[TradeUpdate | object] | None = None
         try:
+            t_iter_start = perf_counter_ns()
             while self.running:
                 next_fut = next_fut or asyncio.ensure_future(anext(iterator, _STREAM_END))
                 done, _ = await asyncio.wait({next_fut}, timeout=self._batch_max_age_s)
                 if not done:
                     continue
+                t_after_wait = perf_counter_ns()
+                trade_probe.record("iter_wait", t_after_wait - t_iter_start)
                 next_fut = None
                 trade = done.pop().result()
                 if trade is _STREAM_END:
@@ -1347,6 +1352,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     _enqueue_or_drop_oldest_trade_write(
                         self._trade_write_queue, row, exchange_label
                     )
+                t_iter_end = perf_counter_ns()
+                trade_probe.record("trade_iter_total", t_iter_end - t_iter_start)
+                trade_probe.maybe_flush()
+                t_iter_start = t_iter_end
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -1428,17 +1437,25 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         mutation of ``batch`` during ``_flush_trade_batch`` cannot
         desync the ``task_done`` count.
 
+        Records ``writer_flush_total`` on the trade probe (enabled by
+        ``SNAPPER_TRADE_PROBE``) covering the full flush cycle: the
+        ``_flush_trade_batch`` await plus ``task_done`` bookkeeping
+        plus the in-place clear.
+
         Args:
             batch: In-flight write batch. Cleared in place on a
                 successful flush; left empty otherwise.
         """
         if not batch:
             return
+        trade_probe = get_trade_probe()
+        t_start = perf_counter_ns()
         flushed_count = len(batch)
         await self._flush_trade_batch(batch)
         for _ in range(flushed_count):
             self._trade_write_queue.task_done()
         batch.clear()
+        trade_probe.record("writer_flush_total", perf_counter_ns() - t_start)
 
     async def _process_trade(
         self, trade: TradeUpdate, exchange: MarketDataExchange
@@ -1448,17 +1465,32 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         Publish-first: ZMQ delivery happens before instrument resolution.
         Returns None when instrument is unknown (ZMQ still delivered).
 
+        Trade-probe stages recorded here (enabled by
+        ``SNAPPER_TRADE_PROBE``):
+
+        * ``build_topic`` -- topic f-string assembly
+        * ``build_trade_model`` -- Pydantic ``TradeData(...)`` construction
+        * ``publish`` -- end-to-end ``_publish_message`` cost (model
+          copy + JSON serialise + topic validate + socket send)
+        * ``ensure_instrument`` -- symbol -> instrument cache lookup
+        * ``build_row`` -- ``_build_trade_row`` dict assembly
+        * ``trade_total`` -- end-to-end cost from method entry
+
         Args:
             trade: Raw trade update from exchange client.
             exchange: Exchange name for message provenance.
         """
         self._last_message_at = monotonic()
+        trade_probe = get_trade_probe()
+        t_start = perf_counter_ns()
         native_symbol = trade.symbol
         received_at = datetime.now(UTC)
         self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
         if self._is_duplicate_trade(trade):
             return None
         topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TRADES)
+        t_after_topic = perf_counter_ns()
+        trade_probe.record("build_topic", t_after_topic - t_start)
         trade_msg = TradeData(
             public_id=str(uuid7()),
             timestamp=received_at,
@@ -1472,11 +1504,22 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             side=trade.side if trade.side in (TradeSideEnum.BUY, TradeSideEnum.SELL) else None,
             trade_id=trade.trade_id,
         )
+        t_after_build = perf_counter_ns()
+        trade_probe.record("build_trade_model", t_after_build - t_after_topic)
         await self._publish_message(topic, trade_msg)
+        t_after_publish = perf_counter_ns()
+        trade_probe.record("publish", t_after_publish - t_after_build)
         instrument_public_id = await self._ensure_instrument(native_symbol)
+        t_after_instr = perf_counter_ns()
+        trade_probe.record("ensure_instrument", t_after_instr - t_after_publish)
         if instrument_public_id is None:
+            trade_probe.record("trade_total", t_after_instr - t_start)
             return None
-        return self._build_trade_row(trade_msg, instrument_public_id)
+        row = self._build_trade_row(trade_msg, instrument_public_id)
+        t_end = perf_counter_ns()
+        trade_probe.record("build_row", t_end - t_after_instr)
+        trade_probe.record("trade_total", t_end - t_start)
+        return row
 
     def _is_duplicate_trade(self, trade: TradeUpdate) -> bool:
         """Return True when a trade id was already seen for the same symbol."""
@@ -1763,12 +1806,20 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         session without acquiring a fresh DBAPI connection per
         flush, and this method commits explicitly afterwards.
 
+        Records ``writer_upsert_call`` on the trade probe (enabled by
+        ``SNAPPER_TRADE_PROBE``) covering just the
+        ``upsert_trades + commit`` await pair so the operator can
+        attribute writer-side latency to the DB I/O round-trip vs the
+        surrounding bookkeeping captured by ``writer_flush_total``.
+
         Args:
             batch: List of trade rows to persist.
         """
         if not batch:
             return
         assert self.repository is not None, _REPO_NOT_INIT_MSG
+        trade_probe = get_trade_probe()
+        t_start = perf_counter_ns()
         try:
             writer_session = self._trade_writer_session
             if writer_session is not None:
@@ -1777,6 +1828,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             else:
                 await self.repository.upsert_trades(batch)
             self._flush_errors["trade"] = 0
+            trade_probe.record("writer_upsert_call", perf_counter_ns() - t_start)
         except Exception as e:
             self._flush_errors["trade"] += 1
             logger.error(f"Trade batch flush failed ({len(batch)} rows): {e}")
