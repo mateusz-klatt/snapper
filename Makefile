@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes move-imports run-server run-static run-polygon-aggregates run-polygon-grouped migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes move-imports run-server run-static reconcile-aliases run-polygon-aggregates run-polygon-grouped migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -45,6 +45,7 @@ help:
 	$(info Application:)
 	$(info run-server                 Start web dashboard [production mode])
 	$(info run-static                 Refresh verified symbol mappings)
+	$(info reconcile-aliases          Close SCD2 alias rows for symbols whose capability is deactivated [idempotent])
 	$(info run-polygon-aggregates     Backfill Polygon OHLCV [settings symbols; ["*"] = all mapped])
 	$(info run-polygon-grouped        Backfill Polygon grouped daily [CLI])
 	$(info migrate-dev                Run migrations + seed dev data)
@@ -103,6 +104,7 @@ help:
 	$(info docker-push                   Push Docker image)
 	$(info docker-run                    Run Docker container [background])
 	$(info docker-run-static             Refresh verified symbol mappings in Docker)
+	$(info docker-reconcile-aliases      Close SCD2 alias rows whose capability is deactivated in Docker [idempotent])
 	$(info docker-polygon-aggregates     Backfill Polygon OHLCV in Docker [settings symbols; ["*"] = all mapped])
 	$(info docker-polygon-grouped        Backfill Polygon grouped daily in Docker)
 	$(info docker-stop                   Stop Docker container)
@@ -375,6 +377,9 @@ run-static:
 	$(PYRUN) snapper update-kraken-equities-market-snapshot
 	$(PYRUN) snapper update-walutomat-market-snapshot
 
+reconcile-aliases:
+	$(PYRUN) snapper reconcile-symbol-aliases --exchange all
+
 run-polygon-aggregates:
 	$(PYRUN) snapper polygon-backfill-aggregates -d 32
 	$(PYRUN) snapper polygon-backfill-aggregates -d 730
@@ -593,6 +598,9 @@ docker-run-static:
 	$(DOCKER_RUN) update-kraken-futures-market-snapshot
 	$(DOCKER_RUN) update-kraken-equities-market-snapshot
 	$(DOCKER_RUN) update-walutomat-market-snapshot
+
+docker-reconcile-aliases:
+	$(DOCKER_RUN) reconcile-symbol-aliases --exchange all
 
 docker-polygon-aggregates:
 	$(DOCKER_RUN) polygon-backfill-aggregates -d 32
