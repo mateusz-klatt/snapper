@@ -1528,9 +1528,9 @@ class TestDelegateAccessTokens:
         assert len(tokens) == 1
         assert tokens[0].token_type == "access"
         assert tokens[0].token_hash == hash_token(payload.access_token)
-        ten_years = _td(days=3650)
+        ninety_days = _td(days=90)
         observed_lifetime = tokens[0].expires_at - tokens[0].issued_at
-        assert abs((observed_lifetime - ten_years).total_seconds()) < 60
+        assert abs((observed_lifetime - ninety_days).total_seconds()) < 60
 
     @pytest.mark.asyncio
     async def test_create_delegate_payload_shape(self, repo: SQLAlchemyRepository) -> None:
@@ -1542,12 +1542,12 @@ class TestDelegateAccessTokens:
             owner=_make_owner_principal("owner-pat-2"), body=body
         )
         assert payload.access_token
-        assert payload.expires_in > 300_000_000
+        assert payload.expires_in > 5_000_000
         assert payload.delegate.public_id
 
     @pytest.mark.asyncio
     async def test_delegate_access_token_decode_roundtrip(self, repo: SQLAlchemyRepository) -> None:
-        """Decoded JWT's ``exp - iat`` equals roughly ten years in seconds."""
+        """Decoded JWT's ``exp - iat`` equals roughly three months in seconds."""
         await _seed_owner(repo, public_id="owner-pat-4", username="owner-pat-4")
         manager = _fresh_manager()
         service = DelegateService(repository=repo, token_manager=manager)
@@ -1557,8 +1557,8 @@ class TestDelegateAccessTokens:
         )
         claims = manager.decode_fresh_token(payload.access_token)
         lifetime_seconds = claims.exp - claims.iat
-        ten_years_seconds = 3650 * 86400
-        assert abs(lifetime_seconds - ten_years_seconds) < 120
+        ninety_days_seconds = 90 * 86400
+        assert abs(lifetime_seconds - ninety_days_seconds) < 120
 
     @pytest.mark.asyncio
     async def test_delegate_jti_not_refresh_prefixed(self, repo: SQLAlchemyRepository) -> None:

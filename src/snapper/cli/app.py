@@ -618,13 +618,22 @@ def executor(
 @app.command()
 def init_admin(
     username: str = typer.Option("admin", help="Admin username"),
-    password: str = typer.Option("AdminSnapper2026!", help="Admin password"),
+    password: str = typer.Option(
+        ...,
+        prompt=True,
+        hide_input=True,
+        confirmation_prompt=True,
+        help="Admin password (prompted with confirmation when omitted; never echoed)",
+    ),
 ) -> None:
     """Create the initial admin user.
 
     Args:
         username: Admin username.
-        password: Admin password.
+        password: Admin password. Never echoed back to stdout; never accepted
+            as a hardcoded default so an operator running ``snapper init-admin``
+            with no flags cannot accidentally create the admin user with the
+            old hardcoded default credential documented in pre-2026-05-27 guides.
     """
 
     async def create_admin_user() -> None:
@@ -638,7 +647,6 @@ def init_admin(
         )
         typer.echo(f"Admin user '{username}' created successfully!")
         typer.echo(f"Username: {username}")
-        typer.echo(f"Password: {password}")
         typer.echo("Please change the password after first login")
 
     asyncio.run(create_admin_user())
@@ -657,8 +665,12 @@ def list_users() -> None:
             status = "Active" if user.is_active else "Inactive"
             typer.echo(f"{user.username:<15} | {user.role:<10} | {status}")
         typer.echo("=" * 50)
-        typer.echo("Default passwords are typically the same as usernames")
-        typer.echo("Try logging in with: admin/admin, operator/operator, or viewer/viewer")
+        typer.echo(
+            "Forgot a password? Use 'snapper reset-password <username>' "
+            "(prompts hidden). The dev seed leaves every account on the "
+            "rotate-on-first-login placeholder password, so any login "
+            "must reset that placeholder."
+        )
 
     asyncio.run(show_users())
 
@@ -687,7 +699,6 @@ def reset_password(
             await user_service.reset_password_by_username(username, new_password)
             typer.echo(f"Password reset for user '{username}'")
             typer.echo(f"Username: {username}")
-            typer.echo(f"New password: {new_password}")
         except ValueError as e:
             typer.echo(str(e))
         except Exception as e:
@@ -963,10 +974,12 @@ async def _commit_rotation_results(
         await session.commit()
         typer.echo(f"Successfully rotated {changes_made} encrypted settings")
         typer.echo()
-        typer.echo("IMPORTANT: Update your environment variables with new credentials:")
-        typer.echo(f"   MASTER_PASSWORD={new_master_password}")
-        typer.echo()
-        typer.echo("Restart the application to use new encryption parameters")
+        typer.echo(
+            "IMPORTANT: Update MASTER_PASSWORD in your .env (or process environment) "
+            "to the value you just entered, then restart the application. The value "
+            "is intentionally NOT printed here so it does not land in shell history, "
+            "scrollback, or CI logs."
+        )
     elif dry_run:
         typer.echo(f"DRY RUN: Would rotate {total_settings} settings")
 
@@ -1030,9 +1043,26 @@ async def _run_encryption_rotation(
 
 @app.command(name="settings-rotate-encryption")
 def settings_rotate_encryption(
-    new_master_password: str = typer.Option(..., "--new-password", help="New master password"),
+    new_master_password: str = typer.Option(
+        ...,
+        "--new-password",
+        prompt=True,
+        hide_input=True,
+        confirmation_prompt=True,
+        help=(
+            "New master password (prompted with confirmation when omitted; "
+            "avoids leaving the value in shell history)"
+        ),
+    ),
     old_master_password: str = typer.Option(
-        None, "--old-password", help="Current master password (optional, reads from env/bootstrap)"
+        "",
+        "--old-password",
+        hide_input=True,
+        help=(
+            "Current master password. Default empty triggers the env/bootstrap "
+            "lookup path; pass on the command line ONLY when scripting in a "
+            "session whose history is not retained (otherwise the value leaks)."
+        ),
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would be changed without making changes"

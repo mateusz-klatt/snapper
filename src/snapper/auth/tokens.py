@@ -107,14 +107,20 @@ class VerifyOutcome:
     rejection_reason: str | None
 
 
-LONG_LIVED_TOKEN_EXPIRE_DAYS: Final[int] = 3650
+LONG_LIVED_TOKEN_EXPIRE_DAYS: Final[int] = 90
 """Access-token lifetime for long-lived (PAT-style) delegate tokens.
 
-Ten years gives practical immortality to operator-issued PATs without
-touching JWT verification code; ``exp`` + ``iat`` claims validate as
-normal. Revocation still works via the per-JTI blacklist + the
-``user_active_tokens.revoked_at`` inventory flip, so the ten-year
-window is a ceiling, not a commitment.
+Ninety days matches the industry default for fine-grained personal
+access tokens (GitHub, GitLab, Azure app secrets). Operators who need
+longer-lived tokens should rotate them on the schedule that fits
+their key-management hygiene; revocation still works via the per-JTI
+blacklist + the ``user_active_tokens.revoked_at`` inventory flip, so
+this window is a ceiling, not a commitment.
+
+The constant was 3650 (ten years) before 2026-05-27; the OSS-readiness
+audit flagged that as excessive default lifetime — revocation works
+but security reviewers will (rightly) treat a ten-year default as a
+liability for tokens that may live in CI secret stores or IDE config.
 """
 
 
@@ -314,7 +320,7 @@ class TokenManager:
         (1) no refresh token is issued;
         (2) the access-token ``exp`` claim is set
             :data:`LONG_LIVED_TOKEN_EXPIRE_DAYS` days out (default
-            3650, ~10 years) instead of the short-lived access TTL;
+            90, ~3 months) instead of the short-lived access TTL;
         (3) the JTI is a plain ``uuid4()`` and carries no
             ``refresh_`` prefix so refresh-token-only code paths
             (e.g. :meth:`refresh_tokens`) never match on it.

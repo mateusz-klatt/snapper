@@ -284,12 +284,14 @@ snapper init-admin [OPTIONS]
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
 | `--username` | string | `admin` | Username |
-| `--password` | string | `AdminSnapper2026!` | Password |
+| `--password` | string | _(prompted, hidden, confirmed)_ | Password — no default; the command prompts with hidden input and confirmation when the flag is omitted, so the value never lands in shell history. |
 
 **Example:**
 
 ```bash
-snapper init-admin --username admin --password SuperSecurePass123!
+# Prompts for password with hidden input + confirmation; no inline value
+# means nothing lands in shell history
+snapper init-admin --username admin
 ```
 
 ### `list-users`
@@ -321,7 +323,9 @@ snapper reset-password USERNAME [OPTIONS]
 **Example:**
 
 ```bash
-snapper reset-password john --new-password NewSecurePass123!
+# Prompts for the new password with hidden input + confirmation; the secret
+# never lands in shell history when --new-password is omitted
+snapper reset-password john
 ```
 
 ## Symbol Synchronization
@@ -717,19 +721,26 @@ snapper settings-rotate-encryption [OPTIONS]
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
-| `--new-password` | string | (required) | New master password |
-| `--old-password` | string | from env | Current master password (optional, reads from env/bootstrap) |
+| `--new-password` | string | _(prompted, hidden, confirmed)_ | New master password — no default; the command prompts with hidden input and confirmation when the flag is omitted, so the value never lands in shell history. Inline `--new-password X` is still accepted for non-interactive automation but the same shell-history caveats apply. |
+| `--old-password` | string | from env | Current master password (optional; reads from env/bootstrap when omitted). Avoid inline use — passing a secret on the command line leaks it to shell history. |
 | `--dry-run` | bool | `false` | Show changes without applying |
 
 **Example:**
 
 ```bash
-# Simulate rotation
-snapper settings-rotate-encryption --new-password NewSecurePass --dry-run
+# Simulate rotation — prompts hidden for the new master password
+snapper settings-rotate-encryption --dry-run
 
-# Actual rotation
-snapper settings-rotate-encryption --new-password NewSecurePass
+# Actual rotation — same prompt flow, then re-encrypts every encrypted setting
+snapper settings-rotate-encryption
 ```
+
+The CLI prompts for `--new-password` with hidden input and confirmation when
+the flag is omitted (preferred), so the master password never lands in shell
+history, scrollback, or CI logs. After a successful rotation the command
+prints only a reminder to update `MASTER_PASSWORD` in `.env` — it does NOT
+echo the value you entered. Inline `--new-password X` is still accepted for
+non-interactive automation but the same shell-history caveats apply.
 
 ## Example Workflows
 
@@ -739,8 +750,8 @@ snapper settings-rotate-encryption --new-password NewSecurePass
 # 1. Initialize database
 snapper db-init
 
-# 2. Create administrator
-snapper init-admin --username admin --password SecretPassword123!
+# 2. Create administrator (prompts for password — never put it on the cmdline)
+snapper init-admin --username admin
 
 # 3. Synchronize symbols
 snapper update-kraken-symbols

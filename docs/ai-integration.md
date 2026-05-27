@@ -129,14 +129,16 @@ Other endpoints on `/api/ai-delegates`:
 
 ## Token model
 
-Each AI delegate mints a single long-lived (~10-year) access JWT.
+Each AI delegate mints a single long-lived (~3-month) access JWT.
 The same token authenticates both the proxy MCP server and the
 optional push-wakeup watch monitor. Revocation works instantly:
 `POST /api/ai-delegates/{id}/deactivate` flips
 `users.is_active=False`, publishes `admin.user_deactivated` on the
 bus, and every Snapper instance evicts the delegate's
 `user_active_tokens` row from the verify-cache within one bus
-round-trip. The 10-year `exp` is a ceiling, not a commitment.
+round-trip. The 90-day `exp` is a ceiling, not a commitment;
+operators are expected to rotate delegate tokens on the cadence
+that fits their key-management hygiene.
 
 ---
 
@@ -161,10 +163,11 @@ Claude Code prompts for two required values at install time
 - **Access token** -- the `access_token` from the `delegate_created`
   response (or paste from the Settings -> AI Delegates config-snippet
   generator). Delegates are PAT-style: the JWT lifetime is
-  ~10 years (`LONG_LIVED_TOKEN_EXPIRE_DAYS = 3650`), so no
-  refresh-token rotation is needed -- revocation is done by
-  deactivating the delegate in Snapper, which invalidates the
-  associated `user_active_tokens` row server-side.
+  ~3 months (`LONG_LIVED_TOKEN_EXPIRE_DAYS = 90`); operators are
+  expected to rotate by minting a fresh delegate via the same flow
+  before the existing one expires. Revocation is immediate:
+  deactivating the delegate in Snapper invalidates the associated
+  `user_active_tokens` row server-side within one bus round-trip.
 
 Run `/mcp list` to confirm the `snapper` server is connected. The
 plugin pins the runtime to a specific `@mateusz-klatt/snapper-mcp`
@@ -220,8 +223,9 @@ In `~/.cursor/config.json`:
 ```
 
 The delegate access token Cursor sends as a Bearer header is a
-long-lived PAT JWT (~10 years), so day-to-day operation does not
-require token rotation. Revocation is by deactivating the delegate
+long-lived PAT JWT (~3 months), so day-to-day operation does not
+require token rotation more often than the 90-day expiry. Revocation
+is by deactivating the delegate
 in Snapper (which invalidates the underlying `user_active_tokens`
 row); recovery is to recreate the delegate and update Cursor's
 `Authorization` header with the new token.
@@ -426,7 +430,7 @@ not on status text.
 | 429    | `rate_limit_exceeded`      | Per-principal MCP middleware quota exhausted     | Back off and retry after `Retry-After` seconds        |
 | 503    | `mcp_unavailable`          | Repository dep unavailable (lifespan not ready)  | Retry with backoff                                    |
 | 401    | `missing_bearer_token`     | No `Authorization: Bearer …` header              | Prompt user to authenticate                           |
-| 401    | `invalid_bearer_token`     | JWT signature/expiry/blacklist/inventory failure | AI delegates have no refresh token (10-year PAT); deactivate + recreate the delegate in Snapper, then update the client's bearer token. Operator (cookie) sessions can fall back to `POST /api/auth/refresh`. |
+| 401    | `invalid_bearer_token`     | JWT signature/expiry/blacklist/inventory failure | AI delegates have no refresh token (90-day PAT); deactivate + recreate the delegate in Snapper, then update the client's bearer token. Operator (cookie) sessions can fall back to `POST /api/auth/refresh`. |
 | 401    | `user_deactivated`         | Owner account deactivated                        | Prompt re-login; don't auto-refresh                   |
 | 401    | Refresh token redeemed     | Replay of a spent refresh JWT                    | Re-login                                              |
 | 401    | Account deactivated        | Session cookie flow                              | Re-login                                              |
@@ -453,8 +457,9 @@ Delegate CRUD:
 - **Operator** access tokens live **15 minutes** (configurable via
     `auth_access_token_expire_minutes`). **AI delegate** access
     tokens are PAT-style and live for `LONG_LIVED_TOKEN_EXPIRE_DAYS`
-    (~10 years); they are revoked by deactivating the delegate
-    rather than by short expiry.
+    (~3 months / 90 days); operators rotate them on the cadence that
+    fits their key-management hygiene, and revocation is immediate via
+    deactivating the delegate rather than waiting for expiry.
 - Refresh tokens live **7 days** (30 days with `remember_me=true`).
 - Refresh rotation is **atomic**: one DB transaction revokes the old
     refresh JTI AND persists the new access+refresh pair. Replay of

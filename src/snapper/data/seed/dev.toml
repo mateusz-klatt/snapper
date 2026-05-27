@@ -1,19 +1,19 @@
 [[users]]
 username = "admin"
 email = "admin@snapper.local"
-password = "AdminSnapper2026!"
+password = "change-me-after-first-login"
 role = "admin"
 
 [[users]]
 username = "operator"
 email = "operator@snapper.local"
-password = "OpSnapper2026!"
+password = "change-me-after-first-login"
 role = "operator"
 
 [[users]]
 username = "viewer"
 email = "viewer@snapper.local"
-password = "ViewSnapper2026!"
+password = "change-me-after-first-login"
 role = "viewer"
 
 [[settings]]

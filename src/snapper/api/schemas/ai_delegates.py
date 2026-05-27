@@ -144,7 +144,7 @@ class DelegateCreatedPayload(StrictBody):
         delegate: The newly-minted :class:`DelegateRead` projection.
         access_token: Freshly-minted long-lived JWT — operator copies
             into the MCP client config.
-        expires_in: Access-token lifetime in seconds (~10 years).
+        expires_in: Access-token lifetime in seconds (~3 months).
     """
 
     delegate: DelegateRead

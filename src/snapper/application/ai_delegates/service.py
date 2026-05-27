@@ -7,7 +7,7 @@ inserts the :class:`~snapper.data.models.User` row (with
 ``role=AI_DELEGATE`` and ``created_by_user_public_id`` pointing
 at the creating operator) and the per-delegate
 class:`~snapper.data.models.UserTradingCaps` row. The minted
-access JWT is long-lived (~10 years) and lives only in the
+access JWT is long-lived (~3 months) and lives only in the
 client; Snapper does not store it.
 """
 

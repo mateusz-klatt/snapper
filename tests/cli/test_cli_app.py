@@ -3162,7 +3162,7 @@ def test_reset_password_updates_user_password(
         )
     assert result.exit_code == 0
     assert "Password reset for user 'testuser'" in result.stdout
-    assert "New password: newpass123" in result.stdout
+    assert "newpass123" not in result.stdout
     mock_user_service.reset_password_by_username.assert_called_once_with("testuser", "newpass123")
 
 
@@ -3332,7 +3332,8 @@ def test_rotate_encryption_success(
         )
     assert result.exit_code == 0
     assert "Successfully rotated 1 encrypted settings" in result.stdout
-    assert "Update your environment variables" in result.stdout
+    assert "Update MASTER_PASSWORD in your .env" in result.stdout
+    assert "intentionally NOT printed" in result.stdout
     mock_session.commit.assert_called_once()
 
 

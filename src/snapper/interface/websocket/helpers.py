@@ -99,7 +99,6 @@ def build_allowed_origins(settings: AppSettings, server_port: int = 8000) -> set
         f"http://localhost:{server_port}",
         "http://localhost:8000",
         "http://localhost:3000",
-        "https://snapper.ch",
     }
     try:
         configured_origin = settings.ui_origin

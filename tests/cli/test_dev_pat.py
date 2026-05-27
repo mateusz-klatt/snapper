@@ -157,7 +157,7 @@ def isolate_seed_profile_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
                 SeedUser(
                     username="admin",
                     email="admin@example.com",
-                    password="AdminSnapper2026!",
+                    password="change-me-after-first-login",
                     role="admin",
                 ),
             ],
@@ -276,7 +276,7 @@ class TestDevMintPatHappyPath:
         assert login_body["type"] == "login_request"
         assert login_body["payload"] == {
             "username": "admin",
-            "password": "AdminSnapper2026!",
+            "password": "change-me-after-first-login",
             "remember_me": False,
         }
         for required_field in ("sequence_id", "public_id", "timestamp", "session_id"):
@@ -755,7 +755,7 @@ class TestDevMintPatDirectCall:
         dev_mint_pat(
             base_url="http://localhost:8000",
             admin_username="admin",
-            admin_password="AdminSnapper2026!",
+            admin_password="change-me-after-first-login",
             output=output_file,
             label="Direct Invocation",
         )

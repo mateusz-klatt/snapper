@@ -236,11 +236,11 @@ def test_client(mock_settings_for_tests: None) -> Generator[TestClient]:
 
 WS_PATH = "/api/ws"
 ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "AdminSnapper2026!"
+ADMIN_PASSWORD = "change-me-after-first-login"
 OPERATOR_USERNAME = "operator"
-OPERATOR_PASSWORD = "OpSnapper2026!"
+OPERATOR_PASSWORD = "change-me-after-first-login"
 VIEWER_USERNAME = "viewer"
-VIEWER_PASSWORD = "ViewSnapper2026!"
+VIEWER_PASSWORD = "change-me-after-first-login"
 
 _TEST_WS_USER_DATA: dict[str, tuple[str, UserRole, str]] = {
     ADMIN_USERNAME: (ADMIN_PASSWORD, UserRole.ADMIN, "00000000-0000-7000-8000-0000000000a1"),
@@ -4470,7 +4470,7 @@ class TestAuthRoutesCoverage:
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "payload": {"username": "admin", "password": "AdminSnapper2026!"},
+                "payload": {"username": "admin", "password": "change-me-after-first-login"},
             },
         )
         assert response.status_code == 200
@@ -4497,7 +4497,7 @@ class TestAuthRoutesCoverage:
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "payload": {"username": "operator", "password": "OpSnapper2026!"},
+                "payload": {"username": "operator", "password": "change-me-after-first-login"},
             },
         )
         assert response.status_code == 200
@@ -4520,7 +4520,7 @@ class TestAuthRoutesCoverage:
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "payload": {"username": "viewer", "password": "ViewSnapper2026!"},
+                "payload": {"username": "viewer", "password": "change-me-after-first-login"},
             },
         )
         assert response.status_code == 200
@@ -4543,7 +4543,7 @@ class TestAuthRoutesCoverage:
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "payload": {"username": "nonexistent", "password": "AdminSnapper2026!"},
+                "payload": {"username": "nonexistent", "password": "change-me-after-first-login"},
             },
         )
         assert response.status_code == 401
@@ -4631,7 +4631,7 @@ class TestAuthRoutesCoverage:
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "payload": {"username": "admin", "password": "AdminSnapper2026!"},
+                "payload": {"username": "admin", "password": "change-me-after-first-login"},
             },
         )
         assert login_response.status_code == 200
@@ -4682,7 +4682,7 @@ class TestAuthRoutesCoverage:
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "payload": {"username": "admin", "password": "AdminSnapper2026!"},
+                "payload": {"username": "admin", "password": "change-me-after-first-login"},
             },
         )
         assert login_response.status_code == 200
@@ -4728,7 +4728,7 @@ class TestAuthRoutesCoverage:
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "payload": {"username": "admin", "password": "AdminSnapper2026!"},
+                "payload": {"username": "admin", "password": "change-me-after-first-login"},
             },
         )
         csrf_token = login_response.cookies.get("csrf_token")
@@ -4780,7 +4780,7 @@ class TestAuthRoutesCoverage:
                 "sequence_id": 0,
                 "public_id": "test-pid",
                 "timestamp": "2024-01-01T00:00:00Z",
-                "payload": {"username": "admin", "password": "AdminSnapper2026!"},
+                "payload": {"username": "admin", "password": "change-me-after-first-login"},
             },
         )
         assert login_response.status_code == 200
