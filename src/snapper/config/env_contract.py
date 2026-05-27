@@ -43,6 +43,8 @@ from pathlib import Path
 from snapper.application.db_stats.snapshotter import ENV_VARS as DB_STATS_ENV_VARS
 from snapper.application.retention.policies import ENV_VARS as RETENTION_ENV_VARS
 from snapper.application.system_metrics.snapshotter import ENV_VARS as SYSTEM_METRICS_ENV_VARS
+from snapper.messaging.infrastructure.tick_probe import ENV_VARS as TICK_PROBE_ENV_VARS
+from snapper.messaging.infrastructure.trade_probe import ENV_VARS as TRADE_PROBE_ENV_VARS
 
 __all__ = [
     "BOOTSTRAP_ENV_VARS",
@@ -83,7 +85,12 @@ stay aligned with the actual loader fields.
 
 
 KNOWN_ENV_KEYS: frozenset[str] = (
-    BOOTSTRAP_ENV_VARS | DB_STATS_ENV_VARS | RETENTION_ENV_VARS | SYSTEM_METRICS_ENV_VARS
+    BOOTSTRAP_ENV_VARS
+    | DB_STATS_ENV_VARS
+    | RETENTION_ENV_VARS
+    | SYSTEM_METRICS_ENV_VARS
+    | TICK_PROBE_ENV_VARS
+    | TRADE_PROBE_ENV_VARS
 )
 """Union of every subsystem's env-var contract."""
 

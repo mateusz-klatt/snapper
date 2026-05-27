@@ -70,6 +70,14 @@ from loguru import logger
 TRADE_PROBE_ENV_VAR: Final = "SNAPPER_TRADE_PROBE"
 """Environment variable that turns the probe on."""
 
+ENV_VARS: Final[frozenset[str]] = frozenset({TRADE_PROBE_ENV_VAR})
+"""Subsystem env-var allowlist consumed by :mod:`snapper.config.env_contract`.
+
+Without this frozenset, dropping ``SNAPPER_TRADE_PROBE=1`` into ``.env``
+trips the bootstrap-time ``UnknownEnvKeyError`` because the validator only
+recognises keys it has been told about.
+"""
+
 FLUSH_INTERVAL_S: Final = 10.0
 """Seconds between successive flush log lines."""
 
