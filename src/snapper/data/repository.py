@@ -4267,6 +4267,19 @@ class SQLAlchemyRepository(Repository):
           which is enough on its own to amortise per-flush cost.
         * Postgres + any other dialect — SQLAlchemy default pool.
 
+        ``pool_pre_ping=True`` is set unconditionally so checkouts issue a
+        cheap liveness check before handing a connection to the caller.
+        Without it, every connection acquired before a Postgres restart
+        (e.g. unattended-upgrades on the host) stays in the pool as a
+        dead handle and surfaces as ``Errno 111 / Connection refused``
+        cascades on every flush until the process is recreated. The pre-
+        ping cost (~one ``SELECT 1`` per checkout) is well under the
+        per-flush WAL fsync cost we already pay, so it is invisible on
+        the publisher hot path. ``pool_recycle=3600`` is the safety net
+        for stale TCP sessions and intermediate firewall idle-out — one
+        hour is well below typical conntrack timeouts but long enough
+        that the recycle is not load-bearing on a hot system.
+
         ``StaticPool`` is **not** appropriate for file-backed SQLite
         in this codebase because every test worker spawns multiple
         repositories against the same file and they must each open
@@ -4278,7 +4291,11 @@ class SQLAlchemyRepository(Repository):
         """
         self.db_url = db_url
         connect_args: dict[str, Any] = {}
-        engine_kwargs: dict[str, Any] = {"future": True}
+        engine_kwargs: dict[str, Any] = {
+            "future": True,
+            "pool_pre_ping": True,
+            "pool_recycle": 3600,
+        }
         if "sqlite" in db_url:
             connect_args = {
                 "timeout": 30,
