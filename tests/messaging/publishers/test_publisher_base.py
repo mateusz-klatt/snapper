@@ -37,8 +37,10 @@ from snapper.messaging.publishers.base import _cleanup_pending_future
 from snapper.messaging.publishers.base import _enqueue_or_drop_oldest_candle_write
 from snapper.messaging.publishers.base import _enqueue_or_drop_oldest_tick_write
 from snapper.messaging.publishers.base import _enqueue_or_drop_oldest_trade_write
+from snapper.messaging.publishers.base import _is_disconnect_error
 from snapper.messaging.publishers.base import _tick_writer_drop_counters
 from snapper.messaging.publishers.base import _trade_writer_drop_counters
+from snapper.messaging.publishers.base import _WriterSessionLostError
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import HeartbeatData
@@ -5619,3 +5621,662 @@ def test_market_data_publishers_autostart_by_default(publisher_name: str) -> Non
         "autostarts the publisher (see AppSettings.instruments wildcard "
         "default + proprietary/data/seed/*.toml market_persist_* seed)."
     )
+
+
+class TestIsDisconnectError:
+    """Cover :func:`_is_disconnect_error` decision branches.
+
+    The helper backs writer-session-lost detection: false positives
+    force pool churn on transient errors, false negatives leave a dead
+    pinned session in place. Both edges are tested.
+    """
+
+    def test_returns_true_for_dbapi_with_invalidated_flag(self) -> None:
+        """DBAPIError.connection_invalidated=True is the strongest signal.
+
+        Given: An SQLAlchemy DBAPIError whose pool already marked the
+            handle as invalidated,
+        When: _is_disconnect_error is called,
+        Then: Returns True.
+        """
+        from sqlalchemy.exc import DBAPIError
+
+        exc = DBAPIError("SELECT 1", {}, Exception("boom"))
+        exc.connection_invalidated = True
+        assert _is_disconnect_error(exc) is True
+
+    def test_returns_false_for_dbapi_without_invalidated_flag(self) -> None:
+        """A live DBAPIError (e.g. statement timeout) should NOT recycle.
+
+        Given: A DBAPIError whose pool flag is False AND whose message
+            does not contain any disconnect hint,
+        When: _is_disconnect_error is called,
+        Then: Returns False.
+        """
+        from sqlalchemy.exc import DBAPIError
+
+        exc = DBAPIError("SELECT 1", {}, Exception("query timeout"))
+        exc.connection_invalidated = False
+        assert _is_disconnect_error(exc) is False
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "[Errno 111] Connection refused",
+            "[Errno 104] Connection reset by peer",
+            "the database system is shutting down",
+            "server closed the connection unexpectedly",
+            "no connection to the server",
+            "broken pipe",
+            "CONNECTION REFUSED uppercase",
+        ],
+    )
+    def test_returns_true_for_known_disconnect_messages(self, msg: str) -> None:
+        """Substring match on common asyncpg / libpq disconnect messages.
+
+        Given: A generic Exception whose message matches a known hint,
+        When: _is_disconnect_error is called,
+        Then: Returns True.
+        """
+        assert _is_disconnect_error(Exception(msg)) is True
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "duplicate key value violates unique constraint",
+            "value too long for type",
+            "syntax error at or near",
+            "permission denied for table",
+            "",
+        ],
+    )
+    def test_returns_false_for_unrelated_errors(self, msg: str) -> None:
+        """Substring match must not over-trigger on data/schema errors.
+
+        Given: A generic Exception with a non-disconnect message,
+        When: _is_disconnect_error is called,
+        Then: Returns False.
+        """
+        assert _is_disconnect_error(Exception(msg)) is False
+
+
+class TestFlushBatchRaisesSessionLostOnDisconnect:
+    """Translate disconnect errors into :class:`_WriterSessionLostError`.
+
+    Each ``_flush_*_batch`` is the unit under test; the recovery path
+    in the writer loop relies on the exception escaping so the pinned
+    session can be disposed and re-opened.
+    """
+
+    @pytest.mark.asyncio
+    async def test_flush_trade_batch_raises_on_disconnect(self) -> None:
+        """Trade flush converts disconnect error into _WriterSessionLostError.
+
+        Given: A publisher whose upsert_trades raises a "Connection refused" error,
+        When: _flush_trade_batch is called,
+        Then: _WriterSessionLostError is raised and the cause is preserved.
+        """
+        pub: Any = DummyPublisher(symbols=["BTC-USD"])
+        pub.repository = SimpleNamespace(
+            upsert_trades=AsyncMock(side_effect=ConnectionRefusedError("Connection refused")),
+        )
+        batch = [
+            {
+                "public_id": "t1",
+                "instrument_public_id": "inst-1",
+                "trade_id": "x",
+                "price": 1.0,
+                "size": 1.0,
+                "side": "buy",
+                "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                "session_id": "",
+                "sequence_id": 0,
+            }
+        ]
+        with pytest.raises(_WriterSessionLostError):
+            await pub._flush_trade_batch(batch)
+
+    @pytest.mark.asyncio
+    async def test_flush_tick_batch_raises_on_disconnect(self) -> None:
+        """Tick flush converts disconnect error into _WriterSessionLostError.
+
+        Given: A publisher whose upsert_ticks raises a "shutting down" error,
+        When: _flush_tick_batch is called,
+        Then: _WriterSessionLostError is raised.
+        """
+        pub: Any = DummyPublisher(symbols=["BTC-USD"])
+        pub.repository = SimpleNamespace(
+            upsert_ticks=AsyncMock(side_effect=Exception("the database system is shutting down")),
+        )
+        batch = [
+            {
+                "public_id": "tk1",
+                "instrument_public_id": "inst-1",
+                "price": 1.0,
+                "size": 1.0,
+                "side": "buy",
+                "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                "session_id": "",
+                "sequence_id": 0,
+            }
+        ]
+        with pytest.raises(_WriterSessionLostError):
+            await pub._flush_tick_batch(batch)
+
+    @pytest.mark.asyncio
+    async def test_flush_candle_batch_raises_on_disconnect(self) -> None:
+        """Candle flush converts disconnect error into _WriterSessionLostError.
+
+        Given: A publisher whose upsert_candles raises a "Connection reset" error,
+        When: _flush_candle_batch is called,
+        Then: _WriterSessionLostError is raised.
+        """
+        pub: Any = DummyPublisher(symbols=["BTC-USD"])
+        pub.repository = SimpleNamespace(
+            upsert_candles=AsyncMock(side_effect=Exception("Connection reset by peer")),
+        )
+        batch = [
+            {
+                "public_id": "c1",
+                "instrument_public_id": "inst-1",
+                "open_at": datetime(2024, 1, 1, tzinfo=UTC),
+                "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                "timeframe": "1m",
+                "open": 1.0,
+                "high": 2.0,
+                "low": 0.5,
+                "close": 1.5,
+                "volume": 10.0,
+                "vwap": 1.2,
+                "trades": 5,
+                "session_id": "",
+                "sequence_id": 0,
+            }
+        ]
+        with pytest.raises(_WriterSessionLostError):
+            await pub._flush_candle_batch(batch)
+
+    @pytest.mark.asyncio
+    async def test_flush_trade_batch_does_not_raise_on_non_disconnect(self) -> None:
+        """Non-disconnect errors stay swallowed (existing behavior).
+
+        Given: A publisher whose upsert_trades raises a constraint error,
+        When: _flush_trade_batch is called,
+        Then: No exception escapes; flush_errors counter is incremented.
+        """
+        pub: Any = DummyPublisher(symbols=["BTC-USD"])
+        pub.repository = SimpleNamespace(
+            upsert_trades=AsyncMock(side_effect=RuntimeError("duplicate key")),
+        )
+        batch = [
+            {
+                "public_id": "t1",
+                "instrument_public_id": "inst-1",
+                "trade_id": "x",
+                "price": 1.0,
+                "size": 1.0,
+                "side": "buy",
+                "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                "session_id": "",
+                "sequence_id": 0,
+            }
+        ]
+        await pub._flush_trade_batch(batch)
+        assert pub._flush_errors["trade"] == 1
+
+
+class TestWriterLoopRetriesOnSessionLost:
+    """Verify each writer loop recovers from :class:`_WriterSessionLostError`.
+
+    The retry path sleeps with exponential backoff and re-enters
+    ``_open_*_writer_session`` so a fresh DB connection is acquired
+    transparently to producers.
+    """
+
+    @pytest.mark.asyncio
+    async def test_trade_writer_loop_retries_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Trade writer loop retries on _WriterSessionLostError then completes.
+
+        Given: A publisher whose ``_flush_trade_writer_batch`` raises
+            _WriterSessionLostError on the first invocation then succeeds,
+            and an ``asyncio.sleep`` patched to a no-op so the backoff
+            does not stall the test,
+        When: The writer loop is driven with one queued row then
+            ``running`` is cleared,
+        Then: The flush is called at least twice (initial failure +
+            successful retry) and the loop exits gracefully.
+        """
+        pub: Any = DummyPublisher(symbols=["BTC-USD"])
+        pub._trade_batch_max_rows = 1
+        pub._batch_max_age_s = 60.0
+        pub.running = True
+        sleep_calls: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleep_calls.append(delay)
+
+        monkeypatch.setattr("snapper.messaging.publishers.base.asyncio.sleep", fake_sleep)
+
+        flush_calls = {"n": 0}
+
+        async def flaky_flush(batch: list[dict[str, Any]]) -> None:
+            flush_calls["n"] += 1
+            if flush_calls["n"] == 1:
+                raise _WriterSessionLostError("simulated disconnect")
+            batch.clear()
+
+        pub._flush_trade_writer_batch = flaky_flush
+        writer = asyncio.create_task(pub._trade_writer_loop())
+        await pub._trade_write_queue.put(
+            {
+                "public_id": "t1",
+                "instrument_public_id": "inst-1",
+                "trade_id": "x",
+                "price": 1.0,
+                "size": 1.0,
+                "side": "buy",
+                "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                "session_id": "",
+                "sequence_id": 0,
+            }
+        )
+        await asyncio.sleep(0.05)
+        pub.running = False
+        await asyncio.wait_for(writer, timeout=2.0)
+        assert flush_calls["n"] >= 2
+        assert any(call == pytest.approx(1.0) for call in sleep_calls)
+
+    @pytest.mark.asyncio
+    async def test_tick_writer_loop_retries_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tick writer loop mirrors the trade-loop retry semantics."""
+        pub: Any = DummyPublisher(symbols=["BTC-USD"])
+        pub._tick_batch_max_rows = 1
+        pub._batch_max_age_s = 60.0
+        pub.running = True
+
+        async def fake_sleep(_delay: float) -> None:
+            return None
+
+        monkeypatch.setattr("snapper.messaging.publishers.base.asyncio.sleep", fake_sleep)
+
+        flush_calls = {"n": 0}
+
+        async def flaky_flush(batch: list[dict[str, Any]]) -> None:
+            flush_calls["n"] += 1
+            if flush_calls["n"] == 1:
+                raise _WriterSessionLostError("simulated disconnect")
+            batch.clear()
+
+        pub._flush_tick_writer_batch = flaky_flush
+        writer = asyncio.create_task(pub._tick_writer_loop())
+        await pub._tick_write_queue.put(_dummy_tick_row(0))
+        await asyncio.sleep(0.05)
+        pub.running = False
+        await asyncio.wait_for(writer, timeout=2.0)
+        assert flush_calls["n"] >= 2
+
+    @pytest.mark.asyncio
+    async def test_candle_writer_loop_retries_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Candle writer loop mirrors the trade-loop retry semantics."""
+        pub: Any = DummyPublisher(symbols=["BTC-USD"])
+        pub._candle_batch_max_rows = 1
+        pub._batch_max_age_s = 60.0
+        pub.running = True
+
+        async def fake_sleep(_delay: float) -> None:
+            return None
+
+        monkeypatch.setattr("snapper.messaging.publishers.base.asyncio.sleep", fake_sleep)
+
+        flush_calls = {"n": 0}
+
+        async def flaky_flush(batch: list[dict[str, Any]]) -> None:
+            flush_calls["n"] += 1
+            if flush_calls["n"] == 1:
+                raise _WriterSessionLostError("simulated disconnect")
+            batch.clear()
+
+        pub._flush_candle_writer_batch = flaky_flush
+        writer = asyncio.create_task(pub._candle_writer_loop())
+        await pub._candle_write_queue.put(
+            {
+                "public_id": "c1",
+                "instrument_public_id": "inst-1",
+                "open_at": datetime(2024, 1, 1, tzinfo=UTC),
+                "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                "timeframe": "1m",
+                "open": 1.0,
+                "high": 2.0,
+                "low": 0.5,
+                "close": 1.5,
+                "volume": 10.0,
+                "vwap": 1.2,
+                "trades": 5,
+                "session_id": "",
+                "sequence_id": 0,
+            }
+        )
+        await asyncio.sleep(0.05)
+        pub.running = False
+        await asyncio.wait_for(writer, timeout=2.0)
+        assert flush_calls["n"] >= 2
+
+    @pytest.mark.asyncio
+    async def test_trade_writer_loop_exits_when_shutdown_during_recovery(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Shutdown signal during recovery aborts the retry instead of looping.
+
+        Given: A publisher with one queued row, ``running=True``, and a
+            flush that clears the batch + flips ``running=False`` then
+            raises ``_WriterSessionLostError`` (so the exit-branch
+            predicate is satisfied on the next except check).
+        When: The writer loop runs.
+        Then: The recovery exit branch fires (running=False + queue
+            empty + batch empty) and the loop returns without sleeping.
+        """
+        pub: Any = DummyPublisher(symbols=["BTC-USD"])
+        pub._trade_batch_max_rows = 1
+        pub.running = True
+
+        async def fake_sleep(_delay: float) -> None:
+            return None
+
+        monkeypatch.setattr("snapper.messaging.publishers.base.asyncio.sleep", fake_sleep)
+
+        async def fail_after_consuming(batch: list[dict[str, Any]]) -> None:
+            batch.clear()
+            pub.running = False
+            raise _WriterSessionLostError("simulated mid-shutdown")
+
+        pub._flush_trade_writer_batch = fail_after_consuming
+        await pub._trade_write_queue.put(
+            {
+                "public_id": "t1",
+                "instrument_public_id": "inst-1",
+                "trade_id": "x",
+                "price": 1.0,
+                "size": 1.0,
+                "side": "buy",
+                "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                "session_id": "",
+                "sequence_id": 0,
+            }
+        )
+        await asyncio.wait_for(pub._trade_writer_loop(), timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_tick_writer_loop_exits_when_shutdown_during_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tick writer exits cleanly when shutdown lands during recovery.
+
+    Given: A publisher with one queued row, ``running=True``, and a
+        flush that clears the batch + flips ``running=False`` then
+        raises ``_WriterSessionLostError``.
+    When: The tick writer loop runs.
+    Then: The recovery exit branch (running=False + queue empty + batch
+        empty) returns without further retries.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._tick_batch_max_rows = 1
+    pub.running = True
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("snapper.messaging.publishers.base.asyncio.sleep", fake_sleep)
+
+    async def fail_after_consuming(batch: list[dict[str, Any]]) -> None:
+        batch.clear()
+        pub.running = False
+        raise _WriterSessionLostError("simulated mid-shutdown")
+
+    pub._flush_tick_writer_batch = fail_after_consuming
+    await pub._tick_write_queue.put(_dummy_tick_row(0))
+    await asyncio.wait_for(pub._tick_writer_loop(), timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_candle_writer_loop_exits_when_shutdown_during_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candle writer exits cleanly when shutdown lands during recovery.
+
+    Given: A publisher with one queued row, ``running=True``, and a
+        flush that clears the batch + flips ``running=False`` then
+        raises ``_WriterSessionLostError``.
+    When: The candle writer loop runs.
+    Then: The recovery exit branch (running=False + queue empty + batch
+        empty) returns without further retries.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub._candle_batch_max_rows = 1
+    pub.running = True
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("snapper.messaging.publishers.base.asyncio.sleep", fake_sleep)
+
+    async def fail_after_consuming(batch: list[dict[str, Any]]) -> None:
+        batch.clear()
+        pub.running = False
+        raise _WriterSessionLostError("simulated mid-shutdown")
+
+    pub._flush_candle_writer_batch = fail_after_consuming
+    await pub._candle_write_queue.put(
+        {
+            "public_id": "c1",
+            "instrument_public_id": "inst-1",
+            "open_at": datetime(2024, 1, 1, tzinfo=UTC),
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 1.0,
+            "high": 2.0,
+            "low": 0.5,
+            "close": 1.5,
+            "volume": 10.0,
+            "vwap": 1.2,
+            "trades": 5,
+            "session_id": "",
+            "sequence_id": 0,
+        }
+    )
+    await asyncio.wait_for(pub._candle_writer_loop(), timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_flush_candle_row_by_row_propagates_disconnect_error() -> None:
+    """Candle row-by-row fallback raises _WriterSessionLostError on disconnect.
+
+    Given: A publisher whose batch upsert raises IntegrityError (forcing
+        the row-by-row fallback path) and whose subsequent per-row
+        upsert raises a "Connection refused" error.
+    When: _flush_candle_batch is called.
+    Then: The row-by-row fallback detects the disconnect and re-raises
+        as _WriterSessionLostError so the writer loop can dispose the
+        dead session and re-acquire a fresh one.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    call_count = {"n": 0}
+
+    async def upsert_candles(batch: list[dict[str, Any]], session: Any = None) -> int:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise IntegrityError("INSERT", {}, Exception("dup key"))
+        raise ConnectionRefusedError("Connection refused")
+
+    pub.repository = SimpleNamespace(upsert_candles=upsert_candles)
+    batch = [_dummy_candle_row(0)]
+    with pytest.raises(_WriterSessionLostError):
+        await pub._flush_candle_batch(batch)
+
+
+@pytest.mark.asyncio
+async def test_flush_candle_row_by_row_drops_committed_rows_on_disconnect() -> None:
+    """Successfully committed fallback rows are popped from batch before raise.
+
+    Given: A publisher whose batch upsert raises IntegrityError (forcing
+        the row-by-row fallback) and whose per-row upsert succeeds on
+        row 1 then raises a "Connection refused" error on row 2.
+    When: _flush_candle_batch is called.
+    Then: ``_WriterSessionLostError`` propagates AND the batch shrinks to
+        only the un-committed row(s) so the outer writer-loop retry
+        only replays the un-committed row through the SCD2 close-old +
+        insert-new pipeline. Queue ``task_done`` accounting is the
+        writer loop's job (see
+        :meth:`MarketDataPublisherService._flush_candle_writer_batch`),
+        not this helper's — direct test calls do not touch the queue.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    call_count = {"n": 0}
+
+    async def upsert_candles(batch: list[dict[str, Any]], session: Any = None) -> int:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise IntegrityError("INSERT", {}, Exception("dup key"))
+        if call_count["n"] == 2:
+            return 1
+        raise ConnectionRefusedError("Connection refused")
+
+    pub.repository = SimpleNamespace(upsert_candles=upsert_candles)
+    row_committed = _dummy_candle_row(0)
+    row_disconnected = _dummy_candle_row(1)
+    batch = [row_committed, row_disconnected]
+    with pytest.raises(_WriterSessionLostError):
+        await pub._flush_candle_batch(batch)
+    assert batch == [row_disconnected]
+
+
+@pytest.mark.asyncio
+async def test_flush_candle_row_by_row_drops_generic_failed_row_before_disconnect() -> None:
+    """Generic-failed rows are dropped from the retry batch on disconnect.
+
+    Given: A publisher whose batch upsert raises IntegrityError (forcing
+        row-by-row), then row 0 succeeds, row 1 raises a non-disconnect
+        generic error (statement timeout on a still-live session), and
+        row 2 raises a disconnect error.
+    When: _flush_candle_batch is called.
+    Then: ``_WriterSessionLostError`` propagates AND the trimmed batch
+        contains ONLY the disconnected row. The generic-failed row was
+        logged + rolled back and is silently dropped, matching the
+        legacy pre-2026-05-28 behavior for non-disconnect failures.
+        Retaining the generic-failed row in the retry batch would risk
+        a shutdown livelock if the failure is persistent. (A retry
+        policy that distinguishes transient from permanent generic
+        failures with a shutdown-safe escape is tracked separately.)
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    call_count = {"n": 0}
+
+    async def upsert_candles(batch: list[dict[str, Any]], session: Any = None) -> int:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise IntegrityError("INSERT", {}, Exception("dup key"))
+        if call_count["n"] == 2:
+            return 1
+        if call_count["n"] == 3:
+            raise RuntimeError("statement timeout")
+        raise ConnectionRefusedError("Connection refused")
+
+    pub.repository = SimpleNamespace(upsert_candles=upsert_candles)
+    row_committed = _dummy_candle_row(0)
+    row_generic_fail = _dummy_candle_row(1)
+    row_disconnected = _dummy_candle_row(2)
+    batch = [row_committed, row_generic_fail, row_disconnected]
+    with pytest.raises(_WriterSessionLostError):
+        await pub._flush_candle_batch(batch)
+    assert batch == [row_disconnected]
+
+
+@pytest.mark.asyncio
+async def test_flush_candle_row_by_row_handles_non_contiguous_commits() -> None:
+    """Non-contiguous commits are trimmed by index, not by prefix count.
+
+    Given: A publisher whose batch upsert raises IntegrityError (forcing
+        row-by-row), then row 0 succeeds, row 1 raises a generic
+        timeout (logged + dropped), row 2 succeeds, row 3 raises a
+        disconnect.
+    When: _flush_candle_batch is called.
+    Then: ``_WriterSessionLostError`` propagates AND the trimmed batch
+        contains ONLY the disconnected row. A prefix-count trim of
+        "two committed rows" would incorrectly pop rows 0 + 1, leaving
+        the already-committed row 2 in the retry batch where it would
+        be replayed through the SCD2 close-old + insert-new pipeline.
+        The generic-failed row is silently dropped per legacy
+        non-disconnect-failure semantics.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    call_count = {"n": 0}
+
+    async def upsert_candles(batch: list[dict[str, Any]], session: Any = None) -> int:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise IntegrityError("INSERT", {}, Exception("dup key"))
+        if call_count["n"] == 2:
+            return 1
+        if call_count["n"] == 3:
+            raise RuntimeError("statement timeout")
+        if call_count["n"] == 4:
+            return 1
+        raise ConnectionRefusedError("Connection refused")
+
+    pub.repository = SimpleNamespace(upsert_candles=upsert_candles)
+    row0_commit = _dummy_candle_row(0)
+    row1_generic = _dummy_candle_row(1)
+    row2_commit = _dummy_candle_row(2)
+    row3_disconnect = _dummy_candle_row(3)
+    batch = [row0_commit, row1_generic, row2_commit, row3_disconnect]
+    with pytest.raises(_WriterSessionLostError):
+        await pub._flush_candle_batch(batch)
+    assert batch == [row3_disconnect]
+
+
+@pytest.mark.asyncio
+async def test_flush_candle_writer_batch_balances_task_done_on_disconnect() -> None:
+    """Writer wrapper acknowledges committed prefix on _WriterSessionLostError.
+
+    Given: Two queued candle rows where the row-by-row fallback
+        commits row 0 then disconnects on row 1, with both rows
+        pushed onto the queue (mirroring live writer-loop state).
+    When: _flush_candle_writer_batch is called.
+    Then: ``_WriterSessionLostError`` propagates AND the queue's
+        ``_unfinished_tasks`` drops from 2 to 1 (committed prefix
+        acknowledged) AND ``batch`` retains the un-committed row for
+        the outer retry. The retry-handed-off row will reach
+        ``task_done`` on its eventual successful flush, closing the
+        ledger and unblocking ``queue.join``.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    call_count = {"n": 0}
+
+    async def upsert_candles(batch: list[dict[str, Any]], session: Any = None) -> int:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise IntegrityError("INSERT", {}, Exception("dup key"))
+        if call_count["n"] == 2:
+            return 1
+        raise ConnectionRefusedError("Connection refused")
+
+    pub.repository = SimpleNamespace(upsert_candles=upsert_candles)
+    row_committed = _dummy_candle_row(0)
+    row_disconnected = _dummy_candle_row(1)
+    await pub._candle_write_queue.put(row_committed)
+    await pub._candle_write_queue.put(row_disconnected)
+    batch = [row_committed, row_disconnected]
+    with pytest.raises(_WriterSessionLostError):
+        await pub._flush_candle_writer_batch(batch)
+    assert batch == [row_disconnected]
+    assert pub._candle_write_queue._unfinished_tasks == 1
