@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -4638,14 +4639,15 @@ def test_feed_engine_starts_publishers_and_shuts_down(
         calls.append("get_service")
         return DummyService()
 
-    async def _no_wait() -> None:
+    async def _no_wait(launcher: Any) -> None:
         calls.append("wait")
+        return None
 
     monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
     monkeypatch.setattr(app_module, "get_settings_with_service", lambda svc: MagicMock())
     monkeypatch.setattr(app_module, "discover_processes", lambda: calls.append("discover"))
     monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
-    monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
+    monkeypatch.setattr(app_module, "_await_feed_shutdown_or_failure", _no_wait)
     result = cli_runner.invoke(app, ["feed-engine"])
     assert result.exit_code == 0
     assert calls == [
@@ -4658,6 +4660,106 @@ def test_feed_engine_starts_publishers_and_shuts_down(
         "stop",
         "shutdown",
     ]
+
+
+def test_feed_engine_exits_nonzero_on_publisher_crash(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """feed-engine exits non-zero when a supervised publisher crashes.
+
+    Given: the shutdown/failure wait resolves with a crashed publisher
+        name (rather than a clean shutdown signal),
+    When: the feed-engine command is invoked,
+    Then: the finally path still tears down, and the command exits with
+        code 1 so the orchestrator restarts the whole container.
+    """
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            return None
+
+    class DummyLauncher:
+        def __init__(self, settings: Any) -> None:
+            return None
+
+        async def sync_registry_to_database(self) -> None:
+            return None
+
+        async def start_feed_publishers(self) -> None:
+            return None
+
+        async def stop_all_processes(self) -> None:
+            return None
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        return DummyService()
+
+    async def _crash(launcher: Any) -> str:
+        return "kraken_equities_feed_publisher"
+
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(app_module, "get_settings_with_service", lambda svc: MagicMock())
+    monkeypatch.setattr(app_module, "discover_processes", lambda: None)
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "_await_feed_shutdown_or_failure", _crash)
+    result = cli_runner.invoke(app, ["feed-engine"])
+    assert result.exit_code == 1
+    assert "kraken_equities_feed_publisher" in result.output
+
+
+def test_await_feed_shutdown_or_failure_returns_crash_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The combinator returns the crashed publisher name when failure wins.
+
+    Given: the shutdown signal never fires but a supervised publisher
+        failure resolves,
+    When: _await_feed_shutdown_or_failure is awaited,
+    Then: it returns the crashed publisher's name and leaves no pending
+        task dangling.
+    """
+
+    async def _never() -> None:
+        await asyncio.Event().wait()
+
+    class DummyLauncher:
+        async def wait_for_feed_publisher_failure(self) -> str:
+            return "kraken_equities_feed_publisher"
+
+    async def _drive() -> str | None:
+        monkeypatch.setattr(app_module, "_await_shutdown_signal", _never)
+        return await app_module._await_feed_shutdown_or_failure(cast(Any, DummyLauncher()))
+
+    result = asyncio.run(_drive())
+    assert result == "kraken_equities_feed_publisher"
+
+
+def test_await_feed_shutdown_or_failure_returns_none_on_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The combinator returns None when the shutdown signal wins.
+
+    Given: the shutdown signal resolves immediately while the publisher
+        failure never fires,
+    When: _await_feed_shutdown_or_failure is awaited,
+    Then: it returns None (clean teardown) and cancels the pending
+        failure waiter.
+    """
+
+    async def _immediate() -> None:
+        return None
+
+    class DummyLauncher:
+        async def wait_for_feed_publisher_failure(self) -> str:
+            await asyncio.Event().wait()
+            return "never"
+
+    async def _drive() -> str | None:
+        monkeypatch.setattr(app_module, "_await_shutdown_signal", _immediate)
+        return await app_module._await_feed_shutdown_or_failure(cast(Any, DummyLauncher()))
+
+    result = asyncio.run(_drive())
+    assert result is None
 
 
 def test_await_shutdown_signal_returns_when_signalled(

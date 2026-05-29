@@ -543,17 +543,48 @@ async def _await_shutdown_signal() -> None:
     await stop_event.wait()
 
 
-async def _run_feed_engine() -> None:
+async def _await_feed_shutdown_or_failure(launcher: ProcessLauncherService) -> str | None:
+    """Block until a shutdown signal or an unexpected publisher crash.
+
+    Races :func:`_await_shutdown_signal` against
+    :meth:`ProcessLauncherService.wait_for_feed_publisher_failure`,
+    returning whichever resolves first and cancelling the loser (awaited
+    so no pending task is left dangling).
+
+    Returns:
+        The name of the publisher that crashed when a supervised feed
+        publisher died first; ``None`` when a SIGINT/SIGTERM shutdown
+        signal arrived first.
+    """
+    shutdown_task = asyncio.ensure_future(_await_shutdown_signal())
+    failure_task = asyncio.ensure_future(launcher.wait_for_feed_publisher_failure())
+    done, pending = await asyncio.wait(
+        {shutdown_task, failure_task}, return_when=asyncio.FIRST_COMPLETED
+    )
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    if failure_task in done:
+        return failure_task.result()
+    return None
+
+
+async def _run_feed_engine() -> str | None:
     """Run the dedicated market-data feed container until shutdown.
 
     Initialises a DB-backed settings service, discovers the process
     registry, syncs it to the database, then starts every enabled
     market-data publisher as its own OS subprocess
     (:meth:`ProcessLauncherService.start_feed_publishers`). Blocks until
-    a shutdown signal, then stops all publishers and disposes the
-    settings service. The ZMQ broker is NOT started here — the feed
-    container connects to the backend's broker via the ``ZMQ_BROKER_*``
-    endpoints.
+    either a shutdown signal or an unexpected publisher crash, then stops
+    all publishers and disposes the settings service. The ZMQ broker is
+    NOT started here — the feed container connects to the backend's broker
+    via the ``ZMQ_BROKER_*`` endpoints.
+
+    Returns:
+        The name of a publisher that crashed (the caller exits non-zero
+        so the orchestrator restarts the container), or ``None`` on a
+        clean shutdown-signal teardown.
     """
     settings = get_settings()
     settings_service = await get_settings_service(settings.db_url, settings.zmq_broker_xsub)
@@ -566,7 +597,7 @@ async def _run_feed_engine() -> None:
         typer.echo(
             "Feed engine running — publishers spawned as separate processes. Ctrl+C to stop."
         )
-        await _await_shutdown_signal()
+        return await _await_feed_shutdown_or_failure(launcher)
     finally:
         await launcher.stop_all_processes()
         await settings_service.shutdown()
@@ -582,8 +613,18 @@ def feed_engine() -> None:
     container alongside the API/trading backend; set
     ``PROCESS_AUTOSTART_PROFILE=api`` on the backend so it no longer
     starts the publishers itself.
+
+    Exits non-zero if a supervised publisher crashes so the orchestrator
+    (``restart: unless-stopped``) restarts the whole container, respawning
+    every publisher — otherwise a single venue's death would go unnoticed.
     """
-    asyncio.run(_run_feed_engine())
+    failed_publisher = asyncio.run(_run_feed_engine())
+    if failed_publisher is not None:
+        typer.echo(
+            f"Feed publisher '{failed_publisher}' crashed; exiting for container restart.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command(name="zmq-logger")

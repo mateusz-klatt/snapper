@@ -6993,3 +6993,180 @@ class TestStartFeedPublishers:
         )
         monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
         await factory.start_feed_publishers()
+
+    @pytest.mark.asyncio
+    async def test_records_core_publishers_as_supervised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only started CORE long-running publishers enter _feed_supervised.
+
+        Given: an enabled CORE publisher and an enabled TASK publisher
+            (paper, which legitimately exits in live mode),
+        When: start_feed_publishers runs,
+        Then: only the CORE publisher is supervised — the TASK publisher
+            is excluded so its clean exit never triggers a restart.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        core_publisher = _publisher_config()
+        task_publisher = ProcessConfigModel(
+            name="paper_feed_publisher",
+            enabled=True,
+            mode="thread",
+            class_path="test.Publisher",
+            method="start",
+            parameters={},
+            role=ProcessRoleEnum.TASK,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            tags=("market-data", "publisher", "paper"),
+        )
+        monkeypatch.setattr(
+            factory,
+            "get_process_configs",
+            mock.AsyncMock(return_value=[core_publisher, task_publisher]),
+        )
+        monkeypatch.setattr(factory, "start_process", mock.AsyncMock())
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        await factory.start_feed_publishers()
+        assert factory._feed_supervised == {core_publisher.name}
+
+    @pytest.mark.asyncio
+    async def test_wait_for_feed_publisher_failure_returns_recorded_name(self) -> None:
+        """wait_for_feed_publisher_failure resolves with the crashed name.
+
+        Given: the failure event is set with a recorded publisher name,
+        When: wait_for_feed_publisher_failure is awaited,
+        Then: it returns that name without blocking.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        factory._feed_failed_publisher = "kraken_equities_feed_publisher"
+        factory._feed_failure_event.set()
+        result = await asyncio.wait_for(factory.wait_for_feed_publisher_failure(), timeout=1.0)
+        assert result == "kraken_equities_feed_publisher"
+
+    @pytest.mark.asyncio
+    async def test_completion_wakes_failure_for_supervised_crash(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A supervised publisher crashing (non-zero exit) wakes the waiter.
+
+        Given: a supervised CORE publisher whose subprocess exits non-zero
+            without an expected termination,
+        When: _handle_process_completion runs,
+        Then: the failure event is set with the crashed publisher's name.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
+        factory.spawner = cast(ProcessSpawnerService, spawner_mock)
+        factory._feed_supervised.add("kraken_equities_feed_publisher")
+        factory.process_lifecycles["kraken_equities_feed_publisher"] = (
+            ProcessLifecycleEnum.LONG_RUNNING
+        )
+        factory.process_roles["kraken_equities_feed_publisher"] = ProcessRoleEnum.CORE
+        proc_info = ProcessInstanceInfo(
+            name="kraken_equities_feed_publisher",
+            pid=321,
+            started_at=datetime.now(UTC),
+            config={},
+            process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=3)),
+        )
+        factory.started_processes["kraken_equities_feed_publisher"] = proc_info
+        monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
+        await factory._handle_process_completion("kraken_equities_feed_publisher", proc_info)
+        assert factory._feed_failure_event.is_set()
+        assert factory._feed_failed_publisher == "kraken_equities_feed_publisher"
+
+    @pytest.mark.asyncio
+    async def test_completion_ignores_expected_termination_for_supervised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A supervised publisher stopped gracefully does NOT wake the waiter.
+
+        Given: a supervised CORE publisher in expected_terminations (a
+            graceful deploy/shutdown stop),
+        When: _handle_process_completion runs,
+        Then: the failure event stays clear — an expected stop must not
+            trigger a container restart.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
+        factory.spawner = cast(ProcessSpawnerService, spawner_mock)
+        factory._feed_supervised.add("kraken_equities_feed_publisher")
+        factory.process_lifecycles["kraken_equities_feed_publisher"] = (
+            ProcessLifecycleEnum.LONG_RUNNING
+        )
+        factory.process_roles["kraken_equities_feed_publisher"] = ProcessRoleEnum.CORE
+        factory.expected_terminations.add("kraken_equities_feed_publisher")
+        proc_info = ProcessInstanceInfo(
+            name="kraken_equities_feed_publisher",
+            pid=321,
+            started_at=datetime.now(UTC),
+            config={},
+            process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=0)),
+        )
+        factory.started_processes["kraken_equities_feed_publisher"] = proc_info
+        monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
+        await factory._handle_process_completion("kraken_equities_feed_publisher", proc_info)
+        assert not factory._feed_failure_event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_completion_wakes_on_unexpected_clean_exit_for_supervised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A supervised publisher exiting 0 unexpectedly DOES wake the waiter.
+
+        Given: a supervised CORE publisher whose subprocess exits 0 while
+            NOT in expected_terminations (a venue silently completing
+            mid-session — it should never stop on its own),
+        When: _handle_process_completion runs,
+        Then: the failure event is set so the container restarts; a clean
+            exit code is not enough to call this benign.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
+        factory.spawner = cast(ProcessSpawnerService, spawner_mock)
+        factory._feed_supervised.add("kraken_equities_feed_publisher")
+        factory.process_lifecycles["kraken_equities_feed_publisher"] = (
+            ProcessLifecycleEnum.LONG_RUNNING
+        )
+        factory.process_roles["kraken_equities_feed_publisher"] = ProcessRoleEnum.CORE
+        proc_info = ProcessInstanceInfo(
+            name="kraken_equities_feed_publisher",
+            pid=321,
+            started_at=datetime.now(UTC),
+            config={},
+            process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=0)),
+        )
+        factory.started_processes["kraken_equities_feed_publisher"] = proc_info
+        monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
+        await factory._handle_process_completion("kraken_equities_feed_publisher", proc_info)
+        assert factory._feed_failure_event.is_set()
+        assert factory._feed_failed_publisher == "kraken_equities_feed_publisher"
+
+    @pytest.mark.asyncio
+    async def test_completion_ignores_crash_when_not_supervised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A crash of a non-supervised process does NOT wake the feed waiter.
+
+        Given: a CORE process that crashed but is not in _feed_supervised
+            (the backend container path, where _feed_supervised is empty),
+        When: _handle_process_completion runs,
+        Then: the failure event stays clear — feed supervision must not
+            affect non-feed nodes.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
+        factory.spawner = cast(ProcessSpawnerService, spawner_mock)
+        factory.process_lifecycles["some_backend_proc"] = ProcessLifecycleEnum.LONG_RUNNING
+        factory.process_roles["some_backend_proc"] = ProcessRoleEnum.CORE
+        proc_info = ProcessInstanceInfo(
+            name="some_backend_proc",
+            pid=10,
+            started_at=datetime.now(UTC),
+            config={},
+            process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=5)),
+        )
+        factory.started_processes["some_backend_proc"] = proc_info
+        monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
+        await factory._handle_process_completion("some_backend_proc", proc_info)
+        assert not factory._feed_failure_event.is_set()

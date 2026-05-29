@@ -168,6 +168,9 @@ class ProcessLauncherService:
         self.active_run_started_at: dict[str, datetime] = {}
         self.spawner = ProcessSpawnerService()
         self.expected_terminations: set[str] = set()
+        self._feed_supervised: set[str] = set()
+        self._feed_failed_publisher: str = ""
+        self._feed_failure_event = asyncio.Event()
         self._run_recorder = ProcessRunRecorder(settings)
         self._registry_syncer = ProcessRegistrySyncer(settings)
         self._market_persist_policy: MarketPersistPolicy | None = None
@@ -886,8 +889,16 @@ class ProcessLauncherService:
         profile (the feed container always wants publishers) and ignores
         each config's registered mode (always ``PROCESS``). Native
         subprocess monitoring is started so a publisher that exits is
-        detected and restarted. CORE long-running failures escalate the
-        same way as :meth:`start_all_processes`.
+        detected. Each CORE long-running publisher that starts is recorded
+        in :attr:`_feed_supervised`; if one later terminates unexpectedly
+        (any exit not in :attr:`expected_terminations`)
+        :meth:`_handle_process_completion` wakes
+        :meth:`wait_for_feed_publisher_failure`, and the feed entrypoint
+        exits non-zero so the orchestrator restarts the whole container.
+        This is what stops a single publisher's silent death (e.g.
+        kraken_equities mid-burst) from leaving the container "healthy"
+        with that venue's ingestion dead. CORE startup failures escalate
+        the same way as :meth:`start_all_processes`.
 
         Raises:
             CoreProcessStartupError: If any market-data publisher (all
@@ -907,6 +918,11 @@ class ProcessLauncherService:
             try:
                 await self.start_process(process_config)
                 started_count += 1
+                if (
+                    config.role is ProcessRoleEnum.CORE
+                    and config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
+                ):
+                    self._feed_supervised.add(config.name)
             except Exception as e:
                 logger.error(f"Failed to start publisher '{config.name}': {e}")
                 if (
@@ -921,6 +937,29 @@ class ProcessLauncherService:
         self._start_native_process_monitoring()
         if failed_core_names:
             raise CoreProcessStartupError(failed_core_names)
+
+    async def wait_for_feed_publisher_failure(self) -> str:
+        """Block until a supervised feed publisher crashes, then name it.
+
+        Resolves when :meth:`_handle_process_completion` records that a
+        CORE long-running market-data publisher started by
+        :meth:`start_feed_publishers` terminated unexpectedly — i.e. it
+        was NOT in :attr:`expected_terminations` (so not a graceful
+        deploy/shutdown stop). This covers both a crash (non-zero exit or
+        unhandled exception) and a venue publisher silently completing
+        with exit 0 mid-session; a CORE long-running publisher should
+        never stop on its own while the feed is up, so either is fatal.
+        The paper publisher (role TASK) is never supervised, so its
+        benign live-mode exit cannot trip this. The feed container
+        entrypoint treats the returned name as fatal and exits non-zero so
+        the orchestrator restarts the whole container, respawning every
+        publisher.
+
+        Returns:
+            The name of the publisher that died unexpectedly.
+        """
+        await self._feed_failure_event.wait()
+        return self._feed_failed_publisher
 
     PER_WALLET_REGISTRY_FIXED_FIELDS: frozenset[str] = frozenset(
         {"class", "class_path", "method", "role", "lifecycle", "tags"}
@@ -1414,6 +1453,9 @@ class ProcessLauncherService:
             run_status, error_message = self._resolve_native_exit_status(
                 name, exit_code, lifecycle, expected
             )
+            if name in self._feed_supervised and not expected:
+                self._feed_failed_publisher = name
+                self._feed_failure_event.set()
             try:
                 self.spawner.cleanup(name)
             except Exception as cleanup_error:
