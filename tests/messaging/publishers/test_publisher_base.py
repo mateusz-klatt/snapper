@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 import zmq
 from loguru import logger
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -5639,8 +5640,6 @@ class TestIsDisconnectError:
         When: _is_disconnect_error is called,
         Then: Returns True.
         """
-        from sqlalchemy.exc import DBAPIError
-
         exc = DBAPIError("SELECT 1", {}, Exception("boom"))
         exc.connection_invalidated = True
         assert _is_disconnect_error(exc) is True
@@ -5653,8 +5652,6 @@ class TestIsDisconnectError:
         When: _is_disconnect_error is called,
         Then: Returns False.
         """
-        from sqlalchemy.exc import DBAPIError
-
         exc = DBAPIError("SELECT 1", {}, Exception("query timeout"))
         exc.connection_invalidated = False
         assert _is_disconnect_error(exc) is False
