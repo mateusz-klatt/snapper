@@ -19,6 +19,7 @@ import json
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -55,6 +56,7 @@ from snapper.config.settings import AppSettings
 from snapper.core.json_types import JsonObject
 from snapper.core.types import HealthStatus
 from snapper.core.types import HealthStatusEnum
+from snapper.core.types import ProcessAutostartProfileEnum
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessMode
 from snapper.core.types import ProcessModeEnum
@@ -80,6 +82,25 @@ _PROCESSES_RUNS_STREAM = "processes.events.runs"
 _STRATEGIES_LIST_STREAM = "strategies.events.list"
 _BROADCAST_FAILURE_TEMPLATE = "Failed to broadcast {}: {}"
 _CORE_HEALTH_CACHE_TTL_S: Final[float] = 5.0
+_MARKET_DATA_PUBLISHER_TAGS: Final[frozenset[str]] = frozenset({"market-data", "publisher"})
+
+
+def is_market_data_publisher(tags: Iterable[str]) -> bool:
+    """Return whether a process's tags mark it as a market-data publisher.
+
+    A market-data publisher carries BOTH the ``market-data`` and
+    ``publisher`` tags (the venue tag, e.g. ``kraken_equities``, is
+    additional). This is the predicate the ``feed``/``api`` autostart
+    profiles split on so the ingest tier can run in its own container.
+
+    Args:
+        tags: The registered tags of a process.
+
+    Returns:
+        True when the tag set is a superset of ``market-data`` +
+        ``publisher``, False otherwise.
+    """
+    return _MARKET_DATA_PUBLISHER_TAGS.issubset(set(tags))
 
 
 class CoreProcessStartupError(RuntimeError):
@@ -771,11 +792,40 @@ class ProcessLauncherService:
         if config.role is ProcessRoleEnum.STRATEGY:
             await self._emit_strategy_list_snapshot()
 
+    def autostart_includes(self, config: ProcessConfigModel) -> bool:
+        """Return whether ``config`` belongs to this node's autostart profile.
+
+        Splits the ingest tier off the FastAPI loop via
+        :attr:`AppSettings.process_autostart_profile`:
+
+        - ``ALL``: every process is included (single-container / dev).
+        - ``API``: every process EXCEPT market-data publishers (backend).
+        - ``FEED``: ONLY market-data publishers (dedicated feed container).
+
+        Identity uses :func:`is_market_data_publisher` on the config tags.
+        Comparison is by ``is`` against the enum singletons so a mocked
+        settings object (whose attribute is not an enum member) falls
+        through to the permissive ``ALL`` behaviour.
+
+        Args:
+            config: The process configuration under consideration.
+
+        Returns:
+            True when the process should autostart on this node.
+        """
+        profile = self.settings.process_autostart_profile
+        if profile is ProcessAutostartProfileEnum.FEED:
+            return is_market_data_publisher(config.tags)
+        if profile is ProcessAutostartProfileEnum.API:
+            return not is_market_data_publisher(config.tags)
+        return True
+
     async def start_all_processes(self) -> None:
         """Start all enabled processes in priority order.
 
-        Loads configurations, sorts by priority (lower first),
-        and starts each enabled process. Tracks success/failure counts.
+        Loads configurations, sorts by priority (lower first), and starts
+        each enabled process that the current autostart profile selects
+        (see :meth:`autostart_includes`). Tracks success/failure counts.
 
         Raises:
             CoreProcessStartupError: If any enabled CORE process fails to start.
@@ -792,25 +842,81 @@ class ProcessLauncherService:
         started_count = 0
         failed_count = 0
         disabled_count = 0
+        filtered_count = 0
         failed_core_names: list[str] = []
         for config in sorted_configs:
-            if config.enabled:
-                try:
-                    await self.start_process(config)
-                    started_count += 1
-                except Exception as e:
-                    logger.error(f"Failed to start process '{config.name}': {e}")
-                    failed_count += 1
-                    if (
-                        config.role is ProcessRoleEnum.CORE
-                        and config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
-                    ):
-                        failed_core_names.append(config.name)
-            else:
+            if not config.enabled:
                 disabled_count += 1
+                continue
+            if not self.autostart_includes(config):
+                filtered_count += 1
+                continue
+            try:
+                await self.start_process(config)
+                started_count += 1
+            except Exception as e:
+                logger.error(f"Failed to start process '{config.name}': {e}")
+                failed_count += 1
+                if (
+                    config.role is ProcessRoleEnum.CORE
+                    and config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
+                ):
+                    failed_core_names.append(config.name)
         logger.info(
-            f"Process startup complete: {started_count} started, "
-            f"{failed_count} failed, {disabled_count} disabled"
+            f"Process startup complete ({self.settings.process_autostart_profile} profile): "
+            f"{started_count} started, {failed_count} failed, {disabled_count} disabled, "
+            f"{filtered_count} filtered by profile"
+        )
+        self._start_native_process_monitoring()
+        if failed_core_names:
+            raise CoreProcessStartupError(failed_core_names)
+
+    async def start_feed_publishers(self) -> None:
+        """Start every enabled market-data publisher as its own OS subprocess.
+
+        The dedicated feed-container entrypoint. Loads the synced process
+        configs, keeps only enabled market-data publishers (identified by
+        :func:`is_market_data_publisher`), and starts each one with its
+        mode forced to ``PROCESS`` so it runs in a separate interpreter
+        with its own GIL and uvloop event loop — and therefore its own
+        CPU core. This is what lifts the single event-loop ceiling: the
+        publishers no longer share one loop with each other or the API.
+
+        Unlike :meth:`start_all_processes` this ignores the autostart
+        profile (the feed container always wants publishers) and ignores
+        each config's registered mode (always ``PROCESS``). Native
+        subprocess monitoring is started so a publisher that exits is
+        detected and restarted. CORE long-running failures escalate the
+        same way as :meth:`start_all_processes`.
+
+        Raises:
+            CoreProcessStartupError: If any market-data publisher (all
+                CORE, long-running) fails to spawn.
+        """
+        configs = await self.get_process_configs()
+        publishers = [
+            config for config in configs if config.enabled and is_market_data_publisher(config.tags)
+        ]
+        logger.info(
+            f"Feed container: starting {len(publishers)} market-data publishers as processes"
+        )
+        started_count = 0
+        failed_core_names: list[str] = []
+        for config in publishers:
+            process_config = replace(config, mode=ProcessModeEnum.PROCESS)
+            try:
+                await self.start_process(process_config)
+                started_count += 1
+            except Exception as e:
+                logger.error(f"Failed to start publisher '{config.name}': {e}")
+                if (
+                    config.role is ProcessRoleEnum.CORE
+                    and config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
+                ):
+                    failed_core_names.append(config.name)
+        logger.info(
+            f"Feed publisher startup complete: {started_count} started, "
+            f"{len(failed_core_names)} core failures"
         )
         self._start_native_process_monitoring()
         if failed_core_names:
@@ -1858,6 +1964,7 @@ class ProcessLauncherService:
                 continue
             if (
                 config.enabled
+                and self.autostart_includes(config)
                 and config.role is ProcessRoleEnum.CORE
                 and config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
                 and config.name not in self.started_processes

@@ -212,8 +212,29 @@ class TestZMQBrokerAdditionalCoverage:
         kwargs = ZmqBrokerProcess.get_default_parameters(settings)
         assert "xsub_endpoint" in kwargs
         assert "xpub_endpoint" in kwargs
-        assert kwargs["xsub_endpoint"] == settings.zmq_broker_xsub
-        assert kwargs["xpub_endpoint"] == settings.zmq_broker_xpub
+        assert kwargs["xsub_endpoint"] == settings.zmq_broker_bind_xsub
+        assert kwargs["xpub_endpoint"] == settings.zmq_broker_bind_xpub
+
+    @pytest.mark.timeout(15)
+    async def test_get_default_parameters_uses_bind_endpoints(self) -> None:
+        """Broker binds the dedicated bind endpoints, not the connect ones.
+
+        Given: settings whose bind endpoints differ from the connect
+            endpoints (the cross-container case),
+        When: get_default_parameters is called,
+        Then: the broker is configured to bind the bind endpoints
+            (``tcp://0.0.0.0:*``), distinct from the hostname connectors
+            target.
+        """
+        settings = SimpleNamespace(
+            zmq_broker_bind_xsub="tcp://0.0.0.0:7500",
+            zmq_broker_bind_xpub="tcp://0.0.0.0:7501",
+            zmq_broker_xsub="tcp://snapper:7500",
+            zmq_broker_xpub="tcp://snapper:7501",
+        )
+        kwargs = ZmqBrokerProcess.get_default_parameters(cast(Any, settings))
+        assert kwargs["xsub_endpoint"] == "tcp://0.0.0.0:7500"
+        assert kwargs["xpub_endpoint"] == "tcp://0.0.0.0:7501"
 
     @pytest.mark.timeout(15)
     async def test_broker_cleanup_with_none_sockets(self) -> None:

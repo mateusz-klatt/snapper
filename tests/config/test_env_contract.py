@@ -33,6 +33,7 @@ from snapper.config.env_contract import UnknownEnvKeyError
 from snapper.config.env_contract import parse_env_file
 from snapper.config.env_contract import validate_env_file
 from snapper.config.env_contract import validate_env_keys
+from snapper.data.repository import ENV_VARS as DB_ENGINE_ENV_VARS
 
 
 class TestKnownEnvKeys:
@@ -75,6 +76,12 @@ class TestKnownEnvKeys:
         """The db_stats subsystem contributes its ENV_VARS."""
         assert DB_STATS_ENV_VARS.issubset(KNOWN_ENV_KEYS)
         assert "DB_METRICS_DISABLED" in KNOWN_ENV_KEYS
+
+    def test_includes_db_engine_pool_keys(self) -> None:
+        """The repository contributes its per-process pool-clamp keys."""
+        assert DB_ENGINE_ENV_VARS.issubset(KNOWN_ENV_KEYS)
+        assert "DB_POOL_SIZE" in KNOWN_ENV_KEYS
+        assert "DB_MAX_OVERFLOW" in KNOWN_ENV_KEYS
 
 
 class TestParseEnvFile:

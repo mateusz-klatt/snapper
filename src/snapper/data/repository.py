@@ -28,6 +28,7 @@ Example:
         inserted = await repo.upsert_candles(rows)
 """
 
+import os
 import weakref
 from abc import ABC
 from abc import abstractmethod
@@ -43,6 +44,7 @@ from datetime import datetime
 from datetime import timedelta
 from inspect import isawaitable
 from typing import Any
+from typing import Final
 from typing import Protocol
 from typing import Unpack
 from typing import cast
@@ -222,7 +224,24 @@ __all__ = [
     "dispose_repositories",
     "where_active",
     "where_active_now",
+    "ENV_VARS",
 ]
+
+_DB_POOL_SIZE_ENV: Final[str] = "DB_POOL_SIZE"
+_DB_MAX_OVERFLOW_ENV: Final[str] = "DB_MAX_OVERFLOW"
+ENV_VARS: Final[frozenset[str]] = frozenset({_DB_POOL_SIZE_ENV, _DB_MAX_OVERFLOW_ENV})
+"""Per-process SQLAlchemy engine pool-clamp keys (PostgreSQL only).
+
+Read directly via ``os.getenv`` in :meth:`SQLAlchemyRepository.__init__`
+so a feed container running N publisher subprocesses can cap each
+process's pool — :func:`get_repository` caches one engine per URL per
+process, so splitting publishers across processes otherwise multiplies
+the default ``pool_size`` (5) + ``max_overflow`` (10) per process and
+can exhaust Postgres ``max_connections``. Unset (the default) preserves
+SQLAlchemy's default sizing, so the single-container backend is
+unaffected. Registered on the shared ``.env`` allowlist via
+:mod:`snapper.config.env_contract`.
+"""
 
 
 class ScopeGrantConflictError(Exception):
@@ -4305,6 +4324,12 @@ class SQLAlchemyRepository(Repository):
                 engine_kwargs["poolclass"] = StaticPool
         elif "postgresql" in db_url:
             connect_args["server_settings"] = {"timezone": "UTC"}
+            pool_size = os.getenv(_DB_POOL_SIZE_ENV)
+            if pool_size is not None:
+                engine_kwargs["pool_size"] = int(pool_size)
+            max_overflow = os.getenv(_DB_MAX_OVERFLOW_ENV)
+            if max_overflow is not None:
+                engine_kwargs["max_overflow"] = int(max_overflow)
         self.engine: AsyncEngine = create_async_engine(
             db_url, connect_args=connect_args, **engine_kwargs
         )

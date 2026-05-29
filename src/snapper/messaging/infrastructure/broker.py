@@ -140,11 +140,17 @@ class ZmqBrokerProcess(RegisterableProcess):
             settings: Application settings containing ZMQ endpoint configuration.
 
         Returns:
-            Dictionary with xsub_endpoint and xpub_endpoint from settings.
+            Dictionary with the XSUB/XPUB endpoints the broker BINDS. These
+            are the dedicated bind endpoints (``zmq_broker_bind_*``), which
+            fall back to the connect endpoints when unset — so a
+            single-container deployment binds the same address connectors
+            use, while a cross-container deployment binds a routable
+            interface (``tcp://0.0.0.0:*``) distinct from the hostname
+            connectors target.
         """
         return {
-            "xsub_endpoint": settings.zmq_broker_xsub,
-            "xpub_endpoint": settings.zmq_broker_xpub,
+            "xsub_endpoint": settings.zmq_broker_bind_xsub,
+            "xpub_endpoint": settings.zmq_broker_bind_xpub,
         }
 
     def __init__(

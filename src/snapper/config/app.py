@@ -41,6 +41,7 @@ from typing import Any
 from snapper.application.services.settings import SettingsService
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import ProcessAutostartProfileEnum
 
 __all__ = ["AppSettings"]
 
@@ -122,6 +123,20 @@ class AppSettings:
         return self._bootstrap.server_api_only
 
     @property
+    def process_autostart_profile(self) -> ProcessAutostartProfileEnum:
+        """Return the container autostart profile from bootstrap settings.
+
+        Selects which registered processes this node autostarts so the
+        market-data ingest tier can run in its own container off the
+        FastAPI event loop. ``ALL`` starts everything, ``API`` skips
+        market-data publishers, ``FEED`` starts only them.
+
+        Returns:
+            The configured :class:`ProcessAutostartProfileEnum` member.
+        """
+        return self._bootstrap.process_autostart_profile
+
+    @property
     def server_proxy_headers(self) -> bool:
         """Return whether uvicorn should parse proxy headers.
 
@@ -156,6 +171,34 @@ class AppSettings:
             ZMQ XPUB endpoint URL.
         """
         return self._bootstrap.zmq_broker_xpub
+
+    @property
+    def zmq_broker_bind_xsub(self) -> str:
+        """Return the interface the broker binds its XSUB socket to.
+
+        Falls back to :attr:`zmq_broker_xsub` (the connectors' endpoint)
+        when the dedicated bind endpoint is unset, preserving
+        single-container behaviour where bind and connect coincide. A
+        cross-container deployment sets ``ZMQ_BROKER_BIND_XSUB`` to a
+        routable interface (e.g. ``tcp://0.0.0.0:7500``) because ZMQ
+        bind rejects the hostname connectors use.
+
+        Returns:
+            The XSUB bind endpoint, or the connect endpoint if unset.
+        """
+        return self._bootstrap.zmq_broker_bind_xsub or self._bootstrap.zmq_broker_xsub
+
+    @property
+    def zmq_broker_bind_xpub(self) -> str:
+        """Return the interface the broker binds its XPUB socket to.
+
+        Falls back to :attr:`zmq_broker_xpub` when unset. See
+        :attr:`zmq_broker_bind_xsub`.
+
+        Returns:
+            The XPUB bind endpoint, or the connect endpoint if unset.
+        """
+        return self._bootstrap.zmq_broker_bind_xpub or self._bootstrap.zmq_broker_xpub
 
     @property
     def coordinator_instance_id(self) -> int:

@@ -6,6 +6,7 @@ import pytest
 
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.core.types import ProcessAutostartProfileEnum
 
 
 class _DummyService:
@@ -754,3 +755,66 @@ class TestCoordinatorPartitioningProperties:
         settings = AppSettings(bootstrap, settings_service=None)
         with pytest.raises(ValueError, match="must be >= 1 or 'unbounded'"):
             _ = settings.coordinator_outbox_max_scan_rows
+
+
+class TestProcessAutostartProfileProperty:
+    """``process_autostart_profile`` delegates straight to bootstrap.
+
+    Does not consult the :class:`SettingsService` — verified by
+    constructing ``AppSettings`` with ``settings_service=None``.
+    """
+
+    def test_default_is_all(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Default bootstrap value surfaces as ``ALL``."""
+        monkeypatch.delenv("PROCESS_AUTOSTART_PROFILE", raising=False)
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.process_autostart_profile is ProcessAutostartProfileEnum.ALL
+
+    def test_delegates_api_profile(self) -> None:
+        """``api`` env value passes through unchanged."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            PROCESS_AUTOSTART_PROFILE="api",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.process_autostart_profile is ProcessAutostartProfileEnum.API
+
+    def test_delegates_feed_profile(self) -> None:
+        """``feed`` env value passes through unchanged."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            PROCESS_AUTOSTART_PROFILE="feed",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.process_autostart_profile is ProcessAutostartProfileEnum.FEED
+
+
+class TestZmqBrokerBindProperties:
+    """Broker bind endpoints fall back to connect endpoints when unset."""
+
+    def test_bind_falls_back_to_connect_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Empty bind endpoints surface the connect endpoints."""
+        monkeypatch.delenv("ZMQ_BROKER_BIND_XSUB", raising=False)
+        monkeypatch.delenv("ZMQ_BROKER_BIND_XPUB", raising=False)
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            ZMQ_BROKER_XSUB="tcp://127.0.0.1:7500",
+            ZMQ_BROKER_XPUB="tcp://127.0.0.1:7501",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.zmq_broker_bind_xsub == "tcp://127.0.0.1:7500"
+        assert settings.zmq_broker_bind_xpub == "tcp://127.0.0.1:7501"
+
+    def test_bind_overrides_take_precedence(self) -> None:
+        """When set, the bind endpoints are returned verbatim."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            ZMQ_BROKER_XSUB="tcp://snapper:7500",
+            ZMQ_BROKER_XPUB="tcp://snapper:7501",
+            ZMQ_BROKER_BIND_XSUB="tcp://0.0.0.0:7500",
+            ZMQ_BROKER_BIND_XPUB="tcp://0.0.0.0:7501",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.zmq_broker_bind_xsub == "tcp://0.0.0.0:7500"
+        assert settings.zmq_broker_bind_xpub == "tcp://0.0.0.0:7501"

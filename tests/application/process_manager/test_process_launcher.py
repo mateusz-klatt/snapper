@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from snapper.application.process_manager.launcher import CoreProcessStartupError
 from snapper.application.process_manager.launcher import ProcessLauncherService
+from snapper.application.process_manager.launcher import is_market_data_publisher
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import ProcessRegistryEntry
@@ -35,6 +36,7 @@ from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
 from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRunStatusEnum
 from snapper.data.models import ProcessRun
@@ -6761,3 +6763,233 @@ class TestLoadTemplateSetting:
         )
         result = await factory._load_template_setting("executor_kraken")
         assert result == {}
+
+
+def _settings_with_profile(profile: str) -> AppSettings:
+    """Build AppSettings whose bootstrap carries the given autostart profile."""
+    bootstrap = BootstrapSettingsLoader(PROCESS_AUTOSTART_PROFILE=profile)
+    return AppSettings(bootstrap, _DummySettingsService())
+
+
+def _publisher_config(name: str = "kraken_equities_feed_publisher") -> ProcessConfigModel:
+    """A market-data publisher config (CORE, long-running, dual-tagged)."""
+    return ProcessConfigModel(
+        name=name,
+        enabled=True,
+        mode="thread",
+        class_path="test.Publisher",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        tags=("market-data", "publisher", "kraken_equities"),
+    )
+
+
+def _non_publisher_config(name: str = "zmq_broker") -> ProcessConfigModel:
+    """A non-publisher CORE config (broker-style tags)."""
+    return ProcessConfigModel(
+        name=name,
+        enabled=True,
+        mode="thread",
+        class_path="test.Broker",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        tags=("zmq", "broker", "infrastructure"),
+    )
+
+
+class TestIsMarketDataPublisher:
+    """The tag predicate that the autostart profiles split on."""
+
+    def test_true_when_both_tags_present(self) -> None:
+        """Both ``market-data`` and ``publisher`` tags → True."""
+        assert is_market_data_publisher(("market-data", "publisher")) is True
+
+    def test_true_with_extra_venue_tag(self) -> None:
+        """A superset (with venue tag) still qualifies."""
+        assert is_market_data_publisher(("market-data", "publisher", "walutomat")) is True
+
+    def test_false_when_only_market_data(self) -> None:
+        """The ``market-data`` tag alone is insufficient."""
+        assert is_market_data_publisher(("market-data",)) is False
+
+    def test_false_when_only_publisher(self) -> None:
+        """The ``publisher`` tag alone is insufficient."""
+        assert is_market_data_publisher(("publisher",)) is False
+
+    def test_false_when_empty(self) -> None:
+        """An untagged process is never a market-data publisher."""
+        assert is_market_data_publisher(()) is False
+
+
+class TestAutostartIncludes:
+    """Profile-driven inclusion predicate on the launcher."""
+
+    def test_all_profile_includes_everything(self) -> None:
+        """``ALL`` selects both publishers and non-publishers."""
+        factory = ProcessLauncherService(_settings_with_profile("all"))
+        assert factory.autostart_includes(_publisher_config()) is True
+        assert factory.autostart_includes(_non_publisher_config()) is True
+
+    def test_api_profile_excludes_publishers(self) -> None:
+        """``API`` excludes market-data publishers, keeps the rest."""
+        factory = ProcessLauncherService(_settings_with_profile("api"))
+        assert factory.autostart_includes(_publisher_config()) is False
+        assert factory.autostart_includes(_non_publisher_config()) is True
+
+    def test_feed_profile_includes_only_publishers(self) -> None:
+        """``FEED`` selects only market-data publishers."""
+        factory = ProcessLauncherService(_settings_with_profile("feed"))
+        assert factory.autostart_includes(_publisher_config()) is True
+        assert factory.autostart_includes(_non_publisher_config()) is False
+
+    def test_mocked_settings_falls_through_to_all(self) -> None:
+        """A non-enum profile attribute (mocked settings) defaults to ALL."""
+        factory = ProcessLauncherService(MagicMock())
+        assert factory.autostart_includes(_publisher_config()) is True
+        assert factory.autostart_includes(_non_publisher_config()) is True
+
+
+class TestStartAllProcessesProfileFilter:
+    """``start_all_processes`` honours the autostart profile."""
+
+    @pytest.mark.asyncio
+    async def test_api_profile_skips_publishers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Under ``API`` only the non-publisher is started."""
+        factory = ProcessLauncherService(_settings_with_profile("api"))
+        publisher = _publisher_config()
+        broker = _non_publisher_config()
+        monkeypatch.setattr(
+            factory, "get_process_configs", mock.AsyncMock(return_value=[publisher, broker])
+        )
+        start_mock = mock.AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        await factory.start_all_processes()
+        start_mock.assert_awaited_once_with(broker)
+
+    @pytest.mark.asyncio
+    async def test_feed_profile_skips_non_publishers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Under ``FEED`` only the publisher is started."""
+        factory = ProcessLauncherService(_settings_with_profile("feed"))
+        publisher = _publisher_config()
+        broker = _non_publisher_config()
+        monkeypatch.setattr(
+            factory, "get_process_configs", mock.AsyncMock(return_value=[publisher, broker])
+        )
+        start_mock = mock.AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        await factory.start_all_processes()
+        start_mock.assert_awaited_once_with(publisher)
+
+
+@pytest.mark.asyncio()
+async def test_get_core_health_profile_filtered_publisher_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A publisher deliberately not started under ``API`` is not an error.
+
+    Given: ``API`` profile with an enabled CORE long-running publisher
+        that is filtered out of autostart and absent from
+        ``started_processes``,
+    When: get_core_health is called,
+    Then: Returns "healthy" — the publisher belongs to the feed
+        container, so the backend not running it is intentional.
+    """
+    factory = ProcessLauncherService(_settings_with_profile("api"))
+    publisher = _publisher_config()
+    monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[publisher]))
+    assert await factory.get_core_health() == "healthy"
+
+
+class TestStartFeedPublishers:
+    """The dedicated feed-container entrypoint on the launcher."""
+
+    @pytest.mark.asyncio
+    async def test_starts_only_publishers_forced_to_process_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only enabled market-data publishers start, each forced PROCESS.
+
+        Given: a config list with a (THREAD-registered) publisher, a
+            non-publisher broker, and a disabled publisher,
+        When: start_feed_publishers runs,
+        Then: only the enabled publisher is started, with mode coerced
+            to PROCESS regardless of its registered THREAD mode.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        publisher = _publisher_config()
+        broker = _non_publisher_config()
+        disabled = ProcessConfigModel(
+            name="walutomat_feed_publisher",
+            enabled=False,
+            mode="thread",
+            class_path="test.Publisher",
+            method="start",
+            parameters={},
+            role=ProcessRoleEnum.CORE,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            tags=("market-data", "publisher", "walutomat"),
+        )
+        started: list[ProcessConfigModel] = []
+
+        async def _capture(config: ProcessConfigModel) -> None:
+            started.append(config)
+
+        monkeypatch.setattr(
+            factory,
+            "get_process_configs",
+            mock.AsyncMock(return_value=[publisher, broker, disabled]),
+        )
+        monkeypatch.setattr(factory, "start_process", _capture)
+        monitor = mock.MagicMock()
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", monitor)
+        await factory.start_feed_publishers()
+        assert [c.name for c in started] == [publisher.name]
+        assert started[0].mode == ProcessModeEnum.PROCESS
+        monitor.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_core_publisher_failure_escalates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A failing CORE long-running publisher raises CoreProcessStartupError."""
+        factory = ProcessLauncherService(MagicMock())
+        publisher = _publisher_config()
+        monkeypatch.setattr(
+            factory, "get_process_configs", mock.AsyncMock(return_value=[publisher])
+        )
+        monkeypatch.setattr(
+            factory, "start_process", mock.AsyncMock(side_effect=RuntimeError("boom"))
+        )
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        with pytest.raises(CoreProcessStartupError):
+            await factory.start_feed_publishers()
+
+    @pytest.mark.asyncio
+    async def test_non_core_publisher_failure_does_not_escalate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing non-CORE publisher is logged but does not raise."""
+        factory = ProcessLauncherService(MagicMock())
+        task_publisher = ProcessConfigModel(
+            name="paper_feed_publisher",
+            enabled=True,
+            mode="thread",
+            class_path="test.Publisher",
+            method="start",
+            parameters={},
+            role=ProcessRoleEnum.TASK,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            tags=("market-data", "publisher", "paper"),
+        )
+        monkeypatch.setattr(
+            factory, "get_process_configs", mock.AsyncMock(return_value=[task_publisher])
+        )
+        monkeypatch.setattr(
+            factory, "start_process", mock.AsyncMock(side_effect=RuntimeError("boom"))
+        )
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+        await factory.start_feed_publishers()

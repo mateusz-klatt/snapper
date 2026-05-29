@@ -78,6 +78,8 @@ from snapper.application.notify.apns_config import load_apns_config
 from snapper.application.notify.push_beta import PUSH_BETA_SETTING_KEY
 from snapper.application.notify.push_beta import parse_push_beta_config
 from snapper.application.notify.sidecar import NotifySidecar
+from snapper.application.process_manager.launcher import ProcessLauncherService
+from snapper.application.process_manager.registry import discover_processes
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.services.settings import get_settings_service
 from snapper.application.updaters.historical.aggregates import PolygonAggregatesBackfillService
@@ -104,6 +106,7 @@ from snapper.cli.dev_pat import dev_mint_pat
 from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
+from snapper.config.settings import get_settings_with_service
 from snapper.core.types import ExchangeEnum
 from snapper.data.archive_symbols import safe_path
 from snapper.data.archiver import EVENT_TABLES
@@ -523,6 +526,64 @@ def feed(
             await publisher.stop()
 
     asyncio.run(run_feed())
+
+
+async def _await_shutdown_signal() -> None:
+    """Block until SIGINT/SIGTERM, then return so callers can shut down.
+
+    Registers asyncio signal handlers (instead of letting the default
+    handler raise / terminate) so a containerised feed engine receiving
+    ``docker stop`` (SIGTERM) unwinds its ``finally`` block and tears
+    down its child publisher subprocesses cleanly.
+    """
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop_event.set)
+    await stop_event.wait()
+
+
+async def _run_feed_engine() -> None:
+    """Run the dedicated market-data feed container until shutdown.
+
+    Initialises a DB-backed settings service, discovers the process
+    registry, syncs it to the database, then starts every enabled
+    market-data publisher as its own OS subprocess
+    (:meth:`ProcessLauncherService.start_feed_publishers`). Blocks until
+    a shutdown signal, then stops all publishers and disposes the
+    settings service. The ZMQ broker is NOT started here — the feed
+    container connects to the backend's broker via the ``ZMQ_BROKER_*``
+    endpoints.
+    """
+    settings = get_settings()
+    settings_service = await get_settings_service(settings.db_url, settings.zmq_broker_xsub)
+    app_settings = get_settings_with_service(settings_service)
+    discover_processes()
+    launcher = ProcessLauncherService(app_settings)
+    try:
+        await launcher.sync_registry_to_database()
+        await launcher.start_feed_publishers()
+        typer.echo(
+            "Feed engine running — publishers spawned as separate processes. Ctrl+C to stop."
+        )
+        await _await_shutdown_signal()
+    finally:
+        await launcher.stop_all_processes()
+        await settings_service.shutdown()
+
+
+@app.command(name="feed-engine")
+def feed_engine() -> None:
+    """Run the dedicated feed container: all market-data publishers as processes.
+
+    Each market-data publisher is launched as its own OS subprocess
+    (``mode=PROCESS``) so it gets a dedicated CPU core and event loop,
+    off the FastAPI backend's loop. Intended to run as a separate
+    container alongside the API/trading backend; set
+    ``PROCESS_AUTOSTART_PROFILE=api`` on the backend so it no longer
+    starts the publishers itself.
+    """
+    asyncio.run(_run_feed_engine())
 
 
 @app.command(name="zmq-logger")

@@ -131,6 +131,31 @@ class ProcessModeEnum(StrEnum):
     PROCESS = "process"
 
 
+class ProcessAutostartProfileEnum(StrEnum):
+    """Container autostart profile selecting which processes a node starts.
+
+    Splits the market-data ingest tier from the API/trading tier so each
+    runs in its own container without sharing one asyncio event loop:
+
+    - ``ALL``: start every enabled process (single-container / dev default).
+    - ``API``: start everything EXCEPT market-data publishers — the
+      backend container keeps the broker, executors, strategies, and API
+      while the publishers move out so the FastAPI loop stops sharing CPU
+      with them under NYSE burst.
+    - ``FEED``: start ONLY market-data publishers — the dedicated feed
+      container. Used by the publishers-only feed CLI entrypoint, which
+      runs each publisher as its own OS process; the FastAPI server is
+      never launched with this profile.
+
+    A market-data publisher is any registered process whose tags carry
+    both ``"market-data"`` and ``"publisher"``.
+    """
+
+    ALL = "all"
+    API = "api"
+    FEED = "feed"
+
+
 class ProcessLifecycleEnum(StrEnum):
     """Process lifecycle type.
 

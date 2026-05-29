@@ -38,6 +38,7 @@ from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
 
 from snapper.config.env_contract import validate_env_file
+from snapper.core.types import ProcessAutostartProfileEnum
 
 __all__ = ["BootstrapSettingsLoader"]
 
@@ -67,11 +68,30 @@ class BootstrapSettingsLoader(BaseSettings):
             caps_violation external WS fanout to exactly one worker per
             review row. See ``docs/architecture.md`` Deployment Modes
             for the full per-bus-topic dedup contract.
+        process_autostart_profile: Selects which registered processes a
+            node autostarts. ``all`` (default) starts everything; ``api``
+            starts everything EXCEPT market-data publishers (backend
+            container); ``feed`` starts ONLY market-data publishers
+            (dedicated feed container). Splits the ingest tier off the
+            FastAPI event loop so publishers no longer share CPU with the
+            API under NYSE burst. Orthogonal to ``server_api_only`` (which
+            skips ALL autostart). See
+            :class:`snapper.core.types.ProcessAutostartProfileEnum`.
         server_proxy_headers: Enable parsing proxy headers in uvicorn.
         server_forwarded_allow_ips: Trusted proxy source IP list for
             forwarded headers.
         zmq_broker_xsub: ZMQ XSUB endpoint (publishers connect here).
         zmq_broker_xpub: ZMQ XPUB endpoint (subscribers connect here).
+        zmq_broker_bind_xsub: Interface the broker BINDS its XSUB socket
+            to. Empty (default) means bind the same endpoint connectors
+            use (``zmq_broker_xsub``) — correct for single-container.
+            For cross-container the broker must bind a routable
+            interface (``tcp://0.0.0.0:7500``) while connectors target
+            the broker host by service name (``tcp://snapper:7500``); ZMQ
+            bind rejects hostnames, so the two endpoints must differ.
+        zmq_broker_bind_xpub: Interface the broker BINDS its XPUB socket
+            to. Empty (default) falls back to ``zmq_broker_xpub``. See
+            ``zmq_broker_bind_xsub``.
         telemetry_recording_enabled: When True, data-plane messages
             (ping/pong, heartbeat, GET reads) are persisted to the
             telemetry table. Default is False (counters still increment).
@@ -106,10 +126,15 @@ class BootstrapSettingsLoader(BaseSettings):
     server_port: int = Field(default=8000, alias="SERVER_PORT")
     server_reload: bool = Field(default=False, alias="SERVER_RELOAD")
     server_api_only: bool = Field(default=False, alias="SERVER_API_ONLY")
+    process_autostart_profile: ProcessAutostartProfileEnum = Field(
+        default=ProcessAutostartProfileEnum.ALL, alias="PROCESS_AUTOSTART_PROFILE"
+    )
     server_proxy_headers: bool = Field(default=True, alias="SERVER_PROXY_HEADERS")
     server_forwarded_allow_ips: str = Field(default="127.0.0.1", alias="SERVER_FORWARDED_ALLOW_IPS")
     zmq_broker_xsub: str = Field(default="tcp://127.0.0.1:7500", alias="ZMQ_BROKER_XSUB")
     zmq_broker_xpub: str = Field(default="tcp://127.0.0.1:7501", alias="ZMQ_BROKER_XPUB")
+    zmq_broker_bind_xsub: str = Field(default="", alias="ZMQ_BROKER_BIND_XSUB")
+    zmq_broker_bind_xpub: str = Field(default="", alias="ZMQ_BROKER_BIND_XPUB")
     telemetry_recording_enabled: bool = Field(default=False, alias="TELEMETRY_RECORDING_ENABLED")
     coordinator_instance_id: int = Field(default=0, alias="SNAPPER_COORDINATOR_INSTANCE_ID")
     coordinator_instance_count: int = Field(default=1, alias="SNAPPER_COORDINATOR_INSTANCE_COUNT")

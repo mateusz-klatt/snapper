@@ -606,6 +606,64 @@ ZMQ-WebSocket bridge still starts, so the frontend receives live data from
 a separately-running engine. Useful when broker/strategies/executors run
 on different hosts.
 
+**Dedicated feed container (NYSE event-loop split):**
+the market-data publishers (Kraken spot/equities/futures, Walutomat,
+paper) can be moved out of the FastAPI backend into a separate container
+so the API event loop stops sharing one CPU core with five WS publishers
++ their parse/persist work. Under NYSE open burst the shared loop
+saturated one core and starved the trade writer (drops); isolating each
+publisher onto its own process/core removes the contention.
+
+`PROCESS_AUTOSTART_PROFILE` selects which registered processes a node
+autostarts (see `snapper.core.types.ProcessAutostartProfileEnum`):
+
+- `all` (default) — every enabled process (single-container / dev).
+- `api` — everything EXCEPT market-data publishers (the backend
+  container: broker, executors, strategies, API).
+- `feed` — ONLY market-data publishers (the feed container). Set by the
+  `feed-engine` CLI command, which launches each publisher as its own OS
+  subprocess (`mode=PROCESS`, uvloop) via
+  `ProcessLauncherService.start_feed_publishers`. A market-data publisher
+  is any registered process tagged both `market-data` and `publisher`.
+
+A market-data publisher is filtered out of the backend's `start_all_processes`
+under the `api` profile, and `get_core_health` honours the same filter so a
+publisher that intentionally runs in the feed container is not reported as a
+missing CORE process on the backend.
+
+The ZMQ broker stays in the backend (its tags are infrastructure, not
+publisher, so the `api` profile keeps it). Cross-container wiring uses two
+endpoint pairs because ZMQ `bind` rejects hostnames while `connect`
+resolves them:
+
+- `ZMQ_BROKER_BIND_XSUB` / `ZMQ_BROKER_BIND_XPUB` — the routable interface
+  the broker binds (`tcp://0.0.0.0:7500` / `:7501`). Empty (default) falls
+  back to the connect endpoints, so single-container behaviour is unchanged.
+- `ZMQ_BROKER_XSUB` / `ZMQ_BROKER_XPUB` — the connect endpoints every
+  process (backend's own components AND the feed container's publishers)
+  dials. Both containers set these to the backend service name
+  (`tcp://snapper:7500` / `:7501`).
+
+`DB_POOL_SIZE` / `DB_MAX_OVERFLOW` clamp each publisher subprocess's
+SQLAlchemy pool (PostgreSQL only). `get_repository` caches one engine per
+process, so splitting publishers across processes otherwise multiplies the
+default pool (5 + 10) per process toward Postgres `max_connections`. Keep
+`count(publishers) * (DB_POOL_SIZE + DB_MAX_OVERFLOW) + backend pool` under
+the server's `max_connections`.
+
+Deploy notes (see `docker-compose.yml` `snapper-feed` service):
+
+- Bring up the backend (`api`) and feed (`feed`) together. A partial
+  `docker compose up snapper` with the `api` profile but no feed container
+  stops all market-data ingest, so deploy both atomically.
+- The broker's bound endpoint is seeded into its DB process-config
+  `parameters` by registry sync on a fresh database. An existing
+  deployment whose broker config already carries `tcp://127.0.0.1:7500`
+  must have that row re-synced (or the `parameters` cleared) so the broker
+  picks up `tcp://0.0.0.0:*`; otherwise the feed container cannot reach it.
+- Verify outbound Kraken WS from the feed container routes through
+  `snapper-egress` (same `egress_pool` setting + network as the backend).
+
 **Multi-instance deployment (AI-review fanout dedup):**
 multi-worker uvicorn is a supported production topology. The
 shared ZMQ XPUB-XSUB broker delivers every internal bus event to

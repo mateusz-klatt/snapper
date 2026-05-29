@@ -4601,3 +4601,83 @@ class TestReconcileSymbolAliasesCommand:
         assert "Unknown exchange" in result.output
         assert "'bogus'" in result.output
         assert invocations == []
+
+
+def test_feed_engine_starts_publishers_and_shuts_down(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """Test feed-engine boots publishers and tears down on shutdown.
+
+    Given: mocked settings service, registry discovery, launcher, and a
+        no-op shutdown wait,
+    When: the feed-engine command is invoked,
+    Then: the launcher syncs the registry, starts publishers, and on the
+        finally path stops all processes and disposes the service — in
+        order.
+    """
+    calls: list[str] = []
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            calls.append("shutdown")
+
+    class DummyLauncher:
+        def __init__(self, settings: Any) -> None:
+            calls.append("init")
+
+        async def sync_registry_to_database(self) -> None:
+            calls.append("sync")
+
+        async def start_feed_publishers(self) -> None:
+            calls.append("start")
+
+        async def stop_all_processes(self) -> None:
+            calls.append("stop")
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        calls.append("get_service")
+        return DummyService()
+
+    async def _no_wait() -> None:
+        calls.append("wait")
+
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(app_module, "get_settings_with_service", lambda svc: MagicMock())
+    monkeypatch.setattr(app_module, "discover_processes", lambda: calls.append("discover"))
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "_await_shutdown_signal", _no_wait)
+    result = cli_runner.invoke(app, ["feed-engine"])
+    assert result.exit_code == 0
+    assert calls == [
+        "get_service",
+        "discover",
+        "init",
+        "sync",
+        "start",
+        "wait",
+        "stop",
+        "shutdown",
+    ]
+
+
+def test_await_shutdown_signal_returns_when_signalled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_await_shutdown_signal`` returns once a registered signal fires.
+
+    Given: the running loop's ``add_signal_handler`` is patched to invoke
+        its callback immediately (simulating SIGINT/SIGTERM delivery),
+    When: ``_await_shutdown_signal`` is awaited,
+    Then: it completes without blocking.
+    """
+
+    async def _drive() -> None:
+        loop = asyncio.get_running_loop()
+
+        def _immediate(sig: int, callback: Callable[[], None]) -> None:
+            callback()
+
+        monkeypatch.setattr(loop, "add_signal_handler", _immediate)
+        await app_module._await_shutdown_signal()
+
+    asyncio.run(_drive())

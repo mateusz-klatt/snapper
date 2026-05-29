@@ -6,8 +6,16 @@ services:
       target: runtime
     container_name: snapper
     env_file: .env
+    environment:
+      - PROCESS_AUTOSTART_PROFILE=api
+      - ZMQ_BROKER_XSUB=tcp://snapper:7500
+      - ZMQ_BROKER_XPUB=tcp://snapper:7501
+      - ZMQ_BROKER_BIND_XSUB=tcp://0.0.0.0:7500
+      - ZMQ_BROKER_BIND_XPUB=tcp://0.0.0.0:7501
     expose:
       - "8000"
+      - "7500"
+      - "7501"
     volumes:
       - ./data:/app/data
       - ./reports:/app/reports
@@ -16,6 +24,27 @@ services:
       - snapper-internal
     restart: unless-stopped
     depends_on:
+      snapper-egress:
+        condition: service_healthy
+  snapper-feed:
+    image: klattm/snapper:latest
+    container_name: snapper-feed
+    env_file: .env
+    environment:
+      - PROCESS_AUTOSTART_PROFILE=feed
+      - ZMQ_BROKER_XSUB=tcp://snapper:7500
+      - ZMQ_BROKER_XPUB=tcp://snapper:7501
+      - DB_POOL_SIZE=2
+      - DB_MAX_OVERFLOW=3
+    volumes:
+      - ./data:/app/data
+    command: ["feed-engine"]
+    networks:
+      - snapper-internal
+    restart: unless-stopped
+    depends_on:
+      snapper:
+        condition: service_healthy
       snapper-egress:
         condition: service_healthy
   snapper-egress:

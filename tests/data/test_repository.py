@@ -9258,3 +9258,38 @@ async def test_get_executions_for_order_filters_in_sql(tmp_path: Path) -> None:
     assert len(rows) == 3
     timestamps = [row["timestamp"] for row in rows]
     assert timestamps == sorted(timestamps)
+
+
+class TestPostgresPoolClamp:
+    """Per-process pool clamp via DB_POOL_SIZE / DB_MAX_OVERFLOW env vars.
+
+    The feed container runs each market-data publisher as its own OS
+    process; get_repository caches one engine per process, so without a
+    clamp the default pool (5 + 10 overflow) multiplies across processes
+    toward Postgres max_connections. These pin the env-gated override on
+    the PostgreSQL engine branch.
+    """
+
+    def test_pool_env_applied_to_postgres_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Set env vars clamp pool_size and max_overflow on the PG engine."""
+        monkeypatch.setenv("DB_POOL_SIZE", "2")
+        monkeypatch.setenv("DB_MAX_OVERFLOW", "3")
+        with patch("snapper.data.repository.create_async_engine") as mock_engine:
+            mock_engine.return_value = Mock()
+            SQLAlchemyRepository("postgresql+asyncpg://u:p@h/db")
+        kwargs = mock_engine.call_args.kwargs
+        assert kwargs["pool_size"] == 2
+        assert kwargs["max_overflow"] == 3
+
+    def test_pool_env_absent_leaves_sqlalchemy_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unset env leaves the engine without explicit pool kwargs."""
+        monkeypatch.delenv("DB_POOL_SIZE", raising=False)
+        monkeypatch.delenv("DB_MAX_OVERFLOW", raising=False)
+        with patch("snapper.data.repository.create_async_engine") as mock_engine:
+            mock_engine.return_value = Mock()
+            SQLAlchemyRepository("postgresql+asyncpg://u:p@h/db")
+        kwargs = mock_engine.call_args.kwargs
+        assert "pool_size" not in kwargs
+        assert "max_overflow" not in kwargs
