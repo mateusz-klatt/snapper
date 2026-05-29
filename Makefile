@@ -398,6 +398,11 @@ run-broker:
 run-feed:
 	$(PYRUN) snapper feed --symbols BTC/USD,ETH/USD --through-broker true
 
+.PHONY: stress-equities
+STRESS_ARGS ?= --sweep 1000,3000,6000 --segment 12 --writer-latency-ms 10 --symbols 50
+stress-equities:
+	PYTHONPATH=src:proprietary/src $(VENV_PY) proprietary/spikes/nyse_stress_harness.py $(STRESS_ARGS)
+
 run-executor:
 	$(PYRUN) snapper executor
 
