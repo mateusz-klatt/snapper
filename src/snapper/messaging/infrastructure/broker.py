@@ -292,10 +292,9 @@ class ZmqBrokerProcess(RegisterableProcess):
 
         The forward happens BEFORE the dict mutation so a mid-flight stop
         never publishes a false ack of a subscription that did not reach
-        XSUB. Mutation is followed by ``notify_all()`` on a
-        :class:`threading.Condition` — race-free against waiters that are
-        between the dict pre-check and the suspend point in
-        :meth:`wait_for_subscription`.
+        XSUB. Mutation and ``notify_all()`` happen while holding the same
+        :class:`threading.Condition` lock used by waiters, so iteration,
+        updates, and wakeups are serialized.
 
         Sync (not async) because this is called from the proxy thread.
         """
@@ -311,15 +310,15 @@ class ZmqBrokerProcess(RegisterableProcess):
             return False
         self.xsub_socket.send_multipart(message)
         topic = frame[1:]
-        if frame[:1] == b"\x01":
-            self._observed_subscriptions[topic] = self._observed_subscriptions.get(topic, 0) + 1
-        else:
-            count = self._observed_subscriptions.get(topic, 0)
-            if count <= 1:
-                self._observed_subscriptions.pop(topic, None)
-            else:
-                self._observed_subscriptions[topic] = count - 1
         with self._observation_changed:
+            if frame[:1] == b"\x01":
+                self._observed_subscriptions[topic] = self._observed_subscriptions.get(topic, 0) + 1
+            else:
+                count = self._observed_subscriptions.get(topic, 0)
+                if count <= 1:
+                    self._observed_subscriptions.pop(topic, None)
+                else:
+                    self._observed_subscriptions[topic] = count - 1
             self._observation_changed.notify_all()
         return True
 
