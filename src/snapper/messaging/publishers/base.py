@@ -13,6 +13,7 @@ from abc import abstractmethod
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from functools import partial
@@ -20,6 +21,7 @@ from time import monotonic
 from time import perf_counter_ns
 from typing import Any
 from typing import Final
+from typing import TypeVar
 from typing import cast
 from uuid import uuid7
 
@@ -165,6 +167,22 @@ _DATA_TYPES_FOR_RAIL: tuple[PersistDataType, ...] = ("ticks", "trades", "candles
 _WriterQueue = (
     asyncio.Queue[TickUpsertRow] | asyncio.Queue[CandleUpsertRow] | asyncio.Queue[TradeUpsertRow]
 )
+_WriterRow = TypeVar("_WriterRow", TickUpsertRow, CandleUpsertRow, TradeUpsertRow)
+_WriterFlush = Callable[[list[_WriterRow]], Awaitable[None]]
+
+
+@dataclass
+class _WriterBatchState[WriterRow]:
+    """Mutable writer batch state shared across session reconnects.
+
+    Attributes:
+        batch: Rows currently buffered by a writer loop.
+        started_at: Event-loop timestamp when the current batch was opened.
+    """
+
+    batch: list[WriterRow]
+    started_at: float | None = None
+
 
 type TickPayloadValue = float | bool | None
 """Union of every value type in the tick payload deduplication tuple."""
@@ -941,6 +959,199 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return ev_loop.time()
         return batch_start
 
+    def _writer_loop_has_work(
+        self,
+        queue: asyncio.Queue[_WriterRow],
+        state: _WriterBatchState[_WriterRow],
+    ) -> bool:
+        """Return whether a writer loop still has rows to drain.
+
+        Args:
+            queue: Writer queue owned by the concrete data type.
+            state: Mutable batch state for the current writer.
+
+        Returns:
+            True while the publisher is running, queued rows remain, or
+            the current batch still needs flushing.
+        """
+        return self.running or not queue.empty() or bool(state.batch)
+
+    def _writer_shutdown_flush_needed(
+        self,
+        queue: asyncio.Queue[_WriterRow],
+        state: _WriterBatchState[_WriterRow],
+    ) -> bool:
+        """Return whether shutdown should flush the final held batch.
+
+        Args:
+            queue: Writer queue owned by the concrete data type.
+            state: Mutable batch state for the current writer.
+
+        Returns:
+            True when the publisher is stopped, the queue is empty, and
+            only the in-flight batch remains.
+        """
+        return not self.running and queue.empty() and bool(state.batch)
+
+    def _writer_batch_age_elapsed(
+        self,
+        state: _WriterBatchState[_WriterRow],
+        ev_loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        """Return whether the current writer batch should flush by age.
+
+        Args:
+            state: Mutable batch state for the current writer.
+            ev_loop: Running event loop (for monotonic clock).
+
+        Returns:
+            True when there is no active timer or the timer has expired.
+        """
+        return (
+            state.started_at is None or self._batch_age_remaining(state.started_at, ev_loop) <= 0.0
+        )
+
+    @staticmethod
+    async def _flush_writer_state(
+        state: _WriterBatchState[_WriterRow],
+        flush_batch: _WriterFlush[_WriterRow],
+    ) -> None:
+        """Flush a writer state batch and clear its timer after success.
+
+        Args:
+            state: Mutable batch state for the current writer.
+            flush_batch: Concrete batch flush coroutine.
+        """
+        await flush_batch(state.batch)
+        state.started_at = None
+
+    async def _read_writer_row_or_flush_timeout(
+        self,
+        queue: asyncio.Queue[_WriterRow],
+        state: _WriterBatchState[_WriterRow],
+        ev_loop: asyncio.AbstractEventLoop,
+        poll_s: float,
+        timeout: float,
+        flush_batch: _WriterFlush[_WriterRow],
+    ) -> _WriterRow | None:
+        """Read one writer row or flush an aged batch after polling timeout.
+
+        Args:
+            queue: Writer queue owned by the concrete data type.
+            state: Mutable batch state for the current writer.
+            ev_loop: Running event loop (for monotonic clock).
+            poll_s: Maximum wait per queue poll during shutdown.
+            timeout: Remaining age budget for the current batch.
+            flush_batch: Concrete batch flush coroutine.
+
+        Returns:
+            The next row when one was available, otherwise None.
+        """
+        try:
+            return await asyncio.wait_for(queue.get(), timeout=min(timeout, poll_s))
+        except TimeoutError:
+            if self._writer_batch_age_elapsed(state, ev_loop):
+                await self._flush_writer_state(state, flush_batch)
+            return None
+
+    async def _append_writer_row_and_flush_if_full(
+        self,
+        row: _WriterRow,
+        state: _WriterBatchState[_WriterRow],
+        ev_loop: asyncio.AbstractEventLoop,
+        max_rows: int,
+        flush_batch: _WriterFlush[_WriterRow],
+    ) -> None:
+        """Append a writer row and flush the batch when it reaches capacity.
+
+        Args:
+            row: Row returned from the writer queue.
+            state: Mutable batch state for the current writer.
+            ev_loop: Running event loop (for monotonic clock).
+            max_rows: Concrete writer batch size limit.
+            flush_batch: Concrete batch flush coroutine.
+        """
+        state.batch.append(row)
+        state.started_at = self._track_batch_start(state.started_at, ev_loop)
+        if len(state.batch) >= max_rows:
+            await self._flush_writer_state(state, flush_batch)
+
+    async def _drain_writer_session(
+        self,
+        queue: asyncio.Queue[_WriterRow],
+        state: _WriterBatchState[_WriterRow],
+        max_rows: int,
+        poll_s: float,
+        flush_batch: _WriterFlush[_WriterRow],
+    ) -> None:
+        """Drain one writer session until shutdown or session loss.
+
+        Args:
+            queue: Writer queue owned by the concrete data type.
+            state: Mutable batch state for the current writer.
+            max_rows: Concrete writer batch size limit.
+            poll_s: Maximum wait per queue poll during shutdown.
+            flush_batch: Concrete batch flush coroutine.
+        """
+        ev_loop = asyncio.get_event_loop()
+        while self._writer_loop_has_work(queue, state):
+            if self._writer_shutdown_flush_needed(queue, state):
+                await self._flush_writer_state(state, flush_batch)
+                continue
+            timeout = self._batch_age_remaining(state.started_at, ev_loop)
+            if timeout <= 0.0:
+                await self._flush_writer_state(state, flush_batch)
+                continue
+            row = await self._read_writer_row_or_flush_timeout(
+                queue, state, ev_loop, poll_s, timeout, flush_batch
+            )
+            if row is None:
+                continue
+            await self._append_writer_row_and_flush_if_full(
+                row, state, ev_loop, max_rows, flush_batch
+            )
+
+    def _writer_recovery_finished(
+        self,
+        queue: asyncio.Queue[_WriterRow],
+        state: _WriterBatchState[_WriterRow],
+    ) -> bool:
+        """Return whether writer recovery can stop after session loss.
+
+        Args:
+            queue: Writer queue owned by the concrete data type.
+            state: Mutable batch state for the current writer.
+
+        Returns:
+            True when shutdown is complete and no rows remain.
+        """
+        return not self.running and queue.empty() and not state.batch
+
+    @staticmethod
+    async def _writer_recovery_backoff(
+        label: str,
+        backoff_s: float,
+        held_rows: int,
+        exc: _WriterSessionLostError,
+    ) -> float:
+        """Log writer session loss and sleep before reopening.
+
+        Args:
+            label: Data type label for log output.
+            backoff_s: Current exponential backoff delay.
+            held_rows: Rows still held in the writer batch.
+            exc: Session loss exception that triggered recovery.
+
+        Returns:
+            The next capped exponential backoff delay.
+        """
+        logger.warning(
+            f"{label} writer: session lost ({exc}); reopening in {backoff_s:.1f}s "
+            f"with {held_rows} rows held"
+        )
+        await asyncio.sleep(backoff_s)
+        return min(backoff_s * 2.0, _WRITER_RECONNECT_MAX_BACKOFF_S)
+
     async def _candle_loop(self, symbols: list[str], timeframe: str) -> None:
         """Subscribe to candle data, publish to ZMQ, and hand off DB rows to the writer.
 
@@ -1000,55 +1211,29 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         ``timeframe`` window per instrument), so the queue cap is
         ``_CANDLE_WRITE_QUEUE_MAX``.
         """
-        batch: list[CandleUpsertRow] = []
-        batch_start: float | None = None
+        state = _WriterBatchState[CandleUpsertRow]([])
         backoff_s = _WRITER_RECONNECT_INITIAL_BACKOFF_S
         while True:
             try:
-                ev_loop = asyncio.get_event_loop()
                 async with self._open_candle_writer_session() as writer_session:
                     self._candle_writer_session = writer_session
                     try:
-                        while self.running or not self._candle_write_queue.empty() or batch:
-                            if not self.running and self._candle_write_queue.empty() and batch:
-                                await self._flush_candle_writer_batch(batch)
-                                batch_start = None
-                                continue
-                            timeout = self._batch_age_remaining(batch_start, ev_loop)
-                            if timeout <= 0.0:
-                                await self._flush_candle_writer_batch(batch)
-                                batch_start = None
-                                continue
-                            try:
-                                row = await asyncio.wait_for(
-                                    self._candle_write_queue.get(),
-                                    timeout=min(timeout, _CANDLE_WRITER_SHUTDOWN_POLL_S),
-                                )
-                            except TimeoutError:
-                                if (
-                                    batch_start is None
-                                    or self._batch_age_remaining(batch_start, ev_loop) <= 0.0
-                                ):
-                                    await self._flush_candle_writer_batch(batch)
-                                    batch_start = None
-                                continue
-                            batch.append(row)
-                            batch_start = self._track_batch_start(batch_start, ev_loop)
-                            if len(batch) >= self._candle_batch_max_rows:
-                                await self._flush_candle_writer_batch(batch)
-                                batch_start = None
+                        await self._drain_writer_session(
+                            self._candle_write_queue,
+                            state,
+                            self._candle_batch_max_rows,
+                            _CANDLE_WRITER_SHUTDOWN_POLL_S,
+                            self._flush_candle_writer_batch,
+                        )
                     finally:
                         self._candle_writer_session = None
                 return
             except _WriterSessionLostError as exc:
-                if not self.running and self._candle_write_queue.empty() and not batch:
+                if self._writer_recovery_finished(self._candle_write_queue, state):
                     return
-                logger.warning(
-                    f"candle writer: session lost ({exc}); reopening in {backoff_s:.1f}s "
-                    f"with {len(batch)} rows held"
+                backoff_s = await self._writer_recovery_backoff(
+                    "candle", backoff_s, len(state.batch), exc
                 )
-                await asyncio.sleep(backoff_s)
-                backoff_s = min(backoff_s * 2.0, _WRITER_RECONNECT_MAX_BACKOFF_S)
 
     @contextlib.asynccontextmanager
     async def _open_candle_writer_session(self) -> AsyncIterator[AsyncSession | None]:
@@ -1224,55 +1409,29 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         ``TimeoutError`` even with items queued, so the loop flushes the
         current batch immediately and `continue`s instead.
         """
-        batch: list[TickUpsertRow] = []
-        batch_start: float | None = None
+        state = _WriterBatchState[TickUpsertRow]([])
         backoff_s = _WRITER_RECONNECT_INITIAL_BACKOFF_S
         while True:
             try:
-                ev_loop = asyncio.get_event_loop()
                 async with self._open_tick_writer_session() as writer_session:
                     self._tick_writer_session = writer_session
                     try:
-                        while self.running or not self._tick_write_queue.empty() or batch:
-                            if not self.running and self._tick_write_queue.empty() and batch:
-                                await self._flush_tick_writer_batch(batch)
-                                batch_start = None
-                                continue
-                            timeout = self._batch_age_remaining(batch_start, ev_loop)
-                            if timeout <= 0.0:
-                                await self._flush_tick_writer_batch(batch)
-                                batch_start = None
-                                continue
-                            try:
-                                row = await asyncio.wait_for(
-                                    self._tick_write_queue.get(),
-                                    timeout=min(timeout, _TICK_WRITER_SHUTDOWN_POLL_S),
-                                )
-                            except TimeoutError:
-                                if (
-                                    batch_start is None
-                                    or self._batch_age_remaining(batch_start, ev_loop) <= 0.0
-                                ):
-                                    await self._flush_tick_writer_batch(batch)
-                                    batch_start = None
-                                continue
-                            batch.append(row)
-                            batch_start = self._track_batch_start(batch_start, ev_loop)
-                            if len(batch) >= self._tick_batch_max_rows:
-                                await self._flush_tick_writer_batch(batch)
-                                batch_start = None
+                        await self._drain_writer_session(
+                            self._tick_write_queue,
+                            state,
+                            self._tick_batch_max_rows,
+                            _TICK_WRITER_SHUTDOWN_POLL_S,
+                            self._flush_tick_writer_batch,
+                        )
                     finally:
                         self._tick_writer_session = None
                 return
             except _WriterSessionLostError as exc:
-                if not self.running and self._tick_write_queue.empty() and not batch:
+                if self._writer_recovery_finished(self._tick_write_queue, state):
                     return
-                logger.warning(
-                    f"tick writer: session lost ({exc}); reopening in {backoff_s:.1f}s "
-                    f"with {len(batch)} rows held"
+                backoff_s = await self._writer_recovery_backoff(
+                    "tick", backoff_s, len(state.batch), exc
                 )
-                await asyncio.sleep(backoff_s)
-                backoff_s = min(backoff_s * 2.0, _WRITER_RECONNECT_MAX_BACKOFF_S)
 
     @contextlib.asynccontextmanager
     async def _open_tick_writer_session(self) -> AsyncIterator[AsyncSession | None]:
@@ -1467,55 +1626,29 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         trade reported by the exchange), so the queue cap is
         ``_TRADE_WRITE_QUEUE_MAX``.
         """
-        batch: list[TradeUpsertRow] = []
-        batch_start: float | None = None
+        state = _WriterBatchState[TradeUpsertRow]([])
         backoff_s = _WRITER_RECONNECT_INITIAL_BACKOFF_S
         while True:
             try:
-                ev_loop = asyncio.get_event_loop()
                 async with self._open_trade_writer_session() as writer_session:
                     self._trade_writer_session = writer_session
                     try:
-                        while self.running or not self._trade_write_queue.empty() or batch:
-                            if not self.running and self._trade_write_queue.empty() and batch:
-                                await self._flush_trade_writer_batch(batch)
-                                batch_start = None
-                                continue
-                            timeout = self._batch_age_remaining(batch_start, ev_loop)
-                            if timeout <= 0.0:
-                                await self._flush_trade_writer_batch(batch)
-                                batch_start = None
-                                continue
-                            try:
-                                row = await asyncio.wait_for(
-                                    self._trade_write_queue.get(),
-                                    timeout=min(timeout, _TRADE_WRITER_SHUTDOWN_POLL_S),
-                                )
-                            except TimeoutError:
-                                if (
-                                    batch_start is None
-                                    or self._batch_age_remaining(batch_start, ev_loop) <= 0.0
-                                ):
-                                    await self._flush_trade_writer_batch(batch)
-                                    batch_start = None
-                                continue
-                            batch.append(row)
-                            batch_start = self._track_batch_start(batch_start, ev_loop)
-                            if len(batch) >= self._trade_batch_max_rows:
-                                await self._flush_trade_writer_batch(batch)
-                                batch_start = None
+                        await self._drain_writer_session(
+                            self._trade_write_queue,
+                            state,
+                            self._trade_batch_max_rows,
+                            _TRADE_WRITER_SHUTDOWN_POLL_S,
+                            self._flush_trade_writer_batch,
+                        )
                     finally:
                         self._trade_writer_session = None
                 return
             except _WriterSessionLostError as exc:
-                if not self.running and self._trade_write_queue.empty() and not batch:
+                if self._writer_recovery_finished(self._trade_write_queue, state):
                     return
-                logger.warning(
-                    f"trade writer: session lost ({exc}); reopening in {backoff_s:.1f}s "
-                    f"with {len(batch)} rows held"
+                backoff_s = await self._writer_recovery_backoff(
+                    "trade", backoff_s, len(state.batch), exc
                 )
-                await asyncio.sleep(backoff_s)
-                backoff_s = min(backoff_s * 2.0, _WRITER_RECONNECT_MAX_BACKOFF_S)
 
     @contextlib.asynccontextmanager
     async def _open_trade_writer_session(self) -> AsyncIterator[AsyncSession | None]:
@@ -1842,6 +1975,64 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             if _is_disconnect_error(e):
                 raise _WriterSessionLostError(str(e)) from e
 
+    async def _flush_single_candle_row(self, row: CandleUpsertRow) -> bool:
+        """Flush one candle row during row-by-row fallback.
+
+        Args:
+            row: Candle row to persist.
+
+        Returns:
+            True when the row hit a generic non-disconnect failure,
+            otherwise False.
+
+        Raises:
+            _WriterSessionLostError: If the row failure indicates a lost
+                writer session.
+        """
+        assert self.repository is not None, _REPO_NOT_INIT_MSG
+        writer_session = self._candle_writer_session
+        try:
+            if writer_session is not None:
+                await self.repository.upsert_candles([row], session=writer_session)
+                await writer_session.commit()
+            else:
+                await self.repository.upsert_candles([row])
+            return False
+        except IntegrityError as exc:
+            logger.warning(
+                f"Candle upsert skipped: instrument={row.get('instrument_public_id')}, "
+                f"open_at={row.get('open_at')}, error={exc}"
+            )
+            if writer_session is not None:
+                with contextlib.suppress(Exception):
+                    await writer_session.rollback()
+            return False
+        except Exception as e:
+            self._flush_errors["candle"] += 1
+            logger.error(f"Candle row flush failed: {e}")
+            if writer_session is not None:
+                with contextlib.suppress(Exception):
+                    await writer_session.rollback()
+            if _is_disconnect_error(e):
+                raise _WriterSessionLostError(str(e)) from e
+            return True
+
+    @staticmethod
+    def _retain_unfinished_candle_rows(
+        batch: list[CandleUpsertRow],
+        snapshot: list[CandleUpsertRow],
+        committed_or_skipped: set[int],
+    ) -> None:
+        """Trim a candle batch to rows that still need retry after disconnect.
+
+        Args:
+            batch: Original mutable batch to trim in place.
+            snapshot: Stable batch snapshot used for index-based trimming.
+            committed_or_skipped: Row indexes that no longer need retry.
+        """
+        retry_idx = set(range(len(snapshot))) - committed_or_skipped
+        batch[:] = [snapshot[i] for i in sorted(retry_idx)]
+
     async def _flush_candle_batch_row_by_row(self, batch: list[CandleUpsertRow]) -> None:
         """Fallback: retry each candle individually to isolate bad rows.
 
@@ -1882,37 +2073,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         assert self.repository is not None, _REPO_NOT_INIT_MSG
         had_generic_error = False
         committed_or_skipped: set[int] = set()
-        writer_session = self._candle_writer_session
         snapshot = list(batch)
         for idx, row in enumerate(snapshot):
             try:
-                if writer_session is not None:
-                    await self.repository.upsert_candles([row], session=writer_session)
-                    await writer_session.commit()
-                else:
-                    await self.repository.upsert_candles([row])
-                committed_or_skipped.add(idx)
-            except IntegrityError as exc:
-                logger.warning(
-                    f"Candle upsert skipped: instrument={row.get('instrument_public_id')}, "
-                    f"open_at={row.get('open_at')}, error={exc}"
-                )
-                if writer_session is not None:
-                    with contextlib.suppress(Exception):
-                        await writer_session.rollback()
-                committed_or_skipped.add(idx)
-            except Exception as e:
-                had_generic_error = True
-                self._flush_errors["candle"] += 1
-                logger.error(f"Candle row flush failed: {e}")
-                if writer_session is not None:
-                    with contextlib.suppress(Exception):
-                        await writer_session.rollback()
-                if _is_disconnect_error(e):
-                    retry_idx = set(range(len(snapshot))) - committed_or_skipped
-                    batch[:] = [snapshot[i] for i in sorted(retry_idx)]
-                    raise _WriterSessionLostError(str(e)) from e
-                committed_or_skipped.add(idx)
+                had_generic_error = await self._flush_single_candle_row(row) or had_generic_error
+            except _WriterSessionLostError:
+                self._retain_unfinished_candle_rows(batch, snapshot, committed_or_skipped)
+                raise
+            committed_or_skipped.add(idx)
         if not had_generic_error:
             self._flush_errors["candle"] = 0
 

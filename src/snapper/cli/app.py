@@ -959,7 +959,6 @@ async def _commit_rotation_results(
     changes_made: int,
     total_settings: int,
     dry_run: bool,
-    new_master_password: str,
 ) -> None:
     """Commit rotation results and print summary.
 
@@ -968,7 +967,6 @@ async def _commit_rotation_results(
         changes_made: Number of settings successfully rotated.
         total_settings: Total number of encrypted settings found.
         dry_run: Whether this was a dry run.
-        new_master_password: New master password for display.
     """
     if not dry_run and changes_made > 0:
         await session.commit()
@@ -1032,7 +1030,6 @@ async def _run_encryption_rotation(
                 changes_made,
                 len(encrypted_settings),
                 dry_run,
-                new_master_password,
             )
         await engine.dispose()
     except Exception as e:
