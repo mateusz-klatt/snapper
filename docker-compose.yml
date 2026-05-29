@@ -47,6 +47,12 @@ services:
         condition: service_healthy
       snapper-egress:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import psutil,sys;sys.exit(0 if any(p.info['cmdline'] and 'snapper.server.process_runner' in p.info['cmdline'] for p in psutil.process_iter(['cmdline'])) else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
   snapper-egress:
     image: klattm/snapper:latest
     container_name: snapper-egress
