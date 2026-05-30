@@ -345,6 +345,7 @@ class Trade(TemporalMixin, Base):
     __table_args__ = (
         UniqueConstraint("instrument_public_id", "trade_id", name="uq_trade_instrument_trade_id"),
         Index("ix_trade_instrument_ts", "instrument_public_id", "timestamp"),
+        Index("ix_trades_timestamp", "timestamp"),
         Index(
             "ix_trades_public_id",
             "public_id",
@@ -358,7 +359,7 @@ class Trade(TemporalMixin, Base):
         primary_key=True,
         autoincrement=True,
     )
-    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn())
     price: Mapped[float] = mapped_column(Float)
     size: Mapped[float] = mapped_column(Float)
     side: Mapped[str] = mapped_column(String(4))
