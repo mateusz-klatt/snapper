@@ -890,8 +890,9 @@ class ProcessLauncherService:
         each config's registered mode (always ``PROCESS``). Native
         subprocess monitoring is started so a publisher that exits is
         detected. Each CORE long-running publisher that starts is recorded
-        in :attr:`_feed_supervised`; if one later terminates unexpectedly
-        (any exit not in :attr:`expected_terminations`)
+        in :attr:`_feed_supervised`; if one later crashes (non-zero exit
+        or unhandled exception — NOT a clean exit-0, which spares the
+        paper publisher's benign live-mode idle-exit)
         :meth:`_handle_process_completion` wakes
         :meth:`wait_for_feed_publisher_failure`, and the feed entrypoint
         exits non-zero so the orchestrator restarts the whole container.
@@ -942,21 +943,20 @@ class ProcessLauncherService:
         """Block until a supervised feed publisher crashes, then name it.
 
         Resolves when :meth:`_handle_process_completion` records that a
-        CORE long-running market-data publisher started by
-        :meth:`start_feed_publishers` terminated unexpectedly — i.e. it
-        was NOT in :attr:`expected_terminations` (so not a graceful
-        deploy/shutdown stop). This covers both a crash (non-zero exit or
-        unhandled exception) and a venue publisher silently completing
-        with exit 0 mid-session; a CORE long-running publisher should
-        never stop on its own while the feed is up, so either is fatal.
-        The paper publisher (role TASK) is never supervised, so its
-        benign live-mode exit cannot trip this. The feed container
-        entrypoint treats the returned name as fatal and exits non-zero so
-        the orchestrator restarts the whole container, respawning every
-        publisher.
+        supervised market-data publisher started by
+        :meth:`start_feed_publishers` exited with a FAILED status — a
+        non-zero exit code or an unhandled exception (e.g. kraken_equities
+        crashing during the NYSE-open burst). A clean exit (code 0)
+        resolves to SUCCEEDED, never FAILED, so it does NOT wake this
+        method — critically, the paper publisher is registered CORE
+        long-running (so it IS supervised) yet idle-exits 0 in live mode
+        when it has no replay window, and that benign exit must not
+        restart the container. The feed entrypoint treats the returned
+        name as fatal and exits non-zero so the orchestrator restarts the
+        whole container, respawning every publisher.
 
         Returns:
-            The name of the publisher that died unexpectedly.
+            The name of the publisher that crashed.
         """
         await self._feed_failure_event.wait()
         return self._feed_failed_publisher
@@ -1453,7 +1453,7 @@ class ProcessLauncherService:
             run_status, error_message = self._resolve_native_exit_status(
                 name, exit_code, lifecycle, expected
             )
-            if name in self._feed_supervised and not expected:
+            if name in self._feed_supervised and run_status is ProcessRunStatusEnum.FAILED:
                 self._feed_failed_publisher = name
                 self._feed_failure_event.set()
             try:

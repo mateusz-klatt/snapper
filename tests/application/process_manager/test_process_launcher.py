@@ -6998,18 +6998,32 @@ class TestStartFeedPublishers:
     async def test_records_core_publishers_as_supervised(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Only started CORE long-running publishers enter _feed_supervised.
+        """Started CORE long-running publishers enter _feed_supervised; TASK excluded.
 
-        Given: an enabled CORE publisher and an enabled TASK publisher
-            (paper, which legitimately exits in live mode),
+        Given: an enabled CORE venue publisher, the enabled CORE paper
+            publisher (paper is registered CORE long-running — it idle-exits
+            0 in live mode but is still supervised), and an enabled TASK
+            publisher,
         When: start_feed_publishers runs,
-        Then: only the CORE publisher is supervised — the TASK publisher
-            is excluded so its clean exit never triggers a restart.
+        Then: both CORE publishers are supervised and the TASK one is not.
+            Paper's benign clean exit is spared by the FAILED-status gate
+            in _handle_process_completion, NOT by exclusion from the set.
         """
         factory = ProcessLauncherService(MagicMock())
         core_publisher = _publisher_config()
-        task_publisher = ProcessConfigModel(
+        paper_publisher = ProcessConfigModel(
             name="paper_feed_publisher",
+            enabled=True,
+            mode="thread",
+            class_path="test.Publisher",
+            method="start",
+            parameters={},
+            role=ProcessRoleEnum.CORE,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            tags=("market-data", "publisher", "paper"),
+        )
+        task_publisher = ProcessConfigModel(
+            name="aux_feed_publisher",
             enabled=True,
             mode="thread",
             class_path="test.Publisher",
@@ -7017,17 +7031,17 @@ class TestStartFeedPublishers:
             parameters={},
             role=ProcessRoleEnum.TASK,
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
-            tags=("market-data", "publisher", "paper"),
+            tags=("market-data", "publisher", "aux"),
         )
         monkeypatch.setattr(
             factory,
             "get_process_configs",
-            mock.AsyncMock(return_value=[core_publisher, task_publisher]),
+            mock.AsyncMock(return_value=[core_publisher, paper_publisher, task_publisher]),
         )
         monkeypatch.setattr(factory, "start_process", mock.AsyncMock())
         monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
         await factory.start_feed_publishers()
-        assert factory._feed_supervised == {core_publisher.name}
+        assert factory._feed_supervised == {core_publisher.name, paper_publisher.name}
 
     @pytest.mark.asyncio
     async def test_wait_for_feed_publisher_failure_returns_recorded_name(self) -> None:
@@ -7109,38 +7123,41 @@ class TestStartFeedPublishers:
         assert not factory._feed_failure_event.is_set()
 
     @pytest.mark.asyncio
-    async def test_completion_wakes_on_unexpected_clean_exit_for_supervised(
+    async def test_completion_spares_paper_core_clean_idle_exit(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A supervised publisher exiting 0 unexpectedly DOES wake the waiter.
+        """REGRESSION: supervised paper (CORE) exiting 0 must NOT restart.
 
-        Given: a supervised CORE publisher whose subprocess exits 0 while
-            NOT in expected_terminations (a venue silently completing
-            mid-session — it should never stop on its own),
+        The paper publisher is registered CORE long-running, so it lands in
+        _feed_supervised, but in live mode it idle-exits 0 immediately (no
+        replay window) WITHOUT being in expected_terminations. Gating on
+        FAILED status (not on "unexpected") is what spares it — a clean
+        exit resolves to SUCCEEDED. Treating any unexpected exit as fatal
+        here crash-looped the live feed container (paper exits -> restart
+        -> paper exits ...). This guards that exact failure.
+
+        Given: supervised CORE paper_feed_publisher, exit code 0, NOT in
+            expected_terminations,
         When: _handle_process_completion runs,
-        Then: the failure event is set so the container restarts; a clean
-            exit code is not enough to call this benign.
+        Then: the failure event stays clear — no container restart.
         """
         factory = ProcessLauncherService(MagicMock())
         spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
         factory.spawner = cast(ProcessSpawnerService, spawner_mock)
-        factory._feed_supervised.add("kraken_equities_feed_publisher")
-        factory.process_lifecycles["kraken_equities_feed_publisher"] = (
-            ProcessLifecycleEnum.LONG_RUNNING
-        )
-        factory.process_roles["kraken_equities_feed_publisher"] = ProcessRoleEnum.CORE
+        factory._feed_supervised.add("paper_feed_publisher")
+        factory.process_lifecycles["paper_feed_publisher"] = ProcessLifecycleEnum.LONG_RUNNING
+        factory.process_roles["paper_feed_publisher"] = ProcessRoleEnum.CORE
         proc_info = ProcessInstanceInfo(
-            name="kraken_equities_feed_publisher",
+            name="paper_feed_publisher",
             pid=321,
             started_at=datetime.now(UTC),
             config={},
             process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=0)),
         )
-        factory.started_processes["kraken_equities_feed_publisher"] = proc_info
+        factory.started_processes["paper_feed_publisher"] = proc_info
         monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
-        await factory._handle_process_completion("kraken_equities_feed_publisher", proc_info)
-        assert factory._feed_failure_event.is_set()
-        assert factory._feed_failed_publisher == "kraken_equities_feed_publisher"
+        await factory._handle_process_completion("paper_feed_publisher", proc_info)
+        assert not factory._feed_failure_event.is_set()
 
     @pytest.mark.asyncio
     async def test_completion_ignores_crash_when_not_supervised(
