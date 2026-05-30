@@ -29,6 +29,7 @@ from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
 from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
@@ -118,6 +119,7 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
     description="Paper trading feed publisher",
     priority=30,
     role=ProcessRoleEnum.CORE,
+    restart_policy=ProcessRestartPolicyEnum.ON_FAILURE,
     tags=("market-data", "publisher", "paper"),
     parameters_model=PaperPublisherParameters,
     enabled=True,

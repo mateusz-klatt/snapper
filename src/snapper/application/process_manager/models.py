@@ -25,6 +25,7 @@ from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessLifecycleType
 from snapper.core.types import ProcessMode
+from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRoleType
 from snapper.core.types import StartProcessStatus
@@ -165,6 +166,7 @@ class ProcessConfigModel:
         note: Optional human-readable description.
         lifecycle: LONG_RUNNING or ONE_SHOT.
         role: Process role (CORE, TASK, STRATEGY, BACKTEST).
+        restart_policy: Auto-restart policy for the launcher watchdog.
         tags: Tuple of string tags for filtering.
         parameters_schema: Optional JSON schema for parameters.
     """
@@ -178,6 +180,7 @@ class ProcessConfigModel:
     note: str | None = None
     lifecycle: ProcessLifecycleEnum = ProcessLifecycleEnum.LONG_RUNNING
     role: ProcessRoleEnum = ProcessRoleEnum.CORE
+    restart_policy: ProcessRestartPolicyEnum = ProcessRestartPolicyEnum.ON_FAILURE
     tags: tuple[str, ...] = ()
     parameters_schema: JsonObject | None = None
 
@@ -251,6 +254,7 @@ class ProcessRegistryEntry:
         parameters_schema: Derived JSON Schema from parameters_model (API metadata).
         enabled: Default enabled state.
         mode: Default execution mode.
+        restart_policy: Default auto-restart policy for the launcher watchdog.
     """
 
     class_ref: type[RegisterableProcess]
@@ -265,6 +269,7 @@ class ProcessRegistryEntry:
     parameters_schema: JsonObject | None
     enabled: bool
     mode: ProcessMode
+    restart_policy: ProcessRestartPolicyEnum = ProcessRestartPolicyEnum.ON_FAILURE
 
 
 @dataclass

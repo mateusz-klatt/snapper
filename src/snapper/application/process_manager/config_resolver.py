@@ -21,6 +21,7 @@ from snapper.config.settings import AppSettings
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessMode
 from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
@@ -84,6 +85,34 @@ def resolve_role(
             process_name,
         )
         return ProcessRoleEnum.CORE
+
+
+def resolve_restart_policy(
+    raw: Any,
+    process_name: str,
+) -> ProcessRestartPolicyEnum:
+    """Resolve restart policy value from config or metadata.
+
+    Args:
+        raw: Raw restart policy value (enum, string, or None).
+        process_name: Name used in warning messages.
+
+    Returns:
+        Resolved ProcessRestartPolicyEnum value.
+    """
+    if raw is None:
+        return ProcessRestartPolicyEnum.ON_FAILURE
+    if isinstance(raw, ProcessRestartPolicyEnum):
+        return raw
+    try:
+        return ProcessRestartPolicyEnum(str(raw))
+    except ValueError:
+        logger.warning(
+            "Unknown restart policy '{}' for process '{}', defaulting to on-failure",
+            raw,
+            process_name,
+        )
+        return ProcessRestartPolicyEnum.ON_FAILURE
 
 
 def resolve_tags(raw: Any) -> tuple[str, ...]:
@@ -174,6 +203,9 @@ def build_process_config_from_dict(
     tags_raw = config_dict.get("tags")
     if tags_raw is None:
         tags_raw = entry.tags if entry else ()
+    restart_policy_raw = config_dict.get("restart_policy")
+    if restart_policy_raw is None:
+        restart_policy_raw = entry.restart_policy if entry else ProcessRestartPolicyEnum.ON_FAILURE
     return ProcessConfigModel(
         name=process_name,
         enabled=config_dict.get("enabled", False),
@@ -184,6 +216,7 @@ def build_process_config_from_dict(
         note=config_dict.get("note"),
         lifecycle=resolve_lifecycle(lifecycle_raw, process_name),
         role=resolve_role(role_raw, process_name),
+        restart_policy=resolve_restart_policy(restart_policy_raw, process_name),
         tags=resolve_tags(tags_raw),
         parameters_schema=resolve_parameters_schema(config_dict, entry),
     )

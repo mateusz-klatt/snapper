@@ -8,12 +8,24 @@ from unittest.mock import patch
 
 import pytest
 
+from snapper.application.process_manager.registry import get_registered_processes
+from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.messaging.publishers.paper import PaperMarketDataPublisher
 from snapper.messaging.publishers.paper import PerSourcePaperPublisher
 
 
 class TestPerSourcePaperPublisher:
     """Tests for PerSourcePaperPublisher — single source exchange publisher."""
+
+    def test_registered_restart_policy_is_on_failure(self) -> None:
+        """The paper publisher restarts only on failure, never on its clean idle exit.
+
+        Given: The paper feed publisher registered via @register_process,
+        When: Its registry entry is inspected,
+        Then: restart_policy is ON_FAILURE so its benign exit-0 never crash-loops.
+        """
+        entry = get_registered_processes()["paper_feed_publisher"]
+        assert entry.restart_policy == ProcessRestartPolicyEnum.ON_FAILURE
 
     @patch("snapper.config.settings.get_settings")
     def test_initialization(self, mock_get_settings: MagicMock) -> None:

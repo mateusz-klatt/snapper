@@ -41,6 +41,7 @@ from snapper.config.settings import AppSettings
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
@@ -78,6 +79,7 @@ _FORCE_WS_RESTART_BACKOFF_S: Final[float] = 5.0
     description="Kraken market data feed publisher",
     priority=20,
     role=ProcessRoleEnum.CORE,
+    restart_policy=ProcessRestartPolicyEnum.ALWAYS,
     tags=("market-data", "publisher", "kraken"),
     parameters_model=PublisherSymbolsParameters,
     enabled=True,

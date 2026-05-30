@@ -35,6 +35,7 @@ from snapper.application.process_manager.config_resolver import import_process_c
 from snapper.application.process_manager.config_resolver import resolve_lifecycle
 from snapper.application.process_manager.config_resolver import resolve_mode
 from snapper.application.process_manager.config_resolver import resolve_parameters_schema
+from snapper.application.process_manager.config_resolver import resolve_restart_policy
 from snapper.application.process_manager.config_resolver import resolve_role
 from snapper.application.process_manager.config_resolver import resolve_tags
 from snapper.application.process_manager.executor_naming import is_executor_instance
@@ -60,6 +61,7 @@ from snapper.core.types import ProcessAutostartProfileEnum
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessMode
 from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRunStatusEnum
 from snapper.core.types import StartProcessStatusEnum
@@ -962,15 +964,15 @@ class ProcessLauncherService:
         return self._feed_failed_publisher
 
     PER_WALLET_REGISTRY_FIXED_FIELDS: frozenset[str] = frozenset(
-        {"class", "class_path", "method", "role", "lifecycle", "tags"}
+        {"class", "class_path", "method", "role", "lifecycle", "tags", "restart_policy"}
     )
     """Fields whose values come exclusively from the registry decorator.
 
     Setting attempts to override these are logged and ignored when
     building per-wallet instance configs. The Setting captures
     operator-tunable runtime config; class identity / role / lifecycle
-    / tags are wired by ``@register_process`` and must not drift across
-    instances of the same exchange.
+    / tags / restart_policy are wired by ``@register_process`` and must
+    not drift across instances of the same exchange.
     """
 
     async def _load_template_setting(self, template_name: str) -> dict[str, Any]:
@@ -1124,6 +1126,7 @@ class ProcessLauncherService:
             note=note,
             lifecycle=entry.lifecycle,
             role=entry.role,
+            restart_policy=entry.restart_policy,
             tags=entry.tags,
             parameters_schema=parameters_schema,
         )
@@ -1634,6 +1637,11 @@ class ProcessLauncherService:
         role_raw = config_dict.get("role")
         if role_raw is None:
             role_raw = entry.role if entry else ProcessRoleEnum.CORE
+        restart_policy_raw = config_dict.get("restart_policy")
+        if restart_policy_raw is None:
+            restart_policy_raw = (
+                entry.restart_policy if entry else ProcessRestartPolicyEnum.ON_FAILURE
+            )
         tags_raw = entry.tags if entry else None
         if tags_raw is None:
             tags_raw = config_dict.get("tags", ())
@@ -1651,6 +1659,7 @@ class ProcessLauncherService:
             note=config_dict.get("note"),
             lifecycle=self._resolve_lifecycle(lifecycle_raw, name),
             role=self._resolve_role(role_raw, name),
+            restart_policy=resolve_restart_policy(restart_policy_raw, name),
             tags=tags_tuple,
             parameters_schema=parameters_schema,
         )

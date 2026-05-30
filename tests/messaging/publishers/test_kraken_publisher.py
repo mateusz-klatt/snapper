@@ -8,7 +8,9 @@ from unittest.mock import patch
 
 import pytest
 
+from snapper.application.process_manager.registry import get_registered_processes
 from snapper.config.app import AppSettings
+from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISHER
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_LIMIT
@@ -19,6 +21,16 @@ from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 
 class TestKrakenMarketDataPublisher:
     """Tests for KrakenMarketDataPublisher functionality."""
+
+    def test_registered_restart_policy_is_always(self) -> None:
+        """The kraken publisher restarts on any exit (live venue must never stop).
+
+        Given: The kraken feed publisher registered via @register_process,
+        When: Its registry entry is inspected,
+        Then: restart_policy is ALWAYS.
+        """
+        entry = get_registered_processes()["kraken_feed_publisher"]
+        assert entry.restart_policy == ProcessRestartPolicyEnum.ALWAYS
 
     def test_create_exchange_client_returns_kraken_client(self) -> None:
         """Verify factory method creates KrakenExchangeClient.

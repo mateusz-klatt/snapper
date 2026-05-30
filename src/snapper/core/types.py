@@ -180,6 +180,21 @@ class ProcessRoleEnum(StrEnum):
     BACKTEST = "backtest"
 
 
+class ProcessRestartPolicyEnum(StrEnum):
+    """Auto-restart policy for a managed process.
+
+    Drives the launcher watchdog: ``ALWAYS`` respawns on any exit (even a
+    clean one — for live feed publishers that must never stop on their own),
+    ``ON_FAILURE`` respawns only when the run ends in the FAILED status (the
+    safe default; a clean idle exit-0 maps to SUCCEEDED and is left alone),
+    and ``NEVER`` disables auto-restart entirely.
+    """
+
+    ALWAYS = "always"
+    ON_FAILURE = "on_failure"
+    NEVER = "never"
+
+
 class ProcessRunStatusEnum(StrEnum):
     """Current execution state of a managed process."""
 

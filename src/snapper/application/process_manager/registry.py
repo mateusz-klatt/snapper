@@ -15,6 +15,7 @@ from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessMode
 from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.utils.autoload import import_all_under
 
@@ -52,6 +53,7 @@ def register_process[T: type[RegisterableProcess]](
     parameters_model: type[Any] | None = None,
     enabled: bool = False,
     mode: ProcessMode = ProcessModeEnum.THREAD,
+    restart_policy: ProcessRestartPolicyEnum | str = ProcessRestartPolicyEnum.ON_FAILURE,
 ) -> Callable[[T], T]:
     """Decorator to register a process class in the global registry.
 
@@ -70,6 +72,7 @@ def register_process[T: type[RegisterableProcess]](
             When provided, parameters_schema is derived automatically.
         enabled: Default enabled state. Defaults to False.
         mode: Execution mode ("thread" or "process"). Defaults to "thread".
+        restart_policy: Watchdog auto-restart policy. Defaults to on_failure.
 
     Returns:
         Decorator function that registers and returns the class unchanged.
@@ -97,6 +100,11 @@ def register_process[T: type[RegisterableProcess]](
             else ProcessLifecycleEnum(str(lifecycle))
         )
         role_value = role if isinstance(role, ProcessRoleEnum) else ProcessRoleEnum(str(role))
+        restart_policy_value = (
+            restart_policy
+            if isinstance(restart_policy, ProcessRestartPolicyEnum)
+            else ProcessRestartPolicyEnum(str(restart_policy))
+        )
         tags_value: tuple[str, ...] = tuple(str(tag) for tag in tags) if tags is not None else ()
         _PROCESS_REGISTRY[name] = ProcessRegistryEntry(
             class_ref=cls,
@@ -111,6 +119,7 @@ def register_process[T: type[RegisterableProcess]](
             parameters_schema=_derive_parameters_schema(parameters_model),
             enabled=enabled,
             mode=mode,
+            restart_policy=restart_policy_value,
         )
         return cls
 

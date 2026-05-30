@@ -25,6 +25,7 @@ from snapper.config.settings import AppSettings
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
@@ -43,6 +44,7 @@ apply_kraken_futures_pool_routing()
     description="Kraken Futures market data feed publisher",
     priority=20,
     role=ProcessRoleEnum.CORE,
+    restart_policy=ProcessRestartPolicyEnum.ALWAYS,
     tags=("market-data", "publisher", "kraken_futures"),
     parameters_model=PublisherSymbolsParameters,
     enabled=True,

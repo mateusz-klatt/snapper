@@ -27,6 +27,7 @@ from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRunStatusEnum
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -2027,6 +2028,56 @@ def test_resolve_mode_accepts_valid_modes() -> None:
     """
     assert resolve_mode("thread", "test_process") == "thread"
     assert resolve_mode("process", "test_process") == "process"
+
+
+def test_build_config_for_start_by_name_honors_restart_policy(
+    launcher: ProcessLauncherService,
+) -> None:
+    """A restart_policy in the config dict is applied by the start-by-name builder.
+
+    Given: A config dict carrying restart_policy for an unregistered process,
+    When: _build_config_for_start_by_name resolves it,
+    Then: The resulting ProcessConfigModel carries the requested policy.
+    """
+    config = launcher._build_config_for_start_by_name(
+        "unregistered_proc",
+        {"class": "a.B", "restart_policy": "always"},
+        True,
+    )
+    assert config.restart_policy == ProcessRestartPolicyEnum.ALWAYS
+
+
+def test_build_config_for_start_by_name_inherits_restart_policy_from_entry(
+    launcher: ProcessLauncherService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the config omits restart_policy, the builder inherits it from the registry entry.
+
+    Given: A registered entry with restart_policy ALWAYS and a config dict without it,
+    When: _build_config_for_start_by_name resolves the config,
+    Then: The resulting ProcessConfigModel inherits ALWAYS from the entry.
+    """
+    entry = ProcessRegistryEntry(
+        class_ref=MagicMock(),
+        class_path="a.B",
+        method="start",
+        description="",
+        priority=0,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.CORE,
+        tags=(),
+        parameters_model=None,
+        parameters_schema=None,
+        enabled=False,
+        mode="thread",
+        restart_policy=ProcessRestartPolicyEnum.ALWAYS,
+    )
+    monkeypatch.setattr(
+        "snapper.application.process_manager.launcher.get_registered_processes",
+        lambda: {"regd": entry},
+    )
+    config = launcher._build_config_for_start_by_name("regd", {"class": "a.B"}, True)
+    assert config.restart_policy == ProcessRestartPolicyEnum.ALWAYS
 
 
 def test_set_market_persist_policy_round_trip(launcher: ProcessLauncherService) -> None:
