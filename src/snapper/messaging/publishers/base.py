@@ -21,7 +21,6 @@ from time import monotonic
 from time import perf_counter_ns
 from typing import Any
 from typing import Final
-from typing import TypeVar
 from typing import cast
 from uuid import uuid7
 
@@ -167,8 +166,8 @@ _DATA_TYPES_FOR_RAIL: tuple[PersistDataType, ...] = ("ticks", "trades", "candles
 _WriterQueue = (
     asyncio.Queue[TickUpsertRow] | asyncio.Queue[CandleUpsertRow] | asyncio.Queue[TradeUpsertRow]
 )
-_WriterRow = TypeVar("_WriterRow", TickUpsertRow, CandleUpsertRow, TradeUpsertRow)
-_WriterFlush = Callable[[list[_WriterRow]], Awaitable[None]]
+type _WriterRow = TickUpsertRow | CandleUpsertRow | TradeUpsertRow
+type _WriterFlush[WriterRow: _WriterRow] = Callable[[list[WriterRow]], Awaitable[None]]
 
 
 @dataclass
@@ -959,10 +958,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return ev_loop.time()
         return batch_start
 
-    def _writer_loop_has_work(
+    def _writer_loop_has_work[WriterRow: _WriterRow](
         self,
-        queue: asyncio.Queue[_WriterRow],
-        state: _WriterBatchState[_WriterRow],
+        queue: asyncio.Queue[WriterRow],
+        state: _WriterBatchState[WriterRow],
     ) -> bool:
         """Return whether a writer loop still has rows to drain.
 
@@ -976,10 +975,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         return self.running or not queue.empty() or bool(state.batch)
 
-    def _writer_shutdown_flush_needed(
+    def _writer_shutdown_flush_needed[WriterRow: _WriterRow](
         self,
-        queue: asyncio.Queue[_WriterRow],
-        state: _WriterBatchState[_WriterRow],
+        queue: asyncio.Queue[WriterRow],
+        state: _WriterBatchState[WriterRow],
     ) -> bool:
         """Return whether shutdown should flush the final held batch.
 
@@ -993,9 +992,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         return not self.running and queue.empty() and bool(state.batch)
 
-    def _writer_batch_age_elapsed(
+    def _writer_batch_age_elapsed[WriterRow: _WriterRow](
         self,
-        state: _WriterBatchState[_WriterRow],
+        state: _WriterBatchState[WriterRow],
         ev_loop: asyncio.AbstractEventLoop,
     ) -> bool:
         """Return whether the current writer batch should flush by age.
@@ -1012,9 +1011,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         )
 
     @staticmethod
-    async def _flush_writer_state(
-        state: _WriterBatchState[_WriterRow],
-        flush_batch: _WriterFlush[_WriterRow],
+    async def _flush_writer_state[WriterRow: _WriterRow](
+        state: _WriterBatchState[WriterRow],
+        flush_batch: _WriterFlush[WriterRow],
     ) -> None:
         """Flush a writer state batch and clear its timer after success.
 
@@ -1025,15 +1024,15 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         await flush_batch(state.batch)
         state.started_at = None
 
-    async def _read_writer_row_or_flush_timeout(
+    async def _read_writer_row_or_flush_timeout[WriterRow: _WriterRow](
         self,
-        queue: asyncio.Queue[_WriterRow],
-        state: _WriterBatchState[_WriterRow],
+        queue: asyncio.Queue[WriterRow],
+        state: _WriterBatchState[WriterRow],
         ev_loop: asyncio.AbstractEventLoop,
         poll_s: float,
-        timeout: float,
-        flush_batch: _WriterFlush[_WriterRow],
-    ) -> _WriterRow | None:
+        batch_age_budget_s: float,
+        flush_batch: _WriterFlush[WriterRow],
+    ) -> WriterRow | None:
         """Read one writer row or flush an aged batch after polling timeout.
 
         Args:
@@ -1041,26 +1040,27 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             state: Mutable batch state for the current writer.
             ev_loop: Running event loop (for monotonic clock).
             poll_s: Maximum wait per queue poll during shutdown.
-            timeout: Remaining age budget for the current batch.
+            batch_age_budget_s: Remaining age budget for the current batch.
             flush_batch: Concrete batch flush coroutine.
 
         Returns:
             The next row when one was available, otherwise None.
         """
         try:
-            return await asyncio.wait_for(queue.get(), timeout=min(timeout, poll_s))
+            async with asyncio.timeout(min(batch_age_budget_s, poll_s)):
+                return await queue.get()
         except TimeoutError:
             if self._writer_batch_age_elapsed(state, ev_loop):
                 await self._flush_writer_state(state, flush_batch)
             return None
 
-    async def _append_writer_row_and_flush_if_full(
+    async def _append_writer_row_and_flush_if_full[WriterRow: _WriterRow](
         self,
-        row: _WriterRow,
-        state: _WriterBatchState[_WriterRow],
+        row: WriterRow,
+        state: _WriterBatchState[WriterRow],
         ev_loop: asyncio.AbstractEventLoop,
         max_rows: int,
-        flush_batch: _WriterFlush[_WriterRow],
+        flush_batch: _WriterFlush[WriterRow],
     ) -> None:
         """Append a writer row and flush the batch when it reaches capacity.
 
@@ -1076,13 +1076,13 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if len(state.batch) >= max_rows:
             await self._flush_writer_state(state, flush_batch)
 
-    async def _drain_writer_session(
+    async def _drain_writer_session[WriterRow: _WriterRow](
         self,
-        queue: asyncio.Queue[_WriterRow],
-        state: _WriterBatchState[_WriterRow],
+        queue: asyncio.Queue[WriterRow],
+        state: _WriterBatchState[WriterRow],
         max_rows: int,
         poll_s: float,
-        flush_batch: _WriterFlush[_WriterRow],
+        flush_batch: _WriterFlush[WriterRow],
     ) -> None:
         """Drain one writer session until shutdown or session loss.
 
@@ -1098,12 +1098,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             if self._writer_shutdown_flush_needed(queue, state):
                 await self._flush_writer_state(state, flush_batch)
                 continue
-            timeout = self._batch_age_remaining(state.started_at, ev_loop)
-            if timeout <= 0.0:
+            batch_age_budget_s = self._batch_age_remaining(state.started_at, ev_loop)
+            if batch_age_budget_s <= 0.0:
                 await self._flush_writer_state(state, flush_batch)
                 continue
             row = await self._read_writer_row_or_flush_timeout(
-                queue, state, ev_loop, poll_s, timeout, flush_batch
+                queue, state, ev_loop, poll_s, batch_age_budget_s, flush_batch
             )
             if row is None:
                 continue
@@ -1111,10 +1111,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 row, state, ev_loop, max_rows, flush_batch
             )
 
-    def _writer_recovery_finished(
+    def _writer_recovery_finished[WriterRow: _WriterRow](
         self,
-        queue: asyncio.Queue[_WriterRow],
-        state: _WriterBatchState[_WriterRow],
+        queue: asyncio.Queue[WriterRow],
+        state: _WriterBatchState[WriterRow],
     ) -> bool:
         """Return whether writer recovery can stop after session loss.
 

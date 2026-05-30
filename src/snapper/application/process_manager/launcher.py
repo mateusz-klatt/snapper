@@ -917,7 +917,7 @@ class ProcessLauncherService:
         started_count = 0
         failed_core_names: list[str] = []
         for config in publishers:
-            process_config = replace(config, mode=ProcessModeEnum.PROCESS)
+            process_config: ProcessConfigModel = replace(config, mode=ProcessModeEnum.PROCESS)
             try:
                 await self.start_process(process_config)
                 started_count += 1
