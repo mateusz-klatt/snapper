@@ -225,6 +225,27 @@ def test_run_event_loop_uses_uvloop_when_supported(monkeypatch: pytest.MonkeyPat
     assert calls == ["uvloop", "run"]
 
 
+def test_run_event_loop_uses_asyncio_when_uvloop_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows subprocesses use the asyncio event-loop runner.
+
+    Given the subprocess runner is on a platform without uvloop support,
+    When an awaitable is executed through the event-loop helper,
+    Then asyncio drives the awaitable without importing uvloop.
+    """
+
+    async def _target() -> str:
+        return "ok"
+
+    def _import_module(name: str) -> object:
+        raise AssertionError(f"Unexpected import of {name}")
+
+    monkeypatch.setattr(process_runner, "_use_asyncio_runner", lambda: True)
+    monkeypatch.setattr(process_runner.importlib, "import_module", _import_module)
+    assert process_runner._run_event_loop(_target()) == "ok"
+
+
 def test_main_async_path_uses_listener_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the integration: ``main()`` async path delegates to the listener wrapper.
 
