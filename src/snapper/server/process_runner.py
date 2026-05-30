@@ -58,6 +58,7 @@ from snapper.application.ai_review.service import _BUS_AI_REVIEW_DECISION_TOPIC
 from snapper.application.ai_review.service import get_ai_review_service
 from snapper.config.settings import get_settings
 from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_patches_status
+from snapper.utils.logging import resolve_subprocess_logfile
 from snapper.utils.logging import set_log_context
 from snapper.utils.logging import setup_logging
 
@@ -166,10 +167,16 @@ def main() -> int:
     instantiates it with provided parameters, and invokes
     the target method (sync or async).
 
+    Logging is routed to the container's dedicated file resolved by
+    :func:`snapper.utils.logging.resolve_subprocess_logfile` (inherited
+    from the parent via ``SNAPPER_LOG_FILE``) so a feed-container
+    publisher logs to ``data/snapper-feed.log`` rather than the API
+    container's ``data/snapper.log``.
+
     Returns:
         Exit code: 0 for success, 1 for configuration error or process failure.
     """
-    setup_logging(level="INFO", json_logs=False, logfile="data/snapper.log")
+    setup_logging(level="INFO", json_logs=False, logfile=resolve_subprocess_logfile())
     log_kraken_sdk_patches_status()
     parser = argparse.ArgumentParser(description="Snapper process runner")
     parser.add_argument(

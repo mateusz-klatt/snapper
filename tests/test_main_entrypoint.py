@@ -13,6 +13,7 @@ import pytest
 import snapper.__main__
 from snapper.__main__ import main
 from snapper.cli.app import app
+from snapper.utils.logging import LOGFILE_ENV_VAR
 from snapper.utils.logging import setup_logging
 
 
@@ -144,16 +145,16 @@ def test_main_calls_log_patches_status_after_setup_logging(
 def test_main_non_egress_subcommand_uses_default_logfile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Spec — every other sub-command keeps the shared ``data/snapper.log``.
+    """Spec — a non-mapped sub-command keeps the shared ``data/snapper.log``.
 
-    Given argv whose first positional arg is a non-egress
-        sub-command (e.g. ``"server"``),
+    Given argv whose first positional arg is a command without a
+        dedicated logfile (e.g. ``"server"``, the ``snapper-api``
+        container),
     When main() is called,
-    Then setup_logging receives ``logfile="data/snapper.log"`` — only
-        ``egress`` is dispatched to a dedicated file today;
-        ``server``, ``broker``, ``feed`` etc. share the API
-        container's log because they all run under the same
-        ``snapper:snapper`` uid.
+    Then setup_logging receives ``logfile="data/snapper.log"`` —
+        ``feed-engine`` and ``egress`` map to dedicated files while
+        ``server``, ``broker`` etc. share the API container's log
+        because they run under the same ``snapper:snapper`` uid.
     """
     setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
@@ -167,6 +168,54 @@ def test_main_non_egress_subcommand_uses_default_logfile(
     main()
     _, kwargs = setup_calls[0]
     assert kwargs["logfile"] == "data/snapper.log"
+
+
+def test_main_feed_engine_subcommand_uses_feed_logfile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec — ``snapper feed-engine`` logs to ``data/snapper-feed.log``.
+
+    Given argv whose first positional arg is ``"feed-engine"`` (the
+        docker-compose CMD for the ``snapper-feed`` container),
+    When main() is called,
+    Then setup_logging receives ``logfile="data/snapper-feed.log"`` so
+        the feed container does not write to the API container's
+        ``data/snapper.log`` on the shared ``./data`` bind mount.
+    """
+    setup_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def _fake_setup_logging(*args: object, **kwargs: object) -> None:
+        setup_calls.append((args, kwargs))
+
+    monkeypatch.setattr("snapper.__main__.setup_logging", _fake_setup_logging)
+    monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", lambda: None)
+    monkeypatch.setattr("snapper.__main__.app", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["snapper", "feed-engine"])
+    monkeypatch.setenv(LOGFILE_ENV_VAR, "sentinel")
+    main()
+    _, kwargs = setup_calls[0]
+    assert kwargs["logfile"] == "data/snapper-feed.log"
+
+
+def test_main_exports_resolved_logfile_to_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec — main() exports the resolved logfile in ``SNAPPER_LOG_FILE``.
+
+    Given argv for the feed container (``feed-engine``),
+    When main() is called,
+    Then ``os.environ[LOGFILE_ENV_VAR]`` holds ``data/snapper-feed.log``
+        so subprocesses spawned by the container inherit it and log to
+        the SAME per-container file (see
+        :func:`snapper.utils.logging.resolve_subprocess_logfile`).
+    """
+    monkeypatch.setattr("snapper.__main__.setup_logging", lambda **kwargs: None)
+    monkeypatch.setattr("snapper.__main__.log_kraken_sdk_patches_status", lambda: None)
+    monkeypatch.setattr("snapper.__main__.app", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["snapper", "feed-engine"])
+    monkeypatch.setenv(LOGFILE_ENV_VAR, "sentinel")
+    main()
+    assert os.environ[LOGFILE_ENV_VAR] == "data/snapper-feed.log"
 
 
 def test_run_module_executes_main(monkeypatch: pytest.MonkeyPatch) -> None:

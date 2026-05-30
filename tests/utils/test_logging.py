@@ -705,3 +705,31 @@ def test_is_file_sink_ready_resets_when_reconfigured_without_logfile(
         assert log_utils.is_file_sink_ready() is False
     finally:
         log_utils._FILE_SINK_READY[0] = saved
+
+
+def test_resolve_subprocess_logfile_uses_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``resolve_subprocess_logfile`` returns the ``SNAPPER_LOG_FILE`` value.
+
+    Given the container entry point exported its logfile in
+        ``LOGFILE_ENV_VAR``,
+    When a spawned subprocess calls ``resolve_subprocess_logfile``,
+    Then it returns that value so the child logs to its container's
+        dedicated file (e.g. ``data/snapper-feed.log``).
+    """
+    monkeypatch.setenv(log_utils.LOGFILE_ENV_VAR, "data/snapper-feed.log")
+    assert log_utils.resolve_subprocess_logfile() == "data/snapper-feed.log"
+
+
+def test_resolve_subprocess_logfile_defaults_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``resolve_subprocess_logfile`` falls back to ``DEFAULT_LOGFILE``.
+
+    Given ``LOGFILE_ENV_VAR`` is not set (a child spawned outside the
+        managed entry point, or a unit test),
+    When ``resolve_subprocess_logfile`` is called,
+    Then it returns ``DEFAULT_LOGFILE`` (``data/snapper.log``).
+    """
+    monkeypatch.delenv(log_utils.LOGFILE_ENV_VAR, raising=False)
+    assert log_utils.resolve_subprocess_logfile() == log_utils.DEFAULT_LOGFILE
+    assert log_utils.DEFAULT_LOGFILE == "data/snapper.log"

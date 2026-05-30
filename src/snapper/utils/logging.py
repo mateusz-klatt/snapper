@@ -50,6 +50,9 @@ __all__ = [
     "setup_logging",
     "set_log_context",
     "get_log_context",
+    "resolve_subprocess_logfile",
+    "LOGFILE_ENV_VAR",
+    "DEFAULT_LOGFILE",
 ]
 _MSG_ONLY_FMT = "{message}"
 _RESET = "\033[0m"
@@ -358,6 +361,30 @@ def setup_logging(level: str = "INFO", json_logs: bool = False, logfile: str | N
     if logfile:
         _add_file_logging(level, logfile)
         _FILE_SINK_READY[0] = True
+
+
+LOGFILE_ENV_VAR = "SNAPPER_LOG_FILE"
+DEFAULT_LOGFILE = "data/snapper.log"
+
+
+def resolve_subprocess_logfile() -> str:
+    """Return the logfile a spawned subprocess should append to.
+
+    A managed subprocess (``python -m snapper.server.process_runner``)
+    cannot derive its container from ``sys.argv`` the way the package
+    entry point does, so the container entry point exports its resolved
+    logfile in :data:`LOGFILE_ENV_VAR` and every child inherits it
+    through the process environment. This keeps a feed-container
+    publisher writing to ``data/snapper-feed.log`` (its parent's file)
+    instead of the API container's ``data/snapper.log``, so each
+    container — and its children — own a single dedicated log file.
+    Falls back to :data:`DEFAULT_LOGFILE` when the variable is unset
+    (e.g. a child spawned outside the managed entry point, or a test).
+
+    Returns:
+        The logfile path the current subprocess should write to.
+    """
+    return os.environ.get(LOGFILE_ENV_VAR, DEFAULT_LOGFILE)
 
 
 _FILE_SINK_READY: list[bool] = [False]
