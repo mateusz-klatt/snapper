@@ -19,7 +19,6 @@ import json
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
-from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -103,6 +102,34 @@ def is_market_data_publisher(tags: Iterable[str]) -> bool:
         ``publisher``, False otherwise.
     """
     return _MARKET_DATA_PUBLISHER_TAGS.issubset(set(tags))
+
+
+def _copy_process_config_with_mode(
+    config: ProcessConfigModel, mode: ProcessMode
+) -> ProcessConfigModel:
+    """Return a process config copy with a different execution mode.
+
+    Args:
+        config: Process configuration to copy.
+        mode: Execution mode for the returned configuration.
+
+    Returns:
+        ProcessConfigModel with all fields preserved except ``mode``.
+    """
+    return ProcessConfigModel(
+        name=config.name,
+        enabled=config.enabled,
+        mode=mode,
+        class_path=config.class_path,
+        method=config.method,
+        parameters=config.parameters,
+        note=config.note,
+        lifecycle=config.lifecycle,
+        role=config.role,
+        restart_policy=config.restart_policy,
+        tags=config.tags,
+        parameters_schema=config.parameters_schema,
+    )
 
 
 class CoreProcessStartupError(RuntimeError):
@@ -917,7 +944,7 @@ class ProcessLauncherService:
         started_count = 0
         failed_core_names: list[str] = []
         for config in publishers:
-            process_config: ProcessConfigModel = replace(config, mode=ProcessModeEnum.PROCESS)
+            process_config = _copy_process_config_with_mode(config, ProcessModeEnum.PROCESS)
             try:
                 await self.start_process(process_config)
                 started_count += 1
