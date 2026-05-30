@@ -53,7 +53,7 @@ before running `make migrate-dev`, or rotate after first login via
 
 - Python 3.14+
 - Poetry
-- Node.js 22.13+ (per frontend `engines`) and pnpm 11+ (for frontend)
+- Node.js 26+ and pnpm 11+ (for frontend)
 - TA-Lib (C library)
 
 ### Installation

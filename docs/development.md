@@ -6,8 +6,8 @@ Guidelines for developers working on the Snapper project.
 
 - Python 3.14+
 - Poetry
-- Node.js (frontend `engines` floor: `>=22.13.0`; root CI pins
-  Node 25; per-workflow frontend `setup-node` steps pin Node 22) and pnpm
+- Node.js 26+ and pnpm 11+ (frontend engines, Docker UI build, and CI
+  workflows all standardize on Node 26)
 - TA-Lib (C library)
 - Pre-commit hooks
 
