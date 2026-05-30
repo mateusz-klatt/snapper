@@ -18,12 +18,11 @@ Configuration JSON
         "parameters": {"symbols": ["BTC-USD"]}
 The subprocess runs independently with its own Python interpreter
 allowing true parallelism and isolation from the main server process.
-The async target is driven on a uvloop event loop (via ``uvloop.run``)
-so a ``mode=PROCESS`` publisher gets the same libuv IO speedup the
-FastAPI server enjoys (``uvicorn --loop uvloop``); a vanilla
-``asyncio.run`` would otherwise leave subprocess publishers on the
-slower stock selector loop. This matters for the dedicated feed
-container where each market-data publisher runs as its own process.
+The async target is driven on a uvloop event loop where uvloop is
+available so a ``mode=PROCESS`` publisher gets the same libuv IO
+speedup the FastAPI server enjoys (``uvicorn --loop uvloop``). Windows
+workers fall back to ``asyncio.run`` because uvloop is not published
+for that platform.
 
 AI Review fast-path: subprocess
 strategies that invoke ``create_ai_review_and_await`` register an
@@ -41,6 +40,7 @@ re-publish would N-duplicate the external WS frame).
 """
 
 import argparse
+import asyncio
 import contextlib
 import importlib
 import inspect
@@ -50,8 +50,8 @@ from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
 from typing import Any
+from typing import cast
 
-import uvloop
 from loguru import logger
 
 from snapper.application.ai_review.service import _BUS_AI_REVIEW_DECISION_TOPIC
@@ -62,7 +62,7 @@ from snapper.utils.logging import set_log_context
 from snapper.utils.logging import setup_logging
 
 
-async def _await_result(awaitable: Awaitable[Any]) -> Any:
+async def _await_result[Result](awaitable: Awaitable[Result]) -> Result:
     """Await and return result from an awaitable.
 
     Args:
@@ -72,6 +72,27 @@ async def _await_result(awaitable: Awaitable[Any]) -> Any:
         Result of the awaited operation.
     """
     return await awaitable
+
+
+def _use_asyncio_runner() -> bool:
+    """Return whether the subprocess runner must avoid uvloop."""
+    return os.name == "nt"
+
+
+def _run_event_loop[Result](awaitable: Awaitable[Result]) -> Result:
+    """Run an awaitable with uvloop where supported.
+
+    Returns:
+        Result returned by the awaited operation.
+    """
+    if _use_asyncio_runner():
+        return asyncio.run(_await_result(awaitable))
+    event_loop_module = importlib.import_module("uvloop")
+    run_event_loop = cast(
+        Callable[[Awaitable[Result]], Result],
+        event_loop_module.run,
+    )
+    return run_event_loop(_await_result(awaitable))
 
 
 async def _run_async_method(method: Callable[[], Awaitable[Any]]) -> Any:
@@ -132,7 +153,7 @@ async def _run_async_method_with_listener(method: Callable[[], Awaitable[Any]]) 
         return await _run_async_method(method)
 
 
-async def _await_result_with_listener(awaitable: Awaitable[Any]) -> Any:
+async def _await_result_with_listener[Result](awaitable: Awaitable[Result]) -> Result:
     """Drive ``awaitable`` with the subprocess decision-only bus listener active."""
     async with _ai_review_decision_listener():
         return await _await_result(awaitable)
@@ -177,11 +198,11 @@ def main() -> int:
         target_method = getattr(instance, method)
         logger.info(f"Process '{name}' calling {class_path}.{method}()")
         if inspect.iscoroutinefunction(target_method):
-            uvloop.run(_run_async_method_with_listener(target_method))
+            _run_event_loop(_run_async_method_with_listener(target_method))
         else:
             result = target_method()
             if inspect.isawaitable(result):
-                uvloop.run(_await_result_with_listener(result))
+                _run_event_loop(_await_result_with_listener(result))
         logger.info(f"Process '{name}' completed successfully")
         return 0
     except Exception as e:

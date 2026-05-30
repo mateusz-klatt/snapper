@@ -197,6 +197,34 @@ async def test_await_result_with_listener_drives_awaitable_inside_seam() -> None
     assert invocation_order == ["start", "awaitable", "stop"]
 
 
+def test_run_event_loop_uses_uvloop_when_supported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POSIX subprocesses keep the uvloop event-loop runner.
+
+    Given the subprocess runner is on a uvloop-capable platform,
+    When an awaitable is executed through the event-loop helper,
+    Then uvloop is imported and used to drive the awaitable.
+    """
+    calls: list[str] = []
+
+    async def _target() -> str:
+        return "ok"
+
+    class _FakeUvloop:
+        @staticmethod
+        def run(awaitable: Awaitable[str]) -> str:
+            calls.append("run")
+            return asyncio.run(awaitable)
+
+    def _import_module(name: str) -> object:
+        calls.append(name)
+        return _FakeUvloop
+
+    monkeypatch.setattr(process_runner, "_use_asyncio_runner", lambda: False)
+    monkeypatch.setattr(process_runner.importlib, "import_module", _import_module)
+    assert process_runner._run_event_loop(_target()) == "ok"
+    assert calls == ["uvloop", "run"]
+
+
 def test_main_async_path_uses_listener_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the integration: ``main()`` async path delegates to the listener wrapper.
 
