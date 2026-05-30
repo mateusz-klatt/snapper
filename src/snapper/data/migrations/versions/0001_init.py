@@ -391,7 +391,6 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
         postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
-    op.create_index("ix_trades_instrument_public_id", "trades", ["instrument_public_id"])
     op.create_index("ix_trades_timestamp", "trades", ["timestamp"])
     op.create_index("ix_trade_instrument_ts", "trades", ["instrument_public_id", "timestamp"])
     op.create_table(
