@@ -22,14 +22,18 @@ from uuid import UUID
 import pytest
 from pydantic import BaseModel
 
+from snapper.application.process_manager import launcher as launcher_module
 from snapper.application.process_manager.launcher import CoreProcessStartupError
 from snapper.application.process_manager.launcher import ProcessLauncherService
+from snapper.application.process_manager.launcher import _DesiredState
 from snapper.application.process_manager.launcher import is_market_data_publisher
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import ProcessStartResult
 from snapper.application.process_manager.models import SpawnerStatusSnapshot
+from snapper.application.process_manager.registry import discover_processes
+from snapper.application.process_manager.registry import get_registered_processes
 from snapper.application.process_manager.spawner import ProcessSpawnerService
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
@@ -37,6 +41,7 @@ from snapper.config.settings import get_settings
 from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRunStatusEnum
 from snapper.data.models import ProcessRun
@@ -2267,7 +2272,7 @@ async def test_stop_all_processes_handles_done_tasks_and_cleanup_errors(
     factory.started_processes["native"] = proc_info
     await factory.stop_all_processes()
     spawner_mock.terminate.assert_called_once_with("native")
-    spawner_mock.cleanup.assert_called_once_with("native")
+    spawner_mock.cleanup.assert_called_with("native")
     assert factory.started_processes == {}
     assert factory.process_tasks == {}
 
@@ -6906,6 +6911,98 @@ async def test_get_core_health_profile_filtered_publisher_ignored(
     assert await factory.get_core_health() == "healthy"
 
 
+def _make_proc_info(name: str, returncode: int) -> ProcessInstanceInfo:
+    """Build a ProcessInstanceInfo whose subprocess reports a fixed returncode.
+
+    Args:
+        name: Process name for the instance.
+        returncode: The subprocess return code to expose.
+
+    Returns:
+        A ProcessInstanceInfo wired with a stub Popen exposing returncode.
+    """
+    return ProcessInstanceInfo(
+        name=name,
+        pid=4242,
+        started_at=datetime.now(UTC),
+        config={},
+        process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=returncode)),
+    )
+
+
+def _watchdog_config(
+    name: str = "kraken_equities_feed_publisher",
+    *,
+    role: ProcessRoleEnum = ProcessRoleEnum.CORE,
+    lifecycle: ProcessLifecycleEnum = ProcessLifecycleEnum.LONG_RUNNING,
+    restart_policy: ProcessRestartPolicyEnum = ProcessRestartPolicyEnum.ALWAYS,
+    tags: tuple[str, ...] = ("market-data", "publisher", "kraken_equities"),
+    enabled: bool = True,
+) -> ProcessConfigModel:
+    """Build a process config for watchdog tests with sensible defaults.
+
+    Args:
+        name: Process name.
+        role: Process role (CORE for escalation paths).
+        lifecycle: Lifecycle (LONG_RUNNING by default).
+        restart_policy: Restart policy under test.
+        tags: Tags (market-data publisher tags by default).
+        enabled: Whether the config is enabled.
+
+    Returns:
+        A ProcessConfigModel for the watchdog under test.
+    """
+    return ProcessConfigModel(
+        name=name,
+        enabled=enabled,
+        mode="process",
+        class_path="test.Publisher",
+        method="start",
+        parameters={},
+        role=role,
+        lifecycle=lifecycle,
+        restart_policy=restart_policy,
+        tags=tags,
+    )
+
+
+def _arm_watchdog(
+    factory: ProcessLauncherService,
+    config: ProcessConfigModel,
+    *,
+    uptime_start: float = 0.0,
+) -> None:
+    """Register a process with the watchdog as if it had been started.
+
+    Sets desired-state RUNNING and the respawn config + uptime origin so a
+    subsequent death is reconciled, without going through start_process.
+
+    Args:
+        factory: The launcher under test.
+        config: The config to arm.
+        uptime_start: The monotonic uptime origin to record.
+    """
+    factory._desired_state[config.name] = _DesiredState.RUNNING
+    factory._restart_configs[config.name] = config
+    factory._restart_uptime_start[config.name] = uptime_start
+
+
+@pytest.fixture(autouse=False)
+def _no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch asyncio.sleep in the launcher to return immediately.
+
+    Keeps _delayed_restart deterministic with no wall-clock waits.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+
+    async def _instant(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(launcher_module.asyncio, "sleep", _instant)
+
+
 class TestStartFeedPublishers:
     """The dedicated feed-container entrypoint on the launcher."""
 
@@ -6955,7 +7052,12 @@ class TestStartFeedPublishers:
 
     @pytest.mark.asyncio
     async def test_core_publisher_failure_escalates(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A failing CORE long-running publisher raises CoreProcessStartupError."""
+        """A failing CORE long-running publisher raises CoreProcessStartupError.
+
+        Given: a single CORE long-running publisher whose start_process raises,
+        When: start_feed_publishers runs,
+        Then: CoreProcessStartupError is raised.
+        """
         factory = ProcessLauncherService(MagicMock())
         publisher = _publisher_config()
         monkeypatch.setattr(
@@ -6972,7 +7074,12 @@ class TestStartFeedPublishers:
     async def test_non_core_publisher_failure_does_not_escalate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failing non-CORE publisher is logged but does not raise."""
+        """A failing non-CORE publisher is logged but does not raise.
+
+        Given: a single TASK publisher whose start_process raises,
+        When: start_feed_publishers runs,
+        Then: no exception is raised (only CORE failures escalate).
+        """
         factory = ProcessLauncherService(MagicMock())
         task_publisher = ProcessConfigModel(
             name="paper_feed_publisher",
@@ -6995,57 +7102,8 @@ class TestStartFeedPublishers:
         await factory.start_feed_publishers()
 
     @pytest.mark.asyncio
-    async def test_records_core_publishers_as_supervised(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Started CORE long-running publishers enter _feed_supervised; TASK excluded.
-
-        Given: an enabled CORE venue publisher, the enabled CORE paper
-            publisher (paper is registered CORE long-running — it idle-exits
-            0 in live mode but is still supervised), and an enabled TASK
-            publisher,
-        When: start_feed_publishers runs,
-        Then: both CORE publishers are supervised and the TASK one is not.
-            Paper's benign clean exit is spared by the FAILED-status gate
-            in _handle_process_completion, NOT by exclusion from the set.
-        """
-        factory = ProcessLauncherService(MagicMock())
-        core_publisher = _publisher_config()
-        paper_publisher = ProcessConfigModel(
-            name="paper_feed_publisher",
-            enabled=True,
-            mode="thread",
-            class_path="test.Publisher",
-            method="start",
-            parameters={},
-            role=ProcessRoleEnum.CORE,
-            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
-            tags=("market-data", "publisher", "paper"),
-        )
-        task_publisher = ProcessConfigModel(
-            name="aux_feed_publisher",
-            enabled=True,
-            mode="thread",
-            class_path="test.Publisher",
-            method="start",
-            parameters={},
-            role=ProcessRoleEnum.TASK,
-            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
-            tags=("market-data", "publisher", "aux"),
-        )
-        monkeypatch.setattr(
-            factory,
-            "get_process_configs",
-            mock.AsyncMock(return_value=[core_publisher, paper_publisher, task_publisher]),
-        )
-        monkeypatch.setattr(factory, "start_process", mock.AsyncMock())
-        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
-        await factory.start_feed_publishers()
-        assert factory._feed_supervised == {core_publisher.name, paper_publisher.name}
-
-    @pytest.mark.asyncio
     async def test_wait_for_feed_publisher_failure_returns_recorded_name(self) -> None:
-        """wait_for_feed_publisher_failure resolves with the crashed name.
+        """wait_for_feed_publisher_failure resolves with the escalated name.
 
         Given: the failure event is set with a recorded publisher name,
         When: wait_for_feed_publisher_failure is awaited,
@@ -7057,133 +7115,2483 @@ class TestStartFeedPublishers:
         result = await asyncio.wait_for(factory.wait_for_feed_publisher_failure(), timeout=1.0)
         assert result == "kraken_equities_feed_publisher"
 
-    @pytest.mark.asyncio
-    async def test_completion_wakes_failure_for_supervised_crash(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A supervised publisher crashing (non-zero exit) wakes the waiter.
 
-        Given: a supervised CORE publisher whose subprocess exits non-zero
-            without an expected termination,
-        When: _handle_process_completion runs,
-        Then: the failure event is set with the crashed publisher's name.
+class TestRestartHelpers:
+    """Module-level deterministic helpers used by the watchdog."""
+
+    def test_monotonic_returns_float(self) -> None:
+        """_monotonic returns a float clock reading.
+
+        Given: the module-level clock indirection,
+        When: _monotonic is called,
+        Then: a float is returned.
+        """
+        assert isinstance(launcher_module._monotonic(), float)
+
+    def test_jitter_is_additive_and_bounded(self) -> None:
+        """_jitter is non-negative and below the jitter fraction of base.
+
+        Given: a process name and a base delay,
+        When: _jitter is computed,
+        Then: it lies in [0, base * fraction) and is deterministic per name.
+        """
+        base = 8.0
+        jitter = launcher_module._jitter("kraken", base)
+        assert 0.0 <= jitter < base * launcher_module._RESTART_JITTER_FRACTION
+        assert launcher_module._jitter("kraken", base) == jitter
+
+    def test_jitter_is_de_correlated_across_names(self) -> None:
+        """_jitter differs across names so a fleet does not stampede.
+
+        Given: two distinct names with the same base,
+        When: _jitter is computed for each,
+        Then: the jitters differ (de-correlated by crc32).
+        """
+        base = 16.0
+        assert launcher_module._jitter("kraken", base) != launcher_module._jitter("walutomat", base)
+
+    def test_backoff_grows_exponentially(self) -> None:
+        """_compute_backoff_delay grows by the factor per attempt.
+
+        Given: increasing attempt counts below the cap,
+        When: the backoff is computed,
+        Then: each delay is at least the exponential term for that attempt.
+        """
+        d0 = launcher_module._compute_backoff_delay("kraken", 0)
+        d1 = launcher_module._compute_backoff_delay("kraken", 1)
+        assert d0 >= launcher_module._RESTART_BASE_DELAY_S
+        assert d1 >= launcher_module._RESTART_BASE_DELAY_S * launcher_module._RESTART_FACTOR
+
+    def test_backoff_is_capped_plus_jitter(self) -> None:
+        """_compute_backoff_delay caps the exponential term, then adds jitter.
+
+        Given: a large attempt count that overflows the cap,
+        When: the backoff is computed,
+        Then: the delay equals the cap plus the additive jitter and never
+            exceeds cap * (1 + jitter fraction).
+        """
+        attempts = 50
+        delay = launcher_module._compute_backoff_delay("kraken", attempts)
+        cap = launcher_module._RESTART_MAX_DELAY_S
+        expected = cap + launcher_module._jitter("kraken", cap)
+        assert delay == expected
+        assert cap <= delay < cap * (1 + launcher_module._RESTART_JITTER_FRACTION)
+
+
+class TestMaybeScheduleRestart:
+    """Policy + escalation accounting in _maybe_schedule_restart."""
+
+    @pytest.mark.asyncio
+    async def test_desired_stopped_suppresses_restart(self) -> None:
+        """A death while desired=STOPPED schedules no restart and clears nothing.
+
+        Given: a process whose desired state is STOPPED (a deliberate stop
+            owns cleanup),
+        When: _maybe_schedule_restart runs for a FAILED death,
+        Then: no restart task is scheduled.
         """
         factory = ProcessLauncherService(MagicMock())
-        spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
-        factory.spawner = cast(ProcessSpawnerService, spawner_mock)
-        factory._feed_supervised.add("kraken_equities_feed_publisher")
-        factory.process_lifecycles["kraken_equities_feed_publisher"] = (
-            ProcessLifecycleEnum.LONG_RUNNING
-        )
-        factory.process_roles["kraken_equities_feed_publisher"] = ProcessRoleEnum.CORE
-        proc_info = ProcessInstanceInfo(
-            name="kraken_equities_feed_publisher",
-            pid=321,
-            started_at=datetime.now(UTC),
-            config={},
-            process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=3)),
-        )
-        factory.started_processes["kraken_equities_feed_publisher"] = proc_info
-        monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
-        await factory._handle_process_completion("kraken_equities_feed_publisher", proc_info)
+        config = _watchdog_config()
+        _arm_watchdog(factory, config)
+        factory._desired_state[config.name] = _DesiredState.STOPPED
+        await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.FAILED)
+        assert config.name not in factory._restart_tasks
+
+    @pytest.mark.asyncio
+    async def test_expected_termination_suppresses_restart(self) -> None:
+        """A death in expected_terminations schedules no restart.
+
+        Given: a RUNNING process listed in expected_terminations,
+        When: _maybe_schedule_restart runs,
+        Then: no restart task is scheduled (a deliberate stop owns cleanup).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config()
+        _arm_watchdog(factory, config)
+        factory.expected_terminations.add(config.name)
+        await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.FAILED)
+        assert config.name not in factory._restart_tasks
+
+    @pytest.mark.asyncio
+    async def test_missing_config_returns_without_scheduling(self) -> None:
+        """A death with no recorded config schedules no restart.
+
+        Given: a RUNNING desired-state but no snapshot config,
+        When: _maybe_schedule_restart runs,
+        Then: it returns without scheduling.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        factory._desired_state["ghost"] = _DesiredState.RUNNING
+        await factory._maybe_schedule_restart("ghost", ProcessRunStatusEnum.FAILED)
+        assert "ghost" not in factory._restart_tasks
+
+    @pytest.mark.asyncio
+    async def test_one_shot_never_restarts(self) -> None:
+        """A ONE_SHOT process is never restarted and its state is cleared.
+
+        Given: a ONE_SHOT process that completed,
+        When: _maybe_schedule_restart runs,
+        Then: no restart is scheduled and the watchdog state is cleared.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="oneshot_job", lifecycle=ProcessLifecycleEnum.ONE_SHOT)
+        _arm_watchdog(factory, config)
+        await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.SUCCEEDED)
+        assert config.name not in factory._restart_tasks
+        assert config.name not in factory._desired_state
+
+    @pytest.mark.asyncio
+    async def test_never_policy_does_not_restart(self) -> None:
+        """A NEVER-policy process is never restarted and its state is cleared.
+
+        Given: a process registered restart_policy=NEVER that died FAILED,
+        When: _maybe_schedule_restart runs,
+        Then: no restart is scheduled and the watchdog state is cleared.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.NEVER)
+        _arm_watchdog(factory, config)
+        await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.FAILED)
+        assert config.name not in factory._restart_tasks
+        assert config.name not in factory._desired_state
+
+    @pytest.mark.asyncio
+    async def test_on_failure_clean_exit_does_not_restart(self) -> None:
+        """ON_FAILURE + a non-FAILED death does not restart and clears state.
+
+        Given: an ON_FAILURE process that exited cleanly (SUCCEEDED),
+        When: _maybe_schedule_restart runs,
+        Then: no restart is scheduled and the watchdog state is cleared.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ON_FAILURE)
+        _arm_watchdog(factory, config)
+        await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.SUCCEEDED)
+        assert config.name not in factory._restart_tasks
+        assert config.name not in factory._desired_state
+
+    @pytest.mark.asyncio
+    async def test_on_failure_failed_death_restarts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """ON_FAILURE + a FAILED death schedules a restart and counts it.
+
+        Given: an ON_FAILURE process that died FAILED with short uptime,
+        When: _maybe_schedule_restart runs,
+        Then: a restart task is scheduled and both counters increment.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        monkeypatch.setattr(launcher_module, "_monotonic", lambda: 10.0)
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ON_FAILURE)
+        _arm_watchdog(factory, config, uptime_start=0.0)
+        await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.FAILED)
+        task = factory._restart_tasks[config.name]
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert factory._restart_attempts[config.name] == 1
+        assert factory._total_failed_restarts[config.name] == 1
+
+    @pytest.mark.asyncio
+    async def test_always_clean_exit_restarts_without_counting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ALWAYS + a clean exit-0 restarts but touches NEITHER counter.
+
+        Given: an ALWAYS process that exited cleanly (SUCCEEDED) with short
+            uptime,
+        When: _maybe_schedule_restart runs,
+        Then: a restart is scheduled but no escalation counter is set (the
+            paper false-escalation hole stays closed).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        monkeypatch.setattr(launcher_module, "_monotonic", lambda: 10.0)
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        _arm_watchdog(factory, config, uptime_start=0.0)
+        await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.SUCCEEDED)
+        task = factory._restart_tasks[config.name]
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert config.name not in factory._restart_attempts
+        assert config.name not in factory._total_failed_restarts
+
+    @pytest.mark.asyncio
+    async def test_always_clean_exit_long_healthy_resets_counters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A clean ALWAYS exit after a long healthy run zeroes both counters.
+
+        Given: an ALWAYS process with prior accumulated counters that exited
+            cleanly after a > 20 min healthy uptime,
+        When: _maybe_schedule_restart runs,
+        Then: both counters are reset to 0 (recovery is demonstrated).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        monkeypatch.setattr(launcher_module, "_monotonic", lambda: 1300.0)
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        _arm_watchdog(factory, config, uptime_start=0.0)
+        factory._restart_attempts[config.name] = 3
+        factory._total_failed_restarts[config.name] = 5
+        await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.SUCCEEDED)
+        task = factory._restart_tasks[config.name]
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert factory._restart_attempts[config.name] == 0
+        assert factory._total_failed_restarts[config.name] == 0
+
+    @pytest.mark.asyncio
+    async def test_healthy_uptime_resets_consecutive_attempts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A FAILED death after a healthy uptime zeroes consecutive attempts.
+
+        Given: a FAILED death after uptime > _RESTART_HEALTHY_UPTIME_S with
+            prior accumulated consecutive attempts,
+        When: _maybe_schedule_restart runs,
+        Then: _restart_attempts resets to 0 (fresh backoff budget) while
+            _total_failed_restarts still increments.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        monkeypatch.setattr(launcher_module, "_monotonic", lambda: 200.0)
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        _arm_watchdog(factory, config, uptime_start=0.0)
+        factory._restart_attempts[config.name] = 4
+        factory._total_failed_restarts[config.name] = 4
+        await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.FAILED)
+        task = factory._restart_tasks[config.name]
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert factory._restart_attempts[config.name] == 0
+        assert factory._total_failed_restarts[config.name] == 5
+
+    @pytest.mark.asyncio
+    async def test_double_schedule_suppressed_by_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live pending restart task suppresses a second schedule (Fix 1).
+
+        Given: a FAILED death that scheduled a restart task still asleep in
+            its backoff (not done),
+        When: a second FAILED death for the same name reaches
+            _maybe_schedule_restart before the first task finished,
+        Then: the live-task guard returns without replacing the task — the
+            same single _delayed_restart stays armed (no two sleeping tasks,
+            no double-spawn).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        monkeypatch.setattr(launcher_module, "_monotonic", lambda: 5.0)
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        _arm_watchdog(factory, config, uptime_start=0.0)
+        await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.FAILED)
+        first = factory._restart_tasks[config.name]
+        assert not first.done()
+        await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.FAILED)
+        second = factory._restart_tasks[config.name]
+        assert second is first
+        first.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await first
+
+
+class TestRestartEscalation:
+    """The two-counter escalation model (consecutive + lifetime backstop)."""
+
+    @pytest.mark.asyncio
+    async def test_fast_crash_loop_escalates_to_feed_event(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Six consecutive instant FAILED deaths escalate to the feed event.
+
+        Given: a CORE market-data publisher that crashes instantly (uptime 0)
+            repeatedly,
+        When: _maybe_schedule_restart processes six consecutive FAILED deaths,
+        Then: the sixth trips the feed failure event with the publisher name.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        monkeypatch.setattr(launcher_module, "_monotonic", lambda: 0.0)
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        for _ in range(launcher_module._MAX_RESTART_ATTEMPTS):
+            _arm_watchdog(factory, config, uptime_start=0.0)
+            await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.FAILED)
+            task = factory._restart_tasks.get(config.name)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         assert factory._feed_failure_event.is_set()
-        assert factory._feed_failed_publisher == "kraken_equities_feed_publisher"
+        assert factory._feed_failed_publisher == config.name
 
     @pytest.mark.asyncio
-    async def test_completion_ignores_expected_termination_for_supervised(
+    async def test_slow_crash_loop_below_healthy_escalates(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A supervised publisher stopped gracefully does NOT wake the waiter.
+        """A steady ~95s crasher (below healthy) still escalates at 6 (livelock fix).
 
-        Given: a supervised CORE publisher in expected_terminations (a
-            graceful deploy/shutdown stop),
-        When: _handle_process_completion runs,
-        Then: the failure event stays clear — an expected stop must not
-            trigger a container restart.
+        Given: a CORE publisher whose uptime is always 95s (< 120s healthy),
+        When: _maybe_schedule_restart processes six consecutive FAILED deaths,
+        Then: the feed failure event trips — the v2 livelock case is closed.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        for _ in range(launcher_module._MAX_RESTART_ATTEMPTS):
+            monkeypatch.setattr(launcher_module, "_monotonic", lambda: 95.0)
+            _arm_watchdog(factory, config, uptime_start=0.0)
+            await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.FAILED)
+            task = factory._restart_tasks.get(config.name)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        assert factory._feed_failure_event.is_set()
+        assert factory._feed_failed_publisher == config.name
+
+    @pytest.mark.asyncio
+    async def test_just_above_healthy_escalates_via_ceiling(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 121s crasher resets attempts each time but escalates via the ceiling.
+
+        Given: a CORE publisher whose uptime is always 121s (just above the
+            120s healthy threshold but below the 1200s long-healthy reset),
+        When: _maybe_schedule_restart processes 20 FAILED deaths,
+        Then: _restart_attempts resets each cycle yet _total_failed_restarts
+            climbs to the ceiling and escalates (residual escape closed).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        for _ in range(launcher_module._MAX_TOTAL_FAILED_RESTARTS):
+            monkeypatch.setattr(launcher_module, "_monotonic", lambda: 121.0)
+            _arm_watchdog(factory, config, uptime_start=0.0)
+            await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.FAILED)
+            task = factory._restart_tasks.get(config.name)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        assert factory._feed_failure_event.is_set()
+        assert factory._feed_failed_publisher == config.name
+
+    @pytest.mark.asyncio
+    async def test_blipping_healthy_venue_never_escalates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A venue that fails once then runs 1300s clean, x30, never escalates.
+
+        Given: a CORE publisher that fails once then recovers for > 1200s
+            healthy uptime, repeated 30 times,
+        When: _maybe_schedule_restart processes each FAILED death,
+        Then: the long healthy run resets the backstop every cycle and the
+            feed failure event never trips (v3.1 false-escalation fix).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        for _ in range(30):
+            monkeypatch.setattr(launcher_module, "_monotonic", lambda: 1300.0)
+            _arm_watchdog(factory, config, uptime_start=0.0)
+            await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.FAILED)
+            task = factory._restart_tasks.get(config.name)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        assert not factory._feed_failure_event.is_set()
+        assert factory._total_failed_restarts[config.name] == 1
+
+    @pytest.mark.asyncio
+    async def test_clean_exit_always_never_escalates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Repeated clean exit-0 under ALWAYS restarts but never escalates.
+
+        Given: a CORE publisher that exits cleanly (SUCCEEDED) instantly,
+            repeated well beyond the escalation budget,
+        When: _maybe_schedule_restart processes each death,
+        Then: neither escalation counter is touched and the feed event stays
+            clear (a healthy cleanly-exiting publisher cannot trip the exit).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        monkeypatch.setattr(launcher_module, "_monotonic", lambda: 0.0)
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        for _ in range(launcher_module._MAX_TOTAL_FAILED_RESTARTS + 5):
+            _arm_watchdog(factory, config, uptime_start=0.0)
+            await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.SUCCEEDED)
+            task = factory._restart_tasks.get(config.name)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        assert not factory._feed_failure_event.is_set()
+        assert config.name not in factory._total_failed_restarts
+
+    @pytest.mark.asyncio
+    async def test_core_non_publisher_gives_up_without_feed_event(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A CORE non-publisher exhausting its budget gives up, no feed event.
+
+        Given: a CORE process WITHOUT market-data publisher tags crashing
+            instantly six times,
+        When: the budget is exhausted,
+        Then: it gives up (logged) without tripping the feed failure event.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        monkeypatch.setattr(launcher_module, "_monotonic", lambda: 0.0)
+        config = _watchdog_config(
+            name="backend_core",
+            restart_policy=ProcessRestartPolicyEnum.ALWAYS,
+            tags=("infrastructure",),
+        )
+        for _ in range(launcher_module._MAX_RESTART_ATTEMPTS):
+            _arm_watchdog(factory, config, uptime_start=0.0)
+            await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.FAILED)
+            task = factory._restart_tasks.get(config.name)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        assert not factory._feed_failure_event.is_set()
+        assert config.name not in factory._desired_state
+
+    @pytest.mark.asyncio
+    async def test_non_core_publisher_gives_up_without_feed_event(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-CORE publisher exhausting its budget gives up, no feed event.
+
+        Given: a TASK-role market-data publisher crashing instantly six times,
+        When: the budget is exhausted,
+        Then: it gives up without tripping the feed failure event (only CORE
+            publishers escalate to the container exit).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        monkeypatch.setattr(launcher_module, "_monotonic", lambda: 0.0)
+        config = _watchdog_config(role=ProcessRoleEnum.TASK)
+        for _ in range(launcher_module._MAX_RESTART_ATTEMPTS):
+            _arm_watchdog(factory, config, uptime_start=0.0)
+            await factory._maybe_schedule_restart(config.name, ProcessRunStatusEnum.FAILED)
+            task = factory._restart_tasks.get(config.name)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        assert not factory._feed_failure_event.is_set()
+        assert config.name not in factory._desired_state
+
+
+class TestDelayedRestart:
+    """The locked respawn task: stop-during-start, failed-respawn, teardown."""
+
+    @pytest.mark.asyncio
+    async def test_respawn_calls_start_process(
+        self, monkeypatch: pytest.MonkeyPatch, _no_real_sleep: None
+    ) -> None:
+        """A delayed restart respawns via start_process while desired=RUNNING.
+
+        Given: a RUNNING process with a recorded enabled config,
+        When: _delayed_restart fires (sleep patched instant),
+        Then: start_process is awaited with the recorded config.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        _arm_watchdog(factory, config)
+        start_mock = mock.AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        await factory._delayed_restart(config.name, 1.0)
+        start_mock.assert_awaited_once_with(config)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_during_backoff_returns_clean(self) -> None:
+        """A cancel during the backoff sleep is a clean return.
+
+        Given: a _delayed_restart task suspended in its backoff sleep,
+        When: the task is cancelled,
+        Then: it returns cleanly (no respawn, no exception propagated).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config()
+        _arm_watchdog(factory, config)
+        start_mock = mock.AsyncMock()
+        factory.start_process = start_mock
+        task = asyncio.create_task(factory._delayed_restart(config.name, 100.0))
+        await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        start_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_desired_stopped_skips_respawn(
+        self, monkeypatch: pytest.MonkeyPatch, _no_real_sleep: None
+    ) -> None:
+        """A restart that wakes to desired=STOPPED does not respawn.
+
+        Given: desired state flipped to STOPPED before the locked region,
+        When: _delayed_restart fires,
+        Then: start_process is not called.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config()
+        _arm_watchdog(factory, config)
+        factory._desired_state[config.name] = _DesiredState.STOPPED
+        start_mock = mock.AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        await factory._delayed_restart(config.name, 1.0)
+        start_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_disabled_config_clears_state(
+        self, monkeypatch: pytest.MonkeyPatch, _no_real_sleep: None
+    ) -> None:
+        """A restart whose config became disabled clears state and skips respawn.
+
+        Given: the recorded config is now disabled,
+        When: _delayed_restart fires,
+        Then: state is cleared and start_process is not called.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(enabled=False)
+        _arm_watchdog(factory, config)
+        start_mock = mock.AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        await factory._delayed_restart(config.name, 1.0)
+        start_mock.assert_not_awaited()
+        assert config.name not in factory._desired_state
+
+    @pytest.mark.asyncio
+    async def test_missing_config_clears_state(
+        self, monkeypatch: pytest.MonkeyPatch, _no_real_sleep: None
+    ) -> None:
+        """A restart with no recorded config clears state and skips respawn.
+
+        Given: desired=RUNNING but the snapshot config was dropped,
+        When: _delayed_restart fires,
+        Then: state is cleared and start_process is not called.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        factory._desired_state["ghost"] = _DesiredState.RUNNING
+        start_mock = mock.AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        await factory._delayed_restart("ghost", 1.0)
+        start_mock.assert_not_awaited()
+        assert "ghost" not in factory._desired_state
+
+    @pytest.mark.asyncio
+    async def test_stop_during_start_tears_down_just_spawned(
+        self, monkeypatch: pytest.MonkeyPatch, _no_real_sleep: None
+    ) -> None:
+        """A stop that lands during the spawn tears down the just-spawned process.
+
+        Given: start_process registers a live ProcessInstanceInfo and the
+            desired state flips to STOPPED before the post-spawn re-check,
+        When: _delayed_restart fires,
+        Then: the just-spawned process is stopped and cleaned (spawner.cleanup
+            called via instance.stop) and not left in started_processes.
         """
         factory = ProcessLauncherService(MagicMock())
         spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
         factory.spawner = cast(ProcessSpawnerService, spawner_mock)
-        factory._feed_supervised.add("kraken_equities_feed_publisher")
-        factory.process_lifecycles["kraken_equities_feed_publisher"] = (
-            ProcessLifecycleEnum.LONG_RUNNING
+        config = _watchdog_config()
+        _arm_watchdog(factory, config)
+
+        async def _fake_start(cfg: ProcessConfigModel) -> None:
+            factory.started_processes[cfg.name] = ProcessInstanceInfo(
+                name=cfg.name,
+                pid=999,
+                started_at=datetime.now(UTC),
+                config={},
+                process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=None)),
+                spawner=factory.spawner,
+            )
+            factory._desired_state[cfg.name] = _DesiredState.STOPPED
+
+        monkeypatch.setattr(factory, "start_process", _fake_start)
+        await factory._delayed_restart(config.name, 1.0)
+        spawner_mock.terminate.assert_called_once_with(config.name)
+        spawner_mock.cleanup.assert_called_once_with(config.name)
+        assert config.name not in factory.started_processes
+        assert config.name not in factory._desired_state
+
+    @pytest.mark.asyncio
+    async def test_failed_respawn_reschedules_then_escalates(
+        self, monkeypatch: pytest.MonkeyPatch, _no_real_sleep: None
+    ) -> None:
+        """A respawn that keeps raising re-schedules then eventually escalates.
+
+        Given: a CORE publisher whose start_process always raises,
+        When: _delayed_restart is driven repeatedly,
+        Then: the first failures re-schedule the next backoff (never abandon)
+            and the budget exhaustion trips the feed failure event.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        _arm_watchdog(factory, config)
+        monkeypatch.setattr(
+            factory, "start_process", mock.AsyncMock(side_effect=RuntimeError("nope"))
         )
-        factory.process_roles["kraken_equities_feed_publisher"] = ProcessRoleEnum.CORE
-        factory.expected_terminations.add("kraken_equities_feed_publisher")
-        proc_info = ProcessInstanceInfo(
-            name="kraken_equities_feed_publisher",
-            pid=321,
+        await factory._delayed_restart(config.name, 1.0)
+        assert factory._restart_attempts[config.name] == 1
+        assert config.name in factory._restart_tasks
+        pending = factory._restart_tasks[config.name]
+        pending.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pending
+        for _ in range(launcher_module._MAX_RESTART_ATTEMPTS):
+            _arm_watchdog(factory, config)
+            await factory._delayed_restart(config.name, 1.0)
+            task = factory._restart_tasks.get(config.name)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        assert factory._feed_failure_event.is_set()
+        assert factory._feed_failed_publisher == config.name
+
+    @pytest.mark.asyncio
+    async def test_delayed_restart_pops_only_own_task(
+        self, monkeypatch: pytest.MonkeyPatch, _no_real_sleep: None
+    ) -> None:
+        """The finally clause pops the tasks entry only when it is the own task.
+
+        Given: a successful respawn whose _restart_tasks entry was replaced by
+            an unrelated sentinel before the finally clause runs,
+        When: _delayed_restart finishes,
+        Then: the sentinel is preserved (only the current task pops itself).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        _arm_watchdog(factory, config)
+        sentinel = asyncio.create_task(asyncio.sleep(100))
+
+        async def _fake_start(_cfg: ProcessConfigModel) -> None:
+            factory._restart_tasks[config.name] = sentinel
+
+        monkeypatch.setattr(factory, "start_process", _fake_start)
+        await factory._delayed_restart(config.name, 1.0)
+        assert factory._restart_tasks.get(config.name) is sentinel
+        sentinel.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sentinel
+
+
+class TestTeardownStartedProcess:
+    """The lock-free internal stop primitive."""
+
+    @pytest.mark.asyncio
+    async def test_teardown_stops_and_drops_instance(self) -> None:
+        """Teardown stops the instance and drops it from tracking dicts.
+
+        Given: a tracked ProcessInstanceInfo with a spawner reference,
+        When: _teardown_started_process runs,
+        Then: the instance is stopped and removed from started_processes.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
+        factory.spawner = cast(ProcessSpawnerService, spawner_mock)
+        info = ProcessInstanceInfo(
+            name="pub",
+            pid=1,
             started_at=datetime.now(UTC),
             config={},
-            process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=0)),
+            process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=None)),
+            spawner=factory.spawner,
         )
-        factory.started_processes["kraken_equities_feed_publisher"] = proc_info
-        monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
-        await factory._handle_process_completion("kraken_equities_feed_publisher", proc_info)
-        assert not factory._feed_failure_event.is_set()
+        factory.started_processes["pub"] = info
+        factory.process_lifecycles["pub"] = ProcessLifecycleEnum.LONG_RUNNING
+        factory.process_roles["pub"] = ProcessRoleEnum.CORE
+        await factory._teardown_started_process("pub")
+        spawner_mock.terminate.assert_called_once_with("pub")
+        assert "pub" not in factory.started_processes
+        assert "pub" not in factory.process_lifecycles
 
     @pytest.mark.asyncio
-    async def test_completion_spares_paper_core_clean_idle_exit(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """REGRESSION: supervised paper (CORE) exiting 0 must NOT restart.
+    async def test_teardown_absent_instance_is_noop(self) -> None:
+        """Teardown of an absent process is a clean no-op.
 
-        The paper publisher is registered CORE long-running, so it lands in
-        _feed_supervised, but in live mode it idle-exits 0 immediately (no
-        replay window) WITHOUT being in expected_terminations. Gating on
-        FAILED status (not on "unexpected") is what spares it — a clean
-        exit resolves to SUCCEEDED. Treating any unexpected exit as fatal
-        here crash-looped the live feed container (paper exits -> restart
-        -> paper exits ...). This guards that exact failure.
+        Given: no tracked instance for the name,
+        When: _teardown_started_process runs,
+        Then: it returns without error and tracking stays empty.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        await factory._teardown_started_process("missing")
+        assert "missing" not in factory.started_processes
 
-        Given: supervised CORE paper_feed_publisher, exit code 0, NOT in
-            expected_terminations,
-        When: _handle_process_completion runs,
-        Then: the failure event stays clear — no container restart.
+    @pytest.mark.asyncio
+    async def test_teardown_suppresses_stop_error(self) -> None:
+        """A stop that raises is suppressed and the instance is still dropped.
+
+        Given: a tracked instance whose stop raises,
+        When: _teardown_started_process runs,
+        Then: the error is suppressed and the instance is removed.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        instance = MagicMock()
+        instance.stop = AsyncMock(side_effect=RuntimeError("stop boom"))
+        factory.started_processes["pub"] = instance
+        await factory._teardown_started_process("pub")
+        assert "pub" not in factory.started_processes
+
+
+class TestWatchdogStop:
+    """Deliberate stops own cleanup and cancel pending restarts."""
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_pending_restart(self) -> None:
+        """stop_process_by_name cancels a pending restart task and clears state.
+
+        Given: a running process with a pending (suspended) restart task,
+        When: stop_process_by_name runs,
+        Then: the pending restart is cancelled and watchdog state is cleared.
         """
         factory = ProcessLauncherService(MagicMock())
         spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
         factory.spawner = cast(ProcessSpawnerService, spawner_mock)
-        factory._feed_supervised.add("paper_feed_publisher")
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        instance = MagicMock()
+        instance.stop = AsyncMock()
+        factory.started_processes["pub"] = instance
+        factory.process_lifecycles["pub"] = ProcessLifecycleEnum.LONG_RUNNING
+        factory.process_roles["pub"] = ProcessRoleEnum.CORE
+        pending = asyncio.create_task(asyncio.sleep(100))
+        factory._restart_tasks["pub"] = pending
+        factory._finalize_process_run = AsyncMock()
+        factory._emit_summary_snapshot = AsyncMock()
+        result = await asyncio.wait_for(factory.stop_process_by_name("pub"), timeout=2.0)
+        assert result.status == "success"
+        assert pending.cancelled()
+        assert "pub" not in factory._desired_state
+        assert "pub" not in factory._restart_tasks
+
+    @pytest.mark.asyncio
+    async def test_stop_sets_desired_stopped_before_await(self) -> None:
+        """stop_process_by_name marks desired=STOPPED synchronously.
+
+        Given: a running process,
+        When: stop_process_by_name completes,
+        Then: the desired-state marker is cleared (STOPPED owned the stop and
+            the terminal cleanup removed the entry).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        instance = MagicMock()
+        instance.stop = AsyncMock()
+        factory.started_processes["pub"] = instance
+        factory.process_lifecycles["pub"] = ProcessLifecycleEnum.LONG_RUNNING
+        factory.process_roles["pub"] = ProcessRoleEnum.CORE
+        factory._finalize_process_run = AsyncMock()
+        factory._emit_summary_snapshot = AsyncMock()
+        await factory.stop_process_by_name("pub")
+        assert "pub" not in factory._desired_state
+
+    @pytest.mark.asyncio
+    async def test_stop_while_respawn_in_flight_no_deadlock(self) -> None:
+        """Stopping while a respawn holds the lock does not deadlock.
+
+        Given: a _delayed_restart task suspended inside its locked region
+            (mid-respawn, awaiting a blocked start_process),
+        When: stop_process_by_name is invoked,
+        Then: the stop sets desired=STOPPED, cancels the pending task, and
+            completes within the timeout (no self-deadlock on the name lock).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
+        factory.spawner = cast(ProcessSpawnerService, spawner_mock)
+        config = _watchdog_config(name="pub", restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        _arm_watchdog(factory, config)
+        instance = MagicMock()
+        instance.stop = AsyncMock()
+        factory.started_processes["pub"] = instance
+        factory.process_lifecycles["pub"] = ProcessLifecycleEnum.LONG_RUNNING
+        factory.process_roles["pub"] = ProcessRoleEnum.CORE
+        factory._finalize_process_run = AsyncMock()
+        factory._emit_summary_snapshot = AsyncMock()
+        pending = asyncio.create_task(asyncio.sleep(100))
+        factory._restart_tasks["pub"] = pending
+        result = await asyncio.wait_for(factory.stop_process_by_name("pub"), timeout=2.0)
+        assert result.status == "success"
+        assert pending.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_stop_not_running_returns_not_running(self) -> None:
+        """Stopping an absent process returns NOT_RUNNING.
+
+        Given: a name absent from started_processes,
+        When: stop_process_by_name runs,
+        Then: it returns NOT_RUNNING.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        result = await factory.stop_process_by_name("absent")
+        assert result.status == "not_running"
+
+    @pytest.mark.asyncio
+    async def test_stop_error_returns_error_status(self) -> None:
+        """A stop whose instance.stop raises returns ERROR.
+
+        Given: a running process whose instance.stop raises,
+        When: stop_process_by_name runs,
+        Then: it returns ERROR and still discards expected_terminations.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        instance = MagicMock()
+        instance.stop = AsyncMock(side_effect=RuntimeError("boom"))
+        factory.started_processes["pub"] = instance
+        factory.process_lifecycles["pub"] = ProcessLifecycleEnum.LONG_RUNNING
+        factory.process_roles["pub"] = ProcessRoleEnum.CORE
+        factory._finalize_process_run = AsyncMock()
+        result = await factory.stop_process_by_name("pub")
+        assert result.status == "error"
+        assert "pub" not in factory.expected_terminations
+
+
+class TestStartProcessWatchdogMarkers:
+    """start_process records watchdog markers and retains them on failure."""
+
+    @pytest.mark.asyncio
+    async def test_records_desired_state_on_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A successful start records desired=RUNNING and the respawn config.
+
+        Given: a config started via start_process (subprocess spawn stubbed),
+        When: start_process completes,
+        Then: desired state is RUNNING and the config snapshot is recorded.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        monkeypatch.setattr(factory, "_try_create_run_record", mock.AsyncMock(return_value=None))
+        monkeypatch.setattr(factory, "_start_as_subprocess", mock.MagicMock())
+        monkeypatch.setattr(factory, "_finalize_one_shot", mock.AsyncMock())
+        monkeypatch.setattr(factory, "_emit_summary_snapshot", mock.AsyncMock())
+        await factory.start_process(config)
+        assert factory._desired_state["pub"] is _DesiredState.RUNNING
+        assert factory._restart_configs["pub"] is config
+        assert "pub" in factory._restart_uptime_start
+
+    @pytest.mark.asyncio
+    async def test_start_failure_retains_watchdog_markers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A startup failure leaves the watchdog markers in place (R2-1).
+
+        Given: a config whose subprocess spawn raises on start,
+        When: start_process raises,
+        Then: the desired/config/uptime markers it set are RETAINED (the
+            primitive no longer clears watchdog desired-state ownership on
+            failure, so a respawn failure cannot clobber a concurrent
+            stop's STOPPED marker). The lock-taking manual callers own the
+            first-start-leak cleanup for names they armed.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        monkeypatch.setattr(factory, "_try_create_run_record", mock.AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            factory, "_start_as_subprocess", mock.MagicMock(side_effect=RuntimeError("spawn boom"))
+        )
+        monkeypatch.setattr(factory, "_handle_start_failure", mock.AsyncMock())
+        with pytest.raises(RuntimeError, match="spawn boom"):
+            await factory.start_process(config)
+        assert factory._desired_state["pub"] is _DesiredState.RUNNING
+        assert factory._restart_configs["pub"] is config
+        assert "pub" in factory._restart_uptime_start
+
+
+class TestStartByNameLock:
+    """start_process_by_name serializes with the watchdog under the lock."""
+
+    @pytest.mark.asyncio
+    async def test_start_by_name_acquires_lock(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """start_process_by_name starts under the per-name lock.
+
+        Given: a configured process resolvable from a Setting,
+        When: start_process_by_name runs,
+        Then: start_process is awaited (the manual start serializes with a
+            watchdog respawn of the same name).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        captured: list[ProcessConfigModel] = []
+
+        async def _capture(cfg: ProcessConfigModel) -> None:
+            captured.append(cfg)
+
+        monkeypatch.setattr(factory, "_build_config_for_start_by_name", lambda *a, **k: config)
+        monkeypatch.setattr(factory, "_apply_overrides_to_config_dict", lambda *a, **k: True)
+        monkeypatch.setattr(factory, "start_process", _capture)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
+
+        setting = SimpleNamespace(value=json.dumps({"class_path": "x", "method": "start"}))
+
+        @asynccontextmanager
+        async def _session() -> AsyncIterator[Any]:
+            session = MagicMock()
+            session.execute = AsyncMock(
+                return_value=SimpleNamespace(scalar_one_or_none=lambda: setting)
+            )
+            yield session
+
+        repo = MagicMock()
+        repo.session = _session
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repo)
+        result = await factory.start_process_by_name("pub")
+        assert result.status == "success"
+        assert captured == [config]
+
+
+class TestStopAllSweepsWatchdog:
+    """stop_all_processes sweeps live subprocesses and watchdog state."""
+
+    @pytest.mark.asyncio
+    async def test_stop_all_cleans_live_process_instance(self) -> None:
+        """stop_all_processes stops + cleans a live ProcessInstanceInfo.
+
+        Given: a tracked live ProcessInstanceInfo plus watchdog state,
+        When: stop_all_processes runs,
+        Then: the instance is stopped, spawner.cleanup is invoked, and all
+            watchdog dicts are emptied (no orphan subprocess).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
+        factory.spawner = cast(ProcessSpawnerService, spawner_mock)
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        info = ProcessInstanceInfo(
+            name="pub",
+            pid=7,
+            started_at=datetime.now(UTC),
+            config={},
+            process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=None)),
+            spawner=factory.spawner,
+        )
+        factory.started_processes["pub"] = info
+        factory._restart_attempts["pub"] = 2
+        factory._emit_summary_snapshot = AsyncMock()
+        await factory.stop_all_processes()
+        spawner_mock.cleanup.assert_any_call("pub")
+        assert factory.started_processes == {}
+        assert factory._desired_state == {}
+        assert factory._restart_attempts == {}
+        assert factory._restart_tasks == {}
+
+    @pytest.mark.asyncio
+    async def test_stop_all_cancels_pending_restart_task(self) -> None:
+        """stop_all_processes cancels a pending restart task.
+
+        Given: a pending (suspended) restart task and no live instances,
+        When: stop_all_processes runs,
+        Then: the pending restart is cancelled and the dicts are cleared.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        pending = asyncio.create_task(asyncio.sleep(100))
+        factory._restart_tasks["pub"] = pending
+        factory._emit_summary_snapshot = AsyncMock()
+        await factory.stop_all_processes()
+        assert pending.cancelled()
+        assert factory._restart_tasks == {}
+        assert factory._desired_state == {}
+
+
+class TestCompletionHookSchedulesRestart:
+    """_handle_process_completion drives the watchdog after finalize."""
+
+    @pytest.mark.asyncio
+    async def test_completion_schedules_restart_for_failed_always(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A FAILED native death under ALWAYS schedules a restart.
+
+        Given: a RUNNING ALWAYS publisher whose subprocess exited non-zero,
+        When: _handle_process_completion runs,
+        Then: a restart task is scheduled (the completion hook fires the
+            watchdog AFTER finalize).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        monkeypatch.setattr(launcher_module, "_monotonic", lambda: 0.0)
+        spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
+        factory.spawner = cast(ProcessSpawnerService, spawner_mock)
+        config = _watchdog_config(name="pub", restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        _arm_watchdog(factory, config, uptime_start=0.0)
+        factory.process_lifecycles["pub"] = ProcessLifecycleEnum.LONG_RUNNING
+        factory.process_roles["pub"] = ProcessRoleEnum.CORE
+        proc_info = _make_proc_info("pub", 3)
+        factory.started_processes["pub"] = proc_info
+        monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
+        monkeypatch.setattr(factory, "_emit_summary_snapshot", mock.AsyncMock())
+        await factory._handle_process_completion("pub", proc_info)
+        task = factory._restart_tasks.get("pub")
+        assert task is not None
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_completion_spares_paper_clean_idle_exit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """REGRESSION: a CORE ON_FAILURE publisher exiting 0 never restarts.
+
+        The paper publisher is CORE long-running and idle-exits 0 in live
+        mode WITHOUT being in expected_terminations. Under ON_FAILURE its
+        clean exit resolves to SUCCEEDED and must not restart — the exact
+        crash-loop the live feed container hit.
+
+        Given: a CORE ON_FAILURE paper publisher, exit code 0, not expected,
+        When: _handle_process_completion runs,
+        Then: no restart is scheduled and the feed event stays clear.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
+        factory.spawner = cast(ProcessSpawnerService, spawner_mock)
+        config = _watchdog_config(
+            name="paper_feed_publisher",
+            restart_policy=ProcessRestartPolicyEnum.ON_FAILURE,
+            tags=("market-data", "publisher", "paper"),
+        )
+        _arm_watchdog(factory, config, uptime_start=0.0)
         factory.process_lifecycles["paper_feed_publisher"] = ProcessLifecycleEnum.LONG_RUNNING
         factory.process_roles["paper_feed_publisher"] = ProcessRoleEnum.CORE
-        proc_info = ProcessInstanceInfo(
-            name="paper_feed_publisher",
-            pid=321,
-            started_at=datetime.now(UTC),
-            config={},
-            process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=0)),
-        )
+        proc_info = _make_proc_info("paper_feed_publisher", 0)
         factory.started_processes["paper_feed_publisher"] = proc_info
         monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
+        monkeypatch.setattr(factory, "_emit_summary_snapshot", mock.AsyncMock())
         await factory._handle_process_completion("paper_feed_publisher", proc_info)
+        assert "paper_feed_publisher" not in factory._restart_tasks
         assert not factory._feed_failure_event.is_set()
 
     @pytest.mark.asyncio
-    async def test_completion_ignores_crash_when_not_supervised(
+    async def test_completion_expected_stop_does_not_restart(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A crash of a non-supervised process does NOT wake the feed waiter.
+        """A graceful (expected) stop does not schedule a restart.
 
-        Given: a CORE process that crashed but is not in _feed_supervised
-            (the backend container path, where _feed_supervised is empty),
+        Given: a RUNNING publisher in expected_terminations exiting cleanly,
         When: _handle_process_completion runs,
-        Then: the failure event stays clear — feed supervision must not
-            affect non-feed nodes.
+        Then: no restart is scheduled (a deliberate stop owns the lifecycle).
         """
         factory = ProcessLauncherService(MagicMock())
         spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
         factory.spawner = cast(ProcessSpawnerService, spawner_mock)
-        factory.process_lifecycles["some_backend_proc"] = ProcessLifecycleEnum.LONG_RUNNING
-        factory.process_roles["some_backend_proc"] = ProcessRoleEnum.CORE
-        proc_info = ProcessInstanceInfo(
-            name="some_backend_proc",
-            pid=10,
-            started_at=datetime.now(UTC),
-            config={},
-            process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=5)),
-        )
-        factory.started_processes["some_backend_proc"] = proc_info
+        config = _watchdog_config(name="pub", restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        _arm_watchdog(factory, config, uptime_start=0.0)
+        factory.process_lifecycles["pub"] = ProcessLifecycleEnum.LONG_RUNNING
+        factory.process_roles["pub"] = ProcessRoleEnum.CORE
+        factory.expected_terminations.add("pub")
+        proc_info = _make_proc_info("pub", 0)
+        factory.started_processes["pub"] = proc_info
         monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
-        await factory._handle_process_completion("some_backend_proc", proc_info)
+        monkeypatch.setattr(factory, "_emit_summary_snapshot", mock.AsyncMock())
+        await factory._handle_process_completion("pub", proc_info)
+        assert "pub" not in factory._restart_tasks
+
+
+class TestClearWatchdogState:
+    """The single terminal-cleanup helper."""
+
+    def test_clear_removes_all_entries(self) -> None:
+        """_clear_watchdog_state drops every watchdog entry except the lock.
+
+        Given: a name populated across all watchdog dicts (lock included),
+        When: _clear_watchdog_state runs,
+        Then: every per-name dict drops the name EXCEPT _restart_locks — the
+            lock is deliberately retained so a caller queued on it can never
+            be split onto a second freshly-minted lock (Fix 3). The lock is
+            garbage collected only in the fully-drained stop_all_processes
+            context.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        factory._restart_attempts["pub"] = 1
+        factory._total_failed_restarts["pub"] = 2
+        factory._restart_tasks["pub"] = cast("asyncio.Task[None]", SimpleNamespace())
+        factory._restart_locks["pub"] = asyncio.Lock()
+        factory._clear_watchdog_state("pub")
+        assert "pub" not in factory._desired_state
+        assert "pub" not in factory._restart_attempts
+        assert "pub" not in factory._restart_uptime_start
+        assert "pub" not in factory._restart_tasks
+        assert "pub" not in factory._restart_configs
+        assert "pub" in factory._restart_locks
+        assert "pub" not in factory._total_failed_restarts
+
+
+class TestRestartLockFor:
+    """The synchronous per-name lock accessor."""
+
+    def test_lock_is_created_and_memoized(self) -> None:
+        """_restart_lock_for creates a lock once and returns the same instance.
+
+        Given: a fresh launcher,
+        When: _restart_lock_for is called twice for one name,
+        Then: the same Lock is returned both times.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        first = factory._restart_lock_for("pub")
+        second = factory._restart_lock_for("pub")
+        assert isinstance(first, asyncio.Lock)
+        assert first is second
+
+
+class TestMarketDataPublishersRestartPolicyGuard:
+    """Registry guard: no market-data publisher is registered NEVER."""
+
+    def test_no_market_data_publisher_is_registered_never(self) -> None:
+        """No registered market-data publisher carries restart_policy=NEVER.
+
+        A CORE market-data publisher registered NEVER would neither restart
+        nor escalate, silently blocking wait_for_feed_publisher_failure
+        forever. This makes that misconfiguration impossible by construction.
+
+        Given: the full process registry after discovery,
+        When: every market-data publisher entry is inspected,
+        Then: none is registered restart_policy=NEVER.
+        """
+        discover_processes()
+        registry = get_registered_processes()
+        offenders = [
+            name
+            for name, entry in registry.items()
+            if is_market_data_publisher(entry.tags)
+            and entry.restart_policy is ProcessRestartPolicyEnum.NEVER
+        ]
+        assert offenders == []
+
+
+class TestWatchdogStopDuringStartSyncCoverage:
+    """Sync-driven anchors for the stop-during-start await-lines.
+
+    The post-spawn teardown await inside _delayed_restart's locked region
+    is attributed reliably by coverage's thread tracer when the coroutine
+    is driven from a synchronous frame via ``asyncio.run`` rather than an
+    already-running loop, so this sync test keeps those lines covered
+    under parallel (xdist) runs.
+    """
+
+    def test_stop_during_start_teardown_via_asyncio_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Driving the stop-during-start path via asyncio.run covers the teardown.
+
+        Given: a respawn that registers a live instance then flips desired
+            to STOPPED before the post-spawn re-check,
+        When: _delayed_restart is driven through asyncio.run,
+        Then: the just-spawned process is torn down and its state cleared.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
+        factory.spawner = cast(ProcessSpawnerService, spawner_mock)
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        _arm_watchdog(factory, config)
+
+        async def _instant(_delay: float) -> None:
+            return None
+
+        monkeypatch.setattr(launcher_module.asyncio, "sleep", _instant)
+
+        async def _fake_start(cfg: ProcessConfigModel) -> None:
+            factory.started_processes[cfg.name] = ProcessInstanceInfo(
+                name=cfg.name,
+                pid=999,
+                started_at=datetime.now(UTC),
+                config={},
+                process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=None)),
+                spawner=factory.spawner,
+            )
+            factory._desired_state[cfg.name] = _DesiredState.STOPPED
+
+        monkeypatch.setattr(factory, "start_process", _fake_start)
+        asyncio.run(factory._delayed_restart(config.name, 1.0))
+        spawner_mock.terminate.assert_called_once_with(config.name)
+        assert config.name not in factory.started_processes
+        assert config.name not in factory._desired_state
+
+
+class TestStopAllDoneRestartTask:
+    """stop_all_processes skips an already-completed restart task."""
+
+    @pytest.mark.asyncio
+    async def test_stop_all_skips_done_restart_task(self) -> None:
+        """A done restart task in _restart_tasks is not cancelled by stop_all.
+
+        Given: a restart task that has already completed,
+        When: stop_all_processes runs,
+        Then: it skips the done task (no cancel needed) and clears the dicts.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        done_restart = asyncio.create_task(asyncio.sleep(0))
+        await done_restart
+        factory._restart_tasks["pub"] = done_restart
+        factory._emit_summary_snapshot = AsyncMock()
+        await factory.stop_all_processes()
+        assert factory._restart_tasks == {}
+        assert factory._desired_state == {}
+
+
+class TestDelayedRestartFinallyPop:
+    """The finally-clause pops the own task entry on a successful respawn."""
+
+    @pytest.mark.asyncio
+    async def test_own_task_entry_is_popped_on_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A respawn whose own task is the registered entry pops it in finally.
+
+        Given: _delayed_restart launched as a real task and registered as
+            _restart_tasks[name] (so asyncio.current_task() matches),
+        When: the respawn succeeds,
+        Then: the finally clause pops the own entry (line guarded by the
+            current-task identity check executes).
+        """
+        factory = ProcessLauncherService(MagicMock())
+
+        async def _instant(_delay: float) -> None:
+            return None
+
+        monkeypatch.setattr(launcher_module.asyncio, "sleep", _instant)
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
+        _arm_watchdog(factory, config)
+        monkeypatch.setattr(factory, "start_process", mock.AsyncMock())
+        task = asyncio.create_task(factory._delayed_restart(config.name, 1.0))
+        factory._restart_tasks[config.name] = task
+        await task
+        assert config.name not in factory._restart_tasks
+
+
+class _RaceLock:
+    """A per-name lock that simulates a watchdog respawn winning a race.
+
+    On ``__aenter__`` it deterministically inserts ``name`` into the
+    shared ``started_processes`` mapping, modelling a watchdog respawn
+    that started the process while a manual caller was waiting to acquire
+    the lock. This drives the in-lock re-check branch (Fix 4) without
+    spawning helper tasks, so the test leaks no pending coroutine.
+    """
+
+    def __init__(self, started: dict[str, Any], name: str) -> None:
+        """Store the shared registry and the name to mark as running.
+
+        Args:
+            started: The launcher's ``started_processes`` mapping.
+            name: The process name the simulated respawn starts.
+        """
+        self._started = started
+        self._name = name
+        self._inner = asyncio.Lock()
+
+    async def __aenter__(self) -> _RaceLock:
+        """Acquire the lock and mark the process as already running.
+
+        Returns:
+            The lock instance, after simulating the respawn win.
+        """
+        await self._inner.acquire()
+        self._started[self._name] = MagicMock()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        """Release the inner lock and propagate any exception.
+
+        Args:
+            exc_type: Exception type raised in the context, if any.
+            exc: Exception instance raised in the context, if any.
+            tb: Traceback for the exception, if any.
+
+        Returns:
+            ``False`` so any exception propagates unchanged.
+        """
+        self._inner.release()
+        return False
+
+
+class TestWatchdogConcurrencyRegressions:
+    """Focused regressions for the six v3.1 watchdog concurrency fixes.
+
+    Each test drives the exact race the converged Codex+Copilot review
+    flagged on the production feed-container watchdog: double-schedule,
+    abandoned failed-respawn, lock-pop split, manual-start TOCTOU,
+    stop-during-backoff, and terminal-state leak on non-native paths.
+    """
+
+    @pytest.mark.asyncio()
+    async def test_fix1_pending_restart_blocks_second_schedule(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live pending restart task suppresses a second schedule (Fix 1).
+
+        Given: a FAILED death scheduled a restart task still asleep in its
+            backoff (not done), with create_task tracked,
+        When: a second FAILED death reaches _maybe_schedule_restart before
+            the first task finishes,
+        Then: the live-task guard returns without creating a second
+            _delayed_restart and the stored task ref is unchanged — exactly
+            one spawn path stays armed (no double-spawn).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        created: list[asyncio.Task[None]] = []
+        real_create_task = launcher_module.asyncio.create_task
+
+        def _track(coro: Any) -> asyncio.Task[None]:
+            task: asyncio.Task[None] = real_create_task(coro)
+            created.append(task)
+            return task
+
+        async def _never(_delay: float) -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(launcher_module.asyncio, "create_task", _track)
+        monkeypatch.setattr(launcher_module.asyncio, "sleep", _never)
+        await factory._maybe_schedule_restart("pub", ProcessRunStatusEnum.FAILED)
+        first = factory._restart_tasks["pub"]
+        assert not first.done()
+        await factory._maybe_schedule_restart("pub", ProcessRunStatusEnum.FAILED)
+        assert factory._restart_tasks["pub"] is first
+        assert len(created) == 1
+        first.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await first
+
+    @pytest.mark.asyncio()
+    async def test_fix2_failed_respawn_rearms_so_next_attempt_proceeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed respawn reschedules so the next attempt spawns (Fix 2).
+
+        Given: start_process RETAINS desired/config/uptime on a failing
+            call (as the production primitive now does — it no longer
+            clears watchdog ownership on failure) then succeeds,
+        When: _delayed_restart runs and the first respawn raises below the
+            escalation ceiling with desired still RUNNING,
+        Then: the failed-respawn branch confirms desired is still RUNNING,
+            bumps the counters, refreshes the uptime origin, and schedules
+            the next attempt, and that next _delayed_restart proceeds past
+            the desired/config guard and actually respawns rather than
+            silently exiting (the CORE publisher is not abandoned).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        _stub_run_tracking(factory)
+        calls: list[str] = []
+
+        async def _flaky_start(cfg: ProcessConfigModel) -> None:
+            calls.append(cfg.name)
+            if len(calls) == 1:
+                raise RuntimeError("first respawn boom")
+            factory.started_processes[cfg.name] = MagicMock()
+
+        monkeypatch.setattr(factory, "start_process", _flaky_start)
+        monkeypatch.setattr(launcher_module.asyncio, "sleep", AsyncMock())
+        await factory._delayed_restart("pub", 0.0)
+        next_task = factory._restart_tasks.get("pub")
+        assert next_task is not None
+        await next_task
+        assert calls == ["pub", "pub"]
+        assert "pub" in factory.started_processes
         assert not factory._feed_failure_event.is_set()
+
+    @pytest.mark.asyncio()
+    async def test_fix3_clear_preserves_lock_identity_for_waiter(self) -> None:
+        """clear_watchdog_state keeps the lock so a waiter is not split (Fix 3).
+
+        Given: a per-name lock that a caller currently holds, with another
+            coroutine queued to acquire it,
+        When: _clear_watchdog_state runs while the lock is held,
+        Then: the lock object is NOT popped, so _restart_lock_for returns
+            the SAME live lock — the queued waiter and any later caller share
+            one lock and mutual exclusion is preserved (no double-spawn).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        lock = factory._restart_lock_for("pub")
+        order: list[str] = []
+
+        async with lock:
+            order.append("holder-in")
+
+            async def _waiter() -> None:
+                async with factory._restart_lock_for("pub"):
+                    order.append("waiter-in")
+
+            waiter_task = asyncio.create_task(_waiter())
+            await asyncio.sleep(0)
+            factory._clear_watchdog_state("pub")
+            assert factory._restart_lock_for("pub") is lock
+            order.append("holder-out")
+        await waiter_task
+        assert order == ["holder-in", "holder-out", "waiter-in"]
+        assert factory._restart_lock_for("pub") is lock
+
+    @pytest.mark.asyncio()
+    async def test_fix4_manual_start_rechecks_running_inside_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Manual start re-checks started_processes inside the lock (Fix 4).
+
+        Given: a manual start_process_by_name that passes the pre-lock
+            not-running check, then blocks on the per-name lock held by a
+            simulated watchdog respawn which inserts the process into
+            started_processes before releasing,
+        When: the manual start finally acquires the lock,
+        Then: the in-lock re-check sees the name now running and returns
+            ALREADY_RUNNING without a second start_process call — no
+            double-spawn — and the pending restart task was cancelled first
+            (before the lock was awaited).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="zmq_broker", role=ProcessRoleEnum.CORE)
+        started: list[str] = []
+
+        async def _fake_start(cfg: ProcessConfigModel) -> None:
+            started.append(cfg.name)
+
+        cancelled = asyncio.Event()
+
+        async def _pending() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        pending = asyncio.create_task(_pending())
+        await asyncio.sleep(0)
+        factory._restart_tasks["zmq_broker"] = pending
+        race_lock = _RaceLock(factory.started_processes, "zmq_broker")
+        monkeypatch.setattr(factory, "start_process", _fake_start)
+        monkeypatch.setattr(factory, "_build_config_for_start_by_name", lambda *a, **k: config)
+        monkeypatch.setattr(factory, "_apply_overrides_to_config_dict", lambda *a, **k: True)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", lambda: None)
+        monkeypatch.setattr(factory, "_restart_lock_for", lambda _name: race_lock)
+        repo = MagicMock()
+        session = MagicMock()
+        setting = MagicMock()
+        setting.value = json.dumps({"class": "test.Publisher", "method": "run"})
+        session.execute = AsyncMock(return_value=MagicMock())
+        session.execute.return_value.scalar_one_or_none.return_value = setting
+        repo.session.return_value.__aenter__.return_value = session
+        repo.session.return_value.__aexit__ = AsyncMock(return_value=False)
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repo)
+        result = await factory.start_process_by_name("zmq_broker")
+        assert result.status == "already_running"
+        assert started == []
+        assert cancelled.is_set()
+        assert "zmq_broker" not in factory._restart_tasks
+
+    @pytest.mark.asyncio()
+    async def test_fix4_per_wallet_start_rechecks_running_inside_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-wallet manual start re-checks running inside the lock (Fix 4).
+
+        Given: a per-wallet start that passes the pre-lock not-running check,
+            then blocks on the per-name lock held by a simulated watchdog
+            respawn which inserts the instance into started_processes before
+            releasing,
+        When: the per-wallet start finally acquires the lock,
+        Then: the in-lock re-check sees the instance now running and returns
+            ALREADY_RUNNING without calling start_process (no double-spawn),
+            restoring the prior instance config rather than overwriting it.
+        """
+        name = "executor_kraken_w0123456789ab"
+        settings = MagicMock()
+        settings.db_url = "sqlite+aiosqlite:///:memory:"
+        factory = ProcessLauncherService(settings)
+        prior = _watchdog_config(name=name)
+        factory.instance_configs[name] = prior
+        entry = ProcessRegistryEntry(
+            class_ref=cast(Any, MagicMock()),
+            class_path="test.KrakenExecutor",
+            method="run",
+            description="",
+            priority=0,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=("market-data", "publisher"),
+            parameters_model=None,
+            parameters_schema=None,
+            enabled=True,
+            mode="process",
+        )
+        monkeypatch.setattr(
+            launcher_module, "get_registered_processes", lambda: {"executor_kraken": entry}
+        )
+        credential = {"exchange": "kraken", "wallet_public_id": "wallet-0123456789ab"}
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(return_value=[credential])
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repo)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        monkeypatch.setattr(
+            factory,
+            "_build_per_wallet_instance_config",
+            lambda **kwargs: _watchdog_config(name=name),
+        )
+        started: list[str] = []
+
+        async def _fake_start(cfg: ProcessConfigModel) -> None:
+            started.append(cfg.name)
+
+        monkeypatch.setattr(factory, "start_process", _fake_start)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", lambda: None)
+        race_lock = _RaceLock(factory.started_processes, name)
+        monkeypatch.setattr(factory, "_restart_lock_for", lambda _name: race_lock)
+        result = await factory.start_per_wallet_instance_by_name(name)
+        assert result.status == "already_running"
+        assert started == []
+        assert factory.instance_configs[name] is prior
+
+    @pytest.mark.asyncio()
+    async def test_fix4_per_wallet_in_lock_recheck_without_prior_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """In-lock recheck with no prior instance config still short-circuits (Fix 4).
+
+        Given: a per-wallet start for an instance NOT previously registered
+            in instance_configs (so prior_instance_config is None); the
+            per-name lock is replaced by a _RaceLock that marks the instance
+            running on acquire,
+        When: the per-wallet start acquires the lock,
+        Then: the in-lock re-check returns ALREADY_RUNNING without calling
+            start_process and without a prior-config restore (the no-prior
+            branch), exercising the 2192->2194 branch.
+        """
+        name = "executor_kraken_w0123456789ab"
+        settings = MagicMock()
+        settings.db_url = "sqlite+aiosqlite:///:memory:"
+        factory = ProcessLauncherService(settings)
+        entry = ProcessRegistryEntry(
+            class_ref=cast(Any, MagicMock()),
+            class_path="test.KrakenExecutor",
+            method="run",
+            description="",
+            priority=0,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=("market-data", "publisher"),
+            parameters_model=None,
+            parameters_schema=None,
+            enabled=True,
+            mode="process",
+        )
+        monkeypatch.setattr(
+            launcher_module, "get_registered_processes", lambda: {"executor_kraken": entry}
+        )
+        credential = {"exchange": "kraken", "wallet_public_id": "wallet-0123456789ab"}
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(return_value=[credential])
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repo)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        instance_config = _watchdog_config(name=name)
+        monkeypatch.setattr(
+            factory,
+            "_build_per_wallet_instance_config",
+            lambda **kwargs: instance_config,
+        )
+        started: list[str] = []
+
+        async def _fake_start(cfg: ProcessConfigModel) -> None:
+            started.append(cfg.name)
+
+        monkeypatch.setattr(factory, "start_process", _fake_start)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", lambda: None)
+        race_lock = _RaceLock(factory.started_processes, name)
+        monkeypatch.setattr(factory, "_restart_lock_for", lambda _name: race_lock)
+        result = await factory.start_per_wallet_instance_by_name(name)
+        assert result.status == "already_running"
+        assert started == []
+        assert factory.instance_configs[name] is instance_config
+
+    @pytest.mark.asyncio()
+    async def test_fix5_stop_wins_when_process_already_gone(self) -> None:
+        """A stop cancels a pending respawn even with no live process (Fix 5).
+
+        Given: a process already gone from started_processes but with
+            desired=RUNNING and a pending restart task still queued (a
+            respawn scheduled while the old process died),
+        When: stop_process_by_name runs,
+        Then: desired flips STOPPED and the pending restart is cancelled
+            BEFORE the not_running early-return, so the respawn never fires;
+            the result is NOT_RUNNING and the watchdog state is cleared.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        _stub_run_tracking(factory)
+
+        async def _never(_d: float) -> None:
+            await asyncio.Event().wait()
+
+        pending = asyncio.create_task(_never(0.0))
+        factory._restart_tasks["pub"] = pending
+        result = await factory.stop_process_by_name("pub")
+        assert result.status == "not_running"
+        assert pending.cancelled()
+        assert "pub" not in factory._restart_tasks
+        assert "pub" not in factory._desired_state
+        assert "pub" not in factory._restart_configs
+
+    @pytest.mark.asyncio()
+    async def test_fix6_one_shot_completion_clears_watchdog_state(self) -> None:
+        """A completed non-native ONE_SHOT clears its watchdog state (Fix 6).
+
+        Given: a ONE_SHOT thread-mode process whose markers start_process
+            armed before spawning,
+        When: _finalize_one_shot runs after the one-shot completed,
+        Then: the watchdog state is cleared so a ONE_SHOT never leaks
+            desired/config/uptime entries and can never be respawned.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(
+            name="updater",
+            role=ProcessRoleEnum.CORE,
+            lifecycle=ProcessLifecycleEnum.ONE_SHOT,
+            tags=(),
+        )
+        config.mode = "thread"
+        _arm_watchdog(factory, config)
+        _stub_run_tracking(factory)
+        await factory._finalize_one_shot(config)
+        assert "updater" not in factory._desired_state
+        assert "updater" not in factory._restart_configs
+        assert "updater" not in factory._restart_uptime_start
+
+    @pytest.mark.asyncio()
+    async def test_fix6_task_completion_clears_watchdog_state(self) -> None:
+        """A completed asyncio-task process clears its watchdog state (Fix 6).
+
+        Given: a thread/async-task process with watchdog markers armed,
+        When: _handle_task_completion runs on its finished task,
+        Then: the watchdog state is cleared (task processes are never
+            watchdog-respawned), closing the non-native state leak.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="job", role=ProcessRoleEnum.CORE)
+        _arm_watchdog(factory, config)
+        _stub_run_tracking(factory)
+
+        async def _done() -> None:
+            return None
+
+        task = asyncio.create_task(_done())
+        await task
+        factory.process_tasks["job"] = task
+        factory.process_lifecycles["job"] = ProcessLifecycleEnum.LONG_RUNNING
+        await factory._handle_task_completion("job", task)
+        assert "job" not in factory._desired_state
+        assert "job" not in factory._restart_configs
+
+    @pytest.mark.asyncio()
+    async def test_r2_1_failed_respawn_does_not_resurrect_a_stopped_process(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing respawn that races a stop neither resurrects nor orphans (R2-1).
+
+        Given: a watchdog-managed publisher whose respawn is in flight; the
+            respawning start_process RAISES, and while it runs a concurrent
+            stop flips desired=STOPPED (modelling the interleaving where the
+            stop set STOPPED before the respawn's failure path resumes),
+        When: _delayed_restart's failed-respawn branch resumes,
+        Then: it re-checks desired, sees it is no longer RUNNING, clears the
+            watchdog state and returns WITHOUT re-arming desired=RUNNING and
+            WITHOUT scheduling a successor task — so the stopped process is
+            never resurrected and no orphan retry task is left behind.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        _stub_run_tracking(factory)
+        monkeypatch.setattr(launcher_module.asyncio, "sleep", AsyncMock())
+
+        async def _stop_wins_then_fail(cfg: ProcessConfigModel) -> None:
+            factory._desired_state[cfg.name] = _DesiredState.STOPPED
+            raise RuntimeError("respawn boom")
+
+        monkeypatch.setattr(factory, "start_process", _stop_wins_then_fail)
+        await factory._delayed_restart("pub", 0.0)
+        assert "pub" not in factory._restart_tasks
+        assert "pub" not in factory._desired_state
+        assert "pub" not in factory._restart_configs
+        assert "pub" not in factory.started_processes
+        assert not factory._feed_failure_event.is_set()
+
+    @pytest.mark.asyncio()
+    async def test_r2_1_cancel_pending_restart_cancels_successor_task(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stop's cancel loops until the successor task is also gone (R2-1).
+
+        Given: a pending restart task T1 that, when cancelled+awaited,
+            installs a fresh successor task T2 into _restart_tasks[name]
+            (modelling a failed-respawn re-schedule that lands during the
+            stop's cancel/await window), AND a third already-completed task
+            T3 that the loop must pop-and-skip without cancelling,
+        When: _cancel_pending_restart runs,
+        Then: it loops — cancelling T1, observing the live successor T2 and
+            cancelling it too, then popping the already-done T3 via the
+            not-done False branch — so no live task remains for the name
+            (no orphan retry survives the stop).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        successor_cancelled = asyncio.Event()
+
+        async def _done_task() -> None:
+            return None
+
+        async def _successor() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                done_task = asyncio.create_task(_done_task())
+                await done_task
+                factory._restart_tasks["pub"] = done_task
+                successor_cancelled.set()
+                raise
+
+        async def _first() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                factory._restart_tasks["pub"] = asyncio.create_task(_successor())
+                raise
+
+        first = asyncio.create_task(_first())
+        await asyncio.sleep(0)
+        factory._restart_tasks["pub"] = first
+        await factory._cancel_pending_restart("pub")
+        assert "pub" not in factory._restart_tasks
+        assert first.cancelled()
+        assert successor_cancelled.is_set()
+
+    @pytest.mark.asyncio()
+    async def test_r2_2_duplicate_completion_while_pending_is_noop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A duplicate FAILED completion while a restart sleeps is a no-op (R2-2).
+
+        Given: a watchdog-managed publisher with a live pending restart task
+            (still asleep in its backoff) and the escalation counters parked
+            one tick below the ceiling,
+        When: a second FAILED completion reaches _maybe_schedule_restart,
+        Then: the live-task guard at the TOP returns before any counter or
+            escalation mutation — the counters are unchanged, no escalation
+            fires, and the stored task ref is the same (no budget burn, no
+            spurious container trip).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        factory._restart_attempts["pub"] = launcher_module._MAX_RESTART_ATTEMPTS - 1
+        factory._total_failed_restarts["pub"] = 1
+
+        async def _never(_delay: float) -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(launcher_module.asyncio, "sleep", _never)
+        await factory._maybe_schedule_restart("pub", ProcessRunStatusEnum.FAILED)
+        first = factory._restart_tasks["pub"]
+        assert not first.done()
+        attempts_after_first = factory._restart_attempts["pub"]
+        total_after_first = factory._total_failed_restarts["pub"]
+        await factory._maybe_schedule_restart("pub", ProcessRunStatusEnum.FAILED)
+        assert factory._restart_tasks["pub"] is first
+        assert factory._restart_attempts["pub"] == attempts_after_first
+        assert factory._total_failed_restarts["pub"] == total_after_first
+        assert not factory._feed_failure_event.is_set()
+        first.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await first
+
+    @pytest.mark.asyncio()
+    async def test_r2_3_cancel_mid_start_finalizes_run_record(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cancel landing mid-start_process finalizes the run record (R2-3).
+
+        Given: start_process that has created the active run record and is
+            suspended in the spawn region (before the process is live) when
+            its task is cancelled — CancelledError is a BaseException that
+            bypasses the except Exception cleanup,
+        When: the task is cancelled and awaited,
+        Then: the finally clause finalizes the dangling active run (drops it
+            from active_runs and records a terminal status) so no RUNNING run
+            record leaks.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _stub_run_tracking(factory)
+        finalized: list[ProcessRunStatusEnum] = []
+        real_finalize = factory._finalize_process_run
+
+        async def _spy_finalize(name: str, status: ProcessRunStatusEnum, **kwargs: Any) -> None:
+            finalized.append(status)
+            await real_finalize(name, status, **kwargs)
+
+        monkeypatch.setattr(factory, "_finalize_process_run", _spy_finalize)
+        spawn_started = asyncio.Event()
+
+        async def _slow_create(_cfg: ProcessConfigModel) -> str:
+            factory.active_runs["pub"] = "run-id"
+            factory.active_run_started_at["pub"] = datetime.now(UTC)
+            return "run-id"
+
+        async def _block_in_spawn(_cfg: ProcessConfigModel) -> None:
+            spawn_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(factory, "_try_create_run_record", _slow_create)
+        monkeypatch.setattr(factory, "_start_in_process", _block_in_spawn)
+        config.mode = "thread"
+        task = asyncio.create_task(factory.start_process(config))
+        await spawn_started.wait()
+        assert "pub" in factory.active_runs
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert "pub" not in factory.active_runs
+        assert finalized == [ProcessRunStatusEnum.FAILED]
+
+    @pytest.mark.asyncio()
+    async def test_r2_4_failed_manual_start_keeps_managed_name_recoverable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed manual start of a managed name stays recoverable (R2-4).
+
+        Given: a watchdog-managed publisher (desired=RUNNING + config armed)
+            with a pending restart during backoff; an operator triggers a
+            manual start_process_by_name which cancels the pending restart,
+            then start_process RAISES,
+        When: start_process_by_name returns ERROR,
+        Then: because the name was already watchdog-managed before the manual
+            start, the watchdog markers are NOT cleared — desired stays
+            RUNNING and the config is retained — and recovery is re-armed
+            with a fresh pending restart task (R3-1) so the publisher is not
+            left permanently disarmed (it can still be recovered) rather than
+            left dead with no desired/config (the R2-4 regression).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="zmq_broker", role=ProcessRoleEnum.CORE)
+        _arm_watchdog(factory, config)
+
+        async def _failing_start(_cfg: ProcessConfigModel) -> None:
+            raise RuntimeError("manual start boom")
+
+        async def _never() -> None:
+            await asyncio.Event().wait()
+
+        pending = asyncio.create_task(_never())
+        await asyncio.sleep(0)
+        factory._restart_tasks["zmq_broker"] = pending
+        monkeypatch.setattr(factory, "start_process", _failing_start)
+        monkeypatch.setattr(factory, "_build_config_for_start_by_name", lambda *a, **k: config)
+        monkeypatch.setattr(factory, "_apply_overrides_to_config_dict", lambda *a, **k: True)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", lambda: None)
+        repo = MagicMock()
+        session = MagicMock()
+        setting = MagicMock()
+        setting.value = json.dumps({"class": "test.Publisher", "method": "run"})
+        session.execute = AsyncMock(return_value=MagicMock())
+        session.execute.return_value.scalar_one_or_none.return_value = setting
+        repo.session.return_value.__aenter__.return_value = session
+        repo.session.return_value.__aexit__ = AsyncMock(return_value=False)
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repo)
+        result = await factory.start_process_by_name("zmq_broker")
+        assert result.status == "error"
+        assert factory._desired_state["zmq_broker"] is _DesiredState.RUNNING
+        assert factory._restart_configs["zmq_broker"] is config
+        rearmed = factory._restart_tasks["zmq_broker"]
+        assert rearmed is not pending
+        assert not rearmed.done()
+        rearmed.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await rearmed
+
+    @pytest.mark.asyncio()
+    async def test_r2_4_failed_manual_start_of_new_name_clears_markers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed manual start of a brand-new name leaks no markers (R2-1/R2-4).
+
+        Given: a name that is NOT watchdog-managed before the manual start;
+            the manual start_process_by_name calls start_process which arms
+            fresh markers then RAISES (start_process no longer clears them),
+        When: start_process_by_name returns ERROR,
+        Then: because the name was not managed before, the manual caller owns
+            the first-start-leak cleanup and clears the watchdog markers — no
+            desired/config leak for a never-managed name.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="zmq_broker", role=ProcessRoleEnum.CORE)
+
+        async def _arm_then_fail(cfg: ProcessConfigModel) -> None:
+            factory._desired_state[cfg.name] = _DesiredState.RUNNING
+            factory._restart_configs[cfg.name] = cfg
+            factory._restart_uptime_start[cfg.name] = 0.0
+            raise RuntimeError("manual start boom")
+
+        monkeypatch.setattr(factory, "start_process", _arm_then_fail)
+        monkeypatch.setattr(factory, "_build_config_for_start_by_name", lambda *a, **k: config)
+        monkeypatch.setattr(factory, "_apply_overrides_to_config_dict", lambda *a, **k: True)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", lambda: None)
+        repo = MagicMock()
+        session = MagicMock()
+        setting = MagicMock()
+        setting.value = json.dumps({"class": "test.Publisher", "method": "run"})
+        session.execute = AsyncMock(return_value=MagicMock())
+        session.execute.return_value.scalar_one_or_none.return_value = setting
+        repo.session.return_value.__aenter__.return_value = session
+        repo.session.return_value.__aexit__ = AsyncMock(return_value=False)
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repo)
+        result = await factory.start_process_by_name("zmq_broker")
+        assert result.status == "error"
+        assert "zmq_broker" not in factory._desired_state
+        assert "zmq_broker" not in factory._restart_configs
+        assert "zmq_broker" not in factory._restart_uptime_start
+
+    @pytest.mark.asyncio()
+    async def test_r2_4_failed_per_wallet_start_keeps_managed_instance_recoverable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed per-wallet start of a managed instance stays recoverable (R2-4).
+
+        Given: a watchdog-managed per-wallet executor instance (desired=RUNNING
+            + config armed) whose manual start_per_wallet_instance_by_name then
+            has start_process RAISE,
+        When: the per-wallet start returns ERROR,
+        Then: because the instance was already watchdog-managed before the
+            manual start, the markers are NOT cleared — desired stays RUNNING
+            and the config is retained — and recovery is re-armed with a
+            fresh pending restart task (R3-1), so the instance is not
+            permanently disarmed (it can still be recovered), exercising the
+            managed (re-arm) branch of the per-wallet failure path.
+        """
+        name = "executor_kraken_w0123456789ab"
+        settings = MagicMock()
+        settings.db_url = "sqlite+aiosqlite:///:memory:"
+        factory = ProcessLauncherService(settings)
+        managed_config = _watchdog_config(name=name)
+        _arm_watchdog(factory, managed_config)
+        entry = ProcessRegistryEntry(
+            class_ref=cast(Any, MagicMock()),
+            class_path="test.KrakenExecutor",
+            method="run",
+            description="",
+            priority=0,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=("market-data", "publisher"),
+            parameters_model=None,
+            parameters_schema=None,
+            enabled=True,
+            mode="process",
+        )
+        monkeypatch.setattr(
+            launcher_module, "get_registered_processes", lambda: {"executor_kraken": entry}
+        )
+        credential = {"exchange": "kraken", "wallet_public_id": "wallet-0123456789ab"}
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(return_value=[credential])
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repo)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        monkeypatch.setattr(
+            factory,
+            "_build_per_wallet_instance_config",
+            lambda **kwargs: _watchdog_config(name=name),
+        )
+
+        async def _failing_start(_cfg: ProcessConfigModel) -> None:
+            raise RuntimeError("per-wallet start boom")
+
+        async def _never() -> None:
+            await asyncio.Event().wait()
+
+        pending = asyncio.create_task(_never())
+        await asyncio.sleep(0)
+        factory._restart_tasks[name] = pending
+        monkeypatch.setattr(factory, "start_process", _failing_start)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", lambda: None)
+        result = await factory.start_per_wallet_instance_by_name(name)
+        assert result.status == "error"
+        assert factory._desired_state[name] is _DesiredState.RUNNING
+        assert factory._restart_configs[name] is managed_config
+        assert "job" not in factory._restart_uptime_start
+        rearmed = factory._restart_tasks[name]
+        assert rearmed is not pending
+        assert not rearmed.done()
+        rearmed.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await rearmed
+
+    @pytest.mark.asyncio()
+    async def test_r3_1_failed_manual_start_rearms_recovery_for_managed_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed manual start of a managed name re-arms recovery (R3-1).
+
+        Given: a watchdog-managed publisher with a pending restart task armed
+            during backoff; an operator's manual start_process_by_name cancels
+            that pending task (via _cancel_pending_restart) and then
+            start_process RAISES,
+        When: start_process_by_name returns ERROR,
+        Then: recovery is re-armed — a NEW _restart_tasks entry (distinct from
+            the cancelled one, not done) is scheduled under the existing
+            per-name lock — and the watchdog markers are retained
+            (desired=RUNNING, config kept), closing the INERT-state hole where
+            the watchdog would otherwise never re-fire.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="zmq_broker", role=ProcessRoleEnum.CORE)
+        _arm_watchdog(factory, config)
+        factory._restart_attempts["zmq_broker"] = 2
+
+        async def _failing_start(_cfg: ProcessConfigModel) -> None:
+            raise RuntimeError("manual start boom")
+
+        async def _never() -> None:
+            await asyncio.Event().wait()
+
+        pending = asyncio.create_task(_never())
+        await asyncio.sleep(0)
+        factory._restart_tasks["zmq_broker"] = pending
+        monkeypatch.setattr(factory, "start_process", _failing_start)
+        monkeypatch.setattr(factory, "_build_config_for_start_by_name", lambda *a, **k: config)
+        monkeypatch.setattr(factory, "_apply_overrides_to_config_dict", lambda *a, **k: True)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", lambda: None)
+        repo = MagicMock()
+        session = MagicMock()
+        setting = MagicMock()
+        setting.value = json.dumps({"class": "test.Publisher", "method": "run"})
+        session.execute = AsyncMock(return_value=MagicMock())
+        session.execute.return_value.scalar_one_or_none.return_value = setting
+        repo.session.return_value.__aenter__.return_value = session
+        repo.session.return_value.__aexit__ = AsyncMock(return_value=False)
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repo)
+        result = await factory.start_process_by_name("zmq_broker")
+        assert result.status == "error"
+        assert factory._desired_state["zmq_broker"] is _DesiredState.RUNNING
+        assert factory._restart_configs["zmq_broker"] is config
+        assert pending.cancelled()
+        rearmed = factory._restart_tasks["zmq_broker"]
+        assert rearmed is not pending
+        assert not rearmed.done()
+        rearmed.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await rearmed
+
+    @pytest.mark.asyncio()
+    async def test_r3_1_failed_manual_start_of_new_name_does_not_rearm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed manual start of an unmanaged name re-arms nothing (R3-1).
+
+        Given: a name that is NOT watchdog-managed before the manual start;
+            start_process arms fresh markers then RAISES,
+        When: start_process_by_name returns ERROR,
+        Then: because the name was not managed before, the manual caller clears
+            the watchdog markers and schedules NO replacement restart task —
+            the re-arm is reserved for already-managed names only.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="zmq_broker", role=ProcessRoleEnum.CORE)
+
+        async def _arm_then_fail(cfg: ProcessConfigModel) -> None:
+            factory._desired_state[cfg.name] = _DesiredState.RUNNING
+            factory._restart_configs[cfg.name] = cfg
+            factory._restart_uptime_start[cfg.name] = 0.0
+            raise RuntimeError("manual start boom")
+
+        monkeypatch.setattr(factory, "start_process", _arm_then_fail)
+        monkeypatch.setattr(factory, "_build_config_for_start_by_name", lambda *a, **k: config)
+        monkeypatch.setattr(factory, "_apply_overrides_to_config_dict", lambda *a, **k: True)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", lambda: None)
+        repo = MagicMock()
+        session = MagicMock()
+        setting = MagicMock()
+        setting.value = json.dumps({"class": "test.Publisher", "method": "run"})
+        session.execute = AsyncMock(return_value=MagicMock())
+        session.execute.return_value.scalar_one_or_none.return_value = setting
+        repo.session.return_value.__aenter__.return_value = session
+        repo.session.return_value.__aexit__ = AsyncMock(return_value=False)
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repo)
+        result = await factory.start_process_by_name("zmq_broker")
+        assert result.status == "error"
+        assert "zmq_broker" not in factory._desired_state
+        assert "zmq_broker" not in factory._restart_configs
+        assert "zmq_broker" not in factory._restart_tasks
+
+    @pytest.mark.asyncio()
+    async def test_r3_1_rearm_does_not_stack_when_task_already_live(self) -> None:
+        """Re-arm is a no-op when a live restart task is already pending (R3-1).
+
+        Given: a managed name whose _restart_tasks entry is still a live (not
+            done) task when _rearm_recovery_after_manual_start_failure is
+            invoked directly,
+        When: the re-arm runs,
+        Then: the live-task guard returns without scheduling a second task —
+            the existing task ref is preserved (no stacking of two sleeping
+            restart tasks).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+
+        async def _never() -> None:
+            await asyncio.Event().wait()
+
+        live = asyncio.create_task(_never())
+        await asyncio.sleep(0)
+        factory._restart_tasks["pub"] = live
+        factory._rearm_recovery_after_manual_start_failure("pub")
+        assert factory._restart_tasks["pub"] is live
+        live.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await live
+
+    @pytest.mark.asyncio()
+    async def test_r3_2_cancel_during_create_run_record_finalizes_run(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cancel inside _try_create_run_record finalizes the run (R3-2).
+
+        Given: start_process whose _try_create_run_record has stamped
+            active_runs and is suspended awaiting the run-event emit when a
+            CancelledError lands — a BaseException that the inner
+            except-Exception of _try_create_run_record does not catch and that
+            bypasses start_process's except-Exception cleanup,
+        When: the task is cancelled and awaited,
+        Then: the try/finally that now opens BEFORE the run-record creation
+            finalizes the dangling active run FAILED and drops it from
+            active_runs, so a cancel landing during run-record creation never
+            leaks a RUNNING run record.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _stub_run_tracking(factory)
+        finalized: list[ProcessRunStatusEnum] = []
+        real_finalize = factory._finalize_process_run
+
+        async def _spy_finalize(name: str, status: ProcessRunStatusEnum, **kwargs: Any) -> None:
+            finalized.append(status)
+            await real_finalize(name, status, **kwargs)
+
+        monkeypatch.setattr(factory, "_finalize_process_run", _spy_finalize)
+        create_blocking = asyncio.Event()
+
+        async def _block_in_create(_cfg: ProcessConfigModel) -> str:
+            factory.active_runs["pub"] = "run-id"
+            factory.active_run_started_at["pub"] = datetime.now(UTC)
+            create_blocking.set()
+            await asyncio.Event().wait()
+            return "run-id"
+
+        monkeypatch.setattr(factory, "_try_create_run_record", _block_in_create)
+        config.mode = "thread"
+        task = asyncio.create_task(factory.start_process(config))
+        await create_blocking.wait()
+        assert "pub" in factory.active_runs
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert "pub" not in factory.active_runs
+        assert finalized == [ProcessRunStatusEnum.FAILED]
+
+    @pytest.mark.asyncio()
+    async def test_r3_2_normal_exception_failure_does_not_double_finalize(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A normal start_process failure does not double-finalize (R3-2).
+
+        Given: start_process whose spawn raises an ordinary Exception after the
+            run record was created — the normal except-Exception path runs
+            _handle_start_failure, which records the run FAILED and pops
+            active_runs,
+        When: start_process raises,
+        Then: the widened finally is a no-op because active_runs was already
+            popped by _handle_start_failure, so _finalize_process_run is never
+            called by the cancel-guard — the run is finalized FAILED exactly
+            once (via _handle_start_failure / _update_process_run_record) with
+            no double-finalize from the broadened guard.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _stub_run_tracking(factory)
+        finalize_calls: list[ProcessRunStatusEnum] = []
+        update_calls: list[ProcessRunStatusEnum] = []
+
+        async def _spy_finalize(name: str, status: ProcessRunStatusEnum, **kwargs: Any) -> None:
+            finalize_calls.append(status)
+
+        async def _spy_update(public_id: str, status: ProcessRunStatusEnum, **kwargs: Any) -> None:
+            update_calls.append(status)
+
+        async def _create(_cfg: ProcessConfigModel) -> str:
+            factory.active_runs["pub"] = "run-id"
+            factory.active_run_started_at["pub"] = datetime.now(UTC)
+            return "run-id"
+
+        monkeypatch.setattr(factory, "_try_create_run_record", _create)
+        monkeypatch.setattr(factory, "_finalize_process_run", _spy_finalize)
+        monkeypatch.setattr(factory, "_update_process_run_record", _spy_update)
+
+        async def _failing_spawn(_cfg: ProcessConfigModel) -> None:
+            raise RuntimeError("spawn boom")
+
+        monkeypatch.setattr(factory, "_start_in_process", _failing_spawn)
+        config.mode = "thread"
+        with pytest.raises(RuntimeError, match="spawn boom"):
+            await factory.start_process(config)
+        assert "pub" not in factory.active_runs
+        assert finalize_calls == []
+        assert update_calls == [ProcessRunStatusEnum.FAILED]
+
+    @pytest.mark.asyncio()
+    async def test_r4_1_handle_manual_start_stop_race_returns_none_when_running(self) -> None:
+        """The post-spawn re-check is a no-op when desired stays RUNNING (R4-1).
+
+        Given: a watchdog-managed name whose desired state is still RUNNING
+            after the in-flight manual start spawned it (no racing stop),
+        When: ``_handle_manual_start_stop_race`` runs its post-spawn re-check,
+        Then: it returns ``None`` (the start won) and the just-started process
+            is left running.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        factory.started_processes["pub"] = MagicMock()
+        result = await factory._handle_manual_start_stop_race("pub")
+        assert result is None
+        assert "pub" in factory.started_processes
+        assert factory._desired_state.get("pub") is _DesiredState.RUNNING
+
+    @pytest.mark.asyncio()
+    async def test_r4_1_manual_start_post_spawn_recheck_tears_down(self) -> None:
+        """A manual start whose post-spawn re-check sees STOPPED tears down (R4-1).
+
+        Given: the in-flight manual start spawned a live process, but a
+            concurrent stop flipped desired to STOPPED before the post-spawn
+            re-check,
+        When: ``_handle_manual_start_stop_race`` runs,
+        Then: the just-started process is torn down (its ``stop`` awaited, no
+            ``started_processes`` entry, watchdog state cleared) and an ERROR
+            result is returned so the stop wins.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        stop_calls: list[str] = []
+        instance = MagicMock()
+        instance.stop = AsyncMock(side_effect=lambda: stop_calls.append("pub"))
+        factory.started_processes["pub"] = instance
+        factory._desired_state["pub"] = _DesiredState.STOPPED
+        result = await factory._handle_manual_start_stop_race("pub")
+        assert result is not None
+        assert result.status == "error"
+        assert stop_calls == ["pub"]
+        assert "pub" not in factory.started_processes
+        assert factory._desired_state.get("pub") is None
+
+    @pytest.mark.asyncio()
+    async def test_r4_1_bare_start_post_spawn_stopped_tears_down(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bare manual start whose stop won post-spawn returns the stop (R4-1).
+
+        Given: a manual ``start_process_by_name`` where ``start_process``
+            registers the live process but a concurrent stop set desired to
+            STOPPED by the time the post-spawn re-check runs,
+        When: the in-lock re-check fires,
+        Then: ``start_process_by_name`` returns the not-running ERROR result
+            from the teardown (the stop wins), exercising the bare-start
+            post-spawn return path.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        instance = MagicMock()
+        instance.stop = AsyncMock()
+
+        async def _stop_wins_start(cfg: ProcessConfigModel) -> None:
+            factory._desired_state["pub"] = _DesiredState.STOPPED
+            factory.started_processes["pub"] = instance
+
+        monkeypatch.setattr(factory, "start_process", _stop_wins_start)
+        monkeypatch.setattr(factory, "_build_config_for_start_by_name", lambda *a, **k: config)
+        monkeypatch.setattr(factory, "_apply_overrides_to_config_dict", lambda *a, **k: True)
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", lambda: None)
+        repo = MagicMock()
+        session = MagicMock()
+        setting = MagicMock()
+        setting.value = json.dumps({"class": "test.Publisher", "method": "run"})
+        session.execute = AsyncMock(return_value=MagicMock())
+        session.execute.return_value.scalar_one_or_none.return_value = setting
+        repo.session.return_value.__aenter__.return_value = session
+        repo.session.return_value.__aexit__ = AsyncMock(return_value=False)
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repo)
+        result = await asyncio.wait_for(factory.start_process_by_name("pub"), timeout=2.0)
+        assert result.status == "error"
+        assert "pub" not in factory.started_processes
+        assert factory._desired_state.get("pub") is None
+
+    @pytest.mark.asyncio()
+    async def test_r4_1_per_wallet_start_post_spawn_stopped_tears_down(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A per-wallet manual start whose stop won post-spawn tears down (R4-1).
+
+        Given: a per-wallet executor manual start where ``start_process``
+            registers the live instance but a concurrent stop set desired to
+            STOPPED by the time the post-spawn re-check runs,
+        When: ``start_per_wallet_instance_by_name`` runs its in-lock re-check,
+        Then: the just-started instance is torn down, ``instance_configs`` is
+            dropped, and an ERROR result is returned so the stop wins.
+        """
+        name = "executor_kraken_w0123456789ab"
+        settings = MagicMock()
+        settings.db_url = "sqlite+aiosqlite:///:memory:"
+        factory = ProcessLauncherService(settings)
+        entry = ProcessRegistryEntry(
+            class_ref=cast(Any, MagicMock()),
+            class_path="test.KrakenExecutor",
+            method="run",
+            description="",
+            priority=0,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=("market-data", "publisher"),
+            parameters_model=None,
+            parameters_schema=None,
+            enabled=True,
+            mode="process",
+        )
+        monkeypatch.setattr(
+            launcher_module, "get_registered_processes", lambda: {"executor_kraken": entry}
+        )
+        credential = {"exchange": "kraken", "wallet_public_id": "wallet-0123456789ab"}
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(return_value=[credential])
+        monkeypatch.setattr(launcher_module, "get_repository", lambda _url: repo)
+        monkeypatch.setattr(factory, "_load_template_setting", AsyncMock(return_value={}))
+        monkeypatch.setattr(
+            factory,
+            "_build_per_wallet_instance_config",
+            lambda **kwargs: _watchdog_config(name=name),
+        )
+        monkeypatch.setattr(factory, "_start_native_process_monitoring", lambda: None)
+        stop_calls: list[str] = []
+        instance = MagicMock()
+        instance.stop = AsyncMock(side_effect=lambda: stop_calls.append(name))
+
+        async def _stop_wins_start(cfg: ProcessConfigModel) -> None:
+            factory._desired_state[name] = _DesiredState.STOPPED
+            factory.started_processes[name] = instance
+
+        monkeypatch.setattr(factory, "start_process", _stop_wins_start)
+        result = await asyncio.wait_for(
+            factory.start_per_wallet_instance_by_name(name), timeout=2.0
+        )
+        assert result.status == "error"
+        assert stop_calls == [name]
+        assert name not in factory.started_processes
+        assert name not in factory.instance_configs
+        assert factory._desired_state.get(name) is None
+
+    @pytest.mark.asyncio()
+    async def test_r4_1_rearm_gated_when_stop_set_desired_stopped(self) -> None:
+        """The R3-1 re-arm is suppressed when a stop set desired=STOPPED (R4-1).
+
+        Given: a watchdog-managed name whose desired state was flipped to
+            STOPPED by a concurrent stop, with no pending restart task,
+        When: ``_rearm_recovery_after_manual_start_failure`` runs (the failed
+            manual-start re-arm path),
+        Then: no restart task is created — the stop owns the lifecycle and the
+            re-arm must not resurrect it.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        factory._desired_state["pub"] = _DesiredState.STOPPED
+        factory._rearm_recovery_after_manual_start_failure("pub")
+        assert factory._restart_tasks.get("pub") is None
+
+    @pytest.mark.asyncio()
+    async def test_r4_1_stop_racing_inflight_manual_start_wins_via_lock(self) -> None:
+        """Stop racing an in-flight manual start wins and leaves no orphan (R4-1).
+
+        Given: a watchdog-managed publisher; an in-flight manual start holds the
+            per-name lock and is suspended inside ``start_process`` after it set
+            desired=RUNNING and registered a live process,
+        When: a concurrent ``stop_process_by_name`` runs (sets desired=STOPPED,
+            then blocks on the same per-name lock) and the start then finishes,
+        Then: the manual start's post-spawn re-check sees STOPPED and tears the
+            process down; the stop then acquires the lock, finds nothing
+            running, and clears state — end state is STOPPED, not running,
+            watchdog state cleared, and NO orphan restart task remains.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        config_for_start = _watchdog_config(name="pub")
+        gate = asyncio.Event()
+        released = asyncio.Event()
+
+        async def _suspending_start(_cfg: ProcessConfigModel) -> None:
+            factory._desired_state["pub"] = _DesiredState.RUNNING
+            instance = MagicMock()
+            instance.stop = AsyncMock()
+            factory.started_processes["pub"] = instance
+            released.set()
+            await gate.wait()
+
+        async def _manual_start_under_lock() -> str:
+            await factory._cancel_pending_restart("pub")
+            async with factory._restart_lock_for("pub"):
+                await _suspending_start(config_for_start)
+                stopped = await factory._handle_manual_start_stop_race("pub")
+                if stopped is not None:
+                    return stopped.status
+            return "success"
+
+        start_task = asyncio.create_task(_manual_start_under_lock())
+        await released.wait()
+        stop_task = asyncio.create_task(factory.stop_process_by_name("pub"))
+        await asyncio.sleep(0)
+        gate.set()
+        start_status = await asyncio.wait_for(start_task, timeout=2.0)
+        stop_result = await asyncio.wait_for(stop_task, timeout=2.0)
+        assert start_status == "error"
+        assert stop_result.status == "not_running"
+        assert factory._desired_state.get("pub") is None
+        assert "pub" not in factory.started_processes
+        assert "pub" not in factory._restart_configs
+        assert factory._restart_tasks.get("pub") is None
+
+    @pytest.mark.asyncio()
+    async def test_r4_1_stop_takes_lock_no_self_deadlock(self) -> None:
+        """Stop takes the lock for its decision without self-deadlock (R4-1).
+
+        Given: a watchdog-managed publisher with a live process and a pending
+            delayed-restart task,
+        When: ``stop_process_by_name`` runs — it cancels the pending restart
+            outside the lock, then acquires the per-name lock for the real stop
+            and ``_clear_watchdog_state``,
+        Then: the call completes within a timeout (proving the lock acquisition
+            does not deadlock against the cancelled task) and the process is
+            stopped with watchdog state cleared.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        _stub_run_tracking(factory)
+        instance = MagicMock()
+        instance.stop = AsyncMock()
+        factory.started_processes["pub"] = instance
+        factory._restart_tasks["pub"] = asyncio.create_task(factory._delayed_restart("pub", 999.0))
+        await asyncio.sleep(0)
+        result = await asyncio.wait_for(factory.stop_process_by_name("pub"), timeout=2.0)
+        assert result.status == "success"
+        assert "pub" not in factory.started_processes
+        assert factory._desired_state.get("pub") is None
+        assert factory._restart_tasks.get("pub") is None

@@ -17,10 +17,12 @@ import contextlib
 import inspect
 import json
 import time
+import zlib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 from typing import Final
 from uuid import uuid7
@@ -84,6 +86,80 @@ _STRATEGIES_LIST_STREAM = "strategies.events.list"
 _BROADCAST_FAILURE_TEMPLATE = "Failed to broadcast {}: {}"
 _CORE_HEALTH_CACHE_TTL_S: Final[float] = 5.0
 _MARKET_DATA_PUBLISHER_TAGS: Final[frozenset[str]] = frozenset({"market-data", "publisher"})
+
+_RESTART_BASE_DELAY_S: Final[float] = 1.0
+_RESTART_FACTOR: Final[float] = 2.0
+_RESTART_MAX_DELAY_S: Final[float] = 60.0
+_RESTART_JITTER_FRACTION: Final[float] = 0.25
+_RESTART_HEALTHY_UPTIME_S: Final[float] = 120.0
+_TOTAL_RESET_UPTIME_S: Final[float] = 1200.0
+_MAX_RESTART_ATTEMPTS: Final[int] = 6
+_MAX_TOTAL_FAILED_RESTARTS: Final[int] = 20
+
+
+class _DesiredState(StrEnum):
+    """Operator-intended state for a managed process.
+
+    The watchdog reconciles the actual process state toward this
+    single source of truth on every death. ``RUNNING`` means the
+    process should be (re)spawned on an unexpected death per its
+    restart policy; ``STOPPED`` means a deliberate stop owns the
+    process and the watchdog must not respawn it.
+    """
+
+    RUNNING = "running"
+    STOPPED = "stopped"
+
+
+def _monotonic() -> float:
+    """Return a monotonic clock reading for uptime/backoff accounting.
+
+    A module-level indirection so tests can patch the clock and drive
+    deterministic uptime/escalation scenarios without real sleeps.
+
+    Returns:
+        The current monotonic time in seconds.
+    """
+    return time.monotonic()
+
+
+def _jitter(name: str, base: float) -> float:
+    """Return an additive, per-name de-correlated jitter for a backoff.
+
+    The jitter is ADDITIVE-only (never shrinks the base delay) and is
+    de-correlated across process names via ``zlib.crc32`` so a fleet of
+    publishers dying together does not stampede with identical backoffs.
+    A given name always yields the same fraction, which keeps tests
+    deterministic.
+
+    Args:
+        name: Process name driving the de-correlation.
+        base: Base backoff delay the jitter is computed against.
+
+    Returns:
+        A non-negative jitter in ``[0, base * _RESTART_JITTER_FRACTION)``.
+    """
+    fraction = zlib.crc32(name.encode()) % 1000 / 1000.0
+    return base * _RESTART_JITTER_FRACTION * fraction
+
+
+def _compute_backoff_delay(name: str, attempts: int) -> float:
+    """Return the backoff delay for the n-th consecutive restart attempt.
+
+    Exponential backoff (``base * factor ** attempts``) capped at
+    ``_RESTART_MAX_DELAY_S``, plus the additive per-name jitter so the
+    final delay never drops below the capped exponential term.
+
+    Args:
+        name: Process name (drives the de-correlated jitter).
+        attempts: Consecutive restart-triggering deaths so far.
+
+    Returns:
+        The backoff delay in seconds.
+    """
+    exponential = _RESTART_BASE_DELAY_S * _RESTART_FACTOR**attempts
+    capped = min(exponential, _RESTART_MAX_DELAY_S)
+    return capped + _jitter(name, capped)
 
 
 def is_market_data_publisher(tags: Iterable[str]) -> bool:
@@ -170,6 +246,24 @@ class ProcessLauncherService:
     - ProcessRegistrySyncer for registry-database synchronization
     - config_resolver module for configuration parsing
 
+    Watchdog concurrency model (desired-state reconciler):
+        Each managed process carries an explicit desired state
+        (``RUNNING`` | ``STOPPED``) in :attr:`_desired_state` — the
+        single source of truth. On every death the watchdog reconciles
+        the actual state toward the desired one under a per-name
+        ``asyncio.Lock`` obtained from :meth:`_restart_lock_for`.
+        Single-loop asyncio makes a synchronous check-and-set atomic.
+
+        NO-REENTRANCY RULE: only :meth:`_maybe_schedule_restart`,
+        :meth:`_delayed_restart`, :meth:`start_process_by_name`,
+        :meth:`stop_process_by_name`, and :meth:`stop_all_processes`
+        acquire ``_restart_lock_for``. :meth:`start_process` and the
+        internal stop primitive used INSIDE a locked region MUST NOT
+        acquire it (the lock is not reentrant). The backoff
+        ``asyncio.sleep`` in :meth:`_delayed_restart` stays OUTSIDE the
+        lock so a stop can cancel it cleanly. No path acquires two
+        different name-locks, so there is no cross-name deadlock.
+
     Attributes:
         settings: Application settings.
         started_processes: Dict of running process instances.
@@ -197,9 +291,15 @@ class ProcessLauncherService:
         self.active_run_started_at: dict[str, datetime] = {}
         self.spawner = ProcessSpawnerService()
         self.expected_terminations: set[str] = set()
-        self._feed_supervised: set[str] = set()
         self._feed_failed_publisher: str = ""
         self._feed_failure_event = asyncio.Event()
+        self._desired_state: dict[str, _DesiredState] = {}
+        self._restart_attempts: dict[str, int] = {}
+        self._total_failed_restarts: dict[str, int] = {}
+        self._restart_uptime_start: dict[str, float] = {}
+        self._restart_configs: dict[str, ProcessConfigModel] = {}
+        self._restart_tasks: dict[str, asyncio.Task[None]] = {}
+        self._restart_locks: dict[str, asyncio.Lock] = {}
         self._run_recorder = ProcessRunRecorder(settings)
         self._registry_syncer = ProcessRegistrySyncer(settings)
         self._market_persist_policy: MarketPersistPolicy | None = None
@@ -768,6 +868,13 @@ class ProcessLauncherService:
     async def _finalize_one_shot(self, config: ProcessConfigModel) -> None:
         """Finalize a one-shot process that has already completed.
 
+        Clears the watchdog markers :meth:`start_process` armed before
+        spawning so a completed non-native ONE_SHOT never leaks
+        desired-state/config/uptime entries (it must never be
+        watchdog-restarted). Native ONE_SHOT subprocesses do not reach
+        this branch (the :meth:`_is_one_shot_completed` guard excludes
+        PROCESS mode) and are cleared via their completion handler.
+
         Args:
             config: Process configuration.
         """
@@ -777,6 +884,7 @@ class ProcessLauncherService:
         self.started_processes.pop(config.name, None)
         self.process_lifecycles.pop(config.name, None)
         self.process_roles.pop(config.name, None)
+        self._clear_watchdog_state(config.name)
 
     async def start_process(self, config: ProcessConfigModel) -> None:
         """Start a single process from configuration.
@@ -791,6 +899,32 @@ class ProcessLauncherService:
         config carries the STRATEGY role — so subscribers can refresh
         their cached views without polling.
 
+        This is the LOCK-FREE start primitive. It synchronously records
+        the watchdog markers (desired-state RUNNING, the respawn config
+        snapshot, and the uptime origin) BEFORE its first await so a
+        death that arrives later can be reconciled. It NEVER clears the
+        watchdog desired-state/config/uptime on a startup failure:
+        ownership of those markers belongs to the watchdog and to a
+        deliberate stop, so a respawn failure cannot clobber a concurrent
+        stop's ``STOPPED`` marker (see R2-1). The lock-taking manual
+        callers (:meth:`start_process_by_name`,
+        :meth:`start_per_wallet_instance_by_name`) own the first-start
+        leak cleanup for names they themselves armed. The ``try`` opens
+        BEFORE the run-record creation await so its ``finally`` covers
+        ``_try_create_run_record`` too. On ANY non-clean exit (including
+        ``CancelledError``, which is a ``BaseException`` that bypasses
+        the ``except Exception`` cleanup), the ``finally`` finalizes a
+        still-dangling active run record so a cancel landing inside
+        run-record creation, or between it and the spawn, never leaks a
+        RUNNING run (see R2-3 / R3-2). The ``finally`` guards on
+        ``config.name in self.active_runs`` so the normal ``except``
+        path (which already pops ``active_runs`` via
+        :meth:`_handle_start_failure`) is never double-finalized. Per
+        the NO-REENTRANCY RULE it never acquires
+        ``_restart_lock_for``; callers that need serialization
+        (:meth:`start_process_by_name`, :meth:`_delayed_restart`) hold
+        the lock around their call.
+
         Args:
             config: Process configuration to start.
 
@@ -799,8 +933,13 @@ class ProcessLauncherService:
         """
         self.process_lifecycles[config.name] = config.lifecycle
         self.process_roles[config.name] = config.role
-        public_id = await self._try_create_run_record(config)
+        self._desired_state[config.name] = _DesiredState.RUNNING
+        self._restart_configs[config.name] = config
+        self._restart_uptime_start[config.name] = _monotonic()
+        started = False
+        public_id: str | None = None
         try:
+            public_id = await self._try_create_run_record(config)
             logger.info(
                 f"Starting process '{config.name}' in {config.mode} mode "
                 f"(class: {config.class_path}, method: {config.method})"
@@ -816,9 +955,18 @@ class ProcessLauncherService:
                 )
             if config.note:
                 logger.info(f"Note for '{config.name}': {config.note}")
+            started = True
         except Exception as exc:
             await self._handle_start_failure(config.name, public_id, exc)
             raise
+        finally:
+            if not started and config.name in self.active_runs:
+                self._cleanup_failed_start(config.name)
+                await self._finalize_process_run(
+                    config.name,
+                    ProcessRunStatusEnum.FAILED,
+                    error="start cancelled before spawn",
+                )
         await self._finalize_one_shot(config)
         await self._emit_summary_snapshot()
         if config.role is ProcessRoleEnum.STRATEGY:
@@ -918,17 +1066,16 @@ class ProcessLauncherService:
         profile (the feed container always wants publishers) and ignores
         each config's registered mode (always ``PROCESS``). Native
         subprocess monitoring is started so a publisher that exits is
-        detected. Each CORE long-running publisher that starts is recorded
-        in :attr:`_feed_supervised`; if one later crashes (non-zero exit
-        or unhandled exception — NOT a clean exit-0, which spares the
-        paper publisher's benign live-mode idle-exit)
-        :meth:`_handle_process_completion` wakes
-        :meth:`wait_for_feed_publisher_failure`, and the feed entrypoint
-        exits non-zero so the orchestrator restarts the whole container.
-        This is what stops a single publisher's silent death (e.g.
-        kraken_equities mid-burst) from leaving the container "healthy"
-        with that venue's ingestion dead. CORE startup failures escalate
-        the same way as :meth:`start_all_processes`.
+        detected, and :meth:`start_process` records the desired-state
+        ``RUNNING`` marker so the watchdog supervises each publisher.
+        When a publisher later dies unexpectedly the watchdog restarts
+        it per its ``restart_policy`` with exponential backoff; only
+        after the restart budget is exhausted does a CORE market-data
+        publisher escalate to :meth:`wait_for_feed_publisher_failure`
+        (the last-resort container trip). A clean exit-0 under an
+        ALWAYS policy is restarted but never escalates, sparing the
+        paper publisher's benign live-mode idle-exit. CORE startup
+        failures escalate the same way as :meth:`start_all_processes`.
 
         Raises:
             CoreProcessStartupError: If any market-data publisher (all
@@ -948,11 +1095,6 @@ class ProcessLauncherService:
             try:
                 await self.start_process(process_config)
                 started_count += 1
-                if (
-                    config.role is ProcessRoleEnum.CORE
-                    and config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
-                ):
-                    self._feed_supervised.add(config.name)
             except Exception as e:
                 logger.error(f"Failed to start publisher '{config.name}': {e}")
                 if (
@@ -969,23 +1111,21 @@ class ProcessLauncherService:
             raise CoreProcessStartupError(failed_core_names)
 
     async def wait_for_feed_publisher_failure(self) -> str:
-        """Block until a supervised feed publisher crashes, then name it.
+        """Block until the watchdog escalates a feed publisher, then name it.
 
-        Resolves when :meth:`_handle_process_completion` records that a
-        supervised market-data publisher started by
-        :meth:`start_feed_publishers` exited with a FAILED status — a
-        non-zero exit code or an unhandled exception (e.g. kraken_equities
-        crashing during the NYSE-open burst). A clean exit (code 0)
-        resolves to SUCCEEDED, never FAILED, so it does NOT wake this
-        method — critically, the paper publisher is registered CORE
-        long-running (so it IS supervised) yet idle-exits 0 in live mode
-        when it has no replay window, and that benign exit must not
-        restart the container. The feed entrypoint treats the returned
+        Resolves only when the watchdog exhausts the restart budget for a
+        CORE market-data publisher (see :meth:`_escalate_restart`) — i.e.
+        a publisher that keeps dying (non-zero exit / unhandled exception,
+        e.g. kraken_equities crashing during the NYSE-open burst) and
+        cannot be healed by per-process restarts. A clean exit-0 under an
+        ALWAYS policy is restarted without ever touching the escalation
+        counters, so the paper publisher's benign live-mode idle-exit can
+        never wake this method. The feed entrypoint treats the returned
         name as fatal and exits non-zero so the orchestrator restarts the
-        whole container, respawning every publisher.
+        whole container as a last resort.
 
         Returns:
-            The name of the publisher that crashed.
+            The name of the publisher whose restart budget was exhausted.
         """
         await self._feed_failure_event.wait()
         return self._feed_failed_publisher
@@ -1171,6 +1311,13 @@ class ProcessLauncherService:
         to decide whether a CORE/LONG_RUNNING failure should escalate
         to :class:`CoreProcessStartupError`.
 
+        This boot-time spawn path is LOCK-FREE by design: it runs once
+        during startup, sequentially per credential, BEFORE the
+        native-process monitor is armed, so it cannot race a watchdog
+        respawn. The operator-triggered manual path
+        (:meth:`start_per_wallet_instance_by_name`) takes the per-name
+        lock instead.
+
         Returns:
             ``None`` when the credential is skipped (template missing
             or instance already running). Otherwise a populated
@@ -1302,6 +1449,13 @@ class ProcessLauncherService:
         tracked_processes = set(self.process_tasks.keys()) | set(self.started_processes.keys())
         if tracked_processes:
             self.expected_terminations.update(tracked_processes)
+        for name in set(self._desired_state):
+            self._desired_state[name] = _DesiredState.STOPPED
+        for restart_task in list(self._restart_tasks.values()):
+            if not restart_task.done():
+                restart_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await restart_task
         tasks_with_priority = [
             (name, task, registry[name].priority if name in registry else 50)
             for name, task in self.process_tasks.items()
@@ -1326,6 +1480,9 @@ class ProcessLauncherService:
                 await instance.stop()
             except Exception as e:
                 logger.error(f"Error stopping process '{name}': {e}")
+            if isinstance(instance, ProcessInstanceInfo):
+                with contextlib.suppress(Exception):
+                    self.spawner.cleanup(name)
         self.started_processes.clear()
         self.process_tasks.clear()
         self.process_lifecycles.clear()
@@ -1333,6 +1490,13 @@ class ProcessLauncherService:
         self.expected_terminations.clear()
         self.active_runs.clear()
         self.active_run_started_at.clear()
+        self._desired_state.clear()
+        self._restart_attempts.clear()
+        self._total_failed_restarts.clear()
+        self._restart_uptime_start.clear()
+        self._restart_configs.clear()
+        self._restart_tasks.clear()
+        self._restart_locks.clear()
         logger.info("All processes stopped")
         await self._emit_summary_snapshot()
 
@@ -1474,6 +1638,297 @@ class ProcessLauncherService:
         )
         return ProcessRunStatusEnum.FAILED, f"exit_code={exit_code}"
 
+    def _restart_lock_for(self, name: str) -> asyncio.Lock:
+        """Return the per-name restart lock, creating it on first use.
+
+        Synchronous (no await) so a caller can acquire the lock without a
+        suspension point between lookup and ``async with``. The lock
+        serializes all restart decisions and fire-time spawn/stop for a
+        single name. Per the NO-REENTRANCY RULE only the documented
+        callers acquire it, and no caller acquires two different
+        name-locks, so there is no cross-name deadlock.
+
+        Args:
+            name: Process name the lock guards.
+
+        Returns:
+            The (possibly freshly created) ``asyncio.Lock`` for ``name``.
+        """
+        lock = self._restart_locks.get(name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._restart_locks[name] = lock
+        return lock
+
+    def _clear_watchdog_state(self, name: str) -> None:
+        """Drop every watchdog bookkeeping entry for a process.
+
+        The single terminal-cleanup helper. Called on each terminal
+        decision (NEVER policy, ON_FAILURE clean exit, ONE_SHOT,
+        give-up/escalation, deliberate stop) so a later deliberate
+        re-start gets a fresh restart/backstop budget. Never called while
+        an in-flight backoff still needs the state.
+
+        The per-name ``_restart_locks`` entry is deliberately NOT popped
+        here: popping a lock object while another caller is queued on it
+        would let :meth:`_restart_lock_for` mint a SECOND live lock for
+        the same name, losing mutual exclusion and permitting a
+        double-spawn. The lock is cheap and per-name; it is garbage
+        collected only in the fully-drained context of
+        :meth:`stop_all_processes`, after every per-name task has been
+        cancelled and joined.
+
+        Args:
+            name: Process name to forget.
+        """
+        self._desired_state.pop(name, None)
+        self._restart_attempts.pop(name, None)
+        self._restart_uptime_start.pop(name, None)
+        self._restart_tasks.pop(name, None)
+        self._restart_configs.pop(name, None)
+        self._total_failed_restarts.pop(name, None)
+
+    async def _maybe_schedule_restart(self, name: str, run_status: ProcessRunStatusEnum) -> None:
+        """Reconcile a dead process toward its desired state (watchdog core).
+
+        Acquires the per-name lock, then immediately bails out as a pure
+        no-op when a restart task is already live for the name (the
+        live-task guard runs BEFORE any counter/escalation mutation, so a
+        re-entrant FAILED completion arriving while a restart sleeps can
+        neither burn restart budget nor escalate without a real new
+        attempt — see R2-2). Otherwise it decides whether the death
+        warrants a restart based on the desired state, the registered
+        ``restart_policy``, and the run status. Escalation is driven by
+        FAILED deaths ONLY, via two counters: :attr:`_restart_attempts`
+        (consecutive short FAILED deaths; reset on a healthy uptime;
+        escalate at ``_MAX_RESTART_ATTEMPTS``) and
+        :attr:`_total_failed_restarts` (lifetime backstop; reset only on a
+        long healthy uptime; escalate at ``_MAX_TOTAL_FAILED_RESTARTS``).
+        A clean exit-0 under an ALWAYS policy is restarted but touches
+        NEITHER counter, so a healthy cleanly-exiting publisher can never
+        trip escalation. When a restart is warranted a delayed respawn
+        task is scheduled with the computed backoff.
+
+        Args:
+            name: Process name that died.
+            run_status: The resolved terminal run status.
+        """
+        async with self._restart_lock_for(name):
+            existing = self._restart_tasks.get(name)
+            if existing is not None and not existing.done():
+                logger.info(f"Restart of '{name}' already pending; not scheduling a second")
+                return
+            if self._desired_state.get(name) is not _DesiredState.RUNNING:
+                return
+            if name in self.expected_terminations:
+                return
+            config = self._restart_configs.get(name)
+            if config is None:
+                return
+            if config.lifecycle is ProcessLifecycleEnum.ONE_SHOT:
+                self._clear_watchdog_state(name)
+                return
+            if config.restart_policy is ProcessRestartPolicyEnum.NEVER:
+                logger.info(f"Process '{name}' died; restart_policy=NEVER, not restarting")
+                self._clear_watchdog_state(name)
+                return
+            if (
+                config.restart_policy is ProcessRestartPolicyEnum.ON_FAILURE
+                and run_status is not ProcessRunStatusEnum.FAILED
+            ):
+                logger.info(f"Process '{name}' exited cleanly under ON_FAILURE; not restarting")
+                self._clear_watchdog_state(name)
+                return
+            uptime = _monotonic() - self._restart_uptime_start.get(name, _monotonic())
+            healthy = uptime > _RESTART_HEALTHY_UPTIME_S
+            long_healthy = uptime > _TOTAL_RESET_UPTIME_S
+            if run_status is ProcessRunStatusEnum.FAILED:
+                if long_healthy:
+                    self._total_failed_restarts[name] = 0
+                self._total_failed_restarts[name] = self._total_failed_restarts.get(name, 0) + 1
+                if healthy:
+                    self._restart_attempts[name] = 0
+                else:
+                    self._restart_attempts[name] = self._restart_attempts.get(name, 0) + 1
+                if (
+                    self._restart_attempts[name] >= _MAX_RESTART_ATTEMPTS
+                    or self._total_failed_restarts[name] >= _MAX_TOTAL_FAILED_RESTARTS
+                ):
+                    self._escalate_restart(name, config)
+                    self._clear_watchdog_state(name)
+                    return
+            else:
+                if long_healthy:
+                    self._total_failed_restarts[name] = 0
+                if healthy:
+                    self._restart_attempts[name] = 0
+            delay = _compute_backoff_delay(name, self._restart_attempts.get(name, 0))
+            logger.info(
+                f"Scheduling restart of '{name}' in {delay:.2f}s "
+                f"(attempt {self._restart_attempts.get(name, 0)})"
+            )
+            self._restart_tasks[name] = asyncio.create_task(self._delayed_restart(name, delay))
+
+    def _escalate_restart(self, name: str, config: ProcessConfigModel) -> None:
+        """Take the last-resort escalation action for an exhausted process.
+
+        A CORE market-data publisher trips the feed-engine container exit
+        (reusing the unchanged ``wait_for_feed_publisher_failure``
+        contract); anything else is logged as a give-up with no container
+        kill. The caller is responsible for the subsequent
+        :meth:`_clear_watchdog_state`.
+
+        Args:
+            name: Process whose restart budget was exhausted.
+            config: The process config (role + tags drive the action).
+        """
+        if config.role is ProcessRoleEnum.CORE and is_market_data_publisher(config.tags):
+            logger.error(
+                f"Publisher '{name}' exhausted its restart budget; "
+                f"escalating to container restart"
+            )
+            self._feed_failed_publisher = name
+            self._feed_failure_event.set()
+            return
+        logger.error(
+            f"Process '{name}' exhausted its restart budget; giving up (no container restart)"
+        )
+
+    def _rearm_recovery_after_manual_start_failure(self, name: str) -> None:
+        """Re-arm watchdog recovery after a failed manual start (R3-1).
+
+        A manual start of a watchdog-managed name cancels the pending
+        delayed-restart task (via :meth:`_cancel_pending_restart`) before
+        calling :meth:`start_process`. When that start raises, the
+        managed-failure branch RETAINS desired=RUNNING and the respawn
+        config (R2-1) but would otherwise leave ``_restart_tasks`` empty,
+        so nothing would ever re-fire — :meth:`_maybe_schedule_restart`
+        only runs from a (now-spent) completion event. This schedules a
+        fresh :meth:`_delayed_restart` so the watchdog resumes its backoff
+        loop. The backoff delay uses the current consecutive-attempt count
+        so the operator's failed retry does not reset the budget.
+
+        The caller's per-name restart lock has already been released by the
+        time its ``except`` branch runs, but scheduling a task never
+        ACQUIRES that lock (the task acquires it only when its backoff
+        elapses), so this respects the no-reentrancy rule. The preceding
+        :meth:`_cancel_pending_restart` leaves ``_restart_tasks`` empty;
+        the live-task guard here additionally prevents stacking a second
+        task if one is somehow still pending.
+
+        The re-arm is gated on ``desired==RUNNING`` (R4-1): a concurrent
+        :meth:`stop_process_by_name` that set desired=STOPPED while the
+        manual start was in flight owns the lifecycle now, so no successor
+        restart task may be created (it would only orphan-sleep and bail at
+        its own desired re-check anyway, but creating it means the stop did
+        not cleanly win).
+
+        Args:
+            name: Logical process name whose recovery must be re-armed.
+        """
+        if self._desired_state.get(name) is not _DesiredState.RUNNING:
+            return
+        existing = self._restart_tasks.get(name)
+        if existing is not None and not existing.done():
+            return
+        attempts = self._restart_attempts.get(name, 0)
+        delay = _compute_backoff_delay(name, attempts)
+        self._restart_tasks[name] = asyncio.create_task(self._delayed_restart(name, delay))
+
+    async def _delayed_restart(self, name: str, delay: float) -> None:
+        """Respawn a process after a backoff, honouring a concurrent stop.
+
+        Sleeps the backoff OUTSIDE the lock (so a stop can cancel it
+        cleanly), then acquires the per-name lock and respawns only if the
+        desired state is still RUNNING. Because ``spawner.spawn`` is
+        synchronous (no suspension point), a stop cannot land mid-spawn;
+        the post-spawn re-check under the lock tears down the just-spawned
+        process if a stop set desired=STOPPED while we were spawning. A
+        respawn that itself raises counts as a FAILED death: the
+        failed-respawn branch FIRST re-checks the desired state — if a
+        concurrent stop flipped it away from RUNNING (or cleared it), it
+        clears the watchdog state and returns WITHOUT re-arming or
+        rescheduling, so a stop that raced the failing respawn can never
+        be resurrected and never orphans a successor task (see R2-1).
+        Only when desired is still RUNNING does it bump both escalation
+        counters and either escalate or schedule the next backoff — it
+        never abandons a still-wanted process. Because
+        :meth:`start_process` no longer clears the watchdog
+        desired-state/config on a startup exception, those markers
+        survive a failed respawn, so the next ``_delayed_restart`` does
+        not exit at its desired/config guard.
+
+        Args:
+            name: Process name to respawn.
+            delay: Backoff delay in seconds.
+        """
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        async with self._restart_lock_for(name):
+            try:
+                if self._desired_state.get(name) is not _DesiredState.RUNNING:
+                    return
+                config = self._restart_configs.get(name)
+                if config is None or not config.enabled:
+                    self._clear_watchdog_state(name)
+                    return
+                try:
+                    await self.start_process(config)
+                except Exception as exc:
+                    logger.error(f"Respawn of '{name}' failed: {exc}")
+                    if self._desired_state.get(name) is not _DesiredState.RUNNING:
+                        logger.info(
+                            f"Respawn of '{name}' failed but desired state is no longer "
+                            f"RUNNING; a stop won, not re-arming"
+                        )
+                        self._clear_watchdog_state(name)
+                        return
+                    self._total_failed_restarts[name] = self._total_failed_restarts.get(name, 0) + 1
+                    self._restart_attempts[name] = self._restart_attempts.get(name, 0) + 1
+                    if (
+                        self._restart_attempts[name] >= _MAX_RESTART_ATTEMPTS
+                        or self._total_failed_restarts[name] >= _MAX_TOTAL_FAILED_RESTARTS
+                    ):
+                        self._escalate_restart(name, config)
+                        self._clear_watchdog_state(name)
+                        return
+                    self._restart_uptime_start[name] = _monotonic()
+                    next_delay = _compute_backoff_delay(name, self._restart_attempts[name])
+                    self._restart_tasks[name] = asyncio.create_task(
+                        self._delayed_restart(name, next_delay)
+                    )
+                    return
+                if self._desired_state.get(name) is _DesiredState.STOPPED:
+                    logger.info(
+                        f"Stop won during respawn of '{name}'; tearing down just-spawned process"
+                    )
+                    await self._teardown_started_process(name)
+                    self._clear_watchdog_state(name)
+            finally:
+                if self._restart_tasks.get(name) is asyncio.current_task():
+                    self._restart_tasks.pop(name, None)
+
+    async def _teardown_started_process(self, name: str) -> None:
+        """Stop and clean up a just-spawned process (lock-free primitive).
+
+        The internal stop primitive used INSIDE a locked region. Per the
+        NO-REENTRANCY RULE it MUST NOT acquire ``_restart_lock_for``. Stops
+        the tracked instance (which terminates and cleans the subprocess)
+        and drops it from the live-process tracking dicts.
+
+        Args:
+            name: Process name to tear down.
+        """
+        instance = self.started_processes.get(name)
+        if instance is not None:
+            with contextlib.suppress(Exception):
+                await instance.stop()
+        self.started_processes.pop(name, None)
+        self.process_lifecycles.pop(name, None)
+        self.process_roles.pop(name, None)
+
     async def _handle_process_completion(self, name: str, proc_info: ProcessInstanceInfo) -> None:
         was_strategy = self.process_roles.get(name) is ProcessRoleEnum.STRATEGY
         try:
@@ -1483,9 +1938,6 @@ class ProcessLauncherService:
             run_status, error_message = self._resolve_native_exit_status(
                 name, exit_code, lifecycle, expected
             )
-            if name in self._feed_supervised and run_status is ProcessRunStatusEnum.FAILED:
-                self._feed_failed_publisher = name
-                self._feed_failure_event.set()
             try:
                 self.spawner.cleanup(name)
             except Exception as cleanup_error:
@@ -1493,6 +1945,7 @@ class ProcessLauncherService:
             await self._finalize_process_run(
                 name, run_status, error=error_message, exit_code=exit_code
             )
+            await self._maybe_schedule_restart(name, run_status)
         except Exception as e:
             logger.error(f"Error handling completion of native process '{name}': {e}")
         finally:
@@ -1582,6 +2035,19 @@ class ProcessLauncherService:
         self.expected_terminations.discard(name)
 
     async def _handle_task_completion(self, name: str, task: asyncio.Task[Any]) -> None:
+        """Finalize an asyncio-task process and clear its watchdog state.
+
+        Thread/async-task processes are never watchdog-respawned (only the
+        native-subprocess completion handler drives
+        :meth:`_maybe_schedule_restart`), so this terminal handler clears
+        the watchdog markers :meth:`start_process` armed before launch,
+        closing the non-native state leak. Native subprocesses never reach
+        here; they are handled by :meth:`_handle_process_completion`.
+
+        Args:
+            name: Process name whose task completed.
+            task: The completed asyncio task.
+        """
         try:
             lifecycle = self.process_lifecycles.get(name, ProcessLifecycleEnum.LONG_RUNNING)
             expected = name in self.expected_terminations
@@ -1595,6 +2061,7 @@ class ProcessLauncherService:
             else:
                 run_status = self._resolve_task_success_status(name, lifecycle, expected)
             self._cleanup_task_tracking(name, task)
+            self._clear_watchdog_state(name)
             should_finalize = task.cancelled() or not isinstance(
                 task.exception(), (GeneratorExit, StopAsyncIteration)
             )
@@ -1691,6 +2158,43 @@ class ProcessLauncherService:
             parameters_schema=parameters_schema,
         )
 
+    async def _handle_manual_start_stop_race(self, name: str) -> ProcessStartResult | None:
+        """Tear down a just-started process when a stop won the race (R4-1).
+
+        The manual lock-takers (:meth:`start_process_by_name`,
+        :meth:`start_per_wallet_instance_by_name`) call this immediately
+        after :meth:`start_process` returns, still INSIDE their per-name
+        restart lock. ``spawner.spawn`` is synchronous (no suspension
+        point), so a concurrent :meth:`stop_process_by_name` cannot land
+        mid-spawn; instead it set desired=STOPPED synchronously and then
+        BLOCKS on the same per-name lock. This post-spawn re-check observes
+        that STOPPED marker, tears the just-started process down with the
+        same teardown the watchdog respawn uses
+        (:meth:`_teardown_started_process`), clears the watchdog state, and
+        returns an ERROR result so the racing stop wins: the operator sees
+        the process did not stay up, and the subsequent stop finds nothing
+        to do. Returns ``None`` when desired is still RUNNING (the start
+        won the race and should report success normally). Per the
+        NO-REENTRANCY RULE this never acquires ``_restart_lock_for``; the
+        caller already holds it.
+
+        Args:
+            name: Process name whose start may have been raced by a stop.
+
+        Returns:
+            A not-running ``ProcessStartResult`` when a stop won and the
+            just-started process was torn down, else ``None``.
+        """
+        if self._desired_state.get(name) is not _DesiredState.STOPPED:
+            return None
+        logger.info(f"Stop won during manual start of '{name}'; tearing down just-started process")
+        await self._teardown_started_process(name)
+        self._clear_watchdog_state(name)
+        return ProcessStartResult(
+            status=StartProcessStatusEnum.ERROR,
+            message=f"Process '{name}' was stopped during start",
+        )
+
     async def start_per_wallet_instance_by_name(
         self,
         name: str,
@@ -1710,8 +2214,23 @@ class ProcessLauncherService:
         4. Apply the optional ``mode`` override on the resolved config
            so the operator's selection in the execution-mode modal
            (Thread vs Process) actually takes effect at start time.
-        5. Call :meth:`start_process` and register the live config in
-           ``instance_configs`` so the API surface keeps mirroring it.
+        5. Cancel any pending watchdog restart for the name, then call
+           :meth:`start_process` UNDER ``_restart_lock_for(name)`` with an
+           in-lock re-check of ``started_processes`` (returning
+           ``ALREADY_RUNNING`` if a watchdog respawn won the race), and
+           register the live config in ``instance_configs`` so the API
+           surface keeps mirroring it. The boot-time per-wallet spawner
+           (:meth:`_spawn_one_per_wallet_instance`) does NOT take the lock
+           because it runs once at startup, sequentially, before the
+           native-process monitor is armed, so it cannot race a watchdog
+           respawn.
+
+        Like :meth:`start_process_by_name`, this owns the first-start
+        leak cleanup for the markers it caused: a failed start clears the
+        watchdog markers only when the instance was NOT already
+        watchdog-managed before the start began, so a failed manual start
+        of an already-managed instance leaves the watchdog able to
+        recover it (see R2-1 / R2-4).
 
         Args:
             name: Per-wallet instance name in the form
@@ -1789,13 +2308,32 @@ class ProcessLauncherService:
             instance_config.mode = mode
         prior_instance_config = self.instance_configs.get(name)
         self.instance_configs[name] = instance_config
+        was_watchdog_managed = name in self._desired_state
+        await self._cancel_pending_restart(name)
         try:
-            await self.start_process(instance_config)
+            async with self._restart_lock_for(name):
+                if name in self.started_processes:
+                    logger.warning(f"Process '{name}' is already running")
+                    if prior_instance_config is not None:
+                        self.instance_configs[name] = prior_instance_config
+                    return ProcessStartResult(
+                        status=StartProcessStatusEnum.ALREADY_RUNNING,
+                        message=f"Process '{name}' is already running",
+                    )
+                await self.start_process(instance_config)
+                stopped_result = await self._handle_manual_start_stop_race(name)
+                if stopped_result is not None:
+                    self.instance_configs.pop(name, None)
+                    return stopped_result
         except Exception as exc:
             if prior_instance_config is not None:
                 self.instance_configs[name] = prior_instance_config
             else:
                 self.instance_configs.pop(name, None)
+            if was_watchdog_managed:
+                self._rearm_recovery_after_manual_start_failure(name)
+            else:
+                self._clear_watchdog_state(name)
             logger.error(f"Per-wallet start: failed to start '{name}': {exc}")
             return ProcessStartResult(
                 status=StartProcessStatusEnum.ERROR,
@@ -1827,6 +2365,15 @@ class ProcessLauncherService:
         the instance config. Bare executor template names
         (``executor_<exchange>``) are rejected as ERROR — templates
         are config-only and never directly runnable.
+
+        This manual lock-taker owns the first-start-leak cleanup for the
+        markers it caused: if the name was NOT already watchdog-managed
+        when the start began and :meth:`start_process` then raises, it
+        clears the watchdog markers so a failed manual start of a
+        brand-new name leaks nothing. Conversely, a failed manual start
+        of an already-managed name (e.g. a publisher mid-backoff) does
+        NOT clear the markers, so the watchdog can still recover it (see
+        R2-1 / R2-4).
 
         Args:
             name: Process name from registry.
@@ -1868,9 +2415,25 @@ class ProcessLauncherService:
             config_dict = json.loads(setting.value)
             autostart_enabled = self._apply_overrides_to_config_dict(config_dict, mode, parameters)
             config = self._build_config_for_start_by_name(name, config_dict, autostart_enabled)
+        was_watchdog_managed = name in self._desired_state
+        await self._cancel_pending_restart(name)
         try:
-            await self.start_process(config)
+            async with self._restart_lock_for(name):
+                if name in self.started_processes:
+                    logger.warning(f"Process '{name}' is already running")
+                    return ProcessStartResult(
+                        status=StartProcessStatusEnum.ALREADY_RUNNING,
+                        message=f"Process '{name}' is already running",
+                    )
+                await self.start_process(config)
+                stopped_result = await self._handle_manual_start_stop_race(name)
+                if stopped_result is not None:
+                    return stopped_result
         except Exception as e:
+            if was_watchdog_managed:
+                self._rearm_recovery_after_manual_start_failure(name)
+            else:
+                self._clear_watchdog_state(name)
             logger.error(f"Failed to start process '{name}': {e}")
             return ProcessStartResult(
                 status=StartProcessStatusEnum.ERROR,
@@ -1890,6 +2453,36 @@ class ProcessLauncherService:
             message=f"Process '{name}' started successfully",
             public_id=public_id,
         )
+
+    async def _cancel_pending_restart(self, name: str) -> None:
+        """Cancel and join every pending delayed-restart task for ``name``.
+
+        Pops the ``_restart_tasks`` entry and cancels it if it is still
+        live. The cancel lands cleanly because the only cancellable point
+        in :meth:`_delayed_restart` is the backoff ``asyncio.sleep``,
+        which runs OUTSIDE the per-name lock; a task still queued on the
+        lock is interrupted at its ``acquire`` await. MUST be called
+        WITHOUT holding ``_restart_lock_for(name)`` so the awaited task
+        can never deadlock against the caller.
+
+        Loops until no live task remains for the name: a failed-respawn
+        task can schedule a SUCCESSOR ``_delayed_restart`` into
+        ``_restart_tasks[name]`` while it runs, so cancelling a single
+        entry is not enough — awaiting the cancelled task lets that
+        successor be observed and cancelled in turn (see R2-1). The
+        bound is the escalation ceiling, so the loop always terminates.
+
+        Args:
+            name: Process name whose pending restarts should be dropped.
+        """
+        while True:
+            pending = self._restart_tasks.pop(name, None)
+            if pending is None:
+                return
+            if not pending.done():
+                pending.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pending
 
     async def _cancel_process_task(self, name: str) -> None:
         """Cancel and await the asyncio task for a process.
@@ -1915,31 +2508,50 @@ class ProcessLauncherService:
         carried the STRATEGY role — after the spawner releases so
         subscribers refresh without polling.
 
+        A stop always wins, even when no live process entry exists:
+        desired=STOPPED is set and any pending delayed-restart task is
+        cancelled FIRST (synchronously, OUTSIDE the lock — the cancel must
+        await the cancelled task, which only re-acquires the lock after its
+        backoff sleep and is already cancelled, so there is no contention
+        and no self-deadlock). The not-running check, the real stop, and
+        ``_clear_watchdog_state`` then ALL run INSIDE the per-name restart
+        lock (R4-1) so the stop serializes against an in-flight manual
+        start or a watchdog respawn that holds the same lock: the stop
+        waits, then either sees the now-started process and stops it, or
+        the in-flight start sees desired=STOPPED in its post-spawn re-check
+        and tears the just-started process down. The not-running path
+        clears the watchdog state so the STOPPED marker never leaks.
+
         Args:
             name: Process name to stop.
 
         Returns:
             Typed result with operation status and message.
         """
-        if name not in self.started_processes:
-            logger.warning(f"Process '{name}' is not running")
-            return ProcessStopResult(
-                status=StopProcessStatusEnum.NOT_RUNNING,
-                message=f"Process '{name}' is not running",
-            )
+        self._desired_state[name] = _DesiredState.STOPPED
+        await self._cancel_pending_restart(name)
         was_strategy = self.process_roles.get(name) is ProcessRoleEnum.STRATEGY
         try:
-            self.expected_terminations.add(name)
-            await self._cancel_process_task(name)
-            instance = self.started_processes.get(name)
-            if instance is not None:
-                logger.info(f"Stopping process '{name}'")
-                await instance.stop()
-            self.started_processes.pop(name, None)
-            self.process_lifecycles.pop(name, None)
-            self.process_roles.pop(name, None)
-            logger.info(f"Process '{name}' stopped successfully")
-            await self._finalize_process_run(name, ProcessRunStatusEnum.CANCELLED)
+            async with self._restart_lock_for(name):
+                if name not in self.started_processes:
+                    logger.warning(f"Process '{name}' is not running")
+                    self._clear_watchdog_state(name)
+                    return ProcessStopResult(
+                        status=StopProcessStatusEnum.NOT_RUNNING,
+                        message=f"Process '{name}' is not running",
+                    )
+                self.expected_terminations.add(name)
+                await self._cancel_process_task(name)
+                instance = self.started_processes.get(name)
+                if instance is not None:
+                    logger.info(f"Stopping process '{name}'")
+                    await instance.stop()
+                self.started_processes.pop(name, None)
+                self.process_lifecycles.pop(name, None)
+                self.process_roles.pop(name, None)
+                logger.info(f"Process '{name}' stopped successfully")
+                await self._finalize_process_run(name, ProcessRunStatusEnum.CANCELLED)
+                self._clear_watchdog_state(name)
             await self._emit_summary_snapshot()
             if was_strategy:
                 await self._emit_strategy_list_snapshot()
