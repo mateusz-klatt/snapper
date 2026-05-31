@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 from uuid import UUID
 
+import psutil
 import pytest
 from pydantic import BaseModel
 
@@ -31,6 +32,7 @@ from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import ProcessStartResult
+from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.process_manager.registry import get_registered_processes
@@ -8236,6 +8238,208 @@ class TestClearWatchdogState:
         assert "pub" not in factory._restart_configs
         assert "pub" in factory._restart_locks
         assert "pub" not in factory._total_failed_restarts
+
+    def test_clear_drops_metrics_and_psutil_handle(self) -> None:
+        """_clear_watchdog_state drops per-child metrics + the psutil handle.
+
+        Given: a name carrying sampled metrics and a live psutil handle,
+        When: _clear_watchdog_state runs,
+        Then: both the _process_metrics entry and the _psutil_handles entry
+            are dropped so a dead process never carries stale RSS/CPU and a
+            respawn under the same name mints a fresh handle.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        factory._process_metrics["pub"] = (1024, 7.5)
+        factory._psutil_handles["pub"] = cast("psutil.Process", MagicMock())
+        factory._clear_watchdog_state("pub")
+        assert "pub" not in factory._process_metrics
+        assert "pub" not in factory._psutil_handles
+
+
+class TestSampleProcessMetrics:
+    """_sample_process_metrics samples RSS + CPU for native children."""
+
+    def test_sample_populates_rss_and_cpu(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A native child sample populates _process_metrics with rss + cpu.
+
+        Given: one native ProcessInstanceInfo and a patched psutil.Process
+            whose handle reports a cpu_percent and memory_info().rss,
+        When: _sample_process_metrics runs,
+        Then: _process_metrics carries (rss, cpu) and the handle is cached
+            keyed by process name.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        proc_info = _make_proc_info("pub", 0)
+        factory.started_processes["pub"] = proc_info
+        handle = MagicMock()
+        handle.pid = proc_info.pid
+        handle.cpu_percent.return_value = 33.0
+        handle.memory_info.return_value = SimpleNamespace(rss=2048)
+        process_factory = MagicMock(return_value=handle)
+        monkeypatch.setattr(launcher_module.psutil, "Process", process_factory)
+        factory._sample_process_metrics()
+        assert factory._process_metrics["pub"] == (2048, 33.0)
+        assert factory._psutil_handles["pub"] is handle
+        process_factory.assert_called_once_with(proc_info.pid)
+        handle.cpu_percent.assert_called_once_with(interval=None)
+
+    def test_first_sample_cpu_is_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The first cpu_percent reading is 0.0 (psutil delta contract).
+
+        Given: a freshly created psutil handle whose first cpu_percent
+            call returns 0.0 (no prior reading to delta against),
+        When: _sample_process_metrics runs once,
+        Then: _process_metrics records cpu_percent == 0.0 with a real rss.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        proc_info = _make_proc_info("pub", 0)
+        factory.started_processes["pub"] = proc_info
+        handle = MagicMock()
+        handle.pid = proc_info.pid
+        handle.cpu_percent.return_value = 0.0
+        handle.memory_info.return_value = SimpleNamespace(rss=4096)
+        monkeypatch.setattr(launcher_module.psutil, "Process", MagicMock(return_value=handle))
+        factory._sample_process_metrics()
+        assert factory._process_metrics["pub"] == (4096, 0.0)
+
+    def test_pid_change_recreates_handle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A new pid for the same name recreates the psutil handle.
+
+        Given: a cached handle whose pid differs from the live child's pid
+            (a watchdog respawn gave the name a new pid),
+        When: _sample_process_metrics runs,
+        Then: a fresh handle is constructed for the new pid and cached.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        proc_info = _make_proc_info("pub", 0)
+        factory.started_processes["pub"] = proc_info
+        stale_handle = MagicMock()
+        stale_handle.pid = proc_info.pid + 1
+        factory._psutil_handles["pub"] = cast("psutil.Process", stale_handle)
+        fresh_handle = MagicMock()
+        fresh_handle.pid = proc_info.pid
+        fresh_handle.cpu_percent.return_value = 5.0
+        fresh_handle.memory_info.return_value = SimpleNamespace(rss=512)
+        process_factory = MagicMock(return_value=fresh_handle)
+        monkeypatch.setattr(launcher_module.psutil, "Process", process_factory)
+        factory._sample_process_metrics()
+        process_factory.assert_called_once_with(proc_info.pid)
+        assert factory._psutil_handles["pub"] is fresh_handle
+        assert factory._process_metrics["pub"] == (512, 5.0)
+
+    def test_reuses_cached_handle_when_pid_matches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A cached handle with a matching pid is reused, not recreated.
+
+        Given: a cached handle whose pid equals the live child's pid,
+        When: _sample_process_metrics runs,
+        Then: psutil.Process is not called again and the cached handle is
+            sampled in place (preserving the cpu delta baseline).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        proc_info = _make_proc_info("pub", 0)
+        factory.started_processes["pub"] = proc_info
+        cached_handle = MagicMock()
+        cached_handle.pid = proc_info.pid
+        cached_handle.cpu_percent.return_value = 21.0
+        cached_handle.memory_info.return_value = SimpleNamespace(rss=8192)
+        factory._psutil_handles["pub"] = cast("psutil.Process", cached_handle)
+        process_factory = MagicMock()
+        monkeypatch.setattr(launcher_module.psutil, "Process", process_factory)
+        factory._sample_process_metrics()
+        process_factory.assert_not_called()
+        assert factory._process_metrics["pub"] == (8192, 21.0)
+
+    @pytest.mark.parametrize(
+        "error_cls",
+        [psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess],
+    )
+    def test_psutil_error_records_none_and_prunes_handle(
+        self,
+        error_cls: type[Exception],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A vanished/inaccessible child records (None, None) + prunes handle.
+
+        Given: a native child whose handle raises NoSuchProcess /
+            AccessDenied / ZombieProcess on cpu_percent,
+        When: _sample_process_metrics runs,
+        Then: _process_metrics records (None, None) and the dead handle is
+            pruned so a later respawn mints a fresh one.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        proc_info = _make_proc_info("pub", 0)
+        factory.started_processes["pub"] = proc_info
+        handle = MagicMock()
+        handle.pid = proc_info.pid
+        handle.cpu_percent.side_effect = error_cls(proc_info.pid)
+        monkeypatch.setattr(launcher_module.psutil, "Process", MagicMock(return_value=handle))
+        factory._sample_process_metrics()
+        assert factory._process_metrics["pub"] == (None, None)
+        assert "pub" not in factory._psutil_handles
+
+    def test_thread_mode_process_is_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A non-ProcessInstanceInfo (thread-mode) process gets no metrics.
+
+        Given: a started process that is NOT a ProcessInstanceInfo,
+        When: _sample_process_metrics runs,
+        Then: no _process_metrics entry is created (its summary row stays
+            None) and psutil.Process is never constructed.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        factory.started_processes["worker"] = cast(RegisterableProcess, SimpleNamespace(pid=123))
+        process_factory = MagicMock()
+        monkeypatch.setattr(launcher_module.psutil, "Process", process_factory)
+        factory._sample_process_metrics()
+        assert "worker" not in factory._process_metrics
+        process_factory.assert_not_called()
+
+
+class TestMonitorTickSamplesAndEmits:
+    """The monitor loop samples metrics + emits a summary each tick."""
+
+    @pytest.mark.asyncio
+    async def test_tick_calls_sampler_then_emits_summary(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each monitor tick samples metrics then emits a summary snapshot.
+
+        Given: one live native process whose status stays running for one
+            tick before clearing on the next,
+        When: _monitor_native_processes runs,
+        Then: _sample_process_metrics is invoked and _emit_summary_snapshot
+            is awaited on the tick that detected the live child (the ~5s
+            RAM/CPU heartbeat the frontend slice consumes).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        spawner_mock = mock.create_autospec(ProcessSpawnerService, instance=True)
+        factory.spawner = cast(ProcessSpawnerService, spawner_mock)
+        proc_info = _make_proc_info("pub", 0)
+        factory.started_processes["pub"] = proc_info
+        tick = {"count": 0}
+
+        def status(_name: str) -> SpawnerStatusSnapshot:
+            tick["count"] += 1
+            if tick["count"] >= 2:
+                factory.started_processes.clear()
+            return SpawnerStatusSnapshot(name=_name, running=True)
+
+        spawner_mock.get_status.side_effect = status
+
+        async def sleep_fake(_delay: float) -> None:
+            return None
+
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.asyncio.sleep", sleep_fake
+        )
+        sample_mock = MagicMock()
+        emit_mock = mock.AsyncMock()
+        monkeypatch.setattr(factory, "_sample_process_metrics", sample_mock)
+        monkeypatch.setattr(factory, "_emit_summary_snapshot", emit_mock)
+        await factory._monitor_native_processes()
+        sample_mock.assert_called()
+        emit_mock.assert_awaited()
 
 
 class TestRestartLockFor:

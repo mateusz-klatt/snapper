@@ -2601,6 +2601,56 @@ class TestSummarySnapshotInstanceConfigs:
         names = [item.name for item in payload.processes]
         assert names.count("executor_kraken_w019dbb34f439") == 1
 
+    @pytest.mark.asyncio
+    async def test_snapshot_carries_sampled_metrics_and_none_fallback(
+        self, launcher: ProcessLauncherService
+    ) -> None:
+        """`_build_process_summary_items` surfaces sampled RSS/CPU per process.
+
+        Given: a persisted config WITH sampled metrics and an
+            ``instance_configs`` entry WITHOUT sampled metrics,
+        When: the snapshot is built,
+        Then: the persisted row carries its (rss_bytes, cpu_percent) and the
+            unsampled instance row falls back to (None, None).
+        """
+        publisher = _RecordingPublisher()
+        launcher.set_msg_publisher(publisher)
+        persisted = ProcessConfigModel(
+            name="kraken_feed_publisher",
+            enabled=True,
+            mode="process",
+            class_path="x.Y",
+            method="start",
+            parameters={},
+            note=None,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=(),
+            parameters_schema=None,
+        )
+        launcher.get_process_configs = AsyncMock(return_value=[persisted])
+        instance_cfg = ProcessConfigModel(
+            name="executor_kraken_w019dbb34f439",
+            enabled=True,
+            mode="thread",
+            class_path="x.Y",
+            method="start",
+            parameters={"wallet_public_id": "wal-1"},
+            note=None,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=(),
+            parameters_schema=None,
+        )
+        launcher.instance_configs["executor_kraken_w019dbb34f439"] = instance_cfg
+        launcher._process_metrics["kraken_feed_publisher"] = (98_304, 12.5)
+        items = await launcher._build_process_summary_items()
+        by_name = {item.name: item for item in items}
+        assert by_name["kraken_feed_publisher"].rss_bytes == 98_304
+        assert by_name["kraken_feed_publisher"].cpu_percent == pytest.approx(12.5)
+        assert by_name["executor_kraken_w019dbb34f439"].rss_bytes is None
+        assert by_name["executor_kraken_w019dbb34f439"].cpu_percent is None
+
 
 class TestCompletionEmitBranches:
     """Strategy-role completion fires both summary + strategy-list emits."""
@@ -2636,14 +2686,16 @@ class TestCompletionEmitBranches:
         assert any(t.startswith("strategies.events.list.") for t in topics)
 
     @pytest.mark.asyncio
-    async def test_handle_process_completion_strategy_emits_strategy_list(
+    async def test_handle_process_completion_strategy_emits_strategy_list_only(
         self, launcher: ProcessLauncherService
     ) -> None:
-        """Native strategy subprocess completion fires the strategy event.
+        """Native strategy subprocess completion fires only the strategy event.
 
         Given: A strategy subprocess that exited cleanly,
         When: ``_handle_process_completion`` runs,
-        Then: Publisher captures BOTH a summary + strategy-list frame.
+        Then: Publisher captures the strategy-list frame but NOT a summary
+            frame — the per-tick summary emit now belongs to the monitor
+            loop, so completion no longer double-emits the summary.
         """
         publisher = _RecordingPublisher()
         launcher.set_msg_publisher(publisher)
@@ -2661,7 +2713,7 @@ class TestCompletionEmitBranches:
         await launcher._handle_process_completion("momentum", proc_info)
 
         topics = [topic for topic, _ in publisher.sent]
-        assert any(t.startswith("processes.events.summary.") for t in topics)
+        assert not any(t.startswith("processes.events.summary.") for t in topics)
         assert any(t.startswith("strategies.events.list.") for t in topics)
 
 

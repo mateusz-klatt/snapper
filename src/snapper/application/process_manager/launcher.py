@@ -27,6 +27,7 @@ from typing import Any
 from typing import Final
 from uuid import uuid7
 
+import psutil
 from loguru import logger
 from sqlalchemy import select
 
@@ -310,6 +311,8 @@ class ProcessLauncherService:
         self._restart_configs: dict[str, ProcessConfigModel] = {}
         self._restart_tasks: dict[str, asyncio.Task[None]] = {}
         self._restart_locks: dict[str, asyncio.Lock] = {}
+        self._psutil_handles: dict[str, psutil.Process] = {}
+        self._process_metrics: dict[str, tuple[int | None, float | None]] = {}
         self._run_recorder = ProcessRunRecorder(settings)
         self._registry_syncer = ProcessRegistrySyncer(settings)
         self._market_persist_policy: MarketPersistPolicy | None = None
@@ -358,6 +361,7 @@ class ProcessLauncherService:
         seen: set[str] = set()
         for config in configs:
             name = config.name
+            rss, cpu = self._process_metrics.get(name, (None, None))
             items.append(
                 ProcessSummaryItem(
                     name=name,
@@ -366,12 +370,15 @@ class ProcessLauncherService:
                     role=config.role.value,
                     lifecycle=config.lifecycle.value,
                     active_public_id=self.active_runs.get(name),
+                    rss_bytes=rss,
+                    cpu_percent=cpu,
                 )
             )
             seen.add(name)
         for name, instance_config in self.instance_configs.items():
             if name in seen:
                 continue
+            rss, cpu = self._process_metrics.get(name, (None, None))
             items.append(
                 ProcessSummaryItem(
                     name=name,
@@ -380,6 +387,8 @@ class ProcessLauncherService:
                     role=instance_config.role.value,
                     lifecycle=instance_config.lifecycle.value,
                     active_public_id=self.active_runs.get(name),
+                    rss_bytes=rss,
+                    cpu_percent=cpu,
                 )
             )
         return items
@@ -1517,6 +1526,8 @@ class ProcessLauncherService:
         self._restart_configs.clear()
         self._restart_tasks.clear()
         self._restart_locks.clear()
+        self._process_metrics.clear()
+        self._psutil_handles.clear()
         logger.info("All processes stopped")
         await self._emit_summary_snapshot()
 
@@ -1574,6 +1585,50 @@ class ProcessLauncherService:
 
         task.add_done_callback(_callback)
 
+    def _sample_process_metrics(self) -> None:
+        """Sample RSS + CPU% for every native subprocess child.
+
+        Walks ``started_processes`` and, for each
+        :class:`ProcessInstanceInfo` (PROCESS-mode child with a live
+        pid), maintains a persistent :class:`psutil.Process` handle keyed
+        by process NAME. The handle is (re)created when missing or when
+        the live ``ProcessInstanceInfo.pid`` differs from the stored
+        handle's pid (a watchdog respawn gives the same name a new pid).
+        A persistent handle is required because
+        ``cpu_percent(interval=None)`` is non-blocking and returns the
+        delta since the previous call on the SAME handle: the first call
+        after a (re)start reads ``0.0`` and later calls read the real
+        utilisation, mirroring
+        :meth:`SystemMetricsSnapshotter._sample_cpu_metrics`.
+
+        Results are stored in :attr:`_process_metrics` as
+        ``(rss_bytes, cpu_percent)`` for
+        :meth:`_build_process_summary_items` to surface on the ZMQ
+        summary event. A child that has vanished or become inaccessible
+        between ticks (``NoSuchProcess`` / ``AccessDenied`` /
+        ``ZombieProcess``) records ``(None, None)`` and its handle is
+        pruned so a later respawn mints a fresh one. Thread-mode
+        processes are skipped entirely (no entry), so their summary rows
+        carry ``None`` metrics. Synchronous: every psutil read is a cheap
+        /proc access, and the monitor loop owns the only call site, so
+        there is no concurrency to coordinate.
+        """
+        for name, proc in self.started_processes.items():
+            if not isinstance(proc, ProcessInstanceInfo):
+                continue
+            try:
+                handle = self._psutil_handles.get(name)
+                if handle is None or handle.pid != proc.pid:
+                    handle = psutil.Process(proc.pid)
+                    self._psutil_handles[name] = handle
+                cpu = handle.cpu_percent(interval=None)
+                rss = handle.memory_info().rss
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                self._process_metrics[name] = (None, None)
+                self._psutil_handles.pop(name, None)
+                continue
+            self._process_metrics[name] = (rss, cpu)
+
     def _start_native_process_monitoring(self) -> None:
         existing_monitor = self.process_tasks.get("_native_monitor")
         if existing_monitor and not existing_monitor.done():
@@ -1607,6 +1662,8 @@ class ProcessLauncherService:
                         if not status.running:
                             logger.info(f"Native process '{name}' has completed")
                             await self._handle_process_completion(name, proc_info)
+                    self._sample_process_metrics()
+                    await self._emit_summary_snapshot()
                 except asyncio.CancelledError:
                     logger.info("Native process monitoring cancelled")
                     raise
@@ -1687,7 +1744,10 @@ class ProcessLauncherService:
         decision (NEVER policy, ON_FAILURE clean exit, ONE_SHOT,
         give-up/escalation, deliberate stop) so a later deliberate
         re-start gets a fresh restart/backstop budget. Never called while
-        an in-flight backoff still needs the state.
+        an in-flight backoff still needs the state. Also drops the
+        per-child resource metrics and the persistent psutil handle so a
+        dead process never carries stale RSS/CPU into the summary event
+        and a respawn under the same name mints a fresh handle.
 
         The per-name ``_restart_locks`` entry is deliberately NOT popped
         here: popping a lock object while another caller is queued on it
@@ -1707,6 +1767,8 @@ class ProcessLauncherService:
         self._restart_tasks.pop(name, None)
         self._restart_configs.pop(name, None)
         self._total_failed_restarts.pop(name, None)
+        self._process_metrics.pop(name, None)
+        self._psutil_handles.pop(name, None)
 
     def _arm_desired_running(self, name: str) -> None:
         """Declare ``name`` desired-RUNNING (the lock-owned transition).
@@ -2054,6 +2116,25 @@ class ProcessLauncherService:
         self.process_roles.pop(name, None)
 
     async def _handle_process_completion(self, name: str, proc_info: ProcessInstanceInfo) -> None:
+        """Finalize a dead native subprocess and drive the watchdog.
+
+        Resolves the exit status, finalizes the run record, and schedules
+        a watchdog restart per the process's policy. Regardless of whether
+        a restart is scheduled, it drops the dead child's per-process
+        metrics (set to ``(None, None)``) and prunes its stale psutil
+        handle so a ``running=False`` backoff row never reports the old
+        pid's RSS/CPU and a respawn mints a fresh handle on the next
+        sample. Per-tick fanout is the monitor loop's responsibility: the
+        loop emits exactly one summary snapshot after this handler runs
+        (see :meth:`_monitor_native_processes`), so this method does NOT
+        publish a summary itself, avoiding a double-emit on a death tick.
+        A STRATEGY-role process still emits a strategy-list snapshot here
+        because the monitor loop does not.
+
+        Args:
+            name: Logical process name of the dead subprocess.
+            proc_info: The tracked instance info carrying the OS process.
+        """
         was_strategy = self.process_roles.get(name) is ProcessRoleEnum.STRATEGY
         try:
             lifecycle = self.process_lifecycles.get(name, ProcessLifecycleEnum.LONG_RUNNING)
@@ -2077,7 +2158,8 @@ class ProcessLauncherService:
             self.process_roles.pop(name, None)
             self.started_processes.pop(name, None)
             self.expected_terminations.discard(name)
-            await self._emit_summary_snapshot()
+            self._process_metrics[name] = (None, None)
+            self._psutil_handles.pop(name, None)
             if was_strategy:
                 await self._emit_strategy_list_snapshot()
 

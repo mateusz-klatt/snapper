@@ -963,6 +963,48 @@ class TestProcessAndStrategyEventSchemas:
     bridge dispatch path the moment ``parse_message`` is invoked.
     """
 
+    def test_process_summary_item_metrics_round_trip_when_present(self) -> None:
+        """ProcessSummaryItem carries rss_bytes + cpu_percent through JSON.
+
+        Given: a ProcessSummaryItem with sampled rss_bytes and cpu_percent,
+        When: serialized to JSON and parsed back,
+        Then: both metric fields survive the round-trip with their values.
+        """
+        item = ProcessSummaryItem(
+            name="kraken_feed_publisher",
+            running=True,
+            enabled=True,
+            role="core",
+            lifecycle="long_running",
+            active_public_id="run-123",
+            rss_bytes=12_345_678,
+            cpu_percent=42.5,
+        )
+        restored = ProcessSummaryItem.model_validate_json(item.model_dump_json())
+        assert restored.rss_bytes == 12_345_678
+        assert restored.cpu_percent == pytest.approx(42.5)
+
+    def test_process_summary_item_metrics_default_to_none_when_absent(self) -> None:
+        """ProcessSummaryItem metric fields default to None when omitted.
+
+        Given: a ProcessSummaryItem built without rss_bytes / cpu_percent
+            (a thread-mode or unsampled process, or an older event),
+        When: the item is constructed and round-tripped through JSON,
+        Then: both metric fields are None, preserving backward compatibility.
+        """
+        item = ProcessSummaryItem(
+            name="momentum",
+            running=False,
+            enabled=False,
+            role="strategy",
+            lifecycle="one_shot",
+        )
+        assert item.rss_bytes is None
+        assert item.cpu_percent is None
+        restored = ProcessSummaryItem.model_validate_json(item.model_dump_json())
+        assert restored.rss_bytes is None
+        assert restored.cpu_percent is None
+
     def test_process_summary_event_roundtrip(self) -> None:
         """``ProcessSummaryEventData`` survives JSON roundtrip via parse_message."""
         event = ProcessSummaryEventData(

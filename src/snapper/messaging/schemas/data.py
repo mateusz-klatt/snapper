@@ -1734,6 +1734,17 @@ class ProcessSummaryItem(StrictBody):
         active_public_id: ``ProcessRun.public_id`` for the in-flight run
             when applicable; ``None`` for stopped / one-shot-completed
             entries.
+        rss_bytes: Resident set size of the subprocess in bytes, sampled
+            by the launcher's per-child psutil sampler. ``None`` for
+            thread-mode processes (no separate OS process), for native
+            children that have not yet been sampled, and for older events
+            published before the sampler existed.
+        cpu_percent: CPU utilisation of the subprocess as a percentage,
+            sampled non-blocking by the launcher (``psutil`` whole-process
+            value across cores, so a busy multi-threaded child can exceed
+            100). ``None`` under the same conditions as ``rss_bytes``; the
+            first sample after a (re)start reads ``0.0`` because psutil
+            needs two readings to compute a delta.
     """
 
     name: str
@@ -1742,6 +1753,8 @@ class ProcessSummaryItem(StrictBody):
     role: str
     lifecycle: str
     active_public_id: str | None = None
+    rss_bytes: int | None = None
+    cpu_percent: float | None = None
 
 
 class ProcessSummaryEventData(StrictDataSchema[Literal["process_summary_event"]]):
