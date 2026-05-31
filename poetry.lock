@@ -4252,14 +4252,14 @@ files = [
 
 [[package]]
 name = "poetry-plugin-dotenv"
-version = "3.3.0"
+version = "3.3.2"
 description = "poetry-plugin-dotenv - is the plugin that automatically loads environment variables from a dotenv file into the environment before poetry commands are run."
 optional = false
 python-versions = "<4.0,>=3.9"
 groups = ["dev"]
 files = [
-    {file = "poetry_plugin_dotenv-3.3.0-py3-none-any.whl", hash = "sha256:9f9b7d4bb0de0a2de1f615eacc62c0dcfa3eacf4fa840672d936d4f74604280c"},
-    {file = "poetry_plugin_dotenv-3.3.0.tar.gz", hash = "sha256:6b567ca1aa8ca656408e00e360c662427efe3627c6004c1c164f3443eabd45ab"},
+    {file = "poetry_plugin_dotenv-3.3.2-py3-none-any.whl", hash = "sha256:1beb606dd221236ed34269ec9ba5c4a971d9bc8c52395c5711a8ff6bb59ac46e"},
+    {file = "poetry_plugin_dotenv-3.3.2.tar.gz", hash = "sha256:ddea18b6b4efefb58eb66aab390f92b0518a1b08ddbd6534bacc1d5ed3cc8494"},
 ]
 
 [package.dependencies]
@@ -6348,14 +6348,14 @@ tests = ["cython", "littleutils", "pygments", "pytest", "typeguard"]
 
 [[package]]
 name = "starlette"
-version = "1.2.0"
+version = "1.2.1"
 description = "The little ASGI library that shines."
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "starlette-1.2.0-py3-none-any.whl", hash = "sha256:36e0c76ac59157e75dc4b3bdeafba97fb04eaf1878045f15dbef666a6f092ed7"},
-    {file = "starlette-1.2.0.tar.gz", hash = "sha256:3c5a6b23fff42492914e93890bb80cbfea72dbf37de268eec06185d62a4ca553"},
+    {file = "starlette-1.2.1-py3-none-any.whl", hash = "sha256:4de0082d08c8f6764a85a54cf1120d6939507a19905c7768acad2a9f875d2b89"},
+    {file = "starlette-1.2.1.tar.gz", hash = "sha256:9b9b5ebb992e67d6093741e63c2f59e4f6fff986f81163c087867bd7b924b3f6"},
 ]
 
 [package.dependencies]
@@ -7431,4 +7431,4 @@ test = ["pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "322628a829c7ea5b9ab73d99639512f8c31f8601252c19eae1fede07f7f08249"
+content-hash = "44e459c0be24992fb97e79cb3de7405879623ecf03904ba8e7cd6ae335da1d4b"
