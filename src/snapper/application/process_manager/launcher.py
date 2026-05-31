@@ -900,14 +900,22 @@ class ProcessLauncherService:
         their cached views without polling.
 
         This is the LOCK-FREE start primitive. It synchronously records
-        the watchdog markers (desired-state RUNNING, the respawn config
-        snapshot, and the uptime origin) BEFORE its first await so a
-        death that arrives later can be reconciled. It NEVER clears the
-        watchdog desired-state/config/uptime on a startup failure:
-        ownership of those markers belongs to the watchdog and to a
-        deliberate stop, so a respawn failure cannot clobber a concurrent
-        stop's ``STOPPED`` marker (see R2-1). The lock-taking manual
-        callers (:meth:`start_process_by_name`,
+        the respawn config snapshot and the uptime origin BEFORE its
+        first await so a death that arrives later can be reconciled. It
+        does NOT own the desired-state RUNNING transition (R5-1): the
+        ``desired=RUNNING`` write belongs to the lock-holding callers
+        (:meth:`start_process_by_name`,
+        :meth:`start_per_wallet_instance_by_name`,
+        :meth:`_delayed_restart`) and to the boot-time spawners, which
+        all set it via :meth:`_arm_desired_running` before invoking this
+        primitive. Were ``start_process`` to set RUNNING itself, a manual
+        start racing a stop's pre-lock window could clobber the stop's
+        ``STOPPED`` marker. It NEVER clears the watchdog
+        desired-state/config/uptime on a startup failure: ownership of
+        those markers belongs to the watchdog and to a deliberate stop,
+        so a respawn failure cannot clobber a concurrent stop's
+        ``STOPPED`` marker (see R2-1). The lock-taking manual callers
+        (:meth:`start_process_by_name`,
         :meth:`start_per_wallet_instance_by_name`) own the first-start
         leak cleanup for names they themselves armed. The ``try`` opens
         BEFORE the run-record creation await so its ``finally`` covers
@@ -933,7 +941,6 @@ class ProcessLauncherService:
         """
         self.process_lifecycles[config.name] = config.lifecycle
         self.process_roles[config.name] = config.role
-        self._desired_state[config.name] = _DesiredState.RUNNING
         self._restart_configs[config.name] = config
         self._restart_uptime_start[config.name] = _monotonic()
         started = False
@@ -1032,6 +1039,7 @@ class ProcessLauncherService:
                 filtered_count += 1
                 continue
             try:
+                self._arm_desired_running(config.name)
                 await self.start_process(config)
                 started_count += 1
             except Exception as e:
@@ -1093,6 +1101,7 @@ class ProcessLauncherService:
         for config in publishers:
             process_config = _copy_process_config_with_mode(config, ProcessModeEnum.PROCESS)
             try:
+                self._arm_desired_running(process_config.name)
                 await self.start_process(process_config)
                 started_count += 1
             except Exception as e:
@@ -1349,6 +1358,7 @@ class ProcessLauncherService:
         )
         self.instance_configs[instance_name] = instance_config
         try:
+            self._arm_desired_running(instance_name)
             await self.start_process(instance_config)
         except Exception as exc:
             self.instance_configs.pop(instance_name, None)
@@ -1687,6 +1697,65 @@ class ProcessLauncherService:
         self._restart_tasks.pop(name, None)
         self._restart_configs.pop(name, None)
         self._total_failed_restarts.pop(name, None)
+
+    def _arm_desired_running(self, name: str) -> None:
+        """Declare ``name`` desired-RUNNING (the lock-owned transition).
+
+        :meth:`start_process` no longer writes ``desired=RUNNING`` itself
+        (R5-1); the transition belongs here so only deliberate starters
+        own it. The lock-holding manual callers
+        (:meth:`start_process_by_name`,
+        :meth:`start_per_wallet_instance_by_name`) call this UNDER
+        ``_restart_lock_for(name)`` so a start cannot clobber a
+        concurrent :meth:`stop_process_by_name`'s ``STOPPED`` marker that
+        was set during the stop's pre-lock window: the stop and the start
+        serialize on the same per-name lock. The boot-time spawners and
+        :meth:`_delayed_restart` also call this; they cannot race an
+        operator stop (boot runs once, sequentially, before the
+        native-process monitor is armed; the respawn already holds the
+        lock and has re-checked desired before arming).
+
+        Args:
+            name: Logical process name to mark desired-RUNNING.
+        """
+        self._desired_state[name] = _DesiredState.RUNNING
+
+    async def _cancel_restart_tasks_locked(self, name: str) -> None:
+        """Cancel every pending restart task for ``name``, under the lock.
+
+        The R5-1 defense-in-depth: a :meth:`stop_process_by_name` runs
+        ``await _cancel_pending_restart`` BEFORE acquiring the per-name
+        lock, so a manual start that fails and re-arms recovery during
+        that pre-lock window can create a fresh :meth:`_delayed_restart`
+        task that the stop's :meth:`_clear_watchdog_state` would merely
+        POP (not cancel), leaving an orphan sleeper that could later
+        respawn against an already-running name. This helper, called AFTER
+        the stop has acquired ``_restart_lock_for(name)``, cancels and
+        joins any such task so none survives the stop.
+
+        Unlike :meth:`_cancel_pending_restart`, this is safe to run while
+        HOLDING the lock: every task it cancels is either sleeping its
+        backoff (outside the lock) or queued on the lock ``acquire``, and
+        a cancel lands at that suspension point and unwinds WITHOUT ever
+        entering the locked body, so the awaited task never contends for
+        the lock the caller holds. Because the caller holds the lock, no
+        watchdog path can schedule a NEW task while this runs, so the loop
+        is bounded and terminates. The current-task guard is defensive:
+        the stop is never itself a restart task.
+
+        Args:
+            name: Logical process name whose restart tasks to cancel.
+        """
+        while True:
+            pending = self._restart_tasks.pop(name, None)
+            if pending is None:
+                return
+            if pending is asyncio.current_task():
+                return
+            if not pending.done():
+                pending.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pending
 
     async def _maybe_schedule_restart(self, name: str, run_status: ProcessRunStatusEnum) -> None:
         """Reconcile a dead process toward its desired state (watchdog core).
@@ -2320,6 +2389,7 @@ class ProcessLauncherService:
                         status=StartProcessStatusEnum.ALREADY_RUNNING,
                         message=f"Process '{name}' is already running",
                     )
+                self._arm_desired_running(name)
                 await self.start_process(instance_config)
                 stopped_result = await self._handle_manual_start_stop_race(name)
                 if stopped_result is not None:
@@ -2425,6 +2495,7 @@ class ProcessLauncherService:
                         status=StartProcessStatusEnum.ALREADY_RUNNING,
                         message=f"Process '{name}' is already running",
                     )
+                self._arm_desired_running(name)
                 await self.start_process(config)
                 stopped_result = await self._handle_manual_start_stop_race(name)
                 if stopped_result is not None:
@@ -2522,6 +2593,16 @@ class ProcessLauncherService:
         and tears the just-started process down. The not-running path
         clears the watchdog state so the STOPPED marker never leaks.
 
+        Once the lock is held the stop re-cancels every restart task for
+        the name via :meth:`_cancel_restart_tasks_locked` (R5-1): a manual
+        start that failed and re-armed recovery during the pre-lock
+        ``_cancel_pending_restart`` window could have created a fresh
+        delayed-restart task that ``_clear_watchdog_state`` would only POP
+        (not cancel), leaving an orphan sleeper that could later respawn
+        against an already-running name. Re-cancelling under the lock
+        guarantees no restart task survives the stop, regardless of the
+        pre-lock window.
+
         Args:
             name: Process name to stop.
 
@@ -2533,6 +2614,7 @@ class ProcessLauncherService:
         was_strategy = self.process_roles.get(name) is ProcessRoleEnum.STRATEGY
         try:
             async with self._restart_lock_for(name):
+                await self._cancel_restart_tasks_locked(name)
                 if name not in self.started_processes:
                     logger.warning(f"Process '{name}' is not running")
                     self._clear_watchdog_state(name)

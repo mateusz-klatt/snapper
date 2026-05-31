@@ -7949,12 +7949,18 @@ class TestStartProcessWatchdogMarkers:
     """start_process records watchdog markers and retains them on failure."""
 
     @pytest.mark.asyncio
-    async def test_records_desired_state_on_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A successful start records desired=RUNNING and the respawn config.
+    async def test_records_config_and_uptime_but_not_desired(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful start records config + uptime, NOT desired (R5-1).
 
         Given: a config started via start_process (subprocess spawn stubbed),
         When: start_process completes,
-        Then: desired state is RUNNING and the config snapshot is recorded.
+        Then: the respawn config snapshot and uptime origin are recorded, but
+            start_process does NOT own the desired=RUNNING transition — that
+            belongs to the lock-holding callers / boot spawners via
+            ``_arm_desired_running``, so a start can never clobber a concurrent
+            stop's STOPPED during the stop's pre-lock window.
         """
         factory = ProcessLauncherService(MagicMock())
         config = _watchdog_config(name="pub")
@@ -7963,9 +7969,22 @@ class TestStartProcessWatchdogMarkers:
         monkeypatch.setattr(factory, "_finalize_one_shot", mock.AsyncMock())
         monkeypatch.setattr(factory, "_emit_summary_snapshot", mock.AsyncMock())
         await factory.start_process(config)
-        assert factory._desired_state["pub"] is _DesiredState.RUNNING
+        assert factory._desired_state.get("pub") is None
         assert factory._restart_configs["pub"] is config
         assert "pub" in factory._restart_uptime_start
+
+    @pytest.mark.asyncio
+    async def test_arm_desired_running_sets_running(self) -> None:
+        """``_arm_desired_running`` is the lock-owned desired=RUNNING write (R5-1).
+
+        Given: a launcher with no desired state for a name,
+        When: ``_arm_desired_running`` is called,
+        Then: the name's desired state becomes RUNNING (the only entry point
+            that declares RUNNING, so the transition is lock-ownable).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        factory._arm_desired_running("pub")
+        assert factory._desired_state["pub"] is _DesiredState.RUNNING
 
     @pytest.mark.asyncio
     async def test_start_failure_retains_watchdog_markers(
@@ -7973,16 +7992,18 @@ class TestStartProcessWatchdogMarkers:
     ) -> None:
         """A startup failure leaves the watchdog markers in place (R2-1).
 
-        Given: a config whose subprocess spawn raises on start,
+        Given: a name already armed desired=RUNNING (a respawn / manual caller
+            arms it before calling start_process) whose subprocess spawn raises,
         When: start_process raises,
-        Then: the desired/config/uptime markers it set are RETAINED (the
-            primitive no longer clears watchdog desired-state ownership on
-            failure, so a respawn failure cannot clobber a concurrent
-            stop's STOPPED marker). The lock-taking manual callers own the
-            first-start-leak cleanup for names they armed.
+        Then: the desired/config/uptime markers are RETAINED — the primitive
+            never clears watchdog desired-state ownership on failure, so a
+            respawn failure cannot clobber a concurrent stop's STOPPED marker.
+            The lock-taking manual callers own the first-start-leak cleanup for
+            names they armed.
         """
         factory = ProcessLauncherService(MagicMock())
         config = _watchdog_config(name="pub")
+        factory._arm_desired_running("pub")
         monkeypatch.setattr(factory, "_try_create_run_record", mock.AsyncMock(return_value=None))
         monkeypatch.setattr(
             factory, "_start_as_subprocess", mock.MagicMock(side_effect=RuntimeError("spawn boom"))
@@ -9595,3 +9616,105 @@ class TestWatchdogConcurrencyRegressions:
         assert "pub" not in factory.started_processes
         assert factory._desired_state.get("pub") is None
         assert factory._restart_tasks.get("pub") is None
+
+    @pytest.mark.asyncio()
+    async def test_r5_1_stop_recancels_task_created_in_prelock_window(self) -> None:
+        """Stop kills a restart task armed during its pre-lock window (R5-1).
+
+        Given: a watchdog-managed, not-running publisher with a pending sleeping
+            ``_restart_tasks[name]``; a manual start fails and re-arms recovery
+            DURING the stop's pre-lock ``_cancel_pending_restart`` window, and
+            the failing manual start clobbered desired back to RUNNING (the R5-1
+            race),
+        When: the stop acquires the per-name lock,
+        Then: the in-lock re-cancel (:meth:`_cancel_restart_tasks_locked`) kills
+            the window-created task; after both settle there is NO surviving
+            ``_restart_tasks[name]``, desired is cleared, and advancing time
+            triggers NO respawn (the orphan sleeper can never wake and spawn
+            against an already-running name).
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        _stub_run_tracking(factory)
+        respawns: list[str] = []
+
+        async def _fake_respawn(name: str, delay: float) -> None:
+            await asyncio.sleep(delay)
+            async with factory._restart_lock_for(name):
+                respawns.append(name)
+
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+        original_cancel = factory._cancel_pending_restart
+
+        async def _slow_cancel(name: str) -> None:
+            await original_cancel(name)
+            entered.set()
+            await gate.wait()
+
+        pending_task = asyncio.create_task(_fake_respawn("pub", 999.0))
+        factory._restart_tasks["pub"] = pending_task
+        await asyncio.sleep(0)
+        factory._cancel_pending_restart = _slow_cancel
+        stop_task = asyncio.create_task(factory.stop_process_by_name("pub"))
+        await entered.wait()
+        factory._desired_state["pub"] = _DesiredState.RUNNING
+        window_task = asyncio.create_task(_fake_respawn("pub", 999.0))
+        factory._restart_tasks["pub"] = window_task
+        gate.set()
+        result = await asyncio.wait_for(stop_task, timeout=2.0)
+        assert result.status == "not_running"
+        assert pending_task.cancelled()
+        assert window_task.cancelled()
+        assert factory._desired_state.get("pub") is None
+        assert factory._restart_tasks.get("pub") is None
+        await asyncio.sleep(0)
+        assert respawns == []
+
+    @pytest.mark.asyncio()
+    async def test_r5_1_start_process_does_not_arm_desired(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """start_process never sets desired=RUNNING by itself (R5-1 Option 1).
+
+        Given: a stop has declared desired=STOPPED for a name,
+        When: ``start_process`` runs the LOCK-FREE primitive for that name,
+        Then: it records the respawn config/uptime but leaves desired=STOPPED
+            untouched — only the lock-holding callers / boot spawners own the
+            ``desired=RUNNING`` transition (via ``_arm_desired_running``), so a
+            start can never clobber a concurrent stop's STOPPED marker.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        factory._desired_state["pub"] = _DesiredState.STOPPED
+        monkeypatch.setattr(factory, "_try_create_run_record", mock.AsyncMock(return_value=None))
+        monkeypatch.setattr(factory, "_start_as_subprocess", mock.MagicMock())
+        monkeypatch.setattr(factory, "_finalize_one_shot", mock.AsyncMock())
+        monkeypatch.setattr(factory, "_emit_summary_snapshot", mock.AsyncMock())
+        await factory.start_process(config)
+        assert factory._desired_state.get("pub") is _DesiredState.STOPPED
+        assert factory._restart_configs["pub"] is config
+
+    @pytest.mark.asyncio()
+    async def test_r5_1_in_lock_recancel_terminates_no_deadlock(self) -> None:
+        """In-lock re-cancel of a window task terminates without deadlock (R5-1).
+
+        Given: a not-running name whose ``_restart_tasks`` entry is a live
+            delayed-restart task sleeping its backoff OUTSIDE the per-name lock,
+        When: ``stop_process_by_name`` acquires the lock and re-cancels it via
+            :meth:`_cancel_restart_tasks_locked`,
+        Then: the stop completes within a timeout (the cancelled task unwinds at
+            its sleep/acquire suspension point and never contends for the held
+            lock) and no restart task survives.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="pub")
+        _arm_watchdog(factory, config)
+        _stub_run_tracking(factory)
+        factory._restart_tasks["pub"] = asyncio.create_task(factory._delayed_restart("pub", 999.0))
+        await asyncio.sleep(0)
+        result = await asyncio.wait_for(factory.stop_process_by_name("pub"), timeout=2.0)
+        assert result.status == "not_running"
+        assert factory._restart_tasks.get("pub") is None
+        assert factory._desired_state.get("pub") is None
