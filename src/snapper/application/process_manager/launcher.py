@@ -1740,22 +1740,22 @@ class ProcessLauncherService:
         entering the locked body, so the awaited task never contends for
         the lock the caller holds. Because the caller holds the lock, no
         watchdog path can schedule a NEW task while this runs, so the loop
-        is bounded and terminates. The current-task guard is defensive:
-        the stop is never itself a restart task.
+        is bounded and terminates. A single pop-and-cancel suffices (no
+        loop): because the caller holds the lock, no watchdog path can
+        schedule a SUCCESSOR while this runs — unlike the pre-lock
+        :meth:`_cancel_pending_restart`, whose loop must chase a successor
+        that a failed respawn schedules during its own await. The caller
+        (the stop) is never itself a restart task, so no current-task
+        self-cancel can arise.
 
         Args:
-            name: Logical process name whose restart tasks to cancel.
+            name: Logical process name whose restart task to cancel.
         """
-        while True:
-            pending = self._restart_tasks.pop(name, None)
-            if pending is None:
-                return
-            if pending is asyncio.current_task():
-                return
-            if not pending.done():
-                pending.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await pending
+        pending = self._restart_tasks.pop(name, None)
+        if pending is not None and not pending.done():
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending
 
     async def _maybe_schedule_restart(self, name: str, run_status: ProcessRunStatusEnum) -> None:
         """Reconcile a dead process toward its desired state (watchdog core).
