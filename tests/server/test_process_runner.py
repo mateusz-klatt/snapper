@@ -271,6 +271,18 @@ def test_main_async_path_uses_listener_wrapper(monkeypatch: pytest.MonkeyPatch) 
             captured["instance_start_called"] = True
             await asyncio.sleep(0)
 
+    class _FakeUvloop:
+        @staticmethod
+        def run(awaitable: Awaitable[None]) -> None:
+            return asyncio.run(awaitable)
+
+    def _import_module(name: str) -> object:
+        if name == "fake.module":
+            return fake_module
+        if name == "uvloop":
+            return _FakeUvloop
+        raise AssertionError(f"Unexpected import of {name}")
+
     fake_module = MagicMock()
     fake_module.FakeStrategy = _Instance
     config = (
@@ -283,17 +295,17 @@ def test_main_async_path_uses_listener_wrapper(monkeypatch: pytest.MonkeyPatch) 
             "snapper.server.process_runner._run_async_method_with_listener",
             side_effect=_wrapper,
         ) as mock_wrapper,
+        patch("snapper.server.process_runner.setup_logging"),
         patch(
             "snapper.server.process_runner.importlib.import_module",
-            return_value=fake_module,
+            side_effect=_import_module,
         ),
-        patch("snapper.server.process_runner.setup_logging"),
     ):
 
         exit_code = process_runner.main()
     assert exit_code == 0
     assert captured.get("instance_start_called") is None
-    mock_wrapper.assert_called_once()
+    mock_wrapper.assert_awaited_once()
 
 
 def test_main_logs_to_container_subprocess_logfile(monkeypatch: pytest.MonkeyPatch) -> None:

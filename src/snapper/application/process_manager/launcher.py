@@ -233,6 +233,16 @@ class _PerWalletSpawnOutcome:
     error: Exception | None
 
 
+@dataclass
+class _PerWalletStartTarget:
+    """Resolved registry target for a per-wallet manual start."""
+
+    exchange: str
+    wallet_short: str
+    template_name: str
+    entry: ProcessRegistryEntry
+
+
 class ProcessLauncherService:
     """Service for launching and managing application processes.
 
@@ -1461,7 +1471,7 @@ class ProcessLauncherService:
             self.expected_terminations.update(tracked_processes)
         for name in set(self._desired_state):
             self._desired_state[name] = _DesiredState.STOPPED
-        for restart_task in list(self._restart_tasks.values()):
+        for restart_task in self._restart_tasks.values():
             if not restart_task.done():
                 restart_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -1757,6 +1767,96 @@ class ProcessLauncherService:
             with contextlib.suppress(asyncio.CancelledError):
                 await pending
 
+    def _has_live_restart_task(self, name: str) -> bool:
+        """Return whether a delayed restart task is already pending."""
+        existing = self._restart_tasks.get(name)
+        return existing is not None and not existing.done()
+
+    def _restart_config_for_status(
+        self,
+        name: str,
+        run_status: ProcessRunStatusEnum,
+    ) -> ProcessConfigModel | None:
+        """Return the restart config when policy allows a restart."""
+        if self._desired_state.get(name) is not _DesiredState.RUNNING:
+            return None
+        if name in self.expected_terminations:
+            return None
+        config = self._restart_configs.get(name)
+        if config is None:
+            return None
+        if config.lifecycle is ProcessLifecycleEnum.ONE_SHOT:
+            self._clear_watchdog_state(name)
+            return None
+        if config.restart_policy is ProcessRestartPolicyEnum.NEVER:
+            logger.info(f"Process '{name}' died; restart_policy=NEVER, not restarting")
+            self._clear_watchdog_state(name)
+            return None
+        if (
+            config.restart_policy is ProcessRestartPolicyEnum.ON_FAILURE
+            and run_status is not ProcessRunStatusEnum.FAILED
+        ):
+            logger.info(f"Process '{name}' exited cleanly under ON_FAILURE; not restarting")
+            self._clear_watchdog_state(name)
+            return None
+        return config
+
+    def _record_failed_restart_attempt(
+        self,
+        name: str,
+        healthy: bool,
+        long_healthy: bool,
+    ) -> None:
+        """Update restart counters for a failed process death."""
+        if long_healthy:
+            self._total_failed_restarts[name] = 0
+        self._total_failed_restarts[name] = self._total_failed_restarts.get(name, 0) + 1
+        if healthy:
+            self._restart_attempts[name] = 0
+            return
+        self._restart_attempts[name] = self._restart_attempts.get(name, 0) + 1
+
+    def _record_non_failed_restart_attempt(
+        self,
+        name: str,
+        healthy: bool,
+        long_healthy: bool,
+    ) -> None:
+        """Reset restart counters after a non-failed process death."""
+        if long_healthy:
+            self._total_failed_restarts[name] = 0
+        if healthy:
+            self._restart_attempts[name] = 0
+
+    def _record_restart_attempt(
+        self,
+        name: str,
+        run_status: ProcessRunStatusEnum,
+    ) -> None:
+        """Update restart accounting for the just-observed process death."""
+        now = _monotonic()
+        uptime = now - self._restart_uptime_start.get(name, now)
+        healthy = uptime > _RESTART_HEALTHY_UPTIME_S
+        long_healthy = uptime > _TOTAL_RESET_UPTIME_S
+        if run_status is ProcessRunStatusEnum.FAILED:
+            self._record_failed_restart_attempt(name, healthy, long_healthy)
+            return
+        self._record_non_failed_restart_attempt(name, healthy, long_healthy)
+
+    def _restart_budget_exhausted(self, name: str) -> bool:
+        """Return whether the process exhausted its restart budget."""
+        return (
+            self._restart_attempts.get(name, 0) >= _MAX_RESTART_ATTEMPTS
+            or self._total_failed_restarts.get(name, 0) >= _MAX_TOTAL_FAILED_RESTARTS
+        )
+
+    def _schedule_delayed_restart(self, name: str) -> None:
+        """Schedule the next delayed restart task for a process."""
+        attempts = self._restart_attempts.get(name, 0)
+        delay = _compute_backoff_delay(name, attempts)
+        logger.info(f"Scheduling restart of '{name}' in {delay:.2f}s (attempt {attempts})")
+        self._restart_tasks[name] = asyncio.create_task(self._delayed_restart(name, delay))
+
     async def _maybe_schedule_restart(self, name: str, run_status: ProcessRunStatusEnum) -> None:
         """Reconcile a dead process toward its desired state (watchdog core).
 
@@ -1783,60 +1883,18 @@ class ProcessLauncherService:
             run_status: The resolved terminal run status.
         """
         async with self._restart_lock_for(name):
-            existing = self._restart_tasks.get(name)
-            if existing is not None and not existing.done():
+            if self._has_live_restart_task(name):
                 logger.info(f"Restart of '{name}' already pending; not scheduling a second")
                 return
-            if self._desired_state.get(name) is not _DesiredState.RUNNING:
-                return
-            if name in self.expected_terminations:
-                return
-            config = self._restart_configs.get(name)
+            config = self._restart_config_for_status(name, run_status)
             if config is None:
                 return
-            if config.lifecycle is ProcessLifecycleEnum.ONE_SHOT:
+            self._record_restart_attempt(name, run_status)
+            if self._restart_budget_exhausted(name):
+                self._escalate_restart(name, config)
                 self._clear_watchdog_state(name)
                 return
-            if config.restart_policy is ProcessRestartPolicyEnum.NEVER:
-                logger.info(f"Process '{name}' died; restart_policy=NEVER, not restarting")
-                self._clear_watchdog_state(name)
-                return
-            if (
-                config.restart_policy is ProcessRestartPolicyEnum.ON_FAILURE
-                and run_status is not ProcessRunStatusEnum.FAILED
-            ):
-                logger.info(f"Process '{name}' exited cleanly under ON_FAILURE; not restarting")
-                self._clear_watchdog_state(name)
-                return
-            uptime = _monotonic() - self._restart_uptime_start.get(name, _monotonic())
-            healthy = uptime > _RESTART_HEALTHY_UPTIME_S
-            long_healthy = uptime > _TOTAL_RESET_UPTIME_S
-            if run_status is ProcessRunStatusEnum.FAILED:
-                if long_healthy:
-                    self._total_failed_restarts[name] = 0
-                self._total_failed_restarts[name] = self._total_failed_restarts.get(name, 0) + 1
-                if healthy:
-                    self._restart_attempts[name] = 0
-                else:
-                    self._restart_attempts[name] = self._restart_attempts.get(name, 0) + 1
-                if (
-                    self._restart_attempts[name] >= _MAX_RESTART_ATTEMPTS
-                    or self._total_failed_restarts[name] >= _MAX_TOTAL_FAILED_RESTARTS
-                ):
-                    self._escalate_restart(name, config)
-                    self._clear_watchdog_state(name)
-                    return
-            else:
-                if long_healthy:
-                    self._total_failed_restarts[name] = 0
-                if healthy:
-                    self._restart_attempts[name] = 0
-            delay = _compute_backoff_delay(name, self._restart_attempts.get(name, 0))
-            logger.info(
-                f"Scheduling restart of '{name}' in {delay:.2f}s "
-                f"(attempt {self._restart_attempts.get(name, 0)})"
-            )
-            self._restart_tasks[name] = asyncio.create_task(self._delayed_restart(name, delay))
+            self._schedule_delayed_restart(name)
 
     def _escalate_restart(self, name: str, config: ProcessConfigModel) -> None:
         """Take the last-resort escalation action for an exhausted process.
@@ -1931,10 +1989,7 @@ class ProcessLauncherService:
             name: Process name to respawn.
             delay: Backoff delay in seconds.
         """
-        try:
-            await asyncio.sleep(delay)
-        except asyncio.CancelledError:
-            return
+        await asyncio.sleep(delay)
         async with self._restart_lock_for(name):
             try:
                 if self._desired_state.get(name) is not _DesiredState.RUNNING:
@@ -2264,6 +2319,139 @@ class ProcessLauncherService:
             message=f"Process '{name}' was stopped during start",
         )
 
+    def _already_running_start_result(self, name: str) -> ProcessStartResult | None:
+        """Return an ALREADY_RUNNING start result when a process is live."""
+        if name not in self.started_processes:
+            return None
+        logger.warning(f"Process '{name}' is already running")
+        return ProcessStartResult(
+            status=StartProcessStatusEnum.ALREADY_RUNNING,
+            message=f"Process '{name}' is already running",
+        )
+
+    def _resolve_per_wallet_start_target(
+        self,
+        name: str,
+    ) -> _PerWalletStartTarget | ProcessStartResult:
+        """Resolve a per-wallet instance name to its registry template."""
+        parsed = parse_executor_instance(name)
+        if parsed is None:
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=f"'{name}' is not a per-wallet executor instance name",
+            )
+        exchange, wallet_short = parsed
+        template_name = f"executor_{exchange}"
+        entry = get_registered_processes().get(template_name)
+        if entry is None:
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=f"Template '{template_name}' is not registered",
+            )
+        return _PerWalletStartTarget(
+            exchange=exchange,
+            wallet_short=wallet_short,
+            template_name=template_name,
+            entry=entry,
+        )
+
+    async def _resolve_per_wallet_credential(
+        self,
+        name: str,
+        target: _PerWalletStartTarget,
+    ) -> WalletCredentialRow | ProcessStartResult:
+        """Return the active wallet credential matching a per-wallet target."""
+        repository = get_repository(self.settings.db_url)
+        try:
+            credentials = await repository.list_active_wallet_credentials(as_of=datetime.now(UTC))
+        except Exception as exc:
+            logger.error(f"Per-wallet start: failed to query wallet_credentials: {exc}")
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=f"Cannot query wallet credentials: {exc}",
+            )
+        match = next(
+            (
+                credential
+                for credential in credentials
+                if credential["exchange"] == target.exchange
+                and compute_wallet_short(credential["wallet_public_id"]) == target.wallet_short
+            ),
+            None,
+        )
+        if match is None:
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=(
+                    f"No active wallet credential for '{name}' "
+                    f"(exchange={target.exchange}, wallet prefix={target.wallet_short}); "
+                    f"create the credential or use a different instance name"
+                ),
+            )
+        return match
+
+    def _restore_prior_instance_config(
+        self,
+        name: str,
+        prior_instance_config: ProcessConfigModel | None,
+    ) -> None:
+        """Restore or remove a per-wallet instance config after a failed start."""
+        if prior_instance_config is None:
+            self.instance_configs.pop(name, None)
+            return
+        self.instance_configs[name] = prior_instance_config
+
+    def _handle_manual_start_failure(
+        self,
+        name: str,
+        was_watchdog_managed: bool,
+    ) -> None:
+        """Restore watchdog state after a failed manual start attempt."""
+        if was_watchdog_managed:
+            self._rearm_recovery_after_manual_start_failure(name)
+            return
+        self._clear_watchdog_state(name)
+
+    async def _start_prepared_per_wallet_instance(
+        self,
+        name: str,
+        instance_config: ProcessConfigModel,
+    ) -> ProcessStartResult:
+        """Start a resolved per-wallet instance under the per-name lock."""
+        prior_instance_config = self.instance_configs.get(name)
+        self.instance_configs[name] = instance_config
+        was_watchdog_managed = name in self._desired_state
+        await self._cancel_pending_restart(name)
+        try:
+            async with self._restart_lock_for(name):
+                running_result = self._already_running_start_result(name)
+                if running_result is not None:
+                    if prior_instance_config is not None:
+                        self.instance_configs[name] = prior_instance_config
+                    return running_result
+                self._arm_desired_running(name)
+                await self.start_process(instance_config)
+                stopped_result = await self._handle_manual_start_stop_race(name)
+                if stopped_result is not None:
+                    self.instance_configs.pop(name, None)
+                    return stopped_result
+        except Exception as exc:
+            self._restore_prior_instance_config(name, prior_instance_config)
+            self._handle_manual_start_failure(name, was_watchdog_managed)
+            logger.error(f"Per-wallet start: failed to start '{name}': {exc}")
+            return ProcessStartResult(
+                status=StartProcessStatusEnum.ERROR,
+                message=f"Failed to start '{name}': {exc}",
+            )
+        self._start_native_process_monitoring()
+        public_id = self.active_runs.get(name)
+        logger.info(f"Per-wallet start: '{name}' started successfully")
+        return ProcessStartResult(
+            status=StartProcessStatusEnum.SUCCESS,
+            message=f"Process '{name}' started successfully",
+            public_id=public_id,
+        )
+
     async def start_per_wallet_instance_by_name(
         self,
         name: str,
@@ -2318,105 +2506,25 @@ class ProcessLauncherService:
             credential exists, or the underlying ``start_process``
             raises.
         """
-        if name in self.started_processes:
-            logger.warning(f"Process '{name}' is already running")
-            return ProcessStartResult(
-                status=StartProcessStatusEnum.ALREADY_RUNNING,
-                message=f"Process '{name}' is already running",
-            )
-        parsed = parse_executor_instance(name)
-        if parsed is None:
-            return ProcessStartResult(
-                status=StartProcessStatusEnum.ERROR,
-                message=f"'{name}' is not a per-wallet executor instance name",
-            )
-        exchange, wallet_short = parsed
-        registry = get_registered_processes()
-        template_name = f"executor_{exchange}"
-        entry = registry.get(template_name)
-        if entry is None:
-            return ProcessStartResult(
-                status=StartProcessStatusEnum.ERROR,
-                message=f"Template '{template_name}' is not registered",
-            )
-        repository = get_repository(self.settings.db_url)
-        try:
-            credentials = await repository.list_active_wallet_credentials(as_of=datetime.now(UTC))
-        except Exception as exc:
-            logger.error(f"Per-wallet start: failed to query wallet_credentials: {exc}")
-            return ProcessStartResult(
-                status=StartProcessStatusEnum.ERROR,
-                message=f"Cannot query wallet credentials: {exc}",
-            )
-        match = next(
-            (
-                cred
-                for cred in credentials
-                if cred["exchange"] == exchange
-                and compute_wallet_short(cred["wallet_public_id"]) == wallet_short
-            ),
-            None,
-        )
-        if match is None:
-            return ProcessStartResult(
-                status=StartProcessStatusEnum.ERROR,
-                message=(
-                    f"No active wallet credential for '{name}' "
-                    f"(exchange={exchange}, wallet prefix={wallet_short}); "
-                    f"create the credential or use a different instance name"
-                ),
-            )
-        template_config = await self._load_template_setting(template_name)
+        running_result = self._already_running_start_result(name)
+        if running_result is not None:
+            return running_result
+        target = self._resolve_per_wallet_start_target(name)
+        if isinstance(target, ProcessStartResult):
+            return target
+        match = await self._resolve_per_wallet_credential(name, target)
+        if isinstance(match, ProcessStartResult):
+            return match
+        template_config = await self._load_template_setting(target.template_name)
         instance_config = self._build_per_wallet_instance_config(
-            exchange=exchange,
+            exchange=target.exchange,
             wallet_public_id=match["wallet_public_id"],
-            entry=entry,
+            entry=target.entry,
             template_config=template_config,
         )
         if mode is not None:
             instance_config.mode = mode
-        prior_instance_config = self.instance_configs.get(name)
-        self.instance_configs[name] = instance_config
-        was_watchdog_managed = name in self._desired_state
-        await self._cancel_pending_restart(name)
-        try:
-            async with self._restart_lock_for(name):
-                if name in self.started_processes:
-                    logger.warning(f"Process '{name}' is already running")
-                    if prior_instance_config is not None:
-                        self.instance_configs[name] = prior_instance_config
-                    return ProcessStartResult(
-                        status=StartProcessStatusEnum.ALREADY_RUNNING,
-                        message=f"Process '{name}' is already running",
-                    )
-                self._arm_desired_running(name)
-                await self.start_process(instance_config)
-                stopped_result = await self._handle_manual_start_stop_race(name)
-                if stopped_result is not None:
-                    self.instance_configs.pop(name, None)
-                    return stopped_result
-        except Exception as exc:
-            if prior_instance_config is not None:
-                self.instance_configs[name] = prior_instance_config
-            else:
-                self.instance_configs.pop(name, None)
-            if was_watchdog_managed:
-                self._rearm_recovery_after_manual_start_failure(name)
-            else:
-                self._clear_watchdog_state(name)
-            logger.error(f"Per-wallet start: failed to start '{name}': {exc}")
-            return ProcessStartResult(
-                status=StartProcessStatusEnum.ERROR,
-                message=f"Failed to start '{name}': {exc}",
-            )
-        self._start_native_process_monitoring()
-        public_id = self.active_runs.get(name)
-        logger.info(f"Per-wallet start: '{name}' started successfully")
-        return ProcessStartResult(
-            status=StartProcessStatusEnum.SUCCESS,
-            message=f"Process '{name}' started successfully",
-            public_id=public_id,
-        )
+        return await self._start_prepared_per_wallet_instance(name, instance_config)
 
     async def start_process_by_name(
         self,

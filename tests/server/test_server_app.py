@@ -153,8 +153,13 @@ class TestLifespan:
         mock_zmq_bridge.stop = AsyncMock()
         mock_manager.zmq_bridge = mock_zmq_bridge
         mock_app.state.manager = mock_manager
+        mock_app.state.mcp_sub_app.router.lifespan_context = _noop_lifespan
         with (
             patch("snapper.server.app.discover_processes") as mock_discover,
+            patch(
+                "snapper.server.app.get_ai_review_service",
+                return_value=_make_ai_review_service_mock(),
+            ),
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
             patch(
@@ -162,6 +167,35 @@ class TestLifespan:
                 return_value=(MagicMock(), MagicMock()),
             ),
             patch("snapper.server.app._shutdown_user_service_publisher"),
+            patch(
+                "snapper.server.app.MarketPersistPolicy",
+                return_value=MagicMock(
+                    initial_rebuild=AsyncMock(),
+                    start_admin_listener=AsyncMock(),
+                    stop=AsyncMock(),
+                ),
+            ),
+            patch(
+                "snapper.server.app.MarketCacheService",
+                return_value=MagicMock(
+                    start=AsyncMock(),
+                    stop=AsyncMock(),
+                ),
+            ),
+            patch(
+                "snapper.server.app.MarketStatsWorker",
+                return_value=MagicMock(
+                    start=AsyncMock(),
+                    stop=AsyncMock(),
+                ),
+            ),
+            patch("snapper.server.app.get_repository"),
+            patch("snapper.server.app._start_system_metrics_snapshotter", new=AsyncMock()),
+            patch("snapper.server.app._stop_system_metrics_snapshotter", new=AsyncMock()),
+            patch("snapper.server.app._start_retention_scheduler", new=AsyncMock()),
+            patch("snapper.server.app._stop_retention_scheduler", new=AsyncMock()),
+            patch("snapper.server.app._start_db_stats_snapshotter", new=AsyncMock()),
+            patch("snapper.server.app._stop_db_stats_snapshotter", new=AsyncMock()),
             patch(
                 "snapper.server.app.get_ws_auth_manager",
                 return_value=MagicMock(

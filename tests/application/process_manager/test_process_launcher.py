@@ -7599,12 +7599,12 @@ class TestDelayedRestart:
         start_mock.assert_awaited_once_with(config)
 
     @pytest.mark.asyncio
-    async def test_cancelled_during_backoff_returns_clean(self) -> None:
-        """A cancel during the backoff sleep is a clean return.
+    async def test_cancelled_during_backoff_cancels_task(self) -> None:
+        """A cancel during the backoff sleep propagates task cancellation.
 
         Given: a _delayed_restart task suspended in its backoff sleep,
         When: the task is cancelled,
-        Then: it returns cleanly (no respawn, no exception propagated).
+        Then: it unwinds as cancelled and does not respawn.
         """
         factory = ProcessLauncherService(MagicMock())
         config = _watchdog_config()
@@ -7616,6 +7616,7 @@ class TestDelayedRestart:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        assert task.cancelled()
         start_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
