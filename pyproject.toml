@@ -30,7 +30,7 @@ sqlalchemy = {extras = ["asyncio"], version = "^2.0.50"}
 aiosqlite = "^0.22.1"
 pandas = "^3.0.3"
 numpy = "^2.4.6"
-typer = {extras = ["all"], version = "^0.26.4"}
+typer = {extras = ["all"], version = "^0.26.5"}
 python-dotenv = "^1.2.2"
 loguru = "^0.7.3"
 alembic = "^1.18.4"
@@ -87,7 +87,7 @@ matplotlib = "^3.10.9"
 scikit-learn = "^1.8.0"
 tqdm = "^4.67.3"
 types-markdown = "^3.10.2.20260518"
-httpx2 = "^2.2.0"
+httpx2 = "^2.3.0"
 
 [tool.poetry.scripts]
 snapper = "snapper.__main__:main"
