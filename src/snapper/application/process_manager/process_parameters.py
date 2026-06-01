@@ -12,6 +12,8 @@ Processes keep clean domain constructors. The process manager validates
 parameters externally, then instantiates via keyword unpacking.
 """
 
+from datetime import date
+
 from snapper.api.schemas.base import StrictBody
 from snapper.core.json_types import JsonObject
 from snapper.core.types import ExchangeEnum
@@ -98,6 +100,24 @@ class AggregatesBackfillParameters(StrictBody):
     days_back: int = 7
     resume: bool = True
     save_csv: bool = True
+
+
+class CsvLoadParameters(StrictBody):
+    """Parameters for PolygonCsvLoaderService.
+
+    Attributes:
+        symbols: Symbols to load (empty uses settings default).
+        all_mapped: If True, load every archive symbol present in cache.
+        timespan: Candle timespan selecting the cache subtree.
+        since: Earliest day to (re)load, inclusive (None for no lower bound).
+        until: Latest day to (re)load, inclusive (None for no upper bound).
+    """
+
+    symbols: list[str] = []
+    all_mapped: bool = False
+    timespan: str = "day"
+    since: date | None = None
+    until: date | None = None
 
 
 class KrakenFuturesBackfillParameters(StrictBody):

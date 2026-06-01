@@ -1,6 +1,12 @@
-"""Unit tests for PolygonAggregatesBackfillService."""
+"""Unit tests for the download-only PolygonAggregatesBackfillService.
 
-import math
+The service writes candle data to the CSV cache only; it never touches
+the database. These tests assert the download/skip behavior and that
+``upsert_candles`` is never invoked (loading the cache into the
+``candles`` table is the separate responsibility of
+``PolygonCsvLoaderService``).
+"""
+
 from collections.abc import Callable
 from datetime import UTC
 from datetime import date
@@ -25,20 +31,15 @@ from snapper.application.updaters.historical.aggregates import PolygonAggregates
 from snapper.application.updaters.historical.aggregates import _SymbolContext
 from snapper.application.updaters.historical.aggregates import _timeframe_label
 from snapper.data.repository import DatabaseRepository
-from snapper.data.repository import Repository
 from snapper.infrastructure.historical.polygon.loader import AggregateCandle
+from snapper.infrastructure.historical.polygon.loader import PolygonHistoricalLoader
 
 TEST_DB_URL = "sqlite:///:memory:"
 
 
 @pytest.fixture(autouse=True)
-def _patch_resolve_spid(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Patch resolve_symbol_public_id for all tests in this module."""
-    monkeypatch.setattr(
-        "snapper.application.updaters.historical.aggregates.resolve_symbol_public_id",
-        AsyncMock(return_value="stub-spid"),
-    )
-
+def _patch_archive_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Seed a permissive archive-symbol map on every constructed service."""
     original_init = PolygonAggregatesBackfillService.__init__
 
     def _patched_init(self: PolygonAggregatesBackfillService, *args: Any, **kwargs: Any) -> None:
@@ -101,36 +102,6 @@ class _StubSyncRepo:
 
     def get_session(self) -> _StubSession:
         return _StubSession([list(row) for row in self._template])
-
-
-class _StubAsyncRepo:
-    """Test stub for asynchronous repository."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-        self.return_value: tuple[int, str] = (42, "stub-instrument-pub-id")
-
-    async def ensure_instrument(
-        self,
-        symbol_public_id: str,
-        exchange: str,
-        session_id: str,
-        sequence_id: int,
-        timestamp: datetime | None = None,
-    ) -> tuple[int, str]:
-        self.calls.append(
-            {
-                "symbol_public_id": symbol_public_id,
-                "exchange": exchange,
-                "session_id": session_id,
-                "sequence_id": sequence_id,
-                "timestamp": timestamp,
-            }
-        )
-        return self.return_value
-
-    async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
-        return len(rows)
 
 
 class _StubSymbolMapper:
@@ -211,6 +182,24 @@ def test_timeframe_label_variants() -> None:
     assert _timeframe(2, "hour") == "2h"
     assert _timeframe(5, "day") == "5d"
     assert _timeframe(3, "Week") == "3w"
+
+
+def test_bars_per_day_variants() -> None:
+    """Return the estimated bars-per-day for each timespan.
+
+    Given: Backfill services configured for each timespan,
+    When: _bars_per_day is evaluated,
+    Then: minute yields 1440, hour yields 24 and any other timespan (the
+        ``day`` default) yields 1. The daily branch is exercised here
+        explicitly because the daily download path now bypasses the
+        resume-skip optimization that previously reached it.
+    """
+    minute_svc = PolygonAggregatesBackfillService(symbols=[], timespan="minute")
+    hour_svc = PolygonAggregatesBackfillService(symbols=[], timespan="hour")
+    day_svc = PolygonAggregatesBackfillService(symbols=[], timespan="day")
+    assert cast(Any, minute_svc)._bars_per_day() == 1440
+    assert cast(Any, hour_svc)._bars_per_day() == 24
+    assert cast(Any, day_svc)._bars_per_day() == 1
 
 
 def test_get_all_mapped_symbols(service: PolygonAggregatesBackfillService) -> None:
@@ -319,152 +308,6 @@ def test_lookup_polygon_raises_when_archive_symbol_missing(
         cast(Any, service)._lookup_context_by_polygon_symbol("X:BTCUSD")
 
 
-@pytest.mark.asyncio
-async def test_ensure_instrument_caches_result(service: PolygonAggregatesBackfillService) -> None:
-    """Verify _ensure_instrument caches instrument ID.
-
-    Given: Async repository with ensure_instrument,
-    When: _ensure_instrument called twice for same symbol,
-    Then: Repository called only once, same ID returned.
-    """
-    async_repo = _StubAsyncRepo()
-    cast(Any, service)._db_async = async_repo
-    context = _symbol_context(
-        native_symbol="ETH-USD",
-        polygon_symbol="X:ETHUSD",
-        base_currency="ETH",
-        quote_currency="USD",
-        symbol_public_id="",
-    )
-    ensure_instrument = cast(Any, service)._ensure_instrument
-    result = await ensure_instrument(context, as_of=datetime.now(UTC))
-    repeated_result = await ensure_instrument(context, as_of=datetime.now(UTC))
-    assert result == repeated_result == async_repo.return_value[1]
-    assert len(async_repo.calls) == 1
-    call = async_repo.calls[0]
-    assert call["exchange"] == "polygon"
-    assert call["session_id"] != ""
-    assert call["sequence_id"] >= 1
-
-
-@pytest.mark.asyncio
-async def test_ensure_instrument_raises_when_symbol_not_resolved(
-    service: PolygonAggregatesBackfillService,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify _ensure_instrument raises when active Symbol row is missing.
-
-    Given: Async repository without cached instrument,
-    When: symbol resolution returns None,
-    Then: _ensure_instrument raises ValueError.
-    """
-    monkeypatch.setattr(
-        "snapper.application.updaters.historical.aggregates.resolve_symbol_public_id",
-        AsyncMock(return_value=None),
-    )
-    async_repo = _StubAsyncRepo()
-    cast(Any, service)._db_async = async_repo
-    context = _symbol_context(
-        native_symbol="ETH-USD",
-        polygon_symbol="X:ETHUSD",
-        base_currency="ETH",
-        quote_currency="USD",
-        symbol_public_id="",
-    )
-    ensure_instrument = cast(Any, service)._ensure_instrument
-    with pytest.raises(ValueError, match="No active Symbol row for ETH-USD"):
-        await ensure_instrument(context, as_of=datetime.now(UTC))
-
-
-@pytest.mark.asyncio
-async def test_ensure_instrument_uses_context_symbol_public_id(
-    service: PolygonAggregatesBackfillService,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify _ensure_instrument prefers symbol_public_id from context.
-
-    Given: A context resolved from the active Symbol row and a backfill
-    timestamp earlier than the Symbol timestamp,
-    When: _ensure_instrument is called,
-    Then: It uses context.symbol_public_id directly and does not fail on
-    historical resolve_symbol_public_id lookup. Instrument ensure uses
-    current time, not the historical backfill boundary.
-    """
-    monkeypatch.setattr(
-        "snapper.application.updaters.historical.aggregates.datetime",
-        _FixedDateTime,
-    )
-    resolve_mock = AsyncMock(return_value=None)
-    monkeypatch.setattr(
-        "snapper.application.updaters.historical.aggregates.resolve_symbol_public_id",
-        resolve_mock,
-    )
-    async_repo = _StubAsyncRepo()
-    cast(Any, service)._db_async = async_repo
-    context = _symbol_context(
-        native_symbol="BTC-USD",
-        polygon_symbol="X:BTCUSD",
-        base_currency="BTC",
-        quote_currency="USD",
-        symbol_public_id="sym-pub-btcusd",
-    )
-    ensure_instrument = cast(Any, service)._ensure_instrument
-    result = await ensure_instrument(context, as_of=datetime(2026, 2, 22, tzinfo=UTC))
-    assert result == async_repo.return_value[1]
-    assert len(async_repo.calls) == 1
-    assert async_repo.calls[0]["symbol_public_id"] == "sym-pub-btcusd"
-    assert async_repo.calls[0]["timestamp"] == _FIXED_NOW
-    resolve_mock.assert_not_awaited()
-
-
-def test_build_candle_rows(service: PolygonAggregatesBackfillService) -> None:
-    """Verify _build_candle_rows converts candles to row dicts with provenance.
-
-    Given: List of AggregateCandle objects and a service with a tracker,
-    When: _build_candle_rows called with session_id and sequence_id_fn,
-    Then: List of dicts with correct fields and provenance values returned.
-    """
-    candles = [
-        AggregateCandle(
-            ticker="X:BTCUSD",
-            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-            open=Decimal("100"),
-            high=Decimal("110"),
-            low=Decimal("95"),
-            close=Decimal("105"),
-            volume=Decimal("123"),
-            vwap=Decimal("101.5"),
-            transactions=10,
-        ),
-        AggregateCandle(
-            ticker="X:BTCUSD",
-            timestamp=datetime(2024, 1, 2, tzinfo=UTC),
-            open=Decimal("105"),
-            high=Decimal("112"),
-            low=Decimal("100"),
-            close=Decimal("110"),
-            volume=Decimal("130"),
-            vwap=None,
-            transactions=None,
-        ),
-    ]
-    seq_counter = [0]
-
-    def _seq_fn() -> int:
-        seq_counter[0] += 1
-        return seq_counter[0]
-
-    tracker_any = cast(Any, service)._tracker
-    rows = service._build_candle_rows(candles, "inst-pub-7", "1m", tracker_any.session_id, _seq_fn)
-    assert rows[0]["instrument_public_id"] == "inst-pub-7"
-    assert rows[0]["vwap"] == pytest.approx(101.5)
-    assert rows[1]["vwap"] is None
-    assert rows[1]["trades"] is None
-    assert rows[0]["session_id"] == tracker_any.session_id
-    assert rows[0]["sequence_id"] == 1
-    assert rows[1]["sequence_id"] == 2
-
-
 class DummySettings(SimpleNamespace):
     """Mock settings object for testing aggregates service."""
 
@@ -526,10 +369,6 @@ async def test_start_all_mapped_returns_when_no_symbols(monkeypatch: pytest.Monk
         lambda client, cache_root: None,
     )
     monkeypatch.setattr(
-        "snapper.application.updaters.historical.aggregates.get_repository",
-        lambda url: None,
-    )
-    monkeypatch.setattr(
         "snapper.application.updaters.historical.aggregates.DatabaseRepository",
         lambda _url: SimpleNamespace(get_archive_symbols=_PermissiveArchiveSymbols),
     )
@@ -574,10 +413,6 @@ async def test_start_wildcard_settings_delegates_to_all_mapped(
         lambda client, cache_root: None,
     )
     monkeypatch.setattr(
-        "snapper.application.updaters.historical.aggregates.get_repository",
-        lambda url: None,
-    )
-    monkeypatch.setattr(
         "snapper.application.updaters.historical.aggregates.DatabaseRepository",
         lambda _url: SimpleNamespace(get_archive_symbols=_PermissiveArchiveSymbols),
     )
@@ -620,10 +455,6 @@ async def test_start_wildcard_settings_returns_when_no_mapped_symbols(
         lambda client, cache_root: None,
     )
     monkeypatch.setattr(
-        "snapper.application.updaters.historical.aggregates.get_repository",
-        lambda url: None,
-    )
-    monkeypatch.setattr(
         "snapper.application.updaters.historical.aggregates.DatabaseRepository",
         lambda _url: SimpleNamespace(get_archive_symbols=_PermissiveArchiveSymbols),
     )
@@ -636,19 +467,18 @@ async def test_start_wildcard_settings_returns_when_no_mapped_symbols(
 
 @pytest.mark.asyncio
 async def test_start_disposes_allocated_repositories(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify start disposes repositories after processing completes.
+    """Verify start disposes the sync repository after processing completes.
 
-    Given: start allocates sync and async repositories,
+    Given: start allocates only the synchronous repository (download-only,
+        no async DB use),
     When: the service finishes processing its symbol list,
-    Then: repository resources are disposed and service references cleared.
+    Then: the sync repository is disposed and service references cleared.
     """
     svc = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"])
     svc.settings = DummySettings(
         polygon_api_key="key",
         instruments={"polygon": ["X:BTCUSD"]},
     )
-    async_engine = SimpleNamespace(dispose=AsyncMock())
-    async_repo = SimpleNamespace(engine=async_engine)
     sync_repo = SimpleNamespace(
         get_archive_symbols=lambda: _PermissiveArchiveSymbols(),
         dispose=Mock(),
@@ -674,10 +504,6 @@ async def test_start_disposes_allocated_repositories(monkeypatch: pytest.MonkeyP
         lambda _url: sync_repo,
     )
     monkeypatch.setattr(
-        "snapper.application.updaters.historical.aggregates.get_repository",
-        lambda _url: async_repo,
-    )
-    monkeypatch.setattr(
         "snapper.application.updaters.historical.aggregates.PolygonExchangeClient",
         lambda api_key: None,
     )
@@ -688,31 +514,25 @@ async def test_start_disposes_allocated_repositories(monkeypatch: pytest.MonkeyP
 
     await svc.start()
 
-    async_engine.dispose.assert_awaited_once()
     sync_repo.dispose.assert_called_once_with()
-    assert svc._db_async is None
     assert svc._db_sync is None
     assert svc._loader is None
+    assert not hasattr(svc, "_db_async")
 
 
 @pytest.mark.asyncio
 async def test_process_symbol_with_empty_candles(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify _process_symbol handles empty candle result.
+    """Verify _process_symbol handles empty candle result without DB writes.
 
     Given: Loader returning empty candle list,
     When: _process_symbol called,
-    Then: Instrument upserted but no candles inserted.
+    Then: fetch is attempted and no DB persistence occurs (download-only).
     """
     svc = PolygonAggregatesBackfillService(symbols=[], days_back=1)
     loader: Any = SimpleNamespace()
     loader.get_aggregate_csv_path_for_day = Mock(return_value=None)
     loader.fetch_aggregates = AsyncMock(return_value=[])
     svc._loader = loader
-    repo: Any = SimpleNamespace()
-    repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
-    repo.upsert_candles = AsyncMock(return_value=0)
-    svc._db_async = repo
-    svc._instrument_cache = {}
     context = _SymbolContext(
         native_symbol="BTC-USD",
         polygon_symbol="X:BTCUSD",
@@ -721,8 +541,8 @@ async def test_process_symbol_with_empty_candles(monkeypatch: pytest.MonkeyPatch
         archive_symbol="BTC-USD",
     )
     await svc._process_symbol(context)
-    repo.ensure_instrument.assert_awaited_once()
     loader.fetch_aggregates.assert_awaited()
+    assert not hasattr(svc, "_db_async")
 
 
 def test_timeframe_label_falls_back_to_first_letter() -> None:
@@ -733,32 +553,6 @@ def test_timeframe_label_falls_back_to_first_letter() -> None:
     Then: Returns '3w' using first letter.
     """
     assert _timeframe_label(3, "week") == "3w"
-
-
-def test_build_candle_rows_converts_values() -> None:
-    """Verify _build_candle_rows converts Decimal to float.
-
-    Given: Candle with None vwap,
-    When: _build_candle_rows called,
-    Then: Row dict has vwap=None.
-    """
-    candles = [
-        AggregateCandle(
-            timestamp=datetime.now(tz=UTC),
-            open=Decimal("1"),
-            high=Decimal("2"),
-            low=Decimal("0.5"),
-            close=Decimal("1.5"),
-            volume=Decimal("10"),
-            vwap=None,
-            transactions=4,
-            ticker="X:BTCUSD",
-        )
-    ]
-    svc = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"])
-    rows = svc._build_candle_rows(candles, "inst-pub-1", "1m", "", lambda: 0)
-    assert rows[0]["instrument_public_id"] == "inst-pub-1"
-    assert rows[0]["vwap"] is None
 
 
 def test_get_default_parameters_uses_settings() -> None:
@@ -828,9 +622,6 @@ async def test_process_symbol_skips_small_chunk_when_all_csv_exist(
     Then: No fetch_aggregates calls made.
     """
     svc = PolygonAggregatesBackfillService(symbols=[], days_back=2, resume=True, save_csv=True)
-    svc._db_async = cast(
-        Any, SimpleNamespace(ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")))
-    )
 
     class Loader:
         def __init__(self) -> None:
@@ -853,6 +644,7 @@ async def test_process_symbol_skips_small_chunk_when_all_csv_exist(
     )
     await svc._process_symbol(context)
     assert cast(Any, svc._loader).fetch_calls == 0
+    assert not hasattr(svc, "_db_async")
 
 
 @pytest.mark.asyncio
@@ -861,7 +653,7 @@ async def test_process_symbol_optimizes_large_chunk(monkeypatch: pytest.MonkeyPa
 
     Given: Large days_back with some missing CSVs,
     When: _process_symbol called,
-    Then: Only missing days fetched.
+    Then: Only missing days fetched and no DB writes occur.
     """
     svc = PolygonAggregatesBackfillService(symbols=[], days_back=40, resume=True, save_csv=True)
 
@@ -872,13 +664,6 @@ async def test_process_symbol_optimizes_large_chunk(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(
         "snapper.application.updaters.historical.aggregates.datetime", FrozenDatetime
-    )
-    svc._db_async = cast(
-        Any,
-        SimpleNamespace(
-            ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
-            upsert_candles=AsyncMock(return_value=1),
-        ),
     )
     missing_days = {
         datetime(2024, 1, 13, tzinfo=UTC).date(),
@@ -919,11 +704,9 @@ async def test_process_symbol_optimizes_large_chunk(monkeypatch: pytest.MonkeyPa
         archive_symbol="BTC-USD",
     )
     await svc._process_symbol(context)
-    db_async = cast(Any, svc._db_async)
     loader = cast(Any, svc._loader)
-    db_async.ensure_instrument.assert_awaited_once()
-    db_async.upsert_candles.assert_awaited()
     assert loader.fetch_calls == 1
+    assert not hasattr(svc, "_db_async")
 
 
 @pytest.mark.asyncio
@@ -932,7 +715,7 @@ async def test_process_symbol_hour_timespan_fetches(monkeypatch: pytest.MonkeyPa
 
     Given: Service configured with timespan='hour',
     When: _process_symbol called,
-    Then: fetch_aggregates called once.
+    Then: fetch_aggregates called once and no DB writes occur.
     """
     svc = PolygonAggregatesBackfillService(
         symbols=[],
@@ -940,13 +723,6 @@ async def test_process_symbol_hour_timespan_fetches(monkeypatch: pytest.MonkeyPa
         resume=True,
         save_csv=True,
         timespan="hour",
-    )
-    svc._db_async = cast(
-        Any,
-        SimpleNamespace(
-            ensure_instrument=AsyncMock(return_value=(7, "inst-pub-7")),
-            upsert_candles=AsyncMock(return_value=1),
-        ),
     )
 
     class Loader:
@@ -981,20 +757,22 @@ async def test_process_symbol_hour_timespan_fetches(monkeypatch: pytest.MonkeyPa
         archive_symbol="EUR-USD",
     )
     await svc._process_symbol(context)
-    repo = cast(Any, svc._db_async)
     loader = cast(Any, svc._loader)
-    repo.ensure_instrument.assert_awaited_once()
-    repo.upsert_candles.assert_awaited_once()
     assert loader.fetch_calls == 1
+    assert not hasattr(svc, "_db_async")
 
 
 @pytest.mark.asyncio
-async def test_process_symbol_day_timespan_skips_when_csv_exist(tmp_path: Any) -> None:
-    """Verify _process_symbol skips daily fetch when CSV exists.
+async def test_process_symbol_day_timespan_always_fetches_despite_existing_csv(
+    tmp_path: Any,
+) -> None:
+    """Verify the daily path bypasses the per-day resume-skip optimization.
 
-    Given: Existing CSV file for daily data,
-    When: _process_symbol called with resume=True,
-    Then: No fetch calls made.
+    Given: An existing monthly CSV that every requested day resolves to,
+    When: _process_symbol runs with timespan="day" and resume=True,
+    Then: fetch_aggregates is still invoked because a partial monthly file
+        must not make the whole month look cached. The read-merge-write in
+        the loader keeps the re-fetch idempotent.
     """
     svc = PolygonAggregatesBackfillService(
         symbols=[],
@@ -1002,9 +780,6 @@ async def test_process_symbol_day_timespan_skips_when_csv_exist(tmp_path: Any) -
         resume=True,
         save_csv=True,
         timespan="day",
-    )
-    svc._db_async = cast(
-        Any, SimpleNamespace(ensure_instrument=AsyncMock(return_value=(11, "inst-pub-11")))
     )
     existing_file = tmp_path / "exists.csv"
     existing_file.touch()
@@ -1029,10 +804,93 @@ async def test_process_symbol_day_timespan_skips_when_csv_exist(tmp_path: Any) -
         archive_symbol="AAPL",
     )
     await svc._process_symbol(context)
-    repo = cast(Any, svc._db_async)
     loader = cast(Any, svc._loader)
-    repo.ensure_instrument.assert_awaited_once()
-    assert loader.fetch_calls == 0
+    assert loader.fetch_calls >= 1
+    assert not hasattr(svc, "_db_async")
+
+
+@pytest.mark.asyncio
+async def test_process_symbol_day_partial_monthly_file_fetches_missing_days(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fetch the missing days when only part of a daily month is cached.
+
+    Given: A daily backfill whose month already has a partial monthly file
+        (only the last requested day present) shared by every day of the
+        month, and a frozen clock pinning the requested range,
+    When: _process_symbol runs with timespan="day" and resume=True,
+    Then: fetch_aggregates is still invoked covering the full requested
+        range, so the days missing from the partial monthly file are
+        downloaded rather than silently skipped.
+    """
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> Any:
+            return datetime(2024, 6, 5, tzinfo=UTC)
+
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.datetime", FrozenDatetime
+    )
+    svc = PolygonAggregatesBackfillService(
+        symbols=[],
+        days_back=4,
+        resume=True,
+        save_csv=True,
+        timespan="day",
+    )
+    real_loader = PolygonHistoricalLoader(None, cache_root=tmp_path, rate_delay_seconds=0.0)
+    present_day = datetime(2024, 6, 4, tzinfo=UTC)
+    real_loader._save_candles_to_csv(
+        [
+            AggregateCandle(
+                ticker="X:BTCUSD",
+                timestamp=present_day,
+                open=Decimal("1"),
+                high=Decimal("1"),
+                low=Decimal("1"),
+                close=Decimal("1"),
+                volume=Decimal("1"),
+                vwap=None,
+                transactions=None,
+            )
+        ],
+        "BTC-USD",
+        "day",
+        from_ts=present_day,
+        to_ts=present_day,
+    )
+    monthly_path = tmp_path / "day" / "BTC-USD" / "2024" / "2024-06.csv"
+    assert monthly_path.exists()
+    fetch_ranges: list[tuple[date, date]] = []
+
+    async def _record_fetch(
+        _ticker: str,
+        _multiplier: int,
+        _timespan: str,
+        *,
+        from_ts: datetime,
+        to_ts: datetime,
+        **_kwargs: Any,
+    ) -> list[AggregateCandle]:
+        fetch_ranges.append((from_ts.date(), to_ts.date()))
+        return []
+
+    monkeypatch.setattr(real_loader, "fetch_aggregates", _record_fetch)
+    svc._loader = real_loader
+    context = _SymbolContext(
+        native_symbol="BTC-USD",
+        polygon_symbol="X:BTCUSD",
+        base_currency="BTC",
+        quote_currency="USD",
+        archive_symbol="BTC-USD",
+    )
+    await svc._process_symbol(context)
+    assert fetch_ranges, "daily fetch must run even with a partial monthly file"
+    fetched_from = min(start for start, _ in fetch_ranges)
+    fetched_to = max(end for _, end in fetch_ranges)
+    assert fetched_from == date(2024, 6, 1)
+    assert fetched_to == date(2024, 6, 4)
 
 
 @pytest.mark.asyncio
@@ -1046,9 +904,6 @@ async def test_process_symbol_large_chunk_all_csv_exist_skips_fetch(
     Then: Zero fetch calls made.
     """
     svc = PolygonAggregatesBackfillService(symbols=[], days_back=40, resume=True, save_csv=True)
-    svc._db_async = cast(
-        Any, SimpleNamespace(ensure_instrument=AsyncMock(return_value=(3, "inst-pub-3")))
-    )
 
     class FrozenDatetime(datetime):
         @classmethod
@@ -1079,10 +934,9 @@ async def test_process_symbol_large_chunk_all_csv_exist_skips_fetch(
         archive_symbol="BTC-USD",
     )
     await svc._process_symbol(context)
-    repo = cast(Any, svc._db_async)
     loader = cast(Any, svc._loader)
-    repo.ensure_instrument.assert_awaited_once()
     assert loader.fetch_calls == 0
+    assert not hasattr(svc, "_db_async")
 
 
 def test_resolve_symbol_context_with_polygon_cache(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1357,39 +1211,6 @@ class _StubBackfillSyncRepo:
         return _PermissiveArchiveSymbols()
 
 
-class _StubBackfillAsyncRepo:
-    """Test stub for asynchronous backfill repository."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-        self.upsert_candles_called = 0
-
-    async def ensure_instrument(
-        self,
-        symbol_public_id: str,
-        exchange: str,
-        session_id: str,
-        sequence_id: int,
-        timestamp: datetime | None = None,
-    ) -> tuple[int, str]:
-        self.calls.append(
-            {
-                "ensure_instrument": {
-                    "symbol_public_id": symbol_public_id,
-                    "exchange": exchange,
-                    "session_id": session_id,
-                    "sequence_id": sequence_id,
-                    "timestamp": timestamp,
-                }
-            }
-        )
-        return (1, "stub-backfill-inst-pub-id")
-
-    async def upsert_candles(self, rows: list[dict[str, object]]) -> int:
-        self.upsert_candles_called += len(rows)
-        return len(rows)
-
-
 class _StubLoader:
     """Test stub for aggregate data loader."""
 
@@ -1497,10 +1318,6 @@ async def test_all_mapped_no_results_returns_early() -> None:
             return_value=MagicMock(),
         ),
         patch(
-            "snapper.application.updaters.historical.aggregates.get_repository",
-            return_value=_StubBackfillAsyncRepo(),
-        ),
-        patch(
             "snapper.application.updaters.historical.aggregates.PolygonExchangeClient"
         ) as mock_client_cls,
         patch(
@@ -1519,22 +1336,21 @@ async def test_all_mapped_no_results_returns_early() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_candles_returned_logs_warning() -> None:
-    """Verify empty candle result does not insert rows.
+async def test_no_candles_returned_skips_quietly() -> None:
+    """Verify empty candle result downloads nothing without DB writes.
 
-    Given: Loader returning empty candle list,
-    When: start method processes symbol,
-    Then: upsert_candles called with zero rows.
+    Given: Loader returning empty candle list for a resolvable symbol,
+    When: start method processes the symbol,
+    Then: fetch is attempted and no async DB repository is allocated.
     """
     service = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"], days_back=1)
-    stub_mapping = MagicMock()
-    stub_mapping.native_symbol = "BTC/USD"
-    stub_mapping.polygon_symbol = "X:BTCUSD"
-    stub_mapping.base_currency = "BTC"
-    stub_mapping.quote_currency = "USD"
-    service._db_sync = _StubBackfillSyncRepo([[stub_mapping]])
-    stub_async_repo = _StubBackfillAsyncRepo()
-    service._db_async = stub_async_repo
+    context = _symbol_context(
+        native_symbol="BTC-USD",
+        polygon_symbol="X:BTCUSD",
+        base_currency="BTC",
+        quote_currency="USD",
+    )
+    service._resolve_symbol_context = Mock(return_value=context)
     stub_loader = _StubLoader(candles=[])
     service._loader = stub_loader
     stub_settings = MagicMock()
@@ -1557,11 +1373,7 @@ async def test_no_candles_returned_logs_warning() -> None:
         ) as mock_get_settings_with_service,
         patch(
             "snapper.application.updaters.historical.aggregates.DatabaseRepository",
-            return_value=service._db_sync,
-        ),
-        patch(
-            "snapper.application.updaters.historical.aggregates.get_repository",
-            return_value=stub_async_repo,
+            return_value=SimpleNamespace(get_archive_symbols=_PermissiveArchiveSymbols),
         ),
         patch("snapper.application.updaters.historical.aggregates.PolygonExchangeClient"),
         patch(
@@ -1573,34 +1385,8 @@ async def test_no_candles_returned_logs_warning() -> None:
         mock_get_settings_service.return_value = mock_settings_service
         mock_get_settings_with_service.return_value = stub_settings
         await service.start()
-        assert stub_async_repo.upsert_candles_called == 0
-
-
-@pytest.mark.asyncio
-async def test_build_candle_rows_with_vwap_none() -> None:
-    """Verify _build_candle_rows preserves None vwap.
-
-    Given: Candle with vwap=None,
-    When: _build_candle_rows called,
-    Then: Row dict has vwap=None.
-    """
-    candles = [
-        AggregateCandle(
-            ticker="X:BTCUSD",
-            timestamp=datetime(2026, 12, 1, 12, 0, tzinfo=UTC),
-            open=Decimal("100.0"),
-            high=Decimal("101.0"),
-            low=Decimal("99.0"),
-            close=Decimal("100.5"),
-            volume=Decimal("1000.0"),
-            vwap=None,
-            transactions=10,
-        )
-    ]
-    svc = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"])
-    rows = svc._build_candle_rows(candles, "inst-pub-1", "1m", "", lambda: 0)
-    assert len(rows) == 1
-    assert rows[0]["vwap"] is None
+        assert len(stub_loader.fetch_calls) >= 1
+        assert not hasattr(service, "_db_async")
 
 
 @pytest.mark.asyncio
@@ -1617,8 +1403,6 @@ async def test_730_day_limit_enforced() -> None:
     )
     stub_alias = SimpleNamespace(symbol_public_id="sym-pub-btcusd", exchange_symbol="X:BTCUSD")
     service._db_sync = _StubBackfillSyncRepo([[stub_catalog], [stub_alias]])
-    stub_async_repo = _StubBackfillAsyncRepo()
-    service._db_async = stub_async_repo
     stub_loader = _StubLoader(candles=[])
     service._loader = stub_loader
     stub_settings = MagicMock()
@@ -1642,10 +1426,6 @@ async def test_730_day_limit_enforced() -> None:
         patch(
             "snapper.application.updaters.historical.aggregates.DatabaseRepository",
             return_value=service._db_sync,
-        ),
-        patch(
-            "snapper.application.updaters.historical.aggregates.get_repository",
-            return_value=stub_async_repo,
         ),
         patch("snapper.application.updaters.historical.aggregates.PolygonExchangeClient"),
         patch(
@@ -1681,8 +1461,6 @@ async def test_chunk_optimization_skip_when_all_csv_exist() -> None:
     stub_mapping.base_currency = "BTC"
     stub_mapping.quote_currency = "USD"
     service._db_sync = _StubBackfillSyncRepo([[stub_mapping]])
-    stub_async_repo = _StubBackfillAsyncRepo()
-    service._db_async = stub_async_repo
 
     class _StubLoaderWithCSV(_StubLoader):
         def get_aggregate_csv_path_for_day(
@@ -1715,10 +1493,6 @@ async def test_chunk_optimization_skip_when_all_csv_exist() -> None:
         patch(
             "snapper.application.updaters.historical.aggregates.DatabaseRepository",
             return_value=service._db_sync,
-        ),
-        patch(
-            "snapper.application.updaters.historical.aggregates.get_repository",
-            return_value=stub_async_repo,
         ),
         patch("snapper.application.updaters.historical.aggregates.PolygonExchangeClient"),
         patch(
@@ -1769,7 +1543,6 @@ async def test_start_without_symbols_returns(monkeypatch: pytest.MonkeyPatch) ->
         "DatabaseRepository",
         lambda _url: SimpleNamespace(get_archive_symbols=_PermissiveArchiveSymbols),
     )
-    monkeypatch.setattr(aggregates_module, "get_repository", lambda _url: SimpleNamespace())
     monkeypatch.setattr(
         aggregates_module,
         "PolygonExchangeClient",
@@ -1823,7 +1596,6 @@ async def test_start_all_mapped_without_results(
         "DatabaseRepository",
         lambda _url: SimpleNamespace(get_archive_symbols=_PermissiveArchiveSymbols),
     )
-    monkeypatch.setattr(aggregates_module, "get_repository", lambda _url: SimpleNamespace())
     monkeypatch.setattr(
         aggregates_module,
         "PolygonExchangeClient",
@@ -1878,7 +1650,6 @@ async def test_start_skips_symbol_without_context(
         "DatabaseRepository",
         lambda _url: SimpleNamespace(get_archive_symbols=_PermissiveArchiveSymbols),
     )
-    monkeypatch.setattr(aggregates_module, "get_repository", lambda _url: SimpleNamespace())
     monkeypatch.setattr(
         aggregates_module,
         "PolygonExchangeClient",
@@ -1915,23 +1686,6 @@ class _DummyRepo:
 
     def execute(self, *_: object, **__: object) -> Any:
         return SimpleNamespace(scalars=lambda: [])
-
-
-class _DummyAsyncRepo:
-    """Test dummy for async repository."""
-
-    async def ensure_instrument(
-        self,
-        symbol_public_id: str,
-        exchange: str,
-        session_id: str,
-        sequence_id: int,
-        timestamp: datetime | None = None,
-    ) -> tuple[int, str]:
-        return (1, "dummy-inst-pub-id")
-
-    async def upsert_candles(self, rows: list[dict[str, object]]) -> int:
-        return len(rows)
 
 
 class _DummyClient:
@@ -2008,10 +1762,6 @@ async def test_start_all_mapped_uses_fetched_symbols(monkeypatch: pytest.MonkeyP
         lambda *_: dummy_repo,
     )
     monkeypatch.setattr(
-        "snapper.application.updaters.historical.aggregates.get_repository",
-        lambda *_: _DummyAsyncRepo(),
-    )
-    monkeypatch.setattr(
         "snapper.application.updaters.historical.aggregates.PolygonExchangeClient",
         lambda **kwargs: _DummyClient(),
     )
@@ -2068,7 +1818,6 @@ async def test_process_symbol_caps_to_max_ts(monkeypatch: pytest.MonkeyPatch) ->
     loader = _DummyLoader()
     service = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"], all_mapped=False)
     service._db_sync = cast(Any, _DummyRepo())
-    service._db_async = cast(Any, _DummyAsyncRepo())
     service._loader = cast(Any, loader)
     context = _SymbolContext(
         native_symbol="BTC-USD",
@@ -2271,37 +2020,6 @@ class _MockSymbolMapper:
 
     def load_cache_if_needed(self) -> None:
         self.cache_loaded = True
-
-
-class _RepoStub:
-    """Test stub for repository operations."""
-
-    def __init__(self) -> None:
-        self.instrument_calls: list[dict[str, Any]] = []
-        self.candle_batches: list[list[dict[str, object]]] = []
-
-    async def ensure_instrument(
-        self,
-        symbol_public_id: str,
-        exchange: str,
-        session_id: str,
-        sequence_id: int,
-        timestamp: datetime | None = None,
-    ) -> tuple[int, str]:
-        self.instrument_calls.append(
-            {
-                "symbol_public_id": symbol_public_id,
-                "exchange": exchange,
-                "session_id": session_id,
-                "sequence_id": sequence_id,
-                "timestamp": timestamp,
-            }
-        )
-        return (77, "inst-pub-77")
-
-    async def upsert_candles(self, rows: list[dict[str, object]]) -> int:
-        self.candle_batches.append(rows)
-        return len(rows)
 
 
 class _PathStub:
@@ -2507,88 +2225,6 @@ def test_resolve_symbol_context_missing_returns_none(
     assert service_private._resolve_symbol_context("UNKNOWN") is None
 
 
-@pytest.mark.asyncio
-async def test_ensure_instrument_caches_id(
-    service_and_mapper: tuple[PolygonAggregatesBackfillService, _MockSymbolMapper],
-) -> None:
-    """Ensure instrument caches instrument ID after first call.
-
-    Given a backfill service processing a symbol context,
-    When ensure_instrument is called multiple times for same context,
-    Then the instrument ID is cached and database is called only once.
-    """
-    calls: list[dict[str, Any]] = []
-
-    async def ensure_instrument(
-        symbol_public_id: str,
-        exchange: str,
-        session_id: str,
-        sequence_id: int,
-        timestamp: datetime | None = None,
-    ) -> tuple[int, str]:
-        calls.append(
-            {
-                "symbol_public_id": symbol_public_id,
-                "exchange": exchange,
-                "session_id": session_id,
-                "sequence_id": sequence_id,
-                "timestamp": timestamp,
-            }
-        )
-        return (42, "inst-pub-42")
-
-    service, _ = service_and_mapper
-    service_private = cast(Any, service)
-    service._db_async = cast(Repository, SimpleNamespace(ensure_instrument=ensure_instrument))
-    context = SimpleNamespace(
-        native_symbol="BTC-USD",
-        polygon_symbol="X:BTCUSD",
-        base_currency="BTC",
-        quote_currency=None,
-    )
-    first = await service_private._ensure_instrument(context, as_of=datetime.now(UTC))
-    second = await service_private._ensure_instrument(context, as_of=datetime.now(UTC))
-    assert first == second == "inst-pub-42"
-    assert len(calls) == 1
-    assert calls[0]["exchange"] == "polygon"
-
-
-def test_build_candle_rows_converts_values_decimal() -> None:
-    """Build candle rows converts Decimal values to float.
-
-    Given candle data with Decimal price and volume values,
-    When building candle rows for database insertion,
-    Then Decimal values are converted to float format.
-    """
-    candle = AggregateCandle(
-        ticker="X:BTCUSD",
-        timestamp=datetime.now(UTC),
-        open=Decimal("1"),
-        high=Decimal("2"),
-        low=Decimal("3"),
-        close=Decimal("4"),
-        volume=Decimal("5"),
-        vwap=None,
-        transactions=10,
-    )
-    svc = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"])
-    rows = svc._build_candle_rows([candle], "inst-pub-7", "1m", "", lambda: 0)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["instrument_public_id"] == "inst-pub-7"
-    assert row["open_at"] == candle.timestamp
-    assert row["timeframe"] == "1m"
-    assert math.isclose(row["open"], 1.0)
-    assert math.isclose(row["high"], 2.0)
-    assert math.isclose(row["low"], 3.0)
-    assert math.isclose(row["close"], 4.0)
-    assert math.isclose(row["volume"], 5.0)
-    assert row["vwap"] is None
-    assert row["trades"] == 10
-    assert isinstance(row["timestamp"], datetime)
-    assert row["timestamp"] == row["open_at"]
-
-
 def test_timeframe_label_variants_extended() -> None:
     """Timeframe label handles various timespan variants.
 
@@ -2609,9 +2245,9 @@ async def test_process_symbol_skips_when_all_csv_exist(
 ) -> None:
     """Process symbol skips fetching when all CSV files exist.
 
-    Given a backfill service with resume and save_csv enabled,
+    Given a download service with resume and save_csv enabled,
     When processing a symbol with existing CSV files for all days,
-    Then the fetch operation is skipped and no data is persisted.
+    Then the fetch operation is skipped and no DB repository is allocated.
     """
     monkeypatch.setattr(
         "snapper.application.updaters.historical.aggregates.datetime",
@@ -2624,8 +2260,6 @@ async def test_process_symbol_skips_when_all_csv_exist(
     service._save_csv = True
     loader_stub = _LoaderStub(csv_exists=True)
     service._loader = cast(Any, loader_stub)
-    repo = _RepoStub()
-    service._db_async = cast(Repository, repo)
     context = SimpleNamespace(
         native_symbol="BTC-USD",
         polygon_symbol="X:BTCUSD",
@@ -2634,20 +2268,22 @@ async def test_process_symbol_skips_when_all_csv_exist(
         archive_symbol="BTC-USD",
     )
     await service_private._process_symbol(context)
-    assert repo.candle_batches == []
     assert loader_stub.fetch_calls == []
+    assert not hasattr(service, "_db_async")
 
 
 @pytest.mark.asyncio
-async def test_process_symbol_persists_fetched_rows(
+async def test_process_symbol_downloads_without_db_writes(
     monkeypatch: pytest.MonkeyPatch,
     service_and_mapper: tuple[PolygonAggregatesBackfillService, _MockSymbolMapper],
 ) -> None:
-    """Process symbol persists fetched candle rows to database.
+    """Process symbol downloads fetched candles to CSV without DB writes.
 
-    Given a backfill service configured to fetch and persist data,
+    Given a download service configured to fetch data (save_csv handled by
+        the loader),
     When processing a symbol with available candle data,
-    Then the fetched candle rows are persisted to the database.
+    Then fetch_aggregates is invoked and no async DB repository is
+        allocated (loading is the CSV loader's job).
     """
     monkeypatch.setattr(
         "snapper.application.updaters.historical.aggregates.datetime",
@@ -2673,8 +2309,6 @@ async def test_process_symbol_persists_fetched_rows(
     service._save_csv = False
     loader_stub = _LoaderStub(csv_exists=False, candles=candles)
     service._loader = cast(Any, loader_stub)
-    repo = _RepoStub()
-    service._db_async = cast(Repository, repo)
     context = SimpleNamespace(
         native_symbol="BTC-USD",
         polygon_symbol="X:BTCUSD",
@@ -2683,10 +2317,8 @@ async def test_process_symbol_persists_fetched_rows(
         archive_symbol="BTC-USD",
     )
     await service_private._process_symbol(context)
-    assert len(repo.instrument_calls) == 1
-    assert repo.instrument_calls[0]["exchange"] == "polygon"
-    assert repo.candle_batches and repo.candle_batches[0][0]["timeframe"] == "1m"
     assert loader_stub.fetch_calls, "fetch_aggregates should have been invoked"
+    assert not hasattr(service, "_db_async")
 
 
 def test_lookup_context_by_polygon_symbol_alias_found_catalog_missing() -> None:
@@ -2713,64 +2345,3 @@ def test_lookup_context_by_polygon_symbol_alias_found_catalog_missing() -> None:
 
     service._db_sync = cast(Any, SimpleNamespace(get_session=lambda: _Session()))
     assert service._lookup_context_by_polygon_symbol("X:ORPHAN") is None
-
-
-def test_batch_commit_size_default() -> None:
-    """Verify default BATCH_COMMIT_SIZE is 500.
-
-    Given: The PolygonAggregatesBackfillService class,
-    When: BATCH_COMMIT_SIZE is read,
-    Then: It equals 500.
-    """
-    assert PolygonAggregatesBackfillService.BATCH_COMMIT_SIZE == 500
-
-
-@pytest.mark.asyncio
-async def test_fetch_and_persist_chunk_splits_into_batches(
-    monkeypatch: pytest.MonkeyPatch,
-    service_and_mapper: tuple[PolygonAggregatesBackfillService, _MockSymbolMapper],
-) -> None:
-    """Large candle sets are split into BATCH_COMMIT_SIZE batches.
-
-    Given: A backfill service with BATCH_COMMIT_SIZE=3,
-    When: Persisting 7 candle rows,
-    Then: upsert_candles is called 3 times with sizes [3, 3, 1].
-    """
-    monkeypatch.setattr(
-        "snapper.application.updaters.historical.aggregates.datetime",
-        _FixedDateTime,
-    )
-    candles = [
-        AggregateCandle(
-            ticker="X:BTCUSD",
-            timestamp=_FIXED_NOW - timedelta(hours=i),
-            open=Decimal("100"),
-            high=Decimal("110"),
-            low=Decimal("90"),
-            close=Decimal("105"),
-            volume=Decimal("5"),
-            vwap=Decimal("103"),
-            transactions=20,
-        )
-        for i in range(7)
-    ]
-    service, _ = service_and_mapper
-    service.BATCH_COMMIT_SIZE = 3
-    service_private = cast(Any, service)
-    service._days_back = 1
-    service._resume = False
-    service._save_csv = False
-    loader_stub = _LoaderStub(csv_exists=False, candles=candles)
-    service._loader = cast(Any, loader_stub)
-    repo = _RepoStub()
-    service._db_async = cast(Repository, repo)
-    context = SimpleNamespace(
-        native_symbol="BTC-USD",
-        polygon_symbol="X:BTCUSD",
-        base_currency="BTC",
-        quote_currency="USD",
-        archive_symbol="BTC-USD",
-    )
-    await service_private._process_symbol(context)
-    batch_sizes = [len(b) for b in repo.candle_batches]
-    assert batch_sizes == [3, 3, 1]

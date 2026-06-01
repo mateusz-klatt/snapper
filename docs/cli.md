@@ -475,7 +475,16 @@ snapper update-walutomat-market-snapshot
 
 ### `polygon-backfill-aggregates`
 
-Fetches historical aggregated data from the Polygon.io API.
+Downloads historical aggregated data from the Polygon.io API to the
+on-disk CSV cache. This command is download-only: it writes CSV files
+and never touches the database. Populating the `candles` table is the
+separate second step, handled by [`polygon-load-csv`](#polygon-load-csv).
+
+The full workflow is two steps:
+
+1. `polygon-backfill-aggregates` downloads candles into the CSV cache.
+2. `polygon-load-csv` reads that cache and upserts the candles into the
+    database (no Polygon API calls).
 
 ```bash
 snapper polygon-backfill-aggregates [OPTIONS]
@@ -485,25 +494,69 @@ snapper polygon-backfill-aggregates [OPTIONS]
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
-| `-s, --symbol` | string[] | from settings | Symbols to backfill |
+| `-s, --symbol` | string[] | from settings | Symbols to download |
 | `--all` | bool | `false` | All mapped symbols |
 | `-m, --multiplier` | int | `1` | Timeframe multiplier |
 | `-t, --timespan` | string | `minute` | Timespan (`minute`, `hour`, `day`) |
 | `-d, --days` | int | `None` (effective default `30`) | Days back |
-| `--resume/--no-resume` | bool | `true` | Resume from last timestamp |
-| `--csv/--no-csv` | bool | `true` | Save to CSV.gz files |
+| `--resume/--no-resume` | bool | `true` | Skip days already cached on disk |
+| `--csv/--no-csv` | bool | `true` | Save to CSV files |
 
 **Examples:**
 
 ```bash
-# Backfill for specific symbols
+# Download specific symbols to the CSV cache
 snapper polygon-backfill-aggregates -s AAPL -s MSFT --days 365
 
-# Backfill all mapped symbols
+# Download all mapped symbols
 snapper polygon-backfill-aggregates --all --timespan day
 
-# Hourly backfill with resume
+# Hourly download, skipping already-cached days
 snapper polygon-backfill-aggregates -s SPY -t hour -m 1 --resume
+
+# Then load the downloaded cache into the database
+snapper polygon-load-csv --all --timespan day
+```
+
+### `polygon-load-csv`
+
+Loads candles from the on-disk Polygon CSV cache into the database. This
+is the cache-only counterpart to `polygon-backfill-aggregates`: it reads
+the CSV files produced by that command and upserts the candles into the
+`candles` table. It never contacts the Polygon API.
+
+Run this after `polygon-backfill-aggregates` has populated the cache.
+Archive-symbol cache directories with no current `Symbol` identity are
+skipped with a warning, so a stale cache directory never aborts the load.
+
+When neither `--symbol` nor `--all` is given, the symbols default to the
+settings-configured Polygon instruments (the `instruments` setting). The
+wildcard sentinel `["*"]` in that setting is treated like `--all` and
+loads every cached archive symbol; an explicit settings list loads only
+those symbols.
+
+```bash
+snapper polygon-load-csv [OPTIONS]
+```
+
+**Options:**
+
+| Option | Type | Default | Description |
+| ------ | ---- | ------- | ----------- |
+| `-s, --symbol` | string[] | from settings | Symbols to load (native or Polygon format) |
+| `--all` | bool | `false` | Load every archive symbol present in the cache |
+| `-t, --timespan` | string | `day` | Timespan subtree to read (`minute`, `hour`, `day`) |
+| `--since` | string | `None` | Earliest day to load, inclusive (`YYYY-MM-DD`) |
+| `--until` | string | `None` | Latest day to load, inclusive (`YYYY-MM-DD`) |
+
+**Examples:**
+
+```bash
+# Load every cached minute symbol into the database
+snapper polygon-load-csv --all --timespan minute
+
+# Load a single symbol within a date window
+snapper polygon-load-csv -s X:BTCUSD --since 2024-01-01 --until 2024-01-31
 ```
 
 ### `kraken-futures-backfill-candles`
@@ -574,7 +627,9 @@ snapper build-continuous TICKER EXCHANGE CONTRACT_FAMILY [OPTIONS]
 
 ### `polygon-backfill-grouped`
 
-Fetches grouped daily data from the Polygon.io API.
+Downloads grouped daily data from the Polygon.io API to the CSV cache.
+Like `polygon-backfill-aggregates`, this is download-only and writes CSV
+files without touching the database.
 
 ```bash
 snapper polygon-backfill-grouped [OPTIONS]
@@ -782,12 +837,18 @@ SERVER_API_ONLY=true snapper server
 
 ### Historical Data Backfill
 
+Backfilling Polygon candles is a two-step workflow: download to the CSV
+cache, then load the cache into the database.
+
 ```bash
-# Backfill last 30 days for SPY
+# Step 1 - download last 30 days for SPY to the CSV cache (no DB write)
 snapper polygon-backfill-aggregates -s SPY --days 30 --timespan minute
 
-# Backfill daily data for all symbols
+# Step 1 - download daily data for all symbols to the CSV cache
 snapper polygon-backfill-aggregates --all --timespan day --days 365
+
+# Step 2 - load the downloaded CSV cache into the database (no API calls)
+snapper polygon-load-csv --all --timespan day
 ```
 
 ## Notifications

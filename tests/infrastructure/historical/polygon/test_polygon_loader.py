@@ -13,8 +13,10 @@ from typing import cast
 import pytest
 
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
+from snapper.infrastructure.historical.polygon.loader import AggregateCandle
 from snapper.infrastructure.historical.polygon.loader import PolygonHistoricalLoader
 from snapper.infrastructure.historical.polygon.loader import _format_decimal
+from snapper.infrastructure.historical.polygon.loader import read_aggregate_csv
 
 
 def test_format_decimal_preserves_very_small_values() -> None:
@@ -579,3 +581,405 @@ def test_get_grouped_csv_path_accepts_datetime(tmp_path: Path) -> None:
     path = loader.get_grouped_csv_path(dt, market_type="crypto", locale="global")
     assert path.name == "2024-03-05.csv"
     assert path.parent.parent.name == "crypto"
+
+
+def _cache_loader(tmp_path: Path) -> PolygonHistoricalLoader:
+    """Build a cache-only loader (no client) rooted at a temp directory.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        PolygonHistoricalLoader with client=None.
+    """
+    return PolygonHistoricalLoader(None, cache_root=tmp_path, rate_delay_seconds=0.0)
+
+
+def _make_candle(
+    timestamp: datetime, *, vwap: Decimal | None, transactions: int | None
+) -> AggregateCandle:
+    """Build an AggregateCandle for round-trip tests.
+
+    Args:
+        timestamp: Candle timestamp.
+        vwap: Volume-weighted average price or None.
+        transactions: Trade count or None.
+
+    Returns:
+        AggregateCandle instance.
+    """
+    return AggregateCandle(
+        ticker="X:BTCUSD",
+        timestamp=timestamp,
+        open=Decimal("1.20"),
+        high=Decimal("1.25"),
+        low=Decimal("1.15"),
+        close=Decimal("1.22"),
+        volume=Decimal("200"),
+        vwap=vwap,
+        transactions=transactions,
+    )
+
+
+def test_read_aggregate_csv_round_trip(tmp_path: Path) -> None:
+    """Read back candles written by the loader's CSV writer.
+
+    Given: A CSV file written by _write_csv with ISO-8601 timestamps,
+    When: read_aggregate_csv parses it,
+    Then: The candles round-trip with stamped ticker, Decimal prices,
+          parsed vwap, and integer transactions. The writer encodes a
+          None vwap/transactions as ``0`` on disk, so they read back as
+          zero rather than None (the genuine-None path is the blank-cell
+          test).
+    """
+    loader = _cache_loader(tmp_path)
+    early = datetime(2024, 1, 1, 14, tzinfo=UTC)
+    late = datetime(2024, 1, 1, 16, tzinfo=UTC)
+    candles = [
+        _make_candle(early, vwap=Decimal("1.21"), transactions=7),
+        _make_candle(late, vwap=None, transactions=None),
+    ]
+    csv_path = tmp_path / "minute" / "BTC-USD" / "2024" / "2024-01-01.csv"
+    loader._write_csv(csv_path, candles)
+    parsed = read_aggregate_csv(csv_path, "ARCH")
+    assert [c.timestamp for c in parsed] == [early, late]
+    assert parsed[0].ticker == "ARCH"
+    assert parsed[0].open == Decimal("1.2")
+    assert parsed[0].vwap == Decimal("1.21")
+    assert parsed[0].transactions == 7
+    assert parsed[1].vwap == Decimal("0")
+    assert parsed[1].transactions == 0
+
+
+def test_save_candles_day_timespan_round_trip_preserves_all_days(tmp_path: Path) -> None:
+    """Preserve every day when writing daily candles spanning a month.
+
+    Given: Daily candles on three distinct days within one month written
+        with the ``day`` timespan (which shares one monthly file),
+    When: _save_candles_to_csv writes them and read_aggregate_csv reads the
+        single resolved monthly file back,
+    Then: All three days survive in timestamp order rather than only the
+          last day's candle. This guards against the per-day overwrite bug
+          where each day clobbered the shared monthly file.
+    """
+    loader = _cache_loader(tmp_path)
+    days = [
+        datetime(2024, 3, 1, tzinfo=UTC),
+        datetime(2024, 3, 15, tzinfo=UTC),
+        datetime(2024, 3, 31, tzinfo=UTC),
+    ]
+    candles = [_make_candle(ts, vwap=Decimal("1.21"), transactions=7) for ts in days]
+    loader._save_candles_to_csv(
+        list(reversed(candles)),
+        "BTC-USD",
+        "day",
+        from_ts=datetime(2024, 3, 1, tzinfo=UTC),
+        to_ts=datetime(2024, 3, 31, tzinfo=UTC),
+    )
+    monthly_path = tmp_path / "day" / "BTC-USD" / "2024" / "2024-03.csv"
+    assert monthly_path.exists()
+    parsed = read_aggregate_csv(monthly_path, "BTC-USD")
+    assert [c.timestamp for c in parsed] == days
+
+
+def test_save_candles_day_timespan_incremental_write_accumulates(tmp_path: Path) -> None:
+    """Merge incremental daily fetches instead of truncating the month.
+
+    Given: A monthly daily file already holding day 31 of a month,
+    When: a later incremental fetch writes days 2-30 of the same month,
+    Then: reading the shared monthly file back yields every day (2-30 plus
+          31) in timestamp order. This guards against the truncate-on-write
+          bug where the second partial fetch wiped the previously cached
+          day.
+    """
+    loader = _cache_loader(tmp_path)
+    day_31 = _make_candle(datetime(2024, 7, 31, tzinfo=UTC), vwap=None, transactions=None)
+    loader._save_candles_to_csv(
+        [day_31],
+        "BTC-USD",
+        "day",
+        from_ts=datetime(2024, 7, 31, tzinfo=UTC),
+        to_ts=datetime(2024, 7, 31, tzinfo=UTC),
+    )
+    monthly_path = tmp_path / "day" / "BTC-USD" / "2024" / "2024-07.csv"
+    assert [c.timestamp for c in read_aggregate_csv(monthly_path, "BTC-USD")] == [
+        datetime(2024, 7, 31, tzinfo=UTC)
+    ]
+    incremental = [
+        _make_candle(datetime(2024, 7, day, tzinfo=UTC), vwap=None, transactions=None)
+        for day in range(2, 31)
+    ]
+    loader._save_candles_to_csv(
+        incremental,
+        "BTC-USD",
+        "day",
+        from_ts=datetime(2024, 7, 2, tzinfo=UTC),
+        to_ts=datetime(2024, 7, 30, tzinfo=UTC),
+    )
+    parsed = read_aggregate_csv(monthly_path, "BTC-USD")
+    expected = [datetime(2024, 7, day, tzinfo=UTC) for day in range(2, 31)] + [
+        datetime(2024, 7, 31, tzinfo=UTC)
+    ]
+    assert [c.timestamp for c in parsed] == expected
+
+
+def test_save_candles_day_timespan_refetch_updates_in_place(tmp_path: Path) -> None:
+    """Let a re-fetched day overwrite the cached row rather than duplicate it.
+
+    Given: A monthly daily file already holding one day's candle,
+    When: the same day is fetched again with a changed close price,
+    Then: the merged file keeps exactly one row for that day carrying the
+          freshly fetched close, proving the merge is keyed by timestamp and
+          idempotent.
+    """
+    loader = _cache_loader(tmp_path)
+    original = _make_candle(datetime(2024, 8, 5, tzinfo=UTC), vwap=None, transactions=None)
+    loader._save_candles_to_csv(
+        [original],
+        "BTC-USD",
+        "day",
+        from_ts=datetime(2024, 8, 5, tzinfo=UTC),
+        to_ts=datetime(2024, 8, 5, tzinfo=UTC),
+    )
+    updated = AggregateCandle(
+        ticker="X:BTCUSD",
+        timestamp=datetime(2024, 8, 5, tzinfo=UTC),
+        open=Decimal("1.20"),
+        high=Decimal("1.25"),
+        low=Decimal("1.15"),
+        close=Decimal("9.99"),
+        volume=Decimal("200"),
+        vwap=None,
+        transactions=None,
+    )
+    loader._save_candles_to_csv(
+        [updated],
+        "BTC-USD",
+        "day",
+        from_ts=datetime(2024, 8, 5, tzinfo=UTC),
+        to_ts=datetime(2024, 8, 5, tzinfo=UTC),
+    )
+    monthly_path = tmp_path / "day" / "BTC-USD" / "2024" / "2024-08.csv"
+    parsed = read_aggregate_csv(monthly_path, "BTC-USD")
+    assert len(parsed) == 1
+    assert parsed[0].close == Decimal("9.99")
+
+
+def test_save_candles_day_timespan_empty_month_writes_marker(tmp_path: Path) -> None:
+    """Write a header-only marker for a month with no candles.
+
+    Given: No candles for a requested ``day``-timespan month,
+    When: _save_candles_to_csv runs over that month,
+    Then: A single header-only monthly marker file is created.
+    """
+    loader = _cache_loader(tmp_path)
+    loader._save_candles_to_csv(
+        [],
+        "BTC-USD",
+        "day",
+        from_ts=datetime(2024, 4, 1, tzinfo=UTC),
+        to_ts=datetime(2024, 4, 30, tzinfo=UTC),
+    )
+    monthly_path = tmp_path / "day" / "BTC-USD" / "2024" / "2024-04.csv"
+    assert monthly_path.exists()
+    assert read_aggregate_csv(monthly_path, "BTC-USD") == []
+
+
+def test_save_candles_day_timespan_does_not_clobber_data_with_marker(tmp_path: Path) -> None:
+    """Never overwrite a month that has data with an empty marker.
+
+    Given: A month where only some days carry candles within the requested
+        range,
+    When: _save_candles_to_csv writes the month,
+    Then: The monthly file keeps the data candles instead of being replaced
+          by a header-only marker for the empty days.
+    """
+    loader = _cache_loader(tmp_path)
+    candle = _make_candle(datetime(2024, 5, 10, tzinfo=UTC), vwap=None, transactions=None)
+    loader._save_candles_to_csv(
+        [candle],
+        "BTC-USD",
+        "day",
+        from_ts=datetime(2024, 5, 1, tzinfo=UTC),
+        to_ts=datetime(2024, 5, 31, tzinfo=UTC),
+    )
+    monthly_path = tmp_path / "day" / "BTC-USD" / "2024" / "2024-05.csv"
+    parsed = read_aggregate_csv(monthly_path, "BTC-USD")
+    assert [c.timestamp for c in parsed] == [datetime(2024, 5, 10, tzinfo=UTC)]
+
+
+def test_save_candles_sub_day_preserves_per_day_files(tmp_path: Path) -> None:
+    """Keep one file per day for sub-day timespans and mark empty days.
+
+    Given: Minute candles on two of three days in a window,
+    When: _save_candles_to_csv writes them with the ``minute`` timespan,
+    Then: Each data day gets its own per-day file and the empty middle day
+          gets a header-only marker, unchanged from prior behaviour.
+    """
+    loader = _cache_loader(tmp_path)
+    candles = [
+        _make_candle(datetime(2024, 1, 1, 9, tzinfo=UTC), vwap=None, transactions=None),
+        _make_candle(datetime(2024, 1, 3, 9, tzinfo=UTC), vwap=None, transactions=None),
+    ]
+    loader._save_candles_to_csv(
+        candles,
+        "BTC-USD",
+        "minute",
+        from_ts=datetime(2024, 1, 1, tzinfo=UTC),
+        to_ts=datetime(2024, 1, 3, tzinfo=UTC),
+    )
+    base = tmp_path / "minute" / "BTC-USD" / "2024"
+    assert read_aggregate_csv(base / "2024-01-01.csv", "BTC-USD")[0].timestamp == datetime(
+        2024, 1, 1, 9, tzinfo=UTC
+    )
+    assert read_aggregate_csv(base / "2024-01-02.csv", "BTC-USD") == []
+    assert read_aggregate_csv(base / "2024-01-03.csv", "BTC-USD")[0].timestamp == datetime(
+        2024, 1, 3, 9, tzinfo=UTC
+    )
+
+
+def test_read_aggregate_csv_skips_header_only_marker(tmp_path: Path) -> None:
+    """Treat a header-only marker file as an empty no-op.
+
+    Given: A header-only CSV marker file written for a data-less day,
+    When: read_aggregate_csv parses it,
+    Then: An empty list is returned.
+    """
+    loader = _cache_loader(tmp_path)
+    csv_path = tmp_path / "minute" / "BTC-USD" / "2024" / "2024-01-02.csv"
+    loader._write_csv(csv_path, [])
+    assert read_aggregate_csv(csv_path, "ARCH") == []
+
+
+def test_read_aggregate_csv_parses_naive_timestamp_as_utc(tmp_path: Path) -> None:
+    """Parse a naive ISO timestamp as UTC.
+
+    Given: A hand-written CSV row with a tz-naive ISO timestamp,
+    When: read_aggregate_csv parses it,
+    Then: The timestamp is assigned UTC.
+    """
+    csv_path = tmp_path / "naive.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume,vwap,transactions\n"
+        "2024-01-01T14:00:00,1.2,1.25,1.15,1.22,200,1.21,7\n",
+        encoding="utf-8",
+    )
+    parsed = read_aggregate_csv(csv_path, "ARCH")
+    assert parsed[0].timestamp == datetime(2024, 1, 1, 14, tzinfo=UTC)
+
+
+def test_read_aggregate_csv_skips_blank_timestamp_rows(tmp_path: Path) -> None:
+    """Skip rows whose timestamp cell is blank.
+
+    Given: A CSV row with an empty timestamp value,
+    When: read_aggregate_csv parses the file,
+    Then: The blank-timestamp row is skipped.
+    """
+    csv_path = tmp_path / "blank.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume,vwap,transactions\n"
+        ",1.2,1.25,1.15,1.22,200,1.21,7\n"
+        "2024-01-01T15:00:00+00:00,1.0,1.1,0.9,1.05,100,,3\n",
+        encoding="utf-8",
+    )
+    parsed = read_aggregate_csv(csv_path, "ARCH")
+    assert len(parsed) == 1
+    assert parsed[0].timestamp == datetime(2024, 1, 1, 15, tzinfo=UTC)
+    assert parsed[0].vwap is None
+
+
+def test_iter_aggregate_csv_files_sub_day_granularity(tmp_path: Path) -> None:
+    """Enumerate per-day CSV files for a sub-day timespan.
+
+    Given: Two per-day CSV files under a minute-timespan cache directory,
+    When: iter_aggregate_csv_files is called,
+    Then: Files sort by representative day with each day parsed exactly.
+    """
+    loader = _cache_loader(tmp_path)
+    base = tmp_path / "minute" / "BTC-USD" / "2024"
+    base.mkdir(parents=True)
+    (base / "2024-01-02.csv").write_text("timestamp\n", encoding="utf-8")
+    (base / "2024-01-01.csv").write_text("timestamp\n", encoding="utf-8")
+    files = loader.iter_aggregate_csv_files("BTC-USD", "minute")
+    assert [day for _path, day in files] == [date(2024, 1, 1), date(2024, 1, 2)]
+
+
+def test_iter_aggregate_csv_files_day_granularity(tmp_path: Path) -> None:
+    """Enumerate monthly CSV files for the day timespan.
+
+    Given: A monthly CSV file under a day-timespan cache directory,
+    When: iter_aggregate_csv_files is called,
+    Then: The monthly file maps to the first of that month.
+    """
+    loader = _cache_loader(tmp_path)
+    base = tmp_path / "day" / "BTC-USD" / "2024"
+    base.mkdir(parents=True)
+    (base / "2024-03.csv").write_text("timestamp\n", encoding="utf-8")
+    files = loader.iter_aggregate_csv_files("BTC-USD", "day")
+    assert [day for _path, day in files] == [date(2024, 3, 1)]
+
+
+def test_iter_aggregate_csv_files_skips_unparseable_names(tmp_path: Path) -> None:
+    """Skip CSV files whose names are not recognized date forms.
+
+    Given: A junk-named CSV alongside a valid per-day file,
+    When: iter_aggregate_csv_files is called,
+    Then: Only the valid file is returned.
+    """
+    loader = _cache_loader(tmp_path)
+    base = tmp_path / "minute" / "BTC-USD" / "2024"
+    base.mkdir(parents=True)
+    (base / "notadate.csv").write_text("timestamp\n", encoding="utf-8")
+    (base / "2024-13-99.csv").write_text("timestamp\n", encoding="utf-8")
+    (base / "2024-01-05.csv").write_text("timestamp\n", encoding="utf-8")
+    files = loader.iter_aggregate_csv_files("BTC-USD", "minute")
+    assert [day for _path, day in files] == [date(2024, 1, 5)]
+
+
+def test_iter_aggregate_csv_files_missing_directory(tmp_path: Path) -> None:
+    """Return an empty list when the cache subtree does not exist.
+
+    Given: A cache root with no directory for the archive symbol,
+    When: iter_aggregate_csv_files is called,
+    Then: An empty list is returned.
+    """
+    loader = _cache_loader(tmp_path)
+    assert loader.iter_aggregate_csv_files("MISSING", "minute") == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_aggregates_requires_client(tmp_path: Path) -> None:
+    """Reject fetch_aggregates on a cache-only loader.
+
+    Given: A loader constructed with client=None,
+    When: fetch_aggregates is awaited,
+    Then: ValueError is raised before any network access.
+    """
+    loader = _cache_loader(tmp_path)
+    with pytest.raises(ValueError, match="cache-only loader"):
+        await loader.fetch_aggregates(
+            ticker="X:BTCUSD",
+            multiplier=1,
+            timespan="minute",
+            from_ts=datetime(2024, 1, 1, tzinfo=UTC),
+            to_ts=datetime(2024, 1, 2, tzinfo=UTC),
+            archive_symbol="BTC-USD",
+            save_csv=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_fetch_grouped_daily_requires_client(tmp_path: Path) -> None:
+    """Reject fetch_grouped_daily on a cache-only loader.
+
+    Given: A loader constructed with client=None,
+    When: fetch_grouped_daily is awaited,
+    Then: ValueError is raised before any network access.
+    """
+    loader = _cache_loader(tmp_path)
+    with pytest.raises(ValueError, match="cache-only loader"):
+        await loader.fetch_grouped_daily(
+            date(2024, 1, 1),
+            market_type="crypto",
+            save_csv=False,
+        )

@@ -359,9 +359,9 @@ class TestCandleBitemporal:
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
         t3 = datetime(2024, 6, 1, 12, 0, 30, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1)])
-        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t2)])
-        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t3)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t2, close=105.0)])
+        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t3, close=110.0)])
 
         async with repo.session() as s:
             all_rows = (
@@ -915,20 +915,23 @@ class TestCandlePolicyBitemporal:
     async def test_upsert_candles_duplicate_same_timestamp_is_idempotent(
         self, tmp_path: Path
     ) -> None:
-        """Upserting the same candle with same timestamp creates a zero-length closed version.
+        """Re-upserting an identical candle is a true no-op (idempotency guard).
 
         Given: A candle inserted at t1 with close=100,
         When: The same candle is upserted again at t1 with identical OHLCV,
-        Then: Two rows exist: the original closed with [t1, t1) (zero-length)
-            and the new active with [t1, MAX). This documents current policy
-            (not necessarily ideal but deterministic).
+        Then: The value-guard short-circuits — no version is closed and no new
+            version is inserted, so exactly one active row remains and the
+            second call reports zero inserts.
         """
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
 
-        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
-        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
+        first = await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
+        second = await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
+
+        assert first == 1
+        assert second == 0
 
         async with repo.session() as s:
             rows = (
@@ -945,17 +948,93 @@ class TestCandlePolicyBitemporal:
                 .all()
             )
 
+        assert len(rows) == 1
+        assert rows[0].known_to == KNOWN_TO_MAX
+        assert rows[0].timestamp == t1
+
+    @pytest.mark.asyncio
+    async def test_upsert_candles_changed_value_creates_new_version(self, tmp_path: Path) -> None:
+        """A changed business value re-opens SCD2 close-old + insert-new.
+
+        Given: A candle inserted at t1 with close=100,
+        When: The same key is upserted at t2 > t1 with a single changed column,
+        Then: The idempotency guard does not fire — the old version is closed
+            with [t1, t2) and a new active version [t2, MAX) is inserted under
+            the same public_id.
+        """
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
+        open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        t1 = datetime(2024, 6, 1, 12, 0, 10, tzinfo=UTC)
+        t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
+
+        first = await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
+        second = await repo.upsert_candles([_candle_row(inst_public_id, open_at, t2, close=100.5)])
+
+        assert first == 1
+        assert second == 1
+
+        async with repo.session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(Candle)
+                        .where(
+                            Candle.instrument_public_id == inst_public_id,
+                            Candle.timeframe == "1m",
+                            Candle.open_at == open_at,
+                        )
+                        .order_by(Candle.timestamp)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
         assert len(rows) == 2
-        public_ids = {r.public_id for r in rows}
-        assert len(public_ids) == 1
+        assert {r.public_id for r in rows} == {rows[0].public_id}
+        assert rows[0].known_to == t2
+        assert rows[0].close == 100.0
+        assert rows[1].known_to == KNOWN_TO_MAX
+        assert rows[1].close == 100.5
 
-        closed = [r for r in rows if r.known_to != KNOWN_TO_MAX]
-        assert len(closed) == 1
-        assert closed[0].known_to == closed[0].timestamp
+    @pytest.mark.asyncio
+    async def test_upsert_candles_new_key_inserts_without_guard(self, tmp_path: Path) -> None:
+        """A row with no existing active version is always inserted.
 
-        active = [r for r in rows if r.known_to == KNOWN_TO_MAX]
-        assert len(active) == 1
-        assert active[0].timestamp == t1
+        Given: Two candles with distinct open_at (no existing active match),
+        When: upsert_candles is called for each,
+        Then: Both are inserted as fresh active versions; the guard never fires.
+        """
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
+        open_at_a = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        open_at_b = datetime(2024, 6, 1, 12, 1, 0, tzinfo=UTC)
+        ts = datetime(2024, 6, 1, 12, 2, 0, tzinfo=UTC)
+
+        first = await repo.upsert_candles([_candle_row(inst_public_id, open_at_a, ts, close=100.0)])
+        second = await repo.upsert_candles(
+            [_candle_row(inst_public_id, open_at_b, ts, close=100.0)]
+        )
+
+        assert first == 1
+        assert second == 1
+
+        async with repo.session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(Candle).where(
+                            Candle.instrument_public_id == inst_public_id,
+                            Candle.timeframe == "1m",
+                            Candle.known_to == KNOWN_TO_MAX,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        assert len(rows) == 2
+        assert {r.open_at for r in rows} == {open_at_a, open_at_b}
 
     @pytest.mark.asyncio
     async def test_upsert_candles_out_of_order_timestamp_rejected(self, tmp_path: Path) -> None:

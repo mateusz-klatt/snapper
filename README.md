@@ -247,7 +247,8 @@ printing.
 snapper update-kraken-symbols        # Sync Kraken symbols
 snapper update-polygon-symbols       # Sync Polygon symbols
 snapper update-underlyings           # Sync underlying asset mappings from YAML
-snapper polygon-backfill-aggregates  # Backfill historical data
+snapper polygon-backfill-aggregates  # Step 1: download history to CSV cache (no DB write)
+snapper polygon-load-csv --all       # Step 2: load the CSV cache into the database
 snapper archive --day 2024-01-15     # Export candle cache to CSV
 snapper archive --from 2024-01-01 --to 2024-01-31 --exchange polygon
 snapper archive --table ticks --day 2024-01-15 --exchange polygon

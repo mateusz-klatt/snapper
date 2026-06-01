@@ -1,15 +1,17 @@
-"""Polygon aggregates backfill service module.
+"""Polygon aggregates backfill download service module.
 
 This module provides batch downloading of historical OHLCV candle data
-from Polygon.io API. It supports:
-- Per-symbol backfill with configurable date ranges
+from Polygon.io API. It is download-only: it writes the on-disk CSV
+cache and NEVER touches the database. Loading the cached CSVs into the
+``candles`` table is a separate step handled by
+``PolygonCsvLoaderService`` (the ``polygon-load-csv`` command).
+
+It supports:
+- Per-symbol download with configurable date ranges
 - CSV caching to avoid re-downloading
-- Database storage for query access
-- Resume capability for interrupted downloads
+- Resume capability for interrupted downloads via the filesystem cache
 """
 
-from collections.abc import Callable
-from collections.abc import Iterable
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC
@@ -37,15 +39,9 @@ from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.repository import DatabaseRepository
-from snapper.data.repository import Repository
-from snapper.data.repository import get_repository
-from snapper.data.repository_types import CandleUpsertRow
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
-from snapper.infrastructure.historical.polygon.loader import AggregateCandle
 from snapper.infrastructure.historical.polygon.loader import PolygonHistoricalLoader
-from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
-from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.utils.logging import set_log_context
 
 __all__ = ["PolygonAggregatesBackfillService", "_timeframe_label"]
@@ -109,25 +105,20 @@ def _timeframe_label(multiplier: int, timespan: str) -> str:
     mode=ProcessModeEnum.THREAD,
 )
 class PolygonAggregatesBackfillService(RegisterableProcess):
-    """Service for backfilling Polygon aggregate (OHLCV) data.
+    """Service for downloading Polygon aggregate (OHLCV) data to CSV.
 
-    Downloads historical candle data from Polygon.io API and stores it
-    in both compressed CSV files and the database. Supports
+    Downloads historical candle data from Polygon.io API and writes it
+    to the on-disk CSV cache only. It never touches the database;
+    loading the cache into the ``candles`` table is the separate
+    responsibility of ``PolygonCsvLoaderService``.
+
+    Supports
     Configurable timeframes
-    Resume from last downloaded data
+    Resume from cached CSVs on disk
     All mapped symbols or specific symbol list
     Rate limiting and chunked requests
     Registered as one-shot task process.
-
-    Attributes:
-        BATCH_COMMIT_SIZE: Maximum rows per ``upsert_candles`` call.
-            Each call runs in its own DB transaction, so smaller values
-            reduce SQLite write-lock hold time at the cost of more
-            round-trips. Default 500 balances throughput with write
-            contention on single-writer databases.
     """
-
-    BATCH_COMMIT_SIZE: int = 500
 
     @staticmethod
     def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
@@ -158,15 +149,15 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         resume: bool = True,
         save_csv: bool = True,
     ) -> None:
-        """Initialize the backfill service.
+        """Initialize the download service.
 
         Args:
-            symbols: Specific symbols to backfill. Defaults to settings.
-            all_mapped: If True, backfill all symbols with Polygon mapping.
+            symbols: Specific symbols to download. Defaults to settings.
+            all_mapped: If True, download all symbols with Polygon mapping.
             multiplier: Timeframe multiplier (e.g., 1, 5).
             timespan: Timespan string.
-            days_back: Number of days to backfill.
-            resume: Whether to skip existing data.
+            days_back: Number of days to download.
+            resume: Whether to skip days already cached on disk.
             save_csv: Whether to save CSV files.
         """
         self._requested_symbols = list(symbols) if symbols is not None else None
@@ -178,19 +169,17 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         self._save_csv = save_csv
         self.settings = get_settings()
         self._db_sync: DatabaseRepository | None = None
-        self._db_async: Repository | None = None
         self._loader: PolygonHistoricalLoader | None = None
-        self._instrument_cache: dict[str, str] = {}
         self._archive_symbols: dict[str, str] = {}
         self._symbol_mapper = SymbolMapperService.get_instance()
-        self._tracker: SequenceTracker = SequenceTracker()
 
     async def start(self) -> None:
-        """Start the backfill process.
+        """Start the download process.
 
-        Initializes database connections, loads settings, and processes
-        each configured symbol sequentially. Supports both specific
-        symbols list and all_mapped mode.
+        Loads settings, resolves the archive-symbol map for cache paths,
+        and downloads each configured symbol's candles to CSV
+        sequentially. Supports both specific symbols list and all_mapped
+        mode. Never writes to the database.
         """
         set_log_context("bf:poly_agg")
         try:
@@ -203,7 +192,6 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             if not api_key:
                 raise ValueError("Polygon API key not configured in settings")
             self._db_sync = DatabaseRepository(self.settings.db_url)
-            self._db_async = get_repository(self.settings.db_url)
             self._archive_symbols = self._db_sync.get_archive_symbols()
             client = PolygonExchangeClient(api_key=api_key)
             self._loader = PolygonHistoricalLoader(client, cache_root=_CACHE_ROOT)
@@ -241,16 +229,10 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             await self._dispose_resources()
 
     async def _dispose_resources(self) -> None:
-        """Dispose repositories allocated during service startup."""
-        async_repo = self._db_async
+        """Dispose the synchronous repository allocated during startup."""
         sync_repo = self._db_sync
-        self._db_async = None
         self._db_sync = None
         self._loader = None
-
-        engine = getattr(async_repo, "engine", None)
-        if engine is not None:
-            await engine.dispose()
 
         sync_dispose = getattr(sync_repo, "dispose", None)
         if callable(sync_dispose):
@@ -497,27 +479,26 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             return None
         return large_result
 
-    async def _fetch_and_persist_chunk(
+    async def _fetch_chunk(
         self,
         context: _SymbolContext,
         chunk_start: date,
         chunk_end: date,
         max_ts: datetime,
-        instrument_public_id: str,
-        timeframe: str,
     ) -> None:
-        """Fetch candle data for a chunk and persist to database.
+        """Download candle data for a chunk to the CSV cache.
+
+        Writes the on-disk CSV cache only. Does not touch the database;
+        loading the cache into the ``candles`` table is the separate
+        responsibility of ``PolygonCsvLoaderService``.
 
         Args:
             context: Symbol context.
             chunk_start: Chunk start date.
             chunk_end: Chunk end date.
             max_ts: Maximum allowed timestamp.
-            instrument_public_id: Stable public identity of the instrument.
-            timeframe: Timeframe label string.
         """
         assert self._loader is not None
-        assert self._db_async is not None
         from_ts = datetime.combine(chunk_start, datetime.min.time(), tzinfo=UTC)
         to_ts = datetime.combine(chunk_end, datetime.max.time(), tzinfo=UTC)
         if to_ts > max_ts:
@@ -545,29 +526,11 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
                 symbol=context.polygon_symbol,
             )
             return
-        rows = self._build_candle_rows(
-            candles,
-            instrument_public_id,
-            timeframe,
-            self._tracker.session_id,
-            lambda: self._tracker.next_sequence("candles"),
-        )
-        total_inserted = 0
-        for i in range(0, len(rows), self.BATCH_COMMIT_SIZE):
-            batch = rows[i : i + self.BATCH_COMMIT_SIZE]
-            inserted = await self._db_async.upsert_candles(batch)
-            total_inserted += inserted
-            logger.debug(
-                f"Inserted batch {i // self.BATCH_COMMIT_SIZE + 1}: "
-                f"{inserted}/{len(batch)} candles",
-                symbol=context.native_symbol,
-            )
         logger.info(
-            f"Persisted {total_inserted}/{len(rows)} candles for "
-            f"{context.native_symbol} ({timeframe})",
+            f"Downloaded {len(candles)} candles for {context.native_symbol}",
             chunk=f"{chunk_start.isoformat()} -> {chunk_end.isoformat()}",
-            first_ts=candles[0].timestamp.isoformat() if candles else None,
-            last_ts=candles[-1].timestamp.isoformat() if candles else None,
+            first_ts=candles[0].timestamp.isoformat(),
+            last_ts=candles[-1].timestamp.isoformat(),
         )
 
     def _resolve_chunk_range(
@@ -579,6 +542,18 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         start_date: date,
     ) -> tuple[date, date] | None:
         """Resolve the effective chunk range after resume optimization.
+
+        The filesystem resume-skip optimization decides a day is already
+        cached by checking that its per-day CSV path exists. For the ``day``
+        timespan every day of a month resolves to the same monthly
+        ``{YYYY}-{MM}.csv`` file, so a partial monthly file (e.g. only the
+        last day of the month present) would make every day of that month
+        look cached and silently skip the missing days. The daily path
+        therefore bypasses the resume-skip optimization entirely and always
+        fetches the requested range; the loader's read-merge-write keeps the
+        re-fetch idempotent and daily volume is tiny so the extra fetch is
+        cheap. Sub-day timespans keep the per-day resume-skip optimization
+        unchanged.
 
         Args:
             context: Symbol context with Polygon symbol.
@@ -592,6 +567,8 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         """
         if not (self._resume and self._save_csv):
             return chunk_start, chunk_end
+        if self._timespan.lower() == "day":
+            return chunk_start, chunk_end
         return self._apply_resume_optimization(
             context.archive_symbol,
             chunk_start,
@@ -601,22 +578,18 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         )
 
     async def _process_symbol(self, context: _SymbolContext) -> None:
-        """Process backfill for a single symbol.
+        """Download a single symbol's candles to the CSV cache.
 
-        Handles chunked date ranges, resume optimization,
-        and database persistence.
+        Handles chunked date ranges and CSV-based resume optimization.
+        Never writes to the database.
 
         Args:
             context: Symbol context with native and Polygon symbols.
         """
         assert self._loader is not None
-        assert self._db_async is not None
-        timeframe = _timeframe_label(self._multiplier, self._timespan)
         start_date, end_date, max_ts = self._compute_date_range()
-        backfill_time = datetime.combine(start_date, datetime.min.time(), tzinfo=UTC)
-        instrument_public_id = await self._ensure_instrument(context, as_of=backfill_time)
         logger.info(
-            f"Starting backfill for {context.polygon_symbol}",
+            f"Starting download for {context.polygon_symbol}",
             symbol=context.polygon_symbol,
             timespan=self._timespan,
             start_date=start_date.isoformat(),
@@ -634,13 +607,11 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
                 chunk_end = chunk_start - timedelta(days=1)
                 continue
             chunk_start, chunk_end = resolved
-            await self._fetch_and_persist_chunk(
+            await self._fetch_chunk(
                 context,
                 chunk_start,
                 chunk_end,
                 max_ts,
-                instrument_public_id,
-                timeframe,
             )
             chunk_end = chunk_start - timedelta(days=1)
 
@@ -796,84 +767,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             return context
         logger.warning(
             f"Symbol '{symbol}' not found in symbol mappings - skipping. "
-            "Add symbol to database via symbol mapper before backfilling.",
+            "Add symbol to database via symbol mapper before downloading.",
             symbol=symbol,
         )
         return None
-
-    async def _ensure_instrument(self, context: _SymbolContext, as_of: datetime) -> str:
-        """Ensure instrument exists in database, return its public_id.
-
-        Uses cache to avoid repeated database lookups.  Resolves the
-        Symbol.public_id from the already-resolved symbol context when
-        available, so the Instrument can reference the stable symbol
-        identity even when the historical backfill window predates the
-        symbol row's creation time.
-
-        Args:
-            context: Symbol context.
-            as_of: Historical backfill boundary. Used only as a fallback
-                for symbol lookup when the context lacks symbol_public_id.
-
-        Returns:
-            The instrument_public_id string.
-        """
-        assert self._db_async is not None
-        if context.native_symbol in self._instrument_cache:
-            return self._instrument_cache[context.native_symbol]
-        symbol_pid = getattr(context, "symbol_public_id", "")
-        if not symbol_pid:
-            symbol_pid = await resolve_symbol_public_id(
-                self._db_async, context.native_symbol, as_of=as_of
-            )
-        if symbol_pid is None:
-            raise ValueError(f"No active Symbol row for {context.native_symbol}")
-        ensure_time = datetime.now(UTC)
-        _id, instrument_public_id = await self._db_async.ensure_instrument(
-            symbol_public_id=symbol_pid,
-            exchange=ExchangeEnum.POLYGON,
-            session_id=self._tracker.session_id,
-            sequence_id=self._tracker.next_sequence("instruments"),
-            timestamp=ensure_time,
-        )
-        self._instrument_cache[context.native_symbol] = instrument_public_id
-        return instrument_public_id
-
-    def _build_candle_rows(
-        self,
-        candles: Iterable[AggregateCandle],
-        instrument_public_id: str,
-        timeframe: str,
-        session_id: str,
-        sequence_id_fn: Callable[[], int],
-    ) -> list[CandleUpsertRow]:
-        """Build database row dicts from candle objects.
-
-        Args:
-            candles: Iterable of AggregateCandle objects.
-            instrument_public_id: Stable public identity of the instrument.
-            timeframe: Timeframe label string.
-            session_id: Session identifier for provenance stamping.
-            sequence_id_fn: Callable returning next sequence number per row.
-
-        Returns:
-            List of row dicts ready for database insertion.
-        """
-        return [
-            {
-                "instrument_public_id": instrument_public_id,
-                "open_at": candle.timestamp,
-                "timestamp": candle.timestamp,
-                "timeframe": timeframe,
-                "open": float(candle.open),
-                "high": float(candle.high),
-                "low": float(candle.low),
-                "close": float(candle.close),
-                "volume": float(candle.volume),
-                "vwap": float(candle.vwap) if candle.vwap is not None else None,
-                "trades": candle.transactions,
-                "session_id": session_id,
-                "sequence_id": sequence_id_fn(),
-            }
-            for candle in candles
-        ]

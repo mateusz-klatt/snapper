@@ -42,7 +42,12 @@ from loguru import logger
 
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 
-__all__ = ["AggregateCandle", "GroupedDailyRow", "PolygonHistoricalLoader"]
+__all__ = [
+    "AggregateCandle",
+    "GroupedDailyRow",
+    "PolygonHistoricalLoader",
+    "read_aggregate_csv",
+]
 
 
 def _format_decimal(value: Decimal | None) -> str:
@@ -107,6 +112,84 @@ class AggregateCandle:
     transactions: int | None
 
 
+def _parse_aggregate_csv_filename(stem: str) -> date | None:
+    """Derive a representative date from an aggregate CSV filename stem.
+
+    Recognizes the two on-disk granularities:
+
+    - monthly day-timespan files ``{YYYY}-{MM}`` map to the first of the
+      month.
+    - per-day sub-day files ``{YYYY}-{MM}-{DD}`` map to that exact day.
+
+    Args:
+        stem: Filename without the ``.csv`` suffix.
+
+    Returns:
+        Representative ``date`` or None when the stem is not a recognized
+        date form.
+    """
+    parts = stem.split("-")
+    try:
+        if len(parts) == 2:
+            year, month = (int(parts[0]), int(parts[1]))
+            return date(year, month, 1)
+        if len(parts) == 3:
+            return date.fromisoformat(stem)
+    except ValueError:
+        return None
+    return None
+
+
+def read_aggregate_csv(path: Path, ticker: str) -> list[AggregateCandle]:
+    """Read cached aggregate candles from a single CSV file.
+
+    Cache-only reader: never touches the network.  Parses the on-disk
+    format written by :meth:`PolygonHistoricalLoader._write_csv`, which
+    uses the shared ``_HEADER`` columns and stores the timestamp as an
+    ISO-8601 string (``candle.timestamp.isoformat()``).
+
+    Header-only marker files (a single header row with no data rows,
+    written for days with no data) are treated as a no-op and yield an
+    empty list.
+
+    Args:
+        path: CSV file path to read.
+        ticker: Ticker symbol stamped onto each parsed candle.
+
+    Returns:
+        List of AggregateCandle objects parsed from the file. Empty when
+        the file is a header-only marker or has no data rows.
+    """
+    candles: list[AggregateCandle] = []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for record in reader:
+            raw_timestamp = record.get("timestamp")
+            if not raw_timestamp:
+                continue
+            timestamp = datetime.fromisoformat(raw_timestamp)
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=UTC)
+            raw_transactions = record.get("transactions")
+            transactions = int(raw_transactions) if raw_transactions else None
+            raw_vwap = record.get("vwap")
+            vwap = Decimal(raw_vwap) if raw_vwap else None
+            candles.append(
+                AggregateCandle(
+                    ticker=ticker,
+                    timestamp=timestamp,
+                    open=Decimal(record["open"]),
+                    high=Decimal(record["high"]),
+                    low=Decimal(record["low"]),
+                    close=Decimal(record["close"]),
+                    volume=Decimal(record["volume"]),
+                    vwap=vwap,
+                    transactions=transactions,
+                )
+            )
+    return candles
+
+
 @dataclass(slots=True)
 class GroupedDailyRow:
     """Daily aggregated data for a single ticker.
@@ -156,14 +239,16 @@ class PolygonHistoricalLoader:
 
     def __init__(
         self,
-        client: PolygonExchangeClient,
+        client: PolygonExchangeClient | None,
         cache_root: str | Path,
         rate_delay_seconds: float = 12.0,
     ) -> None:
         """Initialize the historical data loader.
 
         Args:
-            client: Polygon exchange client instance.
+            client: Polygon exchange client instance, or None for cache-only
+                use (path resolution and CSV reads). API-fetching methods
+                require a non-None client.
             cache_root: Root directory for CSV cache.
             rate_delay_seconds: Delay between API calls for rate limiting.
         """
@@ -218,10 +303,28 @@ class PolygonHistoricalLoader:
         from_ts: datetime,
         to_ts: datetime,
     ) -> None:
-        """Save aggregate candles to per-day CSV files.
+        """Save aggregate candles to their resolved CSV files.
 
-        Creates CSV files for each day in the date range. Days without
-        data get an empty marker file.
+        Groups candles by the CSV path each day resolves to, then writes
+        every path exactly once using a read-merge-write cycle so an
+        incremental fetch accumulates instead of truncating. For sub-day
+        timespans each day maps to its own per-day file, so the behaviour
+        is one write per day; for the ``day`` timespan every day of a month
+        shares the same ``{YYYY}-{MM}.csv`` monthly file, so an entire
+        month's candles land in a single write.
+
+        For each resolved path being written, any candles already cached in
+        that file are read back and merged with the new candles, deduped by
+        timestamp (the freshly fetched candle wins on collision) and sorted
+        by timestamp. This keeps a later partial fetch of a month from
+        wiping the month's previously cached days and makes every write
+        idempotent. A header-only marker file already on disk contributes
+        no candles, so merging never resurrects a stale marker.
+
+        A resolved path covering the requested range that has no candles
+        receives a header-only marker file, but only when no candles for
+        that path exist and no file is already present, so a path that
+        carries data is never overwritten with an empty marker.
 
         Args:
             candles: List of candles to save.
@@ -230,25 +333,58 @@ class PolygonHistoricalLoader:
             from_ts: Start of the full date range.
             to_ts: End of the full date range.
         """
-        candles_by_day: dict[date, list[AggregateCandle]] = defaultdict(list)
+        candles_by_path: dict[Path, list[AggregateCandle]] = defaultdict(list)
         for candle in candles:
-            day = candle.timestamp.date()
-            candles_by_day[day].append(candle)
-        all_days: set[date] = set()
+            path = self.get_aggregate_csv_path_for_day(
+                archive_symbol, timespan, candle.timestamp.date()
+            )
+            candles_by_path[path].append(candle)
+        marker_paths: set[Path] = set()
         current_day = from_ts.date()
         end_day = to_ts.date()
         while current_day <= end_day:
-            all_days.add(current_day)
+            day_path = self.get_aggregate_csv_path_for_day(archive_symbol, timespan, current_day)
+            if day_path not in candles_by_path:
+                marker_paths.add(day_path)
             current_day += timedelta(days=1)
-        for day in sorted(all_days):
-            csv_path = self.get_aggregate_csv_path_for_day(archive_symbol, timespan, day)
-            if day in candles_by_day:
-                day_candles = candles_by_day[day]
-                day_candles.sort(key=lambda c: c.timestamp)
-                self._write_csv(csv_path, day_candles)
-            elif not csv_path.exists():
-                self._write_csv(csv_path, [])
-                logger.debug(f"Created empty marker file for {day}")
+        for path in sorted(candles_by_path):
+            merged = self._merge_with_existing(path, archive_symbol, candles_by_path[path])
+            self._write_csv(path, merged)
+        for path in sorted(marker_paths):
+            if not path.exists():
+                self._write_csv(path, [])
+                logger.debug(f"Created empty marker file for {path.name}")
+
+    def _merge_with_existing(
+        self,
+        path: Path,
+        archive_symbol: str,
+        new_candles: list[AggregateCandle],
+    ) -> list[AggregateCandle]:
+        """Merge freshly fetched candles with any already cached at a path.
+
+        Reads the candles currently stored at ``path`` (none when the file
+        is absent or a header-only marker) and combines them with
+        ``new_candles``, keyed by timestamp so a re-fetch updates a day in
+        place rather than duplicating it. Fresh candles win on collision.
+
+        Args:
+            path: CSV file the candles resolve to.
+            archive_symbol: Ticker stamped onto candles read back from disk.
+            new_candles: Candles fetched in the current run for this path.
+
+        Returns:
+            The merged candle set sorted by timestamp.
+        """
+        by_timestamp: dict[datetime, AggregateCandle] = {}
+        if path.exists():
+            for existing in read_aggregate_csv(path, archive_symbol):
+                by_timestamp[existing.timestamp] = existing
+        for candle in new_candles:
+            by_timestamp[candle.timestamp] = candle
+        merged = list(by_timestamp.values())
+        merged.sort(key=lambda candle: candle.timestamp)
+        return merged
 
     async def fetch_aggregates(
         self,
@@ -287,6 +423,8 @@ class PolygonHistoricalLoader:
         Returns:
             List of AggregateCandle objects, sorted by timestamp.
         """
+        if self._client is None:
+            raise ValueError("fetch_aggregates requires a Polygon client (cache-only loader)")
         boundary_from = resume_from if resume_from is not None else from_ts
         logger.info(
             "Fetching Polygon aggregates",
@@ -340,6 +478,8 @@ class PolygonHistoricalLoader:
         Returns:
             List of GroupedDailyRow objects, sorted by ticker.
         """
+        if self._client is None:
+            raise ValueError("fetch_grouped_daily requires a Polygon client (cache-only loader)")
         logger.info(
             "Fetching grouped daily aggregates",
             target_date=target_date.isoformat(),
@@ -426,6 +566,42 @@ class PolygonHistoricalLoader:
         if timespan.lower() == "day":
             return year_directory / f"{day.year}-{day.month:02d}.csv"
         return year_directory / f"{day.isoformat()}.csv"
+
+    def iter_aggregate_csv_files(
+        self,
+        archive_symbol: str,
+        timespan: str,
+    ) -> list[tuple[Path, date]]:
+        """Enumerate cached aggregate CSV files for an archive symbol.
+
+        Walks ``{cache_root}/{timespan}/{archive_symbol}/{year}/*.csv`` and
+        derives a representative date from each filename. Handles both path
+        granularities written by the loader:
+
+        - day timespan: monthly files named ``{YYYY}-{MM}.csv`` (the day is
+          the first of that month).
+        - sub-day timespans: per-day files named ``{day.isoformat()}.csv``.
+
+        Files whose names cannot be parsed as either form are skipped.
+
+        Args:
+            archive_symbol: Stable archive symbol for the cache directory.
+            timespan: Timespan unit.
+
+        Returns:
+            Sorted list of ``(csv_path, representative_date)`` tuples.
+        """
+        base_directory = self.get_aggregate_csv_path(archive_symbol, timespan)
+        if not base_directory.exists():
+            return []
+        results: list[tuple[Path, date]] = []
+        for csv_path in base_directory.rglob("*.csv"):
+            parsed = _parse_aggregate_csv_filename(csv_path.stem)
+            if parsed is None:
+                continue
+            results.append((csv_path, parsed))
+        results.sort(key=lambda item: (item[1], item[0].name))
+        return results
 
     def get_grouped_csv_path(self, day: date | datetime, market_type: str, locale: str) -> Path:
         """Get CSV file path for grouped daily data.

@@ -707,7 +707,12 @@ class Repository(ABC):
     async def upsert_candles(
         self, rows: list[CandleUpsertRow], session: AsyncSession | None = None
     ) -> int:
-        """Insert or update candles. Return affected row count.
+        """Insert or update candles. Return the inserted/updated count.
+
+        Rows whose active version already carries identical OHLCV/vwap/trade
+        values are a no-op and excluded from the count, so re-upserting
+        unchanged data returns ``0``; only rows that insert a new version
+        (new candle or a genuine correction) are counted.
 
         Optional ``session`` lets writer tasks share a pinned
         connection across many flushes.
@@ -4795,16 +4800,16 @@ class SQLAlchemyRepository(Repository):
             existing_by_key = await self._load_existing_candles_for_rows(session, unique_rows)
             count = await self._upsert_unique_candle_rows(session, unique_rows, existing_by_key)
             for r in sequential_rows:
-                await self._upsert_candle_row(session, r)
-                count += 1
+                if await self._upsert_candle_row(session, r):
+                    count += 1
             return count
         async with self.session() as s:
             unique_rows, sequential_rows = self._split_candle_rows_by_duplicate_key(rows)
             existing_by_key = await self._load_existing_candles_for_rows(s, unique_rows)
             count = await self._upsert_unique_candle_rows(s, unique_rows, existing_by_key)
             for r in sequential_rows:
-                await self._upsert_candle_row(s, r)
-                count += 1
+                if await self._upsert_candle_row(s, r):
+                    count += 1
             await s.commit()
         return count
 
@@ -4812,6 +4817,32 @@ class SQLAlchemyRepository(Repository):
     def _candle_natural_key(row: CandleUpsertRow) -> _CandleNaturalKey:
         """Return the SCD2 natural key for a candle upsert row."""
         return row["instrument_public_id"], row["timeframe"], row["open_at"]
+
+    @staticmethod
+    def _candle_row_matches(existing: Candle, row: CandleUpsertRow) -> bool:
+        """Return True when every business column of ``row`` equals ``existing``.
+
+        Used to make a re-upsert of identical data a true no-op: when the
+        active version already carries the same OHLCV/vwap/trade values, the
+        SCD2 close-old + insert-new churn is skipped.
+
+        The stored layer types these columns as ``Float`` (open, high, low,
+        close, volume, vwap) and ``Integer`` (trades), so the incoming
+        ``CandleUpsertRow`` already carries Python ``float``/``int`` values
+        matching the column types.  Comparison is exact equality on those
+        stored values — no rounding or float coercion is introduced, so a
+        genuine correction in any column still falls through to a new
+        version.
+        """
+        return (
+            existing.open == row["open"]
+            and existing.high == row["high"]
+            and existing.low == row["low"]
+            and existing.close == row["close"]
+            and existing.volume == row["volume"]
+            and existing.vwap == row["vwap"]
+            and existing.trades == row["trades"]
+        )
 
     @classmethod
     def _split_candle_rows_by_duplicate_key(
@@ -4880,24 +4911,39 @@ class SQLAlchemyRepository(Repository):
         rows: list[CandleUpsertRow],
         existing_by_key: dict[_CandleNaturalKey, Candle],
     ) -> int:
-        """Close matched candle rows and stage inserts for unique-key rows."""
+        """Close matched candle rows and stage inserts for unique-key rows.
+
+        When the active version already holds identical business values the
+        row is a no-op: neither the close-update nor the insert runs and it is
+        not counted, so re-loading unchanged data does not create a new
+        SCD2 version.
+        """
+        count = 0
         for row in rows:
             existing = existing_by_key.get(cls._candle_natural_key(row))
             if existing is not None:
+                if cls._candle_row_matches(existing, row):
+                    continue
                 await session.execute(
                     update(Candle).where(Candle.id == existing.id).values(known_to=row["timestamp"])
                 )
                 row["public_id"] = existing.public_id
             session.add(Candle(**row))
-        return len(rows)
+            count += 1
+        return count
 
     @classmethod
     async def _upsert_candle_row(
         cls,
         session: AsyncSession,
         row: CandleUpsertRow,
-    ) -> None:
-        """Run the sequential SCD2 close+insert path for one candle row."""
+    ) -> bool:
+        """Run the sequential SCD2 close+insert path for one candle row.
+
+        Returns ``True`` when a row was inserted and ``False`` when the row
+        was a no-op because the active version already held identical
+        business values (so the caller skips counting it).
+        """
         bus_time = row["timestamp"]
         existing = (
             (
@@ -4917,11 +4963,14 @@ class SQLAlchemyRepository(Repository):
             .first()
         )
         if existing:
+            if cls._candle_row_matches(existing, row):
+                return False
             await session.execute(
                 update(Candle).where(Candle.id == existing.id).values(known_to=bus_time)
             )
             row["public_id"] = existing.public_id
         session.add(Candle(**row))
+        return True
 
     async def upsert_trades(
         self, rows: list[TradeUpsertRow], session: AsyncSession | None = None

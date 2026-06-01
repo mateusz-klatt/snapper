@@ -212,6 +212,13 @@ async def test_upsert_candles_closes_old_and_inserts_new(
         open_at=ts,
         timestamp=ts,
         known_to=KNOWN_TO_MAX,
+        open=90.0,
+        high=91.0,
+        low=89.0,
+        close=90.5,
+        volume=900.0,
+        vwap=None,
+        trades=9,
     )
     call_count = 0
     added_objects: list[Any] = []
@@ -444,7 +451,17 @@ async def test_upsert_candles_duplicate_keys_use_sequential_path() -> None:
     Then: The batch lookup is skipped and each row runs sequential SCD2.
     """
     ts = datetime(2024, 1, 1, tzinfo=UTC)
-    existing_candle = SimpleNamespace(id=42, public_id="existing-uuid")
+    existing_candle = SimpleNamespace(
+        id=42,
+        public_id="existing-uuid",
+        open=90.0,
+        high=91.0,
+        low=89.0,
+        close=90.5,
+        volume=900.0,
+        vwap=None,
+        trades=9,
+    )
     call_count = 0
     added_objects: list[object] = []
 
@@ -521,6 +538,13 @@ async def test_upsert_candles_with_caller_session_defers_commit() -> None:
         open_at=ts,
         timestamp=ts,
         known_to=KNOWN_TO_MAX,
+        open=90.0,
+        high=91.0,
+        low=89.0,
+        close=90.5,
+        volume=900.0,
+        vwap=None,
+        trades=9,
     )
     call_count = 0
     added_objects: list[object] = []
@@ -694,6 +718,240 @@ async def test_load_existing_candles_chunks_large_lookup() -> None:
 
     assert existing == {}
     assert call_count == 2
+
+
+def _candle_match_row(**overrides: Any) -> CandleUpsertRow:
+    """Build a candle upsert row with stable business defaults for guard tests."""
+    base: dict[str, Any] = {
+        "instrument_public_id": "fake-inst-pid",
+        "open_at": datetime(2024, 1, 1, tzinfo=UTC),
+        "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+        "timeframe": "1m",
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.5,
+        "volume": 1000.0,
+        "vwap": 100.25,
+        "trades": 10,
+        "session_id": "test-session",
+        "sequence_id": 1,
+    }
+    base.update(overrides)
+    return cast(CandleUpsertRow, base)
+
+
+def test_candle_row_matches_returns_true_when_all_business_columns_equal() -> None:
+    """Verify the idempotency guard matches when every business column is equal.
+
+    Given: An existing candle whose business columns equal the incoming row,
+    When: _candle_row_matches is called,
+    Then: It returns True so the SCD2 close+insert is skipped.
+    """
+    row = _candle_match_row()
+    existing = SimpleNamespace(
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=1000.0,
+        vwap=100.25,
+        trades=10,
+    )
+
+    assert SQLAlchemyRepository._candle_row_matches(cast(Any, existing), row) is True
+
+
+@pytest.mark.parametrize(
+    ("column", "changed"),
+    [
+        ("open", 100.1),
+        ("high", 101.1),
+        ("low", 98.9),
+        ("close", 100.6),
+        ("volume", 1000.1),
+        ("vwap", 100.3),
+        ("trades", 11),
+    ],
+)
+def test_candle_row_matches_returns_false_when_any_business_column_differs(
+    column: str, changed: float
+) -> None:
+    """Verify the guard rejects a match when any single business column differs.
+
+    Given: An existing candle differing from the incoming row in one column,
+    When: _candle_row_matches is called,
+    Then: It returns False so a real correction still creates a new version.
+    """
+    row = _candle_match_row()
+    existing_values: dict[str, Any] = {
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.5,
+        "volume": 1000.0,
+        "vwap": 100.25,
+        "trades": 10,
+    }
+    existing_values[column] = changed
+    existing = SimpleNamespace(**existing_values)
+
+    assert SQLAlchemyRepository._candle_row_matches(cast(Any, existing), row) is False
+
+
+def test_candle_row_matches_handles_none_vwap() -> None:
+    """Verify the guard treats matching None vwap as equal.
+
+    Given: An existing candle and row that both carry vwap=None,
+    When: _candle_row_matches is called,
+    Then: It returns True.
+    """
+    row = _candle_match_row(vwap=None)
+    existing = SimpleNamespace(
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=1000.0,
+        vwap=None,
+        trades=10,
+    )
+
+    assert SQLAlchemyRepository._candle_row_matches(cast(Any, existing), row) is True
+
+
+@pytest.mark.asyncio
+async def test_upsert_candles_skips_identical_batch_row() -> None:
+    """Verify the batch path no-ops when the active version is identical.
+
+    Given: A unique-key row whose business values equal the existing version,
+    When: upsert_candles runs the batch path,
+    Then: No close-update runs, nothing is added, and the count is zero.
+    """
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    existing_candle = SimpleNamespace(
+        id=42,
+        public_id="existing-uuid",
+        instrument_public_id="fake-inst-pid",
+        timeframe="1m",
+        open_at=ts,
+        timestamp=ts,
+        known_to=KNOWN_TO_MAX,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=1000.0,
+        vwap=100.25,
+        trades=10,
+    )
+    execute_calls = 0
+    added_objects: list[Any] = []
+
+    async def _execute(stmt: Any) -> Any:
+        nonlocal execute_calls
+        execute_calls += 1
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [existing_candle]))
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
+    session.add = lambda obj: added_objects.append(obj)
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    rows: list[CandleUpsertRow] = [_candle_match_row()]
+
+    inserted = await repo.upsert_candles(rows)
+
+    assert inserted == 0
+    assert execute_calls == 1
+    assert added_objects == []
+    assert session.commit_called is True
+
+
+@pytest.mark.asyncio
+async def test_upsert_candles_skips_identical_sequential_row() -> None:
+    """Verify the sequential path no-ops when the active version is identical.
+
+    Given: Duplicate-key rows where the matched version equals the incoming row,
+    When: upsert_candles runs the sequential path for the matched row,
+    Then: No close-update runs for it and it is not counted.
+    """
+    existing_candle = SimpleNamespace(
+        id=42,
+        public_id="existing-uuid",
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=1000.0,
+        vwap=100.25,
+        trades=10,
+    )
+    call_count = 0
+    added_objects: list[Any] = []
+
+    async def _execute(stmt: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: existing_candle))
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
+    session.add = lambda obj: added_objects.append(obj)
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    rows: list[CandleUpsertRow] = [
+        _candle_match_row(sequence_id=1),
+        _candle_match_row(sequence_id=2),
+    ]
+
+    inserted = await repo.upsert_candles(rows)
+
+    assert inserted == 1
+    assert call_count == 2
+    assert len(added_objects) == 1
+    assert session.commit_called is True
+
+
+@pytest.mark.asyncio
+async def test_upsert_candles_caller_session_skips_identical_sequential_row() -> None:
+    """Verify the caller-session sequential path no-ops on an identical row.
+
+    Given: A caller-owned session and duplicate-key rows whose matched version
+        equals each incoming row,
+    When: upsert_candles runs the sequential path under that session,
+    Then: No row is added, the count stays zero, and no repository commit occurs.
+    """
+    existing_candle = SimpleNamespace(
+        id=42,
+        public_id="existing-uuid",
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=1000.0,
+        vwap=100.25,
+        trades=10,
+    )
+    added_objects: list[Any] = []
+
+    async def _execute(stmt: Any) -> Any:
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: existing_candle))
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
+    session.add = lambda obj: added_objects.append(obj)
+    repo = _make_repo(lambda: _session_factory(_DummyAsyncSession()), dialect="custom")
+    rows: list[CandleUpsertRow] = [
+        _candle_match_row(sequence_id=1),
+        _candle_match_row(sequence_id=2),
+    ]
+
+    inserted = await repo.upsert_candles(rows, session=cast(AsyncSession, session))
+
+    assert inserted == 0
+    assert added_objects == []
+    assert session.commit_called is False
 
 
 @pytest.mark.asyncio
@@ -2147,6 +2405,13 @@ class TestSQLAlchemyRepositoryDialects:
             open_at=datetime(2024, 1, 1, tzinfo=UTC),
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             known_to=KNOWN_TO_MAX,
+            open=90.0,
+            high=91.0,
+            low=89.0,
+            close=90.5,
+            volume=900.0,
+            vwap=None,
+            trades=9,
         )
         scalars_mock = Mock()
         scalars_mock.all.return_value = [existing_candle]

@@ -83,6 +83,7 @@ from snapper.application.process_manager.registry import discover_processes
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.services.settings import get_settings_service
 from snapper.application.updaters.historical.aggregates import PolygonAggregatesBackfillService
+from snapper.application.updaters.historical.csv_loader import PolygonCsvLoaderService
 from snapper.application.updaters.historical.grouped import PolygonGroupedDailyBackfillService
 from snapper.application.updaters.historical.kraken_equities_aggregates import (
     KrakenEquitiesAggregatesBackfillService,
@@ -1265,6 +1266,60 @@ def polygon_backfill_aggregates(
             raise typer.Exit(code=1) from e
 
     asyncio.run(run_aggregates_backfill())
+
+
+@app.command(name="polygon-load-csv")
+def polygon_load_csv(
+    symbols: Annotated[
+        list[str] | None,
+        typer.Option("--symbol", "-s", help="Symbols to load from cache (default: from settings)"),
+    ] = None,
+    all_mapped: bool = typer.Option(
+        False, "--all", help="Load every archive symbol present in the cache"
+    ),
+    timespan: str = typer.Option("day", "--timespan", "-t", help="Timespan: minute, hour, day"),
+    since: str | None = typer.Option(
+        None, "--since", help="Earliest day to load, inclusive (YYYY-MM-DD)"
+    ),
+    until: str | None = typer.Option(
+        None, "--until", help="Latest day to load, inclusive (YYYY-MM-DD)"
+    ),
+) -> None:
+    """Load cached Polygon CSV candles into the database (cache-only).
+
+    Reads the existing on-disk CSV cache and upserts candles into the
+    database without contacting the Polygon API.
+
+    Args:
+        symbols: Symbols to load (native or Polygon format).
+        all_mapped: Load every archive symbol present in the cache.
+        timespan: Timespan unit selecting the cache subtree.
+        since: Earliest day to load, inclusive (YYYY-MM-DD).
+        until: Latest day to load, inclusive (YYYY-MM-DD).
+    """
+    since_day = date_type.fromisoformat(since) if since is not None else None
+    until_day = date_type.fromisoformat(until) if until is not None else None
+
+    async def run_csv_load() -> None:
+        service = PolygonCsvLoaderService(
+            symbols=symbols,
+            all_mapped=all_mapped,
+            timespan=timespan,
+            since=since_day,
+            until=until_day,
+        )
+        try:
+            symbol_source = (
+                _CLI_SYMBOL_SOURCE_ALL_MAPPED if all_mapped else _CLI_SYMBOL_SOURCE_SETTINGS
+            )
+            typer.echo(f"Starting Polygon CSV load ({timespan}, {symbol_source})...")
+            await service.start()
+            typer.echo("Polygon CSV load complete!")
+        except Exception as e:
+            typer.echo(f"Error during Polygon CSV load: {e}")
+            raise typer.Exit(code=1) from e
+
+    asyncio.run(run_csv_load())
 
 
 @app.command(name="kraken-futures-backfill-candles")
