@@ -7517,7 +7517,7 @@ async def test_update_execution_plan_status_scd2(tmp_path: Path) -> None:
             "timestamp": now,
         }
     )
-    later = datetime(2026, 6, 1, tzinfo=UTC)
+    later = now + timedelta(days=1)
     new_id = await r.update_execution_plan_status(
         public_id=pid,
         new_status="active",
@@ -7581,7 +7581,7 @@ async def test_claim_execution_plan_cancel_claims_when_actionable(tmp_path: Path
     await r.create_all()
     now = datetime.now(UTC)
     _id, pid = await r.insert_execution_plan(_claim_cancel_plan_payload(now))
-    later = datetime(2026, 6, 1, tzinfo=UTC)
+    later = now + timedelta(days=1)
     result = await r.claim_execution_plan_cancel(
         public_id=pid,
         idempotency_key="key-A",
@@ -7604,7 +7604,7 @@ async def test_claim_execution_plan_cancel_replay_on_matching_key(tmp_path: Path
     await r.create_all()
     now = datetime.now(UTC)
     _id, pid = await r.insert_execution_plan(_claim_cancel_plan_payload(now))
-    later = datetime(2026, 6, 1, tzinfo=UTC)
+    later = now + timedelta(days=1)
     await r.claim_execution_plan_cancel(
         public_id=pid,
         idempotency_key="key-A",
@@ -7613,7 +7613,7 @@ async def test_claim_execution_plan_cancel_replay_on_matching_key(tmp_path: Path
         sequence_id=2,
         cancel_requested_at=later,
     )
-    even_later = datetime(2026, 6, 1, 0, 1, tzinfo=UTC)
+    even_later = later + timedelta(minutes=1)
     result = await r.claim_execution_plan_cancel(
         public_id=pid,
         idempotency_key="key-A",
@@ -7635,7 +7635,7 @@ async def test_claim_execution_plan_cancel_key_mismatch_blocks_overwrite(tmp_pat
     await r.create_all()
     now = datetime.now(UTC)
     _id, pid = await r.insert_execution_plan(_claim_cancel_plan_payload(now))
-    later = datetime(2026, 6, 1, tzinfo=UTC)
+    later = now + timedelta(days=1)
     await r.claim_execution_plan_cancel(
         public_id=pid,
         idempotency_key="key-A",
@@ -7644,7 +7644,7 @@ async def test_claim_execution_plan_cancel_key_mismatch_blocks_overwrite(tmp_pat
         sequence_id=2,
         cancel_requested_at=later,
     )
-    even_later = datetime(2026, 6, 1, 0, 2, tzinfo=UTC)
+    even_later = later + timedelta(minutes=2)
     result = await r.claim_execution_plan_cancel(
         public_id=pid,
         idempotency_key="key-B",
@@ -7678,7 +7678,7 @@ async def test_claim_execution_plan_cancel_key_mismatch_precedence_over_terminal
     await r.create_all()
     now = datetime.now(UTC)
     _id, pid = await r.insert_execution_plan(_claim_cancel_plan_payload(now))
-    later = datetime(2026, 6, 1, tzinfo=UTC)
+    later = now + timedelta(days=1)
     await r.claim_execution_plan_cancel(
         public_id=pid,
         idempotency_key="key-A",
@@ -7690,11 +7690,11 @@ async def test_claim_execution_plan_cancel_key_mismatch_precedence_over_terminal
     await r.update_execution_plan_status(
         public_id=pid,
         new_status="cancelled",
-        bus_time=datetime(2026, 6, 1, 0, 0, 30, tzinfo=UTC),
+        bus_time=later + timedelta(seconds=30),
         session_id="s3",
         sequence_id=3,
     )
-    even_later = datetime(2026, 6, 1, 0, 1, tzinfo=UTC)
+    even_later = later + timedelta(minutes=1)
     result = await r.claim_execution_plan_cancel(
         public_id=pid,
         idempotency_key="key-B",
@@ -7714,7 +7714,7 @@ async def test_claim_execution_plan_cancel_terminal_outcome(tmp_path: Path) -> N
     await r.create_all()
     now = datetime.now(UTC)
     _id, pid = await r.insert_execution_plan(_claim_cancel_plan_payload(now, status="cancelled"))
-    later = datetime(2026, 6, 1, tzinfo=UTC)
+    later = now + timedelta(days=1)
     result = await r.claim_execution_plan_cancel(
         public_id=pid,
         idempotency_key="key-X",
@@ -7738,7 +7738,7 @@ async def test_claim_execution_plan_cancel_in_progress_outcome(tmp_path: Path) -
     _id, pid = await r.insert_execution_plan(
         _claim_cancel_plan_payload(now, status="cancel_requested")
     )
-    later = datetime(2026, 6, 1, tzinfo=UTC)
+    later = now + timedelta(days=1)
     result = await r.claim_execution_plan_cancel(
         public_id=pid,
         idempotency_key="key-X",
@@ -7776,7 +7776,7 @@ async def test_claim_execution_plan_cancel_admits_keyless_caller(tmp_path: Path)
     await r.create_all()
     now = datetime.now(UTC)
     _id, pid = await r.insert_execution_plan(_claim_cancel_plan_payload(now))
-    later = datetime(2026, 6, 1, tzinfo=UTC)
+    later = now + timedelta(days=1)
     result = await r.claim_execution_plan_cancel(
         public_id=pid,
         idempotency_key=None,

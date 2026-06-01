@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from collections.abc import Generator
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
@@ -3445,7 +3446,7 @@ class TestKrakenMarginToNonMarginTransition:
             )
             assert spec.funding_type == "spot_margin_rollover"
 
-        later = datetime(2026, 6, 1, tzinfo=UTC)
+        later = now + timedelta(days=1)
         with db_session_factory() as session:
             sym_row = session.query(Symbol).filter_by(native_symbol="BTC-USD").one()
             non_margin_data: dict[str, Any] = {
@@ -3512,7 +3513,7 @@ class TestKrakenMarginToNonMarginTransition:
             )
             assert len(active_rates) == 2
 
-        later = datetime(2026, 6, 1, tzinfo=UTC)
+        later = now + timedelta(days=1)
         with db_session_factory() as session:
             sym_row = session.query(Symbol).filter_by(native_symbol="ETH-USD").one()
             non_margin_data: dict[str, Any] = {
@@ -3627,7 +3628,7 @@ class TestKrakenMarginToNonMarginTransition:
             )
             assert len(active_rates) == 2
 
-        later = datetime(2026, 6, 1, tzinfo=UTC)
+        later = now + timedelta(days=1)
         with db_session_factory() as session:
             sym_row = session.query(Symbol).filter_by(native_symbol="XYZ-USD").one()
             ws_only_data: dict[str, Any] = {
