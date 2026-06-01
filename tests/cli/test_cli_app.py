@@ -24,6 +24,7 @@ from pydantic import SecretStr
 from typer.testing import CliRunner
 
 import snapper.cli.app as app_module
+import snapper.messaging.infrastructure.publisher as publisher_module
 from snapper.application.services.continuous_contract_builder import BuildResult
 from snapper.application.services.continuous_contract_builder import RollPointInfo
 from snapper.auth.domain.roles import UserRole
@@ -4617,6 +4618,7 @@ def test_feed_engine_starts_publishers_and_shuts_down(
         order.
     """
     calls: list[str] = []
+    captured: dict[str, object] = {}
 
     class DummyService:
         async def shutdown(self) -> None:
@@ -4625,6 +4627,10 @@ def test_feed_engine_starts_publishers_and_shuts_down(
     class DummyLauncher:
         def __init__(self, settings: Any) -> None:
             calls.append("init")
+
+        def set_msg_publisher(self, publisher: object) -> None:
+            calls.append("set_publisher")
+            captured["publisher"] = publisher
 
         async def sync_registry_to_database(self) -> None:
             calls.append("sync")
@@ -4635,6 +4641,35 @@ def test_feed_engine_starts_publishers_and_shuts_down(
         async def stop_all_processes(self) -> None:
             calls.append("stop")
 
+    closed: dict[str, bool] = {"sock": False, "ctx": False}
+    sockopts: list[tuple[int, int]] = []
+
+    class FakeSocket:
+        def setsockopt(self, option: int, value: int) -> None:
+            sockopts.append((option, value))
+
+        def connect(self, addr: str) -> None:
+            captured["connect_addr"] = addr
+
+        def close(self) -> None:
+            calls.append("sock_close")
+            closed["sock"] = True
+
+    class FakeContext:
+        def socket(self, kind: object) -> FakeSocket:
+            return FakeSocket()
+
+        def term(self) -> None:
+            calls.append("ctx_term")
+            closed["ctx"] = True
+
+    class FakeZmqAsyncio:
+        @staticmethod
+        def Context() -> FakeContext:
+            return FakeContext()
+
+    fake_zmq = SimpleNamespace(PUB="PUB", LINGER=17, asyncio=FakeZmqAsyncio())
+
     async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
         calls.append("get_service")
         return DummyService()
@@ -4643,8 +4678,16 @@ def test_feed_engine_starts_publishers_and_shuts_down(
         calls.append("wait")
         return None
 
+    monkeypatch.setattr(publisher_module, "zmq", fake_zmq)
+    monkeypatch.setattr(publisher_module, "apply_hwm", lambda sock, **kwargs: None)
+    monkeypatch.setattr(publisher_module, "ValidatedPublisher", lambda sock: sock)
+    monkeypatch.setattr(publisher_module, "MessagePublisher", lambda validated, tracker: validated)
     monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
-    monkeypatch.setattr(app_module, "get_settings_with_service", lambda svc: MagicMock())
+    monkeypatch.setattr(
+        app_module,
+        "get_settings_with_service",
+        lambda svc: SimpleNamespace(zmq_broker_xsub="tcp://broker:7500"),
+    )
     monkeypatch.setattr(app_module, "discover_processes", lambda: calls.append("discover"))
     monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
     monkeypatch.setattr(app_module, "_await_feed_shutdown_or_failure", _no_wait)
@@ -4654,12 +4697,20 @@ def test_feed_engine_starts_publishers_and_shuts_down(
         "get_service",
         "discover",
         "init",
+        "set_publisher",
         "sync",
         "start",
         "wait",
         "stop",
         "shutdown",
+        "sock_close",
+        "ctx_term",
     ]
+    publisher_obj = captured["publisher"]
+    assert isinstance(publisher_obj, FakeSocket)
+    assert captured["connect_addr"] == "tcp://broker:7500"
+    assert closed == {"sock": True, "ctx": True}
+    assert (fake_zmq.LINGER, 0) in sockopts
 
 
 def test_feed_engine_exits_nonzero_on_publisher_crash(
@@ -4682,6 +4733,9 @@ def test_feed_engine_exits_nonzero_on_publisher_crash(
         def __init__(self, settings: Any) -> None:
             return None
 
+        def set_msg_publisher(self, publisher: object) -> None:
+            return None
+
         async def sync_registry_to_database(self) -> None:
             return None
 
@@ -4698,13 +4752,168 @@ def test_feed_engine_exits_nonzero_on_publisher_crash(
         return "kraken_equities_feed_publisher"
 
     monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
-    monkeypatch.setattr(app_module, "get_settings_with_service", lambda svc: MagicMock())
+    monkeypatch.setattr(
+        app_module,
+        "get_settings_with_service",
+        lambda svc: SimpleNamespace(zmq_broker_xsub="tcp://broker:7500"),
+    )
     monkeypatch.setattr(app_module, "discover_processes", lambda: None)
     monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
     monkeypatch.setattr(app_module, "_await_feed_shutdown_or_failure", _crash)
     result = cli_runner.invoke(app, ["feed-engine"])
     assert result.exit_code == 1
     assert "kraken_equities_feed_publisher" in result.output
+
+
+def test_feed_engine_degrades_when_publisher_build_fails(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """A broker hiccup during publisher build degrades to no-metrics, not a crash.
+
+    Given: ZMQ socket creation succeeds but ``connect`` raises (a
+        momentarily-unavailable broker / bad endpoint),
+    When: the feed-engine command runs,
+    Then: the partially-built socket is closed and the context terminated,
+        the launcher is wired with ``None`` (metrics emission disabled),
+        feed startup still proceeds, and the command exits cleanly without
+        crash-looping the container.
+    """
+    calls: list[str] = []
+    captured: dict[str, object] = {}
+    closed: dict[str, bool] = {"sock": False, "ctx": False}
+    sockopts: list[tuple[int, int]] = []
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            calls.append("shutdown")
+
+    class DummyLauncher:
+        def __init__(self, settings: Any) -> None:
+            calls.append("init")
+
+        def set_msg_publisher(self, publisher: object) -> None:
+            captured["publisher"] = publisher
+
+        async def sync_registry_to_database(self) -> None:
+            calls.append("sync")
+
+        async def start_feed_publishers(self) -> None:
+            calls.append("start")
+
+        async def stop_all_processes(self) -> None:
+            calls.append("stop")
+
+    class FakeSocket:
+        def setsockopt(self, option: int, value: int) -> None:
+            sockopts.append((option, value))
+
+        def connect(self, addr: str) -> None:
+            raise RuntimeError("broker down")
+
+        def close(self) -> None:
+            closed["sock"] = True
+
+    class FakeContext:
+        def socket(self, kind: object) -> FakeSocket:
+            return FakeSocket()
+
+        def term(self) -> None:
+            closed["ctx"] = True
+
+    class FakeZmqAsyncio:
+        @staticmethod
+        def Context() -> FakeContext:
+            return FakeContext()
+
+    fake_zmq = SimpleNamespace(PUB="PUB", LINGER=17, asyncio=FakeZmqAsyncio())
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        return DummyService()
+
+    async def _no_wait(launcher: Any) -> None:
+        return None
+
+    monkeypatch.setattr(publisher_module, "zmq", fake_zmq)
+    monkeypatch.setattr(publisher_module, "apply_hwm", lambda sock, **kwargs: None)
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings_with_service",
+        lambda svc: SimpleNamespace(zmq_broker_xsub="tcp://broker:7500"),
+    )
+    monkeypatch.setattr(app_module, "discover_processes", lambda: None)
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "_await_feed_shutdown_or_failure", _no_wait)
+    result = cli_runner.invoke(app, ["feed-engine"])
+    assert result.exit_code == 0
+    assert "summary publisher unavailable" in result.output
+    assert captured["publisher"] is None
+    assert closed == {"sock": True, "ctx": True}
+    assert (fake_zmq.LINGER, 0) in sockopts
+    assert calls == ["init", "sync", "start", "stop", "shutdown"]
+
+
+def test_feed_engine_degrades_when_context_creation_fails(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """Context creation failure degrades cleanly with nothing to close.
+
+    Given: ``zmq.asyncio.Context()`` itself raises before any socket
+        exists,
+    When: the feed-engine command runs,
+    Then: the except path skips both the socket-close and context-term
+        guards (neither was created), wires the launcher with ``None``,
+        and feed startup still proceeds to a clean exit.
+    """
+    captured: dict[str, object] = {}
+
+    class DummyService:
+        async def shutdown(self) -> None:
+            return None
+
+    class DummyLauncher:
+        def __init__(self, settings: Any) -> None:
+            return None
+
+        def set_msg_publisher(self, publisher: object) -> None:
+            captured["publisher"] = publisher
+
+        async def sync_registry_to_database(self) -> None:
+            return None
+
+        async def start_feed_publishers(self) -> None:
+            return None
+
+        async def stop_all_processes(self) -> None:
+            return None
+
+    class FailingZmqAsyncio:
+        @staticmethod
+        def Context() -> object:
+            raise RuntimeError("no zmq context")
+
+    fake_zmq = SimpleNamespace(PUB="PUB", LINGER=17, asyncio=FailingZmqAsyncio())
+
+    async def _fake_get_service(db_url: str, xsub: str) -> DummyService:
+        return DummyService()
+
+    async def _no_wait(launcher: Any) -> None:
+        return None
+
+    monkeypatch.setattr(publisher_module, "zmq", fake_zmq)
+    monkeypatch.setattr(app_module, "get_settings_service", _fake_get_service)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings_with_service",
+        lambda svc: SimpleNamespace(zmq_broker_xsub="tcp://broker:7500"),
+    )
+    monkeypatch.setattr(app_module, "discover_processes", lambda: None)
+    monkeypatch.setattr(app_module, "ProcessLauncherService", DummyLauncher)
+    monkeypatch.setattr(app_module, "_await_feed_shutdown_or_failure", _no_wait)
+    result = cli_runner.invoke(app, ["feed-engine"])
+    assert result.exit_code == 0
+    assert "summary publisher unavailable" in result.output
+    assert captured["publisher"] is None
 
 
 def test_await_feed_shutdown_or_failure_returns_crash_name(

@@ -3,14 +3,18 @@
 import json
 from datetime import UTC
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
 
+import snapper.messaging.infrastructure.publisher as publisher_module
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.infrastructure.publisher import build_audit_publisher
+from snapper.messaging.infrastructure.publisher import shutdown_audit_publisher
 from snapper.messaging.schemas.data import TickData
 
 
@@ -234,3 +238,199 @@ class TestMessagePublisher:
         mp = MessagePublisher(mock_pub, tracker)
 
         assert mp.session_id == tracker.session_id
+
+
+class _FakeAuditSocket:
+    """Minimal stand-in for a ZMQ PUB socket used by the audit helpers."""
+
+    def __init__(self, connect_error: Exception | None = None) -> None:
+        """Record interactions and optionally raise from ``connect``.
+
+        Args:
+            connect_error: Exception to raise from ``connect`` to simulate
+                a momentarily-unavailable broker; ``None`` connects cleanly.
+        """
+        self.connect_error = connect_error
+        self.connect_addr: str | None = None
+        self.sockopts: list[tuple[int, int]] = []
+        self.closed = False
+        self.hwm_applied = False
+
+    def connect(self, addr: str) -> None:
+        """Record the connect target or raise the configured error."""
+        self.connect_addr = addr
+        if self.connect_error is not None:
+            raise self.connect_error
+
+    def setsockopt(self, option: int, value: int) -> None:
+        """Record a socket option assignment."""
+        self.sockopts.append((option, value))
+
+    def close(self) -> None:
+        """Record that the socket was closed."""
+        self.closed = True
+
+
+class _FakeAuditContext:
+    """Minimal stand-in for ``zmq.asyncio.Context`` for the audit helpers."""
+
+    def __init__(self, socket: _FakeAuditSocket) -> None:
+        """Store the socket to hand out and init teardown state.
+
+        Args:
+            socket: The fake socket returned by :meth:`socket`.
+        """
+        self._socket = socket
+        self.terminated = False
+
+    def socket(self, kind: object) -> _FakeAuditSocket:
+        """Return the pre-built fake socket regardless of ``kind``."""
+        return self._socket
+
+    def term(self) -> None:
+        """Record that the context was terminated."""
+        self.terminated = True
+
+
+class TestBuildAuditPublisher:
+    """Tests for the shared audit-publisher build helper."""
+
+    def test_builds_publisher_and_connects_to_xsub(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A clean build connects the PUB socket and applies the audit HWM.
+
+        Given: ZMQ context and socket creation succeed,
+        When: build_audit_publisher is called with an XSUB endpoint,
+        Then: it returns a MessagePublisher plus the context, connects the
+            socket to the endpoint, applies the audit HWM, and leaves
+            LINGER untouched (only shutdown sets it).
+        """
+        fake_socket = _FakeAuditSocket()
+        fake_context = _FakeAuditContext(fake_socket)
+        hwm_calls: list[int] = []
+
+        def _apply_hwm(sock: object, *, sndhwm: int) -> None:
+            hwm_calls.append(sndhwm)
+            assert sock is fake_socket
+            fake_socket.hwm_applied = True
+
+        fake_zmq = SimpleNamespace(
+            PUB="PUB",
+            LINGER=17,
+            asyncio=SimpleNamespace(Context=lambda: fake_context),
+        )
+        monkeypatch.setattr(publisher_module, "zmq", fake_zmq)
+        monkeypatch.setattr(publisher_module, "apply_hwm", _apply_hwm)
+
+        publisher, context = build_audit_publisher("tcp://broker:7500")
+
+        assert isinstance(publisher, MessagePublisher)
+        assert context is fake_context
+        assert fake_socket.connect_addr == "tcp://broker:7500"
+        assert hwm_calls == [publisher_module.HWM_AUDIT]
+        assert fake_socket.sockopts == []
+        assert not fake_socket.closed
+        assert not fake_context.terminated
+
+    def test_connect_failure_cleans_up_socket_and_context(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A connect failure tears down the partial socket with LINGER=0.
+
+        Given: socket creation succeeds but connect raises,
+        When: build_audit_publisher is called,
+        Then: the socket gets LINGER=0 then close, the context is
+            terminated, and the original error re-raises so nothing leaks.
+        """
+        boom = RuntimeError("broker down")
+        fake_socket = _FakeAuditSocket(connect_error=boom)
+        fake_context = _FakeAuditContext(fake_socket)
+        fake_zmq = SimpleNamespace(
+            PUB="PUB",
+            LINGER=17,
+            asyncio=SimpleNamespace(Context=lambda: fake_context),
+        )
+        monkeypatch.setattr(publisher_module, "zmq", fake_zmq)
+        monkeypatch.setattr(publisher_module, "apply_hwm", lambda sock, **kwargs: None)
+
+        with pytest.raises(RuntimeError, match="broker down"):
+            build_audit_publisher("tcp://broker:7500")
+
+        assert (17, 0) in fake_socket.sockopts
+        assert fake_socket.closed
+        assert fake_context.terminated
+
+    def test_socket_creation_failure_only_terminates_context(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A socket-creation failure terminates the context with no socket.
+
+        Given: the context is created but ``context.socket`` raises before
+            any socket exists,
+        When: build_audit_publisher is called,
+        Then: the cleanup skips the socket guards (raw_socket is None) and
+            only terminates the context, then re-raises.
+        """
+        fake_context = MagicMock()
+        fake_context.socket.side_effect = RuntimeError("no socket")
+        fake_zmq = SimpleNamespace(
+            PUB="PUB",
+            LINGER=17,
+            asyncio=SimpleNamespace(Context=lambda: fake_context),
+        )
+        monkeypatch.setattr(publisher_module, "zmq", fake_zmq)
+        monkeypatch.setattr(publisher_module, "apply_hwm", lambda sock, **kwargs: None)
+
+        with pytest.raises(RuntimeError, match="no socket"):
+            build_audit_publisher("tcp://broker:7500")
+
+        fake_context.term.assert_called_once_with()
+
+
+class TestShutdownAuditPublisher:
+    """Tests for the shared audit-publisher shutdown helper."""
+
+    def test_sets_linger_zero_then_closes_then_terminates(self) -> None:
+        """Shutdown sets LINGER=0, closes the publisher, then terms the context.
+
+        Given: a publisher and context,
+        When: shutdown_audit_publisher is called,
+        Then: the publisher gets LINGER=0 and close, and the context is
+            terminated.
+        """
+        publisher = MagicMock()
+        context = MagicMock()
+
+        shutdown_audit_publisher(publisher, context)
+
+        publisher.setsockopt.assert_called_once()
+        publisher.close.assert_called_once_with()
+        context.term.assert_called_once_with()
+
+    def test_none_arguments_are_noops(self) -> None:
+        """Passing None for both arguments performs no work and does not raise.
+
+        Given: both arguments are None (construction failed or unwired),
+        When: shutdown_audit_publisher is called,
+        Then: it returns without error.
+        """
+        shutdown_audit_publisher(None, None)
+
+    def test_cleanup_exceptions_are_suppressed(self) -> None:
+        """Every cleanup step is suppressed so shutdown never raises.
+
+        Given: setsockopt, close, and term all raise,
+        When: shutdown_audit_publisher is called,
+        Then: it completes silently and still attempts close after a failed
+            setsockopt and term after a failed close.
+        """
+        publisher = MagicMock()
+        publisher.setsockopt.side_effect = RuntimeError("setsockopt boom")
+        publisher.close.side_effect = RuntimeError("close boom")
+        context = MagicMock()
+        context.term.side_effect = RuntimeError("term boom")
+
+        shutdown_audit_publisher(publisher, context)
+
+        publisher.setsockopt.assert_called_once()
+        publisher.close.assert_called_once_with()
+        context.term.assert_called_once_with()

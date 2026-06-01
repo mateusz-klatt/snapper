@@ -37,7 +37,6 @@ Example:
 """
 
 import asyncio
-import contextlib
 import datetime as dt
 import os
 import uuid
@@ -187,9 +186,8 @@ from snapper.mcp.server import build_mcp_app
 from snapper.messaging.infrastructure.gap_detector import GapDetectorStats
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
-from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
-from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
-from snapper.messaging.infrastructure.validated_socket import apply_hwm
+from snapper.messaging.infrastructure.publisher import build_audit_publisher
+from snapper.messaging.infrastructure.publisher import shutdown_audit_publisher
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import ContinuousCandleData
 from snapper.messaging.schemas.data import ContinuousSeriesPartialResponse
@@ -355,12 +353,7 @@ def _build_user_service_publisher(
         Tuple of `(MessagePublisher, zmq.asyncio.Context)`. The context
         is returned so the lifespan can `term()` it on shutdown.
     """
-    context = zmq.asyncio.Context()
-    raw_socket = context.socket(zmq.PUB)
-    apply_hwm(raw_socket, sndhwm=HWM_AUDIT)
-    raw_socket.connect(zmq_broker_xsub)
-    publisher = MessagePublisher(ValidatedPublisher(raw_socket), SequenceTracker())
-    return publisher, context
+    return build_audit_publisher(zmq_broker_xsub)
 
 
 def _shutdown_user_service_publisher(app: FastAPI) -> None:
@@ -385,14 +378,7 @@ def _shutdown_user_service_publisher(app: FastAPI) -> None:
         caps_enforcer_for_shutdown.set_msg_publisher(None)
     publisher = getattr(app.state, "user_service_publisher", None)
     context = getattr(app.state, "user_service_publisher_context", None)
-    if publisher is not None:
-        with contextlib.suppress(Exception):
-            publisher.setsockopt(zmq.LINGER, 0)
-        with contextlib.suppress(Exception):
-            publisher.close()
-    if context is not None:
-        with contextlib.suppress(Exception):
-            context.term()
+    shutdown_audit_publisher(publisher, context)
     app.state.user_service_publisher = None
     app.state.user_service_publisher_context = None
 

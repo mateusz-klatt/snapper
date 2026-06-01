@@ -1012,6 +1012,7 @@ class TestProcessAndStrategyEventSchemas:
             sequence_id=1,
             public_id="019dbb34-f439-77bd-afa8-ee5321d60311",
             timestamp=datetime(2026, 5, 14, 12, tzinfo=UTC),
+            coordinator="coord-1",
             processes=[
                 ProcessSummaryItem(
                     name="trader_coordinator",
@@ -1035,12 +1036,38 @@ class TestProcessAndStrategyEventSchemas:
         parsed = parse_message(event.to_json())
 
         assert isinstance(parsed, ProcessSummaryEventData)
+        assert parsed.coordinator == "coord-1"
         assert len(parsed.processes) == 2
         assert parsed.processes[0].name == "trader_coordinator"
         assert parsed.processes[0].running is True
         assert parsed.processes[0].role == "core"
         assert parsed.processes[1].running is False
         assert parsed.processes[1].active_public_id is None
+
+    def test_process_summary_event_defaults_coordinator_when_omitted(self) -> None:
+        """A payload predating ``coordinator`` decodes with the coord-0 default.
+
+        Given: a process-summary-event payload that omits the ``coordinator``
+            field entirely (an older producer during a rolling deploy),
+        When: ProcessSummaryEventData validates it,
+        Then: ``coordinator`` defaults to ``coord-0`` instead of raising so a
+            strict consumer never rejects the legacy message.
+        """
+        event = ProcessSummaryEventData(
+            session_id="s1",
+            sequence_id=1,
+            public_id="019dbb34-f439-77bd-afa8-ee5321d60311",
+            timestamp=datetime(2026, 5, 14, 12, tzinfo=UTC),
+            coordinator="coord-1",
+            processes=[],
+            snapshot_at=datetime(2026, 5, 14, 12, tzinfo=UTC),
+        )
+        payload = event.model_dump()
+        del payload["coordinator"]
+
+        parsed = ProcessSummaryEventData.model_validate(payload)
+
+        assert parsed.coordinator == "coord-0"
 
     def test_process_configured_event_roundtrip(self) -> None:
         """``ProcessConfiguredEventData`` carries the process-name list."""

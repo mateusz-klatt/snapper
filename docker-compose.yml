@@ -8,6 +8,7 @@ services:
     env_file: .env
     environment:
       - PROCESS_AUTOSTART_PROFILE=api
+      - SNAPPER_COORDINATOR_INSTANCE_ID=0
       - ZMQ_BROKER_XSUB=tcp://snapper:7500
       - ZMQ_BROKER_XPUB=tcp://snapper:7501
       - ZMQ_BROKER_BIND_XSUB=tcp://0.0.0.0:7500
@@ -34,6 +35,7 @@ services:
       - PROCESS_AUTOSTART_PROFILE=feed
       - ZMQ_BROKER_XSUB=tcp://snapper:7500
       - ZMQ_BROKER_XPUB=tcp://snapper:7501
+      - SNAPPER_COORDINATOR_INSTANCE_ID=1
       - DB_POOL_SIZE=2
       - DB_MAX_OVERFLOW=3
     volumes:

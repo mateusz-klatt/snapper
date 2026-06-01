@@ -2248,11 +2248,11 @@ class TestEmitHelpersWithPublisher:
         """Default ``coordinator_instance_id`` of ``0`` slugifies to ``coord-0``.
 
         Given: A launcher built from default ``BootstrapSettingsLoader``,
-        When: ``_coordinator_topic_slug()`` is called,
+        When: ``coordinator_topic_slug()`` is called,
         Then: It returns ``"coord-0"`` and the result satisfies the
             registry validator pattern.
         """
-        slug = launcher._coordinator_topic_slug()
+        slug = launcher.coordinator_topic_slug()
         assert slug == "coord-0"
         valid, err = validate_topic(f"processes.events.summary.{slug}")
         assert valid, err
@@ -2263,13 +2263,13 @@ class TestEmitHelpersWithPublisher:
         """Non-zero ``coordinator_instance_id`` slugifies to ``coord-{n}``.
 
         Given: A launcher whose ``settings.coordinator_instance_id`` is ``7``,
-        When: ``_coordinator_topic_slug()`` is called,
+        When: ``coordinator_topic_slug()`` is called,
         Then: It returns ``"coord-7"`` and the result satisfies the
             registry validator pattern (leading-letter constraint preserved
             even for numeric ids).
         """
         launcher.settings = SimpleNamespace(coordinator_instance_id=7)
-        slug = launcher._coordinator_topic_slug()
+        slug = launcher.coordinator_topic_slug()
         assert slug == "coord-7"
         valid, err = validate_topic(f"strategies.events.list.{slug}")
         assert valid, err
@@ -2535,7 +2535,7 @@ class TestEmitFailurePaths:
 
 
 class TestSummarySnapshotInstanceConfigs:
-    """`_build_process_summary_items` joins persisted + instance configs cleanly."""
+    """`build_process_summary_items` joins persisted + instance configs cleanly."""
 
     @pytest.mark.asyncio
     async def test_instance_config_only_appears_in_snapshot(
@@ -2570,6 +2570,7 @@ class TestSummarySnapshotInstanceConfigs:
 
         assert len(publisher.sent) == 1
         _, payload = publisher.sent[0]
+        assert payload.coordinator == "coord-0"
         names = {item.name: item for item in payload.processes}
         assert "executor_kraken_w019dbb34f439" in names
         assert names["executor_kraken_w019dbb34f439"].running is False
@@ -2605,7 +2606,7 @@ class TestSummarySnapshotInstanceConfigs:
     async def test_snapshot_carries_sampled_metrics_and_none_fallback(
         self, launcher: ProcessLauncherService
     ) -> None:
-        """`_build_process_summary_items` surfaces sampled RSS/CPU per process.
+        """`build_process_summary_items` surfaces sampled RSS/CPU per process.
 
         Given: a persisted config WITH sampled metrics and an
             ``instance_configs`` entry WITHOUT sampled metrics,
@@ -2644,7 +2645,7 @@ class TestSummarySnapshotInstanceConfigs:
         )
         launcher.instance_configs["executor_kraken_w019dbb34f439"] = instance_cfg
         launcher._process_metrics["kraken_feed_publisher"] = (98_304, 12.5)
-        items = await launcher._build_process_summary_items()
+        items = await launcher.build_process_summary_items()
         by_name = {item.name: item for item in items}
         assert by_name["kraken_feed_publisher"].rss_bytes == 98_304
         assert by_name["kraken_feed_publisher"].cpu_percent == pytest.approx(12.5)

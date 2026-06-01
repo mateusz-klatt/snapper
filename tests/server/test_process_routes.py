@@ -13,10 +13,12 @@ import pytest
 from fastapi import HTTPException
 from fastapi import Request
 
+from snapper.api.schemas.process import ProcessCategoryCount
 from snapper.api.schemas.process import ProcessCreateBody
 from snapper.api.schemas.process import ProcessCreateRequest
 from snapper.api.schemas.process import ProcessStartBody
 from snapper.api.schemas.process import ProcessStartRequest
+from snapper.api.schemas.process import ProcessSummaryData
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import ProcessStartResult
@@ -26,6 +28,7 @@ from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import Setting
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import ProcessSummaryItem
 from snapper.server.process_routes import _enforce_strategy_outputs_covered
 from snapper.server.process_routes import _enforce_strategy_scope
 from snapper.server.process_routes import _enforce_wallet_grant_exists
@@ -373,6 +376,8 @@ class TestGetProcessSummary:
         mock_factory.get_process_configs = AsyncMock(return_value=[])
         mock_factory.started_processes = {}
         mock_factory.instance_configs = {}
+        mock_factory.build_process_summary_items = AsyncMock(return_value=[])
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
         )
@@ -384,6 +389,8 @@ class TestGetProcessSummary:
         assert result.payload.executors.total == 0
         assert result.payload.brokers.running == 0
         assert result.payload.brokers.total == 0
+        assert result.payload.coordinator == "coord-0"
+        assert result.payload.processes == []
 
     @pytest.mark.asyncio
     async def test_mixed_processes_categorization(self) -> None:
@@ -466,6 +473,8 @@ class TestGetProcessSummary:
             "zmq_broker": MagicMock(),
             "executor_kraken_w000000000001": MagicMock(),
         }
+        mock_factory.build_process_summary_items = AsyncMock(return_value=[])
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
         )
@@ -498,6 +507,8 @@ class TestGetProcessSummary:
             parameters={},
         )
         mock_factory.instance_configs = {"zmq_broker": spurious}
+        mock_factory.build_process_summary_items = AsyncMock(return_value=[])
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
         )
@@ -523,6 +534,8 @@ class TestGetProcessSummary:
         )
         mock_factory.started_processes = {"backfill_symbols": MagicMock()}
         mock_factory.instance_configs = {}
+        mock_factory.build_process_summary_items = AsyncMock(return_value=[])
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
         result = await get_process_summary(
             request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
         )
@@ -530,6 +543,84 @@ class TestGetProcessSummary:
         assert result.payload.strategies.total == 0
         assert result.payload.executors.total == 0
         assert result.payload.brokers.total == 0
+
+    @pytest.mark.asyncio
+    async def test_summary_passes_through_per_process_rows_and_coordinator(self) -> None:
+        """`/processes/summary` surfaces the launcher's per-process rows verbatim.
+
+        Given: ``build_process_summary_items`` returns a process-mode row
+            carrying sampled RSS/CPU and a thread-mode row whose metrics
+            were never sampled (``None``),
+        When: the summary endpoint is invoked,
+        Then: both rows pass through unchanged (including the ``None``
+            fallbacks) and the response ``coordinator`` mirrors the
+            launcher's node slug.
+        """
+        sampled = ProcessSummaryItem(
+            name="kraken_feed_publisher",
+            running=True,
+            enabled=True,
+            role="core",
+            lifecycle="long_running",
+            active_public_id=None,
+            rss_bytes=98_304,
+            cpu_percent=12.5,
+        )
+        thread_mode = ProcessSummaryItem(
+            name="executor_kraken_w000000000001",
+            running=False,
+            enabled=True,
+            role="core",
+            lifecycle="long_running",
+            active_public_id=None,
+            rss_bytes=None,
+            cpu_percent=None,
+        )
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(return_value=[])
+        mock_factory.started_processes = {}
+        mock_factory.instance_configs = {}
+        mock_factory.build_process_summary_items = AsyncMock(return_value=[sampled, thread_mode])
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-3")
+        result = await get_process_summary(
+            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+        )
+        assert result.payload.coordinator == "coord-3"
+        by_name = {item.name: item for item in result.payload.processes}
+        assert by_name["kraken_feed_publisher"].rss_bytes == 98_304
+        assert by_name["kraken_feed_publisher"].cpu_percent == pytest.approx(12.5)
+        assert by_name["executor_kraken_w000000000001"].rss_bytes is None
+        assert by_name["executor_kraken_w000000000001"].cpu_percent is None
+
+    def test_summary_data_defaults_coordinator_when_omitted(self) -> None:
+        """ProcessSummaryData accepts a payload without ``coordinator``.
+
+        Given: a process-summary payload that omits ``coordinator`` (an
+            older API node during a rolling deploy),
+        When: ProcessSummaryData validates it,
+        Then: ``coordinator`` defaults to ``coord-0`` so a strict frontend
+            never rejects the legacy response.
+        """
+        zero = ProcessCategoryCount(running=0, total=0)
+        summary = ProcessSummaryData(
+            session_id="s1",
+            sequence_id=1,
+            public_id="019dbb34-f439-77bd-afa8-ee5321d60311",
+            timestamp=datetime(2026, 5, 14, 12, tzinfo=UTC),
+            coordinator="coord-2",
+            feeds=zero,
+            strategies=zero,
+            executors=zero,
+            brokers=zero,
+            processes=[],
+        )
+        payload = summary.model_dump()
+        del payload["coordinator"]
+
+        parsed = ProcessSummaryData.model_validate(payload)
+
+        assert parsed.coordinator == "coord-0"
+        assert parsed.processes == []
 
 
 class TestGetProcessSchema:

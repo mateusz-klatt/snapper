@@ -138,6 +138,8 @@ from snapper.messaging.infrastructure.broker import ZmqBrokerThread
 from snapper.messaging.infrastructure.logger import ZmqMessageLogger
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.infrastructure.publisher import build_audit_publisher
+from snapper.messaging.infrastructure.publisher import shutdown_audit_publisher
 from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
 from snapper.messaging.infrastructure.validated_socket import HWM_ORDER_FLOW
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
@@ -581,6 +583,23 @@ async def _run_feed_engine() -> str | None:
     NOT started here — the feed container connects to the backend's broker
     via the ``ZMQ_BROKER_*`` endpoints.
 
+    A bus :class:`MessagePublisher` is wired into the launcher (mirroring
+    the API container at ``snapper.server.app._build_user_service_publisher``)
+    so the launcher's 5s native-process monitor can emit
+    ``processes.events.summary.coord-<id>`` snapshots carrying each
+    feed subprocess's sampled RSS/CPU. The publisher uses
+    ``app_settings.zmq_broker_xsub`` exactly like the API. Publisher
+    construction is wrapped defensively: a momentarily-unavailable broker
+    must NEVER abort feed startup (the container has
+    ``restart: unless-stopped`` and a startup exception would crash-loop
+    every healthy publisher). ZMQ ``PUB.connect()`` is non-blocking and
+    tolerates an absent peer, so connect itself is safe; on any
+    construction failure the publisher degrades to ``None`` and the
+    launcher silently skips metrics emission (its summary emit already
+    no-ops on a missing publisher). The socket is closed and the context
+    terminated in ``finally`` AFTER ``stop_all_processes`` so no monitor
+    send races a closed socket.
+
     Returns:
         The name of a publisher that crashed (the caller exits non-zero
         so the orchestrator restarts the container), or ``None`` on a
@@ -591,6 +610,20 @@ async def _run_feed_engine() -> str | None:
     app_settings = get_settings_with_service(settings_service)
     discover_processes()
     launcher = ProcessLauncherService(app_settings)
+    zmq_ctx: zmq.asyncio.Context | None = None
+    publisher: MessagePublisher | None = None
+    try:
+        publisher, zmq_ctx = build_audit_publisher(app_settings.zmq_broker_xsub)
+    except Exception as exc:
+        typer.echo(
+            f"Feed engine: summary publisher unavailable ({exc}); "
+            "continuing without per-process metrics emission.",
+            err=True,
+        )
+        shutdown_audit_publisher(publisher, zmq_ctx)
+        zmq_ctx = None
+        publisher = None
+    launcher.set_msg_publisher(publisher)
     try:
         await launcher.sync_registry_to_database()
         await launcher.start_feed_publishers()
@@ -601,6 +634,7 @@ async def _run_feed_engine() -> str | None:
     finally:
         await launcher.stop_all_processes()
         await settings_service.shutdown()
+        shutdown_audit_publisher(publisher, zmq_ctx)
 
 
 @app.command(name="feed-engine")

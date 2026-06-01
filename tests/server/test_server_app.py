@@ -1534,7 +1534,9 @@ class TestCreateApp:
         accidentally swaps the value back to ``zmq_broker_xpub``
         fails CI loudly instead of silently breaking the kill switch.
         """
-        with patch("snapper.server.app.zmq.asyncio.Context") as mock_context_cls:
+        with patch(
+            "snapper.messaging.infrastructure.publisher.zmq.asyncio.Context"
+        ) as mock_context_cls:
             mock_socket = MagicMock()
             mock_context = MagicMock()
             mock_context.socket.return_value = mock_socket

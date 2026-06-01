@@ -334,7 +334,7 @@ class ProcessLauncherService:
         """
         self._msg_publisher = publisher
 
-    def _coordinator_topic_slug(self) -> str:
+    def coordinator_topic_slug(self) -> str:
         """Return a topic-safe slug for ``coordinator_instance_id``.
 
         Wraps the int ``coordinator_instance_id`` (zero-based, default ``0``)
@@ -342,11 +342,16 @@ class ProcessLauncherService:
         ``processes.events.*`` and ``strategies.events.list.*`` validator
         pattern ``[A-Za-z][A-Za-z0-9_-]*``. Without the prefix a bare
         ``"0"`` suffix fails the validator's leading-letter constraint
-        and the emit-site send raises ``TopicValidationError``.
+        and the emit-site send raises ``TopicValidationError``. Public so
+        the REST ``/processes/summary`` handler can stamp the same node
+        slug onto its response that the launcher emits on the bus.
+
+        Returns:
+            The ``coord-<id>`` slug for this node, safe as a topic suffix.
         """
         return f"coord-{self.settings.coordinator_instance_id}"
 
-    async def _build_process_summary_items(self) -> list[ProcessSummaryItem]:
+    async def build_process_summary_items(self) -> list[ProcessSummaryItem]:
         """Compose a snapshot of every tracked process row.
 
         Joins persisted configs from :meth:`get_process_configs` (the
@@ -354,7 +359,13 @@ class ProcessLauncherService:
         instances held in ``instance_configs``. The result is the
         launcher's authoritative "what exists right now" view —
         consumers invalidate their cache against this signal and
-        re-fetch via REST for full detail.
+        re-fetch via REST for full detail. Public because the REST
+        ``/processes/summary`` handler reuses it to surface this node's
+        per-process RSS/CPU rows in its response payload.
+
+        Returns:
+            Per-process status rows joining persisted configs with runtime
+            per-wallet instances, each carrying any sampled RSS/CPU.
         """
         configs = await self.get_process_configs()
         items: list[ProcessSummaryItem] = []
@@ -405,15 +416,17 @@ class ProcessLauncherService:
         """
         if self._msg_publisher is None:
             return
-        topic = f"{_PROCESSES_SUMMARY_STREAM}.{self._coordinator_topic_slug()}"
+        slug = self.coordinator_topic_slug()
+        topic = f"{_PROCESSES_SUMMARY_STREAM}.{slug}"
         try:
-            items = await self._build_process_summary_items()
+            items = await self.build_process_summary_items()
             tracker = self._msg_publisher.tracker
             payload = ProcessSummaryEventData(
                 session_id=tracker.session_id,
                 sequence_id=tracker.next_sequence(topic),
                 public_id=str(uuid7()),
                 timestamp=datetime.now(UTC),
+                coordinator=slug,
                 processes=items,
                 snapshot_at=datetime.now(UTC),
             )
@@ -430,7 +443,7 @@ class ProcessLauncherService:
         """
         if self._msg_publisher is None:
             return
-        topic = f"{_PROCESSES_CONFIGURED_STREAM}.{self._coordinator_topic_slug()}"
+        topic = f"{_PROCESSES_CONFIGURED_STREAM}.{self.coordinator_topic_slug()}"
         try:
             configs = await self.get_process_configs()
             names = sorted({config.name for config in configs} | set(self.instance_configs.keys()))
@@ -456,7 +469,7 @@ class ProcessLauncherService:
         """
         if self._msg_publisher is None:
             return
-        topic = f"{_STRATEGIES_LIST_STREAM}.{self._coordinator_topic_slug()}"
+        topic = f"{_STRATEGIES_LIST_STREAM}.{self.coordinator_topic_slug()}"
         try:
             configs = await self.get_process_configs()
             class_paths = sorted(
@@ -1603,7 +1616,7 @@ class ProcessLauncherService:
 
         Results are stored in :attr:`_process_metrics` as
         ``(rss_bytes, cpu_percent)`` for
-        :meth:`_build_process_summary_items` to surface on the ZMQ
+        :meth:`build_process_summary_items` to surface on the ZMQ
         summary event. A child that has vanished or become inaccessible
         between ticks (``NoSuchProcess`` / ``AccessDenied`` /
         ``ZombieProcess``) records ``(None, None)`` and its handle is

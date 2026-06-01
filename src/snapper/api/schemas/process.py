@@ -31,6 +31,7 @@ from snapper.core.types import ProcessRunStatusType
 from snapper.core.types import SpawnerProcessStatus
 from snapper.core.types import StartProcessStatus
 from snapper.core.types import StopProcessStatus
+from snapper.messaging.schemas.data import ProcessSummaryItem
 
 _UNIQUE_PROCESS_NAME_DESC = "Unique process name"
 _CLASS_PATH_DESC = "Full Python class path"
@@ -525,17 +526,35 @@ class ProcessSummaryData(StrictDataSchema[Literal["process_summary"]]):
 
     Attributes:
         type: Payload item type discriminator.
+        coordinator: Topic-safe slug identifying the API node that built
+            this response (e.g. ``coord-0``). Mirrors the launcher's
+            summary-event topic suffix so the per-process rows below can
+            be attributed to the container that sampled them. Defaults to
+            ``coord-0`` so a strict consumer can still decode older
+            payloads emitted before this field existed; the API always
+            sets it explicitly when building a response.
         feeds: Count of feed publisher processes.
         strategies: Count of strategy processes.
         executors: Count of executor processes.
         brokers: Count of broker processes.
+        processes: Per-process status rows for this node, including the
+            per-process RSS/CPU samples the launcher captured. Defaults
+            to an empty list for backward compatibility. The legacy
+            category counts above are retained unchanged so existing
+            consumers keep working.
     """
 
     type: Literal["process_summary"] = "process_summary"
+    coordinator: str = Field(
+        default="coord-0", description="Topic-safe slug of the emitting API node"
+    )
     feeds: ProcessCategoryCount = Field(description="Feed publisher process counts")
     strategies: ProcessCategoryCount = Field(description="Strategy process counts")
     executors: ProcessCategoryCount = Field(description="Executor process counts")
     brokers: ProcessCategoryCount = Field(description="Broker process counts")
+    processes: list[ProcessSummaryItem] = Field(
+        default_factory=list, description="Per-process status rows for this node"
+    )
 
 
 class ProcessSummaryResponse(

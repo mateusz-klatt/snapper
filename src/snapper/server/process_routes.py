@@ -530,12 +530,15 @@ async def get_process_summary(
         executors_total += 1
         executors_running += int(instance_name in running)
 
+    items = await factory.build_process_summary_items()
     sid, seq, pid, ts = _mint_provenance(request)
     data = ProcessSummaryData(
         session_id=sid,
         sequence_id=seq,
         public_id=str(uuid7()),
         timestamp=ts,
+        coordinator=factory.coordinator_topic_slug(),
+        processes=items,
         feeds=ProcessCategoryCount(
             running=feeds_running,
             total=feeds_total,

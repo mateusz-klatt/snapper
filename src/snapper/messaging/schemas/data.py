@@ -1768,6 +1768,14 @@ class ProcessSummaryEventData(StrictDataSchema[Literal["process_summary_event"]]
 
     Attributes:
         type: Payload discriminator (always ``process_summary_event``).
+        coordinator: Topic-safe slug identifying the emitting node
+            (e.g. ``coord-0`` for the API container, ``coord-1`` for the
+            feed container). Mirrors the topic suffix the launcher emits
+            on so consumers can attribute per-process rows to the
+            container that sampled them when multiple coordinators share
+            the bus. Defaults to ``coord-0`` so that during a rolling
+            deploy a consumer can still decode an older payload that
+            predates this field; live producers always set it explicitly.
         processes: Unordered snapshot of per-process status rows. The
             launcher emits persisted configs first (in repository row
             order) followed by runtime per-wallet instances in
@@ -1777,6 +1785,7 @@ class ProcessSummaryEventData(StrictDataSchema[Literal["process_summary_event"]]
     """
 
     type: Literal["process_summary_event"] = "process_summary_event"
+    coordinator: str = "coord-0"
     processes: list[ProcessSummaryItem]
     snapshot_at: datetime
 
