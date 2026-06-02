@@ -226,9 +226,9 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
                     continue
                 await self._process_symbol(context)
         finally:
-            await self._dispose_resources()
+            self._dispose_resources()
 
-    async def _dispose_resources(self) -> None:
+    def _dispose_resources(self) -> None:
         """Dispose the synchronous repository allocated during startup."""
         sync_repo = self._db_sync
         self._db_sync = None

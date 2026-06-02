@@ -1636,7 +1636,7 @@ class ProcessLauncherService:
                     self._psutil_handles[name] = handle
                 cpu = handle.cpu_percent(interval=None)
                 rss = handle.memory_info().rss
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
                 self._process_metrics[name] = (None, None)
                 self._psutil_handles.pop(name, None)
                 continue
