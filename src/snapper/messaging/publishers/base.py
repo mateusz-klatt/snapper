@@ -82,7 +82,7 @@ _TICK_WRITER_DROP_LOG_INTERVAL_S = 1.0
 _TICK_WRITER_SHUTDOWN_POLL_S = 0.5
 _tick_writer_drop_counters: dict[str, list[float]] = {}
 
-_CANDLE_WRITE_QUEUE_MAX = 5_000
+_CANDLE_WRITE_QUEUE_MAX = 20_000
 _CANDLE_WRITER_DROP_LOG_INTERVAL_S = 1.0
 _CANDLE_WRITER_SHUTDOWN_POLL_S = 0.5
 _candle_writer_drop_counters: dict[str, list[float]] = {}
