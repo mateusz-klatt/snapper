@@ -10,6 +10,8 @@ from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.core.types import ProcessRoleEnum
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.strategy_routes import list_strategies
+from snapper.strategies.factory import StrategyFactory
+from snapper.strategies.rsi import RSIReversion
 
 
 class TestListStrategies:
@@ -131,3 +133,54 @@ class TestListStrategies:
         assert stopped.running is False
         assert stopped.enabled is False
         assert stopped.mode == "thread"
+
+    @pytest.mark.asyncio
+    async def test_strategy_class_resolved_from_tags(self) -> None:
+        """Test strategy_class is recovered from the process tags.
+
+        Given: strategy processes whose tags carry the lower-cased registry key,
+        When: list_strategies is called,
+        Then: the exact StrategyFactory key is recovered (case-insensitively),
+            and a tag with no registry match yields None.
+        """
+        saved = dict(StrategyFactory.STRATEGY_CLASSES)
+        try:
+            StrategyFactory.STRATEGY_CLASSES.clear()
+            StrategyFactory.STRATEGY_CLASSES["MACDCrossover"] = RSIReversion
+            mock_factory = MagicMock()
+            mock_factory.get_process_configs = AsyncMock(
+                return_value=[
+                    ProcessConfigModel(
+                        name="strategy_macd",
+                        enabled=True,
+                        mode="thread",
+                        class_path="snapper.strategies.macd.MACDCrossover",
+                        method="run",
+                        parameters={},
+                        role=ProcessRoleEnum.STRATEGY,
+                        tags=("strategy", "MacdCrossover"),
+                    ),
+                    ProcessConfigModel(
+                        name="strategy_unknown",
+                        enabled=False,
+                        mode="thread",
+                        class_path="snapper.strategies.unknown.Unknown",
+                        method="run",
+                        parameters={},
+                        role=ProcessRoleEnum.STRATEGY,
+                        tags=("strategy", "notregistered"),
+                    ),
+                ]
+            )
+            mock_factory.started_processes = {}
+            mock_request = MagicMock(spec=Request)
+            mock_request.app.state.process_factory = mock_factory
+            mock_request.app.state.rest_tracker = SequenceTracker()
+            result = await list_strategies(request=mock_request, _user=MagicMock())
+        finally:
+            StrategyFactory.STRATEGY_CLASSES.clear()
+            StrategyFactory.STRATEGY_CLASSES.update(saved)
+        macd = next(s for s in result.payload if s.name == "strategy_macd")
+        unknown = next(s for s in result.payload if s.name == "strategy_unknown")
+        assert macd.strategy_class == "MACDCrossover"
+        assert unknown.strategy_class is None

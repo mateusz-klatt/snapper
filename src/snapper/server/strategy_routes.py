@@ -26,10 +26,35 @@ from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.types import ProcessRoleEnum
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.strategies.factory import StrategyFactory
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
 _REST_STREAM = "rest.strategies"
+
+
+def _resolve_strategy_class(tags: tuple[str, ...]) -> str | None:
+    """Recover the exact StrategyFactory key from a strategy process's tags.
+
+    Strategy processes are registered with tags
+    ``("strategy", strategy_class.lower())`` (see ``create_strategy_process``),
+    so the original registry key — the value the backtest create form needs to
+    pre-select its strategy dropdown — is recovered by a case-insensitive match
+    of the tags against the registry keys.
+
+    Args:
+        tags: The process config tags.
+
+    Returns:
+        The exact registered strategy_class key, or None when no tag matches.
+    """
+    by_lower = {key.casefold(): key for key in StrategyFactory.STRATEGY_CLASSES}
+    for tag in tags:
+        match = by_lower.get(tag.casefold())
+        if match is not None:
+            return match
+
+    return None
 
 
 @router.get("")
@@ -60,6 +85,7 @@ async def list_strategies(
             running=config.name in factory.started_processes,
             enabled=config.enabled,
             mode=config.mode,
+            strategy_class=_resolve_strategy_class(config.tags),
             session_id=sid,
             sequence_id=tracker.next_sequence(_REST_STREAM),
             public_id=str(uuid7()),

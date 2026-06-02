@@ -580,6 +580,9 @@ class StrategyProcess(StrictDataSchema[Literal["strategy_process"]]):
         running: Whether process is currently running.
         enabled: Whether process autostarts on boot.
         mode: Execution mode (thread/process).
+        strategy_class: Registered StrategyFactory key this process runs
+            (recovered from the process tags), or None if not resolvable.
+            Lets the UI pre-fill the backtest create form's strategy dropdown.
     """
 
     type: Literal["strategy_process"] = "strategy_process"
@@ -587,6 +590,11 @@ class StrategyProcess(StrictDataSchema[Literal["strategy_process"]]):
     running: bool = Field(description=_RUNNING_DESC)
     enabled: bool = Field(description=_ENABLED_DESC)
     mode: ProcessMode = Field(description="Execution mode (thread/process)")
+    strategy_class: str | None = Field(
+        default=None,
+        description="Registered StrategyFactory key this process runs (from tags); "
+        "None if not resolvable. Used to pre-fill the backtest create form.",
+    )
 
 
 class StrategyListResponse(PayloadListResponse[Literal["strategy_list"], StrategyProcess]):
