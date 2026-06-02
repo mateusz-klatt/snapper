@@ -342,6 +342,21 @@ class BacktestRunListResponse(PayloadListResponse[Literal["backtest_run_list"], 
     type: Literal["backtest_run_list"] = "backtest_run_list"
 
 
+class BacktestStrategyClassListResponse(
+    PayloadListResponse[Literal["backtest_strategy_class_list"], str]
+):
+    """Registered strategy-class identifiers valid for backtest creation.
+
+    Payload is the sorted keys of the in-memory ``StrategyFactory`` registry
+    — the only values accepted by ``BacktestCreateBody.strategy_class``. The
+    create-backtest UI reads this to populate its strategy dropdown so the
+    offered choices never drift from the create-time validator on
+    :class:`BacktestCreateBody`.
+    """
+
+    type: Literal["backtest_strategy_class_list"] = "backtest_strategy_class_list"
+
+
 class BacktestResultData(StrictDataSchema[Literal["backtest_result"]]):
     """Backtest result metrics payload.
 

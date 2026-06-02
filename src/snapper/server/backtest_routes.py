@@ -42,6 +42,7 @@ from snapper.api.schemas.backtest import BacktestRunListResponse
 from snapper.api.schemas.backtest import BacktestRunResponse
 from snapper.api.schemas.backtest import BacktestSignalData
 from snapper.api.schemas.backtest import BacktestSignalListResponse
+from snapper.api.schemas.backtest import BacktestStrategyClassListResponse
 from snapper.api.schemas.backtest import BacktestTradeData
 from snapper.api.schemas.backtest import BacktestTradeListResponse
 from snapper.api.schemas.backtest import EquityOverlayPoint
@@ -76,6 +77,7 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
+from snapper.strategies.factory import StrategyFactory
 
 router = APIRouter(prefix="/backtests", tags=["backtests"])
 
@@ -495,6 +497,43 @@ async def list_backtests(
         sequence_id=seq,
         payload=items,
         count=len(items),
+    )
+
+
+@router.get("/strategy-classes")
+async def list_strategy_classes(
+    request: Request,
+    _principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_BACKTESTS))],
+) -> BacktestStrategyClassListResponse:
+    """List registered strategy-class identifiers valid for backtest creation.
+
+    Returns the sorted keys of the in-memory ``StrategyFactory`` registry —
+    the only values accepted by ``BacktestCreateBody.strategy_class``. The
+    create-backtest UI calls this to populate its strategy dropdown so the
+    options stay in lockstep with the create-time validator.
+
+    Declared ahead of the dynamic ``/{run_id}`` route so the static path is
+    not captured as a run identifier.
+
+    Args:
+        request: FastAPI request carrying the REST sequence tracker.
+        _principal: Authenticated caller with READ_BACKTESTS.
+
+    Returns:
+        Sorted registered strategy-class names.
+    """
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_STREAM)
+    names = sorted(StrategyFactory.STRATEGY_CLASSES.keys())
+    return BacktestStrategyClassListResponse(
+        type="backtest_strategy_class_list",
+        public_id=str(uuid7()),
+        timestamp=datetime.now(UTC),
+        session_id=sid,
+        sequence_id=seq,
+        payload=names,
+        count=len(names),
     )
 
 

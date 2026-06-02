@@ -24,6 +24,8 @@ from snapper.server.app import get_repository_dependency
 from snapper.server.backtest_routes import _bt_repo
 from snapper.server.backtest_routes import _normalise_pair
 from snapper.server.backtest_routes import _resolve_as_of
+from snapper.strategies.factory import StrategyFactory
+from snapper.strategies.rsi import RSIReversion
 
 NOW = datetime(2026, 4, 14, 12, 0, 0, tzinfo=UTC)
 _MOCK_STRATEGIES: dict[str, Any] = {"sma_cross": MagicMock()}
@@ -228,6 +230,39 @@ class TestListBacktests:
             assert data["count"] == 1
             assert data["payload"][0]["strategy_name"] == "sma_cross"
             client.close()
+
+
+class TestListStrategyClasses:
+    """Tests for GET /api/backtests/strategy-classes."""
+
+    def test_returns_sorted_registry_keys(self) -> None:
+        """Endpoint returns StrategyFactory registry keys, sorted, with count.
+
+        Registers two sentinel keys in deliberately unsorted insertion order
+        (reusing a real strategy class as a type-safe value) to prove the
+        endpoint sorts them, then restores the registry. Reaching this static
+        route at all also proves it is matched ahead of the dynamic
+        ``/{run_id}`` route.
+        """
+        bt = AsyncMock()
+        saved = dict(StrategyFactory.STRATEGY_CLASSES)
+        try:
+            StrategyFactory.STRATEGY_CLASSES.clear()
+            StrategyFactory.STRATEGY_CLASSES["ZetaStrategy"] = RSIReversion
+            StrategyFactory.STRATEGY_CLASSES["AlphaStrategy"] = RSIReversion
+            client = _create_client(bt)
+            try:
+                response = client.get("/api/backtests/strategy-classes")
+            finally:
+                client.close()
+        finally:
+            StrategyFactory.STRATEGY_CLASSES.clear()
+            StrategyFactory.STRATEGY_CLASSES.update(saved)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["type"] == "backtest_strategy_class_list"
+        assert body["payload"] == ["AlphaStrategy", "ZetaStrategy"]
+        assert body["count"] == 2
 
 
 class TestGetBacktest:
