@@ -231,6 +231,7 @@ from snapper.server.position_cycle_routes import router as position_cycle_router
 from snapper.server.process_routes import router as process_router
 from snapper.server.provenance_middleware import ClientProvenanceMiddleware
 from snapper.server.rate_limiting import limiter
+from snapper.server.remote_summary_cache import RemoteSummaryCache
 from snapper.server.scope_grant_routes import router as scope_grant_router
 from snapper.server.scoping import resolve_target_wallets
 from snapper.server.strategy_routes import router as strategy_router
@@ -518,6 +519,52 @@ async def _stop_system_metrics_snapshotter(app: FastAPI) -> None:
     await snapshotter.stop()
 
 
+async def _start_remote_summary_cache(
+    app: FastAPI, *, own_coordinator: str, zmq_broker_xpub: str
+) -> None:
+    """Build + start the :class:`RemoteSummaryCache` consumer.
+
+    Subscribes to other coordinators' ``processes.events.summary.*``
+    snapshots so the process REST handlers can union the dedicated feed
+    container's live running-state into ``/processes/summary`` and
+    ``/processes/configured``. The attribute is assigned to ``app.state``
+    ONLY after a successful start; on any exception the attribute is left
+    absent and the handlers fall back to their local-only running view.
+    Failure does NOT block the rest of the lifespan startup.
+
+    Args:
+        app: FastAPI application instance whose ``state`` holds the cache.
+        own_coordinator: This node's coordinator slug, dropped on ingest so
+            the local authoritative view always wins for self-owned rows.
+        zmq_broker_xpub: Broker XPUB endpoint to subscribe on.
+    """
+    try:
+        cache = RemoteSummaryCache(own_coordinator=own_coordinator)
+        await cache.start(zmq_broker_xpub)
+    except Exception:
+        logger.exception(
+            "RemoteSummaryCache startup failed — process summary falls back to local-only view"
+        )
+        return
+    app.state.remote_summary_cache = cache
+    logger.info("RemoteSummaryCache started (own={})", own_coordinator)
+
+
+async def _stop_remote_summary_cache(app: FastAPI) -> None:
+    """Stop the :class:`RemoteSummaryCache` consumer if attached.
+
+    Tolerates partial-init state where startup failed before the
+    attribute was assigned.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    cache: RemoteSummaryCache | None = getattr(app.state, "remote_summary_cache", None)
+    if cache is None:
+        return
+    await cache.stop()
+
+
 async def _start_retention_scheduler(app: FastAPI, *, db_url: str) -> None:
     """Build + start the :class:`RetentionScheduler` singleton.
 
@@ -663,6 +710,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.market_persist_policy = None
     app.state.market_cache = None
     app.state.market_stats_worker = None
+    app.state.remote_summary_cache = None
     try:
         settings_service = await _initialize_settings_service(settings)
         settings = get_settings_with_service(settings_service)
@@ -761,6 +809,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         await _start_system_metrics_snapshotter(app)
         await _start_retention_scheduler(app, db_url=settings.db_url)
         await _start_db_stats_snapshotter(app, db_url=settings.db_url)
+        await _start_remote_summary_cache(
+            app,
+            own_coordinator=process_factory.coordinator_topic_slug(),
+            zmq_broker_xpub=settings.zmq_broker_xpub,
+        )
         logger.info("Application startup complete")
         await _warn_on_tradfi_near_expiry(settings)
         mcp_sub_app = app.state.mcp_sub_app
@@ -780,6 +833,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         raise
     finally:
         logger.info("Starting application shutdown sequence")
+        await _stop_remote_summary_cache(app)
         await _stop_db_stats_snapshotter(app)
         await _stop_retention_scheduler(app)
         await _stop_system_metrics_snapshotter(app)

@@ -67,6 +67,7 @@ from snapper.application.process_manager.executor_naming import is_executor_inst
 from snapper.application.process_manager.executor_naming import is_executor_template
 from snapper.application.process_manager.executor_naming import parent_template_for_instance
 from snapper.application.process_manager.launcher import ProcessLauncherService
+from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.auth.dependencies import require_permission
@@ -83,8 +84,10 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import ProcessSummaryItem
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
+from snapper.server.remote_summary_cache import RemoteSummaryCache
 
 _REST_STREAM = "rest.control"
 _PROCESS_BAD_REQUEST_RESPONSE: dict[int | str, dict[str, Any]] = {
@@ -137,6 +140,66 @@ def get_process_factory(request: Request) -> ProcessLauncherService:
     """
     factory: ProcessLauncherService = request.app.state.process_factory
     return factory
+
+
+def get_remote_summary_cache(request: Request) -> RemoteSummaryCache | None:
+    """FastAPI dependency to get the cross-coordinator summary cache.
+
+    Returns ``None`` when the cache failed to start (or was never wired,
+    as in some tests), in which case callers fall back to the local-only
+    running view.
+
+    Args:
+        request: FastAPI request containing app state.
+
+    Returns:
+        The :class:`RemoteSummaryCache` if attached, else ``None``.
+    """
+    cache: RemoteSummaryCache | None = getattr(request.app.state, "remote_summary_cache", None)
+    return cache
+
+
+def _resolve_ownership(
+    factory: ProcessLauncherService,
+    cache: RemoteSummaryCache | None,
+    config: ProcessConfigModel,
+    *,
+    local_running: bool,
+) -> tuple[bool, str | None, bool]:
+    """Union local and remote running-state for one process config.
+
+    Processes the local autostart profile does not select (market-data
+    publishers, when running in the ``API`` profile) are owned by a
+    dedicated feed container; their running-state lives in the
+    cross-coordinator summary cache, not this node's
+    ``started_processes``.
+
+    Args:
+        factory: The local process launcher service.
+        cache: Cross-coordinator summary cache, or ``None`` when the
+            consumer failed to start (degrade to the local-only view).
+        config: The process configuration under consideration.
+        local_running: Whether this node's launcher tracks the process.
+
+    A process that is actually running locally is always treated as
+    locally owned, even when this node's autostart profile would not
+    select it: that is the duplicate-publisher footgun state, and the UI
+    MUST keep Start/Stop enabled so an operator can kill the rogue copy
+    rather than see it frozen behind a "managed remotely" badge.
+
+    Returns:
+        Tuple ``(running, coordinator, managed_remotely)``:
+        ``managed_remotely`` is True when this node neither runs nor owns
+        the process; ``coordinator`` is the owning node slug (``None``
+        when a remote owner has not yet been observed); ``running`` unions
+        the local view with any fresh remote snapshot.
+    """
+    if local_running or factory.autostart_includes(config):
+        return local_running, factory.coordinator_topic_slug(), False
+    if cache is None:
+        return False, None, True
+    remote_running, remote_coordinator = cache.lookup(config.name)
+    return remote_running, remote_coordinator, True
 
 
 def get_repository_for_processes() -> Repository:
@@ -388,6 +451,7 @@ async def list_available_processes(
 async def list_configured_processes(
     request: Request,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
+    cache: Annotated[RemoteSummaryCache | None, Depends(get_remote_summary_cache)],
     _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
 ) -> ConfiguredProcessesResponse:
     """List configured processes — DB templates plus runtime per-wallet instances.
@@ -405,6 +469,11 @@ async def list_configured_processes(
       They carry ``kind="instance"`` plus the ``wallet_public_id`` and
       ``parent_template`` discriminators so the UI can render them
       grouped under their template.
+
+    Each row carries ``coordinator`` + ``managed_remotely`` so the UI can
+    render feed-container-owned publishers as running (via the
+    cross-coordinator summary cache) and disable Start/Stop on them
+    instead of spawning a duplicate publisher in the API container.
     """
     sid, seq, pid, ts = _mint_provenance(request)
     configs = await factory.get_process_configs()
@@ -412,7 +481,10 @@ async def list_configured_processes(
     for config in configs:
         is_template_row = is_executor_template(config.name)
         kind: Literal["template", "instance"] = "template" if is_template_row else "instance"
-        running = False if is_template_row else config.name in factory.started_processes
+        local_running = False if is_template_row else config.name in factory.started_processes
+        running, coordinator, managed_remotely = _resolve_ownership(
+            factory, cache, config, local_running=local_running
+        )
         active_public_id = None if is_template_row else factory.active_runs.get(config.name)
         processes.append(
             ConfiguredProcess(
@@ -437,6 +509,8 @@ async def list_configured_processes(
                 kind=kind,
                 wallet_public_id=None,
                 parent_template=None,
+                coordinator=coordinator,
+                managed_remotely=managed_remotely,
             )
         )
     for instance_name, instance_config in factory.instance_configs.items():
@@ -444,6 +518,10 @@ async def list_configured_processes(
             continue
         wallet_param = instance_config.parameters.get("wallet_public_id")
         wallet_id = wallet_param if isinstance(wallet_param, str) else None
+        local_running = instance_name in factory.started_processes
+        running, coordinator, managed_remotely = _resolve_ownership(
+            factory, cache, instance_config, local_running=local_running
+        )
         processes.append(
             ConfiguredProcess(
                 session_id=sid,
@@ -461,12 +539,14 @@ async def list_configured_processes(
                 role=instance_config.role,
                 tags=list(instance_config.tags),
                 parameters_schema=instance_config.parameters_schema,
-                running=instance_name in factory.started_processes,
+                running=running,
                 is_one_shot=instance_config.lifecycle is ProcessLifecycleEnum.ONE_SHOT,
                 active_public_id=factory.active_runs.get(instance_name),
                 kind="instance",
                 wallet_public_id=wallet_id,
                 parent_template=parent_template_for_instance(instance_name),
+                coordinator=coordinator,
+                managed_remotely=managed_remotely,
             )
         )
     return ConfiguredProcessesResponse(
@@ -483,6 +563,7 @@ async def list_configured_processes(
 async def get_process_summary(
     request: Request,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
+    cache: Annotated[RemoteSummaryCache | None, Depends(get_remote_summary_cache)],
     _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
 ) -> ProcessSummaryResponse:
     """Lightweight process summary returning category counts.
@@ -491,9 +572,14 @@ async def get_process_summary(
     executors, brokers) for the overview dashboard. Requires only
     READ_SYSTEM_STATUS permission so viewers can see process health.
 
+    Feed publishers run in a dedicated container, so their running-state
+    is unioned from the cross-coordinator summary cache; without it the
+    API's local view would always report ``feeds_running = 0``.
+
     Args:
         request: FastAPI request (provides REST tracker for provenance).
         factory: Process launcher service.
+        cache: Cross-coordinator summary cache (``None`` degrades to local).
         _user: Authenticated user with READ_SYSTEM_STATUS permission.
 
     Returns:
@@ -512,7 +598,9 @@ async def get_process_summary(
     brokers_running = 0
 
     for config in configs:
-        is_running = config.name in running
+        is_running, _coordinator, _managed_remotely = _resolve_ownership(
+            factory, cache, config, local_running=config.name in running
+        )
         if "feed_publisher" in config.name:
             feeds_total += 1
             feeds_running += int(is_running)
@@ -530,7 +618,24 @@ async def get_process_summary(
         executors_total += 1
         executors_running += int(instance_name in running)
 
-    items = await factory.build_process_summary_items()
+    local_items = await factory.build_process_summary_items()
+    config_by_name: dict[str, ProcessConfigModel] = {config.name: config for config in configs}
+    for instance_name, instance_config in factory.instance_configs.items():
+        config_by_name.setdefault(instance_name, instance_config)
+    items: list[ProcessSummaryItem] = []
+    for item in local_items:
+        row_config = config_by_name.get(item.name)
+        if row_config is None:
+            items.append(item)
+            continue
+        unioned_running, _coordinator, _managed_remotely = _resolve_ownership(
+            factory, cache, row_config, local_running=item.running
+        )
+        items.append(
+            item
+            if unioned_running == item.running
+            else item.model_copy(update={"running": unioned_running})
+        )
     sid, seq, pid, ts = _mint_provenance(request)
     data = ProcessSummaryData(
         session_id=sid,

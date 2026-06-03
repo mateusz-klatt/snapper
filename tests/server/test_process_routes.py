@@ -38,6 +38,7 @@ from snapper.server.process_routes import create_process_configuration
 from snapper.server.process_routes import get_process_factory
 from snapper.server.process_routes import get_process_schema
 from snapper.server.process_routes import get_process_summary
+from snapper.server.process_routes import get_remote_summary_cache
 from snapper.server.process_routes import get_repository_for_processes
 from snapper.server.process_routes import list_available_processes
 from snapper.server.process_routes import list_configured_processes
@@ -80,6 +81,173 @@ class TestGetProcessFactory:
         del mock_request.app.state.process_factory
         with pytest.raises(AttributeError):
             get_process_factory(mock_request)
+
+
+class TestCrossCoordinatorOwnership:
+    """Cross-coordinator summary cache dependency + union behaviour."""
+
+    def test_get_remote_summary_cache_returns_attached(self) -> None:
+        """The cache is returned when wired into app state."""
+        mock_request = MagicMock(spec=Request)
+        sentinel = MagicMock()
+        mock_request.app.state.remote_summary_cache = sentinel
+        assert get_remote_summary_cache(mock_request) is sentinel
+
+    def test_get_remote_summary_cache_returns_none_when_absent(self) -> None:
+        """``None`` is returned when the cache never started."""
+        mock_request = MagicMock(spec=Request)
+        del mock_request.app.state.remote_summary_cache
+        assert get_remote_summary_cache(mock_request) is None
+
+    @pytest.mark.asyncio
+    async def test_configured_feed_publisher_tagged_running_via_cache(self) -> None:
+        """A feed publisher the API does not own is unioned from the cache.
+
+        The publisher is absent from this node's ``started_processes`` but
+        a fresh remote snapshot reports it running, so the row is
+        ``running=True``, ``managed_remotely=True`` and carries the feed
+        container's coordinator slug.
+        """
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="kraken_feed_publisher",
+                    enabled=True,
+                    mode="process",
+                    class_path="snapper.feeds.KrakenFeed",
+                    method="run",
+                    parameters={},
+                )
+            ]
+        )
+        mock_factory.started_processes = {}
+        mock_factory.active_runs = {}
+        mock_factory.instance_configs = {}
+        mock_factory.autostart_includes = MagicMock(return_value=False)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        cache = MagicMock()
+        cache.lookup = MagicMock(return_value=(True, "coord-1"))
+        result = await list_configured_processes(
+            request=_make_rest_request(), factory=mock_factory, cache=cache, _user=MagicMock()
+        )
+        row = result.payload[0]
+        assert row.name == "kraken_feed_publisher"
+        assert row.running is True
+        assert row.managed_remotely is True
+        assert row.coordinator == "coord-1"
+
+    @pytest.mark.asyncio
+    async def test_configured_local_duplicate_stays_controllable(self) -> None:
+        """A feed publisher running locally (the duplicate footgun) stays local.
+
+        Even though the API profile does not select the publisher, a copy
+        is actually running in this container; the row must be
+        ``managed_remotely=False`` so the UI keeps Stop enabled and the
+        operator can kill the rogue duplicate.
+        """
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="kraken_feed_publisher",
+                    enabled=True,
+                    mode="process",
+                    class_path="snapper.feeds.KrakenFeed",
+                    method="run",
+                    parameters={},
+                )
+            ]
+        )
+        mock_factory.started_processes = {"kraken_feed_publisher": MagicMock()}
+        mock_factory.active_runs = {}
+        mock_factory.instance_configs = {}
+        mock_factory.autostart_includes = MagicMock(return_value=False)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        cache = MagicMock()
+        cache.lookup = MagicMock(return_value=(True, "coord-1"))
+        result = await list_configured_processes(
+            request=_make_rest_request(), factory=mock_factory, cache=cache, _user=MagicMock()
+        )
+        row = result.payload[0]
+        assert row.running is True
+        assert row.managed_remotely is False
+        assert row.coordinator == "coord-0"
+        cache.lookup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_configured_feed_publisher_remote_without_cache(self) -> None:
+        """Without the cache a remote-owned row is stopped with no owner slug.
+
+        Degrades cleanly: ``managed_remotely`` still gates the UI button,
+        but running falls back to the local view (False) and the owner is
+        unknown.
+        """
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="kraken_feed_publisher",
+                    enabled=True,
+                    mode="process",
+                    class_path="snapper.feeds.KrakenFeed",
+                    method="run",
+                    parameters={},
+                )
+            ]
+        )
+        mock_factory.started_processes = {}
+        mock_factory.active_runs = {}
+        mock_factory.instance_configs = {}
+        mock_factory.autostart_includes = MagicMock(return_value=False)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        result = await list_configured_processes(
+            request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
+        )
+        row = result.payload[0]
+        assert row.running is False
+        assert row.managed_remotely is True
+        assert row.coordinator is None
+
+    @pytest.mark.asyncio
+    async def test_summary_unions_remote_feed_running(self) -> None:
+        """``feeds_running`` counts a feed publisher running in the feed container."""
+        mock_factory = MagicMock()
+        mock_factory.get_process_configs = AsyncMock(
+            return_value=[
+                ProcessConfigModel(
+                    name="kraken_feed_publisher",
+                    enabled=True,
+                    mode="process",
+                    class_path="snapper.feeds.KrakenFeed",
+                    method="run",
+                    parameters={},
+                )
+            ]
+        )
+        mock_factory.started_processes = {}
+        mock_factory.instance_configs = {}
+        mock_factory.build_process_summary_items = AsyncMock(
+            return_value=[
+                ProcessSummaryItem(
+                    name="kraken_feed_publisher",
+                    running=False,
+                    enabled=True,
+                    role="core",
+                    lifecycle="long_running",
+                )
+            ]
+        )
+        mock_factory.autostart_includes = MagicMock(return_value=False)
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        cache = MagicMock()
+        cache.lookup = MagicMock(return_value=(True, "coord-1"))
+        result = await get_process_summary(
+            request=_make_rest_request(), factory=mock_factory, cache=cache, _user=MagicMock()
+        )
+        assert result.payload.feeds.total == 1
+        assert result.payload.feeds.running == 1
+        assert result.payload.processes[0].running is True
 
 
 class TestListAvailableProcesses:
@@ -160,6 +328,8 @@ class TestListConfiguredProcesses:
         Then: All configurations are returned with running status.
         """
         mock_factory = MagicMock()
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.autostart_includes = MagicMock(return_value=True)
         mock_factory.get_process_configs = AsyncMock(
             return_value=[
                 ProcessConfigModel(
@@ -178,7 +348,7 @@ class TestListConfiguredProcesses:
         mock_factory.active_runs = {}
         mock_factory.instance_configs = {}
         result = await list_configured_processes(
-            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+            request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
         assert result.count == 1
         assert len(result.payload) == 1
@@ -210,7 +380,7 @@ class TestListConfiguredProcesses:
         mock_factory.started_processes = {}
         mock_factory.instance_configs = {}
         result = await list_configured_processes(
-            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+            request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
         assert result.count == 0
         assert result.payload == []
@@ -225,6 +395,8 @@ class TestListConfiguredProcesses:
         Stop button on a config-only row.
         """
         mock_factory = MagicMock()
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.autostart_includes = MagicMock(return_value=True)
         mock_factory.get_process_configs = AsyncMock(
             return_value=[
                 ProcessConfigModel(
@@ -241,7 +413,7 @@ class TestListConfiguredProcesses:
         mock_factory.active_runs = {"executor_kraken": "stale-public-id"}
         mock_factory.instance_configs = {}
         result = await list_configured_processes(
-            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+            request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
         assert result.count == 1
         process = result.payload[0]
@@ -262,6 +434,8 @@ class TestListConfiguredProcesses:
         """
         wallet = "00000000-0000-7000-8000-0000000000a1"
         mock_factory = MagicMock()
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.autostart_includes = MagicMock(return_value=True)
         mock_factory.get_process_configs = AsyncMock(return_value=[])
         instance = ProcessConfigModel(
             name="executor_kraken_w0000000000a1",
@@ -276,7 +450,7 @@ class TestListConfiguredProcesses:
         mock_factory.started_processes = {"executor_kraken_w0000000000a1": MagicMock()}
         mock_factory.active_runs = {"executor_kraken_w0000000000a1": "run-public-id"}
         result = await list_configured_processes(
-            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+            request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
         assert result.count == 1
         synthetic = result.payload[0]
@@ -311,7 +485,7 @@ class TestListConfiguredProcesses:
         mock_factory.started_processes = {"zmq_broker": MagicMock()}
         mock_factory.active_runs = {}
         result = await list_configured_processes(
-            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+            request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
         assert result.count == 0
 
@@ -326,6 +500,8 @@ class TestListConfiguredProcesses:
         """
         wallet = "00000000-0000-7000-8000-0000000000a1"
         mock_factory = MagicMock()
+        mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
+        mock_factory.autostart_includes = MagicMock(return_value=True)
         mock_factory.get_process_configs = AsyncMock(
             return_value=[
                 ProcessConfigModel(
@@ -350,7 +526,7 @@ class TestListConfiguredProcesses:
         mock_factory.started_processes = {"executor_kraken_w0000000000a1": MagicMock()}
         mock_factory.active_runs = {}
         result = await list_configured_processes(
-            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+            request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
         assert result.count == 2
         kinds = {row.name: row.kind for row in result.payload}
@@ -379,7 +555,7 @@ class TestGetProcessSummary:
         mock_factory.build_process_summary_items = AsyncMock(return_value=[])
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
         result = await get_process_summary(
-            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+            request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
         assert result.payload.feeds.running == 0
         assert result.payload.feeds.total == 0
@@ -476,7 +652,7 @@ class TestGetProcessSummary:
         mock_factory.build_process_summary_items = AsyncMock(return_value=[])
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
         result = await get_process_summary(
-            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+            request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
         assert result.payload.feeds.running == 1
         assert result.payload.feeds.total == 2
@@ -510,7 +686,7 @@ class TestGetProcessSummary:
         mock_factory.build_process_summary_items = AsyncMock(return_value=[])
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
         result = await get_process_summary(
-            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+            request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
         assert result.payload.executors.total == 0
         assert result.payload.executors.running == 0
@@ -537,7 +713,7 @@ class TestGetProcessSummary:
         mock_factory.build_process_summary_items = AsyncMock(return_value=[])
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-0")
         result = await get_process_summary(
-            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+            request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
         assert result.payload.feeds.total == 0
         assert result.payload.strategies.total == 0
@@ -583,7 +759,7 @@ class TestGetProcessSummary:
         mock_factory.build_process_summary_items = AsyncMock(return_value=[sampled, thread_mode])
         mock_factory.coordinator_topic_slug = MagicMock(return_value="coord-3")
         result = await get_process_summary(
-            request=_make_rest_request(), factory=mock_factory, _user=MagicMock()
+            request=_make_rest_request(), factory=mock_factory, cache=None, _user=MagicMock()
         )
         assert result.payload.coordinator == "coord-3"
         by_name = {item.name: item for item in result.payload.processes}

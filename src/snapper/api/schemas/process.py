@@ -479,6 +479,14 @@ class ConfiguredProcess(StrictDataSchema[Literal["configured_process"]]):
         parent_template: Template name (e.g. ``executor_kraken``)
             this instance was synthesized from; ``None`` for templates
             and non-per-wallet rows.
+        coordinator: Slug of the node that owns this process
+            (e.g. ``coord-0`` for the API, ``coord-1`` for the feed
+            container); ``None`` when a remote owner is unknown because
+            its summary has not been observed.
+        managed_remotely: True when this node does not run the process
+            under its autostart profile (a dedicated feed container owns
+            it). The UI disables Start/Stop/Restart for such rows so it
+            cannot spawn a duplicate publisher in the API container.
     """
 
     type: Literal["configured_process"] = "configured_process"
@@ -504,6 +512,14 @@ class ConfiguredProcess(StrictDataSchema[Literal["configured_process"]]):
     )
     parent_template: str | None = Field(
         None, description="Template the per-wallet instance was synthesized from; None otherwise"
+    )
+    coordinator: str | None = Field(
+        None,
+        description="Slug of the node owning this process; None when a remote owner is unknown",
+    )
+    managed_remotely: bool = Field(
+        default=False,
+        description="True when a remote node (e.g. the feed container) owns this process",
     )
 
 
