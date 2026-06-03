@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from functools import partial
 from time import monotonic
 from time import perf_counter_ns
@@ -47,12 +48,15 @@ from snapper.core.types import TradeSideEnum
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import CandleUpsertRow
+from snapper.data.repository_types import InstrumentFeedHealthUpsertRow
 from snapper.data.repository_types import TickUpsertRow
 from snapper.data.repository_types import TradeUpsertRow
+from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.symbols.functions import get_market_data_capability_exclusions
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.messaging.infrastructure.publisher import MessagePublisher
@@ -98,6 +102,17 @@ _CONSUMER_RESTART_BACKOFF_S = 2.0
 _LIVENESS_RECOVERY_THRESHOLD_S_DEFAULT = 300
 _MIN_RECOVERY_INTERVAL_S = 60.0
 _RECOVERY_TIMEOUT_S = 90.0
+
+_FEED_HEALTH_FLUSH_INTERVAL_S = 30.0
+"""Cadence for persisting the subscription-health snapshot to the DB.
+
+The publisher owns its exchange client's in-memory
+:class:`SubscriptionHealthTracker`, which is lost on restart. Every
+``_FEED_HEALTH_FLUSH_INTERVAL_S`` the publisher snapshots that tracker,
+converts the tracker's monotonic-clock fields to wall-clock, and upserts
+the current state into ``instrument_feed_health`` so operators can query
+which symbols are dark, when each last received data, and why — after the
+fact."""
 
 _PERSIST_SKIPPED_LOG_INTERVAL_S = 60.0
 """Cadence for the rate-limited ``persist_skipped_total`` log line.
@@ -381,6 +396,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._trade_writer_session: AsyncSession | None = None
         self._persist_policy: MarketPersistPolicy | None = None
         self._persist_skipped_counters: dict[tuple[str, PersistDataType], list[float]] = {}
+        self._feed_health_loop_task: asyncio.Task[None] | None = None
 
     def set_persist_policy(self, policy: MarketPersistPolicy | None) -> None:
         """Inject the :class:`MarketPersistPolicy` for selective DB-write gating.
@@ -537,6 +553,41 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         return f"pub:{self._get_exchange_name()}"
 
+    def _log_capability_exclusions(self, exchange_name: AllExchange) -> None:
+        """Log the once-per-startup market-data capability exclusion summary.
+
+        Only wildcard publishers (``self._input_symbols == ["*"]``) report
+        exclusions: a wildcard publisher subscribes the full market-data
+        universe, so symbols whose capability row carries
+        ``can_market_data = False`` are genuinely withheld from a universe the
+        operator asked to cover in full. An explicit-symbol publisher only
+        subscribes its own list, so the "excluded from the subscribed
+        universe" concept does not apply and must stay quiet. When there are
+        exclusions, one INFO line reports the counts and one DEBUG line lists
+        the sorted excluded native symbols. Nothing is logged when there are
+        no exclusions so healthy startups stay quiet.
+
+        Args:
+            exchange_name: Resolved exchange identifier used for the lookup
+                and the log line.
+
+        Returns:
+            None.
+        """
+        if self._input_symbols != ["*"]:
+            return
+        included, excluded = get_market_data_capability_exclusions(exchange_name)
+        if not excluded:
+            return
+        logger.info(
+            "{}: {} symbol(s) excluded from market data by capability "
+            "(can_market_data=False); {} included",
+            exchange_name,
+            len(excluded),
+            len(included),
+        )
+        logger.debug("{}: market-data-excluded symbols: {}", exchange_name, excluded)
+
     async def start(self) -> None:
         """Start the publisher service and connect to exchange."""
         exchange_name = self._get_exchange_name()
@@ -545,6 +596,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if self.running:
             logger.warning(f"{process_name}: Already running")
             return
+        self._log_capability_exclusions(exchange_name)
         bootstrap_settings = get_settings()
         settings_service = await get_settings_service(
             bootstrap_settings.db_url,
@@ -593,6 +645,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         tasks: list[asyncio.Task[None]] = []
         tasks.append(asyncio.create_task(self._heartbeat_loop()))
         tasks.append(asyncio.create_task(self._symbol_aliases_loop()))
+        self._feed_health_loop_task = asyncio.create_task(self._feed_health_flush_loop())
+        tasks.append(self._feed_health_loop_task)
         symbols_to_subscribe = self.symbols[:max_symbols] if max_symbols > 0 else self.symbols
         timeframes = self.settings.timeframes
         self._candle_consumer_tasks = [
@@ -667,6 +721,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             self._recovery_tasks.difference_update(recovery_tasks)
         if self._exchange_client is not None:
             await self._exchange_client.stop_health_loop()
+        await self._stop_feed_health_loop()
         await self._stop_tick_pipeline()
         await self._stop_candle_pipeline()
         await self._stop_trade_pipeline()
@@ -706,6 +761,15 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await queue.join()
+
+    async def _stop_feed_health_loop(self) -> None:
+        """Cancel and await the feed-health flush loop if running."""
+        task = self._feed_health_loop_task
+        if task is None:
+            return
+        task.cancel()
+        await self._await_shutdown_task(task)
+        self._feed_health_loop_task = None
 
     async def _stop_tick_pipeline(self) -> None:
         """Stop and drain the tick consumer and writer pipeline."""
@@ -2186,6 +2250,143 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     await asyncio.sleep(1)
         except Exception as e:
             logger.error(f"{exchange}_feed_publisher system messages loop crashed: {e}")
+
+    async def _feed_health_flush_loop(self) -> None:
+        """Periodically persist the exchange client's feed-health snapshot.
+
+        Runs every :data:`_FEED_HEALTH_FLUSH_INTERVAL_S` while the
+        publisher is running, snapshotting the in-memory subscription
+        tracker and upserting its current state into the
+        ``instrument_feed_health`` table so operators can query it after
+        the fact. The loop is fully defensive: a flush failure is logged
+        and the loop continues — feed-health persistence never crashes
+        the publisher hot path.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        exchange = self._get_exchange_name()
+        logger.info(f"{exchange}_feed_publisher: Starting feed-health flush loop")
+        while self.running:
+            await asyncio.sleep(_FEED_HEALTH_FLUSH_INTERVAL_S)
+            if not self.running:
+                break
+            await self._flush_feed_health()
+
+    async def _flush_feed_health(self) -> None:
+        """Snapshot the tracker and upsert its wall-clock current state.
+
+        Wrapped in a broad try/except: any failure (no client / no repo /
+        DB error) is logged and swallowed so the flush loop survives and
+        the publisher hot path is never affected.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        try:
+            client = self._exchange_client
+            repository = self.repository
+            if client is None or repository is None:
+                return
+            snapshot = client.subscription_health_snapshot()
+            if not snapshot:
+                return
+            rows = self._build_feed_health_rows(snapshot)
+            await repository.upsert_instrument_feed_health(rows)
+        except Exception as exc:
+            logger.error(
+                f"{self._get_exchange_name()}_feed_publisher: feed-health flush failed: {exc}"
+            )
+
+    def _build_feed_health_rows(
+        self, snapshot: dict[tuple[str, str], _SymbolEntry]
+    ) -> list[InstrumentFeedHealthUpsertRow]:
+        """Convert a tracker snapshot to wall-clock upsert rows.
+
+        The tracker stores ``requested_at`` / ``confirmed_at`` /
+        ``last_seen_data_at`` as :func:`time.monotonic` values, which are
+        meaningless as persisted timestamps. A single ``wall_now`` /
+        ``mono_now`` pair is captured once per flush so every monotonic
+        value ``m`` maps to the same reference instant via
+        ``wall_now - timedelta(seconds=(mono_now - m))``; ``None`` stays
+        ``None``.
+
+        Args:
+            snapshot: Mapping from ``(channel, symbol)`` to the tracker's
+                copied entry objects.
+
+        Returns:
+            One :class:`InstrumentFeedHealthUpsertRow` per snapshot entry,
+            tagged with this coordinator and exchange.
+        """
+        wall_now = datetime.now(UTC)
+        mono_now = monotonic()
+        coordinator = f"coord-{self.settings.coordinator_instance_id}"
+        exchange = self._get_exchange_name()
+        rows: list[InstrumentFeedHealthUpsertRow] = []
+        for entry in snapshot.values():
+            rows.append(
+                InstrumentFeedHealthUpsertRow(
+                    coordinator=coordinator,
+                    exchange=exchange,
+                    channel=entry.channel,
+                    symbol=entry.symbol,
+                    status=entry.status,
+                    requested_at=self._monotonic_to_wall(entry.requested_at, wall_now, mono_now),
+                    confirmed_at=self._monotonic_to_wall_optional(
+                        entry.confirmed_at, wall_now, mono_now
+                    ),
+                    last_seen_data_at=self._monotonic_to_wall_optional(
+                        entry.last_seen_data_at, wall_now, mono_now
+                    ),
+                    last_error=entry.last_error,
+                    retry_count=entry.retry_count,
+                    snapshot_at=wall_now,
+                )
+            )
+        return rows
+
+    @staticmethod
+    def _monotonic_to_wall(value: float, wall_now: datetime, mono_now: float) -> datetime:
+        """Convert one monotonic value to wall-clock against a flush reference.
+
+        Args:
+            value: A :func:`time.monotonic` reading captured by the
+                tracker.
+            wall_now: Wall-clock instant captured once per flush.
+            mono_now: Monotonic reading captured at the same flush instant
+                as ``wall_now``.
+
+        Returns:
+            The wall-clock instant corresponding to ``value``.
+        """
+        return wall_now - timedelta(seconds=(mono_now - value))
+
+    @classmethod
+    def _monotonic_to_wall_optional(
+        cls, value: float | None, wall_now: datetime, mono_now: float
+    ) -> datetime | None:
+        """Convert an optional monotonic value, preserving ``None``.
+
+        Args:
+            value: A :func:`time.monotonic` reading or ``None``.
+            wall_now: Wall-clock instant captured once per flush.
+            mono_now: Monotonic reading captured at the same flush instant
+                as ``wall_now``.
+
+        Returns:
+            The wall-clock instant for ``value``, or ``None`` when
+            ``value`` is ``None``.
+        """
+        if value is None:
+            return None
+        return cls._monotonic_to_wall(value, wall_now, mono_now)
 
     def _handle_settings_update(self, payload: bytes, exchange: str) -> None:
         """Handle settings update message and refresh cached settings.

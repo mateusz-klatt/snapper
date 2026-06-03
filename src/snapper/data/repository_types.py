@@ -1970,3 +1970,87 @@ class PendingReviewSummary(TypedDict):
     fanout_after: datetime
     instrument: str | None
     signal_envelope: dict[str, Any] | None
+
+
+class MarketDataCoverageRow(TypedDict):
+    """Per-exchange market-data coverage aggregate.
+
+    Returned by :meth:`Repository.get_market_data_coverage`. Each field
+    is a count taken over the active (current bitemporal) instruments
+    for ``exchange``; see the schema
+    :class:`snapper.api.schemas.market_coverage.MarketDataCoverageExchange`
+    for the public-facing contract this row maps onto one-for-one.
+
+    Attributes:
+        exchange: Exchange identifier (lowercase).
+        instruments: Count of active instruments for the exchange.
+        fresh_ticks: Count having at least one fresh ``ticks`` row.
+        fresh_candles: Count having at least one fresh ``candles`` row.
+        gated_off: Count whose current ``can_market_data`` is FALSE.
+        dark: Count NOT gated off and WITHOUT any fresh ticks.
+    """
+
+    exchange: str
+    instruments: int
+    fresh_ticks: int
+    fresh_candles: int
+    gated_off: int
+    dark: int
+
+
+class InstrumentFeedHealthUpsertRow(TypedDict):
+    """Upsert row for :meth:`Repository.upsert_instrument_feed_health`.
+
+    One row per ``(coordinator, exchange, channel, symbol)`` natural key,
+    last-write-wins. All datetime fields are wall-clock UTC — the
+    publisher converts the tracker's monotonic-clock values before
+    building these rows.
+
+    Attributes:
+        coordinator: ``coord-<id>`` slug of the owning coordinator.
+        exchange: Exchange identifier (lowercase).
+        channel: Tracker channel key (e.g. ``ohlc:1m``).
+        symbol: Wire-format symbol or product id.
+        status: Lifecycle state (``pending`` / ``confirmed`` / ``failed``).
+        requested_at: Wall-clock of the current subscribe attempt.
+        confirmed_at: Wall-clock of ACK / data confirmation; ``None``
+            until confirmed.
+        last_seen_data_at: Wall-clock of last market data; ``None``
+            until the first datum.
+        last_error: Last failure reason; ``None`` when healthy.
+        retry_count: Retry attempts already consumed.
+        snapshot_at: Wall-clock when the snapshot was flushed.
+    """
+
+    coordinator: str
+    exchange: str
+    channel: str
+    symbol: str
+    status: str
+    requested_at: datetime
+    confirmed_at: datetime | None
+    last_seen_data_at: datetime | None
+    last_error: str | None
+    retry_count: int
+    snapshot_at: datetime
+
+
+class InstrumentFeedHealthRow(TypedDict):
+    """Read row returned by :meth:`Repository.list_instrument_feed_health`.
+
+    Mirrors :class:`InstrumentFeedHealthUpsertRow` minus the upsert-only
+    nature — every column of the current-state row is projected so the
+    REST surface can render it without a second lookup.
+    """
+
+    coordinator: str
+    exchange: str
+    channel: str
+    symbol: str
+    status: str
+    requested_at: datetime
+    confirmed_at: datetime | None
+    last_seen_data_at: datetime | None
+    last_error: str | None
+    retry_count: int
+    snapshot_at: datetime

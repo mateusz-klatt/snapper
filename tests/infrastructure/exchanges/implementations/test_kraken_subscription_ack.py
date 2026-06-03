@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 from kraken.spot import SpotWSClient
 
+from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
@@ -352,15 +353,18 @@ class TestKrakenSpotSubscribeHealthMarks:
     """Tests for Spot subscribe and data health marks."""
 
     @pytest.mark.asyncio
-    async def test_wildcard_ticker_subscribe_skips_pending_marks(self) -> None:
-        """Wildcard ticker subscribe does not create pending symbols.
+    async def test_wildcard_ticker_subscribe_seeds_confirmed_universe(self) -> None:
+        """Wildcard ticker subscribe seeds confirmed for the resolved universe.
 
-        Given: A wildcard ticker subscription,
+        Given: A wildcard ticker subscription and a known market-data
+            universe,
         When: The iterator starts,
-        Then: mark_pending is not called before subscribe.
+        Then: Each resolved wire symbol is seeded confirmed (the single
+            ``["*"]`` subscribe IS the subscription, so there is no per-symbol
+            ACK to wait for) and the literal ``"*"`` never enters the tracker.
         """
         client = KrakenExchangeClient(api_key="k", api_secret="s")
-        client._health_tracker = MagicMock()
+        client._health_tracker = SubscriptionHealthTracker()
         client._ws_client = AsyncMock()
         client._ws_client.__aenter__.return_value = client._ws_client
         client._ws_client.exception_occur = False
@@ -385,10 +389,100 @@ class TestKrakenSpotSubscribeHealthMarks:
             return None
 
         client._ensure_ws_connected = noop
-        iterator = client.subscribe_ticks(["*"])
-        await anext(iterator)
-        await iterator.aclose()
-        client._health_tracker.mark_pending.assert_not_called()
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken."
+                "get_available_kraken_symbols",
+                return_value=["BTC-USD", "ETH-USD"],
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken."
+                "native_to_kraken_websocket",
+                side_effect=lambda s: s.replace("-", "/"),
+            ),
+        ):
+            iterator = client.subscribe_ticks(["*"])
+            await anext(iterator)
+            await iterator.aclose()
+        snapshot = client._health_tracker.snapshot()
+        assert snapshot[("ticker", "BTC/USD")].status == "confirmed"
+        assert snapshot[("ticker", "ETH/USD")].status == "confirmed"
+        assert ("ticker", "*") not in snapshot
+
+    @pytest.mark.asyncio
+    async def test_explicit_ticker_subscribe_seeds_pending_universe(self) -> None:
+        """Explicit ticker subscribe seeds pending for the requested symbols.
+
+        Given: An explicit two-symbol ticker subscription,
+        When: The iterator starts,
+        Then: Each requested wire symbol is seeded pending (real per-symbol
+            subscribes confirmed later by per-symbol ACKs).
+        """
+        client = KrakenExchangeClient(api_key="k", api_secret="s")
+        client._health_tracker = SubscriptionHealthTracker()
+        client._ws_client = AsyncMock()
+        client._ws_client.__aenter__.return_value = client._ws_client
+        client._ws_client.exception_occur = False
+        await client._tick_queue.put(
+            TickerUpdate(
+                symbol="BTC-USD",
+                bid=1.0,
+                bid_qty=1.0,
+                ask=2.0,
+                ask_qty=1.0,
+                last=1.5,
+                volume=1.0,
+                vwap=1.5,
+                low=1.0,
+                high=2.0,
+                change=0.0,
+                change_pct=0.0,
+            )
+        )
+
+        async def noop() -> None:
+            return None
+
+        client._ensure_ws_connected = noop
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_websocket",
+            side_effect=lambda s: s.replace("-", "/"),
+        ):
+            iterator = client.subscribe_ticks(["BTC-USD", "ETH-USD"])
+            await anext(iterator)
+            await iterator.aclose()
+        snapshot = client._health_tracker.snapshot()
+        assert snapshot[("ticker", "BTC/USD")].status == "pending"
+        assert snapshot[("ticker", "ETH/USD")].status == "pending"
+
+    def test_wildcard_seeded_symbol_is_stale_not_overdue_without_data(self) -> None:
+        """A dark wildcard ticker symbol ages into stale, never into retry.
+
+        Given: A wildcard ticker universe seeded confirmed with no data,
+        When: The stale threshold elapses,
+        Then: The symbol is absent from list_overdue_pending (never retried)
+            but present in list_stale_data (dark detection).
+        """
+        client = KrakenExchangeClient(api_key="k", api_secret="s")
+        client._health_tracker = SubscriptionHealthTracker(data_stale_threshold_s=300.0)
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken."
+                "get_available_kraken_symbols",
+                return_value=["BTC-USD"],
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken."
+                "native_to_kraken_websocket",
+                side_effect=lambda s: s.replace("-", "/"),
+            ),
+        ):
+            client._seed_ticker_health(["*"])
+        entry = client._health_tracker.snapshot()[("ticker", "BTC/USD")]
+        future = (entry.confirmed_at or 0.0) + 301.0
+        assert client._health_tracker.list_overdue_pending(now=future) == []
+        stale = client._health_tracker.list_stale_data(now=future)
+        assert [e.symbol for e in stale] == ["BTC/USD"]
 
     def test_data_seen_uses_wire_symbols_before_parse(self) -> None:
         """Data observer uses raw wire symbols.
@@ -506,15 +600,17 @@ class TestKrakenSpotSubscribeHealthMarks:
         )
 
     @pytest.mark.asyncio
-    async def test_replay_skips_wildcard_ticker_health_mark(self) -> None:
-        """Replay does not track wildcard ticker as a symbol.
+    async def test_replay_reseeds_wildcard_ticker_universe_confirmed(self) -> None:
+        """Replay re-arms the wildcard ticker universe as confirmed.
 
         Given: A cached wildcard ticker subscription,
-        When: _replay_subscriptions runs,
-        Then: mark_pending is not called.
+        When: _replay_subscriptions runs after reconnect,
+        Then: Each resolved wire symbol is re-seeded confirmed, the literal
+            ``"*"`` never enters the tracker, and no pending entry is created
+            (the wildcard universe must never be pending-retried).
         """
         client = KrakenExchangeClient(api_key="k", api_secret="s")
-        client._health_tracker = MagicMock()
+        client._health_tracker = SubscriptionHealthTracker()
         client._ws_client = AsyncMock(spec=SpotWSClient)
         req = SubscriptionRequest(
             channel="ticker",
@@ -522,5 +618,21 @@ class TestKrakenSpotSubscribeHealthMarks:
             parameters_json='{"snapshot":true}',
         )
         client._subscription_cache[req.key()] = req
-        await client._replay_subscriptions()
-        client._health_tracker.mark_pending.assert_not_called()
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken."
+                "get_available_kraken_symbols",
+                return_value=["BTC-USD", "ETH-USD"],
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken."
+                "native_to_kraken_websocket",
+                side_effect=lambda s: s.replace("-", "/"),
+            ),
+        ):
+            await client._replay_subscriptions()
+        snapshot = client._health_tracker.snapshot()
+        assert snapshot[("ticker", "BTC/USD")].status == "confirmed"
+        assert snapshot[("ticker", "ETH/USD")].status == "confirmed"
+        assert ("ticker", "*") not in snapshot
+        assert client._health_tracker.list_overdue_pending(now=1e12) == []

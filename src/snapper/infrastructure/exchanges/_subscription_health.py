@@ -63,6 +63,33 @@ class _SymbolEntry:
     last_seen_data_at: float | None = None
     stale_logged: bool = False
 
+    def stale_reference(self) -> float:
+        """Return the monotonic timestamp staleness is measured from.
+
+        The reference is the MOST RECENT of ``requested_at``,
+        ``confirmed_at`` and ``last_seen_data_at`` (ignoring unset
+        timestamps). Using the latest of the three means a re-confirmation
+        — for example a wildcard ticker universe re-seeded as confirmed
+        after a WS reconnect — grants a fresh post-reconnect data window
+        instead of flagging every previously-active symbol stale the
+        instant the socket returns from an outage longer than the
+        threshold, while ``last_seen_data_at`` is preserved for
+        diagnostics. In steady state ``last_seen_data_at`` is the latest
+        timestamp, so normal stale detection is unchanged. Both the stale
+        decision (:meth:`SubscriptionHealthTracker.list_stale_data`) and
+        the stale-age reporting in the publisher health loop read this
+        single reference so they never diverge.
+
+        Returns:
+            The most recent of ``requested_at``, ``confirmed_at`` and
+            ``last_seen_data_at`` in monotonic seconds.
+        """
+        return max(
+            timestamp
+            for timestamp in (self.requested_at, self.confirmed_at, self.last_seen_data_at)
+            if timestamp is not None
+        )
+
 
 class SubscriptionHealthTracker:
     """Per-(channel, symbol) subscription state with retry queries.
@@ -300,13 +327,19 @@ class SubscriptionHealthTracker:
         every ``retry_interval_s`` for hours during legitimate upstream
         silence (e.g. CME weekend close, low-liquidity exotic pairs).
 
+        Staleness is measured from :meth:`_SymbolEntry.stale_reference`
+        (the most recent of the entry's request, confirmation and
+        last-data timestamps), so a re-confirmation after a reconnect
+        grants a fresh window while ``last_seen_data_at`` is preserved for
+        diagnostics.
+
         Args:
             now: Optional monotonic timestamp for deterministic tests.
 
         Returns:
-            Confirmed entries whose last data timestamp, or confirmation
-            timestamp if no data has arrived, exceeds the stale threshold
-            AND have not yet been logged as stale during this window.
+            Confirmed entries whose stale reference exceeds the stale
+            threshold AND have not yet been logged as stale during this
+            window.
 
         Raises:
             None.
@@ -316,7 +349,7 @@ class SubscriptionHealthTracker:
         for entry in self._entries.values():
             if entry.status != "confirmed" or entry.stale_logged:
                 continue
-            reference = entry.last_seen_data_at or entry.confirmed_at or entry.requested_at
+            reference = entry.stale_reference()
             if current - reference >= self.data_stale_threshold_s:
                 entry.stale_logged = True
                 stale.append(entry)

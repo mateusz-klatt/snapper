@@ -5,6 +5,7 @@ import importlib
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from time import monotonic
 from types import SimpleNamespace
 from typing import Any
@@ -28,9 +29,11 @@ from snapper.data.repository import Repository
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import TickUpsertRow
 from snapper.data.repository_types import TradeUpsertRow
+from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.messaging.publishers.base import _FEED_HEALTH_FLUSH_INTERVAL_S
 from snapper.messaging.publishers.base import _TRADE_ID_LRU_MAX_PER_SYMBOL
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.base import _candle_writer_drop_counters
@@ -254,6 +257,7 @@ async def test_start_warns_on_symbol_limit(monkeypatch: pytest.MonkeyPatch) -> N
     pub.settings.write_buffer_flush_ms = 50
     pub._heartbeat_loop = AsyncMock()
     pub._symbol_aliases_loop = AsyncMock()
+    pub._feed_health_flush_loop = AsyncMock()
     pub._supervise_consumer = AsyncMock()
     pub._tick_loop = AsyncMock()
     pub._tick_writer_loop = AsyncMock()
@@ -263,6 +267,175 @@ async def test_start_warns_on_symbol_limit(monkeypatch: pytest.MonkeyPatch) -> N
     pub._candle_writer_loop = AsyncMock()
     await pub.start()
     await pub.stop()
+
+
+def _mock_start_runtime(pub: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mock the publisher runtime so ``start`` runs without real IO.
+
+    Args:
+        pub: Publisher under test.
+        monkeypatch: Pytest monkeypatch fixture for runtime substitutions.
+
+    Returns:
+        None.
+    """
+    pub._get_max_symbols_per_connection = Mock(return_value=0)
+    mock_repo = SimpleNamespace(get_latest_candle_ids=AsyncMock(return_value={}))
+    monkeypatch.setattr("snapper.messaging.publishers.base.get_repository", lambda _url: mock_repo)
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.get_settings_service",
+        AsyncMock(return_value=SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.get_settings_with_service",
+        lambda _svc: pub.settings,
+    )
+
+    class DummySock(SimpleNamespace):
+        def __init__(self) -> None:
+            super().__init__(
+                connect=lambda *_: None, close=lambda: None, setsockopt=lambda o, v: None
+            )
+
+    class DummyCtx:
+        def socket(self, *_args: Any) -> DummySock:
+            return DummySock()
+
+        def term(self) -> None:
+            return None
+
+    monkeypatch.setattr("snapper.messaging.publishers.base.zmq.asyncio.Context", lambda: DummyCtx())
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.ValidatedPublisher",
+        lambda sock: SimpleNamespace(
+            close=sock.close, send_multipart=AsyncMock(), setsockopt=sock.setsockopt
+        ),
+    )
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.ValidatedSubscriber",
+        lambda sock: SimpleNamespace(
+            subscribe=lambda *_: None,
+            recv_multipart=AsyncMock(),
+            close=sock.close,
+            setsockopt=sock.setsockopt,
+        ),
+    )
+    client: Any = DummyClient()
+    client.connect = AsyncMock()
+    pub._create_exchange_client = lambda: client
+    pub.settings.timeframes = []
+    pub.settings.zmq_heartbeat_interval_ms = 0
+    pub.settings.write_buffer_candle_max_rows = 100
+    pub.settings.write_buffer_tick_max_rows = 500
+    pub.settings.write_buffer_trade_max_rows = 500
+    pub.settings.write_buffer_flush_ms = 50
+
+    async def noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    pub._heartbeat_loop = noop
+    pub._symbol_aliases_loop = noop
+    pub._feed_health_flush_loop = noop
+    pub._tick_loop = noop
+    pub._tick_writer_loop = noop
+    pub._trade_loop = noop
+    pub._trade_writer_loop = noop
+    pub._candle_loop = noop
+    pub._candle_writer_loop = noop
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.gather", AsyncMock(return_value=None)
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_logs_capability_exclusions_for_wildcard_publisher(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Wildcard publisher start reports market-data capability exclusions.
+
+    Given: A wildcard publisher whose exchange withholds two symbols by
+        capability,
+    When: ``start`` runs once,
+    Then: One INFO summary reports the excluded and included counts and a
+        DEBUG line lists the sorted excluded native symbols.
+    """
+    pub: Any = DummyPublisher(symbols=["*"])
+    _mock_start_runtime(pub, monkeypatch)
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.get_market_data_capability_exclusions",
+        lambda _exchange: (["BTC-USD"], ["ADA-USD", "XRP-USD"]),
+    )
+    sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        with caplog.at_level("DEBUG"):
+            await pub.start()
+    finally:
+        logger.remove(sink_id)
+        await pub.stop()
+    info_records = [r for r in caplog.records if r.levelname == "INFO"]
+    debug_records = [r for r in caplog.records if r.levelname == "DEBUG"]
+    assert any(
+        "2 symbol(s) excluded from market data by capability" in r.message
+        and "1 included" in r.message
+        for r in info_records
+    )
+    assert any("['ADA-USD', 'XRP-USD']" in r.message for r in debug_records)
+
+
+@pytest.mark.asyncio
+async def test_start_silent_about_exclusions_for_explicit_publisher(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Explicit-symbol publisher start never reports capability exclusions.
+
+    Given: An explicit-symbol publisher whose exchange would report
+        exclusions,
+    When: ``start`` runs once,
+    Then: No exclusion line is emitted because exclusions only apply to the
+        wildcard universe-coverage case.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    _mock_start_runtime(pub, monkeypatch)
+    exclusions_mock = Mock(return_value=(["BTC-USD"], ["ADA-USD", "XRP-USD"]))
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.get_market_data_capability_exclusions",
+        exclusions_mock,
+    )
+    sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        with caplog.at_level("DEBUG"):
+            await pub.start()
+    finally:
+        logger.remove(sink_id)
+        await pub.stop()
+    exclusions_mock.assert_not_called()
+    assert not [r for r in caplog.records if "excluded from market data" in r.message]
+
+
+@pytest.mark.asyncio
+async def test_start_silent_when_no_capability_exclusions(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Wildcard publisher start stays quiet when nothing is excluded.
+
+    Given: A wildcard publisher whose exchange withholds no symbols,
+    When: ``start`` runs once,
+    Then: No exclusion INFO or DEBUG line is emitted.
+    """
+    pub: Any = DummyPublisher(symbols=["*"])
+    _mock_start_runtime(pub, monkeypatch)
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.get_market_data_capability_exclusions",
+        lambda _exchange: (["BTC-USD", "ETH-USD"], []),
+    )
+    sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+    try:
+        with caplog.at_level("DEBUG"):
+            await pub.start()
+    finally:
+        logger.remove(sink_id)
+        await pub.stop()
+    assert not [r for r in caplog.records if "excluded from market data" in r.message]
 
 
 @pytest.mark.asyncio
@@ -1704,6 +1877,7 @@ async def test_start_skips_trade_loop_when_unsupported(monkeypatch: pytest.Monke
     pub.settings.write_buffer_flush_ms = 50
     pub._heartbeat_loop = AsyncMock()
     pub._symbol_aliases_loop = AsyncMock()
+    pub._feed_health_flush_loop = AsyncMock()
     pub._supervise_consumer = AsyncMock()
     pub._tick_loop = AsyncMock()
     pub._tick_writer_loop = AsyncMock()
@@ -2269,6 +2443,7 @@ class TestFeedPublisherCoverage:
         with (
             patch.object(publisher, "_heartbeat_loop", new=AsyncMock()),
             patch.object(publisher, "_symbol_aliases_loop", new=AsyncMock()),
+            patch.object(publisher, "_feed_health_flush_loop", new=AsyncMock()),
             patch.object(publisher, "_supervise_consumer", new=AsyncMock()),
             patch(
                 "snapper.application.services.settings.zmq.asyncio.Context",
@@ -6277,3 +6452,215 @@ async def test_flush_candle_writer_batch_balances_task_done_on_disconnect() -> N
         await pub._flush_candle_writer_batch(batch)
     assert batch == [row_disconnected]
     assert pub._candle_write_queue._unfinished_tasks == 1
+
+
+class TestFeedHealthFlush:
+    """Periodic feed-health snapshot persistence on the publisher."""
+
+    @staticmethod
+    def _pub_with_settings(coordinator_instance_id: int = 0) -> Any:
+        """Build a DummyPublisher with a settings stub carrying the coordinator id."""
+        pub: Any = DummyPublisher(symbols=["BTC-USD"])
+        pub.settings = SimpleNamespace(coordinator_instance_id=coordinator_instance_id)
+        return pub
+
+    @staticmethod
+    def _entry(
+        *,
+        channel: str = "ticker",
+        symbol: str = "BTC/USD",
+        status: str = "confirmed",
+        requested_at: float,
+        confirmed_at: float | None = None,
+        last_seen_data_at: float | None = None,
+        last_error: str | None = None,
+        retry_count: int = 0,
+    ) -> _SymbolEntry:
+        """Build one tracker entry with monotonic-clock fields."""
+        return _SymbolEntry(
+            channel=channel,
+            symbol=symbol,
+            status=status,
+            requested_at=requested_at,
+            confirmed_at=confirmed_at,
+            last_error=last_error,
+            retry_count=retry_count,
+            last_seen_data_at=last_seen_data_at,
+        )
+
+    def test_build_rows_converts_monotonic_to_wall_clock(self) -> None:
+        """Monotonic fields convert to wall-clock; ``None`` fields stay ``None``."""
+        pub = self._pub_with_settings(coordinator_instance_id=2)
+        mono_now = monotonic()
+        entry = self._entry(
+            requested_at=mono_now - 30.0,
+            confirmed_at=mono_now - 20.0,
+            last_seen_data_at=None,
+            retry_count=1,
+            last_error="prior",
+        )
+        snapshot = {(entry.channel, entry.symbol): entry}
+        rows = pub._build_feed_health_rows(snapshot)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["coordinator"] == "coord-2"
+        assert row["exchange"] == "kraken"
+        assert row["channel"] == "ticker"
+        assert row["symbol"] == "BTC/USD"
+        assert row["status"] == "confirmed"
+        assert row["retry_count"] == 1
+        assert row["last_error"] == "prior"
+        assert row["last_seen_data_at"] is None
+        delta = (row["snapshot_at"] - row["requested_at"]).total_seconds()
+        assert abs(delta - 30.0) < 1.0
+        confirmed_delta = (row["snapshot_at"] - row["confirmed_at"]).total_seconds()
+        assert abs(confirmed_delta - 20.0) < 1.0
+
+    def test_monotonic_to_wall_conversion_is_exact(self) -> None:
+        """The static conversion maps a monotonic value to an exact wall instant."""
+        wall_now = datetime(2026, 6, 3, 12, 0, tzinfo=UTC)
+        mono_now = 1000.0
+        assert MarketDataPublisherService._monotonic_to_wall(
+            970.0, wall_now, mono_now
+        ) == wall_now - timedelta(seconds=30)
+        assert (
+            MarketDataPublisherService._monotonic_to_wall_optional(None, wall_now, mono_now) is None
+        )
+        assert MarketDataPublisherService._monotonic_to_wall_optional(
+            990.0, wall_now, mono_now
+        ) == wall_now - timedelta(seconds=10)
+
+    @pytest.mark.asyncio
+    async def test_flush_upserts_snapshot_rows(self) -> None:
+        """A non-empty snapshot is converted and upserted via the repository."""
+        pub = self._pub_with_settings()
+        mono_now = monotonic()
+        entry = self._entry(requested_at=mono_now - 5.0, confirmed_at=mono_now - 5.0)
+        client = SimpleNamespace(
+            subscription_health_snapshot=lambda: {(entry.channel, entry.symbol): entry}
+        )
+        pub._exchange_client = client
+        upsert = AsyncMock()
+        pub.repository = SimpleNamespace(upsert_instrument_feed_health=upsert)
+        await pub._flush_feed_health()
+        upsert.assert_awaited_once()
+        await_args = upsert.await_args
+        assert await_args is not None
+        rows = await_args.args[0]
+        assert len(rows) == 1
+        assert rows[0]["symbol"] == "BTC/USD"
+
+    @pytest.mark.asyncio
+    async def test_flush_noop_without_client(self) -> None:
+        """No exchange client means the flush returns without touching the repo."""
+        pub = self._pub_with_settings()
+        pub._exchange_client = None
+        upsert = AsyncMock()
+        pub.repository = SimpleNamespace(upsert_instrument_feed_health=upsert)
+        await pub._flush_feed_health()
+        upsert.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_flush_noop_without_repository(self) -> None:
+        """No repository means the flush returns without snapshotting."""
+        pub = self._pub_with_settings()
+        snapshot_calls = {"n": 0}
+
+        def _snapshot() -> dict[tuple[str, str], _SymbolEntry]:
+            snapshot_calls["n"] += 1
+            return {}
+
+        pub._exchange_client = SimpleNamespace(subscription_health_snapshot=_snapshot)
+        pub.repository = None
+        await pub._flush_feed_health()
+        assert snapshot_calls["n"] == 0
+
+    @pytest.mark.asyncio
+    async def test_flush_noop_on_empty_snapshot(self) -> None:
+        """An empty snapshot short-circuits before calling the repository."""
+        pub = self._pub_with_settings()
+        pub._exchange_client = SimpleNamespace(subscription_health_snapshot=lambda: {})
+        upsert = AsyncMock()
+        pub.repository = SimpleNamespace(upsert_instrument_feed_health=upsert)
+        await pub._flush_feed_health()
+        upsert.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_flush_swallows_exception(self) -> None:
+        """A repository error during flush is logged and swallowed, not raised."""
+        pub = self._pub_with_settings()
+        mono_now = monotonic()
+        entry = self._entry(requested_at=mono_now)
+        pub._exchange_client = SimpleNamespace(
+            subscription_health_snapshot=lambda: {(entry.channel, entry.symbol): entry}
+        )
+        upsert = AsyncMock(side_effect=RuntimeError("db down"))
+        pub.repository = SimpleNamespace(upsert_instrument_feed_health=upsert)
+        await pub._flush_feed_health()
+        upsert.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_flush_loop_invokes_flush_then_stops(self) -> None:
+        """The loop sleeps, flushes once, then exits when ``running`` clears."""
+        pub = self._pub_with_settings()
+        pub.running = True
+        flush_calls = {"n": 0}
+
+        async def _fake_flush() -> None:
+            flush_calls["n"] += 1
+            pub.running = False
+
+        pub._flush_feed_health = _fake_flush
+
+        async def _fast_sleep(_seconds: float) -> None:
+            return None
+
+        with patch("snapper.messaging.publishers.base.asyncio.sleep", _fast_sleep):
+            await pub._feed_health_flush_loop()
+        assert flush_calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_flush_loop_breaks_when_stopped_after_sleep(self) -> None:
+        """When ``running`` clears during the sleep, the loop breaks before flush."""
+        pub = self._pub_with_settings()
+        pub.running = True
+        flush_calls = {"n": 0}
+
+        async def _fake_flush() -> None:
+            flush_calls["n"] += 1
+
+        pub._flush_feed_health = _fake_flush
+
+        async def _stopping_sleep(_seconds: float) -> None:
+            pub.running = False
+
+        with patch("snapper.messaging.publishers.base.asyncio.sleep", _stopping_sleep):
+            await pub._feed_health_flush_loop()
+        assert flush_calls["n"] == 0
+
+    @pytest.mark.asyncio
+    async def test_stop_feed_health_loop_noop_when_absent(self) -> None:
+        """Stopping the loop is a no-op when no task was started."""
+        pub = self._pub_with_settings()
+        pub._feed_health_loop_task = None
+        await pub._stop_feed_health_loop()
+        assert pub._feed_health_loop_task is None
+
+    @pytest.mark.asyncio
+    async def test_stop_feed_health_loop_cancels_task(self) -> None:
+        """Stopping the loop cancels and clears a running task."""
+        pub = self._pub_with_settings()
+        pub.running = True
+
+        async def _never() -> None:
+            while True:
+                await asyncio.sleep(3600)
+
+        pub._feed_health_loop_task = asyncio.create_task(_never())
+        await asyncio.sleep(0)
+        await pub._stop_feed_health_loop()
+        assert pub._feed_health_loop_task is None
+
+    def test_flush_interval_is_thirty_seconds(self) -> None:
+        """The module flush interval constant defaults to 30 seconds."""
+        assert _FEED_HEALTH_FLUSH_INTERVAL_S == 30.0

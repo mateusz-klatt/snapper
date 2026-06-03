@@ -376,6 +376,31 @@ class TestSubscriptionHealthQueries:
         tracker.mark_data_seen("ticker", "BTC/USD")
         assert tracker.list_stale_data(now=440.0) == []
 
+    def test_reconfirm_grants_fresh_stale_window_after_old_data(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-confirmation re-arms the stale window despite older data.
+
+        Given: A confirmed entry whose last data is far older than the
+            stale threshold (e.g. a wildcard ticker symbol after a WS
+            outage longer than the threshold),
+        When: the subscription is re-confirmed on reconnect,
+        Then: the entry is not immediately stale because the reference is
+            the most recent of request/confirmation/data timestamps, and it
+            surfaces as stale only once the threshold elapses from the
+            re-confirmation rather than from the old data timestamp.
+        """
+        tracker = SubscriptionHealthTracker(data_stale_threshold_s=30.0)
+        _set_clock(monkeypatch, 100.0)
+        tracker.mark_confirmed("ticker", "BTC/USD")
+        _set_clock(monkeypatch, 110.0)
+        tracker.mark_data_seen("ticker", "BTC/USD")
+        _set_clock(monkeypatch, 200.0)
+        tracker.mark_confirmed("ticker", "BTC/USD")
+        assert tracker.list_stale_data(now=210.0) == []
+        re_stale = tracker.list_stale_data(now=235.0)
+        assert [(entry.channel, entry.symbol) for entry in re_stale] == [("ticker", "BTC/USD")]
+
     def test_list_stale_data_is_log_once_per_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A stale entry is returned at most once until its window resets.
 

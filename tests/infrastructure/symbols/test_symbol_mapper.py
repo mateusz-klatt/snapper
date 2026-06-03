@@ -36,6 +36,7 @@ from snapper.infrastructure.symbols.functions import get_available_symbols_set
 from snapper.infrastructure.symbols.functions import get_available_walutomat_rest_symbols
 from snapper.infrastructure.symbols.functions import get_available_walutomat_symbols
 from snapper.infrastructure.symbols.functions import get_available_ws_symbols
+from snapper.infrastructure.symbols.functions import get_market_data_capability_exclusions
 from snapper.infrastructure.symbols.functions import get_market_data_exchanges
 from snapper.infrastructure.symbols.functions import get_market_data_symbols
 from snapper.infrastructure.symbols.functions import get_market_subscribe_exchanges
@@ -2671,3 +2672,48 @@ class TestCapabilityQueryFunctions:
         monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
         result = get_market_data_symbols("walutomat")
         assert result == []
+
+    def test_get_market_data_capability_exclusions_partitions_sorted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Partition mixed capability rows into sorted included and excluded.
+
+        Given: A polygon capability set mixing market-data-capable and
+            withheld (can_market_data=False) symbols, plus a row for another
+            exchange,
+        When: get_market_data_capability_exclusions('polygon') is called,
+        Then: Returns (included, excluded) sorted native-symbol lists scoped
+            to polygon, with the other exchange's row absent from both.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {
+            ("ETH-USD", "polygon"): CapabilityInfo(True, True, "polygon_updater", None),
+            ("BTC-USD", "polygon"): CapabilityInfo(True, True, "polygon_updater", None),
+            ("XRP-USD", "polygon"): CapabilityInfo(False, False, "polygon_updater", "removed"),
+            ("ADA-USD", "polygon"): CapabilityInfo(False, True, "polygon_updater", None),
+            ("SOL-USD", "kraken"): CapabilityInfo(False, True, "kraken_updater", None),
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        included, excluded = get_market_data_capability_exclusions("polygon")
+        assert included == ["BTC-USD", "ETH-USD"]
+        assert excluded == ["ADA-USD", "XRP-USD"]
+
+    def test_get_market_data_capability_exclusions_no_exclusions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fully market-data-capable exchange yields an empty excluded list.
+
+        Given: A polygon capability set where every symbol is market-data
+            capable,
+        When: get_market_data_capability_exclusions('polygon') is called,
+        Then: Returns the sorted included symbols and an empty excluded list.
+        """
+        mock_mapper = MagicMock()
+        mock_mapper.capabilities = {
+            ("BTC-USD", "polygon"): CapabilityInfo(True, True, "polygon_updater", None),
+            ("ETH-USD", "polygon"): CapabilityInfo(True, False, "polygon_updater", None),
+        }
+        monkeypatch.setattr(functions, "_get_db_mapper", lambda: mock_mapper)
+        included, excluded = get_market_data_capability_exclusions("polygon")
+        assert included == ["BTC-USD", "ETH-USD"]
+        assert excluded == []

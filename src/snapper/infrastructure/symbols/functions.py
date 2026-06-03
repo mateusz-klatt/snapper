@@ -71,6 +71,7 @@ __all__ = [
     "is_market_data_available",
     "get_tradeable_symbols",
     "get_market_data_symbols",
+    "get_market_data_capability_exclusions",
     "_get_db_mapper",
 ]
 
@@ -812,3 +813,38 @@ def get_market_data_symbols(exchange: str) -> list[str]:
         for (sym, exch), cap in mapper.capabilities.items()
         if exch == exchange and cap.can_market_data
     )
+
+
+def get_market_data_capability_exclusions(exchange: str) -> tuple[list[str], list[str]]:
+    """Partition an exchange's capability rows into included and excluded symbols.
+
+    A capability row whose ``can_market_data`` is True is *included* in the
+    subscribed market-data universe; a row that exists but carries
+    ``can_market_data = False`` (e.g. delisted or trade-only pairs) is
+    *excluded*. Surfacing this partition lets a once-per-startup caller log
+    how many symbols the exchange silently withholds without re-deriving the
+    capability table itself. This helper is pure: it performs no logging and
+    has no side effects, so callers control when and how the partition is
+    reported.
+
+    Args:
+        exchange: Exchange identifier (e.g., ``kraken``, ``polygon``). Rows
+            for other exchanges are ignored.
+
+    Returns:
+        A ``(included, excluded)`` tuple of sorted native-symbol lists for
+        the given exchange. ``included`` holds symbols with
+        ``can_market_data = True``; ``excluded`` holds symbols with a
+        capability row present but ``can_market_data = False``.
+    """
+    mapper = _get_db_mapper()
+    included: list[str] = []
+    excluded: list[str] = []
+    for (sym, exch), cap in mapper.capabilities.items():
+        if exch != exchange:
+            continue
+        if cap.can_market_data:
+            included.append(sym)
+        else:
+            excluded.append(sym)
+    return sorted(included), sorted(excluded)

@@ -175,6 +175,7 @@ __all__ = [
     "UserAlertDefault",
     "AlertEvent",
     "AlertDelivery",
+    "InstrumentFeedHealth",
 ]
 
 
@@ -2964,3 +2965,83 @@ class AiReviewEvent(Base):
     new_status: Mapped[str] = mapped_column(String(24), nullable=False)
     payload: Mapped[JsonObject] = mapped_column(JSON(), nullable=False, server_default="{}")
     occurred_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+
+
+class InstrumentFeedHealth(Base):
+    """Current-state per-symbol subscription / feed-health snapshot.
+
+    Persists the in-memory
+    :class:`snapper.infrastructure.exchanges._subscription_health.SubscriptionHealthTracker`
+    state so operators can answer, AFTER the fact, which symbols are
+    dark, when each last received data, and why. The tracker lives in
+    each publisher subprocess and is lost on restart; a periodic flush
+    in :class:`snapper.messaging.publishers.base.MarketDataPublisherService`
+    writes the current snapshot here.
+
+    This is a CURRENT-STATE table (last-write-wins per key), NOT
+    bitemporal / SCD2: the periodic flush upserts on the natural key
+    ``(coordinator, exchange, channel, symbol)`` so each row reflects
+    only the latest observed state, with no version history.
+
+    All monotonic-clock fields on the tracker
+    (``requested_at`` / ``confirmed_at`` / ``last_seen_data_at``) are
+    converted to wall-clock UTC by the publisher BEFORE upsert, so the
+    timestamps stored here are real instants comparable across rows and
+    restarts.
+
+    Attributes:
+        coordinator: ``coord-<id>`` slug of the coordinator instance
+            that owns the publisher subprocess (the natural key's tenant
+            dimension so two coordinators tracking the same symbol do
+            not collide).
+        exchange: Exchange identifier the publisher feeds (lowercase).
+        channel: Tracker channel key, including parameters where needed
+            (e.g. ``ohlc:1m``).
+        symbol: Wire-format symbol or product id tracked.
+        status: Subscription lifecycle state
+            (``pending`` / ``confirmed`` / ``failed``).
+        requested_at: Wall-clock when the current subscribe attempt was
+            issued.
+        confirmed_at: Wall-clock when ACK or data confirmed the
+            subscription; NULL until confirmed.
+        last_seen_data_at: Wall-clock when market data last arrived;
+            NULL until the first datum.
+        last_error: Last failure reason reported by the exchange or
+            retry loop; NULL when healthy.
+        retry_count: Retry attempts already consumed for this entry.
+        snapshot_at: Wall-clock when this snapshot row was flushed.
+    """
+
+    __tablename__ = "instrument_feed_health"
+    __table_args__ = (
+        UniqueConstraint(
+            "coordinator",
+            "exchange",
+            "channel",
+            "symbol",
+            name="uq_instrument_feed_health_key",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'confirmed', 'failed')",
+            name="ck_instrument_feed_health_status",
+        ),
+        CheckConstraint(
+            "retry_count >= 0",
+            name="ck_instrument_feed_health_retry_count_nonneg",
+        ),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_instrument_feed_health_exchange_lower"),
+        Index("ix_instrument_feed_health_exchange", "exchange"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    coordinator: Mapped[str] = mapped_column(String(32), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    channel: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    last_seen_data_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    snapshot_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)

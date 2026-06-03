@@ -783,10 +783,15 @@ class KrakenExchangeClient(ExchangeClientBase):
                     parameters_json=canonicalise_parameters(cast(dict[str, JsonValue], params)),
                 )
                 self._subscription_cache[req.key()] = req
-                if ws_symbols != ["*"]:
-                    for ws_symbol in ws_symbols:
-                        self._health_tracker.mark_pending("ticker", ws_symbol)
+                is_wildcard = ws_symbols == ["*"]
+                seeded = self._seed_ticker_health(ws_symbols)
                 await ws.subscribe(params=params, req_id=req_id)
+                logger.info(
+                    "Subscribed to {} ticks on kraken/ticker: tracking {} symbol(s) ({})",
+                    "wildcard" if is_wildcard else "explicit",
+                    seeded,
+                    "confirmed; data pending" if is_wildcard else "data/ACK pending",
+                )
                 while not hasattr(ws, "exception_occur") or not ws.exception_occur:
                     try:
                         message = await asyncio.wait_for(self._tick_queue.get(), timeout=0.1)
@@ -799,6 +804,54 @@ class KrakenExchangeClient(ExchangeClientBase):
         except Exception as e:
             logger.error(f"WebSocket tick subscription error: {e}")
             raise
+
+    def _seed_ticker_health(self, ws_symbols: list[str]) -> int:
+        """Seed ticker health entries for the subscribed universe.
+
+        The ``ticker`` channel is the only Kraken Spot channel that accepts
+        the server-side ``["*"]`` wildcard, so the wildcard path never lists
+        the individual symbols it covers. Before this seeding a symbol inside
+        the wildcard universe that never streamed a frame had NO tracker entry
+        and NO log line, leaving it invisible to both the background health
+        loop and the persisted ``instrument_feed_health`` table.
+
+        The wildcard and explicit paths seed DIFFERENT statuses because the
+        subscription mechanics differ:
+
+        - Wildcard ``["*"]`` has NO per-symbol ACK; the single ``["*"]``
+          subscribe IS the subscription, so each resolved symbol is already
+          "confirmed/subscribed" at seed time. Seeding them ``confirmed``
+          means a symbol that never streams data is surfaced by
+          :meth:`SubscriptionHealthTracker.list_stale_data` (dark detection,
+          log-once) and persisted via the feed-health snapshot, but is NEVER
+          pending-retried — so no false per-symbol re-subscribe traffic and
+          no false ``failed`` state. The literal ``"*"`` sentinel is never
+          inserted; only the resolved wire symbols are. The universe is
+          resolved from :func:`get_available_kraken_symbols` (the same
+          market-data-capable set the trade and ohlc channels expand ``["*"]``
+          to) and converted to wire format, matching the keys used by
+          ``mark_data_seen`` so a later frame keeps the entry fresh.
+        - Explicit (non-wildcard) subscribes are real per-symbol subscribes
+          confirmed by per-symbol ACKs, so they seed ``pending`` and are
+          confirmed (or failed) by the ACK handler as before.
+
+        Args:
+            ws_symbols: Wire-format symbols passed to the subscribe call, or
+                the literal ``["*"]`` wildcard sentinel.
+
+        Returns:
+            Number of ticker entries seeded.
+        """
+        if ws_symbols == ["*"]:
+            universe = [
+                native_to_kraken_websocket(symbol) for symbol in get_available_kraken_symbols()
+            ]
+            for ws_symbol in universe:
+                self._health_tracker.mark_confirmed("ticker", ws_symbol)
+            return len(universe)
+        for ws_symbol in ws_symbols:
+            self._health_tracker.mark_pending("ticker", ws_symbol)
+        return len(ws_symbols)
 
     async def collect_raw_ticker_symbols(self, window_seconds: float) -> dict[str, dict[str, Any]]:
         """Capture raw ticker frames for symbol-updater discovery.
@@ -923,6 +976,13 @@ class KrakenExchangeClient(ExchangeClientBase):
             )
             async with ws_client as ws:
                 await self._subscribe_candle_chunks(ws, ws_symbols, interval, channel_key, req_id)
+                logger.info(
+                    "Subscribed to {} candles on kraken/{}: "
+                    "tracking {} symbol(s) (data/ACK pending)",
+                    timeframe,
+                    channel_key,
+                    len(ws_symbols),
+                )
                 async for message in self._iter_candle_messages(ws, interval):
                     yield message
         except Exception as e:
@@ -1166,6 +1226,11 @@ class KrakenExchangeClient(ExchangeClientBase):
             )
             async with ws_client as ws:
                 await self._subscribe_trade_chunks(ws, ws_symbols, req_id)
+                logger.info(
+                    "Subscribed to trades on kraken/trade: "
+                    "tracking {} symbol(s) (data/ACK pending)",
+                    len(ws_symbols),
+                )
                 async for message in self._iter_trade_messages(ws):
                     yield message
         except Exception as e:
@@ -1805,7 +1870,22 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._ws_connected = True
 
     async def _replay_subscriptions(self) -> None:
-        """Replay cached public market-data subscriptions after reconnect."""
+        """Replay cached public market-data subscriptions after reconnect.
+
+        Per-symbol subscriptions re-arm their tracker entries as pending
+        (preserving the retry budget) before the subscribe is re-issued. The
+        wildcard ticker request carries the literal ``"*"`` sentinel, which
+        must never enter the tracker (``_retry_subscribe`` rejects it). Rather
+        than skip it, the wildcard ticker universe is re-seeded as confirmed
+        via :meth:`_seed_ticker_health` so the stale clock is re-armed for the
+        whole wildcard universe after a reconnect.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If the WebSocket client is not connected.
+        """
         if self._ws_client is None:
             raise RuntimeError(_WS_CLIENT_CONNECTED_MSG)
         requests = list(self._subscription_cache.values())
@@ -1822,6 +1902,7 @@ class KrakenExchangeClient(ExchangeClientBase):
                     health_channel = f"ohlc:{interval_to_label(raw_interval)}"
             for symbol in req.symbols:
                 if health_channel == "ticker" and symbol == "*":
+                    self._seed_ticker_health(["*"])
                     continue
                 self._health_tracker.mark_pending(
                     health_channel,

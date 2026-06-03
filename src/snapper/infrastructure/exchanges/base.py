@@ -118,6 +118,32 @@ class ExchangeClientBase(ABC):
         """
         await get_rest_call_tracker().acquire(self.exchange_name)
 
+    def subscription_health_snapshot(self) -> dict[tuple[str, str], _SymbolEntry]:
+        """Return a point-in-time copy of subscription-health state.
+
+        Returns the owned :class:`SubscriptionHealthTracker` snapshot
+        when this client tracks per-symbol subscription health, else an
+        empty mapping. Polling-only sources and clients that never
+        instantiate a tracker have no per-symbol identity to report and
+        return ``{}`` so callers (e.g. the publisher feed-health flush)
+        can iterate uniformly without a ``None`` guard.
+
+        Args:
+            None.
+
+        Returns:
+            Mapping from ``(channel, symbol)`` to copied
+            :class:`_SymbolEntry` objects, or an empty mapping when no
+            tracker exists.
+
+        Raises:
+            None.
+        """
+        tracker = self._health_tracker
+        if tracker is None:
+            return {}
+        return tracker.snapshot()
+
     def start_health_loop(self) -> None:
         """Start the subscription health retry loop when a tracker exists.
 
@@ -255,13 +281,20 @@ class ExchangeClientBase(ABC):
     def _entry_age_ref(entry: _SymbolEntry) -> float:
         """Return the timestamp used to measure stale subscription age.
 
+        Delegates to :meth:`_SymbolEntry.stale_reference` so the reported
+        stale age uses the same reference as the stale decision in
+        :meth:`SubscriptionHealthTracker.list_stale_data` (the most recent
+        of request / confirmation / last-data). Without this a re-confirmed
+        subscription would be flagged stale from the fresh reference yet
+        reported with an exaggerated age anchored on the old data.
+
         Args:
             entry: Subscription entry to inspect.
 
         Returns:
-            Last data timestamp, confirmation timestamp, or request timestamp.
+            The entry's stale reference timestamp (monotonic seconds).
         """
-        return entry.last_seen_data_at or entry.confirmed_at or entry.requested_at
+        return entry.stale_reference()
 
     @classmethod
     def _entry_stale_age(cls, entry: _SymbolEntry, now: float) -> float:

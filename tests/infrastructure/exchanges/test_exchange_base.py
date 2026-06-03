@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.data.repository import Repository
+from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -795,3 +796,30 @@ async def test_log_order_to_db_passes_provenance_when_tracker_set(
     call_kwargs = mock_repo.ensure_instrument.call_args.kwargs
     assert call_kwargs["session_id"] == tracker.session_id
     assert call_kwargs["sequence_id"] >= 1
+
+
+def test_subscription_health_snapshot_returns_empty_without_tracker() -> None:
+    """Snapshot accessor degrades gracefully without a tracker.
+
+    Given: a client whose ``_health_tracker`` is None,
+    When: ``subscription_health_snapshot`` is called,
+    Then: it returns an empty mapping rather than raising.
+    """
+    client = DummyExchangeClient()
+    assert client._health_tracker is None
+    assert client.subscription_health_snapshot() == {}
+
+
+def test_subscription_health_snapshot_returns_tracker_state() -> None:
+    """Snapshot accessor mirrors the tracker's entries.
+
+    Given: a client with a tracker holding one pending entry,
+    When: ``subscription_health_snapshot`` is called,
+    Then: the mapping reflects that tracked (channel, symbol) and status.
+    """
+    client = DummyExchangeClient()
+    client._health_tracker = SubscriptionHealthTracker()
+    client._health_tracker.mark_pending("ticker", "BTC/USD")
+    snapshot = client.subscription_health_snapshot()
+    assert set(snapshot.keys()) == {("ticker", "BTC/USD")}
+    assert snapshot[("ticker", "BTC/USD")].status == "pending"

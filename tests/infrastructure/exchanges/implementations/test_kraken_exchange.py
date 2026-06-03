@@ -1091,6 +1091,232 @@ class TestKrakenExchangeClient:
             mock_ensure_ws.assert_called_once()
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_subscribe_ticks_wildcard_seeds_confirmed_universe(
+        self,
+        mock_ws_class: MagicMock,
+        kraken_client: KrakenExchangeClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Wildcard ticks seed confirmed health for the resolved universe.
+
+        Given: ``symbols=["*"]`` and a three-symbol market-data universe,
+        When: ``subscribe_ticks`` runs the wildcard path,
+        Then: the literal ``"*"`` is sent on the wire but a confirmed ticker
+            entry is seeded for every wire symbol in the resolved universe
+            (the single ``["*"]`` subscribe has no per-symbol ACK, so dark
+            wildcard symbols become stale-trackable without false retries),
+            and an INFO summary reports the tracked count.
+        """
+        mock_ws_client = AsyncMock()
+        mock_ws_class.return_value = mock_ws_client
+        mock_ws_client.__aenter__ = AsyncMock(return_value=mock_ws_client)
+        mock_ws_client.__aexit__ = AsyncMock(return_value=None)
+        mock_ws_client.exception_occur = False
+        catalog = ["BTC-USD", "ETH-USD", "XRP-USD"]
+
+        async def _spy_sleep(delay: float) -> None:
+            mock_ws_client.exception_occur = True
+
+        sink_id = logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            with (
+                caplog.at_level("INFO"),
+                patch.object(kraken_client, "_ensure_ws_connected", new_callable=AsyncMock),
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken."
+                    "get_available_kraken_symbols",
+                    return_value=catalog,
+                ),
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken."
+                    "native_to_kraken_websocket",
+                    side_effect=lambda s: s.replace("-", "/"),
+                ),
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                    new=_spy_sleep,
+                ),
+            ):
+                kraken_client._ws_client = mock_ws_client
+                async for _ in kraken_client.subscribe_ticks(["*"]):
+                    break
+        finally:
+            logger.remove(sink_id)
+
+        snapshot = kraken_client._health_tracker.snapshot()
+        seeded_symbols = {sym for (channel, sym) in snapshot if channel == "ticker"}
+        assert seeded_symbols == {"BTC/USD", "ETH/USD", "XRP/USD"}
+        assert all(
+            entry.status == "confirmed"
+            for (channel, _sym), entry in snapshot.items()
+            if channel == "ticker"
+        )
+        assert ("ticker", "*") not in snapshot
+        params = mock_ws_client.subscribe.await_args_list[0].kwargs["params"]
+        assert params["symbol"] == ["*"]
+        info_messages = [r.message for r in caplog.records if r.levelname == "INFO"]
+        assert any(
+            "Subscribed to wildcard ticks on kraken/ticker: "
+            "tracking 3 symbol(s) (confirmed; data pending)" in m
+            for m in info_messages
+        )
+
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_subscribe_ticks_explicit_seeds_pending_and_logs_summary(
+        self,
+        mock_ws_class: MagicMock,
+        kraken_client: KrakenExchangeClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Explicit ticks seed exactly the requested symbols and log coverage.
+
+        Given: an explicit two-symbol tick subscription,
+        When: ``subscribe_ticks`` runs the non-wildcard path,
+        Then: a pending ticker entry exists for each requested wire symbol
+            and an INFO summary reports the explicit tracked count.
+        """
+        mock_ws_client = AsyncMock()
+        mock_ws_class.return_value = mock_ws_client
+        mock_ws_client.__aenter__ = AsyncMock(return_value=mock_ws_client)
+        mock_ws_client.__aexit__ = AsyncMock(return_value=None)
+        mock_ws_client.exception_occur = False
+
+        async def _spy_sleep(delay: float) -> None:
+            mock_ws_client.exception_occur = True
+
+        sink_id = logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            with (
+                caplog.at_level("INFO"),
+                patch.object(kraken_client, "_ensure_ws_connected", new_callable=AsyncMock),
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken."
+                    "native_to_kraken_websocket",
+                    side_effect=lambda s: s.replace("-", "/"),
+                ),
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                    new=_spy_sleep,
+                ),
+            ):
+                kraken_client._ws_client = mock_ws_client
+                async for _ in kraken_client.subscribe_ticks(["BTC-USD", "ETH-USD"]):
+                    break
+        finally:
+            logger.remove(sink_id)
+
+        snapshot = kraken_client._health_tracker.snapshot()
+        seeded_symbols = {sym for (channel, sym) in snapshot if channel == "ticker"}
+        assert seeded_symbols == {"BTC/USD", "ETH/USD"}
+        info_messages = [r.message for r in caplog.records if r.levelname == "INFO"]
+        assert any(
+            "Subscribed to explicit ticks on kraken/ticker: "
+            "tracking 2 symbol(s) (data/ACK pending)" in m
+            for m in info_messages
+        )
+
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_subscribe_trades_logs_coverage_summary(
+        self,
+        mock_ws_class: MagicMock,
+        kraken_client: KrakenExchangeClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Trade subscribe emits an N/M coverage summary after subscribing.
+
+        Given: an explicit two-symbol trade subscription,
+        When: ``subscribe_trades`` runs,
+        Then: an INFO summary reports the tracked symbol count on
+            ``kraken/trade``.
+        """
+        mock_ws_client = AsyncMock()
+        mock_ws_class.return_value = mock_ws_client
+        mock_ws_client.__aenter__ = AsyncMock(return_value=mock_ws_client)
+        mock_ws_client.__aexit__ = AsyncMock(return_value=None)
+        mock_ws_client.exception_occur = False
+
+        async def _spy_sleep(delay: float) -> None:
+            mock_ws_client.exception_occur = True
+
+        sink_id = logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            with (
+                caplog.at_level("INFO"),
+                patch.object(kraken_client, "_ensure_ws_connected", new_callable=AsyncMock),
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken."
+                    "native_to_kraken_websocket",
+                    side_effect=lambda s: s.replace("-", "/"),
+                ),
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                    new=_spy_sleep,
+                ),
+            ):
+                kraken_client._ws_client = mock_ws_client
+                async for _ in kraken_client.subscribe_trades(["BTC-USD", "ETH-USD"]):
+                    break
+        finally:
+            logger.remove(sink_id)
+
+        info_messages = [r.message for r in caplog.records if r.levelname == "INFO"]
+        assert any(
+            "Subscribed to trades on kraken/trade: tracking 2 symbol(s) (data/ACK pending)" in m
+            for m in info_messages
+        )
+
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_subscribe_candles_logs_coverage_summary(
+        self,
+        mock_ws_class: MagicMock,
+        kraken_client: KrakenExchangeClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Candle subscribe emits an N/M coverage summary after subscribing.
+
+        Given: an explicit single-symbol 5m candle subscription,
+        When: ``subscribe_candles`` runs,
+        Then: an INFO summary reports the tracked symbol count on the
+            interval channel ``kraken/ohlc:5m``.
+        """
+        mock_ws_client = AsyncMock()
+        mock_ws_class.return_value = mock_ws_client
+        mock_ws_client.__aenter__ = AsyncMock(return_value=mock_ws_client)
+        mock_ws_client.__aexit__ = AsyncMock(return_value=None)
+        mock_ws_client.exception_occur = False
+
+        async def _spy_sleep(delay: float) -> None:
+            mock_ws_client.exception_occur = True
+
+        sink_id = logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            with (
+                caplog.at_level("INFO"),
+                patch.object(kraken_client, "_ensure_ws_connected", new_callable=AsyncMock),
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken."
+                    "native_to_kraken_websocket",
+                    side_effect=lambda s: s.replace("-", "/"),
+                ),
+                patch(
+                    "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                    new=_spy_sleep,
+                ),
+            ):
+                kraken_client._ws_client = mock_ws_client
+                async for _ in kraken_client.subscribe_candles(["BTC-USD"], "5m"):
+                    break
+        finally:
+            logger.remove(sink_id)
+
+        info_messages = [r.message for r in caplog.records if r.levelname == "INFO"]
+        assert any(
+            "Subscribed to 5m candles on kraken/ohlc:5m: "
+            "tracking 1 symbol(s) (data/ACK pending)" in m
+            for m in info_messages
+        )
+
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
     async def test_subscribe_candles(
         self, mock_ws_class: MagicMock, kraken_client: KrakenExchangeClient
     ) -> None:

@@ -107,6 +107,7 @@ from snapper.data.models import ExecutionPlanCheckpoint
 from snapper.data.models import ExecutionPlanDecision
 from snapper.data.models import FundingRate
 from snapper.data.models import Instrument
+from snapper.data.models import InstrumentFeedHealth
 from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import InstrumentSpec
 from snapper.data.models import InstrumentUnderlyingMapping
@@ -166,11 +167,14 @@ from snapper.data.repository_types import FundingRateInsertRow
 from snapper.data.repository_types import FundingRateRow
 from snapper.data.repository_types import InstrumentContractRow
 from snapper.data.repository_types import InstrumentDetailRow
+from snapper.data.repository_types import InstrumentFeedHealthRow
+from snapper.data.repository_types import InstrumentFeedHealthUpsertRow
 from snapper.data.repository_types import InstrumentFrontMonthRow
 from snapper.data.repository_types import InstrumentOrderCapabilityRow
 from snapper.data.repository_types import InstrumentRelatedRow
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
+from snapper.data.repository_types import MarketDataCoverageRow
 from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import MarketSnapshotUpsertRow
 from snapper.data.repository_types import NotificationDeviceRow
@@ -4134,6 +4138,77 @@ class Repository(ABC):
         Returns:
             :class:`TableCounters` with all four fields populated per
             the per-kind semantics above.
+        """
+        ...
+
+    @abstractmethod
+    async def get_market_data_coverage(
+        self,
+        *,
+        tick_window_seconds: int,
+        candle_window_seconds: int,
+        now: datetime | None = None,
+    ) -> list[MarketDataCoverageRow]:
+        """Per-exchange market-data coverage over active instruments.
+
+        See :meth:`SQLAlchemyRepository.get_market_data_coverage` for
+        the concrete cross-dialect implementation and semantics.
+
+        Args:
+            tick_window_seconds: Freshness window for ``ticks`` rows; a
+                tick newer than ``now - tick_window_seconds`` is fresh.
+            candle_window_seconds: Freshness window for ``candles`` rows
+                (compared against ``open_at``).
+            now: Reference instant for all freshness + active-row
+                predicates; defaults to ``datetime.now(UTC)``. Injectable
+                so tests can assert exact cutoff boundaries deterministically.
+
+        Returns:
+            One :class:`MarketDataCoverageRow` per exchange, ordered by
+            exchange.
+        """
+        ...
+
+    @abstractmethod
+    async def upsert_instrument_feed_health(
+        self, rows: list[InstrumentFeedHealthUpsertRow]
+    ) -> None:
+        """Upsert current-state per-symbol feed-health snapshot rows.
+
+        Last-write-wins on the ``(coordinator, exchange, channel,
+        symbol)`` natural key: an existing row is overwritten with the
+        latest snapshot, a new key inserts a row. See
+        :meth:`SQLAlchemyRepository.upsert_instrument_feed_health` for
+        the cross-dialect implementation.
+
+        Args:
+            rows: Feed-health snapshot rows to persist. Empty list is a
+                no-op.
+
+        Returns:
+            None.
+        """
+        ...
+
+    @abstractmethod
+    async def list_instrument_feed_health(
+        self, *, exchange: str | None = None, fresh_within_seconds: int | None = None
+    ) -> list[InstrumentFeedHealthRow]:
+        """List current-state feed-health rows, newest snapshot first.
+
+        See :meth:`SQLAlchemyRepository.list_instrument_feed_health` for the
+        staleness semantics behind ``fresh_within_seconds``.
+
+        Args:
+            exchange: Optional exchange filter (lowercase). When ``None``
+                every exchange's rows are returned.
+            fresh_within_seconds: When set, return only rows whose
+                ``snapshot_at`` is within this many seconds of now. ``None``
+                returns all rows.
+
+        Returns:
+            One :class:`InstrumentFeedHealthRow` per active natural key,
+            ordered by ``(exchange, channel, symbol)``.
         """
         ...
 
@@ -12658,6 +12733,224 @@ class SQLAlchemyRepository(Repository):
                 )
                 archivable = int((await s.execute(archivable_stmt)).scalar_one())
             return TableCounters(total=total, current=current, closed=closed, archivable=archivable)
+
+    async def get_market_data_coverage(
+        self,
+        *,
+        tick_window_seconds: int,
+        candle_window_seconds: int,
+        now: datetime | None = None,
+    ) -> list[MarketDataCoverageRow]:
+        """Per-exchange market-data coverage over active instruments.
+
+        Replicates the validated prod reference query's *semantics* with
+        portable SQLAlchemy Core constructs so the same statement runs on
+        both the SQLite test fixture and PostgreSQL. The Postgres-only
+        ``interval`` / ``FILTER`` syntax is deliberately avoided:
+
+        * A single ``now`` (the ``now`` arg, else ``datetime.now(UTC)``)
+          drives every freshness cutoff AND the bitemporal active-row
+          predicates, so one call evaluates everything at one instant.
+        * Cutoffs are computed in Python and compared with ``>``.
+        * The query is **instrument-driven and fanout-free**: it counts
+          only ``Instrument`` rows (active via :func:`where_active`), and
+          expresses freshness AND capability-gating as correlated
+          ``EXISTS`` subqueries. A capability ``LEFT JOIN`` would inflate
+          every tally because ``where_active`` (``known_to > now``) is
+          broader than the capability table's sentinel-only partial unique
+          index, so overlapping active capability rows could each join the
+          same instrument.
+        * Per-exchange tallies use ``func.sum(case((cond, 1), else_=0))``
+          (portable) instead of ``COUNT(*) FILTER``.
+
+        ``gated_off`` counts instruments with an active capability row whose
+        ``can_market_data`` is FALSE. ``dark`` counts instruments that are
+        NOT gated off AND have no fresh ticks — the "should be live but
+        isn't" gap; an instrument with no capability row is not gated off
+        (so it can be dark), matching the reference LEFT JOIN semantics.
+
+        Args:
+            tick_window_seconds: Freshness window for ``ticks`` rows; a
+                tick newer than ``now - tick_window_seconds`` is fresh.
+            candle_window_seconds: Freshness window for ``candles`` rows
+                (compared against ``open_at``).
+            now: Reference instant for all freshness + active-row
+                predicates; defaults to ``datetime.now(UTC)``. Injectable
+                so tests can assert exact cutoff boundaries deterministically.
+
+        Returns:
+            One :class:`MarketDataCoverageRow` per exchange, ordered by
+            exchange.
+        """
+        reference = now if now is not None else datetime.now(UTC)
+        tick_cutoff = reference - timedelta(seconds=tick_window_seconds)
+        candle_cutoff = reference - timedelta(seconds=candle_window_seconds)
+        cap = aliased(SymbolExchangeCapability)
+        fresh_ticks_exists = (
+            select(Tick.id)
+            .where(
+                Tick.instrument_public_id == Instrument.public_id,
+                Tick.timestamp > tick_cutoff,
+            )
+            .exists()
+        )
+        fresh_candles_exists = (
+            select(Candle.id)
+            .where(
+                Candle.instrument_public_id == Instrument.public_id,
+                Candle.open_at > candle_cutoff,
+            )
+            .exists()
+        )
+        gated_off_exists = (
+            select(cap.id)
+            .where(
+                cap.symbol_public_id == Instrument.symbol_public_id,
+                cap.exchange == Instrument.exchange,
+                cap.can_market_data.is_(False),
+                *where_active(cap, reference),
+            )
+            .exists()
+        )
+        statement = (
+            select(
+                Instrument.exchange.label("exchange"),
+                func.count().label("instruments"),
+                func.sum(case((fresh_ticks_exists, 1), else_=0)).label("fresh_ticks"),
+                func.sum(case((fresh_candles_exists, 1), else_=0)).label("fresh_candles"),
+                func.sum(case((gated_off_exists, 1), else_=0)).label("gated_off"),
+                func.sum(case((and_(~gated_off_exists, ~fresh_ticks_exists), 1), else_=0)).label(
+                    "dark"
+                ),
+            )
+            .select_from(Instrument)
+            .where(*where_active(Instrument, reference))
+            .group_by(Instrument.exchange)
+            .order_by(Instrument.exchange)
+        )
+        async with self.session() as s:
+            result = await s.execute(statement)
+            rows: list[MarketDataCoverageRow] = []
+            for row in result.all():
+                rows.append(
+                    MarketDataCoverageRow(
+                        exchange=row.exchange,
+                        instruments=int(row.instruments),
+                        fresh_ticks=int(row.fresh_ticks or 0),
+                        fresh_candles=int(row.fresh_candles or 0),
+                        gated_off=int(row.gated_off or 0),
+                        dark=int(row.dark or 0),
+                    )
+                )
+            return rows
+
+    async def upsert_instrument_feed_health(
+        self, rows: list[InstrumentFeedHealthUpsertRow]
+    ) -> None:
+        """Upsert current-state feed-health rows (last-write-wins).
+
+        Cross-dialect by construction: both the SQLite (tests) and
+        PostgreSQL (prod) ``insert`` dialect helpers expose
+        ``on_conflict_do_update`` keyed on the
+        ``(coordinator, exchange, channel, symbol)`` unique constraint,
+        so the same statement form runs on both backends without any
+        Postgres-only SQL. Every non-key column is overwritten with the
+        incoming snapshot value on conflict, giving last-write-wins
+        semantics for this current-state table. Rows are written in bounded
+        chunks within a single transaction so a large snapshot (a wildcard
+        publisher across many channels) never exceeds a dialect's bound
+        parameter limit (SQLite's default 999) and fails the whole flush.
+
+        Args:
+            rows: Feed-health snapshot rows to persist. Empty list is a
+                no-op.
+
+        Returns:
+            None.
+        """
+        if not rows:
+            return
+        values = [dict(row) for row in rows]
+        conflict_cols = ["coordinator", "exchange", "channel", "symbol"]
+        update_cols = [
+            "status",
+            "requested_at",
+            "confirmed_at",
+            "last_seen_data_at",
+            "last_error",
+            "retry_count",
+            "snapshot_at",
+        ]
+        name = self.dialect_name
+        chunk_size = 80
+        async with self.session() as s:
+            for start in range(0, len(values), chunk_size):
+                batch = values[start : start + chunk_size]
+                stmt = (
+                    sqlite_insert(InstrumentFeedHealth)
+                    if name == "sqlite"
+                    else pg_insert(InstrumentFeedHealth)
+                )
+                stmt = stmt.values(batch)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=conflict_cols,
+                    set_={col: getattr(stmt.excluded, col) for col in update_cols},
+                )
+                await s.execute(stmt)
+            await s.commit()
+
+    async def list_instrument_feed_health(
+        self, *, exchange: str | None = None, fresh_within_seconds: int | None = None
+    ) -> list[InstrumentFeedHealthRow]:
+        """List current-state feed-health rows, ordered for display.
+
+        Rows are upserted per natural key, so a symbol a publisher stops
+        flushing (it was dropped from the universe, or the whole publisher
+        died) keeps its last row with a frozen ``snapshot_at``. Pass
+        ``fresh_within_seconds`` to exclude such stale rows and return only
+        what is genuinely current; every row also carries ``snapshot_at``
+        so a caller that wants everything can judge staleness itself.
+
+        Args:
+            exchange: Optional exchange filter (lowercase). When ``None``
+                every exchange's rows are returned.
+            fresh_within_seconds: When set, return only rows whose
+                ``snapshot_at`` is within this many seconds of now (drops
+                rows from stopped/shrunk publishers). ``None`` returns all.
+
+        Returns:
+            One :class:`InstrumentFeedHealthRow` per natural key, ordered
+            by ``(exchange, channel, symbol)``.
+        """
+        statement = select(InstrumentFeedHealth)
+        if exchange is not None:
+            statement = statement.where(InstrumentFeedHealth.exchange == exchange)
+        if fresh_within_seconds is not None:
+            cutoff = datetime.now(UTC) - timedelta(seconds=fresh_within_seconds)
+            statement = statement.where(InstrumentFeedHealth.snapshot_at >= cutoff)
+        statement = statement.order_by(
+            InstrumentFeedHealth.exchange,
+            InstrumentFeedHealth.channel,
+            InstrumentFeedHealth.symbol,
+        )
+        async with self.session() as s:
+            result = await s.execute(statement)
+            return [
+                InstrumentFeedHealthRow(
+                    coordinator=entity.coordinator,
+                    exchange=entity.exchange,
+                    channel=entity.channel,
+                    symbol=entity.symbol,
+                    status=entity.status,
+                    requested_at=entity.requested_at,
+                    confirmed_at=entity.confirmed_at,
+                    last_seen_data_at=entity.last_seen_data_at,
+                    last_error=entity.last_error,
+                    retry_count=entity.retry_count,
+                    snapshot_at=entity.snapshot_at,
+                )
+                for entity in result.scalars().all()
+            ]
 
 
 def _archivable_window_predicate(
