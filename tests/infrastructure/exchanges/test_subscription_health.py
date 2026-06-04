@@ -1,5 +1,6 @@
 """Tests for per-symbol subscription health tracking."""
 
+import zlib
 from collections.abc import Callable
 
 import pytest
@@ -175,17 +176,19 @@ class TestSubscriptionHealthTrackerTransitions:
         assert (missing_result, confirmed_result) == (False, False)
 
     def test_pending_preserves_retry_count_on_replay(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Replay pending can preserve retry accounting.
+        """Replay pending can preserve retry accounting for a struggling entry.
 
-        Given: A confirmed entry with consumed retry budget,
+        Given: A still-pending entry with consumed retry budget (not yet
+            recovered),
         When: mark_pending is called with preserve_retry_count=True,
-        Then: The entry is pending and retry_count is unchanged.
+        Then: The entry is pending and retry_count is unchanged, so a
+            reconnect does not hand a perpetually-failing symbol a fresh
+            fast budget.
         """
         tracker = SubscriptionHealthTracker()
         _set_clock(monkeypatch, 65.0)
         tracker.mark_pending("ticker", "BTC/USD")
         tracker.mark_retry_attempt("ticker", "BTC/USD")
-        tracker.mark_confirmed("ticker", "BTC/USD")
         _set_clock(monkeypatch, 70.0)
         tracker.mark_pending("ticker", "BTC/USD", preserve_retry_count=True)
         entry = tracker.snapshot()[("ticker", "BTC/USD")]
@@ -196,7 +199,7 @@ class TestSubscriptionHealthTrackerTransitions:
     ) -> None:
         """Fresh pending resets retry accounting.
 
-        Given: A confirmed entry with consumed retry budget,
+        Given: A pending entry with consumed retry budget,
         When: mark_pending is called without preserve_retry_count,
         Then: retry_count is reset to zero.
         """
@@ -204,7 +207,6 @@ class TestSubscriptionHealthTrackerTransitions:
         _set_clock(monkeypatch, 75.0)
         tracker.mark_pending("ticker", "BTC/USD")
         tracker.mark_retry_attempt("ticker", "BTC/USD")
-        tracker.mark_confirmed("ticker", "BTC/USD")
         tracker.mark_pending("ticker", "BTC/USD")
         entry = tracker.snapshot()[("ticker", "BTC/USD")]
         assert (entry.status, entry.retry_count) == ("pending", 0)
@@ -497,13 +499,18 @@ class TestSubscriptionHealthValidation:
             lambda: SubscriptionHealthTracker(retry_interval_s=0.0),
             lambda: SubscriptionHealthTracker(max_retries=-1),
             lambda: SubscriptionHealthTracker(data_stale_threshold_s=0.0),
+            lambda: SubscriptionHealthTracker(slow_retry_base_s=0.0),
+            lambda: SubscriptionHealthTracker(slow_retry_multiplier=0.5),
+            lambda: SubscriptionHealthTracker(slow_retry_cap_s=10.0),
+            lambda: SubscriptionHealthTracker(slow_retry_jitter=1.0),
+            lambda: SubscriptionHealthTracker(slow_retry_jitter=-0.1),
         ]
         results = []
         for factory in factories:
             with pytest.raises(ValueError):
                 factory()
             results.append(True)
-        assert results == [True, True, True, True]
+        assert results == [True] * 9
 
     def test_methods_reject_empty_channel(self) -> None:
         """Tracker methods reject empty channels before mutation.
@@ -574,3 +581,349 @@ class TestSubscriptionHealthValidation:
         """
         with pytest.raises(ValueError, match="Unsupported Kraken OHLC interval label"):
             label_to_interval("2m")
+
+
+class TestSlowRetryBackoff:
+    """Tests for non-terminal failed backoff and slow retries."""
+
+    def test_budget_exhaustion_schedules_next_attempt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exhausting the fast budget schedules a slow retry, not death.
+
+        Given: A pending entry with no remaining fast retry budget,
+        When: mark_retry_attempt exhausts the budget,
+        Then: The entry is failed with next_attempt_at one base delay ahead.
+        """
+        tracker = SubscriptionHealthTracker(
+            max_retries=0, slow_retry_base_s=60.0, slow_retry_jitter=0.0
+        )
+        _set_clock(monkeypatch, 100.0)
+        tracker.mark_pending("trade", "AAVE/BTC")
+        result = tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        entry = tracker.snapshot()[("trade", "AAVE/BTC")]
+        assert (result, entry.status, entry.next_attempt_at, entry.slow_retry_count) == (
+            False,
+            "failed",
+            160.0,
+            0,
+        )
+
+    def test_list_due_failed_filters_by_schedule_and_status(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only scheduled, due, failed entries surface for slow retry.
+
+        Given: A due backed-off entry, a not-yet-due backed-off entry, and a
+            directly mark_failed entry with no schedule,
+        When: list_due_failed is queried at a time between the two schedules,
+        Then: Only the due backed-off entry is returned.
+        """
+        tracker = SubscriptionHealthTracker(
+            max_retries=0, slow_retry_base_s=60.0, slow_retry_jitter=0.0
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_pending("trade", "DUE/USD")
+        tracker.mark_retry_attempt("trade", "DUE/USD")
+        _set_clock(monkeypatch, 1000.0)
+        tracker.mark_pending("trade", "LATER/USD")
+        tracker.mark_retry_attempt("trade", "LATER/USD")
+        tracker.mark_failed("trade", "REJECTED/USD", "invalid pair")
+        due = tracker.list_due_failed(now=100.0)
+        assert [(entry.channel, entry.symbol) for entry in due] == [("trade", "DUE/USD")]
+
+    def test_slow_retry_reissues_failed_for_one_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A due failed entry returns to pending for one more ACK window.
+
+        Given: A backed-off failed entry that consumed two fast retries,
+        When: mark_slow_retry is called,
+        Then: It becomes pending again, next_attempt_at clears, the slow
+            counter increments, and the fast retry_count is preserved.
+        """
+        tracker = SubscriptionHealthTracker(
+            max_retries=2, slow_retry_base_s=60.0, slow_retry_jitter=0.0
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_pending("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        _set_clock(monkeypatch, 500.0)
+        result = tracker.mark_slow_retry("trade", "AAVE/BTC")
+        entry = tracker.snapshot()[("trade", "AAVE/BTC")]
+        assert (
+            result,
+            entry.status,
+            entry.requested_at,
+            entry.next_attempt_at,
+            entry.retry_count,
+            entry.slow_retry_count,
+        ) == (True, "pending", 500.0, None, 2, 1)
+
+    def test_slow_retry_returns_false_for_missing_or_non_failed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Slow retry only applies to failed entries.
+
+        Given: A missing entry and a confirmed entry,
+        When: mark_slow_retry is called for both,
+        Then: Both calls return False.
+        """
+        tracker = SubscriptionHealthTracker()
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("ticker", "BTC/USD")
+        missing = tracker.mark_slow_retry("trade", "ETH/USD")
+        confirmed = tracker.mark_slow_retry("ticker", "BTC/USD")
+        assert (missing, confirmed) == (False, False)
+
+    def test_reconnect_preserves_slow_retry_escalation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Replay keeps the slow escalation so backoff does not restart.
+
+        Given: A failed entry that has slow-retried twice,
+        When: mark_pending replays it with preserve_retry_count,
+        Then: retry_count and slow_retry_count carry over and the entry is
+            pending with next_attempt_at cleared.
+        """
+        tracker = SubscriptionHealthTracker(
+            max_retries=0, slow_retry_base_s=60.0, slow_retry_jitter=0.0
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_pending("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        tracker.mark_slow_retry("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        tracker.mark_slow_retry("trade", "AAVE/BTC")
+        _set_clock(monkeypatch, 900.0)
+        tracker.mark_pending("trade", "AAVE/BTC", preserve_retry_count=True)
+        entry = tracker.snapshot()[("trade", "AAVE/BTC")]
+        assert (
+            entry.status,
+            entry.requested_at,
+            entry.next_attempt_at,
+            entry.retry_count,
+            entry.slow_retry_count,
+        ) == ("pending", 900.0, None, 0, 2)
+
+    def test_backoff_grows_geometrically_and_caps(self) -> None:
+        """Backoff grows by the multiplier and saturates at the cap.
+
+        Given: A tracker with base 60, multiplier 5, cap 3600, no jitter,
+        When: The delay is computed across escalation counts,
+        Then: It follows 60, 1500, 3600 and stays at the cap thereafter.
+        """
+        tracker = SubscriptionHealthTracker(
+            slow_retry_base_s=60.0,
+            slow_retry_multiplier=5.0,
+            slow_retry_cap_s=3600.0,
+            slow_retry_jitter=0.0,
+        )
+        delays = [
+            tracker._slow_backoff_delay(
+                health._SymbolEntry("trade", "X/USD", "failed", 0.0, slow_retry_count=count)
+            )
+            for count in (0, 2, 3, 10)
+        ]
+        assert delays == [60.0, 1500.0, 3600.0, 3600.0]
+
+    def test_backoff_constant_when_multiplier_is_one(self) -> None:
+        """A unit multiplier yields a constant base delay.
+
+        Given: A tracker with multiplier 1.0 and no jitter,
+        When: The delay is computed at a high escalation count,
+        Then: It equals the base delay (the exponent cap is zero).
+        """
+        tracker = SubscriptionHealthTracker(
+            slow_retry_base_s=45.0,
+            slow_retry_multiplier=1.0,
+            slow_retry_cap_s=3600.0,
+            slow_retry_jitter=0.0,
+        )
+        entry = health._SymbolEntry("trade", "X/USD", "failed", 0.0, slow_retry_count=7)
+        assert tracker._slow_backoff_delay(entry) == 45.0
+
+    def test_backoff_jitter_is_deterministic_and_bounded(self) -> None:
+        """Jitter is deterministic per identity and within the configured band.
+
+        Given: A tracker with 20% jitter,
+        When: The same entry's delay is computed twice,
+        Then: Repeated calls match the exact crc32-derived value and the
+            result sits within the +/-20% band around the base delay.
+        """
+        tracker = SubscriptionHealthTracker(
+            slow_retry_base_s=100.0,
+            slow_retry_multiplier=5.0,
+            slow_retry_cap_s=3600.0,
+            slow_retry_jitter=0.2,
+        )
+        entry = health._SymbolEntry("trade", "AAVE/BTC", "failed", 0.0, slow_retry_count=0)
+        fraction = zlib.crc32(b"trade|AAVE/BTC|0") / 0xFFFFFFFF
+        expected = 100.0 * (1.0 + 0.2 * (2.0 * fraction - 1.0))
+        first = tracker._slow_backoff_delay(entry)
+        second = tracker._slow_backoff_delay(entry)
+        assert (first, second) == (expected, expected)
+        assert 80.0 <= first <= 120.0
+
+    def test_jitter_never_exceeds_cap(self) -> None:
+        """Jitter cannot push a capped delay above the hard cap.
+
+        Given: A tracker whose escalation already saturates the cap and a
+            jitter band that would otherwise overshoot it,
+        When: The delay is computed,
+        Then: It never exceeds slow_retry_cap_s.
+        """
+        tracker = SubscriptionHealthTracker(
+            slow_retry_base_s=60.0,
+            slow_retry_multiplier=5.0,
+            slow_retry_cap_s=3600.0,
+            slow_retry_jitter=0.2,
+        )
+        delays = [
+            tracker._slow_backoff_delay(
+                health._SymbolEntry("trade", symbol, "failed", 0.0, slow_retry_count=9)
+            )
+            for symbol in ("A/USD", "B/USD", "C/USD", "D/USD", "E/USD")
+        ]
+        assert all(delay <= 3600.0 for delay in delays)
+        assert max(delays) > 2880.0
+
+    def test_explicit_failure_after_schedule_is_terminal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A late explicit rejection clears a scheduled slow retry.
+
+        Given: A subscription scheduled for slow retry after exhausting its
+            fast budget,
+        When: An explicit mark_failed rejection arrives,
+        Then: next_attempt_at is cleared and the entry is no longer due.
+        """
+        tracker = SubscriptionHealthTracker(
+            max_retries=0, slow_retry_base_s=60.0, slow_retry_jitter=0.0
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_pending("trade", "REJECT/USD")
+        tracker.mark_retry_attempt("trade", "REJECT/USD")
+        tracker.mark_failed("trade", "REJECT/USD", "invalid pair")
+        entry = tracker.snapshot()[("trade", "REJECT/USD")]
+        due = tracker.list_due_failed(now=10_000.0)
+        assert (entry.status, entry.next_attempt_at, due) == ("failed", None, [])
+
+    def test_slow_retry_rejects_terminal_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Slow retry skips terminally failed entries with no schedule.
+
+        Given: An explicitly failed entry with no scheduled slow retry,
+        When: mark_slow_retry is called,
+        Then: It returns False and the entry stays failed.
+        """
+        tracker = SubscriptionHealthTracker()
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_failed("trade", "REJECT/USD", "invalid pair")
+        result = tracker.mark_slow_retry("trade", "REJECT/USD")
+        entry = tracker.snapshot()[("trade", "REJECT/USD")]
+        assert (result, entry.status) == (False, "failed")
+
+    def test_reconnect_with_budget_preserves_fast_retries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Replay with a non-zero budget keeps consumed fast and slow counts.
+
+        Given: A failed entry that consumed a two-attempt fast budget and
+            slow-retried once,
+        When: mark_pending replays it with preserve_retry_count,
+        Then: retry_count and slow_retry_count both carry over.
+        """
+        tracker = SubscriptionHealthTracker(
+            max_retries=2, slow_retry_base_s=60.0, slow_retry_jitter=0.0
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_pending("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        tracker.mark_slow_retry("trade", "AAVE/BTC")
+        _set_clock(monkeypatch, 500.0)
+        tracker.mark_pending("trade", "AAVE/BTC", preserve_retry_count=True)
+        entry = tracker.snapshot()[("trade", "AAVE/BTC")]
+        assert (entry.status, entry.retry_count, entry.slow_retry_count) == ("pending", 2, 1)
+
+    def test_confirmation_clears_retry_history(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A late ACK on a backed-off entry wipes its retry history.
+
+        Given: A subscription that exhausted its fast budget and slow-retried,
+        When: mark_confirmed records a late ACK,
+        Then: retry_count, slow_retry_count and next_attempt_at are reset so a
+            future failure starts from a clean budget and re-alerts.
+        """
+        tracker = SubscriptionHealthTracker(
+            max_retries=2, slow_retry_base_s=60.0, slow_retry_jitter=0.0
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_pending("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        tracker.mark_slow_retry("trade", "AAVE/BTC")
+        tracker.mark_confirmed("trade", "AAVE/BTC")
+        entry = tracker.snapshot()[("trade", "AAVE/BTC")]
+        assert (
+            entry.status,
+            entry.retry_count,
+            entry.slow_retry_count,
+            entry.next_attempt_at,
+        ) == ("confirmed", 0, 0, None)
+
+    def test_data_recovery_clears_retry_history(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Data arriving on a backed-off entry wipes its retry history.
+
+        Given: A subscription failed with a scheduled slow retry after one
+            slow escalation,
+        When: mark_data_seen records incoming data,
+        Then: it is confirmed with retry_count, slow_retry_count and
+            next_attempt_at all reset.
+        """
+        tracker = SubscriptionHealthTracker(
+            max_retries=0, slow_retry_base_s=60.0, slow_retry_jitter=0.0
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_pending("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        tracker.mark_slow_retry("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        tracker.mark_data_seen("trade", "AAVE/BTC")
+        entry = tracker.snapshot()[("trade", "AAVE/BTC")]
+        assert (
+            entry.status,
+            entry.retry_count,
+            entry.slow_retry_count,
+            entry.next_attempt_at,
+        ) == ("confirmed", 0, 0, None)
+
+    def test_retry_attempt_skips_replaced_entry_via_expected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The expected guard rejects a stale-listed entry after replacement.
+
+        Given: A pending entry listed for retry, then replaced by a fresh
+            mark_pending (simulating a concurrent reconnect replay),
+        When: mark_retry_attempt is called with the stale listed object as
+            expected,
+        Then: it returns False and the fresh current entry is left untouched
+            (no premature retry, no exhaustion applied to the wrong object).
+        """
+        tracker = SubscriptionHealthTracker(max_retries=3)
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_pending("trade", "AAVE/BTC")
+        _set_clock(monkeypatch, 100.0)
+        listed = tracker.list_overdue_pending()[0]
+        tracker.mark_pending("trade", "AAVE/BTC", preserve_retry_count=True)
+        result = tracker.mark_retry_attempt("trade", "AAVE/BTC", expected=listed)
+        current = tracker.snapshot()[("trade", "AAVE/BTC")]
+        assert (result, current.status, current.retry_count, current.requested_at) == (
+            False,
+            "pending",
+            0,
+            100.0,
+        )

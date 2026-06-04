@@ -206,10 +206,24 @@ class ExchangeClientBase(ABC):
     async def _retry_overdue_pending_subscriptions(
         self, tracker: SubscriptionHealthTracker
     ) -> None:
-        """Retry every pending subscription whose ACK timer expired.
+        """Retry overdue pending subscribes and due slow-retry failures.
+
+        Two passes run each tick. The first retries pending subscriptions
+        whose ACK timer expired; when a subscription exhausts its fast
+        budget it logs ERROR once (its first failure) and is left to back
+        off rather than dying. A failure log is emitted only when the
+        attempt itself drove the entry to a scheduled ``failed`` state;
+        an overdue entry that the concurrent reader confirmed (or
+        explicitly rejected) between listing and this attempt is skipped
+        silently, so a healthy recovery never produces a false failure
+        alert. The second pass reissues failed subscriptions whose
+        backoff delay has elapsed, giving each one more ACK window; these
+        slow retries and any subsequent re-failures log at DEBUG so a
+        permanently unsupported subscription self-heals if it ever
+        becomes available without spamming ERROR forever.
 
         Args:
-            tracker: Health tracker that owns pending subscription state.
+            tracker: Health tracker that owns subscription retry state.
 
         Returns:
             None.
@@ -218,20 +232,50 @@ class ExchangeClientBase(ABC):
             None.
         """
         for entry in tracker.list_overdue_pending():
-            if not tracker.mark_retry_attempt(entry.channel, entry.symbol):
-                logger.error(
-                    "{}: subscribe failed permanently for {}/{} after {} retries",
-                    self.exchange_name,
-                    entry.channel,
-                    entry.symbol,
-                    entry.retry_count,
-                )
+            if not tracker.mark_retry_attempt(entry.channel, entry.symbol, expected=entry):
+                if entry.status == "failed" and entry.next_attempt_at is not None:
+                    if entry.slow_retry_count == 0:
+                        logger.error(
+                            "{}: subscribe failed for {}/{} after {} retries; backing off",
+                            self.exchange_name,
+                            entry.channel,
+                            entry.symbol,
+                            entry.retry_count,
+                        )
+                    else:
+                        logger.debug(
+                            "{}: {}/{} still unconfirmed after slow retry {}; backing off",
+                            self.exchange_name,
+                            entry.channel,
+                            entry.symbol,
+                            entry.slow_retry_count,
+                        )
                 continue
             try:
                 await self._retry_subscribe(entry.channel, entry.symbol)
             except Exception as exc:
                 logger.warning(
                     "{}: retry subscribe raised for {}/{}: {}",
+                    self.exchange_name,
+                    entry.channel,
+                    entry.symbol,
+                    exc,
+                )
+        for entry in tracker.list_due_failed():
+            if not tracker.mark_slow_retry(entry.channel, entry.symbol):
+                continue
+            logger.debug(
+                "{}: slow-retrying {}/{} (attempt {})",
+                self.exchange_name,
+                entry.channel,
+                entry.symbol,
+                entry.slow_retry_count,
+            )
+            try:
+                await self._retry_subscribe(entry.channel, entry.symbol)
+            except Exception as exc:
+                logger.warning(
+                    "{}: slow retry subscribe raised for {}/{}: {}",
                     self.exchange_name,
                     entry.channel,
                     entry.symbol,

@@ -408,6 +408,265 @@ class TestHealthLoopRetry:
         assert symbols_in_debug == {"AAA/USD", "BBB/USD"}
 
     @pytest.mark.asyncio
+    async def test_loop_slow_retries_due_failed_entry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A backed-off failed subscription is reissued when its delay elapses.
+
+        Given: A failed entry whose slow-retry backoff delay has passed,
+        When: The health loop runs one tick,
+        Then: It is re-subscribed and returns to pending with the slow
+            escalation counter incremented.
+        """
+        client = HealthLoopClient()
+        tracker = SubscriptionHealthTracker(
+            ack_timeout_s=1.0,
+            retry_interval_s=1.0,
+            max_retries=0,
+            slow_retry_base_s=60.0,
+            slow_retry_jitter=0.0,
+        )
+        client._health_tracker = tracker
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 0.0)
+        tracker.mark_pending("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 200.0)
+
+        async def stop_after_sleep(_: float) -> None:
+            client._health_loop_running = False
+
+        monkeypatch.setattr(exchange_base.asyncio, "sleep", stop_after_sleep)
+        client._health_loop_running = True
+        await client._subscription_health_loop()
+        entry = tracker.snapshot()[("trade", "AAVE/BTC")]
+        assert (client.retry_calls, entry.status, entry.slow_retry_count) == (
+            [("trade", "AAVE/BTC")],
+            "pending",
+            1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_loop_logs_debug_on_re_failure_after_slow_retry(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A slow-retried subscription that re-fails logs DEBUG, not ERROR.
+
+        Given: A pending entry already escalated by one slow retry,
+        When: Its ACK window expires and the health loop runs one tick,
+        Then: It re-fails with a DEBUG record (not the first-failure ERROR)
+            and is not re-subscribed in the same tick.
+        """
+        client = HealthLoopClient()
+        tracker = SubscriptionHealthTracker(
+            ack_timeout_s=1.0,
+            retry_interval_s=1.0,
+            max_retries=0,
+            slow_retry_base_s=60.0,
+            slow_retry_jitter=0.0,
+        )
+        client._health_tracker = tracker
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 0.0)
+        tracker.mark_pending("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        tracker.mark_slow_retry("trade", "AAVE/BTC")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 100.0)
+
+        async def stop_after_sleep(_: float) -> None:
+            client._health_loop_running = False
+
+        monkeypatch.setattr(exchange_base.asyncio, "sleep", stop_after_sleep)
+        sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+        try:
+            client._health_loop_running = True
+            await client._subscription_health_loop()
+        finally:
+            logger.remove(sink_id)
+        debug_logs = [rec for rec in caplog.records if "after slow retry" in rec.message]
+        entry = tracker.snapshot()[("trade", "AAVE/BTC")]
+        assert (client.retry_calls, len(debug_logs), entry.status) == ([], 1, "failed")
+
+    @pytest.mark.asyncio
+    async def test_loop_warns_when_slow_retry_subscribe_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A raising slow-retry subscribe is caught and warned.
+
+        Given: A due failed entry and a retry method that raises,
+        When: The health loop runs one tick,
+        Then: The exception is caught and one slow-retry WARNING is emitted.
+        """
+        client = HealthLoopClient()
+        client.retry_error = RuntimeError("ws down")
+        tracker = SubscriptionHealthTracker(
+            ack_timeout_s=1.0,
+            retry_interval_s=1.0,
+            max_retries=0,
+            slow_retry_base_s=60.0,
+            slow_retry_jitter=0.0,
+        )
+        client._health_tracker = tracker
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 0.0)
+        tracker.mark_pending("trade", "AAVE/BTC")
+        tracker.mark_retry_attempt("trade", "AAVE/BTC")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 200.0)
+
+        async def stop_after_sleep(_: float) -> None:
+            client._health_loop_running = False
+
+        monkeypatch.setattr(exchange_base.asyncio, "sleep", stop_after_sleep)
+        sink_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            client._health_loop_running = True
+            await client._subscription_health_loop()
+        finally:
+            logger.remove(sink_id)
+        warnings = [rec for rec in caplog.records if "slow retry subscribe raised" in rec.message]
+        assert (client.retry_calls, len(warnings)) == ([("trade", "AAVE/BTC")], 1)
+
+    @pytest.mark.asyncio
+    async def test_loop_skips_slow_retry_when_entry_changes_mid_loop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A due entry confirmed while awaiting a sibling is not re-subscribed.
+
+        Given: Two due failed entries,
+        When: Subscribing the first confirms the second mid-loop,
+        Then: mark_slow_retry returns False for the second and only the
+            first is re-subscribed.
+        """
+        client = HealthLoopClient()
+        tracker = SubscriptionHealthTracker(
+            ack_timeout_s=1.0,
+            retry_interval_s=1.0,
+            max_retries=0,
+            slow_retry_base_s=60.0,
+            slow_retry_jitter=0.0,
+        )
+        client._health_tracker = tracker
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 0.0)
+        tracker.mark_pending("trade", "AAA/USD")
+        tracker.mark_retry_attempt("trade", "AAA/USD")
+        tracker.mark_pending("trade", "BBB/USD")
+        tracker.mark_retry_attempt("trade", "BBB/USD")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 200.0)
+        calls: list[tuple[str, str]] = []
+
+        async def confirming_retry(channel: str, symbol: str) -> None:
+            calls.append((channel, symbol))
+            tracker.mark_confirmed("trade", "BBB/USD")
+
+        monkeypatch.setattr(client, "_retry_subscribe", confirming_retry)
+
+        async def stop_after_sleep(_: float) -> None:
+            client._health_loop_running = False
+
+        monkeypatch.setattr(exchange_base.asyncio, "sleep", stop_after_sleep)
+        client._health_loop_running = True
+        await client._subscription_health_loop()
+        assert calls == [("trade", "AAA/USD")]
+
+    @pytest.mark.asyncio
+    async def test_loop_pass1_no_false_failure_log_when_entry_recovers_mid_loop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An overdue entry confirmed mid-await emits no false failure log.
+
+        Given: Two overdue pending entries,
+        When: Retrying the first confirms the second (late data) while the
+            loop is awaiting the first subscribe,
+        Then: The second, now healthy, produces no "backing off" failure
+            record (its mark_retry_attempt returns False only because it is
+            no longer pending, not because it exhausted its budget).
+        """
+        client = HealthLoopClient()
+        tracker = SubscriptionHealthTracker(
+            ack_timeout_s=1.0, retry_interval_s=1.0, max_retries=3, slow_retry_jitter=0.0
+        )
+        client._health_tracker = tracker
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 0.0)
+        tracker.mark_pending("trade", "AAA/USD")
+        tracker.mark_pending("trade", "BBB/USD")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 100.0)
+
+        async def confirming_retry(channel: str, symbol: str) -> None:
+            tracker.mark_data_seen("trade", "BBB/USD")
+
+        monkeypatch.setattr(client, "_retry_subscribe", confirming_retry)
+
+        async def stop_after_sleep(_: float) -> None:
+            client._health_loop_running = False
+
+        monkeypatch.setattr(exchange_base.asyncio, "sleep", stop_after_sleep)
+        sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+        try:
+            client._health_loop_running = True
+            await client._subscription_health_loop()
+        finally:
+            logger.remove(sink_id)
+        failure_logs = [rec for rec in caplog.records if "backing off" in rec.message]
+        recovered = tracker.snapshot()[("trade", "BBB/USD")]
+        assert (failure_logs, recovered.status) == ([], "confirmed")
+
+    @pytest.mark.asyncio
+    async def test_loop_pass1_skips_entry_replaced_by_reconnect_mid_loop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A reconnect replay replacing an entry mid-loop is not stale-retried.
+
+        Given: Two overdue pending entries,
+        When: Retrying the first triggers a reconnect-style mark_pending that
+            REPLACES the second entry object while the loop still holds the
+            stale listed object,
+        Then: the second is neither re-subscribed (no premature retry before
+            its fresh ACK window) nor logged as failed; it stays freshly
+            pending.
+        """
+        client = HealthLoopClient()
+        tracker = SubscriptionHealthTracker(
+            ack_timeout_s=1.0, retry_interval_s=1.0, max_retries=3, slow_retry_jitter=0.0
+        )
+        client._health_tracker = tracker
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 0.0)
+        tracker.mark_pending("trade", "AAA/USD")
+        tracker.mark_pending("trade", "BBB/USD")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 100.0)
+        calls: list[tuple[str, str]] = []
+
+        async def replaying_retry(channel: str, symbol: str) -> None:
+            calls.append((channel, symbol))
+            if symbol == "AAA/USD":
+                tracker.mark_pending("trade", "BBB/USD", preserve_retry_count=True)
+
+        monkeypatch.setattr(client, "_retry_subscribe", replaying_retry)
+
+        async def stop_after_sleep(_: float) -> None:
+            client._health_loop_running = False
+
+        monkeypatch.setattr(exchange_base.asyncio, "sleep", stop_after_sleep)
+        sink_id = logger.add(caplog.handler, format="{message}", level="DEBUG")
+        try:
+            client._health_loop_running = True
+            await client._subscription_health_loop()
+        finally:
+            logger.remove(sink_id)
+        failure_logs = [rec for rec in caplog.records if "backing off" in rec.message]
+        replaced = tracker.snapshot()[("trade", "BBB/USD")]
+        assert (calls, failure_logs, replaced.status, replaced.requested_at) == (
+            [("trade", "AAA/USD")],
+            [],
+            "pending",
+            100.0,
+        )
+
+    @pytest.mark.asyncio
     async def test_loop_without_tracker_returns(self) -> None:
         """Loop exits immediately without tracker.
 
