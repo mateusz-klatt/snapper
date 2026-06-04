@@ -504,13 +504,15 @@ class TestSubscriptionHealthValidation:
             lambda: SubscriptionHealthTracker(slow_retry_cap_s=10.0),
             lambda: SubscriptionHealthTracker(slow_retry_jitter=1.0),
             lambda: SubscriptionHealthTracker(slow_retry_jitter=-0.1),
+            lambda: SubscriptionHealthTracker(dark_recovery_threshold_multiplier=0.5),
+            lambda: SubscriptionHealthTracker(retry_subscribe_spacing_s=-1.0),
         ]
         results = []
         for factory in factories:
             with pytest.raises(ValueError):
                 factory()
             results.append(True)
-        assert results == [True] * 9
+        assert results == [True] * 11
 
     def test_methods_reject_empty_channel(self) -> None:
         """Tracker methods reject empty channels before mutation.
@@ -927,3 +929,217 @@ class TestSlowRetryBackoff:
             0,
             100.0,
         )
+
+
+class TestDarkRecovery:
+    """Tests for confirmed-but-dark subscription auto-recovery."""
+
+    def test_dark_backoff_zero_first_then_geometric(self) -> None:
+        """First dark recovery adds no delay; later ones escalate geometrically.
+
+        Given: A tracker with base 60, multiplier 5, no jitter,
+        When: The dark backoff is computed across escalation counts,
+        Then: count 0 adds 0, then 60, 300, 1500 (geometric on count-1).
+        """
+        tracker = SubscriptionHealthTracker(
+            slow_retry_base_s=60.0,
+            slow_retry_multiplier=5.0,
+            slow_retry_cap_s=3600.0,
+            slow_retry_jitter=0.0,
+        )
+        delays = [
+            tracker._dark_backoff_delay(
+                health._SymbolEntry("trade", "X/USD", "confirmed", 0.0, dark_recovery_count=count)
+            )
+            for count in (0, 1, 2, 3)
+        ]
+        assert delays == [0.0, 60.0, 300.0, 1500.0]
+
+    def test_list_due_dark_recovery_filters(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Only confirmed, enabled, sufficiently-dark entries are due.
+
+        Given: A dark recoverable entry, a wildcard (disabled) entry, a
+            freshly-fed entry, and a pending entry,
+        When: list_due_dark_recovery is queried past the recovery threshold,
+        Then: Only the dark recoverable entry is returned.
+        """
+        tracker = SubscriptionHealthTracker(
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_jitter=0.0,
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("trade", "DARK/USD")
+        tracker.mark_confirmed("ticker", "WILD/USD", dark_recovery_enabled=False)
+        tracker.mark_confirmed("trade", "FRESH/USD")
+        tracker.mark_pending("trade", "PEND/USD")
+        _set_clock(monkeypatch, 380.0)
+        tracker.mark_data_seen("trade", "FRESH/USD")
+        due = tracker.list_due_dark_recovery(now=400.0)
+        assert [(entry.channel, entry.symbol) for entry in due] == [("trade", "DARK/USD")]
+
+    def test_wildcard_confirm_disables_dark_recovery(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A wildcard-seeded confirm is never dark-recovered.
+
+        Given: A confirmed entry seeded dark_recovery_enabled=False,
+        When: It is dark far past the threshold,
+        Then: It is excluded from list_due_dark_recovery.
+        """
+        tracker = SubscriptionHealthTracker(
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_jitter=0.0,
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("ticker", "WILD/USD", dark_recovery_enabled=False)
+        entry = tracker.snapshot()[("ticker", "WILD/USD")]
+        due = tracker.list_due_dark_recovery(now=1000.0)
+        assert (entry.dark_recovery_enabled, due) == (False, [])
+
+    def test_existing_confirm_updates_dark_recovery_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-confirming an existing entry updates its dark-recovery flag.
+
+        Given: A per-symbol confirmed entry (recoverable by default),
+        When: It is re-confirmed with dark_recovery_enabled=False,
+        Then: The flag flips to False on the existing entry.
+        """
+        tracker = SubscriptionHealthTracker()
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("ticker", "WILD/USD")
+        tracker.mark_confirmed("ticker", "WILD/USD", dark_recovery_enabled=False)
+        entry = tracker.snapshot()[("ticker", "WILD/USD")]
+        assert entry.dark_recovery_enabled is False
+
+    def test_mark_dark_recovery_transitions_confirmed_to_pending(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dark confirmed entry is re-armed to pending for re-subscribe.
+
+        Given: A confirmed entry dark past the recovery threshold,
+        When: mark_dark_recovery is called,
+        Then: It becomes pending with a fresh fast budget, cleared
+            next_attempt_at, and an incremented dark_recovery_count.
+        """
+        tracker = SubscriptionHealthTracker(
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_jitter=0.0,
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("trade", "DARK/USD")
+        _set_clock(monkeypatch, 400.0)
+        result = tracker.mark_dark_recovery("trade", "DARK/USD")
+        entry = tracker.snapshot()[("trade", "DARK/USD")]
+        assert (
+            result,
+            entry.status,
+            entry.requested_at,
+            entry.retry_count,
+            entry.next_attempt_at,
+            entry.dark_recovery_count,
+        ) == (True, "pending", 400.0, 0, None, 1)
+
+    def test_mark_dark_recovery_false_for_ineligible(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Dark recovery skips missing, disabled, and non-confirmed entries.
+
+        Given: A missing key, a wildcard (disabled) entry, and a failed entry,
+        When: mark_dark_recovery is called for each,
+        Then: All return False.
+        """
+        tracker = SubscriptionHealthTracker()
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("ticker", "WILD/USD", dark_recovery_enabled=False)
+        tracker.mark_failed("trade", "REJ/USD", "bad")
+        missing = tracker.mark_dark_recovery("trade", "GONE/USD")
+        disabled = tracker.mark_dark_recovery("ticker", "WILD/USD")
+        failed = tracker.mark_dark_recovery("trade", "REJ/USD")
+        assert (missing, disabled, failed) == (False, False, False)
+
+    def test_mark_dark_recovery_skips_replaced_entry_via_expected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The expected guard rejects a stale-listed entry after replacement.
+
+        Given: A due dark entry that is replaced by a fresh confirm,
+        When: mark_dark_recovery is called with the stale listed object,
+        Then: It returns False and leaves the fresh entry confirmed.
+        """
+        tracker = SubscriptionHealthTracker(
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_jitter=0.0,
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("trade", "DARK/USD")
+        _set_clock(monkeypatch, 400.0)
+        listed = tracker.list_due_dark_recovery()[0]
+        tracker.mark_pending("trade", "DARK/USD")
+        tracker.mark_confirmed("trade", "DARK/USD")
+        result = tracker.mark_dark_recovery("trade", "DARK/USD", expected=listed)
+        current = tracker.snapshot()[("trade", "DARK/USD")]
+        assert (result, current.status) == (False, "confirmed")
+
+    def test_data_arrival_resets_dark_recovery_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Real data clears the dark-recovery escalation.
+
+        Given: A dark entry re-armed once for recovery,
+        When: market data arrives,
+        Then: It is confirmed again with dark_recovery_count reset to zero.
+        """
+        tracker = SubscriptionHealthTracker(
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_jitter=0.0,
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("trade", "DARK/USD")
+        _set_clock(monkeypatch, 400.0)
+        assert tracker.mark_dark_recovery("trade", "DARK/USD") is True
+        tracker.mark_data_seen("trade", "DARK/USD")
+        entry = tracker.snapshot()[("trade", "DARK/USD")]
+        assert (entry.status, entry.dark_recovery_count) == ("confirmed", 0)
+
+    def test_reconnect_preserves_dark_recovery_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Replay keeps the dark escalation for a chronically dark symbol.
+
+        Given: A dark entry re-armed once for recovery,
+        When: mark_pending replays it with preserve_retry_count,
+        Then: dark_recovery_count carries over.
+        """
+        tracker = SubscriptionHealthTracker(
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_jitter=0.0,
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("trade", "DARK/USD")
+        _set_clock(monkeypatch, 400.0)
+        assert tracker.mark_dark_recovery("trade", "DARK/USD") is True
+        tracker.mark_pending("trade", "DARK/USD", preserve_retry_count=True)
+        entry = tracker.snapshot()[("trade", "DARK/USD")]
+        assert entry.dark_recovery_count == 1
+
+    def test_mark_dark_recovery_false_when_no_longer_dark(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Recovery is skipped if the entry received data after being listed.
+
+        Given: A confirmed entry that was dark-due but then got data in place,
+        When: mark_dark_recovery is called,
+        Then: The dark re-check fails and it returns False without
+            re-subscribing an already-healthy symbol.
+        """
+        tracker = SubscriptionHealthTracker(
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_jitter=0.0,
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("trade", "DARK/USD")
+        _set_clock(monkeypatch, 400.0)
+        tracker.mark_data_seen("trade", "DARK/USD")
+        result = tracker.mark_dark_recovery("trade", "DARK/USD")
+        entry = tracker.snapshot()[("trade", "DARK/USD")]
+        assert (result, entry.status, entry.dark_recovery_count) == (False, "confirmed", 0)

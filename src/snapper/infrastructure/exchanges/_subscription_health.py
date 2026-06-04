@@ -69,6 +69,17 @@ class _SymbolEntry:
             than repeating the initial ERROR. Preserved across reconnect
             replay so a struggling subscription does not restart its
             backoff (and its noise) from scratch on every reconnect.
+        dark_recovery_enabled: Whether a confirmed-but-dark subscription
+            (no data for far longer than the stale threshold) may be
+            auto-recovered by re-subscribing it per-symbol. False for
+            wildcard-seeded entries (for example the Spot wildcard ticker
+            universe) which have no per-symbol subscription to re-issue.
+        dark_recovery_count: Number of dark-recovery re-subscribes issued
+            for a confirmed subscription that went silent. Drives a
+            backoff independent of ``slow_retry_count`` so a channel that
+            keeps re-darkening is not hammered, and is reset only when
+            real data arrives (``mark_data_seen``), not on an ACK-only
+            ``mark_confirmed`` which can itself still be data-dark.
     """
 
     channel: str
@@ -82,6 +93,8 @@ class _SymbolEntry:
     stale_logged: bool = False
     next_attempt_at: float | None = None
     slow_retry_count: int = 0
+    dark_recovery_enabled: bool = True
+    dark_recovery_count: int = 0
 
     def stale_reference(self) -> float:
         """Return the monotonic timestamp staleness is measured from.
@@ -133,6 +146,15 @@ class SubscriptionHealthTracker:
             applied to each slow-retry delay to desynchronise the large
             block of subscriptions that fail together during a boot
             subscribe storm, avoiding a synchronised retry herd.
+        dark_recovery_threshold_multiplier: Multiple of
+            ``data_stale_threshold_s`` a confirmed subscription must be
+            dark before auto-recovery re-subscribes it. Larger than 1 so
+            stale logging fires early (diagnostics) while recovery waits
+            long enough not to churn legitimately quiet symbols.
+        retry_subscribe_spacing_s: Minimum spacing the publisher health
+            loop leaves between consecutive re-subscribe sends (overdue
+            pending, slow-failed, and dark recovery) to stay under the
+            exchange per-connection subscribe message-rate limit.
     """
 
     def __init__(
@@ -146,6 +168,8 @@ class SubscriptionHealthTracker:
         slow_retry_multiplier: float = 5.0,
         slow_retry_cap_s: float = 3600.0,
         slow_retry_jitter: float = 0.2,
+        dark_recovery_threshold_multiplier: float = 6.0,
+        retry_subscribe_spacing_s: float = 1.0,
     ) -> None:
         """Initialize subscription health tracking.
 
@@ -165,6 +189,11 @@ class SubscriptionHealthTracker:
                 be at least ``slow_retry_base_s``.
             slow_retry_jitter: Fractional jitter in [0.0, 1.0) applied
                 deterministically to each slow-retry delay.
+            dark_recovery_threshold_multiplier: Multiple (>= 1.0) of
+                ``data_stale_threshold_s`` a confirmed subscription must
+                be dark before auto-recovery re-subscribes it.
+            retry_subscribe_spacing_s: Non-negative seconds the health
+                loop spaces between consecutive re-subscribe sends.
 
         Returns:
             None.
@@ -173,8 +202,9 @@ class SubscriptionHealthTracker:
             ValueError: If any timing value is non-positive,
                 ``max_retries`` is negative, ``slow_retry_multiplier`` is
                 below 1.0, ``slow_retry_cap_s`` is below
-                ``slow_retry_base_s``, or ``slow_retry_jitter`` is
-                outside ``[0.0, 1.0)``.
+                ``slow_retry_base_s``, ``slow_retry_jitter`` is outside
+                ``[0.0, 1.0)``, ``dark_recovery_threshold_multiplier`` is
+                below 1.0, or ``retry_subscribe_spacing_s`` is negative.
         """
         if ack_timeout_s <= 0:
             raise ValueError("ack_timeout_s must be positive")
@@ -192,6 +222,10 @@ class SubscriptionHealthTracker:
             raise ValueError("slow_retry_cap_s must be at least slow_retry_base_s")
         if not 0.0 <= slow_retry_jitter < 1.0:
             raise ValueError("slow_retry_jitter must be in [0.0, 1.0)")
+        if dark_recovery_threshold_multiplier < 1.0:
+            raise ValueError("dark_recovery_threshold_multiplier must be at least 1.0")
+        if retry_subscribe_spacing_s < 0:
+            raise ValueError("retry_subscribe_spacing_s must be non-negative")
         self.ack_timeout_s = ack_timeout_s
         self.retry_interval_s = retry_interval_s
         self.max_retries = max_retries
@@ -200,6 +234,8 @@ class SubscriptionHealthTracker:
         self.slow_retry_multiplier = slow_retry_multiplier
         self.slow_retry_cap_s = slow_retry_cap_s
         self.slow_retry_jitter = slow_retry_jitter
+        self.dark_recovery_threshold_multiplier = dark_recovery_threshold_multiplier
+        self.retry_subscribe_spacing_s = retry_subscribe_spacing_s
         self._max_backoff_exponent = (
             max(0, ceil(log(slow_retry_cap_s / slow_retry_base_s) / log(slow_retry_multiplier)))
             if slow_retry_multiplier > 1.0
@@ -225,7 +261,10 @@ class SubscriptionHealthTracker:
                 neither re-enters the fast subscribe storm nor restarts
                 its backoff schedule and noise from scratch. The fresh
                 entry always clears ``next_attempt_at`` so reconnect
-                grants one immediate attempt before backoff resumes.
+                grants one immediate attempt before backoff resumes. The
+                dark-recovery escalation count is preserved on the same
+                terms so a chronically dark subscription does not reset
+                its dark backoff on every reconnect.
 
         Returns:
             None.
@@ -238,9 +277,11 @@ class SubscriptionHealthTracker:
         if existing is not None and preserve_retry_count:
             retry_count = existing.retry_count
             slow_retry_count = existing.slow_retry_count
+            dark_recovery_count = existing.dark_recovery_count
         else:
             retry_count = 0
             slow_retry_count = 0
+            dark_recovery_count = 0
         self._entries[key] = _SymbolEntry(
             channel=channel,
             symbol=symbol,
@@ -248,22 +289,33 @@ class SubscriptionHealthTracker:
             requested_at=time.monotonic(),
             retry_count=retry_count,
             slow_retry_count=slow_retry_count,
+            dark_recovery_count=dark_recovery_count,
         )
 
-    def mark_confirmed(self, channel: str, symbol: str) -> None:
+    def mark_confirmed(
+        self,
+        channel: str,
+        symbol: str,
+        *,
+        dark_recovery_enabled: bool = True,
+    ) -> None:
         """Mark a subscription as confirmed by ACK.
 
-        Confirmation is full recovery, so it clears the retry history
-        (``retry_count``, ``slow_retry_count`` and any scheduled
-        ``next_attempt_at``). A subscription that struggled, eventually
-        confirmed, then later fails again therefore starts from a clean
-        fast budget and re-emits the first-failure ERROR — a transient
-        past incident does not silently suppress future alerting or carry
-        an inflated backoff across a reconnect replay.
+        Confirmation clears the FAILED-path retry history (``retry_count``,
+        ``slow_retry_count`` and any scheduled ``next_attempt_at``) so a
+        subscription that struggled, confirmed, then later fails again
+        starts from a clean fast budget and re-emits the first-failure
+        ERROR. It deliberately does NOT clear ``dark_recovery_count``: an
+        ACK confirms the subscription exists but does not prove data is
+        flowing, so a still-dark channel keeps escalating its dark backoff
+        until real data arrives (:meth:`mark_data_seen`).
 
         Args:
             channel: Tracker channel key.
             symbol: Wire-format symbol or product id.
+            dark_recovery_enabled: False for wildcard-seeded entries (the
+                Spot wildcard ticker universe) that have no per-symbol
+                subscription to re-issue, so dark auto-recovery skips them.
 
         Returns:
             None.
@@ -281,6 +333,7 @@ class SubscriptionHealthTracker:
                 status="confirmed",
                 requested_at=now,
                 confirmed_at=now,
+                dark_recovery_enabled=dark_recovery_enabled,
             )
             return
         entry.status = "confirmed"
@@ -290,6 +343,7 @@ class SubscriptionHealthTracker:
         entry.retry_count = 0
         entry.slow_retry_count = 0
         entry.next_attempt_at = None
+        entry.dark_recovery_enabled = dark_recovery_enabled
 
     def mark_failed(self, channel: str, symbol: str, error: str) -> None:
         """Mark a subscription as terminally failed by explicit rejection.
@@ -337,9 +391,12 @@ class SubscriptionHealthTracker:
         and any scheduled ``next_attempt_at``) for the same reason as
         :meth:`mark_confirmed`: a future failure of a recovered
         subscription must start from a clean fast budget and re-alert.
-        The reset is confined to the recovery transition, so the
-        steady-state data hot path (already-confirmed entries) only
-        refreshes the freshness timestamp.
+        The transition reset is confined to the recovery transition, so
+        the steady-state data hot path (already-confirmed entries) only
+        refreshes the freshness timestamp. Real data is also the only
+        signal that clears ``dark_recovery_count`` (a dark channel that
+        truly resumed), and that clear is gated on a non-zero count so the
+        common data frame stays a single timestamp write.
 
         Args:
             channel: Tracker channel key.
@@ -366,6 +423,8 @@ class SubscriptionHealthTracker:
             return
         entry.last_seen_data_at = now
         entry.stale_logged = False
+        if entry.dark_recovery_count:
+            entry.dark_recovery_count = 0
         if entry.status != "confirmed":
             entry.status = "confirmed"
             entry.confirmed_at = now
@@ -468,6 +527,67 @@ class SubscriptionHealthTracker:
         entry.requested_at = time.monotonic()
         entry.next_attempt_at = None
         entry.slow_retry_count += 1
+        return True
+
+    def mark_dark_recovery(
+        self,
+        channel: str,
+        symbol: str,
+        *,
+        expected: _SymbolEntry | None = None,
+    ) -> bool:
+        """Re-arm a confirmed-but-dark subscription for a recovery re-subscribe.
+
+        Transitions a confirmed entry that has gone silent (per
+        :meth:`list_due_dark_recovery`) back to ``pending`` so the caller
+        can re-send its per-symbol subscribe to nudge the exchange into
+        resuming the stream. The fast ``retry_count`` is reset so the
+        re-subscribe gets a full ACK budget; ``dark_recovery_count`` is
+        incremented to grow the next dark backoff. If the re-subscribe
+        still yields no data the entry darkens again and the next recovery
+        waits longer; real data clears the count via :meth:`mark_data_seen`.
+
+        This method enforces ELIGIBILITY (still confirmed, still
+        dark-recovery-enabled, still the ``expected`` object) AND
+        re-checks the entry is STILL dark. The dark re-check is essential
+        and differs from the failed-path guard: a dark entry recovers by
+        data arriving IN PLACE (``mark_data_seen`` mutates the same object
+        without changing ``status``), so a sibling that recovered between
+        :meth:`list_due_dark_recovery` and this call would otherwise still
+        pass the identity + status guards and be needlessly re-subscribed.
+        Re-evaluating :meth:`_dark_recovery_due` against the live entry
+        rejects it.
+
+        Args:
+            channel: Tracker channel key.
+            symbol: Wire-format symbol or product id.
+            expected: When given, the object the caller listed; the
+                transition is skipped unless it is still the current entry.
+
+        Returns:
+            True when a still-dark confirmed entry was transitioned to
+            pending and the caller should issue a subscribe. False when the
+            entry is missing, not confirmed, not dark-recovery-enabled, no
+            longer the ``expected`` object, or no longer dark (recovered
+            in place since listing).
+
+        Raises:
+            ValueError: If ``channel`` or ``symbol`` is empty.
+        """
+        key = self._validate_key(channel, symbol)
+        entry = self._entries.get(key)
+        if entry is None or entry.status != "confirmed" or not entry.dark_recovery_enabled:
+            return False
+        if expected is not None and entry is not expected:
+            return False
+        now = time.monotonic()
+        if not self._dark_recovery_due(entry, now):
+            return False
+        entry.status = "pending"
+        entry.requested_at = now
+        entry.retry_count = 0
+        entry.next_attempt_at = None
+        entry.dark_recovery_count += 1
         return True
 
     def list_overdue_pending(self, now: float | None = None) -> list[_SymbolEntry]:
@@ -574,6 +694,38 @@ class SubscriptionHealthTracker:
         """
         return [entry for entry in self._entries.values() if entry.status == "failed"]
 
+    def list_due_dark_recovery(self, now: float | None = None) -> list[_SymbolEntry]:
+        """List confirmed subscriptions dark long enough to auto-recover.
+
+        A confirmed, dark-recovery-enabled entry is due once it has had no
+        data for at least ``data_stale_threshold_s *
+        dark_recovery_threshold_multiplier`` PLUS its current dark backoff.
+        The multiplier keeps recovery well above the stale-logging
+        threshold so legitimately quiet symbols are surfaced as
+        diagnostics long before they are ever re-subscribed, and the
+        per-entry backoff paces a channel that keeps re-darkening.
+        Wildcard-seeded entries (``dark_recovery_enabled`` False) are
+        excluded because they have no per-symbol subscription to re-issue.
+
+        Args:
+            now: Optional monotonic timestamp for deterministic tests.
+
+        Returns:
+            Confirmed dark-recovery-enabled entries whose silent duration
+            exceeds the recovery threshold plus their dark backoff.
+
+        Raises:
+            None.
+        """
+        current = time.monotonic() if now is None else now
+        return [
+            entry
+            for entry in self._entries.values()
+            if entry.status == "confirmed"
+            and entry.dark_recovery_enabled
+            and self._dark_recovery_due(entry, current)
+        ]
+
     def snapshot(self) -> dict[tuple[str, str], _SymbolEntry]:
         """Return a point-in-time copy of tracked entries.
 
@@ -588,42 +740,113 @@ class SubscriptionHealthTracker:
         """
         return {key: replace(entry) for key, entry in self._entries.items()}
 
+    def _geometric_backoff(self, count: int, jitter_key: str) -> float:
+        """Return a capped, deterministically-jittered geometric backoff.
+
+        Shared by the slow-retry (failed-subscription) and dark-recovery
+        (confirmed-but-silent) schedules. The base delay grows
+        geometrically with ``count`` and is hard-capped at
+        ``slow_retry_cap_s`` so the schedule settles to a steady cadence
+        (for example 1m, 5m, 25m, then hourly). The exponent is bounded so
+        the geometric term cannot overflow before the cap applies. A
+        deterministic per-``jitter_key`` jitter spreads a block of
+        subscriptions that escalate together (a boot subscribe storm, or a
+        whole exchange going dark) so their re-subscribes do not form a
+        synchronised herd; determinism keeps the delay reproducible in
+        tests. The jittered result is clamped to the cap so it is a hard
+        upper bound (the early, smaller tiers already provide the spread).
+
+        Args:
+            count: Escalation count (number of prior attempts in this
+                schedule).
+            jitter_key: Stable per-identity key the jitter is derived
+                from, so distinct identities desynchronise.
+
+        Returns:
+            Delay in seconds, never exceeding ``slow_retry_cap_s``.
+
+        Raises:
+            None.
+        """
+        exponent = min(count, self._max_backoff_exponent)
+        interval = min(
+            self.slow_retry_base_s * self.slow_retry_multiplier**exponent,
+            self.slow_retry_cap_s,
+        )
+        if self.slow_retry_jitter <= 0.0:
+            return interval
+        fraction = zlib.crc32(jitter_key.encode()) / 0xFFFFFFFF
+        jittered = interval * (1.0 + self.slow_retry_jitter * (2.0 * fraction - 1.0))
+        return min(jittered, self.slow_retry_cap_s)
+
     def _slow_backoff_delay(self, entry: _SymbolEntry) -> float:
         """Return the next slow-retry delay for a failed entry.
-
-        The base delay grows geometrically with ``slow_retry_count`` and
-        is capped at ``slow_retry_cap_s`` so the schedule settles to a
-        steady cadence (for example 1m, 5m, 25m, then hourly). The
-        exponent is bounded so the geometric term cannot overflow before
-        the cap applies. A deterministic per-(channel, symbol,
-        escalation) jitter spreads the block of subscriptions that fail
-        together during a boot subscribe storm so their retries do not
-        form a synchronised herd; determinism keeps the delay
-        reproducible in tests. The jittered result is clamped to
-        ``slow_retry_cap_s`` so the cap is a hard upper bound (the boot
-        storm is already spread by the smaller, uncapped early tiers).
 
         Args:
             entry: Failed entry whose next backoff delay is computed.
 
         Returns:
-            Delay in seconds until the entry's next slow-retry attempt,
-            never exceeding ``slow_retry_cap_s``.
+            Delay in seconds until the entry's next slow-retry attempt.
 
         Raises:
             None.
         """
-        exponent = min(entry.slow_retry_count, self._max_backoff_exponent)
-        interval = min(
-            self.slow_retry_base_s * self.slow_retry_multiplier**exponent,
-            self.slow_retry_cap_s,
+        return self._geometric_backoff(
+            entry.slow_retry_count,
+            f"{entry.channel}|{entry.symbol}|{entry.slow_retry_count}",
         )
-        if self.slow_retry_jitter == 0.0:
-            return interval
-        key = f"{entry.channel}|{entry.symbol}|{entry.slow_retry_count}".encode()
-        fraction = zlib.crc32(key) / 0xFFFFFFFF
-        jittered = interval * (1.0 + self.slow_retry_jitter * (2.0 * fraction - 1.0))
-        return min(jittered, self.slow_retry_cap_s)
+
+    def _dark_backoff_delay(self, entry: _SymbolEntry) -> float:
+        """Return the extra backoff before a confirmed-dark re-subscribe.
+
+        Added on top of the dark-recovery threshold so a channel that
+        keeps going dark immediately after each recovery re-subscribe is
+        paced by an escalating, capped backoff rather than re-subscribed
+        every loop tick. The first recovery (count 0) adds no extra delay
+        so it fires at exactly the threshold; each subsequent re-darkening
+        escalates geometrically.
+
+        Args:
+            entry: Confirmed dark entry whose recovery backoff is computed.
+
+        Returns:
+            Delay in seconds to add to the dark-recovery threshold; zero
+            for the first recovery attempt.
+
+        Raises:
+            None.
+        """
+        if entry.dark_recovery_count < 1:
+            return 0.0
+        return self._geometric_backoff(
+            entry.dark_recovery_count - 1,
+            f"dark|{entry.channel}|{entry.symbol}|{entry.dark_recovery_count}",
+        )
+
+    def _dark_recovery_due(self, entry: _SymbolEntry, now: float) -> bool:
+        """Return True when a confirmed entry is dark long enough to recover.
+
+        Dark duration is measured from :meth:`_SymbolEntry.stale_reference`
+        and must exceed ``data_stale_threshold_s *
+        dark_recovery_threshold_multiplier`` plus the entry's current dark
+        backoff. Shared by :meth:`list_due_dark_recovery` (selection) and
+        :meth:`mark_dark_recovery` (the claim re-check), so an entry that
+        recovered in place between selection and the claim is not
+        re-subscribed.
+
+        Args:
+            entry: Confirmed entry to evaluate.
+            now: Current monotonic timestamp.
+
+        Returns:
+            True when the entry has been dark past the recovery threshold
+            plus its dark backoff.
+
+        Raises:
+            None.
+        """
+        threshold = self.data_stale_threshold_s * self.dark_recovery_threshold_multiplier
+        return now - entry.stale_reference() >= threshold + self._dark_backoff_delay(entry)
 
     @staticmethod
     def _validate_key(channel: str, symbol: str) -> tuple[str, str]:

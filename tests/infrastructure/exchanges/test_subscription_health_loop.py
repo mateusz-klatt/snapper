@@ -524,7 +524,7 @@ class TestHealthLoopRetry:
             await client._subscription_health_loop()
         finally:
             logger.remove(sink_id)
-        warnings = [rec for rec in caplog.records if "slow retry subscribe raised" in rec.message]
+        warnings = [rec for rec in caplog.records if "retry subscribe raised" in rec.message]
         assert (client.retry_calls, len(warnings)) == ([("trade", "AAVE/BTC")], 1)
 
     @pytest.mark.asyncio
@@ -664,6 +664,185 @@ class TestHealthLoopRetry:
             [],
             "pending",
             100.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_loop_recovers_dark_confirmed_subscription(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A confirmed subscription dark past the threshold is re-subscribed.
+
+        Given: A confirmed entry with no data for longer than the dark
+            recovery threshold,
+        When: The health loop runs one tick,
+        Then: It is re-subscribed (INFO), returns to pending, and its
+            dark_recovery_count is incremented.
+        """
+        client = HealthLoopClient()
+        tracker = SubscriptionHealthTracker(
+            ack_timeout_s=1.0,
+            retry_interval_s=1.0,
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_jitter=0.0,
+            retry_subscribe_spacing_s=0.0,
+        )
+        client._health_tracker = tracker
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 0.0)
+        tracker.mark_confirmed("trade", "DARK/USD")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 400.0)
+
+        async def stop_after_sleep(_: float) -> None:
+            client._health_loop_running = False
+
+        monkeypatch.setattr(exchange_base.asyncio, "sleep", stop_after_sleep)
+        sink_id = logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            client._health_loop_running = True
+            await client._subscription_health_loop()
+        finally:
+            logger.remove(sink_id)
+        info_logs = [rec for rec in caplog.records if "dark-recovery re-subscribe" in rec.message]
+        entry = tracker.snapshot()[("trade", "DARK/USD")]
+        assert (client.retry_calls, len(info_logs), entry.status, entry.dark_recovery_count) == (
+            [("trade", "DARK/USD")],
+            1,
+            "pending",
+            1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_loop_dark_recovery_skips_entry_changed_mid_loop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dark entry replaced mid-loop is not stale-recovered.
+
+        Given: Two dark confirmed entries,
+        When: Recovering the first replaces the second via mark_pending
+            while the loop is awaiting the first subscribe,
+        Then: The second is not re-subscribed (its mark_dark_recovery
+            returns False on the now-pending replacement).
+        """
+        client = HealthLoopClient()
+        tracker = SubscriptionHealthTracker(
+            ack_timeout_s=1.0,
+            retry_interval_s=1.0,
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_jitter=0.0,
+            retry_subscribe_spacing_s=0.0,
+        )
+        client._health_tracker = tracker
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 0.0)
+        tracker.mark_confirmed("trade", "AAA/USD")
+        tracker.mark_confirmed("trade", "BBB/USD")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 400.0)
+        calls: list[tuple[str, str]] = []
+
+        async def changing_retry(channel: str, symbol: str) -> None:
+            calls.append((channel, symbol))
+            if symbol == "AAA/USD":
+                tracker.mark_pending("trade", "BBB/USD")
+
+        monkeypatch.setattr(client, "_retry_subscribe", changing_retry)
+
+        async def stop_after_sleep(_: float) -> None:
+            client._health_loop_running = False
+
+        monkeypatch.setattr(exchange_base.asyncio, "sleep", stop_after_sleep)
+        client._health_loop_running = True
+        await client._subscription_health_loop()
+        bbb = tracker.snapshot()[("trade", "BBB/USD")]
+        assert (calls, bbb.status, bbb.dark_recovery_count) == (
+            [("trade", "AAA/USD")],
+            "pending",
+            0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_loop_dark_recovery_skips_entry_fed_mid_loop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dark entry fed in place mid-sweep is not re-subscribed.
+
+        Given: Two dark confirmed entries,
+        When: Recovering the first feeds the second via mark_data_seen (in
+            place, so it stays confirmed and the same object) while awaiting
+            the first subscribe,
+        Then: The second's dark re-check fails and it is not re-subscribed,
+            so the shared subscribe budget is not wasted on a healthy symbol.
+        """
+        client = HealthLoopClient()
+        tracker = SubscriptionHealthTracker(
+            ack_timeout_s=1.0,
+            retry_interval_s=1.0,
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_jitter=0.0,
+            retry_subscribe_spacing_s=0.0,
+        )
+        client._health_tracker = tracker
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 0.0)
+        tracker.mark_confirmed("trade", "AAA/USD")
+        tracker.mark_confirmed("trade", "BBB/USD")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 400.0)
+        calls: list[tuple[str, str]] = []
+
+        async def feeding_retry(channel: str, symbol: str) -> None:
+            calls.append((channel, symbol))
+            if symbol == "AAA/USD":
+                tracker.mark_data_seen("trade", "BBB/USD")
+
+        monkeypatch.setattr(client, "_retry_subscribe", feeding_retry)
+
+        async def stop_after_sleep(_: float) -> None:
+            client._health_loop_running = False
+
+        monkeypatch.setattr(exchange_base.asyncio, "sleep", stop_after_sleep)
+        client._health_loop_running = True
+        await client._subscription_health_loop()
+        bbb = tracker.snapshot()[("trade", "BBB/USD")]
+        assert (calls, bbb.status, bbb.dark_recovery_count) == (
+            [("trade", "AAA/USD")],
+            "confirmed",
+            0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_loop_spaces_consecutive_retry_subscribes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each re-subscribe is followed by the configured spacing sleep.
+
+        Given: Two overdue pending entries and a 0.5s subscribe spacing,
+        When: The health loop runs one tick,
+        Then: Both are re-subscribed and each send is followed by one 0.5s
+            sleep, so a re-subscribe sweep stays under the message-rate gate.
+        """
+        client = HealthLoopClient()
+        tracker = SubscriptionHealthTracker(
+            ack_timeout_s=1.0, retry_interval_s=99.0, retry_subscribe_spacing_s=0.5
+        )
+        client._health_tracker = tracker
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 0.0)
+        tracker.mark_pending("ticker", "BTC/USD")
+        tracker.mark_pending("trade", "ETH/USD")
+        monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 100.0)
+        sleeps: list[float] = []
+
+        async def record_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            if seconds == 99.0:
+                client._health_loop_running = False
+
+        monkeypatch.setattr(exchange_base.asyncio, "sleep", record_sleep)
+        client._health_loop_running = True
+        await client._subscription_health_loop()
+        assert (client.retry_calls, sleeps.count(0.5)) == (
+            [("ticker", "BTC/USD"), ("trade", "ETH/USD")],
+            2,
         )
 
     @pytest.mark.asyncio

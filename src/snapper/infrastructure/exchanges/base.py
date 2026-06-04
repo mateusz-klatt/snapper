@@ -201,29 +201,24 @@ class ExchangeClientBase(ABC):
         while self._health_loop_running:
             await asyncio.sleep(tracker.retry_interval_s)
             await self._retry_overdue_pending_subscriptions(tracker)
+            await self._retry_due_failed_subscriptions(tracker)
             self._log_stale_subscriptions(tracker)
+            await self._recover_dark_subscriptions(tracker)
 
     async def _retry_overdue_pending_subscriptions(
         self, tracker: SubscriptionHealthTracker
     ) -> None:
-        """Retry overdue pending subscribes and due slow-retry failures.
+        """Retry pending subscriptions whose ACK timer expired.
 
-        Two passes run each tick. The first retries pending subscriptions
-        whose ACK timer expired; when a subscription exhausts its fast
-        budget it logs ERROR once (its first failure) and is left to back
-        off rather than dying. A failure log is emitted only when the
-        attempt itself drove the entry to a scheduled ``failed`` state;
-        an overdue entry that the concurrent reader confirmed (or
-        explicitly rejected) between listing and this attempt is skipped
-        silently, so a healthy recovery never produces a false failure
-        alert. The second pass reissues failed subscriptions whose
-        backoff delay has elapsed, giving each one more ACK window; these
-        slow retries and any subsequent re-failures log at DEBUG so a
-        permanently unsupported subscription self-heals if it ever
-        becomes available without spamming ERROR forever.
+        Each overdue entry consumes one fast retry attempt, guarded by the
+        ``expected`` identity check so a concurrent reconnect replay that
+        replaced the entry is not stale-retried. A genuine fast-budget
+        exhaustion is logged via :meth:`_log_pending_backoff`; an entry the
+        concurrent reader confirmed or rejected mid-loop is skipped
+        silently so a healthy recovery never produces a false failure alert.
 
         Args:
-            tracker: Health tracker that owns subscription retry state.
+            tracker: Health tracker that owns pending subscription state.
 
         Returns:
             None.
@@ -232,35 +227,64 @@ class ExchangeClientBase(ABC):
             None.
         """
         for entry in tracker.list_overdue_pending():
-            if not tracker.mark_retry_attempt(entry.channel, entry.symbol, expected=entry):
-                if entry.status == "failed" and entry.next_attempt_at is not None:
-                    if entry.slow_retry_count == 0:
-                        logger.error(
-                            "{}: subscribe failed for {}/{} after {} retries; backing off",
-                            self.exchange_name,
-                            entry.channel,
-                            entry.symbol,
-                            entry.retry_count,
-                        )
-                    else:
-                        logger.debug(
-                            "{}: {}/{} still unconfirmed after slow retry {}; backing off",
-                            self.exchange_name,
-                            entry.channel,
-                            entry.symbol,
-                            entry.slow_retry_count,
-                        )
-                continue
-            try:
-                await self._retry_subscribe(entry.channel, entry.symbol)
-            except Exception as exc:
-                logger.warning(
-                    "{}: retry subscribe raised for {}/{}: {}",
-                    self.exchange_name,
-                    entry.channel,
-                    entry.symbol,
-                    exc,
-                )
+            if tracker.mark_retry_attempt(entry.channel, entry.symbol, expected=entry):
+                await self._rate_limited_retry_subscribe(tracker, entry.channel, entry.symbol)
+            else:
+                self._log_pending_backoff(entry)
+
+    def _log_pending_backoff(self, entry: _SymbolEntry) -> None:
+        """Log a fast-budget exhaustion, skipping mid-loop recoveries.
+
+        Only an entry this attempt itself drove to a scheduled ``failed``
+        state is logged: a first exhaustion at ERROR, a re-failure after a
+        slow retry at DEBUG. An entry that recovered (now confirmed) or was
+        explicitly rejected (failed but unscheduled) mid-loop stays silent.
+
+        Args:
+            entry: The overdue entry whose retry attempt returned False.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+        if entry.status != "failed" or entry.next_attempt_at is None:
+            return
+        if entry.slow_retry_count == 0:
+            logger.error(
+                "{}: subscribe failed for {}/{} after {} retries; backing off",
+                self.exchange_name,
+                entry.channel,
+                entry.symbol,
+                entry.retry_count,
+            )
+        else:
+            logger.debug(
+                "{}: {}/{} still unconfirmed after slow retry {}; backing off",
+                self.exchange_name,
+                entry.channel,
+                entry.symbol,
+                entry.slow_retry_count,
+            )
+
+    async def _retry_due_failed_subscriptions(self, tracker: SubscriptionHealthTracker) -> None:
+        """Reissue failed subscriptions whose slow-retry backoff elapsed.
+
+        Each gets one more ACK window; these slow retries and any
+        subsequent re-failures log at DEBUG so a permanently unsupported
+        subscription self-heals if it ever becomes available without
+        spamming ERROR forever.
+
+        Args:
+            tracker: Health tracker that owns failed subscription state.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
         for entry in tracker.list_due_failed():
             if not tracker.mark_slow_retry(entry.channel, entry.symbol):
                 continue
@@ -271,16 +295,75 @@ class ExchangeClientBase(ABC):
                 entry.symbol,
                 entry.slow_retry_count,
             )
-            try:
-                await self._retry_subscribe(entry.channel, entry.symbol)
-            except Exception as exc:
-                logger.warning(
-                    "{}: slow retry subscribe raised for {}/{}: {}",
-                    self.exchange_name,
-                    entry.channel,
-                    entry.symbol,
-                    exc,
-                )
+            await self._rate_limited_retry_subscribe(tracker, entry.channel, entry.symbol)
+
+    async def _recover_dark_subscriptions(self, tracker: SubscriptionHealthTracker) -> None:
+        """Re-subscribe confirmed subscriptions that have gone dark.
+
+        A confirmed channel that has delivered no data for far longer than
+        the stale threshold (per
+        :meth:`SubscriptionHealthTracker.list_due_dark_recovery`) is
+        re-subscribed per-symbol to nudge the exchange into resuming the
+        stream. Wildcard-seeded entries are excluded by the tracker, and the
+        ``expected`` identity guard skips an entry a concurrent reader
+        changed mid-loop.
+
+        Args:
+            tracker: Health tracker that owns confirmed subscription state.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+        for entry in tracker.list_due_dark_recovery():
+            if not tracker.mark_dark_recovery(entry.channel, entry.symbol, expected=entry):
+                continue
+            logger.info(
+                "{}: dark-recovery re-subscribe {}/{} (attempt {})",
+                self.exchange_name,
+                entry.channel,
+                entry.symbol,
+                entry.dark_recovery_count,
+            )
+            await self._rate_limited_retry_subscribe(tracker, entry.channel, entry.symbol)
+
+    async def _rate_limited_retry_subscribe(
+        self, tracker: SubscriptionHealthTracker, channel: str, symbol: str
+    ) -> None:
+        """Issue one re-subscribe, exception-guarded and rate-spaced.
+
+        Shared by the pending, slow-failed and dark-recovery passes. A
+        subscribe exception is caught and logged WARNING (a transient send
+        failure must not abort the sweep), then the loop sleeps
+        ``retry_subscribe_spacing_s`` so consecutive re-subscribes stay
+        under the exchange per-connection subscribe message-rate limit
+        (the cause of the observed "Exceeded msg rate" storms).
+
+        Args:
+            tracker: Health tracker supplying the spacing interval.
+            channel: Tracker channel key.
+            symbol: Wire-format symbol or product id.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
+        try:
+            await self._retry_subscribe(channel, symbol)
+        except Exception as exc:
+            logger.warning(
+                "{}: retry subscribe raised for {}/{}: {}",
+                self.exchange_name,
+                channel,
+                symbol,
+                exc,
+            )
+        if tracker.retry_subscribe_spacing_s > 0:
+            await asyncio.sleep(tracker.retry_subscribe_spacing_s)
 
     def _log_stale_subscriptions(self, tracker: SubscriptionHealthTracker) -> None:
         """Emit aggregate and per-entry diagnostics for stale data.

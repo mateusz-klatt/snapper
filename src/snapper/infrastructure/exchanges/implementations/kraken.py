@@ -825,7 +825,11 @@ class KrakenExchangeClient(ExchangeClientBase):
           :meth:`SubscriptionHealthTracker.list_stale_data` (dark detection,
           log-once) and persisted via the feed-health snapshot, but is NEVER
           pending-retried — so no false per-symbol re-subscribe traffic and
-          no false ``failed`` state. The literal ``"*"`` sentinel is never
+          no false ``failed`` state. These entries are seeded
+          ``dark_recovery_enabled=False`` so dark auto-recovery also skips
+          them: there is no per-symbol ticker subscription to re-issue under
+          the wildcard, and the wildcard itself is replayed on reconnect.
+          The literal ``"*"`` sentinel is never
           inserted; only the resolved wire symbols are. The universe is
           resolved from :func:`get_available_kraken_symbols` (the same
           market-data-capable set the trade and ohlc channels expand ``["*"]``
@@ -847,7 +851,9 @@ class KrakenExchangeClient(ExchangeClientBase):
                 native_to_kraken_websocket(symbol) for symbol in get_available_kraken_symbols()
             ]
             for ws_symbol in universe:
-                self._health_tracker.mark_confirmed("ticker", ws_symbol)
+                self._health_tracker.mark_confirmed(
+                    "ticker", ws_symbol, dark_recovery_enabled=False
+                )
             return len(universe)
         for ws_symbol in ws_symbols:
             self._health_tracker.mark_pending("ticker", ws_symbol)
@@ -1474,6 +1480,20 @@ class KrakenExchangeClient(ExchangeClientBase):
             if not isinstance(symbol, str):
                 logger.debug("Received ticker control message without symbol: {}", message)
                 return
+            if symbol == "*":
+                if _subscription_ack_confirms(ticker_ack.success, ticker_ack.error):
+                    logger.debug(
+                        "Ignoring confirming wildcard ticker ack; universe health is owned "
+                        "by _seed_ticker_health and the literal '*' is never tracked: {}",
+                        message,
+                    )
+                else:
+                    logger.warning(
+                        "Wildcard ticker subscribe failed (error={}); universe health is owned "
+                        "by _seed_ticker_health, the literal '*' is not tracked",
+                        ticker_ack.error or _UNKNOWN_SUBSCRIPTION_ERROR,
+                    )
+                return
             if _subscription_ack_confirms(ticker_ack.success, ticker_ack.error):
                 self._health_tracker.mark_confirmed("ticker", symbol)
                 return
@@ -2021,7 +2041,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         Raises:
             ccxt.RateLimitExceeded: If max retries exhausted.
         """
-        logger.warning(f"Rate limit exceeded, retrying in {base_delay * (2 ** attempt)}s")
+        logger.warning(f"Rate limit exceeded, retrying in {base_delay * (2**attempt)}s")
         if attempt < max_retries - 1:
             attempt += 1
             await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
@@ -2045,7 +2065,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         Raises:
             Exception: If max retries exhausted (re-raises original).
         """
-        logger.warning(f"Network error: {error}, retrying in {base_delay * (2 ** attempt)}s")
+        logger.warning(f"Network error: {error}, retrying in {base_delay * (2**attempt)}s")
         self._circuit_failures += 1
         if attempt < max_retries - 1:
             attempt += 1

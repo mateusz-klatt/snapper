@@ -208,6 +208,46 @@ class TestKrakenSpotSubscriptionAck:
         client._handle_ticker_subscription_ack(message, {"channel": "ticker"})
         client._health_tracker.mark_confirmed.assert_not_called()
 
+    def test_ticker_ack_ignores_literal_wildcard_symbol(self, client: KrakenExchangeClient) -> None:
+        """A literal '*' ticker ACK never creates a tracker entry.
+
+        Given: A ticker subscribe ACK whose result symbol is the wildcard
+            sentinel '*',
+        When: _handle_ticker_subscription_ack is called,
+        Then: Neither mark_confirmed nor mark_failed is called, so no
+            dark-recoverable ('ticker', '*') row is created (wildcard health
+            is owned by _seed_ticker_health).
+        """
+        message = {
+            "method": "subscribe",
+            "success": True,
+            "result": {"channel": "ticker", "symbol": "*"},
+        }
+        client._handle_ticker_subscription_ack(message, {"channel": "ticker", "symbol": "*"})
+        client._health_tracker.mark_confirmed.assert_not_called()
+        client._health_tracker.mark_failed.assert_not_called()
+
+    def test_ticker_ack_failed_wildcard_warns_without_tracker_mutation(
+        self, client: KrakenExchangeClient
+    ) -> None:
+        """A failing wildcard ticker ACK warns but creates no tracker row.
+
+        Given: A non-confirming ticker subscribe ACK with the wildcard
+            sentinel '*' (e.g. an Exceeded msg rate throttle),
+        When: _handle_ticker_subscription_ack is called,
+        Then: It surfaces the failure (so a dead wildcard subscribe is
+            visible) but does NOT mark the literal '*' confirmed or failed.
+        """
+        message = {
+            "method": "subscribe",
+            "success": False,
+            "error": "Exceeded msg rate",
+            "result": {"channel": "ticker", "symbol": "*"},
+        }
+        client._handle_ticker_subscription_ack(message, {"channel": "ticker", "symbol": "*"})
+        client._health_tracker.mark_confirmed.assert_not_called()
+        client._health_tracker.mark_failed.assert_not_called()
+
     def test_ticker_ack_validation_error_does_not_touch_tracker(
         self, client: KrakenExchangeClient
     ) -> None:
