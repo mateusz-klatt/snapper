@@ -21,6 +21,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
@@ -46,6 +47,9 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _LAST_CLOSE_CODE
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _PATCH_APPLIED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _PATCH_LOGGED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _PENDING_RETRY_AFTER_S
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _RESUBSCRIBE_PACE_PATCH_APPLIED
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _RESUBSCRIBE_PACE_PATCH_LOGGED
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _RESUBSCRIBE_PACE_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RETRY_AFTER_MAX_SECONDS
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RETRY_AFTER_MIN_SECONDS
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _kraken_futures_ws
@@ -54,6 +58,7 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_get_rec
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_init
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_manage_subscriptions
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_reconnect
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_recover_subscriptions
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_run
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _unregister_connector
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _wrap_connect_factory
@@ -62,6 +67,7 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import (
     apply_kraken_already_subscribed_filter,
 )
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_futures_pool_routing
+from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_resubscribe_pacing
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
 from snapper.infrastructure.exchanges.kraken_sdk_patches import get_registered_publisher
 from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_patches_status
@@ -1916,27 +1922,33 @@ class TestLogKrakenSdkPatchesStatus:
             _PATCH_APPLIED[0],
             _FUTURES_PATCH_APPLIED[0],
             _ALREADY_SUBSCRIBED_PATCH_APPLIED[0],
+            _RESUBSCRIBE_PACE_PATCH_APPLIED[0],
         )
         saved_logged = (
             _PATCH_LOGGED[0],
             _FUTURES_PATCH_LOGGED[0],
             _ALREADY_SUBSCRIBED_PATCH_LOGGED[0],
+            _RESUBSCRIBE_PACE_PATCH_LOGGED[0],
         )
         saved_sink_ready = _FILE_SINK_READY[0]
         _PATCH_APPLIED[0] = False
         _FUTURES_PATCH_APPLIED[0] = False
         _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] = False
+        _RESUBSCRIBE_PACE_PATCH_APPLIED[0] = False
         _PATCH_LOGGED[0] = False
         _FUTURES_PATCH_LOGGED[0] = False
         _ALREADY_SUBSCRIBED_PATCH_LOGGED[0] = False
+        _RESUBSCRIBE_PACE_PATCH_LOGGED[0] = False
         _FILE_SINK_READY[0] = True
         yield
         _PATCH_APPLIED[0] = saved_applied[0]
         _FUTURES_PATCH_APPLIED[0] = saved_applied[1]
         _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] = saved_applied[2]
+        _RESUBSCRIBE_PACE_PATCH_APPLIED[0] = saved_applied[3]
         _PATCH_LOGGED[0] = saved_logged[0]
         _FUTURES_PATCH_LOGGED[0] = saved_logged[1]
         _ALREADY_SUBSCRIBED_PATCH_LOGGED[0] = saved_logged[2]
+        _RESUBSCRIBE_PACE_PATCH_LOGGED[0] = saved_logged[3]
         _FILE_SINK_READY[0] = saved_sink_ready
 
     def test_all_flags_false_emits_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
@@ -1975,6 +1987,26 @@ class TestLogKrakenSdkPatchesStatus:
         assert "kraken-sdk futures pool routing applied" not in messages
         assert "kraken-sdk Already-subscribed filter applied" not in messages
         assert _PATCH_LOGGED[0] is True
+
+    def test_resubscribe_pacing_flag_emits_line(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Spec — the re-subscribe pacing flag drives its own INFO line.
+
+        Given the sink is ready and only ``_RESUBSCRIBE_PACE_PATCH_APPLIED[0]``
+            is True,
+        When ``log_kraken_sdk_patches_status`` is invoked,
+        Then exactly the pacing ``applied`` line is emitted and its LOGGED
+            flag flips True, with no cross-talk to the other patches.
+        """
+        _RESUBSCRIBE_PACE_PATCH_APPLIED[0] = True
+        handler_id = _logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            log_kraken_sdk_patches_status()
+        finally:
+            _logger.remove(handler_id)
+        messages = [r.getMessage() for r in caplog.records]
+        assert "kraken-sdk reconnect re-subscribe pacing applied" in messages
+        assert "kraken-sdk Retry-After honoring applied" not in messages
+        assert _RESUBSCRIBE_PACE_PATCH_LOGGED[0] is True
 
     def test_all_flags_emit_three_lines_in_documented_order(
         self, caplog: pytest.LogCaptureFixture
@@ -2105,3 +2137,156 @@ class TestLogKrakenSdkPatchesStatus:
         applied_messages = [r.getMessage() for r in caplog.records if "applied" in r.getMessage()]
         assert applied_messages == ["kraken-sdk Retry-After honoring applied"]
         assert _PATCH_LOGGED[0] is True
+
+
+class TestKrakenResubscribePacing:
+    """Tests for the paced reconnect re-subscribe SDK patch."""
+
+    @staticmethod
+    def _connector(subscriptions: list[Any], *, is_auth: bool = False) -> MagicMock:
+        """Build a fake ConnectSpotWebsocket exposing the recover-loop surface."""
+        fake = MagicMock()
+        fake.is_auth = is_auth
+        fake._subscriptions = subscriptions
+        fake.client.subscribe = AsyncMock()
+        return fake
+
+    def test_recover_paces_subscribes_between_sends(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Recovery re-subscribes every tracked sub, sleeping between sends.
+
+        Given: A public connector with three tracked subscriptions and a
+            ready event,
+        When: the patched _recover_subscriptions runs,
+        Then: subscribe is awaited once per subscription in order, and sleep
+            is awaited at the pacing interval between consecutive sends only
+            (n-1 times).
+        """
+        subs: list[Any] = [
+            {"channel": "ticker", "symbol": ["A"]},
+            {"channel": "ticker", "symbol": ["B"]},
+            {"channel": "trade", "symbol": ["C"]},
+        ]
+        fake = self._connector(subs)
+        sleep_mock = AsyncMock()
+        monkeypatch.setattr(kraken_sdk_patches.asyncio, "sleep", sleep_mock)
+        event = asyncio.Event()
+        event.set()
+        asyncio.run(_patched_recover_subscriptions(fake, event))
+        sent = [call.kwargs["params"] for call in fake.client.subscribe.await_args_list]
+        assert sent == subs
+        assert sleep_mock.await_count == 2
+        assert sleep_mock.await_args_list[0].args == (_RESUBSCRIBE_PACE_S,)
+
+    def test_recover_empty_cache_sends_and_sleeps_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty subscription cache is a no-op.
+
+        Given: An authenticated connector with no tracked subscriptions,
+        When: the patched _recover_subscriptions runs,
+        Then: no subscribe and no sleep are awaited.
+        """
+        fake = self._connector([], is_auth=True)
+        sleep_mock = AsyncMock()
+        monkeypatch.setattr(kraken_sdk_patches.asyncio, "sleep", sleep_mock)
+        event = asyncio.Event()
+        event.set()
+        asyncio.run(_patched_recover_subscriptions(fake, event))
+        assert fake.client.subscribe.await_count == 0
+        assert sleep_mock.await_count == 0
+
+    def test_recover_single_sub_does_not_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A single tracked subscription is re-sent without a trailing sleep.
+
+        Given: A connector with exactly one tracked subscription,
+        When: the patched _recover_subscriptions runs,
+        Then: subscribe is awaited once and sleep is never awaited.
+        """
+        fake = self._connector([{"channel": "ticker", "symbol": ["A"]}])
+        sleep_mock = AsyncMock()
+        monkeypatch.setattr(kraken_sdk_patches.asyncio, "sleep", sleep_mock)
+        event = asyncio.Event()
+        event.set()
+        asyncio.run(_patched_recover_subscriptions(fake, event))
+        assert fake.client.subscribe.await_count == 1
+        assert sleep_mock.await_count == 0
+
+    def test_recover_snapshots_cache_before_iterating(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cache is snapshotted so a mid-sweep append is not re-sent.
+
+        Given: A connector whose subscribe callback appends a new entry to
+            the live subscription cache,
+        When: the patched _recover_subscriptions runs,
+        Then: only the originally-tracked subscriptions are re-sent — the
+            concurrent append is not picked up by this sweep.
+        """
+        subs: list[Any] = [
+            {"channel": "ticker", "symbol": ["A"]},
+            {"channel": "trade", "symbol": ["B"]},
+        ]
+        fake = self._connector(subs)
+
+        async def _append(*_args: Any, **_kwargs: Any) -> None:
+            fake._subscriptions.append({"channel": "ticker", "symbol": ["LATE"]})
+
+        fake.client.subscribe = AsyncMock(side_effect=_append)
+        monkeypatch.setattr(kraken_sdk_patches.asyncio, "sleep", AsyncMock())
+        event = asyncio.Event()
+        event.set()
+        asyncio.run(_patched_recover_subscriptions(fake, event))
+        assert fake.client.subscribe.await_count == 2
+
+    def test_apply_sets_flag_and_rebinds(self) -> None:
+        """apply_kraken_resubscribe_pacing installs the patched method.
+
+        Given: The pacing patch flag reset to False,
+        When: apply_kraken_resubscribe_pacing is called,
+        Then: the flag is True and ConnectSpotWebsocket._recover_subscriptions
+            is the patched coroutine.
+        """
+        _RESUBSCRIBE_PACE_PATCH_APPLIED[0] = False
+        try:
+            apply_kraken_resubscribe_pacing()
+            assert _RESUBSCRIBE_PACE_PATCH_APPLIED[0] is True
+            assert ConnectSpotWebsocket._recover_subscriptions is _patched_recover_subscriptions
+        finally:
+            _RESUBSCRIBE_PACE_PATCH_APPLIED[0] = True
+
+    def test_second_apply_is_noop(self) -> None:
+        """A second apply is a no-op once the flag is set.
+
+        Given: The pacing patch already installed (flag True),
+        When: apply_kraken_resubscribe_pacing is called again,
+        Then: it returns early, leaving the flag True.
+        """
+        _RESUBSCRIBE_PACE_PATCH_APPLIED[0] = True
+        apply_kraken_resubscribe_pacing()
+        assert _RESUBSCRIBE_PACE_PATCH_APPLIED[0] is True
+
+    def test_recover_waits_for_ready_event(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Recovery blocks on the readiness event before any re-subscribe.
+
+        Given: A connector with one tracked subscription and an event that is
+            not yet set,
+        When: the patched _recover_subscriptions is scheduled and the loop
+            yields once,
+        Then: no subscribe is sent until the event is set, after which the
+            sweep completes with exactly one send.
+        """
+        fake = self._connector([{"channel": "ticker", "symbol": ["A"]}])
+        monkeypatch.setattr(kraken_sdk_patches.asyncio, "sleep", AsyncMock())
+        event = asyncio.Event()
+
+        async def _drive() -> int:
+            task = asyncio.ensure_future(_patched_recover_subscriptions(fake, event))
+            await asyncio.sleep(0)
+            before_count: int = fake.client.subscribe.await_count
+            event.set()
+            await task
+            return before_count
+
+        before = asyncio.run(_drive())
+        assert before == 0
+        assert fake.client.subscribe.await_count == 1

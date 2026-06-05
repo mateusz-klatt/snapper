@@ -34,6 +34,7 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _CURRENT_PUBLISH
 from snapper.infrastructure.exchanges.kraken_sdk_patches import (
     apply_kraken_already_subscribed_filter,
 )
+from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_resubscribe_pacing
 from snapper.infrastructure.symbols.functions import get_available_kraken_equities_symbols
 from snapper.infrastructure.symbols.functions import native_to_kraken_equities_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
@@ -47,6 +48,14 @@ installed it. Required here because `KrakenEquitiesExchangeClient` reuses
 with a different ``ws_url``. An equities-only process that does not import
 `snapper.messaging.publishers.kraken` would otherwise leave the SDK warning
 flood unsuppressed for equities subscriptions.
+"""
+
+apply_kraken_resubscribe_pacing()
+"""Install the kraken-sdk reconnect re-subscribe pacing at module import.
+
+Idempotent. Paces the SDK's post-reconnect per-symbol subscription replay so
+a large Equities universe does not burst past Kraken's subscribe
+message-rate limit and dark the ticker stream on reconnect.
 """
 
 _CME_DAILY_BREAK_START = datetime_time(hour=21)

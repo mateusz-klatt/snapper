@@ -114,6 +114,31 @@ _ALREADY_SUBSCRIBED_PATCH_LOGGED: list[bool] = [False]
 filter patch's ``applied`` INFO confirmation has been emitted
 post-sink-ready."""
 
+_RESUBSCRIBE_PACE_PATCH_APPLIED: list[bool] = [False]
+"""Single-element list flag tracking whether the reconnect re-subscribe
+pacing patch is installed."""
+
+_RESUBSCRIBE_PACE_PATCH_LOGGED: list[bool] = [False]
+"""Single-element list flag tracking whether the re-subscribe pacing
+patch's ``applied`` INFO confirmation has been emitted post-sink-ready."""
+
+_RESUBSCRIBE_PACE_S: Final[float] = 0.2
+"""Seconds slept between consecutive per-subscription re-subscribes while
+the kraken-sdk recovers its subscription cache after a reconnect.
+
+The SDK's stock ``ConnectSpotWebsocket._recover_subscriptions`` replays the
+entire locally-tracked per-symbol cache in a tight no-delay loop. On a large
+universe (~340 Kraken Equities ticker+trade subscriptions) that single burst
+exceeds Kraken's per-connection subscribe message-rate limit ("Exceeded msg
+rate"); the rejected re-subscribes leave channels un-ACKed and the stream
+goes dark (observed 2026-06-05: a load-induced reconnect darkened the
+Equities ticker ~17 min). 0.2 s (5 msg/s) keeps recovery under the limit with
+margin — the Spot path already paces its 100-symbol chunk messages 0.1 s
+apart — while still recovering ~340 subscriptions in well under two minutes.
+The app-level health-loop re-subscribes are separately paced by
+``retry_subscribe_spacing_s``; this constant governs only the SDK's own
+reconnect replay path, which those app-level guards do not cover."""
+
 _ALREADY_SUBSCRIBED_ERROR: Final[str] = "Already subscribed"
 """Kraken Spot WS server response 'error' value emitted when subscribing
 to a feed already present in the SDK's local subscription cache.
@@ -645,6 +670,74 @@ def apply_kraken_already_subscribed_filter() -> None:
     log_kraken_sdk_patches_status()
 
 
+async def _patched_recover_subscriptions(self: ConnectSpotWebsocket, event: asyncio.Event) -> None:
+    """Paced replacement for ``ConnectSpotWebsocket._recover_subscriptions``.
+
+    The SDK's stock implementation replays the entire locally-tracked
+    per-symbol subscription cache in a tight loop with no inter-message
+    spacing. On a large universe (~340 Kraken Equities ticker+trade
+    subscriptions) a single reconnect bursts ~340 subscribe messages
+    back-to-back, exceeding Kraken's per-connection subscribe message-rate
+    limit ("Exceeded msg rate"); the rejected re-subscribes leave those
+    channels un-ACKed and the stream goes dark with only slow recovery
+    (observed 2026-06-05 — a load-induced reconnect darkened the Equities
+    ticker for ~17 min). The app-level health-loop re-subscribes are already
+    paced by ``retry_subscribe_spacing_s``, but that guard does not cover
+    this SDK reconnect replay path.
+
+    This replacement preserves the SDK's recovery semantics — re-subscribe
+    every tracked subscription, in order, once the readiness event is set —
+    but sleeps ``_RESUBSCRIBE_PACE_S`` between consecutive sends so the burst
+    stays under the rate limit. The cache is snapshotted before iterating so
+    a concurrent ``_manage_subscriptions`` append cannot disturb the sweep,
+    and the SDK's per-symbol ``OK`` log plus full-cache dump are collapsed to
+    a single count-based summary to keep reconnects quiet.
+
+    Args:
+        self: The bound ``ConnectSpotWebsocket`` connector being recovered.
+        event: Readiness event the connector sets once the socket is open.
+
+    Returns:
+        None.
+
+    Raises:
+        None.
+    """
+    scope = "authenticated" if self.is_auth else "public"
+    subscriptions = list(self._subscriptions)
+    total = len(subscriptions)
+    logger.info("kraken-sdk recover {} subscriptions ({}): waiting", scope, total)
+    await event.wait()
+    for index, subscription in enumerate(subscriptions):
+        await self.client.subscribe(params=subscription)
+        if index < total - 1:
+            await asyncio.sleep(_RESUBSCRIBE_PACE_S)
+    logger.info("kraken-sdk recover {} subscriptions ({}): done", scope, total)
+
+
+def apply_kraken_resubscribe_pacing() -> None:
+    """Install the paced reconnect re-subscribe patch (idempotent).
+
+    Replaces ``ConnectSpotWebsocket._recover_subscriptions`` with
+    :func:`_patched_recover_subscriptions` so the SDK's post-reconnect cache
+    replay paces its per-symbol subscribe sends by ``_RESUBSCRIBE_PACE_S``
+    instead of bursting them, keeping recovery under Kraken's per-connection
+    subscribe message-rate limit and preventing the reconnect-storm channel
+    darkening observed 2026-06-05.
+
+    Returns:
+        None.
+
+    Raises:
+        None.
+    """
+    if _RESUBSCRIBE_PACE_PATCH_APPLIED[0]:
+        return
+    setattr(ConnectSpotWebsocket, "_recover_subscriptions", _patched_recover_subscriptions)
+    _RESUBSCRIBE_PACE_PATCH_APPLIED[0] = True
+    log_kraken_sdk_patches_status()
+
+
 def log_kraken_sdk_patches_status() -> None:
     """Emit ``applied`` confirmations for kraken-sdk patches that are active.
 
@@ -697,3 +790,6 @@ def log_kraken_sdk_patches_status() -> None:
     if _ALREADY_SUBSCRIBED_PATCH_APPLIED[0] and not _ALREADY_SUBSCRIBED_PATCH_LOGGED[0]:
         logger.info("kraken-sdk Already-subscribed filter applied")
         _ALREADY_SUBSCRIBED_PATCH_LOGGED[0] = True
+    if _RESUBSCRIBE_PACE_PATCH_APPLIED[0] and not _RESUBSCRIBE_PACE_PATCH_LOGGED[0]:
+        logger.info("kraken-sdk reconnect re-subscribe pacing applied")
+        _RESUBSCRIBE_PACE_PATCH_LOGGED[0] = True

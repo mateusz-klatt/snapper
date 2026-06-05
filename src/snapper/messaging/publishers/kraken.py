@@ -50,12 +50,14 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _RECONNECT_WINDO
 from snapper.infrastructure.exchanges.kraken_sdk_patches import (
     apply_kraken_already_subscribed_filter,
 )
+from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_resubscribe_pacing
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 from snapper.messaging.publishers.base import MarketDataPublisherService
 
 apply_kraken_retry_after_honoring()
 apply_kraken_already_subscribed_filter()
+apply_kraken_resubscribe_pacing()
 """Install kraken-sdk patches at module import.
 
 Idempotent — calling multiple times is a no-op. Importing this module from
@@ -68,6 +70,9 @@ the Phase A rollout of
 * :func:`apply_kraken_already_subscribed_filter` — downgrades benign
   ``Already subscribed`` race-condition warnings from the SDK to DEBUG
   so real subscription failures stay visible (Phase B).
+* :func:`apply_kraken_resubscribe_pacing` — paces the SDK's post-reconnect
+  per-symbol subscription replay so a large universe does not burst past
+  Kraken's subscribe message-rate limit and dark the stream on reconnect.
 """
 
 _FORCE_WS_RESTART_BACKOFF_S: Final[float] = 5.0
