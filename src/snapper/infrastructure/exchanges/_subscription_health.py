@@ -155,6 +155,13 @@ class SubscriptionHealthTracker:
             loop leaves between consecutive re-subscribe sends (overdue
             pending, slow-failed, and dark recovery) to stay under the
             exchange per-connection subscribe message-rate limit.
+        dark_recovery_channels: Channels eligible for dark auto-recovery.
+            Only CONTINUOUS channels belong here (default ``{"ticker"}``):
+            a ticker updates on every quote, so silence past the threshold
+            genuinely means the stream broke. Event-driven channels
+            (``trade``, ``ohlc:*``) are intentionally excluded — for an
+            illiquid pair "no data" is the normal sparse state, not a
+            broken subscription, so re-subscribing them is pointless churn.
     """
 
     def __init__(
@@ -170,6 +177,7 @@ class SubscriptionHealthTracker:
         slow_retry_jitter: float = 0.2,
         dark_recovery_threshold_multiplier: float = 6.0,
         retry_subscribe_spacing_s: float = 1.0,
+        dark_recovery_channels: frozenset[str] = frozenset({"ticker"}),
     ) -> None:
         """Initialize subscription health tracking.
 
@@ -194,6 +202,11 @@ class SubscriptionHealthTracker:
                 be dark before auto-recovery re-subscribes it.
             retry_subscribe_spacing_s: Non-negative seconds the health
                 loop spaces between consecutive re-subscribe sends.
+            dark_recovery_channels: Channels eligible for dark
+                auto-recovery; only continuous channels (default
+                ``{"ticker"}``) where silence means a broken stream.
+                Event-driven channels (``trade``, ``ohlc:*``) are
+                excluded because sparse data is their normal state.
 
         Returns:
             None.
@@ -236,6 +249,7 @@ class SubscriptionHealthTracker:
         self.slow_retry_jitter = slow_retry_jitter
         self.dark_recovery_threshold_multiplier = dark_recovery_threshold_multiplier
         self.retry_subscribe_spacing_s = retry_subscribe_spacing_s
+        self.dark_recovery_channels = dark_recovery_channels
         self._max_backoff_exponent = (
             max(0, ceil(log(slow_retry_cap_s / slow_retry_base_s) / log(slow_retry_multiplier)))
             if slow_retry_multiplier > 1.0
@@ -567,16 +581,17 @@ class SubscriptionHealthTracker:
         Returns:
             True when a still-dark confirmed entry was transitioned to
             pending and the caller should issue a subscribe. False when the
-            entry is missing, not confirmed, not dark-recovery-enabled, no
-            longer the ``expected`` object, or no longer dark (recovered
-            in place since listing).
+            entry is missing, not confirmed, not dark-recovery-eligible
+            (disabled flag or non-recoverable channel), no longer the
+            ``expected`` object, or no longer dark (recovered in place
+            since listing).
 
         Raises:
             ValueError: If ``channel`` or ``symbol`` is empty.
         """
         key = self._validate_key(channel, symbol)
         entry = self._entries.get(key)
-        if entry is None or entry.status != "confirmed" or not entry.dark_recovery_enabled:
+        if entry is None or entry.status != "confirmed" or not self._dark_recovery_eligible(entry):
             return False
         if expected is not None and entry is not expected:
             return False
@@ -703,9 +718,11 @@ class SubscriptionHealthTracker:
         The multiplier keeps recovery well above the stale-logging
         threshold so legitimately quiet symbols are surfaced as
         diagnostics long before they are ever re-subscribed, and the
-        per-entry backoff paces a channel that keeps re-darkening.
-        Wildcard-seeded entries (``dark_recovery_enabled`` False) are
-        excluded because they have no per-symbol subscription to re-issue.
+        per-entry backoff paces a channel that keeps re-darkening. Only
+        eligible entries qualify (see :meth:`_dark_recovery_eligible`):
+        wildcard-seeded entries have no per-symbol subscription to
+        re-issue, and event-driven channels (``trade``, ``ohlc:*``) are
+        excluded because for them silence is normal, not a broken stream.
 
         Args:
             now: Optional monotonic timestamp for deterministic tests.
@@ -722,7 +739,7 @@ class SubscriptionHealthTracker:
             entry
             for entry in self._entries.values()
             if entry.status == "confirmed"
-            and entry.dark_recovery_enabled
+            and self._dark_recovery_eligible(entry)
             and self._dark_recovery_due(entry, current)
         ]
 
@@ -822,6 +839,28 @@ class SubscriptionHealthTracker:
             entry.dark_recovery_count - 1,
             f"dark|{entry.channel}|{entry.symbol}|{entry.dark_recovery_count}",
         )
+
+    def _dark_recovery_eligible(self, entry: _SymbolEntry) -> bool:
+        """Return True when an entry's channel and flags allow dark recovery.
+
+        Two gates, both independent of timing: the per-entry
+        ``dark_recovery_enabled`` flag (False for wildcard-seeded entries
+        with no per-symbol subscription to re-issue) and channel type. Only
+        continuous channels in :attr:`dark_recovery_channels` qualify; for
+        event-driven channels (``trade``, ``ohlc:*``) silence is the normal
+        sparse state, so re-subscribing them would churn quiet symbols
+        without recovering anything.
+
+        Args:
+            entry: Confirmed entry to evaluate.
+
+        Returns:
+            True when the entry may be dark-recovered subject to timing.
+
+        Raises:
+            None.
+        """
+        return entry.dark_recovery_enabled and entry.channel in self.dark_recovery_channels
 
     def _dark_recovery_due(self, entry: _SymbolEntry, now: float) -> bool:
         """Return True when a confirmed entry is dark long enough to recover.

@@ -958,10 +958,12 @@ class TestDarkRecovery:
     def test_list_due_dark_recovery_filters(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Only confirmed, enabled, sufficiently-dark entries are due.
 
-        Given: A dark recoverable entry, a wildcard (disabled) entry, a
-            freshly-fed entry, and a pending entry,
+        Given: A dark recoverable ticker, a wildcard (disabled) entry, a
+            dark event-driven (trade) entry, a freshly-fed entry, and a
+            pending entry,
         When: list_due_dark_recovery is queried past the recovery threshold,
-        Then: Only the dark recoverable entry is returned.
+        Then: Only the dark recoverable ticker is returned; the dark trade
+            entry is excluded by channel.
         """
         tracker = SubscriptionHealthTracker(
             data_stale_threshold_s=100.0,
@@ -969,14 +971,15 @@ class TestDarkRecovery:
             slow_retry_jitter=0.0,
         )
         _set_clock(monkeypatch, 0.0)
-        tracker.mark_confirmed("trade", "DARK/USD")
+        tracker.mark_confirmed("ticker", "DARK/USD")
         tracker.mark_confirmed("ticker", "WILD/USD", dark_recovery_enabled=False)
-        tracker.mark_confirmed("trade", "FRESH/USD")
-        tracker.mark_pending("trade", "PEND/USD")
+        tracker.mark_confirmed("trade", "EVENT/USD")
+        tracker.mark_confirmed("ticker", "FRESH/USD")
+        tracker.mark_pending("ticker", "PEND/USD")
         _set_clock(monkeypatch, 380.0)
-        tracker.mark_data_seen("trade", "FRESH/USD")
+        tracker.mark_data_seen("ticker", "FRESH/USD")
         due = tracker.list_due_dark_recovery(now=400.0)
-        assert [(entry.channel, entry.symbol) for entry in due] == [("trade", "DARK/USD")]
+        assert [(entry.channel, entry.symbol) for entry in due] == [("ticker", "DARK/USD")]
 
     def test_wildcard_confirm_disables_dark_recovery(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A wildcard-seeded confirm is never dark-recovered.
@@ -1028,10 +1031,10 @@ class TestDarkRecovery:
             slow_retry_jitter=0.0,
         )
         _set_clock(monkeypatch, 0.0)
-        tracker.mark_confirmed("trade", "DARK/USD")
+        tracker.mark_confirmed("ticker", "DARK/USD")
         _set_clock(monkeypatch, 400.0)
-        result = tracker.mark_dark_recovery("trade", "DARK/USD")
-        entry = tracker.snapshot()[("trade", "DARK/USD")]
+        result = tracker.mark_dark_recovery("ticker", "DARK/USD")
+        entry = tracker.snapshot()[("ticker", "DARK/USD")]
         assert (
             result,
             entry.status,
@@ -1072,13 +1075,13 @@ class TestDarkRecovery:
             slow_retry_jitter=0.0,
         )
         _set_clock(monkeypatch, 0.0)
-        tracker.mark_confirmed("trade", "DARK/USD")
+        tracker.mark_confirmed("ticker", "DARK/USD")
         _set_clock(monkeypatch, 400.0)
         listed = tracker.list_due_dark_recovery()[0]
-        tracker.mark_pending("trade", "DARK/USD")
-        tracker.mark_confirmed("trade", "DARK/USD")
-        result = tracker.mark_dark_recovery("trade", "DARK/USD", expected=listed)
-        current = tracker.snapshot()[("trade", "DARK/USD")]
+        tracker.mark_pending("ticker", "DARK/USD")
+        tracker.mark_confirmed("ticker", "DARK/USD")
+        result = tracker.mark_dark_recovery("ticker", "DARK/USD", expected=listed)
+        current = tracker.snapshot()[("ticker", "DARK/USD")]
         assert (result, current.status) == (False, "confirmed")
 
     def test_data_arrival_resets_dark_recovery_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1094,11 +1097,11 @@ class TestDarkRecovery:
             slow_retry_jitter=0.0,
         )
         _set_clock(monkeypatch, 0.0)
-        tracker.mark_confirmed("trade", "DARK/USD")
+        tracker.mark_confirmed("ticker", "DARK/USD")
         _set_clock(monkeypatch, 400.0)
-        assert tracker.mark_dark_recovery("trade", "DARK/USD") is True
-        tracker.mark_data_seen("trade", "DARK/USD")
-        entry = tracker.snapshot()[("trade", "DARK/USD")]
+        assert tracker.mark_dark_recovery("ticker", "DARK/USD") is True
+        tracker.mark_data_seen("ticker", "DARK/USD")
+        entry = tracker.snapshot()[("ticker", "DARK/USD")]
         assert (entry.status, entry.dark_recovery_count) == ("confirmed", 0)
 
     def test_reconnect_preserves_dark_recovery_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1114,11 +1117,11 @@ class TestDarkRecovery:
             slow_retry_jitter=0.0,
         )
         _set_clock(monkeypatch, 0.0)
-        tracker.mark_confirmed("trade", "DARK/USD")
+        tracker.mark_confirmed("ticker", "DARK/USD")
         _set_clock(monkeypatch, 400.0)
-        assert tracker.mark_dark_recovery("trade", "DARK/USD") is True
-        tracker.mark_pending("trade", "DARK/USD", preserve_retry_count=True)
-        entry = tracker.snapshot()[("trade", "DARK/USD")]
+        assert tracker.mark_dark_recovery("ticker", "DARK/USD") is True
+        tracker.mark_pending("ticker", "DARK/USD", preserve_retry_count=True)
+        entry = tracker.snapshot()[("ticker", "DARK/USD")]
         assert entry.dark_recovery_count == 1
 
     def test_mark_dark_recovery_false_when_no_longer_dark(
@@ -1137,9 +1140,53 @@ class TestDarkRecovery:
             slow_retry_jitter=0.0,
         )
         _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("ticker", "DARK/USD")
+        _set_clock(monkeypatch, 400.0)
+        tracker.mark_data_seen("ticker", "DARK/USD")
+        result = tracker.mark_dark_recovery("ticker", "DARK/USD")
+        entry = tracker.snapshot()[("ticker", "DARK/USD")]
+        assert (result, entry.status, entry.dark_recovery_count) == (False, "confirmed", 0)
+
+    def test_event_driven_channels_excluded_from_dark_recovery(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Trade and ohlc subscriptions are never dark-recovered by default.
+
+        Given: Confirmed trade and ohlc entries dark far past the threshold,
+        When: list_due_dark_recovery and mark_dark_recovery are queried,
+        Then: They are excluded because for event-driven channels silence is
+            the normal sparse state, not a broken stream.
+        """
+        tracker = SubscriptionHealthTracker(
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_jitter=0.0,
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("trade", "QUIET/USD")
+        tracker.mark_confirmed("ohlc:1m", "QUIET/USD")
+        _set_clock(monkeypatch, 5000.0)
+        due = tracker.list_due_dark_recovery(now=5000.0)
+        trade_result = tracker.mark_dark_recovery("trade", "QUIET/USD")
+        ohlc_result = tracker.mark_dark_recovery("ohlc:1m", "QUIET/USD")
+        assert (due, trade_result, ohlc_result) == ([], False, False)
+
+    def test_dark_recovery_channels_configurable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The eligible-channel set is configurable, not hardcoded to ticker.
+
+        Given: A tracker configured to dark-recover the trade channel,
+        When: A confirmed trade entry goes dark past the threshold,
+        Then: It is listed and re-armed for recovery.
+        """
+        tracker = SubscriptionHealthTracker(
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_jitter=0.0,
+            dark_recovery_channels=frozenset({"trade"}),
+        )
+        _set_clock(monkeypatch, 0.0)
         tracker.mark_confirmed("trade", "DARK/USD")
         _set_clock(monkeypatch, 400.0)
-        tracker.mark_data_seen("trade", "DARK/USD")
+        due = tracker.list_due_dark_recovery(now=400.0)
         result = tracker.mark_dark_recovery("trade", "DARK/USD")
-        entry = tracker.snapshot()[("trade", "DARK/USD")]
-        assert (result, entry.status, entry.dark_recovery_count) == (False, "confirmed", 0)
+        assert ([(e.channel, e.symbol) for e in due], result) == ([("trade", "DARK/USD")], True)

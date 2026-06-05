@@ -691,7 +691,7 @@ class TestHealthLoopRetry:
         )
         client._health_tracker = tracker
         monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 0.0)
-        tracker.mark_confirmed("trade", "DARK/USD")
+        tracker.mark_confirmed("ticker", "DARK/USD")
         monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 400.0)
 
         async def stop_after_sleep(_: float) -> None:
@@ -705,9 +705,9 @@ class TestHealthLoopRetry:
         finally:
             logger.remove(sink_id)
         info_logs = [rec for rec in caplog.records if "dark-recovery re-subscribe" in rec.message]
-        entry = tracker.snapshot()[("trade", "DARK/USD")]
+        entry = tracker.snapshot()[("ticker", "DARK/USD")]
         assert (client.retry_calls, len(info_logs), entry.status, entry.dark_recovery_count) == (
-            [("trade", "DARK/USD")],
+            [("ticker", "DARK/USD")],
             1,
             "pending",
             1,
@@ -736,15 +736,15 @@ class TestHealthLoopRetry:
         )
         client._health_tracker = tracker
         monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 0.0)
-        tracker.mark_confirmed("trade", "AAA/USD")
-        tracker.mark_confirmed("trade", "BBB/USD")
+        tracker.mark_confirmed("ticker", "AAA/USD")
+        tracker.mark_confirmed("ticker", "BBB/USD")
         monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 400.0)
         calls: list[tuple[str, str]] = []
 
         async def changing_retry(channel: str, symbol: str) -> None:
             calls.append((channel, symbol))
             if symbol == "AAA/USD":
-                tracker.mark_pending("trade", "BBB/USD")
+                tracker.mark_pending("ticker", "BBB/USD")
 
         monkeypatch.setattr(client, "_retry_subscribe", changing_retry)
 
@@ -754,9 +754,9 @@ class TestHealthLoopRetry:
         monkeypatch.setattr(exchange_base.asyncio, "sleep", stop_after_sleep)
         client._health_loop_running = True
         await client._subscription_health_loop()
-        bbb = tracker.snapshot()[("trade", "BBB/USD")]
+        bbb = tracker.snapshot()[("ticker", "BBB/USD")]
         assert (calls, bbb.status, bbb.dark_recovery_count) == (
-            [("trade", "AAA/USD")],
+            [("ticker", "AAA/USD")],
             "pending",
             0,
         )
@@ -785,15 +785,15 @@ class TestHealthLoopRetry:
         )
         client._health_tracker = tracker
         monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 0.0)
-        tracker.mark_confirmed("trade", "AAA/USD")
-        tracker.mark_confirmed("trade", "BBB/USD")
+        tracker.mark_confirmed("ticker", "AAA/USD")
+        tracker.mark_confirmed("ticker", "BBB/USD")
         monkeypatch.setattr(exchange_base.time, "monotonic", lambda: 400.0)
         calls: list[tuple[str, str]] = []
 
         async def feeding_retry(channel: str, symbol: str) -> None:
             calls.append((channel, symbol))
             if symbol == "AAA/USD":
-                tracker.mark_data_seen("trade", "BBB/USD")
+                tracker.mark_data_seen("ticker", "BBB/USD")
 
         monkeypatch.setattr(client, "_retry_subscribe", feeding_retry)
 
@@ -803,9 +803,9 @@ class TestHealthLoopRetry:
         monkeypatch.setattr(exchange_base.asyncio, "sleep", stop_after_sleep)
         client._health_loop_running = True
         await client._subscription_health_loop()
-        bbb = tracker.snapshot()[("trade", "BBB/USD")]
+        bbb = tracker.snapshot()[("ticker", "BBB/USD")]
         assert (calls, bbb.status, bbb.dark_recovery_count) == (
-            [("trade", "AAA/USD")],
+            [("ticker", "AAA/USD")],
             "confirmed",
             0,
         )
