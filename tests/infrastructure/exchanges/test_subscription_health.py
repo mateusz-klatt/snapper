@@ -506,13 +506,14 @@ class TestSubscriptionHealthValidation:
             lambda: SubscriptionHealthTracker(slow_retry_jitter=-0.1),
             lambda: SubscriptionHealthTracker(dark_recovery_threshold_multiplier=0.5),
             lambda: SubscriptionHealthTracker(retry_subscribe_spacing_s=-1.0),
+            lambda: SubscriptionHealthTracker(never_data_quarantine_after=0),
         ]
         results = []
         for factory in factories:
             with pytest.raises(ValueError):
                 factory()
             results.append(True)
-        assert results == [True] * 11
+        assert results == [True] * 12
 
     def test_methods_reject_empty_channel(self) -> None:
         """Tracker methods reject empty channels before mutation.
@@ -1190,3 +1191,521 @@ class TestDarkRecovery:
         due = tracker.list_due_dark_recovery(now=400.0)
         result = tracker.mark_dark_recovery("trade", "DARK/USD")
         assert ([(e.channel, e.symbol) for e in due], result) == ([("trade", "DARK/USD")], True)
+
+
+class TestNeverDataQuarantine:
+    """Tests for terminal quarantine of never-streaming subscriptions."""
+
+    def test_dark_recovery_quarantines_never_data_at_threshold(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A confirmed-dark ticker that never streamed is quarantined.
+
+        Given: A ticker confirmed but never fed, already dark-recovered once
+            (at a quarantine budget of one escalation),
+        When: It darkens again and mark_dark_recovery is evaluated,
+        Then: It is quarantined terminally (failed, flagged, no schedule,
+            descriptive error) and no re-subscribe is issued.
+        """
+        tracker = SubscriptionHealthTracker(
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_base_s=10.0,
+            slow_retry_cap_s=10.0,
+            slow_retry_jitter=0.0,
+            never_data_quarantine_after=1,
+        )
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("ticker", "DEAD/USD")
+        _set_clock(monkeypatch, 400.0)
+        assert tracker.mark_dark_recovery("ticker", "DEAD/USD") is True
+        tracker.mark_confirmed("ticker", "DEAD/USD")
+        _set_clock(monkeypatch, 100000.0)
+        result = tracker.mark_dark_recovery("ticker", "DEAD/USD")
+        entry = tracker.snapshot()[("ticker", "DEAD/USD")]
+        assert (
+            result,
+            entry.status,
+            entry.quarantined,
+            entry.last_error,
+            entry.next_attempt_at,
+        ) == (False, "failed", True, "quarantined: exchange never streams", None)
+
+    def test_dark_recovery_below_quarantine_budget_recovers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Below the never-data escalation budget, dark recovery proceeds.
+
+        Given: A confirmed-dark ticker never fed, with fewer dark escalations
+            than the quarantine budget,
+        When: mark_dark_recovery is evaluated,
+        Then: It re-arms to pending, not quarantined.
+        """
+        tracker = SubscriptionHealthTracker(
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_jitter=0.0,
+            never_data_quarantine_after=3,
+        )
+        tracker._entries[("ticker", "DARK/USD")] = health._SymbolEntry(
+            "ticker",
+            "DARK/USD",
+            "confirmed",
+            0.0,
+            confirmed_at=0.0,
+            last_seen_data_at=None,
+            dark_recovery_count=2,
+        )
+        _set_clock(monkeypatch, 100000.0)
+        result = tracker.mark_dark_recovery("ticker", "DARK/USD")
+        entry = tracker.snapshot()[("ticker", "DARK/USD")]
+        assert (result, entry.status, entry.quarantined, entry.dark_recovery_count) == (
+            True,
+            "pending",
+            False,
+            3,
+        )
+
+    def test_dark_recovery_with_lifetime_data_not_quarantined(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ticker that ever streamed is never quarantined, even post-reconnect.
+
+        Given: A confirmed ticker dark past the budget with last_seen_data_at
+            wiped (as a reconnect replay does) but ever_seen_data True,
+        When: mark_dark_recovery is evaluated,
+        Then: It re-arms to pending; the lifetime guard spares a live symbol
+            whose per-connection freshness was reset by replay.
+        """
+        tracker = SubscriptionHealthTracker(
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+            slow_retry_jitter=0.0,
+            never_data_quarantine_after=1,
+        )
+        tracker._entries[("ticker", "LIVE/USD")] = health._SymbolEntry(
+            "ticker",
+            "LIVE/USD",
+            "confirmed",
+            0.0,
+            confirmed_at=0.0,
+            last_seen_data_at=None,
+            ever_seen_data=True,
+            dark_recovery_count=4,
+        )
+        _set_clock(monkeypatch, 100000.0)
+        result = tracker.mark_dark_recovery("ticker", "LIVE/USD")
+        entry = tracker.snapshot()[("ticker", "LIVE/USD")]
+        assert (result, entry.status, entry.quarantined) == (True, "pending", False)
+
+    def test_slow_retry_quarantines_acked_never_data_at_threshold(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A never-fed but previously-ACKed subscription is quarantined on retry.
+
+        Given: A pending entry ACKed on this connection (confirmed_at set),
+            never fed (ever_seen_data False), at its fast budget with slow
+            escalations at the quarantine budget,
+        When: Its fast budget is exhausted,
+        Then: It is quarantined terminally instead of being rescheduled.
+        """
+        tracker = SubscriptionHealthTracker(
+            max_retries=1,
+            slow_retry_base_s=10.0,
+            slow_retry_cap_s=10.0,
+            slow_retry_jitter=0.0,
+            never_data_quarantine_after=1,
+        )
+        tracker._entries[("trade", "DEAD/USD")] = health._SymbolEntry(
+            "trade",
+            "DEAD/USD",
+            "pending",
+            0.0,
+            confirmed_at=0.0,
+            retry_count=1,
+            slow_retry_count=1,
+            ever_seen_data=False,
+        )
+        _set_clock(monkeypatch, 0.0)
+        result = tracker.mark_retry_attempt("trade", "DEAD/USD")
+        entry = tracker.snapshot()[("trade", "DEAD/USD")]
+        assert (
+            result,
+            entry.status,
+            entry.quarantined,
+            entry.last_error,
+            entry.next_attempt_at,
+        ) == (False, "failed", True, "quarantined: exchange never streams", None)
+
+    def test_slow_retry_never_acked_not_quarantined(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A never-ACKed subscription is never quarantined via slow-retry.
+
+        Given: A pending entry never ACKed (confirmed_at None) and never fed,
+            at its fast budget with slow escalations over the budget,
+        When: Its fast budget is exhausted,
+        Then: It is rescheduled for slow retry, not quarantined — without an
+            established server-side subscription no self-healing tick could
+            clear a quarantine, so a possibly-valid symbol keeps retrying.
+        """
+        tracker = SubscriptionHealthTracker(
+            max_retries=1,
+            slow_retry_base_s=10.0,
+            slow_retry_cap_s=10.0,
+            slow_retry_jitter=0.0,
+            never_data_quarantine_after=1,
+        )
+        tracker._entries[("trade", "NOACK/USD")] = health._SymbolEntry(
+            "trade",
+            "NOACK/USD",
+            "pending",
+            0.0,
+            confirmed_at=None,
+            retry_count=1,
+            slow_retry_count=5,
+            ever_seen_data=False,
+        )
+        _set_clock(monkeypatch, 0.0)
+        result = tracker.mark_retry_attempt("trade", "NOACK/USD")
+        entry = tracker.snapshot()[("trade", "NOACK/USD")]
+        assert (result, entry.status, entry.quarantined, entry.last_error) == (
+            False,
+            "failed",
+            False,
+            "retry budget exhausted",
+        )
+
+    def test_slow_retry_below_quarantine_budget_schedules(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Below the never-data budget, an ACKed never-streamer still schedules.
+
+        Given: A pending entry ACKed on this connection (confirmed_at set),
+            never fed, at its fast budget with no slow escalations yet and a
+            quarantine budget above one,
+        When: Its fast budget is exhausted,
+        Then: It is scheduled for slow retry, not quarantined.
+        """
+        tracker = SubscriptionHealthTracker(
+            max_retries=1,
+            slow_retry_base_s=10.0,
+            slow_retry_cap_s=10.0,
+            slow_retry_jitter=0.0,
+            never_data_quarantine_after=2,
+        )
+        tracker._entries[("trade", "X/USD")] = health._SymbolEntry(
+            "trade",
+            "X/USD",
+            "pending",
+            0.0,
+            confirmed_at=0.0,
+            retry_count=1,
+            slow_retry_count=0,
+            ever_seen_data=False,
+        )
+        _set_clock(monkeypatch, 0.0)
+        result = tracker.mark_retry_attempt("trade", "X/USD")
+        entry = tracker.snapshot()[("trade", "X/USD")]
+        assert (
+            result,
+            entry.status,
+            entry.quarantined,
+            entry.last_error,
+            entry.next_attempt_at,
+        ) == (False, "failed", False, "retry budget exhausted", 10.0)
+
+    def test_slow_retry_with_lifetime_data_not_quarantined(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A subscription that ever streamed is never quarantined on retry.
+
+        Given: A pending entry at its fast budget with slow escalations over
+            the budget, last_seen_data_at wiped by replay but ever_seen_data
+            True,
+        When: Its fast budget is exhausted,
+        Then: It is scheduled for slow retry; the lifetime guard spares it so a
+            live instrument whose feed drops post-reconnect keeps retrying.
+        """
+        tracker = SubscriptionHealthTracker(
+            max_retries=1,
+            slow_retry_base_s=10.0,
+            slow_retry_cap_s=10.0,
+            slow_retry_jitter=0.0,
+            never_data_quarantine_after=1,
+        )
+        tracker._entries[("trade", "LIVE/USD")] = health._SymbolEntry(
+            "trade",
+            "LIVE/USD",
+            "pending",
+            0.0,
+            retry_count=1,
+            slow_retry_count=3,
+            last_seen_data_at=None,
+            ever_seen_data=True,
+        )
+        _set_clock(monkeypatch, 0.0)
+        result = tracker.mark_retry_attempt("trade", "LIVE/USD")
+        entry = tracker.snapshot()[("trade", "LIVE/USD")]
+        assert (result, entry.status, entry.quarantined, entry.last_error) == (
+            False,
+            "failed",
+            False,
+            "retry budget exhausted",
+        )
+
+    def test_list_due_failed_excludes_quarantined(self) -> None:
+        """Quarantined failed entries are never surfaced for slow retry.
+
+        Given: A failed entry flagged quarantined with a (defensively) set
+            next_attempt_at in the past,
+        When: list_due_failed is queried,
+        Then: The quarantined entry is excluded.
+        """
+        tracker = SubscriptionHealthTracker()
+        tracker._entries[("ticker", "DEAD/USD")] = health._SymbolEntry(
+            "ticker",
+            "DEAD/USD",
+            "failed",
+            0.0,
+            next_attempt_at=1.0,
+            quarantined=True,
+        )
+        assert tracker.list_due_failed(now=100.0) == []
+
+    def test_dark_recovery_excludes_quarantined(self) -> None:
+        """Quarantined confirmed entries are ineligible for dark recovery.
+
+        Given: A confirmed, dark, ticker entry flagged quarantined,
+        When: list_due_dark_recovery and mark_dark_recovery are evaluated,
+        Then: It is excluded and not re-armed.
+        """
+        tracker = SubscriptionHealthTracker(
+            data_stale_threshold_s=100.0,
+            dark_recovery_threshold_multiplier=3.0,
+        )
+        tracker._entries[("ticker", "DEAD/USD")] = health._SymbolEntry(
+            "ticker",
+            "DEAD/USD",
+            "confirmed",
+            0.0,
+            confirmed_at=0.0,
+            last_seen_data_at=None,
+            quarantined=True,
+        )
+        due = tracker.list_due_dark_recovery(now=100000.0)
+        result = tracker.mark_dark_recovery("ticker", "DEAD/USD")
+        assert (due, result) == ([], False)
+
+    def test_mark_data_seen_clears_quarantine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Real data un-quarantines a given-up subscription.
+
+        Given: A quarantined failed entry with stale escalation counts,
+        When: Market data finally arrives,
+        Then: It is confirmed, the flag is cleared, and retry history resets.
+        """
+        tracker = SubscriptionHealthTracker()
+        tracker._entries[("ticker", "REBORN/USD")] = health._SymbolEntry(
+            "ticker",
+            "REBORN/USD",
+            "failed",
+            0.0,
+            last_error="quarantined: exchange never streams",
+            slow_retry_count=9,
+            dark_recovery_count=9,
+            quarantined=True,
+        )
+        _set_clock(monkeypatch, 50.0)
+        tracker.mark_data_seen("ticker", "REBORN/USD")
+        entry = tracker.snapshot()[("ticker", "REBORN/USD")]
+        assert (
+            entry.status,
+            entry.quarantined,
+            entry.ever_seen_data,
+            entry.last_seen_data_at,
+            entry.slow_retry_count,
+            entry.dark_recovery_count,
+            entry.last_error,
+        ) == ("confirmed", False, True, 50.0, 0, 0, None)
+
+    def test_reconnect_holds_quarantine_terminal_fresh_subscribe_clears(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reconnect replay leaves quarantine terminal; fresh subscribe re-probes.
+
+        Given: A quarantined (failed) entry,
+        When: It is replayed with preserve_retry_count, then freshly subscribed,
+        Then: The replay is a no-op (still failed, still quarantined, error
+            intact) so it never re-enters retry; the fresh subscribe re-arms it
+            to pending with quarantine and the lifetime data flag cleared.
+        """
+        tracker = SubscriptionHealthTracker()
+        _set_clock(monkeypatch, 0.0)
+        tracker._entries[("ticker", "DEAD/USD")] = health._SymbolEntry(
+            "ticker",
+            "DEAD/USD",
+            "failed",
+            0.0,
+            last_error="quarantined: exchange never streams",
+            quarantined=True,
+        )
+        tracker.mark_pending("ticker", "DEAD/USD", preserve_retry_count=True)
+        held = tracker.snapshot()[("ticker", "DEAD/USD")]
+        tracker.mark_pending("ticker", "DEAD/USD")
+        fresh = tracker.snapshot()[("ticker", "DEAD/USD")]
+        assert (held.status, held.quarantined, held.last_error) == (
+            "failed",
+            True,
+            "quarantined: exchange never streams",
+        )
+        assert (fresh.status, fresh.quarantined, fresh.ever_seen_data) == (
+            "pending",
+            False,
+            False,
+        )
+
+    def test_reconnect_preserves_lifetime_data_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Reconnect replay preserves the lifetime ever_seen_data flag.
+
+        Given: One non-quarantined entry that has streamed (ever_seen_data
+            True) and one that never has (False),
+        When: Each is replayed with preserve_retry_count,
+        Then: The replay clears per-connection last_seen_data_at but carries
+            ever_seen_data unchanged, so a live symbol stays protected and a
+            never-streamer stays quarantine-eligible.
+        """
+        tracker = SubscriptionHealthTracker()
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("ticker", "LIVE/USD")
+        tracker.mark_data_seen("ticker", "LIVE/USD")
+        tracker.mark_confirmed("ticker", "NEW/USD")
+        tracker.mark_pending("ticker", "LIVE/USD", preserve_retry_count=True)
+        tracker.mark_pending("ticker", "NEW/USD", preserve_retry_count=True)
+        live = tracker.snapshot()[("ticker", "LIVE/USD")]
+        new = tracker.snapshot()[("ticker", "NEW/USD")]
+        assert (live.ever_seen_data, live.last_seen_data_at) == (True, None)
+        assert (new.ever_seen_data, new.last_seen_data_at) == (False, None)
+
+    def test_mark_confirmed_leaves_quarantine_terminal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A reconnect replay ACK does not revive a quarantined entry.
+
+        Given: A quarantined (failed) entry whose replay subscribe is ACKed,
+        When: mark_confirmed runs,
+        Then: It is left fully terminal (still failed, still quarantined, with
+            the quarantine last_error intact) so its feed-health surfacing
+            stays consistent across reconnects rather than flipping to a
+            healthy-looking confirmed/no-error row. Only real data revives it.
+        """
+        tracker = SubscriptionHealthTracker()
+        _set_clock(monkeypatch, 0.0)
+        tracker._entries[("ticker", "DEAD/USD")] = health._SymbolEntry(
+            "ticker",
+            "DEAD/USD",
+            "failed",
+            0.0,
+            last_error="quarantined: exchange never streams",
+            quarantined=True,
+        )
+        tracker.mark_confirmed("ticker", "DEAD/USD")
+        entry = tracker.snapshot()[("ticker", "DEAD/USD")]
+        assert (entry.status, entry.quarantined, entry.last_error) == (
+            "failed",
+            True,
+            "quarantined: exchange never streams",
+        )
+
+    def test_mark_failed_leaves_quarantine_surfacing_intact(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit rejection does not overwrite a quarantine's surfacing.
+
+        Given: A quarantined (failed) entry whose replay subscribe is rejected,
+        When: mark_failed runs with a different error,
+        Then: The entry is left untouched — still failed, still quarantined,
+            with the quarantine last_error preserved (not the rejection text).
+        """
+        tracker = SubscriptionHealthTracker()
+        _set_clock(monkeypatch, 0.0)
+        tracker._entries[("ticker", "DEAD/USD")] = health._SymbolEntry(
+            "ticker",
+            "DEAD/USD",
+            "failed",
+            0.0,
+            last_error="quarantined: exchange never streams",
+            quarantined=True,
+        )
+        tracker.mark_failed("ticker", "DEAD/USD", "subscription rejected")
+        entry = tracker.snapshot()[("ticker", "DEAD/USD")]
+        assert (entry.status, entry.quarantined, entry.last_error) == (
+            "failed",
+            True,
+            "quarantined: exchange never streams",
+        )
+
+    def test_list_overdue_pending_excludes_quarantined(self) -> None:
+        """A quarantined entry that is somehow pending is never fast-retried.
+
+        Given: A pending entry flagged quarantined whose ACK timer has expired,
+        When: list_overdue_pending is queried,
+        Then: It is excluded so a never-streamer cannot re-enter fast retry.
+        """
+        tracker = SubscriptionHealthTracker(ack_timeout_s=10.0)
+        tracker._entries[("ticker", "DEAD/USD")] = health._SymbolEntry(
+            "ticker",
+            "DEAD/USD",
+            "pending",
+            0.0,
+            quarantined=True,
+        )
+        assert tracker.list_overdue_pending(now=1000.0) == []
+
+    def test_mark_retry_attempt_skips_quarantined(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A quarantined pending entry consumes no retry attempt.
+
+        Given: A pending entry flagged quarantined,
+        When: mark_retry_attempt is called,
+        Then: It returns False without incrementing the retry budget or
+            mutating the entry.
+        """
+        tracker = SubscriptionHealthTracker()
+        _set_clock(monkeypatch, 0.0)
+        tracker._entries[("ticker", "DEAD/USD")] = health._SymbolEntry(
+            "ticker",
+            "DEAD/USD",
+            "pending",
+            0.0,
+            retry_count=0,
+            quarantined=True,
+        )
+        result = tracker.mark_retry_attempt("ticker", "DEAD/USD")
+        entry = tracker.snapshot()[("ticker", "DEAD/USD")]
+        assert (result, entry.retry_count, entry.quarantined) == (False, 0, True)
+
+    def test_ever_seen_data_set_once_and_persists(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The lifetime data flag is set on first data and stays set.
+
+        Given: A confirmed entry,
+        When: Two data frames arrive,
+        Then: ever_seen_data is True after the first and remains True (the
+            second frame takes the gated no-write path).
+        """
+        tracker = SubscriptionHealthTracker()
+        _set_clock(monkeypatch, 0.0)
+        tracker.mark_confirmed("ticker", "BTC/USD")
+        _set_clock(monkeypatch, 1.0)
+        tracker.mark_data_seen("ticker", "BTC/USD")
+        first = tracker.snapshot()[("ticker", "BTC/USD")].ever_seen_data
+        _set_clock(monkeypatch, 2.0)
+        tracker.mark_data_seen("ticker", "BTC/USD")
+        second = tracker.snapshot()[("ticker", "BTC/USD")].ever_seen_data
+        assert (first, second) == (True, True)
+
+    def test_quarantine_after_is_configurable(self) -> None:
+        """The never-data quarantine budget is configurable.
+
+        Given: A tracker constructed with a custom never_data_quarantine_after,
+        When: The attribute is read,
+        Then: It reflects the configured value.
+        """
+        tracker = SubscriptionHealthTracker(never_data_quarantine_after=10)
+        assert tracker.never_data_quarantine_after == 10

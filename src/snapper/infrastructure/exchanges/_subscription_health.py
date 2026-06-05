@@ -80,6 +80,33 @@ class _SymbolEntry:
             keeps re-darkening is not hammered, and is reset only when
             real data arrives (``mark_data_seen``), not on an ACK-only
             ``mark_confirmed`` which can itself still be data-dark.
+        quarantined: True once the entry has been determined to never
+            stream on this venue — a subscription that ACKs but produces
+            zero data (lifetime ``ever_seen_data`` False) across
+            ``never_data_quarantine_after`` recovery escalations
+            (dark-recovery or slow-retry). A quarantined entry is terminal
+            (``status='failed'``, ``next_attempt_at=None``) and excluded
+            from both recovery loops, ending the perpetual re-subscribe
+            churn for catalog instruments the exchange lists but never
+            streams (for example discontinued or far-dated micro futures).
+            Quarantine never unsubscribes: the last ACKed subscription
+            stays in place, so real data arriving via
+            :meth:`mark_data_seen` clears the flag and fully recovers the
+            entry. Preserved across reconnect replay (:meth:`mark_pending`
+            with ``preserve_retry_count``) but reset by a fresh subscribe
+            or process boot so liveness is re-probed.
+        ever_seen_data: Lifetime flag — True once this subscription
+            identity has produced at least one data frame, set by
+            :meth:`mark_data_seen` and PRESERVED across reconnect replay
+            (:meth:`mark_pending` with ``preserve_retry_count``). It is the
+            quarantine discriminator: a subscription is only ever
+            quarantined when ``ever_seen_data`` is False, i.e. it has never
+            streamed in its whole life. Unlike ``last_seen_data_at`` (which
+            a replay resets to None and which drives per-connection
+            staleness), this flag is not cleared by replay, so a symbol
+            that streamed before a reconnect is never mistaken for a
+            never-streamer and never wrongly quarantined. A fresh subscribe
+            or process boot clears it so liveness is re-probed.
     """
 
     channel: str
@@ -95,6 +122,8 @@ class _SymbolEntry:
     slow_retry_count: int = 0
     dark_recovery_enabled: bool = True
     dark_recovery_count: int = 0
+    quarantined: bool = False
+    ever_seen_data: bool = False
 
     def stale_reference(self) -> float:
         """Return the monotonic timestamp staleness is measured from.
@@ -178,6 +207,7 @@ class SubscriptionHealthTracker:
         dark_recovery_threshold_multiplier: float = 6.0,
         retry_subscribe_spacing_s: float = 1.0,
         dark_recovery_channels: frozenset[str] = frozenset({"ticker"}),
+        never_data_quarantine_after: int = 6,
     ) -> None:
         """Initialize subscription health tracking.
 
@@ -207,6 +237,12 @@ class SubscriptionHealthTracker:
                 ``{"ticker"}``) where silence means a broken stream.
                 Event-driven channels (``trade``, ``ohlc:*``) are
                 excluded because sparse data is their normal state.
+            never_data_quarantine_after: Number of futile recovery
+                escalations (dark-recovery or slow-retry) a subscription
+                that has never produced data (``last_seen_data_at is
+                None``) may consume before it is quarantined terminally
+                instead of retried forever. Quarantine targets catalog
+                instruments the exchange lists but never streams.
 
         Returns:
             None.
@@ -217,7 +253,8 @@ class SubscriptionHealthTracker:
                 below 1.0, ``slow_retry_cap_s`` is below
                 ``slow_retry_base_s``, ``slow_retry_jitter`` is outside
                 ``[0.0, 1.0)``, ``dark_recovery_threshold_multiplier`` is
-                below 1.0, or ``retry_subscribe_spacing_s`` is negative.
+                below 1.0, ``retry_subscribe_spacing_s`` is negative, or
+                ``never_data_quarantine_after`` is below 1.
         """
         if ack_timeout_s <= 0:
             raise ValueError("ack_timeout_s must be positive")
@@ -239,6 +276,8 @@ class SubscriptionHealthTracker:
             raise ValueError("dark_recovery_threshold_multiplier must be at least 1.0")
         if retry_subscribe_spacing_s < 0:
             raise ValueError("retry_subscribe_spacing_s must be non-negative")
+        if never_data_quarantine_after < 1:
+            raise ValueError("never_data_quarantine_after must be at least 1")
         self.ack_timeout_s = ack_timeout_s
         self.retry_interval_s = retry_interval_s
         self.max_retries = max_retries
@@ -250,6 +289,7 @@ class SubscriptionHealthTracker:
         self.dark_recovery_threshold_multiplier = dark_recovery_threshold_multiplier
         self.retry_subscribe_spacing_s = retry_subscribe_spacing_s
         self.dark_recovery_channels = dark_recovery_channels
+        self.never_data_quarantine_after = never_data_quarantine_after
         self._max_backoff_exponent = (
             max(0, ceil(log(slow_retry_cap_s / slow_retry_base_s) / log(slow_retry_multiplier)))
             if slow_retry_multiplier > 1.0
@@ -278,7 +318,16 @@ class SubscriptionHealthTracker:
                 grants one immediate attempt before backoff resumes. The
                 dark-recovery escalation count is preserved on the same
                 terms so a chronically dark subscription does not reset
-                its dark backoff on every reconnect.
+                its dark backoff on every reconnect, and the lifetime
+                ``ever_seen_data`` flag is preserved so a symbol that
+                streamed before the reconnect is never mistaken for a
+                never-streamer. A reconnect replay of an ALREADY-quarantined
+                entry is a no-op: the entry is left terminal (failed,
+                quarantined) rather than re-armed to pending, so a
+                never-streaming instrument is neither re-probed nor
+                re-churned on every reconnect. A fresh subscribe (default,
+                ``preserve_retry_count=False``) clears quarantine and the
+                lifetime data flag so liveness is re-probed.
 
         Returns:
             None.
@@ -289,13 +338,17 @@ class SubscriptionHealthTracker:
         key = self._validate_key(channel, symbol)
         existing = self._entries.get(key)
         if existing is not None and preserve_retry_count:
+            if existing.quarantined:
+                return
             retry_count = existing.retry_count
             slow_retry_count = existing.slow_retry_count
             dark_recovery_count = existing.dark_recovery_count
+            ever_seen_data = existing.ever_seen_data
         else:
             retry_count = 0
             slow_retry_count = 0
             dark_recovery_count = 0
+            ever_seen_data = False
         self._entries[key] = _SymbolEntry(
             channel=channel,
             symbol=symbol,
@@ -304,6 +357,7 @@ class SubscriptionHealthTracker:
             retry_count=retry_count,
             slow_retry_count=slow_retry_count,
             dark_recovery_count=dark_recovery_count,
+            ever_seen_data=ever_seen_data,
         )
 
     def mark_confirmed(
@@ -322,7 +376,12 @@ class SubscriptionHealthTracker:
         ERROR. It deliberately does NOT clear ``dark_recovery_count``: an
         ACK confirms the subscription exists but does not prove data is
         flowing, so a still-dark channel keeps escalating its dark backoff
-        until real data arrives (:meth:`mark_data_seen`).
+        until real data arrives (:meth:`mark_data_seen`). For the same
+        reason an ACK does NOT revive a QUARANTINED entry: such an entry is
+        left fully terminal (``failed`` plus its quarantine ``last_error``)
+        so its operator-facing ``instrument_feed_health`` surfacing stays
+        consistent across reconnect replays — only real data
+        (:meth:`mark_data_seen`) or a fresh subscribe clears quarantine.
 
         Args:
             channel: Tracker channel key.
@@ -350,6 +409,8 @@ class SubscriptionHealthTracker:
                 dark_recovery_enabled=dark_recovery_enabled,
             )
             return
+        if entry.quarantined:
+            return
         entry.status = "confirmed"
         entry.confirmed_at = now
         entry.last_error = None
@@ -368,7 +429,10 @@ class SubscriptionHealthTracker:
         is NOT surfaced by :meth:`list_due_failed`. A genuinely invalid
         subscription that first timed out (and was scheduled for slow
         retry) and then received a negative ACK therefore stops being
-        retried.
+        retried. A quarantined entry is left untouched — it is already
+        terminal with its quarantine ``last_error``, so an explicit
+        rejection on a reconnect replay does not overwrite the quarantine
+        surfacing.
 
         Args:
             channel: Tracker channel key.
@@ -393,6 +457,8 @@ class SubscriptionHealthTracker:
                 last_error=error,
             )
             return
+        if entry.quarantined:
+            return
         entry.status = "failed"
         entry.last_error = error
         entry.next_attempt_at = None
@@ -410,7 +476,12 @@ class SubscriptionHealthTracker:
         refreshes the freshness timestamp. Real data is also the only
         signal that clears ``dark_recovery_count`` (a dark channel that
         truly resumed), and that clear is gated on a non-zero count so the
-        common data frame stays a single timestamp write.
+        common data frame stays a single timestamp write. Real data also
+        sets the lifetime ``ever_seen_data`` flag and clears a
+        ``quarantined`` flag, both gated so that after the first frame the
+        steady-state hot path is still a single timestamp write; together
+        they fully un-quarantine a never-streamer the exchange finally fed
+        and bar it from being re-quarantined later.
 
         Args:
             channel: Tracker channel key.
@@ -433,12 +504,17 @@ class SubscriptionHealthTracker:
                 requested_at=now,
                 confirmed_at=now,
                 last_seen_data_at=now,
+                ever_seen_data=True,
             )
             return
         entry.last_seen_data_at = now
         entry.stale_logged = False
+        if not entry.ever_seen_data:
+            entry.ever_seen_data = True
         if entry.dark_recovery_count:
             entry.dark_recovery_count = 0
+        if entry.quarantined:
+            entry.quarantined = False
         if entry.status != "confirmed":
             entry.status = "confirmed"
             entry.confirmed_at = now
@@ -477,7 +553,21 @@ class SubscriptionHealthTracker:
             exhaustion the entry transitions to ``failed`` but is NOT
             terminal: its ``next_attempt_at`` is scheduled so
             :meth:`list_due_failed` will surface it for a slow retry once
-            the backoff delay elapses.
+            the backoff delay elapses. The exception is a never-streaming
+            subscription (lifetime ``ever_seen_data`` False) that was ACKed
+            on the current connection (``confirmed_at is not None``) and has
+            consumed ``never_data_quarantine_after`` slow-retry escalations:
+            it is quarantined terminally instead (``next_attempt_at=None``,
+            ``quarantined=True``) so a catalog instrument the exchange never
+            streams stops being retried forever. The ``confirmed_at`` gate
+            means a subscription that has NEVER been ACKed is never
+            quarantined here — without an established server-side
+            subscription no self-healing tick could arrive to clear it, so
+            it keeps slow-retrying instead. A subscription that has ever
+            streamed is likewise never quarantined, so a live instrument
+            whose feed drops after a reconnect keeps retrying indefinitely.
+            An already-quarantined entry returns False without consuming an
+            attempt.
 
         Raises:
             ValueError: If ``channel`` or ``symbol`` is empty.
@@ -486,13 +576,24 @@ class SubscriptionHealthTracker:
         entry = self._entries.get(key)
         if entry is None or entry.status != "pending":
             return False
+        if entry.quarantined:
+            return False
         if expected is not None and entry is not expected:
             return False
         if entry.retry_count >= self.max_retries:
             entry.retry_count = self.max_retries
             entry.status = "failed"
-            entry.last_error = "retry budget exhausted"
-            entry.next_attempt_at = time.monotonic() + self._slow_backoff_delay(entry)
+            if (
+                not entry.ever_seen_data
+                and entry.confirmed_at is not None
+                and entry.slow_retry_count >= self.never_data_quarantine_after
+            ):
+                entry.quarantined = True
+                entry.last_error = "quarantined: exchange never streams"
+                entry.next_attempt_at = None
+            else:
+                entry.last_error = "retry budget exhausted"
+                entry.next_attempt_at = time.monotonic() + self._slow_backoff_delay(entry)
             return False
         entry.retry_count += 1
         entry.requested_at = time.monotonic()
@@ -582,9 +683,15 @@ class SubscriptionHealthTracker:
             True when a still-dark confirmed entry was transitioned to
             pending and the caller should issue a subscribe. False when the
             entry is missing, not confirmed, not dark-recovery-eligible
-            (disabled flag or non-recoverable channel), no longer the
-            ``expected`` object, or no longer dark (recovered in place
-            since listing).
+            (disabled flag, quarantined, or non-recoverable channel), no
+            longer the ``expected`` object, or no longer dark (recovered in
+            place since listing). A still-dark entry that has never produced
+            data (lifetime ``ever_seen_data`` False) and has consumed
+            ``never_data_quarantine_after`` dark escalations is quarantined
+            terminally here (``status='failed'``, ``quarantined=True``,
+            ``next_attempt_at=None``) and returns False without
+            re-subscribing. A confirmed entry that has ever streamed is
+            never quarantined, so it keeps being dark-recovered.
 
         Raises:
             ValueError: If ``channel`` or ``symbol`` is empty.
@@ -597,6 +704,15 @@ class SubscriptionHealthTracker:
             return False
         now = time.monotonic()
         if not self._dark_recovery_due(entry, now):
+            return False
+        if (
+            not entry.ever_seen_data
+            and entry.dark_recovery_count >= self.never_data_quarantine_after
+        ):
+            entry.status = "failed"
+            entry.quarantined = True
+            entry.last_error = "quarantined: exchange never streams"
+            entry.next_attempt_at = None
             return False
         entry.status = "pending"
         entry.requested_at = now
@@ -613,7 +729,9 @@ class SubscriptionHealthTracker:
 
         Returns:
             Pending entries whose ``requested_at`` age is at least
-            ``ack_timeout_s``.
+            ``ack_timeout_s``. Quarantined entries are excluded so a
+            never-streaming subscription that is somehow pending is never
+            re-armed for fast retry.
 
         Raises:
             None.
@@ -622,7 +740,9 @@ class SubscriptionHealthTracker:
         return [
             entry
             for entry in self._entries.values()
-            if entry.status == "pending" and current - entry.requested_at >= self.ack_timeout_s
+            if entry.status == "pending"
+            and not entry.quarantined
+            and current - entry.requested_at >= self.ack_timeout_s
         ]
 
     def list_due_failed(self, now: float | None = None) -> list[_SymbolEntry]:
@@ -634,7 +754,8 @@ class SubscriptionHealthTracker:
         ACK). Entries failed by an explicit exchange rejection via
         ``mark_failed`` have ``next_attempt_at`` of None and are
         intentionally excluded, so a genuinely invalid subscription is
-        never retried forever.
+        never retried forever. Quarantined entries (never-streaming
+        subscriptions given up on) are likewise excluded.
 
         Args:
             now: Optional monotonic timestamp for deterministic tests.
@@ -651,6 +772,7 @@ class SubscriptionHealthTracker:
             entry
             for entry in self._entries.values()
             if entry.status == "failed"
+            and not entry.quarantined
             and entry.next_attempt_at is not None
             and current >= entry.next_attempt_at
         ]
@@ -843,13 +965,16 @@ class SubscriptionHealthTracker:
     def _dark_recovery_eligible(self, entry: _SymbolEntry) -> bool:
         """Return True when an entry's channel and flags allow dark recovery.
 
-        Two gates, both independent of timing: the per-entry
+        Three gates, all independent of timing: the per-entry
         ``dark_recovery_enabled`` flag (False for wildcard-seeded entries
-        with no per-symbol subscription to re-issue) and channel type. Only
-        continuous channels in :attr:`dark_recovery_channels` qualify; for
-        event-driven channels (``trade``, ``ohlc:*``) silence is the normal
-        sparse state, so re-subscribing them would churn quiet symbols
-        without recovering anything.
+        with no per-symbol subscription to re-issue), channel type, and the
+        ``quarantined`` flag. Only continuous channels in
+        :attr:`dark_recovery_channels` qualify; for event-driven channels
+        (``trade``, ``ohlc:*``) silence is the normal sparse state, so
+        re-subscribing them would churn quiet symbols without recovering
+        anything. A quarantined entry (a confirmed-but-never-streaming
+        subscription already given up on) is permanently ineligible until
+        real data or a fresh subscribe clears the flag.
 
         Args:
             entry: Confirmed entry to evaluate.
@@ -860,7 +985,11 @@ class SubscriptionHealthTracker:
         Raises:
             None.
         """
-        return entry.dark_recovery_enabled and entry.channel in self.dark_recovery_channels
+        return (
+            entry.dark_recovery_enabled
+            and entry.channel in self.dark_recovery_channels
+            and not entry.quarantined
+        )
 
     def _dark_recovery_due(self, entry: _SymbolEntry, now: float) -> bool:
         """Return True when a confirmed entry is dark long enough to recover.
