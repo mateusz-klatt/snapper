@@ -165,12 +165,23 @@ snapper feed [OPTIONS]
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
-| `--symbols` | string | `BTC-USD` | Comma-separated Snapper-native symbols (`BASE-QUOTE`); unknown natives are skipped. The Kraken WebSocket form (`XBT/USD`, `ETH/USD`) is derived internally by the publisher. |
+| `--symbols` | string | `BTC/USD` | Comma-separated symbols passed to the Kraken publisher. |
 
 **Example:**
 
 ```bash
-snapper feed --symbols "BTC-USD,ETH-USD,SOL-USD"
+snapper feed --symbols "BTC/USD,ETH/USD"
+```
+
+### `feed-engine`
+
+Runs the dedicated feed-container entrypoint. It syncs the process
+registry, starts enabled market-data publishers as OS subprocesses,
+and exits non-zero if any supervised publisher crashes so the
+orchestrator restarts the feed container.
+
+```bash
+snapper feed-engine
 ```
 
 ### `zmq-logger`
@@ -195,6 +206,18 @@ snapper zmq-logger [OPTIONS]
 ```bash
 snapper zmq-logger --payload --audit-file logs/zmq.jsonl
 ```
+
+### `egress`
+
+Runs the snapper-egress sidecar from the unified Snapper image.
+Additional arguments are forwarded to the egress entrypoint.
+
+```bash
+snapper egress [--instance-id snapper-egress-prod]
+```
+
+See [snapper-egress.md](snapper-egress.md) for tunnel settings and
+verification steps.
 
 ## Database
 
@@ -419,6 +442,20 @@ snapper update-underlyings [OPTIONS]
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `-f, --force` | bool | `false` | Bypass safety guard for stale cleanup |
+
+### `reconcile-symbol-aliases`
+
+Closes active `symbol_aliases` rows whose owning capability row is no
+longer tradeable and no longer market-data-enabled. The command is
+idempotent and can be scoped to one exchange.
+
+```bash
+snapper reconcile-symbol-aliases [OPTIONS]
+```
+
+| Option | Type | Default | Description |
+| ------ | ---- | ------- | ----------- |
+| `-e, --exchange` | string | `all` | Exchange to reconcile (`kraken`, `kraken_futures`, `kraken_equities`, `walutomat`, `polygon`, or `all`) |
 
 ## Market Snapshots
 

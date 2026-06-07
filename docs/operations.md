@@ -221,10 +221,11 @@ Verified on 2026-04-18 against docker-compose-v2.29.7
 # Kraken Equities (TradFi) market data
 
 TradFi index futures (Kraken FCM: MNQ/ES/YM/RTY/NKD/M2K) are shipped
-in market-data-only mode. The symbol updater + publisher processes
-are disabled at code level; runtime enable lives in the DB
-`Setting` rows for the relevant processes so rollout + rollback
-happen without code deploys.
+in market-data-only mode. The symbol updater remains disabled by
+default at code level, while the publisher is registered as an enabled
+market-data process. Persisted DB `Setting` rows still control runtime
+enable/autostart state, so rollout + rollback happen without code
+deploys.
 
 Contracts used by this flow:
 
@@ -240,6 +241,38 @@ Contracts used by this flow:
   `snapper.server._capability_guard.require_tradable` and rejects
   TradFi instruments with HTTP 422
   `error_code=instrument_market_data_only`.
+
+## Market diagnostics
+
+Use these REST endpoints during feed rollout and incident response:
+
+- `GET /api/market/feed-health` — current per-symbol publisher health.
+  Filter with `exchange=kraken_equities` and optionally
+  `fresh_within_seconds=<n>` to hide stale rows from stopped publishers.
+- `GET /api/market/coverage` — per-exchange counts for active
+  instruments, fresh ticks, fresh candles, gated-off instruments, and
+  dark instruments. Tune `tick_window_seconds` and
+  `candle_window_seconds` to match the venue's expected cadence.
+- `GET /api/market/cache/health` — cache and persist-policy snapshot:
+  number of cached instruments, cached pair-stat entries, and persisted
+  instrument universe size.
+- `GET /api/market/cache/stats/configured` and
+  `/api/market/cache/stats/{exchange_a}/{symbol_a}/{exchange_b}/{symbol_b}`
+  — cached Pearson/cointegration diagnostics for configured pairs.
+
+The feed-health table is current-state rather than SCD2 history. Its
+natural key includes coordinator, exchange, native symbol, stream kind,
+and timeframe, so split-feed deployments can show which coordinator is
+publishing a stale or missing stream.
+
+## Per-wallet executors
+
+Executor process configs are templates named `executor_<exchange>`.
+At runtime, `ProcessLauncherService` spawns one instance per active
+`wallet_credentials` row, named `executor_<exchange>_w<wallet_short>`.
+Those instances load credentials through `CredentialResolver` and ignore
+commands for other wallets. Operators should start/stop the generated
+wallet instances, not the bare templates.
 
 ## Enable the feed
 

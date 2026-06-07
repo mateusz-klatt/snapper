@@ -48,11 +48,12 @@ Executes the complete quality gate:
 6.  Canonical `__main__` guards
 7.  Empty `__init__.py` files
 8.  No forbidden temporal mutations
-9.  No pragma/noqa/ignore exclusions
-10. Vendor-neutrality check (`check-vendor-neutral`)
-11. Pydantic-only FastAPI I/O (`check-pydantic-routes`)
-12. Tests with 100% coverage
-13. Frontend (`ui-typecheck`, ESLint, Prettier, dead code, tests with coverage)
+9.  Egress compose safety check (`check-egress-compose`)
+10. No pragma/noqa/ignore exclusions
+11. Vendor-neutrality check (`check-vendor-neutral`)
+12. Pydantic-only FastAPI I/O (`check-pydantic-routes`)
+13. Tests with 100% coverage
+14. Frontend (`ui-typecheck`, ESLint, Prettier, dead code, i18n checks, tests with coverage)
 
 ### Individual Steps
 
@@ -66,6 +67,7 @@ Executes the complete quality gate:
 | `make test` | Tests (parallel) |
 | `make test-serial` | Tests (sequential, debug) |
 | `make cov` | Tests with coverage |
+| `make check-egress-compose` | Reject unsafe snapper-egress compose wiring |
 
 ### Automatic Fixes
 
@@ -288,7 +290,9 @@ Frontend at `http://localhost:3000/` with backend proxy.
 | ------- | ----------- |
 | `make ui-lint` | ESLint |
 | `make ui-format` | Prettier check |
+| `make ui-typecheck` | TypeScript type check |
 | `make ui-dead-code` | Knip dead code |
+| `make ui-i18n-check` | Frontend locale/catalog consistency |
 | `make ui-test` | Vitest tests |
 | `make ui-cov` | Tests with coverage |
 
@@ -346,7 +350,12 @@ flow frontend → iOS via the market-catalog pattern above.
 
 ### Dev DB Location
 
-The development SQLite database lives at `./data/snapper.db`.
+The local server SQLite database lives at `./data/snapper.db`.
+Test and coverage Make targets use an isolated SQLite fixture at
+`./data/dev.db` by setting `DB_URL=sqlite+aiosqlite:///./data/dev.db`
+inside the Makefile. This keeps `make test`, `make cov`, and
+`make check-all` from mutating the database used by a running local
+server, even when `.env` points at `./data/snapper.db` or PostgreSQL.
 
 ### Destructive Migration Strategy (Development)
 

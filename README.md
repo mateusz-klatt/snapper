@@ -180,6 +180,8 @@ snapper broker              # Start ZMQ broker
 snapper trade-zmq           # Trade runtime / coordinator (pass --instance-id + --instance-count for N>=2, see docs/operations.md)
 snapper executor            # Order executor
 snapper feed                # Market data publisher
+snapper feed-engine         # Dedicated feed container entrypoint
+snapper egress              # WireGuard + SOCKS5 egress sidecar entrypoint
 ```
 
 ### Database
@@ -245,15 +247,27 @@ printing.
 
 ```bash
 snapper update-kraken-symbols        # Sync Kraken symbols
+snapper update-kraken-futures-symbols
+snapper update-kraken-equities-symbols
+snapper update-walutomat-symbols
 snapper update-polygon-symbols       # Sync Polygon symbols
 snapper update-underlyings           # Sync underlying asset mappings from YAML
+snapper update-kraken-market-snapshot
+snapper update-kraken-futures-market-snapshot
+snapper update-kraken-equities-market-snapshot
+snapper update-walutomat-market-snapshot
 snapper polygon-backfill-aggregates  # Step 1: download history to CSV cache (no DB write)
 snapper polygon-load-csv --all       # Step 2: load the CSV cache into the database
+snapper kraken-futures-backfill-candles
+snapper kraken-equities-backfill-candles
+snapper update-kraken-futures-funding-rates
 snapper archive --day 2024-01-15     # Export candle cache to CSV
 snapper archive --from 2024-01-01 --to 2024-01-31 --exchange polygon
 snapper archive --table ticks --day 2024-01-15 --exchange polygon
 snapper archive --table candles-audit --day 2024-01-15 --closed-only --purge
 ```
+
+See [docs/cli.md](docs/cli.md) for full options and examples.
 
 ## Strategies
 
@@ -346,14 +360,21 @@ docker compose up -d
 
 ### Compose topology
 
-The compose stack runs three long-running services on the internal
+The compose stack runs four application services on the internal
 `snapper-internal` bridge network, all from a **single image**
 (`klattm/snapper:latest`) that bundles the python runtime + the Caddy
 binary. Each service overrides `entrypoint` / `command` to launch the
-right process:
+right process. The optional `postgres` service is gated behind the
+`dev` compose profile.
 
-- `snapper` — FastAPI backend + publishers (Kraken Spot/Futures/Equities,
-  Walutomat). `command: ["server"]`. Only `expose: 8000` internally.
+- `snapper` — FastAPI backend, ZMQ broker, strategy/process control, and
+  non-publisher runtime processes. `PROCESS_AUTOSTART_PROFILE=api`,
+  `command: ["server"]`, `expose: 8000/7500/7501` internally.
+- `snapper-feed` — dedicated market-data publisher container.
+  `PROCESS_AUTOSTART_PROFILE=feed`, `command: ["feed-engine"]`; it
+  connects to the backend broker via `tcp://snapper:7500/7501` and
+  uses reduced DB pool settings so publisher subprocesses do not
+  overrun PostgreSQL connection limits.
 - `snapper-egress` — WireGuard + SOCKS5 sidecar for outbound publisher
   traffic. `command: ["egress"]`, `cap_add: NET_ADMIN`, kernel module bind.
 - `snapper-web` — Caddy serving the React SPA from `/srv/dist` and
@@ -362,7 +383,7 @@ right process:
   `command: ["run", "--config", "/etc/caddy/Caddyfile"]`. Owns the host
   `127.0.0.1:8000:8000` bind.
 
-All three are `restart: unless-stopped` so they come back automatically
+All four application services are `restart: unless-stopped` so they come back automatically
 after a host reboot (assuming `systemctl is-enabled docker` returns
 `enabled`). Services explicitly stopped via `docker compose stop` stay
 stopped.

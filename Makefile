@@ -405,7 +405,7 @@ run-broker:
 	$(PYRUN) snapper broker
 
 run-feed:
-	$(PYRUN) snapper feed --symbols BTC/USD,ETH/USD --through-broker true
+	$(PYRUN) snapper feed --symbols BTC/USD,ETH/USD
 
 .PHONY: stress-equities
 STRESS_ARGS ?= --sweep 1000,3000,6000 --segment 12 --writer-latency-ms 10 --symbols 50
@@ -416,7 +416,7 @@ run-executor:
 	$(PYRUN) snapper executor
 
 run-trader-zmq:
-	$(PYRUN) snapper trade-zmq --strategy rsi_reversion --paper
+	$(PYRUN) snapper trade-zmq
 
 zmq-logger:
 	$(PYRUN) snapper zmq-logger --payload --max-length 500

@@ -94,6 +94,8 @@ Persistence layer with SQLAlchemy:
     - `UnderlyingAsset` — Canonical asset identity (e.g., S&P 500, Gold) linking instruments across exchanges
     - `InstrumentUnderlyingMapping` — Temporal link from instrument to underlying (exact/derivative/proxy)
     - `MarketSnapshot` — Real-time market data snapshots
+    - `InstrumentFeedHealth` — Current per-symbol feed-health snapshot
+      keyed by coordinator, exchange, native symbol, stream kind, and timeframe
     - `UserLoginEvent` — Authentication event log
     - `Control` — Always-on audit for commands, auth events, subscribe/unsubscribe,
       REST mutations. Includes redacted payload, outcome, and client causation linkage
@@ -103,7 +105,7 @@ Persistence layer with SQLAlchemy:
 
     Most ORM models carry provenance via `TemporalMixin` (the few
     exceptions — `UserActiveToken`, `AiDelegate`, `AiReview`,
-    `AiReviewEvent` — opt out because they manage their own
+    `AiReviewEvent`, `InstrumentFeedHealth` — opt out because they manage their own
     lifecycle / revocation semantics):
 
     - `session_id` (str, required) — producer session identity
@@ -178,7 +180,10 @@ Components:
   exchanges. One executor process per `(exchange, wallet)` pair is
   spawned at boot from active `wallet_credentials` rows; each
   instance filters incoming commands by `wallet_public_id` and loads
-  its credentials via `CredentialResolver` during startup.
+  its credentials via `CredentialResolver` during startup. Persisted
+  `executor_<exchange>` rows are templates only; runtime instances are
+  named `executor_<exchange>_w<wallet_short>` and bare templates are not
+  started as live executors.
 - **Schemas** (`schemas/`) — Pydantic message models
 - **Topics** (`topics/`) — ZMQ topic definitions
 
@@ -240,12 +245,20 @@ behaviour + observable gap) over silent approximation drift.
 Business logic:
 
 - **Engine** (`engine/`) — `TraderCoordinator` is the multi-symbol trade runtime coordinator; `TradingEngineService` is the per-instrument engine that turns signals into `TradeCommand` rows and order requests
-- **Trade** (`trade/`) — Trade-domain services: `trade_service.py` (in-memory command and position read model), `balance_service.py` (cash/equity/exposure projection), `outbox.py` (outbox-driven publishing), `reconciler.py` (stale-command scan and reconciliation failure feedback)
+- **Trade** (`trade/`) — Trade-domain services: `trade_service.py`
+  (in-memory command and position read model, fill deduplication,
+  funding accrual application, and reconciliation halt feedback),
+  `balance_service.py` (cash/equity/exposure projection), `outbox.py`
+  (outbox-driven publishing with wake-up + polling fallback),
+  `reconciler.py` (stale-command scan and reconciliation failure feedback)
 - **Process Manager** (`process_manager/`) — Process management
-- **Services** (`services/`) — Application services
+- **Services** (`services/`) — Application services, including
+  `market_cache.py` (in-process 1m candle cache and pair-stat snapshots)
+  and `market_persist_policy.py` (runtime policy deciding which
+  market-data streams are persisted to DB versus cache-only)
 - **Updaters** (`updaters/`) — Data updates (symbols, historical)
-- **Risk** (`risk/`) — Risk management
-- **Portfolio** (`portfolio/`) — Portfolio management
+- **Risk** (`risk/`) — Risk defaults and sizing models
+- **Portfolio** (`portfolio/`) — Signed long/short portfolio accounting
 
 ### Infrastructure (`src/snapper/infrastructure/`)
 
@@ -369,6 +382,7 @@ candles             -- OHLCV data
 ticks               -- Real-time price snapshots
 trades              -- Transaction history
 market_snapshots    -- Real-time market data (SCD2 per instrument, one active row each)
+instrument_feed_health -- Current per-symbol feed health snapshots
 
 -- Trading (joined to instruments via instrument_public_id)
 orders              -- Order history (mode: live/paper)
@@ -842,7 +856,8 @@ flowchart TB
 ### Backtesting
 
 The backtesting subsystem runs strategy simulations against historical candle
-data. DirectDbEngine performs synchronous candle reads from DB.
+data. DirectDbEngine performs direct repository-backed candle streaming
+without routing through the live ZMQ broker.
 
 **Architecture:**
 

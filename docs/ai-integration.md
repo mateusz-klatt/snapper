@@ -107,8 +107,8 @@ immediately — Snapper never re-serves them:
       "is_active": true,
       "caps": { "max_open_orders": 3, "max_daily_notional_usd": 1000.0, "max_cancels_per_minute": 10 }
     },
-    "access_token": "<jwt-with-10y-exp>",
-    "expires_in": 315360000
+    "access_token": "<jwt-with-90d-exp>",
+    "expires_in": 7776000
   }
 }
 ```
@@ -434,8 +434,8 @@ not on status text.
 | 401    | `user_deactivated`         | Owner account deactivated                        | Prompt re-login; don't auto-refresh                   |
 | 401    | Refresh token redeemed     | Replay of a spent refresh JWT                    | Re-login                                              |
 | 401    | Account deactivated        | Session cookie flow                              | Re-login                                              |
-| 403    | MCP: `wallet_out_of_scope:` *(prefixed message)* / REST: `"Wallet not in accessible set"` *(detail string)* | Tool targets a wallet outside the caller's scope. The two surfaces emit **different** strings: MCP raises `PermissionError(f"wallet_out_of_scope: ...")` lifted by FastMCP into a `ToolError`; REST raises `HTTPException(403, detail="Wallet not in accessible set")` from `server/scoping.py`. Neither path uses a structured `error_code` JSON field | Pick a wallet the caller still has a live grant on    |
-| 403    | MCP: `operator_out_of_scope:` *(prefixed message)* / REST: `"Operator not in accessible set"` *(detail string)* | Same shape as the wallet variant — MCP carries the prefixed `PermissionError` message, REST emits its own English detail string. No structured `error_code` field on either surface | Pick an operator from the caller's authenticated set  |
+| 403    | MCP write helpers: `wallet_out_of_scope:` *(prefixed message)* / REST: `"Wallet not in accessible set"` *(detail string)* | Mutating tool targets a wallet outside the caller's scope. The helper path raises `PermissionError(f"wallet_out_of_scope: ...")` lifted by FastMCP into a `ToolError`; REST raises `HTTPException(403, detail="Wallet not in accessible set")` from `server/scoping.py`. Tool-level read/cancel paths may instead return structured anti-enumeration envelopes such as `order_not_found`, `position_not_found`, or `signal_not_found`. | Pick a wallet the caller still has a live grant on    |
+| 403    | MCP write helpers: `operator_out_of_scope:` *(prefixed message)* / REST: `"Operator not in accessible set"` *(detail string)* | Same write-helper shape as the wallet variant. Read/cancel tools can intentionally collapse out-of-scope and not-found cases into structured not-found envelopes to avoid leaking resource existence. | Pick an operator from the caller's authenticated set  |
 
 Delegate CRUD:
 

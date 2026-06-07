@@ -1,20 +1,25 @@
 # API
 
 Snapper provides a REST API and WebSocket interface for platform interaction.
-The API requires JWT authentication via HTTP-only cookies. Auth bootstrap
-endpoints under `/api/auth` are exempt, but other mutating requests
-(`POST`) require a valid `X-CSRF-Token` header.
+The API accepts JWT authentication either through HTTP-only cookies or an
+`Authorization: Bearer <jwt>` header. When both are present, Bearer auth
+wins. Cookie-authenticated mutating requests require a valid
+`X-CSRF-Token` header; Bearer-authenticated requests skip CSRF because
+they are not ambient browser credentials.
 
 ## Authentication
 
-Authentication uses HTTP-only cookies. After login, the server sets
-`access_token`, `refresh_token`, and `csrf_token` cookies automatically.
+Browser sessions usually use HTTP-only cookies. After login, the server
+sets `access_token`, `refresh_token`, and `csrf_token` cookies
+automatically. API clients and MCP/AI delegates may send the access JWT
+as a Bearer token instead.
 
 ### Roles and Permissions
 
 | Role | Access |
 | ---- | ------ |
 | `viewer` | Read-only market data, orders, positions, strategies, system status |
+| `ai_delegate` | Scoped automation principal for MCP and AI-review workflows; can read market/orders/positions/strategies/signals/backtests/system status and create/cancel/manage scoped orders/positions, but cannot manage users, settings, processes, credentials, or scope grants |
 | `operator` | Viewer permissions plus trade execution, process management |
 | `admin` | Full access including user management, system configuration, wallet/credential management, scope grant management, operator impersonation |
 
@@ -324,7 +329,7 @@ profile.
 Update the authenticated caller's self-service preferences. Currently
 exposes `default_language` only; additional preference fields may
 be added later without changing the endpoint contract. Mirrors the
-admin `POST /api/users/{user_id}/update` shape (codebase convention:
+admin `POST /api/auth/users/{user_id}/update` shape (codebase convention:
 `POST + verb`, no REST `PATCH`).
 
 **Request:**
@@ -361,10 +366,54 @@ with the updated `default_language` echoed in `payload`.
   resolution and the update commit).
 - `422` — `default_language` not in the supported-language allowlist.
 
+### GET /api/auth/users
+
+List users. Requires `manage:users`.
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `include_inactive` | bool | Include deactivated users (default `false`) |
+| `as_of` | datetime | Optional point-in-time query timestamp |
+
+Returns `UserListResponse` with `payload` and `count`.
+
+### POST /api/auth/users
+
+Create a user. Requires `manage:users` and CSRF for cookie auth. Body is
+`CreateUserRequest` wrapping username, password, optional email, role,
+and `is_active`.
+
+### POST /api/auth/users/{user_id}/update
+
+Update email, role, and active state for an existing user. Requires
+`manage:users` and CSRF for cookie auth. Returns `UserResponse`.
+
+### POST /api/auth/users/{user_id}/deactivate
+
+Deactivate a user through the canonical kill-switch flow. Requires
+`manage:users` and CSRF for cookie auth. The path segment is resolved as
+the target username; self-deactivation returns `400`, unknown active
+users return `404`. The service also revokes active sessions and emits
+`admin.user_deactivated` for verify-cache eviction.
+
+### POST /api/auth/users/{user_id}/change-password
+
+Change a password. Users may change their own password; admins may
+change any password. Requires CSRF for cookie auth and is account-rate
+limited. Body is `ChangePasswordRequest` with current and new password.
+
+### POST /api/auth/users/{user_id}/admin-reset-password
+
+Admin password reset without the current password. Requires
+`manage:users`, CSRF for cookie auth, and is account-rate limited. Body
+is `AdminResetPasswordRequest`.
+
 ### CSRF Protection
 
 The `csrf_token` cookie is readable by JavaScript (not HttpOnly). For
-authenticated mutating requests outside `/api/auth/login`,
+cookie-authenticated mutating requests outside `/api/auth/login`,
 `/api/auth/refresh`, and `/api/auth/logout`, include its value as a header:
 
 ```http
@@ -373,6 +422,10 @@ X-CSRF-Token: <value from csrf_token cookie>
 
 New CSRF tokens are issued on login and refresh. There is no separate
 endpoint for obtaining CSRF tokens.
+
+Bearer-authenticated requests do not require `X-CSRF-Token`. This is
+intentional: the request is authorized by the explicit
+`Authorization: Bearer ...` header rather than an ambient browser cookie.
 
 ## REST Endpoints
 
@@ -400,6 +453,14 @@ bitemporal DB projection (the item carries its own
 envelope's provenance. Each item's data-type shape is identical to
 what the WebSocket feed delivers for the same domain object — only
 the wrapping differs.
+
+OpenAPI request-body schemas for routes that use the `json_body`
+dependency are patched into FastAPI's generated OpenAPI from
+`openapi_extra` metadata. Optional request bodies, such as refresh and
+delegate deactivate, stay optional in the generated schema. The mounted
+`/api/mcp` Streamable HTTP sub-app is intentionally outside FastAPI's
+OpenAPI route list; its tool contract is documented in
+[ai-integration.md](ai-integration.md).
 
 ### Provenance on Reads vs. Mutations
 
@@ -546,6 +607,23 @@ results too.
     }
 ]
 ```
+
+### GET /api/candles/db
+
+Explicit DB-only candle read for operators. Parameters and response
+shape match `GET /api/candles`, but the route bypasses the in-process
+market cache unconditionally so incident response can verify persisted
+`candles` rows directly.
+
+### GET /api/candles/cache
+
+Explicit cache-only candle diagnostic read. Parameters match
+`GET /api/candles` except `as_of` is not accepted. For cache-eligible
+timeframes (`1m`, `5m`, `15m`, `30m`) the route returns cache-shaped
+payload data with diagnostic fields such as `is_warm`, `source`, and
+`sample_count`; cold cache returns an empty payload with `is_warm=false`
+instead of silently falling back to DB. Long frames (`1h`, `4h`, `1d`)
+fall through to persisted rows because the cache does not serve them.
 
 ### GET /api/orders
 
@@ -1080,6 +1158,20 @@ X-CSRF-Token: <csrf_token>
 ["BTC-USD", "ETH-USD", "SOL-USD"]
 ```
 
+### GET /api/exchanges/{exchange}/instruments/detail
+
+List capability-aware instrument rows for an exchange. Requires
+`read:market_data`. Each row includes the native symbol plus trade and
+market-data capability flags, instrument kind, and expiry metadata so
+clients can show market-data-only instruments without a second request.
+
+### GET /api/instruments/{exchange}/{native_symbol}/related
+
+Return related instruments for a concrete exchange/native-symbol pair.
+Requires `read:market_data`. Used by cross-asset and continuous-contract
+UI flows to navigate from an instrument to its configured underlying,
+front month, and sibling contracts.
+
 ### GET /api/status
 
 System-wide status including trader process, backtests, and active
@@ -1134,7 +1226,10 @@ GET /api/ws/stats
 X-CSRF-Token: <csrf_token>
 ```
 
-**Response (200):**
+**Response payload excerpt (200):**
+
+The actual response is a `WsStatsResponse` envelope with provenance
+fields and this object under `payload`.
 
 ```json
 {
@@ -1149,7 +1244,7 @@ X-CSRF-Token: <csrf_token>
     "zmq_bridge": {
         "active_topics": 12,
         "subscriber_tasks": 12,
-        "available_topics": ["admin", "market", "orders.commands", "orders.events", "signals", "strategy.signals", "system.heartbeats."]
+        "available_topics": ["market.", "signals.", "system.heartbeats.", "admin.", "orders.commands.", "orders.events.", "accruals.", "backtest.", "alerts.", "plans.decisions.", "ai_reviews.", "processes.events.summary.", "processes.events.configured.", "processes.events.runs.", "strategies.events.list."]
     },
     "connections": {
         "active_connections": 5,
@@ -1199,7 +1294,10 @@ GET /api/zmq/health
 X-CSRF-Token: <csrf_token>
 ```
 
-**Response (200):**
+**Response payload excerpt (200):**
+
+The actual response is a `ZmqHealthResponse` envelope with provenance
+fields and this object under `payload`.
 
 ```json
 {
@@ -1211,7 +1309,7 @@ X-CSRF-Token: <csrf_token>
         "active_connections": 5
     },
     "config": {
-        "available_topics": ["admin", "market", "orders.commands", "orders.events", "signals", "strategy.signals", "system.heartbeats."]
+        "available_topics": ["market.", "signals.", "system.heartbeats.", "admin.", "orders.commands.", "orders.events.", "accruals.", "backtest.", "alerts.", "plans.decisions.", "ai_reviews.", "processes.events.summary.", "processes.events.configured.", "processes.events.runs.", "strategies.events.list."]
     },
     "connections": {
         "active_connections": 5,
@@ -1224,6 +1322,53 @@ X-CSRF-Token: <csrf_token>
     "errors": []
 }
 ```
+
+### GET /api/market/cache/health
+
+Diagnostic snapshot of the in-process market cache, configured pair
+stats, and persist-policy universe. Requires `read:market_data`.
+Returns counts for cached instruments, cached pairs, and persisted
+instrument universe size.
+
+### GET /api/market/cache/stats/configured
+
+Return cached Pearson and cointegration stats for every configured
+market-stats pair. Requires `read:market_data`. Configured-but-cold
+pairs return placeholders with `is_warm=false` so dashboards can render
+stable "computing" rows.
+
+### GET /api/market/cache/stats/{exchange_a}/{symbol_a}/{exchange_b}/{symbol_b}
+
+Return cached stats for one configured pair. Requires
+`read:market_data`. Unknown exchanges return `400`; unconfigured pairs
+return `404`; configured-but-not-yet-computed pairs return `200` with
+`is_warm=false`.
+
+### GET /api/market/coverage
+
+Per-exchange market-data coverage over active instruments. Requires
+`read:system_status`.
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `tick_window_seconds` | int | Freshness window for ticks (default 600) |
+| `candle_window_seconds` | int | Freshness window for candles (default 1800) |
+
+The payload includes one row per exchange with instrument count,
+`fresh_ticks`, `fresh_candles`, `gated_off`, and `dark` counts.
+
+### GET /api/market/feed-health
+
+Current per-symbol feed-health rows. Requires `read:system_status`.
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `exchange` | string | Optional lowercase exchange filter |
+| `fresh_within_seconds` | int | Optional staleness filter; older snapshots are dropped |
 
 ## Process Management
 
@@ -1499,10 +1644,18 @@ kraken_futures) are NOT exposed through the settings endpoints. They
 live in the `wallet_credentials` table and are managed via the
 dedicated `/api/wallets/{wallet_public_id}/credentials*` routes
 (`src/snapper/server/credential_routes.py` — `GET` for the active
-summaries, two `POST` paths for issue/revoke). Seed files
+summaries, `POST` for create, and `POST` rotate for replacing an
+existing credential row). Seed files
 (`proprietary/data/seed/dev.toml` / `prod.toml` — see
 [Configuration / Wallet Credentials](configuration.md#wallet-credentials))
 remain the bootstrap source for dev/prod parity.
+
+### GET /api/settings/features
+
+Public feature-flag projection used by the frontend before auth-gated
+navigation renders. No authentication required. Currently exposes
+`ai_integration_enabled`; disabled AI integration also makes `/api/mcp`
+and `/api/ai-delegates/*` return the shared `feature_disabled` envelope.
 
 ### GET /api/settings/categories
 
@@ -1515,6 +1668,21 @@ List distinct setting category names.
     "categories": ["exchanges", "strategy", "system"]
 }
 ```
+
+### GET /api/settings/push-beta/users
+
+Return the active push-beta gate configuration. Requires
+`configure:system`. If the underlying `push_beta_config` setting is
+absent or malformed, the endpoint returns the default disabled gate with
+an empty allowlist so admins can see the effective routing state.
+
+### POST /api/settings/push-beta/users
+
+Replace the push-beta gate configuration in one call. Requires
+`configure:system` and CSRF for cookie auth. The request body is
+`UpdatePushBetaUsersCommand`; `user_public_ids` becomes the complete
+allowlist after the write, so callers should read, edit locally, then
+submit the full desired set.
 
 ### POST /api/settings/{key}/set
 
@@ -1664,6 +1832,27 @@ Query parameters:
 Returns `PayloadListResponse` with `ContractData` items. Each item includes
 `is_front_month` (true for nearest non-expired within same contract family).
 
+### GET /api/underlyings/{ticker}/continuous
+
+Build a continuous futures series for an underlying from active contract
+metadata and candle rows.
+
+```
+GET /api/underlyings/SPX/continuous?exchange=kraken_equities&contract_family=ES&timeframe=1h&limit=500
+```
+
+Query parameters:
+
+- `exchange` (optional): Filter by exchange
+- `contract_family` (optional): Filter by product root
+- `timeframe` (optional): Candle timeframe, default `1h`
+- `limit` (optional): Maximum points, route-bounded
+- `as_of` (optional): Point-in-time query timestamp
+
+Returns a continuous-series response with the selected contract windows
+and candle points. Returns 400 for invalid parameters and 404 when the
+underlying cannot be resolved.
+
 ## Multi-Tenant (Wallets, Operators, Scope Grants, Credentials)
 
 ADMIN principals see the full catalogue; VIEWER and OPERATOR
@@ -1729,7 +1918,7 @@ DB insert. Body: ``exchange``, ``credential_type`` (``api_key_secret``,
 ``rsa_pem``, ``oauth``, ``paper``), ``credential_payload`` (dict),
 optional ``label``. Returns 409 if ``(wallet, exchange)`` already exists.
 
-### POST /api/wallets/{id}/credentials/{cid}/rotate
+### POST /api/wallets/{wallet_public_id}/credentials/{credential_public_id}/rotate
 
 SCD2 close + insert rotation. Old credential row closed, new row
 inserted with updated encrypted payload. Requires
@@ -1756,8 +1945,11 @@ not query-parameter-based.
 
 **Obtaining a WebSocket token:**
 
-Call `POST /api/auth/refresh` (requires a valid `refresh_token` cookie).
-The response includes `ws_token` and `ws_token_exp` fields.
+Call `POST /api/auth/ws_token` with an access token (Bearer header or
+cookie auth). The route returns a short-lived, one-shot `ws_token`
+without rotating the refresh-token pair. `POST /api/auth/refresh` can
+also return `ws_token` during session rotation, but long-running clients
+should prefer `/api/auth/ws_token`.
 
 ### Authentication Messages
 
@@ -1766,7 +1958,7 @@ The response includes `ws_token` and `ws_token_exp` fields.
 ```json
 {
     "type": "auth_required",
-    "timeout": 10,
+    "timeout": 30,
     "timestamp": "2026-01-18T12:00:00Z"
 }
 ```
@@ -1797,12 +1989,21 @@ The response includes `ws_token` and `ws_token_exp` fields.
 {
     "type": "auth_complete",
     "available_topics": [
-        "market",
-        "orders.commands",
-        "orders.events",
-        "signals",
-        "strategy.signals",
-        "system.heartbeats."
+        "market.",
+        "signals.",
+        "system.heartbeats.",
+        "admin.",
+        "orders.commands.",
+        "orders.events.",
+        "accruals.",
+        "backtest.",
+        "alerts.",
+        "plans.decisions.",
+        "ai_reviews.",
+        "processes.events.summary.",
+        "processes.events.configured.",
+        "processes.events.runs.",
+        "strategies.events.list."
     ],
     "user_role": "operator",
     "session_expires_at": "2026-01-18T12:15:00Z",
@@ -1811,10 +2012,13 @@ The response includes `ws_token` and `ws_token_exp` fields.
 }
 ```
 
-`available_topics` contains allowed topic roots/pattern keys for the user's
-role. Concrete subscriptions may use those roots as prefixes or full topic
-strings such as `market.kraken.BTC-USD.candles.1h` or
-`signals.paper.BTC-USD.rsi_btc_1h`.
+`available_topics` contains allowed registry roots for the user's role.
+Subscriptions may use a registry root such as `market.` or a full
+concrete topic such as `market.kraken.BTC-USD.candles.1h`.
+Intermediate prefixes such as `market.kraken.` are rejected. Backtests
+also allow scoped prefixes: `backtest.`, `backtest.{wallet_public_id}.`,
+and `backtest.{wallet_public_id}.{run_public_id}.`, subject to RBAC and
+wallet scope.
 
 **Server sends on failure:**
 
@@ -1921,7 +2125,7 @@ If the client does not reauthenticate in time:
 {
     "type": "subscriptions_list",
     "subscriptions": ["signals.paper.BTC-USD.rsi_btc_1h"],
-    "available_topics": ["market", "orders.commands", "orders.events", "signals", "strategy.signals", "system.heartbeats."],
+    "available_topics": ["market.", "signals.", "system.heartbeats.", "orders.events.", "alerts.", "backtest."],
     "total_available": 6,
     "timestamp": "2026-01-18T12:00:02Z"
 }
@@ -2110,8 +2314,11 @@ use these fields to detect gaps without server-side replay support.
 
 ### Available Topic Patterns
 
-Topics use dot-separated hierarchical names. Subscribe using the full topic
-string or a prefix to match multiple topics.
+Topics use dot-separated hierarchical names. Subscribe using a full topic
+string or one of the registry roots returned in `available_topics`.
+Intermediate prefixes are rejected; use `market.`, not
+`market.kraken.`. Backtest subscriptions are the exception and support
+the scoped prefixes documented in the WebSocket auth section above.
 
 #### Market Data
 
@@ -2146,6 +2353,18 @@ string or a prefix to match multiple topics.
 
 - `system.heartbeats.{component}.{name}[.{source}]` -- Component heartbeats
 - `admin.{resource}` -- Administrative events (admin only)
+- `processes.events.summary.{coord_slug}` -- Process summary snapshots
+- `processes.events.configured.{coord_slug}` -- Configured process-name snapshots
+- `processes.events.runs.{process_name}` -- Per-process lifecycle transitions
+- `strategies.events.list.{coord_slug}` -- Strategy class-path snapshots
+
+#### Alerts and Reviews
+
+- `alerts.{user_public_id}.{alert_type}` -- Notification stream
+- `plans.decisions.{plan_public_id}` -- Execution-plan decision events
+- `ai_reviews.{user_public_id}.{strategy_public_id}.{suffix}` -- AI delegate review frames
+- `accruals.{exchange}.{instrument}.{accrual_type}` -- Funding, rollover, and borrow accruals
+- `backtest.{wallet_public_id}.{run_public_id}.{event}` -- Backtest lifecycle and progress frames
 
 ## Error Handling
 
@@ -2299,9 +2518,35 @@ List backtest runs with optional filters.
 | --------- | ---- | ----------- |
 | `strategy` | string | Filter by strategy name |
 | `status` | string | Filter by status (pending, running, completed, failed, cancelled) |
+| `config_hash` | string | Pairing-stable SHA-256 config hash used by comparison auto-pairing |
 | `limit` | int | Page size (1-100, default 20) |
 | `offset` | int | Page offset (default 0) |
 | `as_of` | datetime | Temporal query timestamp |
+
+### GET /api/backtests/strategy-classes
+
+List registered strategy-class identifiers accepted by
+`BacktestCreateBody.strategy_class`. Used by the UI to populate the
+create-backtest strategy selector.
+
+### POST /api/backtests/compare
+
+Create or return an idempotent existing comparison row for two terminal
+runs. Manual mode supplies `run_a_public_id` and `run_b_public_id`; auto
+mode supplies `config_hash` and optionally `anchor_run_public_id`.
+Requires an active wallet and `read:backtests`. See
+[backtesting.md](backtesting.md#comparison) for pairing semantics.
+
+### GET /api/backtests/compare
+
+List recent comparison rows for the caller's active wallet.
+
+**Query parameters:** `limit`, `offset`, and `as_of`.
+
+### GET /api/backtests/compare/{comparison_public_id}
+
+Fetch comparison metadata plus recomputed metrics, equity, trades, and
+signals diffs from the current artifact rows.
 
 ### GET /api/backtests/{run_id}
 
@@ -2328,6 +2573,13 @@ Get paginated signals for a completed backtest run.
 ### GET /api/backtests/{run_id}/events
 
 Get lifecycle events for a backtest run (started, failed, etc.).
+
+### GET /api/backtests/{run_id}/equity
+
+Get paginated equity curve points for a run.
+
+**Query parameters:** `limit` (1-20000, default 5000), `after`, and
+`as_of`.
 
 ## AI Reviews
 
@@ -2588,8 +2840,20 @@ Read from the in-process `RestCallTracker` snapshot. Returns
 
 ## AI Delegates
 
-The PAT-minting routes (`POST /api/ai-delegates`, list, deactivate)
-are documented end-to-end in [ai-integration.md](ai-integration.md)
-alongside the Claude Code / Claude Desktop / Cursor / Windsurf
-wire-up instructions. They follow the same `PayloadResponse`
-envelope convention used by the auth routes above.
+AI delegate management is feature-gated by `ai_integration_enabled`;
+when disabled, these routes return a 503 `feature_disabled` envelope
+matching `/api/mcp`.
+
+| Route | Description |
+| ----- | ----------- |
+| `POST /api/ai-delegates` | Create a delegate and return its 90-day access JWT once |
+| `GET /api/ai-delegates` | List active delegates owned by the caller |
+| `GET /api/ai-delegates/{delegate_public_id}` | Fetch one owned delegate; 404 also covers foreign IDs |
+| `PATCH /api/ai-delegates/{delegate_public_id}` | SCD2 close+insert new caps for an owned delegate |
+| `POST /api/ai-delegates/{delegate_public_id}/deactivate` | Deactivate via the shared kill-switch flow and revoke active tokens |
+
+The routes are documented end-to-end in
+[ai-integration.md](ai-integration.md) alongside the Claude Code /
+Claude Desktop / Cursor / Windsurf wire-up instructions. They follow
+the same `PayloadResponse` envelope convention used by the auth routes
+above.

@@ -188,8 +188,10 @@ in UUID7 form.
 ### AI Reviews
 
 Outbound delegate-consultation frames for the human-in-the-loop review
-queue. The bridge applies a per-frame scope filter so each operator only
-sees their own strategy.
+queue. The bridge applies a per-frame scope filter so only the selected
+AI delegate receives frames for wallets and instruments covered by its
+live scope grant. Non-delegate WebSocket principals fail closed for this
+topic family even if they somehow request a subscription.
 
 | Topic | Description |
 | ----- | ----------- |
@@ -199,7 +201,9 @@ sees their own strategy.
 
 Shape: `ai_reviews.{user_public_id}.{strategy_public_id}.{suffix}` (4 segments).
 Both ID segments are UUID7; `suffix` is one of the three frame
-discriminators above.
+discriminators above. The payload must include string
+`wallet_public_id` and `instrument_public_id` values so the bridge can
+check the delegate's grant before forwarding.
 
 ### Backtest
 
@@ -255,25 +259,12 @@ caches (no REST polling).
 
 Shape: 4 segments. The instance-id / process-name tail must match
 `[A-Za-z][A-Za-z0-9_-]*` (regex `_PROCESSES_TOPIC_NAME_PATTERN`).
-
-**Known limitation:** the regex requires a leading letter, but
-`SNAPPER_COORDINATOR_INSTANCE_ID` is typed `int` (default `0`)
-end-to-end (env loader, `AppSettings.coordinator_instance_id`,
-the `trade-zmq --instance-id` CLI flag). Every default numeric
-instance_id therefore fails the validator at publish time and
-the launcher's best-effort emit silently logs+swallows the
-`ValueError`. Until either the regex widens to allow leading
-digits (`[A-Za-z0-9]...`) or the field switches to `str`, the
-fanout topics whose tail is `coordinator_instance_id` —
-`processes.events.summary.*`, `processes.events.configured.*`,
-`strategies.events.list.*` — are effectively dark in
-single-instance deployments. `processes.events.runs.<process_name>`
-is unaffected because its tail is the process name (a string that
-satisfies the regex), so per-run events still flow. The launcher
-emits these best-effort — if no `MessagePublisher` is
-wired the helper silently no-ops; if `send_multipart` raises the
-exception is logged and never propagates, so a broker outage never
-corrupts process state.
+Numeric `SNAPPER_COORDINATOR_INSTANCE_ID` values are converted to
+topic-safe slugs by `ProcessLauncherService.coordinator_topic_slug()`;
+the default instance therefore emits on `coord-0`, and instance 7 emits
+on `coord-7`. The launcher emits these best-effort: if no
+`MessagePublisher` is wired the helper no-ops, and send failures are
+logged without corrupting process state.
 
 ## Message Data Classes
 
@@ -846,8 +837,8 @@ ZMQ sockets use explicit high water marks via `apply_hwm()` from
 | Tier | Constant | Value | Used by |
 | ---- | -------- | ----- | ------- |
 | Order flow | `HWM_ORDER_FLOW` | 0 (unlimited) | Executors, trade runtime coordinator |
-| Broker | `HWM_BROKER` | 10 000 | XSUB (rcvhwm), XPUB (sndhwm) |
-| Market data | `HWM_MARKET_DATA` | 5 000 | Publishers, strategies, bridge, settings, symbol updaters |
+| Broker | `HWM_BROKER` | 50 000 | XSUB (rcvhwm), XPUB (sndhwm) |
+| Market data | `HWM_MARKET_DATA` | 20 000 | Publishers, strategies, bridge, settings, symbol updaters |
 | Audit | `HWM_AUDIT` | 10 000 | Message logger |
 
 `apply_hwm()` must be called **before** `connect()` or `bind()`.

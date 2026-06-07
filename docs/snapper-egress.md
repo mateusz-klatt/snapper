@@ -19,7 +19,8 @@ APPROVED) for the full design.
   sidecar bind-mounts `/lib/modules` and uses the host kernel module
   via netlink (no userspace WireGuard). Empty/default deployments
   with no declared tunnels still expose `/ready` without probing
-  WireGuard.
+  WireGuard. Use `/readyz` when you need strict "every declared tunnel
+  is up" semantics.
 - **`MASTER_PASSWORD`** in the same `.env` the snapper-api container
   uses. The sidecar reads encrypted `egress_tunnel_*_private_key`
   settings via the same Fernet path; mismatched master passwords
@@ -158,16 +159,26 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
    docker compose exec snapper-egress \
      python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8081/ready', timeout=2).read())"
    ```
-   Expect a 200 with the running + failed tunnel id arrays.
+   Expect a 200 with the running + failed tunnel id arrays. This is the
+   Compose health endpoint and intentionally stays 200 after bootstrap
+   even if an individual tunnel failed.
 
 2. **All tunnels up?**
+   ```
+   docker compose exec snapper-egress \
+     python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8081/readyz', timeout=2).read())"
+   ```
+   Expect 200 only when every declared tunnel is up; otherwise it
+   returns 503 with the failed tunnel ids.
+
+3. **Tunnel status detail?**
    ```
    docker compose exec snapper-egress \
      python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8081/tunnels', timeout=2).read())"
    ```
    Each tunnel id maps to `{"status": "up", "reason": null}`.
 
-3. **WireGuard handshake established?** (operator debugging — uses
+4. **WireGuard handshake established?** (operator debugging — uses
    `iproute2` shipped in the image)
    ```
    docker compose exec snapper-egress ip -d link show wg-uk-1

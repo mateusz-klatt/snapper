@@ -154,6 +154,16 @@ constants in
 Operators can drop the ring buffer cap to reduce resident memory
 (720 ≈ 1h ≈ 360 KB).
 
+Publisher hot-path probes are separate, opt-in diagnostics:
+
+| Variable | Default | Effect |
+| -------- | ------- | ------ |
+| `SNAPPER_TICK_PROBE` | unset | Logs per-stage tick publisher timing histograms every ~10 seconds when truthy. |
+| `SNAPPER_TRADE_PROBE` | unset | Logs per-stage trade publisher timing histograms every ~10 seconds when truthy. |
+
+Use these only during targeted throughput investigations; when unset
+the hot path pays only a branch and return.
+
 ## Sampling cadence + ring buffer
 
 - Sample interval: configurable, default **5 seconds**.

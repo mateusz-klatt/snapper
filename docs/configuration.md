@@ -41,13 +41,15 @@ DB_URL=postgresql+asyncpg://user:password@localhost:5432/snapper
 | `SERVER_PROXY_HEADERS` | `true` | Enable proxy header parsing in uvicorn |
 | `SERVER_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted proxy IPs/CIDRs for forwarded headers |
 | `SERVER_API_ONLY` | `false` | Skip process autostart; serve API + WS bridge only (separate-engine boots). Multi-worker uvicorn (multiple FastAPI processes sharing a broker) is supported — see `docs/architecture.md` Deployment Modes for the AI-review fanout dedup contract under N>1. Set `SNAPPER_COORDINATOR_INSTANCE_ID` + `SNAPPER_COORDINATOR_INSTANCE_COUNT` per worker to enable the shared partitioning. |
+| `PROCESS_AUTOSTART_PROFILE` | `all` | Select which enabled process configs this node starts: `all` for single-container/dev, `api` for backend-without-market-publishers, `feed` for the dedicated feed container. |
 | `TELEMETRY_RECORDING_ENABLED` | `false` | Record pings, heartbeats, and GET reads to `telemetry` table. High volume — enable for debugging only |
 
 The `Default` column reflects the Pydantic defaults on
 `BootstrapSettingsLoader` (`src/snapper/config/bootstrap.py`) for
 the server / encryption / ZMQ / coordinator rows. The
 observability rows further down (`SYSTEM_METRICS_*`, `RETENTION_*`,
-`DB_METRICS_*`) are NOT loaded through that class.
+`DB_METRICS_*`, `DB_POOL_*`, `SNAPPER_*_PROBE`) are NOT loaded
+through that class.
 `application/system_metrics/snapshotter.py` and
 `application/db_stats/snapshotter.py` read their env vars directly
 via `os.environ`. The retention env vars are read in two places:
@@ -77,6 +79,27 @@ either value.
 | -------- | ------- | ----------- |
 | `ZMQ_BROKER_XSUB` | `tcp://127.0.0.1:7500` | XSUB endpoint (publishers connect here) |
 | `ZMQ_BROKER_XPUB` | `tcp://127.0.0.1:7501` | XPUB endpoint (subscribers connect here) |
+| `ZMQ_BROKER_BIND_XSUB` | empty | Optional broker bind endpoint for XSUB. Empty means bind `ZMQ_BROKER_XSUB`; cross-container deployments set this to `tcp://0.0.0.0:7500`. |
+| `ZMQ_BROKER_BIND_XPUB` | empty | Optional broker bind endpoint for XPUB. Empty means bind `ZMQ_BROKER_XPUB`; cross-container deployments set this to `tcp://0.0.0.0:7501`. |
+
+Bind endpoints exist because ZMQ `bind()` requires a local interface
+while cross-container clients connect through the Docker service name.
+In the compose split, the backend broker binds `0.0.0.0` and both the
+backend and `snapper-feed` connect to `tcp://snapper:7500/7501`.
+
+### Database Engine Pool
+
+These optional variables are read directly by the repository engine
+factory and only affect PostgreSQL engines.
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `DB_POOL_SIZE` | SQLAlchemy default | Per-process pool size. |
+| `DB_MAX_OVERFLOW` | SQLAlchemy default | Per-process overflow connections. |
+
+Set them on the dedicated feed container when publisher subprocesses
+would otherwise multiply the default pool toward PostgreSQL
+`max_connections`.
 
 ### Coordinator Sharding
 
@@ -108,6 +131,12 @@ underlying snapshots and the retention window math.
 | `RETENTION_OUTPUT_DIR` | `data` | Base directory for archive CSV writes (matches the CLI `--output-dir` default) |
 | `DB_METRICS_INTERVAL_SECONDS` | `60` | Cadence for the per-table row-count / index-health sampler |
 | `DB_METRICS_DISABLED` | `false` | Disable the DB stats sampler |
+| `SNAPPER_TICK_PROBE` | unset | Enable per-stage tick hot-path histograms in publisher logs when truthy (`1`, `true`, `yes`) |
+| `SNAPPER_TRADE_PROBE` | unset | Enable per-stage trade hot-path histograms in publisher logs when truthy (`1`, `true`, `yes`) |
+
+The two probe variables flush one log line roughly every 10 seconds
+with per-stage `count`, `rate`, `p50`, `p95`, `p99`, and `max`.
+Leave them unset outside targeted throughput investigations.
 
 ## Database Settings
 
@@ -204,6 +233,25 @@ path. The engine writes `TradeCommand` rows to the database; the
 `VenueEvent` writes are fail-closed — a failed persist raises before
 the executor acknowledges the venue event.
 
+### Market Persist Policy
+
+Market-data publishers always publish ZMQ frames, but DB persistence is
+controlled by these settings so high-volume feeds can be cache-first:
+
+| Key | Description |
+| --- | ----------- |
+| `market_persist_ticks` | Persistence mode for tick rows |
+| `market_persist_trades` | Persistence mode for trade rows |
+| `market_persist_candles` | Persistence mode for candle rows |
+| `market_persist_extra` | Explicit extra instrument allowlist |
+| `market_persist_exclude` | Explicit instrument denylist |
+
+`MarketPersistPolicy` refreshes from settings and admin bus events, then
+injects immutable allow/deny snapshots into publishers. Invalid edits are
+rejected for that refresh cycle and the previous policy remains active.
+Use `/api/market/cache/health` and `/api/market/coverage` to verify the
+effective persisted universe.
+
 ### Publisher Micro-Batch
 
 | Key                            | Default | Description                                       |
@@ -254,6 +302,7 @@ SERVER_HOST=0.0.0.0
 SERVER_PORT=8000
 SERVER_RELOAD=false
 SERVER_API_ONLY=false
+PROCESS_AUTOSTART_PROFILE=all
 SERVER_PROXY_HEADERS=true
 SERVER_FORWARDED_ALLOW_IPS=127.0.0.1,172.17.0.1
 
@@ -263,6 +312,12 @@ TELEMETRY_RECORDING_ENABLED=false
 # ZMQ broker settings
 ZMQ_BROKER_XSUB=tcp://127.0.0.1:7500
 ZMQ_BROKER_XPUB=tcp://127.0.0.1:7501
+# ZMQ_BROKER_BIND_XSUB=tcp://0.0.0.0:7500
+# ZMQ_BROKER_BIND_XPUB=tcp://0.0.0.0:7501
+
+# PostgreSQL pool clamps for multi-process feed deployments
+# DB_POOL_SIZE=2
+# DB_MAX_OVERFLOW=3
 
 # Coordinator sharding (multi-instance trade-zmq / multi-worker uvicorn)
 SNAPPER_COORDINATOR_INSTANCE_ID=0
@@ -282,6 +337,10 @@ RETENTION_OUTPUT_DIR=data
 # DB stats sampler (per-table row-count snapshots)
 DB_METRICS_INTERVAL_SECONDS=60
 DB_METRICS_DISABLED=false
+
+# Publisher hot-path probes, disabled by default
+# SNAPPER_TICK_PROBE=1
+# SNAPPER_TRADE_PROBE=1
 ```
 
 ## Accessing Configuration in Code
@@ -427,5 +486,10 @@ The system validates configuration at startup:
 - Database connection check
 - ZMQ endpoint verification
 - Settings decryption test
+- Shared `.env` allowlist validation
 
-Configuration errors are reported through exceptions with clear messages.
+The allowlist is the union of `BootstrapSettingsLoader` aliases and
+each subsystem's exported `ENV_VARS` set. Unknown keys fail startup
+with suggestions, so typos such as `MASTER_PASWORD` do not silently
+fall back to defaults. When adding a new env var, register it on the
+owning module's `ENV_VARS` or add it as a bootstrap settings field.
