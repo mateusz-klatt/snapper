@@ -5960,7 +5960,7 @@ class TestKrakenSpotQueuesAreBounded:
 
     A regression that drops ``maxsize`` would let a slow downstream
     consumer grow the per-queue backlog without bound — exactly the
-    risk HV2-H4 closed.
+    risk the finite maxsize bound closes.
     """
 
     def test_default_queues_have_finite_maxsize(self) -> None:
@@ -5990,8 +5990,8 @@ class TestKrakenSpotQueuesAreBounded:
             replays a wildcard ticker snapshot of every subscribed
             pair in the first ~60 s after WS handshake, and the
             2026-05-25 post-restart log review counted 34 drop-oldest
-            WARN records on the tick queue alone in that window
-            (plan item #2). The larger ``_TICK_QUEUE_MAX_SIZE``
+            WARN records on the tick queue alone in that window.
+            The larger ``_TICK_QUEUE_MAX_SIZE``
             absorbs the burst without dropping; the smaller default
             applies to ``trade``/``candle``/``instrument``/``execution``
             paths where no drops have been observed.

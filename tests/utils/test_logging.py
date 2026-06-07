@@ -688,8 +688,8 @@ def test_is_file_sink_ready_resets_when_reconfigured_without_logfile(
         Without this reset a later boot-time confirmation hook would
         see ``True``, emit to a non-file sink, set the per-patch
         LOGGED flag, and then SKIP the persistent emission once a
-        real file sink came back. Regression coverage for the Codex
-        round-2 critical finding.
+        real file sink came back. Regression coverage for that
+        sink-reset ordering bug.
     """
     saved = log_utils._FILE_SINK_READY[0]
 

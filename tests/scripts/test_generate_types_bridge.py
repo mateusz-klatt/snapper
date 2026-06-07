@@ -233,7 +233,7 @@ class TestBridgeEnvelopeSpec:
         """The envelope mirrors every StrictDataSchema field except ``type``.
 
         The set adapts automatically as ``StrictDataSchema`` evolves —
-        the topic-on-data work extended the base from 4 fields to 5
+        adding the topic field extended the base from 4 fields to 5
         without further generator changes. Pinning against the live
         Pydantic schema instead of a hard-coded set keeps the
         derivation contract honest as the base evolves.
@@ -247,7 +247,7 @@ class TestBridgeEnvelopeSpec:
             ), f"envelope declaration missing field {field}"
 
     def test_envelope_includes_topic_field(self) -> None:
-        """Post-Phase-2 envelope carries ``topic: string | null`` reflecting the publisher chokepoint."""
+        """Envelope carries ``topic: string | null`` reflecting the publisher chokepoint."""
         envelope_fields, declaration = _bridge_envelope_spec()
         assert "topic" in envelope_fields
         assert "readonly topic: string | null;" in declaration

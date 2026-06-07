@@ -1353,7 +1353,7 @@ class TestDatabaseSymbolMapperFunctions:
 
 
 class TestAvailableSymbolsSetCache:
-    """Tests for the publisher hot-path frozenset cache (HV2-H5)."""
+    """Tests for the publisher hot-path frozenset cache."""
 
     def test_set_returns_frozenset_with_all_symbols(self) -> None:
         """Frozenset is built from the union of per-exchange getters.

@@ -15,8 +15,8 @@ run against a market-data-only instrument produces:
 - no crash when the source instrument is ``can_trade=False``.
 
 Cross-asset execution (observing TradFi, executing on a crypto
-instrument) was deferred under item 18 and is now
-implemented in this project (SHIPPED
+instrument) was deferred initially and is now
+implemented in this project (shipped
 2026-04-23) — ``batch_processor.process_time_batch`` routes fills
 through ``signal.instrument`` + ``config.target_execution_exchange``
 via the extracted ``_resolve_target_fill_price`` helper. The end-to-end
@@ -121,7 +121,7 @@ class _SilentObservingStrategy(BaseStrategy):
                 the TradFi series rather than only exchange metadata.
 
         Returns:
-            Always ``None``. The plan's observation-only contract forbids
+            Always ``None``. The observation-only contract forbids
             this class from emitting a signal against a ``can_trade=False``
             instrument.
         """
@@ -186,7 +186,7 @@ class TestBacktestTradfiObservationOnly:
         only so the engine's internal ``StrategyConfig`` validation
         passes. The real code path that ensures cross-asset execution
         on a ``can_trade=False`` instrument would be rejected is the
-        REST capability guard + the item 18 deferral
+        REST capability guard + the historical cross-asset deferral
         that documents why a true cross-asset execution test requires
         engine changes.
         """

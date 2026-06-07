@@ -210,8 +210,8 @@ class TestClientInit:
             like Spot, replays a wildcard ticker snapshot on initial
             subscribe and sends follow-on updates before the consumer
             steady-state catches up. The 2026-05-25 post-restart
-            5-minute slice counted 5 drop-oldest WARN records on the
-            Futures tick queue (plan item #2). The larger
+            5-minute window counted 5 drop-oldest WARN records on the
+            Futures tick queue. The larger
             ``_TICK_QUEUE_MAX_SIZE`` absorbs the burst; the smaller
             default applies to ``trade``/``candle``/``execution``
             paths where no drops have been observed.
@@ -578,10 +578,9 @@ async def test_rate_limited_sampled_now_is_consistent_under_lock_contention(
         AFTER the lock acquisition (lock-internal sample), not from
         the pre-lock sample. Sampling ``now`` before the lock would
         leak a stale cooldown deadline equal to the wait duration.
-        Regression coverage for the Codex round-1 critical finding on
-        item #6 — the original throttle patch sampled ``now`` outside
-        the lock and would have under-extended the cooldown by the
-        wait duration under contention.
+        Regression coverage for a throttle defect where the original
+        implementation sampled ``now`` outside the lock and would have
+        under-extended the cooldown by the wait duration under contention.
     """
     clock = _DeterministicClock()
     _install_public_subscribe_clock(monkeypatch, clock)
@@ -1050,10 +1049,10 @@ class TestOnWsMessage:
         When: ``_on_ws_message`` is called,
         Then: ``_candle_builder.active_buckets()`` becomes >= 1 — proving
             the trade-handler path wires the builder, not just the
-            trade queue. Regression guard for the 2026-05-12 Copilot
-            review finding where ``builder.update`` was missing on the
-            Kraken Futures hot path (Kraken Equities had it; Futures
-            was an accidental omission).
+            trade queue. Regression guard for a defect where
+            ``builder.update`` was missing on the Kraken Futures hot
+            path (Kraken Equities had it; Futures was an accidental
+            omission).
         """
         assert client._candle_builder.active_buckets() == 0
         msg = {

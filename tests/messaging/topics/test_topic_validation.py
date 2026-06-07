@@ -4005,13 +4005,13 @@ class TestPlansDecisionsTopicValidation:
         assert valid, err
 
     def test_subscribe_to_prefix_accepted(self) -> None:
-        """``plans.decisions.`` prefix subscription is accepted (closes R10.B-1).
+        """``plans.decisions.`` prefix subscription is accepted.
 
         The sidecar's stop-loss rule calls
         ``subscriber.subscribe("plans.decisions.")`` at start-up; the
         validator-side allowlist must include ``"plans"`` as a valid
-        category (Plan 2 v1.12 R10.B-1 closure) or this subscription
-        fails before the first frame is even received.
+        category or this subscription fails before the first frame is
+        even received.
         """
         valid, err = validate_subscription_pattern("plans.decisions.")
 
@@ -4207,15 +4207,14 @@ class TestAlertTypeParity:
 
 
 class TestProcessesAndStrategiesValidation:
-    """Validator pairings for the four 2026-05-14 process/strategy topics.
+    """Validator pairings for the four process/strategy snapshot topics.
 
     ``TOPIC_REGISTRY`` declares the patterns and
     :class:`ValidatedPublisher` consults ``validate_topic`` /
     ``validate_subscription_pattern`` BEFORE the registry. Without
     matching validator entries every launcher emit would be rejected
     at the publisher boundary and every WS subscribe would be denied.
-    Copilot review on parent PR #50 caught the missing pairing; these
-    tests pin it.
+    An earlier revision was missing this pairing; these tests pin it.
     """
 
     def test_processes_summary_topic_accepted(self) -> None:

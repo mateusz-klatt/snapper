@@ -2802,7 +2802,7 @@ class TestFeedPublisherCoverage:
         When: ``_tick_loop`` processes ticks,
         Then: ZMQ publish is awaited and the row reaches
             ``_tick_write_queue`` — DB persistence is the writer task's
-            job in the post-HV2-H7 decoupled architecture, not the
+            job in the decoupled writer architecture, not the
             consumer's.
         """
         mock_settings = MagicMock()
@@ -3811,7 +3811,7 @@ async def test_trade_loop_publishes_and_enqueues_for_writer(
     When: Trade arrives and stream ends,
     Then: Message is published to ZMQ and the row lands on
     ``_trade_write_queue`` — DB persistence now lives in
-    ``_trade_writer_loop`` (HV2-H7 pattern applied to trades).
+    ``_trade_writer_loop`` (the decoupled-writer pattern applied to trades).
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -3939,13 +3939,13 @@ async def test_candle_loop_cancelled_error_propagates_without_flush() -> None:
 
 @pytest.mark.asyncio
 async def test_tick_loop_does_not_flush_directly() -> None:
-    """Verify ``_tick_loop`` is ingest-only after the HV2-H7 decouple.
+    """Verify ``_tick_loop`` is ingest-only after the writer decouple.
 
     Given: A publisher with a tick in the stream,
     When: ``_tick_loop`` runs to completion,
     Then: No DB upsert happens inside the consumer — the row sits on
         ``_tick_write_queue`` for the dedicated writer task. Flushing
-        decoupled from ingest is the whole point of HV2-H7.
+        decoupled from ingest is the whole point of the writer decouple.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -4028,7 +4028,7 @@ async def test_tick_loop_cancelled_error() -> None:
     When: ``_tick_loop`` is running,
     Then: The first row stays on ``_tick_write_queue`` (no DB upsert
         attempted from the consumer side — that contract moved to
-        ``_tick_writer_loop`` in HV2-H7) and ``CancelledError``
+        ``_tick_writer_loop``) and ``CancelledError``
         propagates up.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])

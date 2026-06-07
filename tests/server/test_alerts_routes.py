@@ -1,4 +1,4 @@
-"""Tests for the iOS Push Foundation alert read routes.
+"""Tests for the iOS push alert read routes.
 
 Covers ``GET /api/alerts/history`` (with opaque cursor round-trip and
 ownership filter) and ``GET /api/alerts/{public_id}`` (with owner-or-

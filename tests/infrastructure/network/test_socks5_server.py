@@ -181,8 +181,8 @@ class TestEndToEnd:
         Then the upstream's final bytes still reach the client before
             both halves close.
 
-        This is the critical bug Codex Plan/Code Reviewer pinned: a
-        naive FIRST_COMPLETED + cancel-other relay would drop the
+        This guards a known failure mode: a naive
+        FIRST_COMPLETED + cancel-other relay would drop the
         upstream's close frame.
         """
 
@@ -434,8 +434,8 @@ class TestRequestParsing:
 class TestFailureReplyShape:
     """Tests that failure replies are well-formed regardless of request ATYP.
 
-    Pinned by Codex Code Reviewer: previously the failure reply echoed
-    the request's ATYP, producing malformed packets for the domain
+    Regression guard: previously the failure reply echoed the
+    request's ATYP, producing malformed packets for the domain
     case (4 zero bytes are not a valid length-prefixed domain).
     """
 

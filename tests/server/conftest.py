@@ -1,6 +1,6 @@
 """Shared fixtures for ``tests/server``.
 
-The order-entry capability guard introduced for TradFi P3
+The order-entry capability guard
 (``snapper.server._capability_guard.require_tradable``) fails closed
 for instruments without a ``SymbolExchangeCapability(can_trade=True)``
 row. Existing route tests use placeholder instrument strings such as
@@ -9,7 +9,7 @@ without a bypass they would all return HTTP 422.
 
 The ``bypass_capability_guard`` autouse fixture makes the guard a
 no-op for every test in this package. Tests that need to exercise
-the guard (new Day-3 regression tests) mark themselves with
+the guard mark themselves with
 ``@pytest.mark.capability_guard`` so the bypass yields without
 patching.
 """

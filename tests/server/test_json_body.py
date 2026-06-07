@@ -100,7 +100,7 @@ class TestOptionalJsonBody:
 
     @pytest.mark.asyncio()
     async def test_empty_body_returns_none(self) -> None:
-        """Empty body returns sentinel ``None`` (R15 contract).
+        """Empty body returns sentinel ``None`` (the optional-body contract).
 
         Given: An empty request body,
         When: optional_json_body dependency is called,

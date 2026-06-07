@@ -90,8 +90,8 @@ def test_polish_is_present_as_the_long_standing_first_translated_locale() -> Non
 def test_irish_is_present_as_the_recent_addition() -> None:
     """Spot-check for ``ga``.
 
-    Given: Irish shipped as part of Batch 9 (Filipino / Burmese /
-        Swahili / Irish + zh-Hant).
+    Given: Irish shipped alongside Filipino / Burmese / Swahili /
+        zh-Hant in a later catalog expansion.
     When: We check membership of ``"ga"``.
     Then: It is present.
     """

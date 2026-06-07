@@ -154,7 +154,8 @@ class TestOrderRouteCapabilityGuard:
         Then: the client-provided ``instrument_public_id`` is ignored;
             the resolved Instrument.public_id from the (symbol, exchange)
             pair flows into the trade-command insert instead. Closes the
-            final-gate regression flagged by gpt-5.4 + gpt-5.3-codex.
+            final-gate regression where a forged identifier could bypass
+            canonicalisation.
         """
         repo = AsyncMock()
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)

@@ -17,7 +17,7 @@ Covers:
 The scenarios use the ``two_coordinator_stack`` fixture from
 :mod:`tests.integration.conftest` for scenarios #1 and #2, and the
 ``@pytest.mark.real_settings`` escape for scenario #3 (narrow
-ownership-only pass, no broker pipeline — R8 narrowing).
+ownership-only pass, no broker pipeline).
 """
 
 import asyncio
@@ -192,7 +192,7 @@ def test_coordinator_ownership_from_bootstrap_env(
         path works without the test-only ``settings=`` kwarg
         injection that scenarios #1/#2 rely on.
 
-    Per R8 scope narrowing: ownership-only, no signal
+    Scope: ownership-only, no signal
     pipeline (scenarios #1/#2 cover the pipeline via the injection
     path). The autouse session-scoped ``isolated_sqlite_db``
     fixture has already pointed ``DB_URL`` at an isolated copy by

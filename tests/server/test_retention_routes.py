@@ -7,7 +7,7 @@ Covers:
 * 503 fallthrough when the scheduler attribute is absent / pre-set
   ``None`` / disabled / has not yet run a tick.
 * TestClient integration: 200 for VIEWER, 401 without auth.
-* Route registration assertion (SC#14).
+* Route registration assertion.
 """
 
 import contextlib
@@ -234,7 +234,7 @@ class TestGetRetentionMetricsViaTestClient:
 
 
 class TestRouteRegistration:
-    """SC#14 — assert route is mounted at the expected path."""
+    """Assert the route is mounted at the expected path."""
 
     def test_route_mounted_at_api_metrics_retention(self) -> None:
         """``/api/metrics/retention`` appears in the FastAPI routes table."""

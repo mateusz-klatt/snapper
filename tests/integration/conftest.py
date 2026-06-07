@@ -283,7 +283,7 @@ async def two_coordinator_stack(
     The fixture reuses :func:`_patch_settings_for_e2e` for broker +
     executor + module-level ``_bootstrap_settings`` patching
     (essential — ``_setup_signal_subscriber`` reads the module-level
-    variable at :1826), then threads per-coordinator ownership via
+    variable), then threads per-coordinator ownership via
     ``settings=``.
 
     Readiness: gives the broker proxy thread + both coordinator

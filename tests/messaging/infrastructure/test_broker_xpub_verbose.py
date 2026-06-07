@@ -89,8 +89,8 @@ class TestBrokerXpubVerbose:
     async def test_no_subscription_raises_timeout_via_outer_context(self) -> None:
         """Missing prefix lets the outer ``asyncio.timeout()`` fire ``TimeoutError``.
 
-        After the S7483 refactor the function waits indefinitely on its
-        internal condition and leaves timeout enforcement to callers;
+        The function waits indefinitely on its internal condition and
+        leaves timeout enforcement to callers;
         the observed-set remains available via
         ``broker._observed_subscriptions`` for debugging when the
         timeout fires.

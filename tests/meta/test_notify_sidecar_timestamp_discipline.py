@@ -68,7 +68,7 @@ def test_datetime_now_only_at_entry_boundaries() -> None:
     When: every ``datetime.now(...)`` call's enclosing function name
         is resolved via AST walk,
     Then: the enclosing function is always one of the allowed entry
-        boundary methods. Any other call site is a B-7 regression —
+        boundary methods. Any other call site is a regression —
         the helper should accept ``now: datetime`` as a parameter.
     """
     tree = ast.parse(SIDECAR_FILE.read_text(encoding="utf-8"))
@@ -85,6 +85,6 @@ def test_datetime_now_only_at_entry_boundaries() -> None:
     assert not offending, (
         "datetime.now(...) used outside the allowed entry boundaries "
         f"({sorted(ALLOWED_ENTRY_BOUNDARIES)}): {sorted(set(offending))}. "
-        "Per feedback_timestamp_discipline.md, mint one now at the "
+        "Mint one now at the "
         "entry boundary and thread it through helpers as a parameter."
     )

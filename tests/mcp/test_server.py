@@ -77,7 +77,7 @@ class TestFeatureFlagMiddleware:
             ``ai_integration_enabled`` flag returns ``False``,
         When: any POST reaches the mount point,
         Then: the response is HTTP 503 with
-            ``error_code="feature_disabled"`` —.12
+            ``error_code="feature_disabled"`` —
             always-mounted-but-gated semantics.
         """
         svc = _make_settings_service(enabled=False)
@@ -177,8 +177,8 @@ class TestBearerAuthMiddleware:
         Then: HTTP 503 with ``error_code="mcp_unavailable"`` is
             returned BEFORE any TokenManager call. The alternative —
             silently skipping the DB-backed check — would let
-            revoked JWTs through during startup, defeating the Day
-            3d-B contract.
+            revoked JWTs through during startup, defeating the
+            DB-backed revocation contract.
         """
         svc = _make_settings_service(enabled=True)
         app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: None)
@@ -293,7 +293,7 @@ class TestBearerAuthMiddleware:
         When: a Bearer-bearing request reaches the downstream,
         Then: the echo handler sees the verified :class:`TokenClaims`
             on ``request.state`` — proving the middleware populates
-            the attribute.2 tool-dispatch contract. The
+            the attribute for the tool-dispatch contract. The
             downstream status is 200 (FastMCP is not invoked here;
             the echo stub replaces it).
         """

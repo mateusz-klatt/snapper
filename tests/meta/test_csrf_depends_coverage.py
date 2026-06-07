@@ -15,8 +15,8 @@ asserts each ``POST``/``PUT``/``DELETE``/``PATCH`` route either:
   irrelevant, etc.).
 
 A route added without protection AND not on the allowlist fails the
-test loud — preventing a Sonnet-style "13+ injection points" audit
-finding from sliding into the codebase.
+test loud — preventing a class of CSRF-injection gaps from sliding
+into the codebase.
 """
 
 import inspect

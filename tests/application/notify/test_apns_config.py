@@ -32,7 +32,7 @@ def _valid_pem() -> str:
 def _ready_settings(**overrides: object) -> MagicMock:
     """Return a mock ``SettingsService`` pre-seeded with every APNs key."""
     defaults: dict[str, object] = {
-        "apns_team_id": "26MP7QQP95",
+        "apns_team_id": "ABCDE12345",
         "apns_key_id": "2V2KBT3VMQ",
         "apns_bundle_id": "ie.klatt.snapper",
         "apns_topic": "ie.klatt.snapper",
@@ -54,7 +54,7 @@ class TestLoadApnsConfig:
         """Every field round-trips; PEM is decoded from base64."""
         config = load_apns_config(_ready_settings())
 
-        assert config.team_id == "26MP7QQP95"
+        assert config.team_id == "ABCDE12345"
         assert config.key_id == "2V2KBT3VMQ"
         assert config.bundle_id == "ie.klatt.snapper"
         assert config.topic == "ie.klatt.snapper"

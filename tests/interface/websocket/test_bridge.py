@@ -1784,7 +1784,7 @@ class TestAiReviewScopeFilterWiring:
     async def test_forward_drops_malformed_ai_review_frame_before_iterating(self) -> None:
         """Malformed ``ai_reviews.*`` frame -> early return, never iterates subs.
 
-        Defense-in-depth fix (Copilot review). ``_check_gap`` already
+        Defense-in-depth fix. ``_check_gap`` already
         rejects malformed JSON before forwarding in production, but
         if a non-dict envelope ever reached ``_forward_to_clients``
         it would otherwise bypass the per-frame scope check (which is

@@ -317,7 +317,7 @@ class TestGetContinuousSeries:
         client.close()
 
     def test_rejects_negative_rollover_days(self) -> None:
-        """R2: rollover_days_before < 0 must be rejected with HTTP 422.
+        """rollover_days_before < 0 must be rejected with HTTP 422.
 
         When: caller passes rollover_days_before=-1,
         Then: FastAPI Query(ge=0) fails validation before the handler runs.
@@ -331,7 +331,7 @@ class TestGetContinuousSeries:
         client.close()
 
     def test_rejects_excessive_rollover_days(self) -> None:
-        """R2: rollover_days_before > 365 must be rejected with HTTP 422.
+        """rollover_days_before > 365 must be rejected with HTTP 422.
 
         When: caller passes rollover_days_before=366,
         Then: FastAPI Query(le=365) fails validation before the handler runs.
@@ -345,7 +345,7 @@ class TestGetContinuousSeries:
         client.close()
 
     def test_returns_200_empty_for_unknown_contract_family(self) -> None:
-        """R4: valid underlying + empty builder result returns 200 with empty payload.
+        """Valid underlying + empty builder result returns 200 with empty payload.
 
         Pins the contract that the endpoint never 404s on "no contracts in
         range" — only on "underlying not found". The OpenAPI description

@@ -1,10 +1,10 @@
 """Tests pinning the exchange-wire-format enum rename + StrEnum conversion.
 
-Before Batch 4 these enums were plain ``Enum`` classes named
+Earlier these enums were plain ``Enum`` classes named
 ``OrderTypeEnum`` / ``OrderStatusEnum`` inside
 ``snapper.infrastructure.exchanges.contracts``. They were renamed to
 ``ExchangeOrderTypeEnum`` / ``ExchangeOrderStatusEnum`` and switched to
-``StrEnum`` in the same commit, so these tests assert two things:
+``StrEnum`` in the same change, so these tests assert two things:
 
 1. Every wire-format value is byte-identical to its pre-rename form
    (no silent value drift).

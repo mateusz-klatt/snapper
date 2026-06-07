@@ -804,7 +804,7 @@ class TestDelegateProliferationCap:
 
 
 class TestDelegateProliferationConcurrency:
-    """R2 closure — proliferation cap survives concurrent creates.
+    """Proliferation cap survives concurrent creates.
 
     Before the row-lock fix, two parallel ``POST /api/ai-delegates``
     calls from the same owner could both read the same pre-insert
@@ -854,7 +854,7 @@ class TestDelegateProliferationConcurrency:
 
 
 class TestCreateDelegateInsertFailureRollsBackAtomically:
-    """Codex R1 NICE-TO-HAVE — pin the transactional rollback invariant."""
+    """Pin the transactional rollback invariant."""
 
     @pytest.mark.asyncio
     async def test_token_insert_conflict_rolls_back_user_and_caps(
@@ -1090,7 +1090,7 @@ class TestAiDelegatesFeatureFlagGate:
         settings_service.get_setting.assert_called_with("ai_integration_enabled", default=True)
 
     def test_handler_returns_mcp_parity_envelope(self) -> None:
-        """Rfollowup (gpt-5.4): envelope must match MCP 503 parity.
+        """Envelope must match MCP 503 parity.
 
         Given: an :class:`AiIntegrationDisabledError`,
         When: :func:`ai_integration_disabled_handler` translates it,

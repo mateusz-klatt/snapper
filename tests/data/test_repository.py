@@ -2674,7 +2674,7 @@ class TestSQLAlchemyRepositoryDialects:
             OR an active Symbol with no matching Instrument on the exchange,
         When: get_candles is called,
         Then: Returns empty list without querying the candles table.
-            The HV2-M5 JOIN collapses Symbol + Instrument resolution into a
+            The batched JOIN collapses Symbol + Instrument resolution into a
             single SELECT, so both legacy "symbol not found" and
             "instrument not found" branches now map to the same JOIN-miss
             (callers never distinguished between them — they both returned
@@ -5045,7 +5045,7 @@ async def test_get_plan_public_id_for_client_order_id_missing(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_get_plan_public_ids_for_client_order_ids_batched(tmp_path: Path) -> None:
-    """Batched resolver returns one row per known child id (HV2-M16).
+    """Batched resolver returns one row per known child id.
 
     Given: three plan-linked create commands plus one unrelated id,
     When: get_plan_public_ids_for_client_order_ids is called with all four,
@@ -8376,7 +8376,7 @@ async def test_get_open_position_cycles_for_shards_empty_shortcircuits(tmp_path:
 async def test_get_open_position_cycles_for_shards_batches_lookups(tmp_path: Path) -> None:
     """Given open cycles for multiple shards, When batched lookup runs, Then map keyed by shard returned.
 
-    HV2-M4: trader reconcile uses this method to collapse a per-engine
+    Trader reconcile uses this method to collapse a per-engine
     waterfall into one round-trip. Verifies the returned dict is keyed
     by ``shard_key`` and only contains shards with an active open cycle.
     """

@@ -245,9 +245,9 @@ class TestEndToEndBearerToContextVar:
     def test_real_tool_dispatched_via_bearer_middleware_stack(self) -> None:
         """Bearer header → middleware → ContextVar → REAL tool via tool manager.
 
-        This is the canonical "bearer-to-tool" proof that R1
-        Recommendation 2 asked for. Instead of a stub handler that
-        just reads :func:`get_current_claims`, this test:
+        This is the canonical "bearer-to-tool" proof. Instead of a
+        stub handler that just reads :func:`get_current_claims`,
+        this test:
 
             1. Builds a real :class:`FastMCP` instance and registers
                the production tools via :func:`register_mcp_tools`

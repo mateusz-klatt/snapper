@@ -79,9 +79,9 @@ def _make_token_listener_recorder(recorded: list[str]) -> MagicMock:
     """Build a TokenManager mock whose listener calls append to ``recorded``.
 
     Mirrors the ``mock_ws_auth`` helper in the lifespan-ordering test
-    so 's `TokenManager.start_admin_listener` /
-    `stop_admin_listener` calls land in the same event sequence as
-    's `WebSocketAuthManager` calls. Each call appends a
+    so the ``TokenManager.start_admin_listener`` /
+    ``stop_admin_listener`` calls land in the same event sequence as
+    the ``WebSocketAuthManager`` calls. Each call appends a
     distinct prefix (`tm_*` vs `ws_*`) so the ordering assertion can
     pin the relative sequence of both listeners' lifecycle hooks.
     """
@@ -1491,7 +1491,8 @@ class TestCreateApp:
         When: create_app is called,
         Then: The only mount is the unconditional MCP sub-app; the
             ``/`` static mount is skipped per the ``os.path.exists``
-            False branch. ``/api/mcp`` is always mounted because the.12 flag-off semantics are implemented inside the
+            False branch. ``/api/mcp`` is always mounted because the
+            flag-off semantics are implemented inside the
             sub-app, not at mount time.
         """
         with (

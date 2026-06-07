@@ -648,8 +648,8 @@ class TestSubmitManualOrderTool:
         When: ``submit_manual_order`` is dispatched,
         Then: a ``operator_out_of_scope`` tool error surfaces AND no
             DB calls fire (not even the scope-gate wallet lookup) —
-            the operator gate short-circuits first. Closes the R1
-            cross-operator attribution bypass finding.
+            the operator gate short-circuits first. Closes the
+            cross-operator attribution bypass.
         """
         repo = AsyncMock()
         repo.insert_execution_plan = AsyncMock()
@@ -1677,7 +1677,7 @@ class TestCancelOrderTool:
     async def test_concurrent_change_returns_service_unavailable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """R1: SCD2 race → ``service_unavailable`` (caller can retry to learn post-race state)."""
+        """SCD2 race → ``service_unavailable`` (caller can retry to learn post-race state)."""
 
         async def _race(**kwargs: Any) -> dict[str, Any]:
             del kwargs

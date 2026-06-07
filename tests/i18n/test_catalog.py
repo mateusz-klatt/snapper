@@ -17,7 +17,7 @@ def test_catalog_loads_all_45_languages() -> None:
     Given: the generator runs on every iOS xcstrings change and writes
         one ``<lang>.json`` per catalog language.
     When: ``supported_catalog_languages`` is queried.
-    Then: 45 codes are present — the count locked in by Batch 9.
+    Then: 45 codes are present — the locked-in catalog count.
     """
     langs = supported_catalog_languages()
     assert len(langs) == 45

@@ -67,7 +67,7 @@ class TestIterPythonFiles:
 
 
 class TestCheckFileShouldFail:
-    """Regression cases from.11 that must trip the scanner."""
+    """Regression cases that must trip the scanner."""
 
     def test_import_anthropic_flagged(self, tmp_path: Path) -> None:
         """Verify ``import anthropic`` is flagged.
@@ -177,9 +177,9 @@ class TestCheckFileShouldPass:
         Given: a vendor-named line whose only ``vendor-neutral-ok``
             occurrence is inside a string literal (no ``#`` comment),
         When: ``check_file`` runs,
-        Then: one violation is returned — closes the R1 finding where
-            substring matching the marker would let authors bypass the
-            gate with a plain string.
+        Then: one violation is returned — prevents substring matching
+            of the marker from letting authors bypass the gate with a
+            plain string.
         """
         f = tmp_path / "x.py"
         f.write_text('NAME = "Claude Desktop is not vendor-neutral-ok here"\n')
@@ -194,9 +194,9 @@ class TestCheckFileShouldPass:
         Given: a vendor-named line where the ``#`` sits inside a
             string literal (``"Claude Desktop # vendor-neutral-ok"``),
         When: ``check_file`` runs,
-        Then: one violation is returned — closes the R2 finding that
-            a regex-based ``#`` anchor could not distinguish a real
-            Python comment from a ``#`` embedded in a string. The
+        Then: one violation is returned — a regex-based ``#`` anchor
+            could not distinguish a real Python comment from a ``#``
+            embedded in a string. The
             tokenizer-based allowlist correctly classifies the ``#``
             as part of the STRING token rather than a COMMENT token.
         """
@@ -234,10 +234,10 @@ class TestCheckFileShouldPass:
             level it is part of the STRING token spanning the
             docstring),
         When: ``check_file`` runs,
-        Then: one violation is returned — closes the R3 finding that
-            per-line tokenization misclassified docstring bodies as
-            comment-bearing lines. File-level tokenization keeps the
-            enclosing STRING context intact.
+        Then: one violation is returned — per-line tokenization
+            misclassified docstring bodies as comment-bearing lines.
+            File-level tokenization keeps the enclosing STRING context
+            intact.
         """
         f = tmp_path / "x.py"
         f.write_text('"""\nClaude Desktop # vendor-neutral-ok\n"""\n')
@@ -253,8 +253,8 @@ class TestCheckFileShouldPass:
             the file-level trailing comment on an assignment,
         When: ``check_file`` runs,
         Then: no violation is reported — confirms the file-level
-            tokenizer still picks up genuine comments after the R3
-            rewrite.
+            tokenizer still picks up genuine comments after the
+            tokenization rewrite.
         """
         f = tmp_path / "x.py"
         f.write_text('NAME = "Claude Desktop client"  # vendor-neutral-ok\n')
@@ -271,11 +271,10 @@ class TestCheckFileShouldPass:
             inside a ``{expr # vendor-neutral-ok}`` replacement field
             on the same physical line,
         When: ``check_file`` runs,
-        Then: one violation is reported — closes the R4 finding that
-            the file-level tokenizer emits a ``COMMENT`` for the ``#``
-            inside the replacement field, which the previous
-            file-level allowlist wrongly treated as a trailing comment
-            on the vendor-bearing line.
+        Then: one violation is reported — the file-level tokenizer
+            emits a ``COMMENT`` for the ``#`` inside the replacement
+            field, which the previous file-level allowlist wrongly
+            treated as a trailing comment on the vendor-bearing line.
         """
         f = tmp_path / "x.py"
         f.write_text('MSG = f"""\nClaude Desktop {1  # vendor-neutral-ok\n}\n"""\n')

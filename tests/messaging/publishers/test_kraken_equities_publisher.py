@@ -257,7 +257,7 @@ class TestKrakenEquitiesMarketDataPublisher:
         legacy hardcoded ``"kraken"`` tag when reserving an
         egress-pool route — required so the
         ``allowed_exchanges=["kraken_equities"]`` filter pins this
-        publisher to the dedicated NYC tunnel.
+        publisher to its dedicated egress tunnel.
         """
         publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
         observed: list[KrakenEquitiesMarketDataPublisher | None] = []

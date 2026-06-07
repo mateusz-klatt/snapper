@@ -934,7 +934,7 @@ class TestExecutionPlanDecisionEventDataSchema:
         assert parsed.trigger_type == "tick"
 
     def test_free_form_reason_accepted(self) -> None:
-        """``reason`` is free-form ``str`` (Plan v1.12 R10.B-3 closure)."""
+        """``reason`` is free-form ``str``."""
         event = ExecutionPlanDecisionEventData(
             session_id="s1",
             sequence_id=7,
@@ -1091,7 +1091,7 @@ class TestProcessAndStrategyEventSchemas:
         The ``status`` field uses the ``ProcessRunStatusEnum.value``
         stringification the launcher emits (``running`` / ``succeeded``
         / ``failed`` / ``cancelled``); ``started`` is intentionally
-        NOT a producer-side value — Copilot review caught the drift
+        NOT a producer-side value — an earlier revision noted the drift
         between the test fixture and the actual emit payload.
         """
         event = ProcessRunEventData(
