@@ -1320,7 +1320,7 @@ class TestHighWriteBigIntegerPK:
 
 
 class TestExchangeColumnLengthAlignment:
-    """Plan F Issue 1a — canonical ``exchange`` column length is String(32).
+    """Canonical ``exchange`` column length is String(32).
 
     Five tables previously used ``String(20)`` while the majority of
     tables in the schema already used ``String(32)``. The mismatch could
@@ -1346,7 +1346,7 @@ class TestExchangeColumnLengthAlignment:
 
 
 class TestTradeCommandClientOrderIdIsString:
-    """Plan F Issue 1b — ``TradeCommand.client_order_id`` is String(64), not UUID.
+    """``TradeCommand.client_order_id`` is String(64), not UUID.
 
     ``Order`` and ``VenueEvent`` already used ``String(64)`` for the same
     logical client-issued identifier. ``TradeCommand`` was the outlier
@@ -1365,7 +1365,7 @@ class TestTradeCommandClientOrderIdIsString:
 
 
 class TestBacktestComparisonRunsDistinctConstraintDeclared:
-    """Plan F Issue 4a — ``ck_bc_runs_distinct`` declared on the model.
+    """``ck_bc_runs_distinct`` declared on the model.
 
     The model-level declaration ensures the constraint is picked up by
     SQLAlchemy introspection (e.g. reflection-based tooling, archive

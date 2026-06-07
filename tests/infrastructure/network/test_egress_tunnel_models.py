@@ -1,9 +1,9 @@
 """Unit tests for TunnelDescriptor + load_declared_tunnels.
 
-SC.2 of the snapper-egress sidecar plan. The descriptor model is a
-pure Pydantic value type — tested by validation cases. The loader
-is async + driven by a mocked ``SettingsService`` so the tests are
-hermetic (no DB, no encryption setup needed).
+The descriptor model is a pure Pydantic value type — tested by
+validation cases. The loader is async + driven by a mocked
+``SettingsService`` so the tests are hermetic (no DB, no encryption
+setup needed).
 """
 
 import dataclasses
@@ -63,8 +63,8 @@ class TestTunnelDescriptor:
         When TunnelDescriptor is instantiated,
         Then no exception fires and defaults apply for allowed_ips/dns.
         """
-        d = TunnelDescriptor(id="eset-de1", **_valid_descriptor_dict())
-        assert d.id == "eset-de1"
+        d = TunnelDescriptor(id="wg-de-1", **_valid_descriptor_dict())
+        assert d.id == "wg-de-1"
         assert d.allowed_ips == ("0.0.0.0/0", "::/0")
         assert d.dns == ()
 
@@ -98,7 +98,7 @@ class TestTunnelDescriptor:
         bad = _valid_descriptor_dict()
         bad["interface"] = "eth0"
         with pytest.raises(ValidationError):
-            TunnelDescriptor(id="eset-de1", **bad)
+            TunnelDescriptor(id="wg-de-1", **bad)
 
     def test_interface_max_length_15(self) -> None:
         """Spec — Linux IFNAMSIZ cap is 15 chars including the wg- prefix.
@@ -110,7 +110,7 @@ class TestTunnelDescriptor:
         bad = _valid_descriptor_dict()
         bad["interface"] = "wg-very-long-name-x"
         with pytest.raises(ValidationError):
-            TunnelDescriptor(id="eset-de1", **bad)
+            TunnelDescriptor(id="wg-de-1", **bad)
 
     def test_rejects_invalid_ip_address(self) -> None:
         """Spec — address must parse as IPv4 or IPv6.
@@ -122,7 +122,7 @@ class TestTunnelDescriptor:
         bad = _valid_descriptor_dict()
         bad["address"] = "not.an.ip"
         with pytest.raises(ValidationError, match="not a valid"):
-            TunnelDescriptor(id="eset-de1", **bad)
+            TunnelDescriptor(id="wg-de-1", **bad)
 
     def test_accepts_ipv6_address(self) -> None:
         """Spec — IPv6 address with prefix_length=128 constructs cleanly.
@@ -134,7 +134,7 @@ class TestTunnelDescriptor:
         d = _valid_descriptor_dict()
         d["address"] = "fd00::1"
         d["prefix_length"] = 128
-        assert TunnelDescriptor(id="eset-de1", **d).address == "fd00::1"
+        assert TunnelDescriptor(id="wg-de-1", **d).address == "fd00::1"
 
     def test_rejects_ipv4_with_prefix_above_32(self) -> None:
         """Spec — IPv4 address must have prefix_length <= 32.
@@ -146,7 +146,7 @@ class TestTunnelDescriptor:
         bad = _valid_descriptor_dict()
         bad["prefix_length"] = 64
         with pytest.raises(ValidationError, match=">"):
-            TunnelDescriptor(id="eset-de1", **bad)
+            TunnelDescriptor(id="wg-de-1", **bad)
 
     def test_pubkey_must_be_44_chars(self) -> None:
         """Spec — peer_pubkey is exactly 44 base64 chars.
@@ -158,7 +158,7 @@ class TestTunnelDescriptor:
         bad = _valid_descriptor_dict()
         bad["peer_pubkey"] = "A" * 43
         with pytest.raises(ValidationError):
-            TunnelDescriptor(id="eset-de1", **bad)
+            TunnelDescriptor(id="wg-de-1", **bad)
 
     def test_socks5_listen_port_rejects_privileged(self) -> None:
         """Spec — SOCKS5 listen port must be in [1024, 65535].
@@ -170,7 +170,7 @@ class TestTunnelDescriptor:
         bad = _valid_descriptor_dict()
         bad["socks5_listen_port"] = 80
         with pytest.raises(ValidationError):
-            TunnelDescriptor(id="eset-de1", **bad)
+            TunnelDescriptor(id="wg-de-1", **bad)
 
     def test_socks5_listen_port_rejects_above_max(self) -> None:
         """Spec — SOCKS5 listen port must be ≤ 65535.
@@ -182,7 +182,7 @@ class TestTunnelDescriptor:
         bad = _valid_descriptor_dict()
         bad["socks5_listen_port"] = 70000
         with pytest.raises(ValidationError):
-            TunnelDescriptor(id="eset-de1", **bad)
+            TunnelDescriptor(id="wg-de-1", **bad)
 
     def test_priority_rejects_negative(self) -> None:
         """Spec — priority must be ≥ 0.
@@ -194,7 +194,7 @@ class TestTunnelDescriptor:
         bad = _valid_descriptor_dict()
         bad["priority"] = -1
         with pytest.raises(ValidationError):
-            TunnelDescriptor(id="eset-de1", **bad)
+            TunnelDescriptor(id="wg-de-1", **bad)
 
     def test_unknown_field_rejected(self) -> None:
         """Spec — extra fields are rejected (extra="forbid").
@@ -205,7 +205,7 @@ class TestTunnelDescriptor:
         """
         with pytest.raises(ValidationError):
             TunnelDescriptor.model_validate(
-                {"id": "eset-de1", "wibble": 1, **_valid_descriptor_dict()}
+                {"id": "wg-de-1", "wibble": 1, **_valid_descriptor_dict()}
             )
 
     def test_allowed_ips_accepts_json_list(self) -> None:
@@ -215,14 +215,13 @@ class TestTunnelDescriptor:
         When TunnelDescriptor.model_validate runs,
         Then the model is accepted AND allowed_ips is a tuple.
 
-        Pinned by Codex Code Reviewer round 1 — without the
-        BeforeValidator, ``ConfigDict(strict=True)`` would reject the
-        list and operator configs with explicit allowed_ips would
-        fail to load.
+        Without the BeforeValidator, ``ConfigDict(strict=True)`` would
+        reject the list and operator configs with explicit allowed_ips
+        would fail to load.
         """
         d = _valid_descriptor_dict()
         d["allowed_ips"] = ["10.0.0.0/8", "2001:db8::/32"]
-        descriptor = TunnelDescriptor(id="eset-de1", **d)
+        descriptor = TunnelDescriptor(id="wg-de-1", **d)
         assert descriptor.allowed_ips == ("10.0.0.0/8", "2001:db8::/32")
         assert isinstance(descriptor.allowed_ips, tuple)
 
@@ -235,7 +234,7 @@ class TestTunnelDescriptor:
         """
         d = _valid_descriptor_dict()
         d["dns"] = ["1.1.1.1", "1.0.0.1"]
-        descriptor = TunnelDescriptor(id="eset-de1", **d)
+        descriptor = TunnelDescriptor(id="wg-de-1", **d)
         assert descriptor.dns == ("1.1.1.1", "1.0.0.1")
         assert isinstance(descriptor.dns, tuple)
 
@@ -251,7 +250,7 @@ class TestTunnelDescriptor:
         d = _valid_descriptor_dict()
         d["allowed_ips"] = [1, 2]
         with pytest.raises(ValidationError):
-            TunnelDescriptor(id="eset-de1", **d)
+            TunnelDescriptor(id="wg-de-1", **d)
 
     def test_allowed_ips_rejects_non_sequence(self) -> None:
         """Spec — non-sequence input falls through to Pydantic's rejector.
@@ -263,7 +262,7 @@ class TestTunnelDescriptor:
         d = _valid_descriptor_dict()
         d["allowed_ips"] = "not-a-list"
         with pytest.raises(ValidationError):
-            TunnelDescriptor(id="eset-de1", **d)
+            TunnelDescriptor(id="wg-de-1", **d)
 
     def test_frozen_after_construction(self) -> None:
         """Spec — model is frozen.
@@ -272,7 +271,7 @@ class TestTunnelDescriptor:
         When a field is reassigned,
         Then ValidationError fires.
         """
-        d = TunnelDescriptor(id="eset-de1", **_valid_descriptor_dict())
+        d = TunnelDescriptor(id="wg-de-1", **_valid_descriptor_dict())
         with pytest.raises(ValidationError):
             d.id = "other"
 
@@ -296,19 +295,19 @@ class TestLoadDeclaredTunnels:
     async def test_loads_single_tunnel_happy_path(self) -> None:
         """Spec — one descriptor + matching keys → one LoadedTunnel.
 
-        Given a cache with egress_tunnel_eset-de1 (dict) AND
-            egress_tunnel_eset-de1_private_key (string),
+        Given a cache with egress_tunnel_wg-de-1 (dict) AND
+            egress_tunnel_wg-de-1_private_key (string),
         When load_declared_tunnels runs,
         Then result has one LoadedTunnel with the parsed descriptor +
             decrypted private key.
         """
         descriptor = _valid_descriptor_dict()
-        cache = {"egress_tunnel_eset-de1": descriptor}
-        secrets = {"egress_tunnel_eset-de1_private_key": "PRIVKEY"}
+        cache = {"egress_tunnel_wg-de-1": descriptor}
+        secrets = {"egress_tunnel_wg-de-1_private_key": "PRIVKEY"}
         service = _make_settings_service(cache=cache, secret_lookups=secrets)
         result = await load_declared_tunnels(service)
         assert len(result.tunnels) == 1
-        assert result.tunnels[0].descriptor.id == "eset-de1"
+        assert result.tunnels[0].descriptor.id == "wg-de-1"
         assert result.tunnels[0].private_key == "PRIVKEY"
         assert result.tunnels[0].preshared_key is None
         assert result.failures == []
@@ -320,10 +319,10 @@ class TestLoadDeclaredTunnels:
         When load_declared_tunnels runs,
         Then LoadedTunnel.preshared_key carries the value.
         """
-        cache = {"egress_tunnel_eset-de1": _valid_descriptor_dict()}
+        cache = {"egress_tunnel_wg-de-1": _valid_descriptor_dict()}
         secrets = {
-            "egress_tunnel_eset-de1_private_key": "PRIVKEY",
-            "egress_tunnel_eset-de1_preshared_key": "PSK",
+            "egress_tunnel_wg-de-1_private_key": "PRIVKEY",
+            "egress_tunnel_wg-de-1_preshared_key": "PSK",
         }
         service = _make_settings_service(cache=cache, secret_lookups=secrets)
         result = await load_declared_tunnels(service)
@@ -336,10 +335,10 @@ class TestLoadDeclaredTunnels:
         When load_declared_tunnels runs,
         Then LoadedTunnel.preshared_key is None (not "").
         """
-        cache = {"egress_tunnel_eset-de1": _valid_descriptor_dict()}
+        cache = {"egress_tunnel_wg-de-1": _valid_descriptor_dict()}
         secrets = {
-            "egress_tunnel_eset-de1_private_key": "PRIVKEY",
-            "egress_tunnel_eset-de1_preshared_key": "",
+            "egress_tunnel_wg-de-1_private_key": "PRIVKEY",
+            "egress_tunnel_wg-de-1_preshared_key": "",
         }
         service = _make_settings_service(cache=cache, secret_lookups=secrets)
         result = await load_declared_tunnels(service)
@@ -353,7 +352,7 @@ class TestLoadDeclaredTunnels:
         Then result.tunnels is empty and failures has one
             entry with reason about the missing key.
         """
-        cache = {"egress_tunnel_eset-de1": _valid_descriptor_dict()}
+        cache = {"egress_tunnel_wg-de-1": _valid_descriptor_dict()}
         service = _make_settings_service(cache=cache, secret_lookups={})
         result = await load_declared_tunnels(service)
         assert result.tunnels == []
@@ -367,8 +366,8 @@ class TestLoadDeclaredTunnels:
         When load_declared_tunnels runs,
         Then a failure is recorded.
         """
-        cache = {"egress_tunnel_eset-de1": _valid_descriptor_dict()}
-        secrets = {"egress_tunnel_eset-de1_private_key": 12345}
+        cache = {"egress_tunnel_wg-de-1": _valid_descriptor_dict()}
+        secrets = {"egress_tunnel_wg-de-1_private_key": 12345}
         service = _make_settings_service(cache=cache, secret_lookups=secrets)
         result = await load_declared_tunnels(service)
         assert result.tunnels == []
@@ -381,10 +380,10 @@ class TestLoadDeclaredTunnels:
         When load_declared_tunnels runs,
         Then a failure is recorded.
         """
-        cache = {"egress_tunnel_eset-de1": _valid_descriptor_dict()}
+        cache = {"egress_tunnel_wg-de-1": _valid_descriptor_dict()}
         secrets = {
-            "egress_tunnel_eset-de1_private_key": "PRIVKEY",
-            "egress_tunnel_eset-de1_preshared_key": 42,
+            "egress_tunnel_wg-de-1_private_key": "PRIVKEY",
+            "egress_tunnel_wg-de-1_preshared_key": 42,
         }
         service = _make_settings_service(cache=cache, secret_lookups=secrets)
         result = await load_declared_tunnels(service)
@@ -401,8 +400,8 @@ class TestLoadDeclaredTunnels:
         """
         descriptor = _valid_descriptor_dict()
         del descriptor["peer_pubkey"]
-        cache = {"egress_tunnel_eset-de1": descriptor}
-        secrets = {"egress_tunnel_eset-de1_private_key": "PRIVKEY"}
+        cache = {"egress_tunnel_wg-de-1": descriptor}
+        secrets = {"egress_tunnel_wg-de-1_private_key": "PRIVKEY"}
         service = _make_settings_service(cache=cache, secret_lookups=secrets)
         result = await load_declared_tunnels(service)
         assert result.tunnels == []
@@ -417,8 +416,8 @@ class TestLoadDeclaredTunnels:
         Then it is decoded + validated successfully.
         """
         descriptor_json = json.dumps(_valid_descriptor_dict())
-        cache = {"egress_tunnel_eset-de1": descriptor_json}
-        secrets = {"egress_tunnel_eset-de1_private_key": "PRIVKEY"}
+        cache = {"egress_tunnel_wg-de-1": descriptor_json}
+        secrets = {"egress_tunnel_wg-de-1_private_key": "PRIVKEY"}
         service = _make_settings_service(cache=cache, secret_lookups=secrets)
         result = await load_declared_tunnels(service)
         assert len(result.tunnels) == 1
@@ -430,7 +429,7 @@ class TestLoadDeclaredTunnels:
         When load_declared_tunnels runs,
         Then a failure is recorded with the JSON error.
         """
-        cache = {"egress_tunnel_eset-de1": "{not json"}
+        cache = {"egress_tunnel_wg-de-1": "{not json"}
         service = _make_settings_service(cache=cache, secret_lookups={})
         result = await load_declared_tunnels(service)
         assert result.tunnels == []
@@ -444,7 +443,7 @@ class TestLoadDeclaredTunnels:
         When load_declared_tunnels runs,
         Then a failure is recorded.
         """
-        cache = {"egress_tunnel_eset-de1": "[1, 2, 3]"}
+        cache = {"egress_tunnel_wg-de-1": "[1, 2, 3]"}
         service = _make_settings_service(cache=cache, secret_lookups={})
         result = await load_declared_tunnels(service)
         assert result.tunnels == []
@@ -458,7 +457,7 @@ class TestLoadDeclaredTunnels:
         When load_declared_tunnels runs,
         Then a failure is recorded.
         """
-        cache = {"egress_tunnel_eset-de1": 42}
+        cache = {"egress_tunnel_wg-de-1": 42}
         service = _make_settings_service(cache=cache, secret_lookups={})
         result = await load_declared_tunnels(service)
         assert result.tunnels == []
@@ -475,7 +474,7 @@ class TestLoadDeclaredTunnels:
         """
         bad = _valid_descriptor_dict()
         bad["interface"] = "eth0"
-        cache = {"egress_tunnel_eset-de1": json.dumps(bad)}
+        cache = {"egress_tunnel_wg-de-1": json.dumps(bad)}
         service = _make_settings_service(cache=cache, secret_lookups={})
         result = await load_declared_tunnels(service)
         assert result.tunnels == []
@@ -485,7 +484,7 @@ class TestLoadDeclaredTunnels:
     async def test_ignores_non_tunnel_keys(self) -> None:
         """Spec — other settings in the cache are ignored.
 
-        Given a cache with egress_pool + egress_tunnel_eset-de1 +
+        Given a cache with egress_pool + egress_tunnel_wg-de-1 +
             unrelated settings,
         When load_declared_tunnels runs,
         Then only the matching tunnel is loaded.
@@ -493,20 +492,20 @@ class TestLoadDeclaredTunnels:
         descriptor = _valid_descriptor_dict()
         cache = {
             "egress_pool": {"enabled": False, "routes": []},
-            "egress_tunnel_eset-de1": descriptor,
+            "egress_tunnel_wg-de-1": descriptor,
             "polygon_api_key": "secret",
         }
-        secrets = {"egress_tunnel_eset-de1_private_key": "PRIVKEY"}
+        secrets = {"egress_tunnel_wg-de-1_private_key": "PRIVKEY"}
         service = _make_settings_service(cache=cache, secret_lookups=secrets)
         result = await load_declared_tunnels(service)
         assert len(result.tunnels) == 1
-        assert result.tunnels[0].descriptor.id == "eset-de1"
+        assert result.tunnels[0].descriptor.id == "wg-de-1"
 
     async def test_does_not_match_private_key_setting_as_tunnel(self) -> None:
         """Spec — egress_tunnel_<id>_private_key MUST NOT be parsed as a tunnel.
 
-        Given the cache contains BOTH egress_tunnel_eset-de1 AND
-            egress_tunnel_eset-de1_private_key as keys,
+        Given the cache contains BOTH egress_tunnel_wg-de-1 AND
+            egress_tunnel_wg-de-1_private_key as keys,
         When load_declared_tunnels runs,
         Then only the descriptor key is matched as a tunnel.
             (Pinned by the regex constraint that the id segment may
@@ -514,14 +513,14 @@ class TestLoadDeclaredTunnels:
         """
         descriptor = _valid_descriptor_dict()
         cache = {
-            "egress_tunnel_eset-de1": descriptor,
-            "egress_tunnel_eset-de1_private_key": "should-not-match",
+            "egress_tunnel_wg-de-1": descriptor,
+            "egress_tunnel_wg-de-1_private_key": "should-not-match",
         }
-        secrets = {"egress_tunnel_eset-de1_private_key": "PRIVKEY"}
+        secrets = {"egress_tunnel_wg-de-1_private_key": "PRIVKEY"}
         service = _make_settings_service(cache=cache, secret_lookups=secrets)
         result = await load_declared_tunnels(service)
         assert len(result.tunnels) == 1
-        assert result.tunnels[0].descriptor.id == "eset-de1"
+        assert result.tunnels[0].descriptor.id == "wg-de-1"
 
     async def test_tunnels_returned_in_sorted_id_order(self) -> None:
         """Spec — tunnels are returned sorted by id for deterministic index.
@@ -574,7 +573,7 @@ class TestLoadDeclaredTunnels:
 
 
 class TestGetTunnelStateLabel:
-    """Trivial helper test for the SC.4 /tunnels endpoint contract."""
+    """Trivial helper test for the /tunnels endpoint contract."""
 
     def test_up_when_no_failure(self) -> None:
         """Spec — None → "up"."""
@@ -596,7 +595,7 @@ class TestLoadResultDataclass:
         When a field is reassigned,
         Then dataclasses.FrozenInstanceError fires.
         """
-        d = TunnelDescriptor(id="eset-de1", **_valid_descriptor_dict())
+        d = TunnelDescriptor(id="wg-de-1", **_valid_descriptor_dict())
         loaded = LoadedTunnel(descriptor=d, private_key="K", preshared_key=None)
         with pytest.raises(dataclasses.FrozenInstanceError):
             loaded.private_key = "Z"

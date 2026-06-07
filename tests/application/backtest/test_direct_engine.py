@@ -90,9 +90,9 @@ class TestIterSortedCandleChunks:
     async def test_single_instrument_sorted(self) -> None:
         """Per-timestamp batches preserve global ascending open_at order.
 
-        After the streaming refactor (plan_2026_05_08_engine_streaming_nleg_paired
-        Phase 1), ``iter_sorted_candle_chunks`` yields one batch per
-        unique timestamp instead of one giant sorted batch. For two
+        After the streaming refactor, ``iter_sorted_candle_chunks``
+        yields one batch per unique timestamp instead of one giant
+        sorted batch. For two
         candles at distinct timestamps that's two single-event batches,
         emitted earliest-first.
         """

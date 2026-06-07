@@ -1,14 +1,12 @@
 """snapper-egress sidecar orchestrator.
 
-SC.4 of ``proprietary/plans/plan_2026_05_21_snapper_egress_sidecar.md``.
+Ties together the per-tunnel pieces:
 
-Ties together the per-tunnel pieces shipped in earlier slices:
-
-* SC.0 — ``Socks5Server`` (per-tunnel listener bound to the WG IP).
-* SC.1 — ``wg_control.check_kernel_wireguard`` (runtime probe when
+* ``Socks5Server`` — per-tunnel listener bound to the WG IP.
+* ``wg_control.check_kernel_wireguard`` (runtime probe when
   tunnels are declared) and ``wg_control.bring_up`` / ``bring_down``
   (per-tunnel WireGuard interface + source-based routing).
-* SC.2 — ``load_declared_tunnels(service)`` (settings → validated
+* ``load_declared_tunnels(service)`` (settings → validated
   descriptors + decrypted keys).
 
 The orchestrator runs three HTTP endpoints on port 8081 for
@@ -53,8 +51,8 @@ _HEALTHCHECK_HOST: Final[str] = "0.0.0.0"
 """Host the healthcheck app binds to.
 
 Default is the Docker private network only (snapper-egress runs with
-no host port mapping per the v4 plan); Compose's healthcheck reaches
-it via the in-network DNS.
+no host port mapping); Compose's healthcheck reaches it via the
+in-network DNS.
 """
 
 _STATE_KEY: Final[web.AppKey[_SidecarState]] = web.AppKey("snapper_egress_state")
@@ -108,7 +106,7 @@ async def run_sidecar(
 ) -> int:
     """Run the snapper-egress orchestrator until shutdown_event fires.
 
-    Bootstrap (per plan §4 sidecar flow):
+    Bootstrap:
 
     1. ``load_declared_tunnels(settings_service)`` enumerates
        declared tunnels + decrypts their keys. If at least one tunnel

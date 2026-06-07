@@ -92,7 +92,7 @@ class TestWalkAndFlatten:
         assert flat == {"sector.extra.deeply-nested": "X"}
 
     def test_flatten_related_namespace(self) -> None:
-        """Phase 2 ``related.*`` keys (incl. nested relationshipType) flatten."""
+        """The ``related.*`` keys (incl. nested relationshipType) flatten."""
         payload = {
             "related": {
                 "labelSeparator": "{{label}}:",
@@ -119,7 +119,7 @@ class TestWalkAndFlatten:
         }
 
     def test_flatten_phase3_namespaces_with_empty_source_preserved(self) -> None:
-        """Phase 3 namespaces flatten incl. empty-string source leaf.
+        """The pairStats/cacheBanner namespaces flatten incl. empty-string source leaf.
 
         The ``cacheBanner.sources.cache`` leaf carries the empty string
         in the EN catalog — must round-trip without being filtered out.
@@ -240,7 +240,7 @@ class TestBuildStringUnit:
         }
 
     def test_preserves_empty_string(self) -> None:
-        """Empty value is preserved (Phase 3 cache source ``cache`` ships ``""``)."""
+        """Empty value is preserved (the cacheBanner ``cache`` source ships ``""``)."""
         assert port._build_string_unit("") == {
             "state": "translated",
             "value": "",

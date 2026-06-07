@@ -134,7 +134,7 @@ class TestResultCollector:
 
 
 class TestCrossAssetBlockedFills:
-    """Cross-asset missing-target-close counter (BE-1 D3)."""
+    """Cross-asset missing-target-close counter."""
 
     def test_counter_initial_zero(self) -> None:
         """Fresh collector has cross_asset_blocked_fills == 0.

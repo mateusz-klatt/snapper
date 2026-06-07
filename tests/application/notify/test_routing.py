@@ -357,7 +357,7 @@ class TestQuietHours:
     def test_non_utc_timezone_converts_before_compare(self) -> None:
         """Local-time quiet hours are respected — ``now`` is converted to the pref's tz.
 
-        BE-3b R1 regression closure: a pref set to
+        Regression closure: a pref set to
         ``America/New_York`` with quiet hours 22:00-07:00 local must
         match against local wall-clock time, not against UTC. Chosen
         timestamps deliberately cross the UTC/local boundary so a

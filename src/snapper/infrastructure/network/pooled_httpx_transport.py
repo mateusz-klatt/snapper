@@ -1,11 +1,8 @@
 """Egress-pool-aware ``httpx`` transport for HTTP-polling publishers.
 
-Phase B'.7 F3 of plan_2026_05_22_kraken_equities_us_tunnel + the
-``proprietary/memory/project_2026_05_22_b_prime_5_shipped.md``
-follow-on. The Kraken SDK shim in ``kraken_sdk_patches.py`` routes
-every WebSocket handshake through the egress pool; Walutomat
-publishes via ``httpx.AsyncClient`` so needs an analogous transport
-hook.
+The Kraken SDK shim in ``kraken_sdk_patches.py`` routes every
+WebSocket handshake through the egress pool; Walutomat publishes via
+``httpx.AsyncClient`` so needs an analogous transport hook.
 
 The transport:
 

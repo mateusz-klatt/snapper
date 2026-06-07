@@ -1,1 +1,1 @@
-"""Tests for the egress route registry (Phase B' main-process slice)."""
+"""Tests for the egress route registry (main-process side)."""

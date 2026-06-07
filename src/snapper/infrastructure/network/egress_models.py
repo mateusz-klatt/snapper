@@ -1,7 +1,6 @@
 """Pydantic + dataclass models for the egress route registry.
 
-Phase B' of plan_2026_05_21_phase_b_prime_egress_multiplexer. Three
-shapes live here:
+Three shapes live here:
 
 * ``RouteConfig`` — frozen Pydantic model for one egress route as
   declared in the ``egress_pool`` setting. Validates that ``direct``
@@ -112,8 +111,8 @@ class RouteConfig(BaseModel):
         Returns:
             ``{"proxy": None}`` for ``direct`` routes (explicitly
             overriding the websockets-16 default of ``proxy=True``
-            which would auto-detect ``HTTPS_PROXY`` env vars — Phase
-            B' MUST NOT silently fall through to environment proxies)
+            which would auto-detect ``HTTPS_PROXY`` env vars — the
+            pool MUST NOT silently fall through to environment proxies)
             and ``{"proxy": self.proxy_url}`` for ``socks5`` routes.
         """
         if self.kind == "direct":
@@ -163,13 +162,13 @@ class EgressPoolConfig(BaseModel):
     Attributes:
         enabled: Master toggle. ``False`` (default) skips pool
             wiring entirely — the connect shim short-circuits to
-            Phase A behaviour.
+            direct-connection behaviour.
         on_all_quarantined: Policy when every route is quarantined.
             ``wait`` (default): pool returns the direct route so the
             patched ``__get_reconnect_wait`` translates the situation
             into a single long sleep until the earliest release.
             ``raise``: pool raises ``AllRoutesQuarantinedError`` so
-            the Phase A.2 watchdog handles the storm.
+            the reconnect watchdog handles the storm.
         routes: List of declared routes. When ``enabled=True``, at
             least one ``direct`` route with ``enabled=True`` MUST be
             present so the pool always has a fallback.

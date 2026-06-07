@@ -305,7 +305,7 @@ class TestMultiLegHostProtocol:
     def test_three_leg_strategy_emits_two_partner_signals(self) -> None:
         """3-leg strategy emits 1 primary + 2 paired = 3 signals per timestep.
 
-        Plan #1 §4.4 acceptance test: a strategy that uses
+        Acceptance test: a strategy that uses
         ``MultiLegSpreadMixin._emit_partner_signals`` for 3 legs
         produces 1 primary signal returned from ``on_candle`` plus 2
         partner signals queued via ``emit_paired_signal``. After the

@@ -259,7 +259,13 @@ POST /api/auth/logout
 
 ```json
 {
-    "message": "Logged out successfully"
+    "type": "message",
+    "public_id": "<uuid7>",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": "Logged out successfully"
 }
 ```
 
@@ -464,9 +470,11 @@ OpenAPI route list; its tool contract is documented in
 
 ### Provenance on Reads vs. Mutations
 
-- **GET reads** — No client provenance is expected. The server records the
-  request in the `telemetry` table for observability but does not stamp
-  provenance onto the response items beyond what was stored at write time.
+- **GET reads** — No client provenance is expected. When telemetry recording
+  is enabled (disabled by default), the server records the request in the
+  `telemetry` table for observability; otherwise no provenance is recorded
+  for reads. Either way, it does not stamp provenance onto the response items
+  beyond what was stored at write time.
 
 - **Mutations (POST)** — All mutations use command-style POST with a
   `PayloadRequest` envelope carrying provenance (`public_id`, `session_id`,
@@ -588,24 +596,33 @@ results too.
 **Response (200):**
 
 ```json
-[
-    {
-        "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
-        "type": "candle",
-        "timestamp": "2026-01-18T12:00:00Z",
-        "instrument": "BTC-USD",
-        "exchange": "kraken",
-        "timeframe": "1h",
-        "open_at": "2026-01-18T11:00:00Z",
-        "open": 42000.0,
-        "high": 42500.0,
-        "low": 41800.0,
-        "close": 42300.0,
-        "volume": 1234.56,
-        "vwap": 42150.0,
-        "trades": 5678
-    }
-]
+{
+    "type": "candle_list",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": [
+        {
+            "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+            "type": "candle",
+            "timestamp": "2026-01-18T12:00:00Z",
+            "instrument": "BTC-USD",
+            "exchange": "kraken",
+            "timeframe": "1h",
+            "open_at": "2026-01-18T11:00:00Z",
+            "open": 42000.0,
+            "high": 42500.0,
+            "low": 41800.0,
+            "close": 42300.0,
+            "volume": 1234.56,
+            "vwap": 42150.0,
+            "trades": 5678
+        }
+    ],
+    "count": 1
+}
 ```
 
 ### GET /api/candles/db
@@ -641,7 +658,7 @@ X-CSRF-Token: <csrf_token>
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
 | `symbol` | string | no | Filter by instrument symbol |
-| `exchange` | string | no | Filter by exchange (`paper`, `kraken`, `walutomat`) |
+| `exchange` | string | no | Filter by exchange (`paper`, `kraken`, `kraken_futures`, `walutomat`) |
 | `limit` | int | no | Number of orders, 1-1000 (default 100) |
 | `offset` | int | no | Number of orders to skip (default 0) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
@@ -651,29 +668,38 @@ X-CSRF-Token: <csrf_token>
 **Response (200):**
 
 ```json
-[
-    {
-        "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
-        "type": "order",
-        "timestamp": "2026-01-18T12:00:00Z",
-        "instrument": "BTC-USD",
-        "exchange": "kraken",
-        "client_order_id": "signal-a1b2c3d4",
-        "exchange_order_id": "KRAKEN-456",
-        "created_at": "2026-01-18T12:00:00Z",
-        "updated_at": "2026-01-18T12:01:00Z",
-        "side": "buy",
-        "order_type": "limit",
-        "price": 42000.0,
-        "size": 0.1,
-        "filled_size": 0.1,
-        "average_price": 42000.0,
-        "status": "filled",
-        "time_in_force": "GTC",
-        "mode": "live",
-        "error": null
-    }
-]
+{
+    "type": "order_list",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": [
+        {
+            "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+            "type": "order",
+            "timestamp": "2026-01-18T12:00:00Z",
+            "instrument": "BTC-USD",
+            "exchange": "kraken",
+            "client_order_id": "signal-a1b2c3d4",
+            "exchange_order_id": "KRAKEN-456",
+            "created_at": "2026-01-18T12:00:00Z",
+            "updated_at": "2026-01-18T12:01:00Z",
+            "side": "buy",
+            "order_type": "limit",
+            "price": 42000.0,
+            "size": 0.1,
+            "filled_size": 0.1,
+            "average_price": 42000.0,
+            "status": "filled",
+            "time_in_force": "GTC",
+            "mode": "live",
+            "error": null
+        }
+    ],
+    "count": 1
+}
 ```
 
 ### POST /api/orders
@@ -849,7 +875,7 @@ X-CSRF-Token: <csrf_token>
 | --------- | ---- | -------- | ----------- |
 | `instrument` | string | no | Filter by instrument symbol |
 | `strategy` | string | no | Filter by strategy name |
-| `exchange` | string | no | Filter by exchange (`paper`, `kraken`, `walutomat`) |
+| `exchange` | string | no | Filter by exchange (`paper`, `kraken`, `kraken_futures`, `walutomat`) |
 | `hours` | int | no | Hours of history, max 168 (default 24) |
 | `limit` | int | no | Number of signals, max 1000 (default 100) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
@@ -857,21 +883,30 @@ X-CSRF-Token: <csrf_token>
 **Response (200):**
 
 ```json
-[
-    {
-        "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
-        "type": "signal",
-        "timestamp": "2026-01-18T12:00:00Z",
-        "instrument": "BTC-USD",
-        "exchange": "paper",
-        "side": "buy",
-        "strength": 0.85,
-        "reason": "RSI 28.5 <= 30",
-        "strategy_name": "rsi_btc_1h",
-        "price": 42000.0,
-        "fired_at": "2026-01-18T12:00:00Z"
-    }
-]
+{
+    "type": "signal_list",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": [
+        {
+            "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+            "type": "signal",
+            "timestamp": "2026-01-18T12:00:00Z",
+            "instrument": "BTC-USD",
+            "exchange": "paper",
+            "side": "buy",
+            "strength": 0.85,
+            "reason": "RSI 28.5 <= 30",
+            "strategy_name": "rsi_btc_1h",
+            "price": 42000.0,
+            "fired_at": "2026-01-18T12:00:00Z"
+        }
+    ],
+    "count": 1
+}
 ```
 
 ### GET /api/executions
@@ -891,29 +926,40 @@ X-CSRF-Token: <csrf_token>
 | --------- | ---- | -------- | ----------- |
 | `limit` | int | no | Number of executions, max 1000 (default 100) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
+| `operator_public_id` | string | no | Scope to a single operator (403 if foreign) |
+| `wallet_public_id` | string | no | Scope to a single wallet (403 if inaccessible) |
 
 **Response (200):**
 
 ```json
-[
-    {
-        "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
-        "type": "execution",
-        "timestamp": "2026-01-18T12:01:00Z",
-        "trade_id": "TTRAD-456",
-        "exchange_order_id": "KRAKEN-456",
-        "client_order_id": "signal-a1b2c3d4",
-        "instrument": "BTC-USD",
-        "exchange": "kraken",
-        "side": "buy",
-        "size": 0.1,
-        "price": 42000.0,
-        "fee": 0.001,
-        "fee_asset": "USD",
-        "status": "filled",
-        "executed_at": "2026-01-18T12:00:59Z"
-    }
-]
+{
+    "type": "execution_list",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:01:00Z",
+    "topic": null,
+    "payload": [
+        {
+            "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+            "type": "execution",
+            "timestamp": "2026-01-18T12:01:00Z",
+            "trade_id": "TTRAD-456",
+            "exchange_order_id": "KRAKEN-456",
+            "client_order_id": "signal-a1b2c3d4",
+            "instrument": "BTC-USD",
+            "exchange": "kraken",
+            "side": "buy",
+            "size": 0.1,
+            "price": 42000.0,
+            "fee": 0.001,
+            "fee_asset": "USD",
+            "status": "filled",
+            "executed_at": "2026-01-18T12:00:59Z"
+        }
+    ],
+    "count": 1
+}
 ```
 
 ### GET /api/positions
@@ -932,25 +978,36 @@ X-CSRF-Token: <csrf_token>
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
+| `operator_public_id` | string | no | Scope to a single operator (403 if foreign) |
+| `wallet_public_id` | string | no | Scope to a single wallet (403 if inaccessible) |
 
 **Response (200):**
 
 ```json
-[
-    {
-        "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
-        "type": "position",
-        "timestamp": "2026-01-18T12:00:00Z",
-        "instrument": "BTC-USD",
-        "exchange": "kraken",
-        "quantity": 0.5,
-        "average_price": 41500.0,
-        "unrealized_pnl": 250.0,
-        "realized_pnl": 100.0,
-        "mode": "live",
-        "position_cycle_public_id": "019e1a2b-4d5e-7f6a-8b9c-0d1e2f3a4b5c"
-    }
-]
+{
+    "type": "position_list",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": [
+        {
+            "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+            "type": "position",
+            "timestamp": "2026-01-18T12:00:00Z",
+            "instrument": "BTC-USD",
+            "exchange": "kraken",
+            "quantity": 0.5,
+            "average_price": 41500.0,
+            "unrealized_pnl": 250.0,
+            "realized_pnl": 100.0,
+            "mode": "live",
+            "position_cycle_public_id": "019e1a2b-4d5e-7f6a-8b9c-0d1e2f3a4b5c"
+        }
+    ],
+    "count": 1
+}
 ```
 
 The `position_cycle_public_id` field is `null` when no open position cycle exists
@@ -1137,7 +1194,16 @@ X-CSRF-Token: <csrf_token>
 **Response (200):**
 
 ```json
-["kraken", "polygon", "walutomat"]
+{
+    "type": "exchange_list",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": ["kraken", "polygon", "walutomat"],
+    "count": 3
+}
 ```
 
 ### GET /api/exchanges/{exchange}/instruments
@@ -1155,7 +1221,16 @@ X-CSRF-Token: <csrf_token>
 **Response (200):**
 
 ```json
-["BTC-USD", "ETH-USD", "SOL-USD"]
+{
+    "type": "instrument_list",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": ["BTC-USD", "ETH-USD", "SOL-USD"],
+    "count": 3
+}
 ```
 
 ### GET /api/exchanges/{exchange}/instruments/detail
@@ -1385,7 +1460,13 @@ List registered process templates that can be instantiated. Requires
 
 ```json
 {
-    "processes": [
+    "type": "available_processes",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": [
         {
             "name": "zmq_broker",
             "class_path": "snapper.messaging.infrastructure.broker.ZmqBrokerProcess",
@@ -1410,8 +1491,15 @@ List configured process instances with runtime state. Requires
 
 ```json
 {
-    "processes": [
+    "type": "configured_processes",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": [
         {
+            "type": "configured_process",
             "name": "zmq_broker",
             "enabled": true,
             "running": true,
@@ -1425,7 +1513,12 @@ List configured process instances with runtime state. Requires
             "tags": ["infrastructure"],
             "parameters_schema": null,
             "is_one_shot": false,
-            "active_public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b"
+            "active_public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+            "kind": "instance",
+            "wallet_public_id": null,
+            "parent_template": null,
+            "coordinator": "coord-0",
+            "managed_remotely": false
         }
     ],
     "count": 1
@@ -1441,10 +1534,21 @@ Lightweight process category counts for the overview dashboard. Requires
 
 ```json
 {
-    "feeds": { "running": 2, "total": 3 },
-    "strategies": { "running": 1, "total": 2 },
-    "executors": { "running": 1, "total": 1 },
-    "brokers": { "running": 1, "total": 1 }
+    "type": "process_summary_response",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": {
+        "type": "process_summary",
+        "coordinator": "coord-0",
+        "feeds": { "running": 2, "total": 3 },
+        "strategies": { "running": 1, "total": 2 },
+        "executors": { "running": 1, "total": 1 },
+        "brokers": { "running": 1, "total": 1 },
+        "processes": []
+    }
 }
 ```
 
@@ -1461,12 +1565,19 @@ Content-Type: application/json
 X-CSRF-Token: <csrf_token>
 
 {
-    "name": "kraken_feed_btc",
-    "template": "kraken_feed_publisher",
-    "enabled": true,
-    "mode": "thread",
-    "parameters": { "symbols": ["BTC-USD"] },
-    "note": "Kraken BTC feed"
+    "type": "process_create_request",
+    "public_id": "<uuid7>",
+    "session_id": "<client-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "payload": {
+        "name": "kraken_feed_btc",
+        "template": "kraken_feed_publisher",
+        "enabled": true,
+        "mode": "thread",
+        "parameters": { "symbols": ["BTC-USD"] },
+        "note": "Kraken BTC feed"
+    }
 }
 ```
 
@@ -1474,10 +1585,19 @@ X-CSRF-Token: <csrf_token>
 
 ```json
 {
-    "status": "created",
-    "process": {
-        "name": "kraken_feed_btc",
-        "template": "kraken_feed_publisher"
+    "type": "process_create_response",
+    "public_id": "<uuid7>",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": {
+        "type": "process_create",
+        "status": "created",
+        "process": {
+            "name": "kraken_feed_btc",
+            "template": "kraken_feed_publisher"
+        }
     }
 }
 ```
@@ -1514,21 +1634,38 @@ Content-Type: application/json
 X-CSRF-Token: <csrf_token>
 
 {
-    "mode": "process"
+    "type": "process_start_request",
+    "public_id": "<uuid7>",
+    "session_id": "<client-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "payload": {
+        "mode": "process"
+    }
 }
 ```
 
-All fields are optional. `mode` overrides the stored execution mode for this
-run only — it does not persist to Settings. Omitting it uses the stored value.
+All `payload` fields are optional. `mode` overrides the stored execution mode
+for this run only — it does not persist to Settings. Omitting it uses the
+stored value.
 
 **Response (200):**
 
 ```json
 {
-    "status": "success",
-    "name": "zmq_broker",
-    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
-    "message": "Process started"
+    "type": "process_start_response",
+    "public_id": "<uuid7>",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": {
+        "type": "process_start",
+        "status": "success",
+        "name": "zmq_broker",
+        "process_public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+        "message": "Process started"
+    }
 }
 ```
 
@@ -1568,8 +1705,15 @@ List historical process runs. Requires `manage:processes` permission.
 
 ```json
 {
-    "runs": [
+    "type": "process_runs",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T18:00:00Z",
+    "topic": null,
+    "payload": [
         {
+            "type": "process_run",
             "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
             "process_name": "zmq_broker",
             "status": "succeeded",
@@ -1598,8 +1742,15 @@ List configured strategy processes with lightweight status. Requires
 
 ```json
 {
-    "strategies": [
+    "type": "strategy_list",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": [
         {
+            "type": "strategy_process",
             "name": "strategy_rsi_btc_1h",
             "running": true,
             "enabled": true,
@@ -1646,7 +1797,7 @@ dedicated `/api/wallets/{wallet_public_id}/credentials*` routes
 (`src/snapper/server/credential_routes.py` — `GET` for the active
 summaries, `POST` for create, and `POST` rotate for replacing an
 existing credential row). Seed files
-(`proprietary/data/seed/dev.toml` / `prod.toml` — see
+(`dev.toml` / `prod.toml` — see
 [Configuration / Wallet Credentials](configuration.md#wallet-credentials))
 remain the bootstrap source for dev/prod parity.
 

@@ -18,8 +18,9 @@ Three filters live here today:
   principal by accessible-wallet set, mirroring the REST
   ``/api/orders`` wallet-scope filter (the v0.7.0 RBAC symmetry fix).
 - :func:`enforce_alerts_scope` — gates ``alerts.*`` per principal by
-  exact ``user_public_id`` match (ADMIN bypass). Powers the Phase E
-  live-refresh path so a web user only sees their own alert frames.
+  exact ``user_public_id`` match (ADMIN bypass). Powers the web
+  (WebSocket) live-refresh path so a web user only sees their own
+  alert frames.
 """
 
 from collections.abc import Mapping

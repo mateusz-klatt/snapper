@@ -731,14 +731,13 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
         This is the canonical cleanup for the architectural rule that
         the operational gate for "can we use this symbol now" is the
-        capability row, not the alias row (see
-        ``proprietary/memory/feedback_capability_gate_on_symbol_aliases.md``).
-        Without this reconcile step, ``symbol_aliases`` rows for
-        delisted / expired / retired contracts accumulate forever with
+        capability row, not the alias row. Without this reconcile
+        step, ``symbol_aliases`` rows for delisted / expired /
+        retired contracts accumulate forever with
         ``known_to = KNOWN_TO_MAX``, polluting
         ``mapper.native_to_<exchange>_<channel>`` reverse dicts and
         forcing every alias-consuming code path to remember the
-        capability filter (the 2026-05-25 incident root cause).
+        capability filter.
 
         Idempotent: a second invocation with no new capability changes
         closes zero rows because every targeted alias is already

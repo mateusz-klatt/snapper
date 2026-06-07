@@ -6,7 +6,7 @@ class AllRoutesQuarantinedError(RuntimeError):
 
     Fires only when ``on_all_quarantined == "raise"`` AND every
     enabled route is currently inside its quarantine window. The
-    Phase A.2 reconnect-storm watchdog will treat the raise as a
+    reconnect-storm watchdog will treat the raise as a
     connect failure and eventually rebuild the WS connection.
 
     With the default ``on_all_quarantined == "wait"`` setting the

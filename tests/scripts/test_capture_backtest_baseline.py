@@ -1,4 +1,4 @@
-"""Tests for the ``capture_phase2c_baseline`` script."""
+"""Tests for the ``capture_backtest_baseline`` script."""
 
 import asyncio
 import json
@@ -7,17 +7,17 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.capture_phase2c_baseline import SCENARIOS
-from scripts.capture_phase2c_baseline import _candle_row
-from scripts.capture_phase2c_baseline import _make_config
-from scripts.capture_phase2c_baseline import _make_strategy
-from scripts.capture_phase2c_baseline import _run_all_scenarios
-from scripts.capture_phase2c_baseline import _serialise_equity
-from scripts.capture_phase2c_baseline import _serialise_portfolio
-from scripts.capture_phase2c_baseline import _serialise_signal
-from scripts.capture_phase2c_baseline import _serialise_trade
-from scripts.capture_phase2c_baseline import main
-from scripts.capture_phase2c_baseline import serialise_run
+from scripts.capture_backtest_baseline import SCENARIOS
+from scripts.capture_backtest_baseline import _candle_row
+from scripts.capture_backtest_baseline import _make_config
+from scripts.capture_backtest_baseline import _make_strategy
+from scripts.capture_backtest_baseline import _run_all_scenarios
+from scripts.capture_backtest_baseline import _serialise_equity
+from scripts.capture_backtest_baseline import _serialise_portfolio
+from scripts.capture_backtest_baseline import _serialise_signal
+from scripts.capture_backtest_baseline import _serialise_trade
+from scripts.capture_backtest_baseline import main
+from scripts.capture_backtest_baseline import serialise_run
 from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.portfolio.models import PortfolioTracker
 from snapper.strategies.models import StrategySignal
@@ -259,7 +259,7 @@ class TestScenarioRegistry:
             4 scenario keys.
         """
         target = tmp_path / "snap.json"
-        with patch("scripts.capture_phase2c_baseline._FIXTURE_PATH", target):
+        with patch("scripts.capture_backtest_baseline._FIXTURE_PATH", target):
             main()
         payload = json.loads(target.read_text(encoding="utf-8"))
         assert set(payload.keys()) == {s.name for s in SCENARIOS}
@@ -278,6 +278,6 @@ class TestScenarioRegistry:
         """
         target = tmp_path / "nested" / "deeper" / "snap.json"
         assert not target.parent.exists()
-        with patch("scripts.capture_phase2c_baseline._FIXTURE_PATH", target):
+        with patch("scripts.capture_backtest_baseline._FIXTURE_PATH", target):
             main()
         assert target.exists()

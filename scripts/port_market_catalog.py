@@ -57,13 +57,13 @@ PHASE_PREFIXES: Final[tuple[str, ...]] = (
 )
 """Frontend ``market.*`` sub-namespaces this script ports.
 
-Phase 1 landed the banner + locale-persist infrastructure
-(``description.`` / ``assetClass.`` / ``sector.``). Phase 2 added
+An earlier increment landed the banner + locale-persist infrastructure
+(``description.`` / ``assetClass.`` / ``sector.``). A follow-up added
 ``related.`` (cluster headers + chip exchange separator + empty
-state). Phase 3 adds ``pairStats.`` (cointegration row label +
-metric + accessibility) and ``cacheBanner.`` (cache-warming notice
-+ data-source caption). Each phase extends this tuple in the same
-commit as the iOS view that consumes the keys, so the catalog
+state). The most recent increment adds ``pairStats.`` (cointegration
+row label + metric + accessibility) and ``cacheBanner.`` (cache-warming
+notice + data-source caption). Each increment extends this tuple in the
+same commit as the iOS view that consumes the keys, so the catalog
 parity gate fails loudly if either side drifts.
 """
 
@@ -122,7 +122,7 @@ def _map_locale(frontend_dir: str) -> str:
 
 
 def _is_phase_key(key: str) -> bool:
-    """Return ``True`` when ``key`` falls under any active phase prefix."""
+    """Return ``True`` when ``key`` falls under any ported prefix."""
     for allowed in PHASE_PREFIXES:
         bare = allowed.rstrip(".")
         if key == bare or key.startswith(allowed):
@@ -131,17 +131,17 @@ def _is_phase_key(key: str) -> bool:
 
 
 def _flatten_market_payload(payload: dict[str, object]) -> dict[str, str]:
-    """Return the dotted-key flat map filtered to phase prefixes.
+    """Return the dotted-key flat map filtered to the ported prefixes.
 
     Skips keys whose value is not a string (i.e. nested namespaces are
-    descended into, leaves outside the phase prefixes are discarded).
+    descended into, leaves outside the ported prefixes are discarded).
 
     Args:
         payload: Parsed ``market.json`` for one locale.
 
     Returns:
         Flat ``{"description.label": "Instrument description", ...}``
-        map containing only Phase-N keys.
+        map containing only keys under :data:`PHASE_PREFIXES`.
     """
     flat: dict[str, str] = {}
     _walk_market_payload("", payload, flat)
@@ -149,7 +149,7 @@ def _flatten_market_payload(payload: dict[str, object]) -> dict[str, str]:
 
 
 def _walk_market_payload(prefix: str, value: object, flat: dict[str, str]) -> None:
-    """Recurse into ``value``, populating ``flat`` with phase-prefixed leaves."""
+    """Recurse into ``value``, populating ``flat`` with prefix-matched leaves."""
     if isinstance(value, dict):
         for child_key, child_value in value.items():
             joined = child_key if prefix == "" else f"{prefix}.{child_key}"
@@ -221,7 +221,7 @@ def _full_catalog_key(short_key: str) -> str:
 
 
 def _iter_phase_keys(en_payload: dict[str, str]) -> Iterable[str]:
-    """Yield Phase-N short keys present in the EN payload, sorted."""
+    """Yield ported short keys present in the EN payload, sorted."""
     yield from sorted(en_payload)
 
 
@@ -245,7 +245,8 @@ def _read_locale_payload(locale_dir_name: str) -> dict[str, str]:
             directory.
 
     Returns:
-        Flat ``{short_key: value}`` map filtered to :data:`PHASE_PREFIXES`.
+        Flat ``{short_key: value}`` map filtered to the namespaces in
+        :data:`PHASE_PREFIXES`.
     """
     path = FRONTEND_LOCALES_DIR / locale_dir_name / "market.json"
     if not path.exists():
@@ -257,7 +258,7 @@ def _read_locale_payload(locale_dir_name: str) -> dict[str, str]:
 
 
 def generate(xcstrings_path: Path | None = None) -> None:
-    """Port frontend ``market.<phase>.*`` translations into the iOS xcstrings.
+    """Port the configured ``market.*`` translations into the iOS xcstrings.
 
     Reads the EN template to lock placeholder ordering, then iterates
     over the 45 frontend locales. For each ``(locale, key)`` pair:

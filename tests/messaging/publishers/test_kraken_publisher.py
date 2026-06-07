@@ -158,9 +158,10 @@ class TestKrakenMarketDataPublisher:
 class TestKrakenReconnectWatchdog:
     """Tests for the publisher-side reconnect-storm watchdog.
 
-    Phase A.2 of the Kraken 429 plan adds an in-process WS-restart
-    mechanism so the publisher recovers from reconnect cascades without
-    leaving the SDK to silently exhaust ``MAX_RECONNECT_NUM`` and die.
+    The watchdog adds an in-process WS-restart mechanism so the publisher
+    recovers from reconnect cascades (e.g. HTTP 429 rate-limit storms)
+    without leaving the SDK to silently exhaust ``MAX_RECONNECT_NUM`` and
+    die.
     """
 
     def test_init_creates_reconnect_state(self) -> None:

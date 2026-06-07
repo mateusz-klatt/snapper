@@ -1,8 +1,8 @@
 r"""One-shot provisioning helper for a new snapper-egress WireGuard tunnel.
 
-Used by the operator (Claude) once an external VPN provider (ESET, Mullvad,
-Proton, …) returns the peer-side WireGuard parameters. Performs three
-distinct DB writes against the live SettingsService:
+Used by the operator once an external WireGuard VPN provider returns the
+peer-side parameters. Performs three distinct DB writes against the live
+SettingsService:
 
 1. ``egress_tunnel_<id>``                — TunnelDescriptor JSON (plain).
 2. ``egress_tunnel_<id>_private_key``    — Fernet-encrypted Curve25519 key.
@@ -17,11 +17,11 @@ Run inside the ``snapper`` container so it shares ``DB_URL`` +
 ``ZMQ_BROKER_XSUB`` env vars with the live service:
 
     docker exec -i snapper python /app/scripts/provision_egress_tunnel.py \\
-        --tunnel-id eset-ie1-grafton \\
-        --interface wg-ie1 \\
+        --tunnel-id wg-eu-1 \\
+        --interface wg-eu1 \\
         --address 10.64.131.201 \\
         --prefix-length 32 \\
-        --private-key-file /app/.local-secrets/wg/eset-ie1-grafton.privkey \\
+        --private-key-file /app/.local-secrets/wg/wg-eu-1.privkey \\
         --peer-pubkey '<peer-pubkey-44ch>' \\
         --peer-endpoint 'vpn.example.com:51820' \\
         --socks5-listen-port 1081 \\
@@ -52,7 +52,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument("--interface", required=True, help="WG interface name, ≤15 chars, prefix wg-")
     p.add_argument("--address", required=True, help="Tunnel local IPv4 (e.g. 10.64.131.201)")
-    p.add_argument("--prefix-length", type=int, required=True, help="Usually 32 for ESET / Mullvad")
+    p.add_argument(
+        "--prefix-length", type=int, required=True, help="Usually 32 for a single-address WG peer"
+    )
     p.add_argument(
         "--private-key-file",
         required=True,

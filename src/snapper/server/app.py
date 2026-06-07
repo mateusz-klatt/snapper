@@ -293,14 +293,13 @@ async def _initialize_settings_service(settings: AppSettings) -> SettingsService
 async def _safely_initialize_egress_pool(settings_service: SettingsService) -> None:
     """Run the egress-pool preflight without crashing the lifespan on failure.
 
-    Phase B'.3 of plan_2026_05_21_phase_b_prime_egress_multiplexer. The
-    preflight reads the ``egress_pool`` setting (defaults to disabled),
-    validates the schema, runs async DNS resolution for SOCKS5 routes,
-    and installs the module-level singleton. Errors (malformed JSON,
-    Pydantic mismatch, DNS timeouts) are logged but never propagate —
-    the pool is best-effort infrastructure and a failed preflight just
-    leaves the pool empty so the connect shim short-circuits to the
-    existing Phase A path.
+    The preflight reads the ``egress_pool`` setting (defaults to
+    disabled), validates the schema, runs async DNS resolution for
+    SOCKS5 routes, and installs the module-level singleton. Errors
+    (malformed JSON, Pydantic mismatch, DNS timeouts) are logged but
+    never propagate — the pool is best-effort infrastructure and a
+    failed preflight just leaves the pool empty so the connect shim
+    short-circuits to the direct-egress path.
 
     Args:
         settings_service: Initialized SettingsService whose cache
@@ -310,8 +309,7 @@ async def _safely_initialize_egress_pool(settings_service: SettingsService) -> N
         await initialize_egress_pool(settings_service)
     except Exception:
         logger.exception(
-            "egress_pool: preflight failed; pool disabled and "
-            "publishers fall back to direct egress"
+            "egress_pool: preflight failed; pool disabled and publishers fall back to direct egress"
         )
 
 
@@ -481,8 +479,8 @@ async def _start_system_metrics_snapshotter(app: FastAPI) -> None:
     """Build + start the :class:`SystemMetricsSnapshotter` singleton.
 
     The attribute is assigned to ``app.state`` ONLY after a successful
-    :meth:`SystemMetricsSnapshotter.start` call (B22 — no
-    half-initialized object can bypass the route layer's 503 fallback).
+    :meth:`SystemMetricsSnapshotter.start` call (no half-initialized
+    object can bypass the route layer's 503 fallback).
     On any exception, the attribute is left absent and the route layer
     falls through to HTTP 503 ``"system metrics snapshotter not
     available"``. Failure does NOT block the rest of the lifespan
@@ -571,7 +569,7 @@ async def _start_retention_scheduler(app: FastAPI, *, db_url: str) -> None:
     """Build + start the :class:`RetentionScheduler` singleton.
 
     The attribute is assigned to ``app.state`` ONLY after a successful
-    :meth:`RetentionScheduler.start` call (B22 — no half-initialized
+    :meth:`RetentionScheduler.start` call (no half-initialized
     object can bypass the route layer's 503 fallback). On any
     exception, the attribute is left absent and the route layer falls
     through to HTTP 503. Failure does NOT block the rest of the
@@ -618,7 +616,7 @@ async def _stop_retention_scheduler(app: FastAPI) -> None:
 async def _start_db_stats_snapshotter(app: FastAPI, *, db_url: str) -> None:
     """Build + start the :class:`DbStatsSnapshotter` singleton.
 
-    Mirrors the B22 attribute-absent contract used for the system
+    Mirrors the attribute-absent contract used for the system
     metrics snapshotter and retention scheduler: the attribute is
     assigned to ``app.state`` ONLY after a successful
     :meth:`DbStatsSnapshotter.start` call. Disabled mode still

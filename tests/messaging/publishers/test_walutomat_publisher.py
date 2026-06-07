@@ -171,10 +171,10 @@ class TestWalutomatPublisher:
         Required so the
         :class:`snapper.infrastructure.network.pooled_httpx_transport.PooledAsyncTransport`
         wired into ``WalutomatExchangeClient._http_client`` reads
-        ``"walutomat"`` as the reservation tag. The pool's
-        ``eset-pl1`` route with ``allowed_exchanges=["walutomat"]``
-        then accepts the reservation and pins HTTP polling to the
-        Polish ESET tunnel.
+        ``"walutomat"`` as the reservation tag. The pool's matching
+        route with ``allowed_exchanges=["walutomat"]`` then accepts the
+        reservation and pins HTTP polling to the configured egress
+        tunnel.
         """
         publisher = WalutomatMarketDataPublisher(symbols=["EUR-PLN"])
         observed: list[WalutomatMarketDataPublisher | None] = []

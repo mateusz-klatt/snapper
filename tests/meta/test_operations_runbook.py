@@ -1,6 +1,6 @@
 r"""Meta-audit — ``docs/operations.md`` runbook structure.
 
-Per acceptance #17, the operations runbook must carry:
+The operations runbook must carry:
 
     - systemd template unit (``snapper-trade-zmq@`` reference).
     - At least ONE non-systemd orchestrator recipe (exactly one of
@@ -58,7 +58,7 @@ def test_runbook_mentions_systemd_template_unit() -> None:
     When: the meta-test greps for ``systemd`` + ``trade-zmq@``,
     Then: both markers must be present — systemd template units
         (``snapper-trade-zmq@0.service``, ``@1.service``) are the
-        stable recipe across 28 plan-review rounds.
+        stable, canonical recipe.
     """
     body = _read_runbook()
     assert "systemd" in body.lower(), "runbook missing systemd reference"

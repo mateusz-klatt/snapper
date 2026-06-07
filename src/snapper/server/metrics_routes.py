@@ -15,10 +15,10 @@ Two route families, both gated by ``Permission.READ_SYSTEM_STATUS``:
   gradient toward exhaustion before a crash.
 
 Latency percentiles (``apns_p99_latency_ms``) + sidecar heartbeat
-(``sidecar_heartbeat_seconds_since``) from the plan wishlist are
-deferred — they need cross-process state (the sidecar runs in its
-own process under ``snapper notify``). A follow-up plan will wire
-those via a small heartbeat + histogram settings table.
+(``sidecar_heartbeat_seconds_since``) are not yet surfaced — they
+need cross-process state (the sidecar runs in its own process under
+``snapper notify``) and would be wired later via a small heartbeat +
+histogram settings table.
 """
 
 import datetime as dt
@@ -213,7 +213,7 @@ def _resolve_snapshotter(request: Request) -> SystemMetricsSnapshotter:
     The lifespan startup hook in :mod:`snapper.server.app` assigns the
     attribute ONLY after a successful :meth:`SystemMetricsSnapshotter.start`
     call. If startup raised, the attribute is left absent and routes
-    fall through to 503 (B22 — no half-initialized object can bypass
+    fall through to 503 (no half-initialized object can bypass
     this fallback).
     """
     snapshotter: SystemMetricsSnapshotter | None = getattr(
@@ -560,7 +560,7 @@ def _resolve_retention_scheduler(request: Request) -> RetentionScheduler:
 
     The lifespan startup hook in :mod:`snapper.server.app` assigns
     ``app.state.retention_scheduler`` ONLY after a successful
-    :meth:`RetentionScheduler.start` call (B22 — no half-initialized
+    :meth:`RetentionScheduler.start` call (no half-initialized
     object can bypass the route layer's 503 fallback).
 
     Args:
@@ -703,7 +703,7 @@ def _resolve_db_stats_snapshotter(request: Request) -> DbStatsSnapshotter:
 
     The lifespan startup hook in :mod:`snapper.server.app` assigns
     ``app.state.db_stats_snapshotter`` ONLY after a successful
-    :meth:`DbStatsSnapshotter.start` call (B22 — no half-initialized
+    :meth:`DbStatsSnapshotter.start` call (no half-initialized
     object can bypass the route layer's 503 fallback).
 
     Args:

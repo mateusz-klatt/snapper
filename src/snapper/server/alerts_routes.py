@@ -111,7 +111,7 @@ def _alert_info_from_row(row: AlertEventRow, *, user_language: str | None) -> Al
     """Project an ``AlertEventRow`` TypedDict into the wire schema.
 
     ``title`` / ``body`` are resolved server-side via the i18n catalog
-    when ``user_language`` is set AND the row carries the Phase C
+    when ``user_language`` is set AND the row carries the localized
     ``title_loc_key`` / ``body_loc_key`` contract. Falls back to the
     stored EN columns otherwise — same all-or-nothing funnel as the
     APNs sidecar uses. ``title_loc_key`` / ``title_loc_args`` /
@@ -169,7 +169,7 @@ def _extract_loc_pair(
       iOS uses ``key is None`` as the signal "do not attempt in-app
       re-localization, the server's resolved EN ``title``/``body`` are
       authoritative".
-    - Phase C row with a valid string ``key`` but malformed args (non-
+    - Localized row with a valid string ``key`` but malformed args (non-
       list ``args``, e.g. a buggy rule emitted a string): ``(key, [])``
       — surfaces the key for iOS to inspect, but normalizes args to
       ``[]`` so the wire never carries a non-list. The catalog resolver
@@ -295,7 +295,7 @@ async def get_alert_event(
 async def _lookup_caller_language(repo: Repository, user_public_id: str) -> str | None:
     """Resolve the caller's ``user.default_language`` (or ``None``) via one SELECT.
 
-    Reuses the Phase C bulk repository helper with a singleton input
+    Reuses the bulk repository helper with a singleton input
     so the single-row read path stays identical to the sidecar's
     batched prefetch (same SCD2 active-row predicate). A user mid-
     update therefore never sees an inactive row's stale preference.

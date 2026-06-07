@@ -7,9 +7,9 @@ Covers:
 * Tracemalloc arm / disarm + clamp semantics.
 * 401 unauthenticated + 403 missing CSRF + 503 missing snapshotter
   via :class:`fastapi.testclient.TestClient`.
-* Lifespan startup helper: failure leaves the attribute absent (B22);
-  successful start attaches the singleton. Stop helper tolerates
-  partial-init (no attribute).
+* Lifespan startup helper: failure leaves the attribute absent
+  (fail-closed); successful start attaches the singleton. Stop helper
+  tolerates partial-init (no attribute).
 """
 
 import asyncio
@@ -396,7 +396,7 @@ class TestPostTracemallocStart:
 
     @pytest.mark.asyncio
     async def test_auto_stops_after_duration(self) -> None:
-        """After ``duration_s`` elapses, tracemalloc auto-disarms (B6 fix)."""
+        """After ``duration_s`` elapses, tracemalloc auto-disarms."""
         controller = TracemallocController()
         snapshotter = _make_snapshotter(tracemalloc_controller=controller)
 
@@ -578,7 +578,7 @@ class TestRouteAuthAndCsrf:
 
 
 class TestRouteRegistration:
-    """SC#13 — assert routes mounted at the expected paths."""
+    """Assert routes mounted at the expected paths."""
 
     def test_routes_mounted_under_api_metrics_system(self) -> None:
         """All four new routes appear under ``/api/metrics/system*``."""
@@ -591,7 +591,7 @@ class TestRouteRegistration:
 
 
 class TestStartSystemMetricsSnapshotterHelper:
-    """Lifespan startup helper — B22 + B23 attribute-absent contract."""
+    """Lifespan startup helper — fail-closed attribute-absent contract."""
 
     @pytest.mark.asyncio
     async def test_start_failure_leaves_attribute_unset(

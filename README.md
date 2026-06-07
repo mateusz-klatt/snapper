@@ -21,9 +21,12 @@ make run-server
 ```
 
 Open <http://localhost:8000/> and log in with the dev seed credentials —
-the default values are defined in `proprietary/data/seed/dev.toml` (the
-proprietary submodule). Override per-environment by editing the seed file
-before running `make migrate-dev`, or rotate after first login via
+the default values are defined in the bundled seed file
+`src/snapper/data/seed/dev.toml` (`admin` / `change-me-after-first-login`);
+maintainers with the proprietary submodule get
+`proprietary/data/seed/dev.toml` via the three-tier seed lookup. Override
+per-environment by editing the seed file before running `make migrate-dev`,
+or rotate after first login via
 `POST /api/auth/users/{user_id}/change-password` (self-service) or
 `POST /api/auth/users/{user_id}/admin-reset-password` (admin reset).
 

@@ -215,15 +215,22 @@ after the picker moves.
 
 Cross-asset strategies observe market data on one venue / instrument
 and emit signals that execute on a *different* venue / instrument
-(for example `TradFiObserveCryptoExecute` observes MNQU6-CME candles
+(for example `TradFiObserveCryptoExecute` observes MNQM6-CME candles
 on `kraken_equities` and emits BUY/SELL signals on `BTC-USD` / `kraken`).
-The backtest engine supports this through a single config field:
+The backtest engine supports this through a single config field.
+
+`TradFiObserveCryptoExecute` is an illustrative, non-runnable example:
+it is **not** auto-registered, so `BacktestConfig.validate_strategy_class`
+rejects the config below as written. To run it, first copy the example
+module to the strategies package root and decorate it with
+`@register_strategy`, or substitute a registered strategy class
+(`RSIReversion`, `MACDCrossover`, or `CointegrationPairs`):
 
 ```python
 BacktestConfig(
     strategy_class="TradFiObserveCryptoExecute",
     instruments={
-        "kraken_equities": ["<MNQU6-CME-public-id>"],
+        "kraken_equities": ["<MNQM6-CME-public-id>"],
         "kraken": ["<BTC-USD-public-id>"],
     },
     target_execution_exchange="kraken",
@@ -306,7 +313,8 @@ through DB persistence + the rerun endpoint, and surfaces on
 payload **only when non-None**, so legacy (default-None) runs keep
 their exact pre-cross-asset hash in both the default and
 `for_pairing=True` paths. This preserves dedup cache validity and
-the auto-pair UI grouping logic at `backtest_routes.py:348`.
+the auto-pair UI grouping logic in the `_resolve_auto_pair` resolver
+in `backtest_routes.py`.
 Explicit cross-asset runs (field set to a concrete venue like
 `"kraken"`) generate distinct fingerprints so they never collide
 with single-venue baselines.

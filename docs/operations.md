@@ -161,8 +161,10 @@ while the signal-driven engine's shard_key appends
 ``wallet_public_id`` is non-empty.
 
 At N=1 this is dormant because every shard is owned by the single
-coordinator, the outbox has no ownership filter, and the CID guard
-is gated on ``instance_count > 1``.
+coordinator, the outbox ownership filter is a no-op at N=1 (the
+trader always passes ``ShardOwnership(0, 1)``, whose ``owns()``
+returns True for every shard when ``instance_count == 1``), and the
+CID guard is gated on ``instance_count > 1``.
 
 Under N>1, a REST order with a non-empty ``wallet_public_id``
 writes a TradeCommand whose shard_key hashes to a different
@@ -206,8 +208,9 @@ that satisfies the same contract:
 
    The regex enforced by `tests/meta/test_operations_runbook.py` is
    `^Verified on \d{4}-\d{2}-\d{2} against \S+$` — exact casing,
-   anchored to the start and end of the line, placed inside the
-   non-systemd recipe section (not anywhere in the file).
+   anchored to the start and end of the line. The meta-test searches
+   the entire file body for at least one matching line; there is no
+   required section placement.
 
 Acceptable orchestrators for the non-systemd recipe are
 `docker compose`, `kubectl` (Kubernetes), or `nomad` — the
@@ -261,9 +264,11 @@ Use these REST endpoints during feed rollout and incident response:
   — cached Pearson/cointegration diagnostics for configured pairs.
 
 The feed-health table is current-state rather than SCD2 history. Its
-natural key includes coordinator, exchange, native symbol, stream kind,
-and timeframe, so split-feed deployments can show which coordinator is
-publishing a stale or missing stream.
+natural key is `(coordinator, exchange, channel, symbol)`, where
+`channel` encodes the stream kind and timeframe together (e.g.
+`ohlc:1m`) and `symbol` is the wire-format product id, so split-feed
+deployments can show which coordinator is publishing a stale or
+missing stream.
 
 ## Per-wallet executors
 
@@ -301,17 +306,23 @@ sqlite3 data/snapper.db \
 #    lives on the create / configure path: `POST /api/processes` or
 #    the Settings page; the registry syncer reconciles that
 #    persisted state onto the launcher.)
+#    The body is the full request envelope: `json_body` calls
+#    `ProcessStartRequest.model_validate_json` on the raw body, and the
+#    envelope (StrictDataSchema, extra="forbid") REQUIRES session_id,
+#    sequence_id, public_id, and timestamp. A bare `{"payload":{}}` is
+#    rejected with HTTP 422 before the handler runs. `payload` may carry
+#    optional `mode` / `parameters` runtime overrides.
 curl -X POST http://localhost:8000/api/processes/kraken_equities_symbol_updater/start \
      -H "Authorization: Bearer <token>" \
      -H "X-CSRF-Token: <csrf>" \
      -H "Content-Type: application/json" \
-     -d '{"payload":{}}'
+     -d '{"type":"process_start_request","session_id":"<sid>","sequence_id":1,"public_id":"<uuid7>","timestamp":"2026-06-07T00:00:00Z","payload":{}}'
 
 curl -X POST http://localhost:8000/api/processes/kraken_equities_feed_publisher/start \
      -H "Authorization: Bearer <token>" \
      -H "X-CSRF-Token: <csrf>" \
      -H "Content-Type: application/json" \
-     -d '{"payload":{}}'
+     -d '{"type":"process_start_request","session_id":"<sid>","sequence_id":1,"public_id":"<uuid7>","timestamp":"2026-06-07T00:00:00Z","payload":{}}'
 
 # To stop a running process later:
 # curl -X POST http://localhost:8000/api/processes/<name>/stop ...
@@ -326,7 +337,9 @@ curl -X POST http://localhost:8000/api/processes/kraken_equities_feed_publisher/
 ## Backfill historical candles
 
 ```
-# 30-day 1-hour backfill of the four default TradFi symbols
+# 30-day 1-hour backfill of the configured KRAKEN_EQUITIES instruments.
+# The default setting is the wildcard ["*"], which expands at runtime to
+# the full mapped venue universe (all ~180 contracts).
 snapper kraken-equities-backfill-candles -t 1h -d 30
 
 # Or the Makefile wrapper (equivalent)
@@ -344,10 +357,14 @@ kraken_equities.py:get_ohlcv` for the error contract.
 
 ## Quarterly rotation
 
-Default TradFi symbols are quarterly expiry contracts
-(`MNQM6-CME` = Jun 26, etc.) and must be rotated before the
-`InstrumentSpec.expiry_at` timestamp on any default symbol drops
-below 14 days. Rotation cadence:
+The default `KRAKEN_EQUITIES` instruments setting is the wildcard
+`["*"]`, which expands at runtime to the full mapped venue universe,
+so the default scope tracks every available contract automatically.
+Rotation discipline applies when an operator narrows the setting to
+an explicit allowlist: the chosen TradFi symbols are quarterly expiry
+contracts (`MNQM6-CME` = Jun 26, etc.) and must be rotated before the
+`InstrumentSpec.expiry_at` timestamp on any listed symbol drops below
+14 days. Rotation cadence:
 
 1. Pull the current expiry list. `native_symbol` lives on the
    `symbols` table (joined to `instruments` via
@@ -369,10 +386,14 @@ below 14 days. Rotation cadence:
    ```
 2. Identify the next quarterly (e.g. `MNQU6-CME` Sep 26 when
    `MNQM6-CME` Jun 26 drops below 14 days).
-3. Update `AppSettings.instruments[KRAKEN_EQUITIES]` in code
-   AND/OR the `instruments` DB Setting row to include the new
-   nearest contract. Deploy + roll back via git revert on the
-   code path; DB Setting path is immediate.
+3. Add the new nearest contract by either changing the default
+   `KRAKEN_EQUITIES` entry inside the `AppSettings.instruments`
+   property default literal in `src/snapper/config/app.py` (code
+   path — requires a deploy; roll back via git revert), OR overriding
+   the `instruments` DB Setting row via the Settings page or
+   `POST /api/settings` (immediate, no deploy). `instruments` is a
+   read-only `@property`, so the DB Setting row is the only runtime
+   override.
 
 ## Troubleshooting
 

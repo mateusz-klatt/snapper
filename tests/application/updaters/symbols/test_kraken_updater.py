@@ -3653,8 +3653,7 @@ class TestKrakenMarginToNonMarginTransition:
 class TestKrakenBtnlDiscovery:
     """Tests for Bitnomial spot venue (``:BTNL``) discovery + persist.
 
-    Phase 1 of ``proprietary/plans/plan_2026_05_11_kraken_btnl_routing.md``:
-    discovers symbols via a wildcard ticker snapshot, registers them as
+    Discovers symbols via a wildcard ticker snapshot, registers them as
     native ``<BASE>-<QUOTE>-BTNL`` with ``can_trade=False`` and
     ``instrument_kind="spot"`` (Bitnomial publishes these as SPOT
     products in its CFTC-regulated product catalog; ``BTNL`` is its

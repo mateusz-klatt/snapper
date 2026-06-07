@@ -6,8 +6,8 @@ and serialises the resulting collector artifacts + portfolio state to
 JSON. Used twice:
 
 1. One-shot baseline capture: writes the golden snapshot to
-   ``tests/application/backtest/fixtures/phase2c_baseline_snapshot.json``.
-2. Regression check: ``TestPhase2cBaselineParity`` imports ``SCENARIOS``
+   ``tests/application/backtest/fixtures/backtest_baseline_snapshot.json``.
+2. Regression check: ``TestBacktestBaselineParity`` imports ``SCENARIOS``
    + ``serialise_run`` and re-runs each scenario against the same
    snapshot — any drift fails the gate.
 
@@ -18,7 +18,7 @@ and keeps domain-deterministic values (``signal_type``, ``instrument``,
 
 Run directly::
 
-    python scripts/capture_phase2c_baseline.py
+    python scripts/capture_backtest_baseline.py
 
 Overwrites the fixture in-place if it already exists.
 """
@@ -59,7 +59,7 @@ _FIXTURE_PATH = (
     / "application"
     / "backtest"
     / "fixtures"
-    / "phase2c_baseline_snapshot.json"
+    / "backtest_baseline_snapshot.json"
 )
 """Golden snapshot output location."""
 
@@ -270,7 +270,7 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario(name="warmup_gated_signal_dropped", run=_scenario_warmup_gated_signal_dropped),
     Scenario(name="signal_emitted_fill_skipped", run=_scenario_signal_emitted_fill_skipped),
 )
-"""Public scenario registry. Imported by ``TestPhase2cBaselineParity``."""
+"""Public scenario registry. Imported by ``TestBacktestBaselineParity``."""
 
 
 def _serialise_signal(row: dict[str, Any]) -> dict[str, Any]:

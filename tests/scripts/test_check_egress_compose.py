@@ -1,6 +1,6 @@
 """Unit tests for ``scripts/check_egress_compose.py``.
 
-SC.3 lint hook protects the snapper-egress sidecar from accidentally
+The lint hook protects the snapper-egress sidecar from accidentally
 exposing its unauthenticated SOCKS5 listener to the host network.
 """
 
@@ -233,7 +233,7 @@ def test_scans_yaml_extension_compose_files(
     Given a `compose.yaml` (Compose v2 default) with a host-port
         mapping on snapper-egress,
     When main runs,
-    Then it returns 1. Pinned by Codex Code Reviewer round 2.
+    Then it returns 1.
     """
     _write(
         tmp_path / "compose.yaml",
@@ -277,11 +277,11 @@ services:
     expose:
       - "8081"
 """
-"""Reference compose fragment satisfying every B'.6 unified-image invariant."""
+"""Reference compose fragment satisfying every unified-image invariant."""
 
 
 def test_unified_image_invariants_pass_on_correct_compose(tmp_path: Path) -> None:
-    """Spec — B'.6 reference compose passes the unified-image lint.
+    """Spec — reference compose passes the unified-image lint.
 
     Given a compose declaring both services with matching ``image:``,
     sidecar command/user/cap_add set, and monolith having neither
@@ -487,9 +487,8 @@ def test_fails_when_egress_user_is_not_root(
 
     Given a compose with the sidecar running as a non-root UID,
     When main runs,
-    Then it returns 1. The R7 invariant from B'.6 v9 — without root,
-        ``pyroute2`` netlink writes fail even with CAP_NET_ADMIN
-        granted.
+    Then it returns 1. Without root, ``pyroute2`` netlink writes fail
+        even with CAP_NET_ADMIN granted.
     """
     _write(
         tmp_path / "docker-compose.yml",
@@ -607,7 +606,7 @@ def test_unified_image_check_skipped_when_monolith_absent(tmp_path: Path) -> Non
     Given a partial override compose declaring only the sidecar
         service (no `snapper:` block),
     When main runs,
-    Then it returns 0. The B'.6 unified-image cross-check is
+    Then it returns 0. The unified-image cross-check is
         skipped silently when either service is missing — allows
         partial overrides without forcing every file to redeclare
         the monolith.

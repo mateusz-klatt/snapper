@@ -1,7 +1,5 @@
 """Pydantic models + loader for ``egress_tunnel_*`` DB settings.
 
-SC.2 of ``proprietary/plans/plan_2026_05_21_snapper_egress_sidecar.md``.
-
 Three setting keys per tunnel:
 
 * ``egress_tunnel_<id>`` — cleartext JSON descriptor:
@@ -14,7 +12,7 @@ Three setting keys per tunnel:
 ``load_declared_tunnels(service)`` enumerates the cache, validates
 each descriptor + matched key payload via ``TunnelDescriptor``, and
 returns a list of ``LoadedTunnel`` value objects ready for the
-orchestrator (SC.4) to feed into ``wg_control.bring_up`` +
+orchestrator to feed into ``wg_control.bring_up`` +
 ``Socks5Server``.
 """
 
@@ -128,10 +126,10 @@ class TunnelDescriptor(BaseModel):
     coerces ``list[str]`` to ``tuple[str, ...]``."""
 
     dns: StringSequence = ()
-    """DNS servers reachable through the tunnel. Informational in SC.2
+    """DNS servers reachable through the tunnel. Informational
     (the SOCKS5 server uses the sidecar's container resolver, not
-    tunnel DNS — Phase C follow-up). Operators can still set this for
-    documentation. Accepts JSON arrays."""
+    tunnel DNS). Operators can still set this for documentation.
+    Accepts JSON arrays."""
 
     socks5_listen_port: int = Field(
         ge=_MIN_SOCKS5_LISTEN_PORT,
@@ -360,7 +358,7 @@ def _validation_failure(
 def get_tunnel_state_label(failure: TunnelLoadFailure | None) -> Literal["up", "failed"]:
     """Helper for orchestrator ``/tunnels`` endpoint.
 
-    Tiny but exported so tests + the SC.4 orchestrator agree on the
+    Tiny but exported so tests + the orchestrator agree on the
     string literal.
 
     Args:

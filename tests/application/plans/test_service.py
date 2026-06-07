@@ -1622,9 +1622,10 @@ class TestPlanExecutorService:
         async def _cancel_sleep(_seconds: float) -> None:
             raise asyncio.CancelledError()
 
-        with patch(
-            "snapper.application.plans.service.asyncio.sleep", side_effect=_cancel_sleep
-        ), pytest.raises(asyncio.CancelledError):
+        with (
+            patch("snapper.application.plans.service.asyncio.sleep", side_effect=_cancel_sleep),
+            pytest.raises(asyncio.CancelledError),
+        ):
             await service._checkpoint_loop()
 
     @pytest.mark.asyncio
@@ -2248,7 +2249,7 @@ class TestLogDecisionError:
 
 
 class TestSetupPublisher:
-    """BE-3b self-bootstrap publisher covers both no-broker + reuse-context paths."""
+    """Self-bootstrap publisher covers both no-broker + reuse-context paths."""
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
@@ -2301,7 +2302,7 @@ class TestSetupPublisher:
     ) -> None:
         """A connect failure in ``_setup_publisher`` closes the raw socket.
 
-        BE-3b R1 recommendation #1: if ``raw_pub_socket.connect`` raises
+        If ``raw_pub_socket.connect`` raises
         (e.g. bad broker address), the socket is explicitly closed
         before the exception propagates so the context is not left
         holding a dangling socket.

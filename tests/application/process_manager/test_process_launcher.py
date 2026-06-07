@@ -2101,7 +2101,7 @@ async def test_handle_process_completion_unexpected_failure(
     Then: Run is finalized with FAILED status, exit code on the run-event
         payload, AND a stringified ``error="exit_code=N"`` for the DB run
         record (the launcher still folds the code into error to preserve
-        the pre-Q3 update_run_record contract).
+        the earlier update_run_record contract).
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)

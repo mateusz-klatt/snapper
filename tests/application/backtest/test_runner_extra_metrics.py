@@ -1,6 +1,6 @@
 """Conditional extra_metrics propagation + SQLAlchemy JSON roundtrip.
 
-Locks BE-1 D9 contract at two layers:
+Locks the extra_metrics propagation contract at two layers:
 
 1. Runner side — the extra_metrics dict is ``{}`` when the collector's
    ``cross_asset_blocked_fills`` counter is zero (single-feed

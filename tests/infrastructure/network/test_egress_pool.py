@@ -214,14 +214,13 @@ class TestReserveSelection:
 
 
 class TestReserveExchangeFilter:
-    """Tests for B'.5 — per-exchange route selection via ``allowed_exchanges``."""
+    """Tests for per-exchange route selection via ``allowed_exchanges``."""
 
     @staticmethod
     def _pl_pinned_config() -> EgressPoolConfig:
         """Helper — direct fallback + IE/UK open + PL pinned to walutomat.
 
-        Mirrors the production target shape after F1 deployment of
-        plan_2026_05_22_egress_per_exchange_routing.md.
+        Mirrors the per-exchange routing shape used in production.
         """
         return EgressPoolConfig(
             enabled=True,
@@ -255,9 +254,8 @@ class TestReserveExchangeFilter:
         Pool has direct(p=100) + pl(p=10, allowed=["walutomat"]).
         Reserve(walutomat): IE/UK absent, direct is higher priority,
         so pl MUST be the selection. Proves the filter actually
-        admits pinned routes for their listed exchange (the original
-        v1 test only proved the filter didn't exclude pl, per Codex
-        review).
+        admits pinned routes for their listed exchange (not merely
+        that the filter fails to exclude pl).
         """
         config = EgressPoolConfig(
             enabled=True,
@@ -961,7 +959,7 @@ class TestPreflightRoutes:
 
 @pytest.mark.asyncio
 class TestSocks5GreetingProbe:
-    """Tests for the SOCKS5 listener reachability probe (v4 plan).
+    """Tests for the SOCKS5 listener reachability probe.
 
     Closes the degraded-ready gap: even when DNS resolves to the
     sidecar host, the pool must NOT admit a route whose TCP listener
@@ -1024,7 +1022,8 @@ class TestSocks5GreetingProbe:
         Given asyncio.open_connection raises ConnectionRefusedError on
             the SOCKS5 probe AND DNS resolves AND python_socks installed,
         When _preflight_one_route runs,
-        Then the route's enabled flag is False (closes v4 gap).
+        Then the route's enabled flag is False (closes the
+            degraded-ready gap).
         """
 
         async def fake_open_connection(host: object, port: object) -> tuple[Any, Any]:

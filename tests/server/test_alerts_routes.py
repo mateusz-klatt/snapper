@@ -64,7 +64,7 @@ def _alert_row(
     """Return a fully-populated active ``AlertEventRow`` fixture.
 
     ``payload`` and ``title`` / ``body`` are exposed so localization
-    tests can pin Phase C loc_key contracts on a row without
+    tests can pin loc_key contracts on a row without
     fabricating their own AlertEventRow shape.
     """
     return AlertEventRow(
@@ -91,7 +91,7 @@ def _alert_row(
 def _make_repo(
     default_language: str | None = None, *, user_public_id: str = "user-alpha"
 ) -> MagicMock:
-    """Build a repo mock with the Phase C ``default_language`` lookup pre-stubbed.
+    """Build a repo mock with the localization ``default_language`` lookup pre-stubbed.
 
     Uses ``MagicMock`` as the parent (NOT ``AsyncMock``) so unstubbed
     attribute access falls back to plain MagicMock and never produces
@@ -331,7 +331,7 @@ class TestGetAlertEvent:
 
 
 def _phase_c_row_payload() -> JsonObject:
-    """Return a payload dict shaped like the Phase C notify-rule emits.
+    """Return a payload dict shaped like the localizing notify-rule emits.
 
     Pinned to ``order_fill_full`` so the catalog will actually resolve
     against the Polish template; tests that need a different shape can
@@ -346,14 +346,14 @@ def _phase_c_row_payload() -> JsonObject:
 
 
 class TestAlertHistoryLocalization:
-    """Phase D — server-side ``title``/``body`` resolution + loc field exposure."""
+    """Server-side ``title``/``body`` resolution + loc field exposure."""
 
     @pytest.mark.asyncio
     async def test_pl_user_history_returns_localized_title_and_body(self) -> None:
         """A PL user gets Polish strings AND the loc fields for in-app re-render.
 
         Given: ``user.default_language = 'pl'`` and a row carrying the
-            Phase C loc_key contract.
+            localization loc_key contract.
         When: ``GET /api/alerts/history`` runs.
         Then: ``payload[0].title``/``body`` are pre-rendered in Polish
             server-side, AND ``title_loc_key`` / ``body_loc_key`` /
@@ -399,7 +399,7 @@ class TestAlertHistoryLocalization:
 
         Given: ``user.default_language`` not set (``{}`` from the
             bulk lookup).
-        When: history runs over a Phase C row.
+        When: history runs over a localization-enabled row.
         Then: response ``title``/``body`` mirror the EN columns AND
             the loc fields still flow through (iOS can re-render to
             its in-app locale even when the server has no preference
@@ -433,10 +433,10 @@ class TestAlertHistoryLocalization:
 
     @pytest.mark.asyncio
     async def test_legacy_row_without_loc_keys_omits_loc_fields(self) -> None:
-        """Rows persisted before Phase C surface ``loc_key=None``.
+        """Rows persisted before localization surface ``loc_key=None``.
 
-        Given: a row whose payload predates Phase C (no loc_keys) and
-            a PL user.
+        Given: a row whose payload predates localization (no loc_keys)
+            and a PL user.
         When: history runs.
         Then: title/body fall back to EN columns; loc fields are
             ``None`` / ``[]`` so iOS knows to not attempt in-app
@@ -512,15 +512,15 @@ class TestAlertHistoryLocalization:
 
 
 class TestGetAlertEventLocalization:
-    """Phase D — singleton endpoint mirrors history's localization."""
+    """Singleton endpoint mirrors history's localization."""
 
     @pytest.mark.asyncio
     async def test_pl_user_singleton_returns_localized_strings(self) -> None:
         """Singleton response honors ``user.default_language`` identically.
 
-        Server-side render must match what the sidecar emitted to APNs
-        (Phase C); otherwise an alert that pushed in PL would render
-        in EN when re-opened from the history list.
+        Server-side render must match what the sidecar emitted to APNs;
+        otherwise an alert that pushed in PL would render in EN when
+        re-opened from the history list.
         """
         repo = _make_repo(default_language="pl")
         repo.get_alert_event_by_public_id = AsyncMock(

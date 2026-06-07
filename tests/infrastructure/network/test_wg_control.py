@@ -3,10 +3,7 @@
 All pyroute2 interactions are mocked: real WG interface creation
 requires kernel support + NET_ADMIN which is not available in the
 CI sandbox. The tests verify the call sequence + arguments passed
-to ``pyroute2.IPRoute`` / ``pyroute2.WireGuard`` against the
-contract described in
-``proprietary/plans/plan_2026_05_21_snapper_egress_sidecar.md``
-section SC.1.
+to ``pyroute2.IPRoute`` / ``pyroute2.WireGuard``.
 """
 
 import errno
@@ -411,7 +408,7 @@ class TestBringUpSync:
         with ``dst="0.0.0.0/0"`` + ``family=AF_INET``, then rule add
         with ``src_len=32`` + ``family=AF_INET``. The explicit family +
         src_len ensures the rule matches only the intended source host
-        (not ``from all``) per Codex Code Reviewer SC.1 round 1 fix.
+        (not ``from all``).
         """
         ipr = _make_ipr_mock()
         wg = _make_wg_mock()

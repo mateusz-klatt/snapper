@@ -1,6 +1,6 @@
 """Tests for ``snapper.i18n.supported_languages``.
 
-Locks in the set membership against accidental drift. Phase B will
+Locks in the set membership against accidental drift. A later change will
 replace the hardcoded set with a generator-driven constant; this test
 becomes a parity check at that point.
 """
@@ -80,7 +80,7 @@ def test_english_is_present_as_the_source_language() -> None:
 def test_polish_is_present_as_the_long_standing_first_translated_locale() -> None:
     """Spot-check for ``pl``.
 
-    Given: Polish shipped at Phase v1 baseline.
+    Given: Polish shipped as part of the initial translated baseline.
     When: We check membership of ``"pl"``.
     Then: It is present.
     """

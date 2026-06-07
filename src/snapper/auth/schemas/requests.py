@@ -105,7 +105,7 @@ class UpdateAuthMeBody(StrictBody):
     Used by the authenticated user to update their own preferences via
     ``POST /api/auth/me/update``. Currently exposes only
     ``default_language`` — additional preference fields may be added
-    later as Phase A or follow-up plans evolve. The admin-facing
+    later as the feature evolves. The admin-facing
     :class:`UpdateUserBody` deliberately stays separate so the
     ``MANAGE_USERS`` permission does not silently expand its scope.
 

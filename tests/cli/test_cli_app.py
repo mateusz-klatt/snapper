@@ -4266,12 +4266,12 @@ class TestNotifyCommand:
 
 
 class TestEgressCommand:
-    """Tests for the `snapper egress` CLI subcommand (B'.6 §1).
+    """Tests for the `snapper egress` CLI subcommand.
 
     The subcommand is a thin shim that forwards extra args to
     :func:`snapper.egress.__main__.main` and propagates its integer
     return code as the Typer process exit code. Tests lock the four
-    invariants the Codex Plan Reviewer flagged across 9 rounds:
+    invariants of the shim:
 
     1. Default invocation passes ``argv=[]`` (NOT ``argv=None``) so
        the egress argparse parser doesn't receive the literal
@@ -4427,8 +4427,7 @@ class TestEgressCommand:
 class TestReconcileSymbolAliasesCommand:
     """Tests for the ``reconcile-symbol-aliases`` CLI backfill.
 
-    Pins the operator-facing surface for plan item #4 from
-    ``proprietary/plans/plan_2026_05_25_log_noise_followups.md``.
+    Pins the operator-facing surface of the alias reconcile backfill.
     The CLI is a one-shot backfill for SCD2 alias rows whose owning
     capability is already deactivated. Steady-state reconcile is
     handled by each symbol updater in its own ``run-static`` flow;

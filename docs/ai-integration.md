@@ -29,12 +29,12 @@ The `/api/mcp` sub-app is always mounted and gated by the
 
 1. The flag **defaults to `true`** — a fresh install exposes the MCP
     endpoint and the AI Integration navigation entry with no manual
-    setup. Operators who need to disable the feature flip the
-    setting to `false` via the Settings UI (operator+) or directly:
+    setup. Admins who need to disable the feature flip the
+    setting to `false` via the Settings UI (admin) or directly:
 
     ```bash
     curl -X POST http://localhost:8000/api/settings/ai_integration_enabled/set \
-      -H "Authorization: Bearer <operator-jwt>" \
+      -H "Authorization: Bearer <admin-jwt>" \
       -H "Content-Type: application/json" \
       -d '{"session_id":"cli","sequence_id":1,"public_id":"$(uuidgen)","timestamp":"2026-04-20T00:00:00Z","payload":{"value":"false","category":"system"}}'
     ```
@@ -144,7 +144,7 @@ that fits their key-management hygiene.
 
 ## Client configuration examples
 
-### Claude Code plugin (recommended, since `snapper-mcp` v0.2.1)
+### Claude Code plugin (recommended)
 
 In any Claude Code session:
 
@@ -501,6 +501,6 @@ bearer-authenticated HTTP connection.
 ## Related reading
 
 - `docs/architecture.md` — repository + SCD2 + bus layering.
-- `docs/operations.md` — lifespan order, token cleanup loop, shard
-    partitioning.
+- `docs/operations.md` — multi-instance trade coordinator and
+    static-hash shard partitioning.
 - `docs/api.md` — full REST surface.

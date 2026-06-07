@@ -1,7 +1,7 @@
-"""Smoke tests for the B'.6 unified Dockerfile.
+"""Smoke tests for the unified Dockerfile.
 
-After B'.6 merged the per-mode `docker/Dockerfile.egress` into the
-root `Dockerfile`, these tests lock the structural invariants that
+After the unified build merged the per-mode `docker/Dockerfile.egress` into
+the root `Dockerfile`, these tests lock the structural invariants that
 keep both monolith and sidecar modes working from one image:
 
 - The old per-mode Dockerfile is GONE (guard against re-creation).
@@ -47,7 +47,7 @@ def _runtime_stage_lines() -> list[str]:
 def test_dockerfile_exists() -> None:
     """Spec — single Dockerfile at repo root.
 
-    Given the B'.6 unification,
+    Given the unified Dockerfile,
     When inspecting the repo root,
     Then `Dockerfile` exists.
     """
@@ -58,14 +58,14 @@ def test_dockerfile_exists() -> None:
 def test_legacy_egress_dockerfile_is_gone() -> None:
     """Spec — `docker/Dockerfile.egress` is removed.
 
-    Given the B'.6 unification deletes the per-mode sidecar Dockerfile,
+    Given the unified Dockerfile replaces the per-mode sidecar Dockerfile,
     When inspecting the repo,
     Then `docker/Dockerfile.egress` does NOT exist. Guard against
         accidental re-creation that would re-introduce the Docker
         Hub 1-private-repo problem.
     """
     assert not _LEGACY_EGRESS_DOCKERFILE.exists(), (
-        f"{_LEGACY_EGRESS_DOCKERFILE} must NOT exist after B'.6; "
+        f"{_LEGACY_EGRESS_DOCKERFILE} must NOT exist under the unified Dockerfile; "
         "the unified Dockerfile at repo root replaces it."
     )
 
@@ -92,7 +92,7 @@ def test_runtime_stage_installs_monolith_deps() -> None:
     When scanning its package list,
     Then `ca-certificates` (TLS), `curl` (HEALTHCHECK), and
         `unixodbc` (ODBC drivers) all survive the merge from the
-        pre-B'.6 main Dockerfile.
+        pre-unification main Dockerfile.
     """
     runtime = _runtime_stage_lines()
     blob = "\n".join(runtime)
@@ -144,7 +144,7 @@ def test_runtime_stage_entrypoint_is_snapper() -> None:
     Then it is `["snapper"]`. Combined with `CMD ["server"]` the
         default invocation is `snapper server` (monolith); sidecar
         overrides CMD via compose to `["egress"]` for `snapper egress`
-        (the §1 CLI subcommand).
+        (the egress CLI subcommand).
     """
     runtime = _runtime_stage_lines()
     entrypoint_lines = [line for line in runtime if line.strip().startswith("ENTRYPOINT")]

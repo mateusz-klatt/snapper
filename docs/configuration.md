@@ -172,8 +172,10 @@ Envelope shapes by `credential_type`:
 - `oauth` — `{"client_id": "...", "client_secret": "...", "refresh_token": "..."}`
 - `paper` — `{"initial_balance": "10000.0"}` (paper wallets)
 
-Seed profiles (`dev.toml` / `prod.toml`) bootstrap `wallet_credentials`
-on a fresh database. Note: the seed loader supports the
+The shipped seed profile (`dev.toml`) bootstraps `wallet_credentials`
+on a fresh database; operators can add their own
+`data/seed/{profile}.toml` override for other environments. Note: the
+seed loader supports the
 `api_key_secret`, `rsa_pem`, and `paper` envelope shapes — the
 `oauth` shape is accepted at the credential-resolver layer but
 **not** by the current seed loader, so OAuth credentials must be
@@ -222,7 +224,7 @@ key before insert.
 
 | Key | Default | Description |
 | --- | ------- | ----------- |
-| `instruments` | `{"kraken": ["BTC-USD", ...], ...}` | Instruments per exchange (dict) |
+| `instruments` | `{"kraken": ["*"], "kraken_futures": ["*"], "kraken_equities": ["*"], "walutomat": ["*"], "polygon": ["*"]}` | Instruments per exchange (`*` = all instruments) |
 | `timeframes` | `["1m"]` | Candle timeframes (list) |
 | `risk_max_leverage` | `1.0` | Maximum leverage |
 | `risk_r_per_trade` | `0.005` | Risk per trade (0.5%) |
@@ -481,12 +483,9 @@ Use `snapper settings-rotate-encryption` to rotate passwords safely.
 
 ## Configuration Validation
 
-The system validates configuration at startup:
-
-- Database connection check
-- ZMQ endpoint verification
-- Settings decryption test
-- Shared `.env` allowlist validation
+The system validates configuration at startup via the shared `.env`
+allowlist check. The encrypt/decrypt round-trip is not a startup step;
+it runs as part of the `snapper settings-rotate-encryption` command.
 
 The allowlist is the union of `BootstrapSettingsLoader` aliases and
 each subsystem's exported `ENV_VARS` set. Unknown keys fail startup

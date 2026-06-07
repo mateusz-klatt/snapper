@@ -618,7 +618,7 @@ class TestPatchedReconnect:
 
 
 class TestCloseCodeBackoff:
-    """Phase A.3 — Kraken WebSocket close codes drive custom reconnect backoff.
+    """Kraken WebSocket close codes drive custom reconnect backoff.
 
     Captures the production cascade observed 2026-05-21 07:00-07:14: Kraken
     sent code 1012 'service restart', SDK's exponential backoff was too
@@ -849,18 +849,18 @@ class TestUnregisterClearsAllStashes:
 
 
 class TestPhaseBPrimeShim:
-    """Phase B' shim integration tests — pool reserve + 429 + 1015 paths.
+    """Egress-pool shim integration tests — pool reserve + 429 + 1015 paths.
 
     The shim now consults ``get_egress_pool()`` and, when a pool is
     configured, reserves a route, injects the proxy kwarg, and routes
     429 / 1015 captures to ``reservation.quarantine`` instead of the
-    legacy global stash. With pool disabled, the original Phase A.1
-    behaviour is preserved byte-for-byte.
+    legacy global stash. With pool disabled, the original
+    global-stash behaviour is preserved byte-for-byte.
     """
 
     @pytest.fixture(autouse=True)
     def _reset_pool(self) -> Any:
-        """Clear the egress-pool singleton + Phase A stashes before/after each test."""
+        """Clear the egress-pool singleton + global stashes before/after each test."""
         reset_egress_pool()
         _PENDING_RETRY_AFTER_S.clear()
         _LAST_CLOSE_CODE.clear()
@@ -901,7 +901,7 @@ class TestPhaseBPrimeShim:
         Given get_egress_pool() returns None,
         When _ConnectShim is constructed with arbitrary kwargs,
         Then original_connect is called with those kwargs verbatim —
-        no proxy override, no new keys (preserves the Phase A.1
+        no proxy override, no new keys (preserves the
         default of websockets-16 ``proxy=True`` env auto-detect).
         """
         seen_kwargs: dict[str, Any] = {}
@@ -987,8 +987,8 @@ class TestPhaseBPrimeShim:
         When the handshake raises InvalidStatus 429 with Retry-After=600,
         Then the borrowed route is quarantined for 600 s with
         reason="http-429" AND ``_PENDING_RETRY_AFTER_S`` is NOT
-        populated (the v4 acceptance criterion — pool quarantine
-        replaces the global stash when pool is enabled).
+        populated (pool quarantine replaces the global stash when
+        pool is enabled).
         """
         pool = self._enable_pool()
         response = Response(
@@ -1026,7 +1026,7 @@ class TestPhaseBPrimeShim:
 
     @pytest.mark.asyncio
     async def test_shim_429_legacy_stash_path_when_pool_disabled(self) -> None:
-        """Spec — pool disabled keeps Phase A.1 stash behaviour.
+        """Spec — pool disabled keeps the global-stash behaviour.
 
         Given get_egress_pool() returns None,
         When the handshake raises InvalidStatus 429 with Retry-After=600,
@@ -1238,7 +1238,7 @@ class TestPhaseBPrimeShim:
         Given the pool is enabled,
         When the async-with body exits with ConnectionClosed(rcvd.code=1012),
         Then quarantine is NOT applied (1012 is Kraken graceful
-        restart; Phase A.3's per-close-code backoff owns the recovery).
+        restart; the per-close-code backoff owns the recovery).
         """
         pool = self._enable_pool()
 
@@ -1372,11 +1372,11 @@ class TestPhaseBPrimeShim:
 
 
 class TestPhaseBPrimeGetReconnectWait:
-    """Phase B' precedence tests for ``_patched_get_reconnect_wait``.
+    """Egress-pool precedence tests for ``_patched_get_reconnect_wait``.
 
-    The v4 design splits behaviour on ``get_egress_pool()``:
+    The design splits behaviour on ``get_egress_pool()``:
 
-    * Pool=None — Phase A.3 path: Retry-After stash → close-code → SDK exponential.
+    * Pool=None — global-stash path: Retry-After stash → close-code → SDK exponential.
     * Pool enabled — close-code → pool wait → SDK exponential. The
       legacy Retry-After stash is intentionally NOT consulted; the
       shim routes 429 captures to ``reservation.quarantine`` instead.
@@ -1410,7 +1410,7 @@ class TestPhaseBPrimeGetReconnectWait:
         return configure_egress_pool(config)
 
     def test_pool_disabled_honors_retry_after_stash(self) -> None:
-        """Spec — pool disabled + stash present → return stashed value (Phase A.1).
+        """Spec — pool disabled + stash present → return stashed value.
 
         Given pool is None and ``_PENDING_RETRY_AFTER_S`` holds 600,
         When _patched_get_reconnect_wait runs,
@@ -1524,7 +1524,7 @@ class TestPhaseBPrimeGetReconnectWait:
         assert wait == 42.5
 
     def test_429_failover_in_one_second_when_healthy_route_available(self) -> None:
-        """Spec — Phase B' acceptance test (Codex v3→v4 critical).
+        """Spec — egress-pool fast-failover acceptance test.
 
         Given pool enabled with direct (priority=0) + socks5 (priority=10),
         When the shim drives a 429 with Retry-After=600 on direct,
@@ -1534,7 +1534,7 @@ class TestPhaseBPrimeGetReconnectWait:
           (c) ``_patched_get_reconnect_wait`` returns ~1.0 (not 600),
           (d) the next reservation picks the socks5 route.
 
-        This is the central Phase B' guarantee: a route-scoped 429
+        This is the central egress-pool guarantee: a route-scoped 429
         produces fast failover, not the legacy full-Retry-After wait.
         """
         pool = self._enable_pool(with_socks5=True)
@@ -1586,7 +1586,7 @@ async def _raise_through_aenter(shim: Any) -> None:
 class TestPhaseBPrimeBranchCoverage:
     """Branch-coverage tests for shim + reconnect_wait defensive paths.
 
-    These pin behaviour for code paths the v4 design must support but
+    These pin behaviour for code paths the design must support but
     that don't fire on the happy paths: pool-disabled exceptions
     (no-reservation release branches), missing connector ContextVar
     in the legacy 429 stash, and the empty-pool fallback in

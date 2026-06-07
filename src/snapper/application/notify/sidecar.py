@@ -136,14 +136,14 @@ class NotifySidecar(RegisterableProcess):
             publisher: ``MessagePublisher`` used to fan out one
                 ``AlertEventData`` frame per persisted alert onto the
                 ZMQ bus topic ``alerts.{user_public_id}.{alert_type}``.
-                Powers the Phase E web live-refresh path: the bridge
+                Powers the web live-refresh path: the bridge
                 forwards the frame to subscribed WebSocket clients
                 with per-user scope enforcement (mirrors REST
                 ``/api/alerts/history`` scoping). Publish happens
                 BEFORE APNs fanout so web clients see updates in
                 <50ms; APNs round-trip is the slower path.
             registry: Alert rule registry — defaults to
-                ``load_default_registry()`` (the 5 P0 rules
+                ``load_default_registry()`` (the core rule set
                 + ``margin_warning``). Injected for tests that want a
                 narrower rule set.
             scope_revalidator: Scope-revocation helper — defaults to
@@ -179,7 +179,7 @@ class NotifySidecar(RegisterableProcess):
         for the default set), drains the outbox (crash recovery),
         spawns the background retry loop, and consumes the receive loop
         until ``_stop_event`` is set. Each entry boundary mints one
-        ``now`` timestamp (per ``feedback_timestamp_discipline.md``)
+        ``now`` timestamp (single timestamp per entry boundary)
         which is threaded through every helper and repository call.
         """
         for prefix in self._registry.all_subscribe_prefixes():
@@ -310,7 +310,7 @@ class NotifySidecar(RegisterableProcess):
     async def _publish_alert_event_frame(self, event: AlertEventRow, now: datetime) -> None:
         """Emit an ``AlertEventData`` frame onto the ZMQ bus.
 
-        Powers the Phase E web live-refresh path. The bridge subscribes
+        Powers the web live-refresh path. The bridge subscribes
         to the ``alerts.`` prefix and forwards the frame to authenticated
         WebSocket clients with per-user scope enforcement. Sequence is
         allocated against the actual topic so consumer-side gap detection
@@ -496,10 +496,9 @@ class NotifySidecar(RegisterableProcess):
         new attempt number is returned when the transition succeeded;
         ``None`` when the row is no longer queued (a concurrent admin
         handler cancelled it between our ``should_skip_send`` check
-        and this call — race guard, ``gpt-5.3-codex`` final
-        review). Callers treating ``None`` as "abort this attempt"
-        keep the sidecar from emitting a send for a row that was
-        just cancelled.
+        and this call — race guard). Callers treating ``None`` as
+        "abort this attempt" keep the sidecar from emitting a send
+        for a row that was just cancelled.
         """
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
@@ -576,7 +575,7 @@ class NotifySidecar(RegisterableProcess):
         use the exponential backoff. Retry exhaustion
         emits a ``logger.warning`` before the terminal ``failed``
         transition so ops alerting has a single log record to pivot
-        on (invariant INV-10).
+        on.
         """
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
@@ -663,8 +662,7 @@ class NotifySidecar(RegisterableProcess):
         at most once even when many deliveries share an alert_event
         or user. The third cache feeds the APNs sidecar's
         catalog-resolution path so push titles/bodies render in the
-        recipient's preferred language (Phase C of
-        ``plan_2026_05_17_backend_user_language_i18n.md``).
+        recipient's preferred language.
         """
         if not rows:
             return {}, {}, {}
@@ -763,7 +761,7 @@ class NotifySidecar(RegisterableProcess):
         ``stop()`` sets the stop event. A cancelled retry is just an
         interrupted sleep — the next startup drains any rows left
         behind. Each tick mints one ``now`` at the entry boundary
-        (per ``feedback_timestamp_discipline.md``) that drives both
+        (single timestamp per tick) that drives both
         the retry-eligibility SELECT and every SCD2 write performed
         while processing the batch returned by that query.
         """
@@ -810,8 +808,7 @@ def _build_apns_payload(event: AlertEventRow, *, user_language: str | None = Non
     payload budget.
 
     When ``user_language`` is non-null AND the event payload carries
-    ``title_loc_key``/``body_loc_key`` (emitted by every notify rule
-    as of Phase C of ``plan_2026_05_17_backend_user_language_i18n.md``),
+    ``title_loc_key``/``body_loc_key`` (emitted by every notify rule),
     the title/body are resolved through ``snapper.i18n.catalog.render``
     so the APNs push renders in the recipient's chosen language.
     Falls back to the EN ``event.title``/``event.body`` columns for
@@ -861,7 +858,7 @@ _APNS_PAYLOAD_SKIP_KEYS: frozenset[str] = frozenset(
 ``aps`` is rewritten by ``_build_apns_payload`` directly. The four
 ``*_loc_key``/``*_loc_args`` keys are an internal contract between
 notify rules and the backend resolver — iOS does not consume them
-(Phase C resolves the title/body server-side), so we strip them
+(the backend resolves the title/body server-side), so we strip them
 from the wire payload to (a) save the 4 KB APNs budget and (b)
 avoid leaking exchange/instrument/reason values in a second place.
 """

@@ -1,7 +1,6 @@
 """Monkeypatches for python-kraken-sdk to honor HTTP 429 Retry-After header.
 
-Per ``proprietary/plans/plan_2026_05_21_kraken_429_retry_after_egress_pool.md``
-Phase A. The SDK ignores the ``Retry-After`` header returned by Cloudflare
+The SDK ignores the ``Retry-After`` header returned by Cloudflare
 on HTTP 429 handshake failures, which produces a self-amplifying reconnect
 cascade until ``MaxReconnectError``. The patches in this module:
 
@@ -208,7 +207,7 @@ def _parse_retry_after(headers: Any) -> float | None:
         return None
     try:
         seconds = float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if seconds <= 0:
         return None
@@ -268,9 +267,9 @@ class _ConnectShim:
        ``ConnectionClosed(rcvd.code=1015)`` (Cloudflare
        close-after-handshake), quarantine the route with
        ``reason="close-1015"``. Other close codes do NOT
-       quarantine — those are Phase A.3's job (1008/1011/1012/1013
-       → per-close-code backoff, not egress-route fault).
-       Then release the reservation in ``finally``.
+       quarantine — those are handled by the per-close-code
+       backoff path (1008/1011/1012/1013 → tuned backoff, not
+       egress-route fault). Then release the reservation in ``finally``.
     """
 
     def __init__(self, original_connect: Any, *args: Any, **kwargs: Any) -> None:
@@ -326,8 +325,7 @@ class _ConnectShim:
             return
         if self._reservation is not None:
             logger.warning(
-                "kraken WS handshake 429 on route '{}'; "
-                "Retry-After={}s (pool-scoped quarantine)",
+                "kraken WS handshake 429 on route '{}'; Retry-After={}s (pool-scoped quarantine)",
                 self._reservation.route_id,
                 retry_after,
             )
@@ -410,7 +408,7 @@ async def _patched_run(self: ConnectSpotWebsocketBase, event: asyncio.Event) -> 
 def _patched_get_reconnect_wait(self: ConnectSpotWebsocketBase, attempts: int) -> float:
     """Pick reconnect backoff with Kraken + egress-pool awareness.
 
-    Phase A.3 precedence (pool disabled, ``get_egress_pool() is None``):
+    Precedence when the pool is disabled (``get_egress_pool() is None``):
 
     1. **Cloudflare 429 Retry-After** stash from the handshake shim —
        honor the server-sent deadline exactly.
@@ -421,7 +419,7 @@ def _patched_get_reconnect_wait(self: ConnectSpotWebsocketBase, attempts: int) -
     3. **SDK exponential** — original ``random() * min(180, 2**n - 1)
        + 1`` formula, preserved as last-resort behaviour.
 
-    Phase B' precedence (pool enabled):
+    Precedence when the pool is enabled:
 
     1. **Close-code stash** (close-1015 already quarantines the route
        via the shim; other Kraken close codes still need their tuned
@@ -442,7 +440,7 @@ def _patched_get_reconnect_wait(self: ConnectSpotWebsocketBase, attempts: int) -
     is intentionally NOT consulted — the shim's ``_handle_handshake_429``
     routes 429 captures to ``reservation.quarantine`` instead, so the
     pool's quarantine state is authoritative. This is the core
-    Phase B' acceptance criterion: a 429 on direct with a healthy
+    pool-routing guarantee: a 429 on direct with a healthy
     SOCKS5 alternate must recover in ~1 s, not the full Retry-After.
 
     Both stashes are popped on consumption so the next reconnect
@@ -582,7 +580,7 @@ def apply_kraken_futures_pool_routing() -> None:
     * The Futures SDK has its own ``ConnectFuturesWebsocket`` class
       with a separate ``__get_reconnect_wait`` and reconnect loop
       that is not subject to the same Cloudflare 429 cascade pattern
-      observed on the Spot path (Phase A.3 incident 2026-05-21).
+      observed on the Spot path.
     * The Futures publisher does not implement the
       ``_on_sdk_reconnect_attempt`` watchdog hook, so registering
       Futures connectors via ``_patched_init`` would add no benefit.

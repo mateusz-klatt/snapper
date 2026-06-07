@@ -1,6 +1,6 @@
 """Unit tests for the snapper-egress orchestrator.
 
-SC.4 tests verify the bootstrap order, per-tunnel best-effort
+These tests verify the bootstrap order, per-tunnel best-effort
 bring-up, healthcheck endpoint contracts, and the SIGTERM-driven
 shutdown sequence. Heavy use of monkeypatching keeps the suite
 hermetic — no real kernel WG calls, no real SOCKS5 listeners, no
@@ -36,7 +36,7 @@ from snapper.infrastructure.network.egress_tunnel_models import TunnelLoadFailur
 
 
 def _make_descriptor(
-    tunnel_id: str = "eset-de1",
+    tunnel_id: str = "wg-de-1",
     interface: str = "wg-uk-1",
     address: str = "10.64.12.34",
     socks5_listen_port: int = 1081,
@@ -54,7 +54,7 @@ def _make_descriptor(
     )
 
 
-def _make_loaded(tunnel_id: str = "eset-de1") -> LoadedTunnel:
+def _make_loaded(tunnel_id: str = "wg-de-1") -> LoadedTunnel:
     """Helper — wrap a descriptor with placeholder secrets."""
     return LoadedTunnel(
         descriptor=_make_descriptor(tunnel_id=tunnel_id),
@@ -193,7 +193,7 @@ class TestBringUpTunnels:
         state = _SidecarState()
         load_result = LoadResult(
             tunnels=[],
-            failures=[TunnelLoadFailure(tunnel_id="eset-de1", reason="missing private_key")],
+            failures=[TunnelLoadFailure(tunnel_id="wg-de-1", reason="missing private_key")],
         )
         await _bring_up_tunnels(load_result, state)
         assert state.running == []
@@ -557,7 +557,7 @@ class TestRunSidecar:
         When run_sidecar runs,
         Then the exception propagates AND _shutdown_tunnels still
             runs so the kernel state is clean for the next sidecar
-            restart. Pinned by Codex Code Reviewer SC.4 round 1.
+            restart.
         """
         service = MagicMock()
         loaded = _make_loaded()

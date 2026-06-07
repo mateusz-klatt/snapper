@@ -474,9 +474,11 @@ class TestGenerateIntegration:
         """
         xcstrings_path, locales_dir = self._fixture(tmp_path)
         shutil.rmtree(locales_dir / "no")
-        with patch.object(port, "XCSTRINGS_PATH", xcstrings_path), patch.object(
-            port, "FRONTEND_LOCALES_DIR", locales_dir
-        ), pytest.raises(SystemExit, match="frontend locale dir missing"):
+        with (
+            patch.object(port, "XCSTRINGS_PATH", xcstrings_path),
+            patch.object(port, "FRONTEND_LOCALES_DIR", locales_dir),
+            pytest.raises(SystemExit, match="frontend locale dir missing"),
+        ):
             port.generate()
 
 
@@ -563,8 +565,9 @@ class TestCheckDrift:
     def test_returns_zero_when_committed_matches_regenerated(self, tmp_path: Path) -> None:
         """Happy path: committed files equal what the script would emit."""
         xcstrings_path, locales_dir = self._bootstrap_committed(tmp_path)
-        with patch.object(port, "XCSTRINGS_PATH", xcstrings_path), patch.object(
-            port, "FRONTEND_LOCALES_DIR", locales_dir
+        with (
+            patch.object(port, "XCSTRINGS_PATH", xcstrings_path),
+            patch.object(port, "FRONTEND_LOCALES_DIR", locales_dir),
         ):
             assert port.check_drift() == 0
 
@@ -575,8 +578,9 @@ class TestCheckDrift:
         xcstrings_path, locales_dir = self._bootstrap_committed(tmp_path)
         stale = locales_dir / "en" / "alerts.json"
         stale.write_text('{"title": {"x": "STALE"}, "navTitle": "Alerts"}\n', encoding="utf-8")
-        with patch.object(port, "XCSTRINGS_PATH", xcstrings_path), patch.object(
-            port, "FRONTEND_LOCALES_DIR", locales_dir
+        with (
+            patch.object(port, "XCSTRINGS_PATH", xcstrings_path),
+            patch.object(port, "FRONTEND_LOCALES_DIR", locales_dir),
         ):
             assert port.check_drift() == 1
         err = capsys.readouterr().err
@@ -591,8 +595,9 @@ class TestCheckDrift:
         """
         xcstrings_path, locales_dir = self._bootstrap_committed(tmp_path)
         (locales_dir / "en" / "alerts.json").unlink()
-        with patch.object(port, "XCSTRINGS_PATH", xcstrings_path), patch.object(
-            port, "FRONTEND_LOCALES_DIR", locales_dir
+        with (
+            patch.object(port, "XCSTRINGS_PATH", xcstrings_path),
+            patch.object(port, "FRONTEND_LOCALES_DIR", locales_dir),
         ):
             assert port.check_drift() == 1
         err = capsys.readouterr().err
@@ -610,8 +615,9 @@ class TestCheckDrift:
         committed = json.loads(common.read_text(encoding="utf-8"))
         committed["nav"]["alerts"] = "STALE_LABEL"
         common.write_text(json.dumps(committed) + "\n", encoding="utf-8")
-        with patch.object(port, "XCSTRINGS_PATH", xcstrings_path), patch.object(
-            port, "FRONTEND_LOCALES_DIR", locales_dir
+        with (
+            patch.object(port, "XCSTRINGS_PATH", xcstrings_path),
+            patch.object(port, "FRONTEND_LOCALES_DIR", locales_dir),
         ):
             assert port.check_drift() == 1
         err = capsys.readouterr().err
@@ -665,8 +671,9 @@ class TestCheckDrift:
         committed = json.loads(common.read_text(encoding="utf-8"))
         del committed["nav"]["alerts"]
         common.write_text(json.dumps(committed) + "\n", encoding="utf-8")
-        with patch.object(port, "XCSTRINGS_PATH", xcstrings_path), patch.object(
-            port, "FRONTEND_LOCALES_DIR", locales_dir
+        with (
+            patch.object(port, "XCSTRINGS_PATH", xcstrings_path),
+            patch.object(port, "FRONTEND_LOCALES_DIR", locales_dir),
         ):
             assert port.check_drift() == 1
         err = capsys.readouterr().err
@@ -682,24 +689,27 @@ class TestMain:
         Patches argv to the bare script invocation so argparse doesn't
         try to consume pytest's own flags.
         """
-        with patch.object(port, "generate") as gen, patch.object(
-            sys, "argv", ["port_ios_alert_catalog.py"]
+        with (
+            patch.object(port, "generate") as gen,
+            patch.object(sys, "argv", ["port_ios_alert_catalog.py"]),
         ):
             gen.return_value = None
             assert port.main() == 0
 
     def test_main_check_flag_invokes_drift(self) -> None:
         """``--check`` routes to ``check_drift`` and returns its int."""
-        with patch.object(port, "check_drift") as drift, patch.object(
-            sys, "argv", ["port_ios_alert_catalog.py", "--check"]
+        with (
+            patch.object(port, "check_drift") as drift,
+            patch.object(sys, "argv", ["port_ios_alert_catalog.py", "--check"]),
         ):
             drift.return_value = 0
             assert port.main() == 0
 
     def test_main_check_flag_propagates_drift_failure(self) -> None:
         """Drift detected → main() returns 1 (CI fail signal)."""
-        with patch.object(port, "check_drift") as drift, patch.object(
-            sys, "argv", ["port_ios_alert_catalog.py", "--check"]
+        with (
+            patch.object(port, "check_drift") as drift,
+            patch.object(sys, "argv", ["port_ios_alert_catalog.py", "--check"]),
         ):
             drift.return_value = 1
             assert port.main() == 1
@@ -710,8 +720,8 @@ class TestMergePreservingFrontendKeys:
 
     The merger reads the existing committed ``alerts.json`` and folds in any
     top-level keys that the iOS payload doesn't own (e.g. the ``page``
-    subtree added for the Phase E web Alerts header). iOS-owned keys
-    always win, so the catalog never drifts.
+    subtree added for the web Alerts header). iOS-owned keys always win,
+    so the catalog never drifts.
     """
 
     def test_merges_existing_page_key_into_ios_payload(self, tmp_path: Path) -> None:

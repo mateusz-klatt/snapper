@@ -262,8 +262,7 @@ class Candle(TemporalMixin, Base):
     PK ``id`` is overridden to ``BigInteger`` on PostgreSQL and kept as
     ``Integer`` on SQLite (where INTEGER PRIMARY KEY is already 64-bit
     rowid). High-write tables would otherwise overflow the INT4
-    sequence at production write rates — see
-    ``proprietary/plans/plan_2026_05_19_bigint_pk_high_write_tables.md``.
+    sequence at production write rates.
     """
 
     __tablename__ = "candles"
@@ -372,8 +371,7 @@ class Order(TemporalMixin, Base):
     """SQLAlchemy model for trading order records.
 
     PK ``id`` is overridden to ``BigInteger`` on PostgreSQL for
-    consistency with the other high-write tables — see
-    ``proprietary/plans/plan_2026_05_19_bigint_pk_high_write_tables.md``.
+    consistency with the other high-write tables.
     """
 
     __tablename__ = "orders"
@@ -459,8 +457,7 @@ class Execution(TemporalMixin, Base):
     """SQLAlchemy model for order execution fills.
 
     PK ``id`` is overridden to ``BigInteger`` on PostgreSQL for
-    consistency with the other high-write tables — see
-    ``proprietary/plans/plan_2026_05_19_bigint_pk_high_write_tables.md``.
+    consistency with the other high-write tables.
     """
 
     __tablename__ = "executions"
@@ -862,8 +859,7 @@ class InstrumentSpec(TemporalMixin, Base):
             name="ck_instrument_specs_kind",
         ),
         CheckConstraint(
-            "funding_type IS NULL OR funding_type IN "
-            "('spot_margin_rollover', 'perpetual_funding')",
+            "funding_type IS NULL OR funding_type IN ('spot_margin_rollover', 'perpetual_funding')",
             name="ck_instrument_specs_funding_type",
         ),
     )

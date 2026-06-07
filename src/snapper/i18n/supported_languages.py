@@ -4,13 +4,14 @@ Union of ``CatalogLanguage`` codes from both the iOS xcstrings catalog
 (``ios/Snapper/I18n/CatalogLanguage.swift``) and the frontend i18n
 catalog (``frontend/src/i18n/types.ts``). The two clients ship slightly
 different code forms for the same languages (e.g. iOS uses ``pt-BR`` and
-``nb``; frontend uses ``pt`` and ``no``) — Phase B will introduce a
-canonical normalization layer, but Phase A accepts both forms so each
-client can send what its own catalog uses without a translation step.
+``nb``; frontend uses ``pt`` and ``no``) — a future canonical
+normalization layer will unify these, but for now both forms are accepted
+so each client can send what its own catalog uses without a translation
+step.
 
-Phase B of `plan_2026_05_17_backend_user_language_i18n.md` will replace
-this hardcoded set with a generator-driven constant sourced from the
-authoritative xcstrings parse + a frontend-↔-iOS code mapping table.
+A future revision will replace this hardcoded set with a generator-driven
+constant sourced from the authoritative xcstrings parse + a
+frontend-↔-iOS code mapping table.
 """
 
 SUPPORTED_LANGUAGES: frozenset[str] = frozenset(
@@ -70,8 +71,8 @@ SUPPORTED_LANGUAGES: frozenset[str] = frozenset(
 """Frozen set of catalog language codes a user may select as their
 ``default_language``. Source: union of iOS ``CatalogLanguage`` (45
 cases) and frontend ``CatalogLanguage`` (45 cases), differing in 5
-codes — total 50. Phase B will collapse the union via a single
-normalization layer."""
+codes — total 50. A future normalization layer will collapse the
+union."""
 
 
 def is_supported_language(value: str) -> bool:

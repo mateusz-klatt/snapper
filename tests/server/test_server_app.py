@@ -314,11 +314,10 @@ class TestLifespan:
     ) -> None:
         """Lifespan passes `settings.zmq_broker_xsub` to publisher (not xpub).
 
-          (Copilot gpt-5.4): the original lifespan
-        passed `settings.zmq_broker_xpub` — wrong endpoint per the
-        broker proxy contract (publishers connect to XSUB, not XPUB).
-        This test pins the call argument so a future refactor that
-        flips it back fails CI loudly.
+        The wrong endpoint here would be `settings.zmq_broker_xpub`,
+        which violates the broker proxy contract (publishers connect to
+        XSUB, not XPUB). This test pins the call argument so a future
+        refactor that flips it back fails CI loudly.
         """
         mock_app = MagicMock()
         mock_manager = MagicMock()
@@ -410,9 +409,8 @@ class TestLifespan:
     ) -> None:
         """Pin the relative order of publisher injection vs listener start/stop.
 
-          (Codex+Copilot): the existing lifespan
-        tests stub the helpers but don't assert call sequence. The
-        ordering is load-bearing.6.1 — the WS subscriber
+        The other lifespan tests stub the helpers but don't assert call
+        sequence. The ordering matters here — the WS subscriber
         must come up after the publisher socket is injected (so any
         immediate publish event reaches a live subscriber) and the
         subscriber must shut down before the publisher socket so the
@@ -1171,13 +1169,13 @@ class TestLifespan:
     async def test_lifespan_finally_runs_when_startup_raises_after_partial_init(
         self,
     ) -> None:
-        """R3 follow-up: shutdown hooks fire even when startup raises mid-init.
+        """Shutdown hooks fire even when startup raises mid-init.
 
-        Codex R3 self-criticism: in the original /3c shape,
-        publisher build + listener start ran BEFORE the `try`
-        block. If `discover_processes` (or anything else after the
-        publisher socket was opened) raised, the `finally` block
-        was never reached → publisher socket + ZMQ context leaked.
+        In an earlier shape, publisher build + listener start ran
+        BEFORE the `try` block. If `discover_processes` (or anything
+        else after the publisher socket was opened) raised, the
+        `finally` block was never reached → publisher socket + ZMQ
+        context leaked.
 
         Fix: all setup work moved INSIDE the `try`, with state
         locals (`settings_service`, `process_factory`)
@@ -1263,7 +1261,7 @@ class TestLifespan:
     async def test_lifespan_finally_tolerates_settings_service_init_failure(
         self,
     ) -> None:
-        """R3 follow-up: finally runs even if settings_service init fails.
+        """Finally runs even if settings_service init fails.
 
         Worst-case partial init: `_initialize_settings_service`
         itself raises (e.g. DB unreachable on boot). At that point
@@ -1578,12 +1576,11 @@ class TestCreateApp:
     ) -> None:
         """Disposal order MUST be singleton-clear → publisher.close → context.term.
 
-          (Copilot gpt-5.4): the in-flight
-        `deactivate_user` call MUST observe a None publisher BEFORE
-        the socket is closed; the socket MUST be closed BEFORE the
-        context terminates so libzmq sees a clean LINGER cycle. The
-        existing test verified each call happened but did not pin
-        relative order — this test does.
+        An in-flight `deactivate_user` call MUST observe a None
+        publisher BEFORE the socket is closed; the socket MUST be closed
+        BEFORE the context terminates so libzmq sees a clean LINGER
+        cycle. An earlier test verified each call happened but did not
+        pin relative order — this test does.
         """
         recorded: list[str] = []
         mock_publisher = MagicMock()
@@ -1979,10 +1976,10 @@ class TestCreateApiRouter:
 
         For long timeframes (1h/4h/1d) the cache route falls back to
         the persisted ``candles`` table because the in-process 100-bar
-        deque can't synthesise them. Copilot review on parent PR #50
-        caught that an exception in that fallback path bypassed the
-        redacted 500 mapping used by the adjacent candle routes; the
-        new generic exception handler closes that hole.
+        deque can't synthesise them. An exception in that fallback path
+        previously bypassed the redacted 500 mapping used by the
+        adjacent candle routes; the generic exception handler closes
+        that hole.
         """
         repo = MockRepository(session_result=[], error=RuntimeError("boom"))
         client = create_app_with_overrides(repo)
@@ -3945,7 +3942,7 @@ class TestCandlesHttpExceptionReraise:
         1h/4h/1d timeframes) can surface auth/permission HTTPExceptions
         from upstream deps. The ``except HTTPException: raise`` branch
         preserves the original status instead of folding it into the
-        generic 500 mapping added in the Copilot Q3 review fix.
+        generic 500 mapping.
         """
         repo = MockRepository(error=HTTPException(status_code=403, detail="Forbidden"))
         client = create_app_with_overrides(repo)
@@ -4366,7 +4363,7 @@ class TestWarnOnTradfiNearExpiry:
 
 
 class TestSafelyInitializeEgressPool:
-    """Phase B'.3 — lifespan integration tests for the egress-pool preflight.
+    """Lifespan integration tests for the egress-pool preflight.
 
     ``_safely_initialize_egress_pool`` is the lifespan-side wrapper around
     ``initialize_egress_pool``. It must call the preflight with the
@@ -4404,7 +4401,7 @@ class TestSafelyInitializeEgressPool:
         When _safely_initialize_egress_pool is awaited,
         Then no exception escapes (the lifespan continues with an
         empty pool, so the connect shim short-circuits to the
-        existing Phase A path).
+        existing direct-connect path).
         """
         mock_initialize.side_effect = RuntimeError("simulated preflight failure")
         await _safely_initialize_egress_pool(MagicMock())

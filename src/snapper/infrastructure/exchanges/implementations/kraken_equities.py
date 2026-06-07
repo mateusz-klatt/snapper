@@ -98,7 +98,7 @@ throttle deploy: tickers stopped dropping but trades continued at
 batches trades into time windows but each batch may still carry
 many trade events per symbol — so the per-symbol rate cap doesn't
 translate into a global frame rate cap the same way it does for
-tickers. Pending deeper investigation (Phase B'.8 candidate), the
+tickers. Pending deeper investigation, the
 100k cap buys ~30min of head-room before steady-state overflow,
 which covers a full Cloudflare WS-proxy restart cycle. Trades feed
 ``TradeCandleBuilder`` (candle aggregation); some drop is tolerable

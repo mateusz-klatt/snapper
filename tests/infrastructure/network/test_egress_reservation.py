@@ -1,8 +1,7 @@
 """Unit tests for EgressReservation lifecycle.
 
-Phase B' explicit tests for the dual-release contract, weakref
-finalizer behaviour, and quarantine timestamp recording. Pinned by
-the Codex Plan Reviewer v3 iteration.
+Explicit tests for the dual-release contract, weakref finalizer
+behaviour, and quarantine timestamp recording.
 """
 
 import gc
@@ -67,9 +66,9 @@ class TestRelease:
             does NOT briefly dip to -1 / get clamped from a double
             decrement).
 
-        This contract is what the v3 Plan Reviewer required: a
-        release followed by GC must produce exactly ONE decrement
-        total, with no second invocation of the finalize callback.
+        This contract requires that a release followed by GC produces
+        exactly ONE decrement total, with no second invocation of the
+        finalize callback.
         """
         pool = _build_pool()
         reservation = pool.reserve(exchange="kraken", purpose="websocket")

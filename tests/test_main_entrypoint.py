@@ -119,9 +119,7 @@ def test_main_calls_log_patches_status_after_setup_logging(
         being live, which only happens once setup_logging has installed
         it. Reversing this order would recreate the original bug where
         patch confirmations were written to stderr before the file sink
-        existed and never reached ``data/snapper.log`` (see
-        ``proprietary/plans/plan_2026_05_25_log_noise_followups.md``
-        item #3).
+        existed and never reached ``data/snapper.log``.
     """
     call_order: list[str] = []
 

@@ -116,13 +116,13 @@ Creates process wrapper for strategy and registers in process manager.
 
 ```python
 @create_strategy_process(
-    process_name="strategy_rsi_eth",
+    process_name="strategy_rsi_eth_1h",
     default_config={
         "name": "rsi_eth_1h",
         "inputs": ["market.kraken.ETH-USD.candles.1h"],
         "outputs": ["ETH-USD"],
         "exchange": "paper",
-        "params": {"period": 14, "upper": 70, "lower": 30},
+        "params": {"period": 14, "upper": 70.0, "lower": 30.0, "cooldown": 2},
     },
 )
 class RSIReversion(BaseStrategy):
@@ -141,7 +141,7 @@ class RSIReversion(BaseStrategy):
 | `outputs` | list[str] | List of instruments for signals |
 | `exchange` | string | Target exchange (`paper`, `kraken`, `kraken_futures`, `walutomat`) |
 | `params` | dict | Strategy-specific parameters |
-| `wallet_public_id` | string | Wallet that will execute orders for this strategy. Empty default for backwards compatibility; **REQUIRED (non-empty) for any strategy that uses `create_ai_review_and_await()`** — see "AI delegate consultation" below. |
+| `wallet_public_id` | string | Wallet that will execute orders for this strategy. Still defaults to empty and is NOT validated by `StrategyConfig` itself (the dataclass keeps an empty default pending the NOT NULL tightening migration). The non-empty requirement applies only at runtime via the caps guard for any strategy that uses `create_ai_review_and_await()` — see "AI delegate consultation" below. |
 | `operator_public_id` | string | Trading-identity operator that owns this strategy instance. Empty default; validated against the launching principal's `operator_public_ids` when populated. |
 
 ### AI delegate consultation
@@ -353,9 +353,15 @@ Subclassing both `BaseStrategy` and `MultiLegSpreadMixin` gives you:
 | `self.legs: tuple[str, ...]` | Resolved leg instruments in declaration order. Populated by `self._init_legs(expected_count=N)` from `__init__`. |
 | `self._partner_legs(current)` | Tuple of leg names other than `current`, in declaration order. |
 | `self._partner_prices(current)` | `{leg: last_close}` for partners with at least one buffered candle. Partners with empty buffers are omitted (same warmup gate as 2-leg cointegration). |
-| `self._emit_partner_signals(current, builder)` | Calls `builder(leg, last_close)` for each buffered partner and queues the result via `self.emit_paired_signal`. The batch processor drains every queued entry in the same timestep. |
+| `self._emit_partner_signals(current, builder)` | Calls `builder(leg, last_close)` for each buffered partner and queues the result via `self.emit_paired_signal`. The backtest batch processor (`process_time_batch`) drains every queued entry in the same timestep; the live `_listen_loop` does NOT drain the queue (see "Signal pairing semantics"). |
 
 ### Worked example — 3-leg equal-weight basket
+
+The partner-leg emission below (`_emit_partner_signals`) is drained
+only by the backtest engine. Run this strategy through `process_time_batch`
+(direct-DB or ZMQ replay) to exercise the synchronized N-leg rebalance;
+the live `_listen_loop` would drop the partner legs (see "Signal pairing
+semantics").
 
 ```python
 from snapper.messaging.schemas.data import CandleData
@@ -426,10 +432,18 @@ class EqualWeightBasket(BaseStrategy, MultiLegSpreadMixin):
 
 `BaseStrategy.emit_paired_signal(signal)` enqueues partner-leg signals
 on the same timestep as the primary signal returned from `on_candle`.
-The downstream batch processor (`process_time_batch`) drains the
-queue immediately after the primary signal, so trade-runtime sees
-the full N-leg basket as one synchronized rebalance — no race between
-legs.
+The drain is **backtest-only**: the batch processor
+(`process_time_batch`, used by the direct-DB and ZMQ replay backtest
+paths) drains the queue immediately after the primary signal, so on
+those paths the full N-leg basket is processed as one synchronized
+rebalance — no race between legs.
+
+The live/paper production `BaseStrategy._listen_loop` does NOT drain
+the pending-signal queue: it emits only the single signal returned by
+`on_candle`. Paired live emission is not yet wired, so partner-leg
+signals queued via `emit_paired_signal` / `_emit_partner_signals` are
+dropped when a multi-leg strategy runs live. Treat the basket/N-leg
+pairing API as backtest-only until live draining is implemented.
 
 `on_tick` callbacks do not use the pairing queue; tick-level pairing
 must be implemented explicitly by the strategy.

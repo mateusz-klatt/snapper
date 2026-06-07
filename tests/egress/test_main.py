@@ -1,6 +1,6 @@
 """Unit tests for the ``python -m snapper.egress`` entrypoint.
 
-SC.4 entrypoint tests verify CLI argv parsing, environment-variable
+These tests verify CLI argv parsing, environment-variable
 preconditions, and the asyncio handoff to run_sidecar. All async
 work + SettingsService access is mocked so the tests are hermetic.
 """

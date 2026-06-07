@@ -2531,7 +2531,7 @@ def _make_engine_with_inflight(
 
 @pytest.mark.asyncio
 class TestFillApplication:
-    """Tests for Stage B: confirmed-state booking via fill events."""
+    """Tests for confirmed-state booking via fill events."""
 
     async def test_fill_applied_to_matching_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify fill is routed to engine with matching pending order.
@@ -2976,7 +2976,7 @@ class TestInFlightTimeout:
 
 
 class TestRecovery:
-    """Tests for Stage D: startup recovery."""
+    """Tests for startup recovery."""
 
     @pytest.mark.asyncio
     async def test_recover_engine_state_from_executions(

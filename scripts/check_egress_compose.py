@@ -1,15 +1,12 @@
 """Lint hook: enforce snapper-egress sidecar safety + unified-image invariants.
 
-SC.3 of ``proprietary/plans/plan_2026_05_21_snapper_egress_sidecar.md``
-+ B'.6 §6 of ``proprietary/plans/plan_2026_05_22_unified_dockerfile_kernel_wg.md``.
-
 Two categories of rules enforced on the snapper-egress service block:
 
-1. **SC.3 isolation rules** (original): no ``ports:`` host publish
+1. **Isolation rules**: no ``ports:`` host publish
    (the SOCKS5 listener has NO authentication), no ``network_mode:
    host``, no env-interpolated bypass of either field.
 
-2. **B'.6 unified-image rules** (added 2026-05-22): when the
+2. **Unified-image rules**: when the
    monolith + sidecar share one image, certain compose attributes
    MUST be present or absent to keep the runtime contract correct.
    Specifically:
@@ -22,7 +19,7 @@ Two categories of rules enforced on the snapper-egress service block:
        - snapper-egress MUST declare ``user: "0:0"`` (root) — the
          unified image defaults to ``USER snapper`` (UID 888), which
          would fail ``pyroute2.WireGuard`` syscalls even with
-         NET_ADMIN. This is the R7 invariant from B'.6 v9.
+         NET_ADMIN. This is the sidecar root-user invariant.
        - snapper service MUST NOT declare ``cap_add`` (monolith stays
          unprivileged even though it shares the image).
        - snapper service MUST NOT declare ``user:`` (inherits secure
@@ -63,7 +60,7 @@ The Compose v2 merge-rule allows override files to silently add
 Scanning every recognised name catches the common bypass routes.
 For absolute coverage operators should also run
 ``docker compose config`` against their final stack and grep the
-output — documented in the SC.5 operator runbook.
+output — documented in the operator runbook (docs/snapper-egress.md).
 """
 
 _EGRESS_SERVICE_NAME: Final[str] = "snapper-egress"
@@ -72,13 +69,13 @@ _EGRESS_SERVICE_NAME: Final[str] = "snapper-egress"
 _MONOLITH_SERVICE_NAME: Final[str] = "snapper"
 """Monolith (FastAPI + bootstrap) service name used for unified-image cross-checks.
 
-B'.6 enforces that this service shares its ``image:`` with the
-sidecar and that the monolith does NOT declare ``cap_add`` or
+The unified-image build enforces that this service shares its ``image:``
+with the sidecar and that the monolith does NOT declare ``cap_add`` or
 ``user:`` overrides (the image's secure default USER snapper inherits).
 """
 
 _REQUIRED_EGRESS_COMMAND: Final[tuple[str, ...]] = ("egress",)
-"""Sidecar command must be exactly ``["egress"]`` post-B'.6.
+"""Sidecar command must be exactly ``["egress"]`` under the unified image.
 
 Under the unified ``ENTRYPOINT ["snapper"]`` the sidecar is
 dispatched via the new ``snapper egress`` CLI subcommand. Any
@@ -93,7 +90,7 @@ _REQUIRED_EGRESS_USER: Final[str] = "0:0"
 The image defaults to ``USER snapper`` (UID 888) for the monolith
 path. Sidecar overrides via ``user: "0:0"`` so ``pyroute2`` netlink
 syscalls + ``ip link add type wireguard`` succeed even with the
-NET_ADMIN capability already granted. R7 of B'.6 v9.
+NET_ADMIN capability already granted.
 """
 
 _REQUIRED_EGRESS_CAP: Final[str] = "NET_ADMIN"
@@ -185,9 +182,9 @@ def _has_volume_target(service: dict[str, object], target: str) -> bool:
 
 
 def _check_unified_image_invariants(services: dict[str, object], compose_path: Path) -> list[str]:
-    """Return errors for the B'.6 unified-image cross-service invariants.
+    """Return errors for the unified-image cross-service invariants.
 
-    Runs after the per-service SC.3 isolation check. Skipped silently
+    Runs after the per-service isolation check. Skipped silently
     when either service is absent (allows partial-override compose
     files that don't redeclare every service).
 

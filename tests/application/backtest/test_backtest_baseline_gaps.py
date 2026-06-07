@@ -27,8 +27,8 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
-from scripts.capture_phase2c_baseline import SCENARIOS as BASELINE_SCENARIOS
-from scripts.capture_phase2c_baseline import serialise_run
+from scripts.capture_backtest_baseline import SCENARIOS as BASELINE_SCENARIOS
+from scripts.capture_backtest_baseline import serialise_run
 from snapper.application.backtest.batch_processor import CandleEvent
 from snapper.application.backtest.batch_processor import process_time_batch
 from snapper.application.backtest.config import BacktestConfig
@@ -615,13 +615,13 @@ class TestCreateBacktestConfigHashFallback:
         assert kwargs["row"]["config_hash"] is None
 
 
-class TestPhase2cBaselineParity:
-    """BE-3: cross-asset refactor must not drift any baseline scenario.
+class TestBacktestBaselineParity:
+    """Cross-asset refactor must not drift any baseline scenario.
 
     Re-runs the 4 deterministic batch_processor scenarios captured by
-    ``scripts.capture_phase2c_baseline.SCENARIOS`` and deep-dict-equal
+    ``scripts.capture_backtest_baseline.SCENARIOS`` and deep-dict-equal
     compares the serialised outputs to the golden JSON at
-    ``tests/application/backtest/fixtures/phase2c_baseline_snapshot.json``.
+    ``tests/application/backtest/fixtures/backtest_baseline_snapshot.json``.
     Fails hard on any drift. The script's ``serialise_run`` helper is
     re-imported (rather than re-implemented) so capture-time and
     parity-check-time semantics are identical by construction.
@@ -629,11 +629,11 @@ class TestPhase2cBaselineParity:
 
     @pytest.mark.asyncio
     async def test_every_scenario_matches_golden_snapshot(self) -> None:
-        """Re-run SCENARIOS through the post-BE-1 engine — outputs equal the baseline.
+        """Re-run SCENARIOS through the post-refactor engine — outputs equal the baseline.
 
         Given: the 4 registered scenarios (single-feed BUY fill, no-signal
             multi-timestamp, warmup-gated signal dropped, signal-emitted
-            fill-skipped) + the golden snapshot at master HEAD pre-BE-1,
+            fill-skipped) + the golden snapshot at master HEAD before the refactor,
         When: each scenario runs against the current batch_processor
             and the result is serialised via the same serialise_run
             helper used to produce the snapshot,
@@ -641,7 +641,7 @@ class TestPhase2cBaselineParity:
             equally — byte-identical for single-feed runs.
         """
         fixture_path = (
-            Path(__file__).resolve().parent / "fixtures" / "phase2c_baseline_snapshot.json"
+            Path(__file__).resolve().parent / "fixtures" / "backtest_baseline_snapshot.json"
         )
         golden = json.loads(fixture_path.read_text(encoding="utf-8"))
         assert set(golden.keys()) == {

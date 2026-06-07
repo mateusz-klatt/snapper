@@ -3563,7 +3563,7 @@ class TestOrdersEventsFailClosedParsing:
 
 
 class TestOrdersEventsTwoPrincipalLeakGuard:
-    """Two-principal cross-tenant leak guard test (Codex acceptance §5#3).
+    """Two-principal cross-tenant leak guard test.
 
     Single ZMQ frame for wallet-A; only the principal whose accessible
     wallet set contains wallet-A receives the forward. The other
@@ -3717,7 +3717,7 @@ class TestAlertsFailClosedParsing:
     frame BEFORE :func:`enforce_alerts_scope` is invoked, so the filter
     never sees malformed input. Each guard increments the bridge's
     ``invalid_messages`` topic metric and emits a warning. Mirrors the
-    orders.events. fail-closed contract for the Phase E live-refresh path.
+    orders.events. fail-closed contract for the web (WebSocket) live-refresh path.
     """
 
     @pytest.fixture

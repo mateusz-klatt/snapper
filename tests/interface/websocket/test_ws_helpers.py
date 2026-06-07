@@ -150,7 +150,7 @@ class TestWebSocketHelpersRuntimeError:
         """Alerts topics resolve to ``notifications`` at every depth.
 
         Given: An ``alerts.{user}.{type}`` topic shape as published by
-            the Phase E sidecar fanout,
+            the sidecar fanout,
         When: ``determine_topic_category`` is invoked,
         Then: Maps to the ``notifications`` WS category, gated by
             ``READ_NOTIFICATIONS`` per :data:`CATEGORY_PERMISSIONS`.

@@ -187,7 +187,7 @@ class TestRequiredCandleHistory:
 
 
 class TestTargetExecutionExchange:
-    """Tests for BacktestConfig.target_execution_exchange (BE-1 D6 carrier)."""
+    """Tests for BacktestConfig.target_execution_exchange (cross-asset carrier)."""
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_target_execution_exchange_defaults_to_none(self) -> None:

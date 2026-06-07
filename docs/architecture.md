@@ -87,7 +87,7 @@ Persistence layer with SQLAlchemy:
     - `Setting` — Settings (encrypted)
     - `Symbol` — Symbol identity with versioned attributes (native_symbol, base, quote, asset_type) via SCD Type 2.
       Archive symbols for filesystem paths are derived from the anchor row (first version per public_id)
-    - `SymbolAlias` — Exchange-specific symbol aliases (one row per native/exchange/channel)
+    - `SymbolAlias` — Exchange-specific symbol aliases (one row per (symbol_public_id, exchange, channel))
     - `SymbolExchangeCapability` — Exchange-specific symbol capabilities
     - `ProcessRun` — Background process execution records
     - `InstrumentSpec` — Instrument trading specifications (tick_size, margins, expiry_at, instrument_kind)
@@ -324,6 +324,18 @@ Authentication system:
   flow (see [ai-integration.md](ai-integration.md)) and is gated by
   its own permission matrix separate from human operators.
 - WebSocket authentication
+
+### MCP (`src/snapper/mcp/`)
+
+Model Context Protocol server mounted at `/api/mcp` as a Starlette
+sub-application. Exposes read/query tools (`tools.py`) consumed by AI
+delegates over Streamable HTTP. The mount re-applies its own middleware
+stack: feature-flag gating, bearer auth (`auth.py`), and per-principal
+rate limiting (`rate_limiting.py`); each tool handler runs output
+sanitization (`output_sanitizer.py`) and returns a structured error
+envelope (`error_envelope.py`). See
+[ai-integration.md](ai-integration.md) for the delegate flow and the
+`@mateusz-klatt/snapper-mcp` client plugin.
 
 ### CLI (`src/snapper/cli/`)
 

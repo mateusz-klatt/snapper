@@ -31,7 +31,7 @@ _spec.loader.exec_module(provision)
 
 
 def _required_args(privkey_file: Path) -> list[str]:
-    """Helper — produce a complete argv slice for an eset-pl1-shaped tunnel.
+    """Helper — produce a complete argv slice for an wg-pl-1-shaped tunnel.
 
     Returns:
         A list of argv tokens covering every required argparse option
@@ -40,7 +40,7 @@ def _required_args(privkey_file: Path) -> list[str]:
     """
     return [
         "--tunnel-id",
-        "eset-pl1",
+        "wg-pl-1",
         "--interface",
         "wg-pl1",
         "--address",
@@ -52,7 +52,7 @@ def _required_args(privkey_file: Path) -> list[str]:
         "--peer-pubkey",
         "fO4beJGkKZxosCZz1qunktieuPyzPnEVKVQNhzanjnA=",
         "--peer-endpoint",
-        "45.134.212.66:51820",
+        "203.0.113.66:51820",
         "--socks5-listen-port",
         "1084",
         "--priority",
@@ -91,13 +91,13 @@ class TestParseArgs:
     def test_parses_required_args(self, privkey_file: Path) -> None:
         """Spec — every required field is captured from argv.
 
-        Given the canonical argv slice for an eset-pl1 tunnel,
+        Given the canonical argv slice for an wg-pl-1 tunnel,
         When _parse_args runs,
         Then every required arg is set on the Namespace and dry_run
         defaults to False.
         """
         ns = provision._parse_args(_required_args(privkey_file))
-        assert ns.tunnel_id == "eset-pl1"
+        assert ns.tunnel_id == "wg-pl-1"
         assert ns.interface == "wg-pl1"
         assert ns.address == "10.67.178.65"
         assert ns.prefix_length == 32
@@ -215,7 +215,7 @@ class TestAmainLiveWrite:
             "routes": [
                 {"id": "default", "kind": "direct", "priority": 100, "enabled": True},
                 {
-                    "id": "eset-ie1",
+                    "id": "wg-ie-1",
                     "kind": "socks5",
                     "proxy_url": "socks5h://snapper-egress:1081",
                     "priority": 10,
@@ -233,12 +233,12 @@ class TestAmainLiveWrite:
         assert service.update_setting.await_count == 3
         keys_written = [call.args[0] for call in service.update_setting.await_args_list]
         assert keys_written == [
-            "egress_tunnel_eset-pl1",
-            "egress_tunnel_eset-pl1_private_key",
+            "egress_tunnel_wg-pl-1",
+            "egress_tunnel_wg-pl-1_private_key",
             "egress_pool",
         ]
         merged_pool = service.update_setting.await_args_list[2].args[1]
-        assert any(r["id"] == "eset-pl1" for r in merged_pool["routes"])
+        assert any(r["id"] == "wg-pl-1" for r in merged_pool["routes"])
         assert merged_pool["enabled"] is True
 
     @pytest.mark.asyncio
@@ -264,7 +264,7 @@ class TestAmainLiveWrite:
             rc = await provision._amain(ns)
         assert rc == 0
         keys_written = [call.args[0] for call in service.update_setting.await_args_list]
-        assert "egress_tunnel_eset-pl1_preshared_key" in keys_written
+        assert "egress_tunnel_wg-pl-1_preshared_key" in keys_written
 
     @pytest.mark.asyncio
     async def test_replaces_existing_route_with_same_id(
@@ -285,7 +285,7 @@ class TestAmainLiveWrite:
             "routes": [
                 {"id": "default", "kind": "direct", "priority": 100, "enabled": True},
                 {
-                    "id": "eset-pl1",
+                    "id": "wg-pl-1",
                     "kind": "socks5",
                     "proxy_url": "socks5h://snapper-egress:9999",
                     "priority": 99,
@@ -299,7 +299,7 @@ class TestAmainLiveWrite:
         with patch.object(provision, "get_settings_service", AsyncMock(return_value=service)):
             await provision._amain(ns)
         merged_pool = service.update_setting.await_args_list[2].args[1]
-        pl_routes = [r for r in merged_pool["routes"] if r["id"] == "eset-pl1"]
+        pl_routes = [r for r in merged_pool["routes"] if r["id"] == "wg-pl-1"]
         assert len(pl_routes) == 1
         assert pl_routes[0]["priority"] == 10
 

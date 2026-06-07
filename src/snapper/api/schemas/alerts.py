@@ -43,7 +43,7 @@ class AlertEventInfo(StrictDataSchema[Literal["alert_event_info"]]):
             (e.g. ``critical_system_error``).
         title: Resolved title — pre-rendered server-side against
             ``user.default_language`` if the caller has one set AND
-            the row carries Phase C ``title_loc_key``. Falls back to
+            the row carries a localized ``title_loc_key``. Falls back to
             the stored EN string for legacy rows / unset preference.
         body: Resolved body — same semantics as ``title``.
         payload: Optional structured context rendered by the iOS

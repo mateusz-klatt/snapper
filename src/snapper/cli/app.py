@@ -2294,8 +2294,8 @@ def reconcile_symbol_aliases(
 ) -> None:
     """Close SCD2 alias rows for symbols whose capability is deactivated.
 
-    One-shot backfill for plan item #4 from
-    ``proprietary/plans/plan_2026_05_25_log_noise_followups.md``.
+    One-shot backfill to close stale aliases left behind before
+    steady-state alias closure was wired into the symbol updaters.
     Steady-state alias closure is handled by each symbol updater's
     own ``run-static`` invocation (which calls
     :func:`SymbolUpdaterService._reconcile_aliases` in the same DB

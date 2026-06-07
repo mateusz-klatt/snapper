@@ -1,6 +1,6 @@
 """Replayable WS subscription cache primitives for kraken-SDK clients.
 
-The Phase A.2 reconnect-storm watchdog destroys the SDK connector instance
+The reconnect-storm watchdog destroys the SDK connector instance
 (holding the SDK's internal ``__subscriptions`` list) when it forces a WS
 restart. The newly-created connector starts with an empty subscriptions
 list, so the SDK's own ``_recover_subscriptions`` no-ops and the WS is

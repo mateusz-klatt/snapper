@@ -61,15 +61,14 @@ apply_kraken_resubscribe_pacing()
 """Install kraken-sdk patches at module import.
 
 Idempotent — calling multiple times is a no-op. Importing this module from
-the process_manager startup path is the documented installation point per
-the Phase A rollout of
-``proprietary/plans/plan_2026_05_21_kraken_429_retry_after_egress_pool.md``.
+the process_manager startup path is the documented installation point for
+the kraken-sdk patches.
 
 * :func:`apply_kraken_retry_after_honoring` — 429 Retry-After honoring +
-  reconnect watchdog (Phase A).
+  reconnect watchdog.
 * :func:`apply_kraken_already_subscribed_filter` — downgrades benign
   ``Already subscribed`` race-condition warnings from the SDK to DEBUG
-  so real subscription failures stay visible (Phase B).
+  so real subscription failures stay visible.
 * :func:`apply_kraken_resubscribe_pacing` — paces the SDK's post-reconnect
   per-symbol subscription replay so a large universe does not burst past
   Kraken's subscribe message-rate limit and dark the stream on reconnect.

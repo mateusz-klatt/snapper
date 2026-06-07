@@ -67,9 +67,9 @@ class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeC
         reservation in
         :class:`snapper.infrastructure.network.pooled_httpx_transport.PooledAsyncTransport`
         reads ``"walutomat"`` as the exchange tag. The
-        ``allowed_exchanges=["walutomat"]`` filter on the
-        ``eset-pl1`` route then pins this publisher's HTTP polling
-        to the Polish ESET tunnel (egress IP 45.134.212.77 Warsaw).
+        ``allowed_exchanges=["walutomat"]`` filter on the matching
+        egress route then pins this publisher's HTTP polling to the
+        configured egress tunnel.
 
         Without this override the pooled transport's
         ``default_exchange_tag="walutomat"`` fallback would still

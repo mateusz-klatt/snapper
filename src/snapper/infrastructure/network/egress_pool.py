@@ -1,7 +1,6 @@
 """Process-wide registry of egress routes with quarantine state.
 
-Phase B' of plan_2026_05_21_phase_b_prime_egress_multiplexer. The
-pool is a singleton populated by ``configure_egress_pool`` during
+The pool is a singleton populated by ``configure_egress_pool`` during
 startup; ``get_egress_pool`` returns the configured instance or
 ``None``.
 
@@ -90,7 +89,7 @@ class EgressPool(EgressPoolBase):
                 ``allowed_exchanges`` is empty or contains this name.
                 When ``None`` (legacy callers / observability code),
                 every enabled+healthy route counts regardless of
-                ``allowed_exchanges``. Phase B'.5 callers that gate
+                ``allowed_exchanges``. Callers that gate
                 retry timing on per-exchange availability (e.g. the
                 Kraken connect shim's ``_patched_get_reconnect_wait``)
                 MUST pass the exchange so a Walutomat-pinned route
@@ -194,8 +193,7 @@ class EgressPool(EgressPoolBase):
             if selection is None:
                 if self._config.on_all_quarantined == "raise":
                     raise AllRoutesQuarantinedError(
-                        f"all egress routes quarantined "
-                        f"(exchange={exchange}, purpose={purpose})"
+                        f"all egress routes quarantined (exchange={exchange}, purpose={purpose})"
                     )
                 fallback = self._fallback_direct_locked()
                 if fallback is None:
@@ -496,8 +494,7 @@ async def _preflight_routes(config: EgressPoolConfig) -> EgressPoolConfig:
         any_socks = any(r.kind == "socks5" for r in config.routes)
         if any_socks:
             logger.warning(
-                "egress_pool: python-socks not installed — "
-                "all socks5 routes will be auto-disabled"
+                "egress_pool: python-socks not installed — all socks5 routes will be auto-disabled"
             )
             _PYTHON_SOCKS_WARNING_LOGGED[0] = True
     new_routes: list[RouteConfig] = []
@@ -529,11 +526,11 @@ async def _preflight_one_route(
 ) -> RouteConfig:
     """Run async DNS + python-socks + SOCKS5-greeting checks for one route.
 
-    The SOCKS5 greeting probe (added in v4 of the egress sidecar plan)
-    closes a gap where the sidecar container was healthy but a tunnel's
-    listener was absent — DNS would resolve, the pool would admit the
-    route, and the shim would keep picking the broken route because
-    generic proxy-connection failures do not quarantine.
+    The SOCKS5 greeting probe closes a gap where the sidecar container
+    was healthy but a tunnel's listener was absent — DNS would resolve,
+    the pool would admit the route, and the shim would keep picking the
+    broken route because generic proxy-connection failures do not
+    quarantine.
 
     Returns a new ``RouteConfig`` with ``enabled=False`` if the route
     failed preflight; otherwise the input route (frozen Pydantic

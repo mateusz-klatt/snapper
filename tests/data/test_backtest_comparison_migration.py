@@ -282,7 +282,7 @@ def _ix_bc_public_id_exists(engine: sa.Engine) -> bool:
 
 
 class TestBacktestComparisonIxPublicIdPartialUnique:
-    """Coverage for Plan E Fix 4 — ``ix_bc_public_id`` is unique partial.
+    """Coverage that ``ix_bc_public_id`` is a unique partial index.
 
     Before 2026-05-20 the migration created a plain non-unique index while
     the model declared a unique partial index on active rows. Fresh installs
@@ -360,7 +360,7 @@ class TestBacktestComparisonIxPublicIdPartialUnique:
 
 
 class TestBacktestComparisonRunsDistinctCheck:
-    """Coverage for Plan F Issue 4a — ``ck_bc_runs_distinct`` CHECK.
+    """Coverage for the ``ck_bc_runs_distinct`` CHECK.
 
     A ``BacktestComparison`` row must reference two distinct runs. Without
     the CHECK, a nonsense self-compare request (``run_a == run_b``)

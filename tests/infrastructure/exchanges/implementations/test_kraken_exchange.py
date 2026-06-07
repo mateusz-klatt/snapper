@@ -6068,12 +6068,10 @@ class TestInvokeFuncOffloadsSyncCalls:
 class TestRawTickerCapture:
     """Tests for the discovery-mode raw ticker capture path.
 
-    The capture sidecar exists so that the Kraken symbol updater can
+    The capture path exists so that the Kraken symbol updater can
     discover product-type listings (e.g. ``BTC/USD:BTNL`` Bitnomial
     perpetuals) that don't yet have aliases in the mapper; the regular
-    parse pipeline silently drops their frames. See
-    ``proprietary/plans/plan_2026_05_11_kraken_btnl_routing.md``
-    Phase 1.
+    parse pipeline silently drops their frames.
     """
 
     def test_handle_ticker_data_captures_raw_symbols_when_capture_active(
@@ -6171,8 +6169,7 @@ class TestRawTickerCapture:
         (the production publisher path),
         When: ``_handle_ticker_data`` runs,
         Then: The parse pipeline runs and successful parses land on
-        ``_tick_queue`` exactly as before the discovery sidecar was
-        added.
+        ``_tick_queue`` exactly as when capture mode is inactive.
         """
         client = KrakenExchangeClient()
         assert client._raw_ticker_capture is None

@@ -5776,7 +5776,7 @@ def test_market_data_publishers_autostart_by_default(publisher_name: str) -> Non
         DB autostarts the full publisher fleet (paired with the
         wildcard ``instruments`` default in ``AppSettings.instruments``
         and the ``market_persist_*`` zero-persist seed in the
-        proprietary ``{dev,prod}.toml`` profiles). Regression guard
+        environment config profiles). Regression guard
         for the wildcard-by-default contract — flipping any decorator
         back to ``enabled=False`` would silently break the fresh-DB
         runbook.

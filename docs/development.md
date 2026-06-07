@@ -14,7 +14,7 @@ Guidelines for developers working on the Snapper project.
 ## Environment Setup
 
 ```bash
-# Install system dependencies (macOS)
+# Install system dependencies (Linux/macOS)
 make system-deps
 
 # Install Python dependencies
@@ -357,13 +357,15 @@ inside the Makefile. This keeps `make test`, `make cov`, and
 `make check-all` from mutating the database used by a running local
 server, even when `.env` points at `./data/snapper.db` or PostgreSQL.
 
-### Destructive Migration Strategy (Development)
+### Migration Strategy (Development)
 
-The project uses a single-file migration (`0001_init.py`) that is rewritten in
-place when the schema changes.  After editing the migration, reset and reseed:
+The schema is built from a chain of sequential Alembic revisions
+(`0001_init.py`, `0002_instrument_feed_health.py`, ...), each of which
+revises the previous one.  To change the schema, add a new numbered
+revision rather than editing an existing one, then apply and reseed:
 
 ```bash
-rm -f data/snapper.db && make migrate-dev
+make migrate-dev
 ```
 
 `make migrate-dev` applies Alembic migrations (via `snapper db-init`) then
@@ -457,6 +459,8 @@ snapper/
 │   ├── config/            # Configuration
 │   ├── core/              # Core types
 │   ├── data/              # Data layer
+│   ├── egress/            # snapper-egress sidecar entry point
+│   ├── i18n/              # Backend i18n catalogs
 │   ├── indicators/        # Technical indicators
 │   ├── infrastructure/    # External integrations
 │   ├── interface/        # WebSocket

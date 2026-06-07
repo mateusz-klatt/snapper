@@ -6,9 +6,7 @@ SOCKS5 listeners inside one container, so the Kraken Spot publisher
 traffic out through an alternate egress IP without changing source
 code.
 
-This is Phase B' of the Kraken-429 / egress-multiplexer plan. See
-`proprietary/plans/plan_2026_05_21_snapper_egress_sidecar.md` (v4
-APPROVED) for the full design.
+This sidecar is part of the egress-multiplexer subsystem.
 
 ## Prerequisites
 
@@ -56,7 +54,7 @@ Three DB settings per tunnel:
 | Key | Encrypted? | Type | Example |
 |---|---|---|---|
 | `egress_tunnel_<id>` | no (JSON descriptor) | text | `{"interface":"wg-uk-1", "address":"10.64.12.34", "prefix_length":32, "peer_pubkey":"...", "peer_endpoint":"vpn.example.com:51820", "socks5_listen_port":1081, "priority":10}` |
-| `egress_tunnel_<id>_private_key` | yes (auto-encrypted by `_key` pattern) | text | base64 WG private key |
+| `egress_tunnel_<id>_private_key` | yes (auto-encrypted because the key contains the `private_key` substring) | text | base64 WG private key |
 | `egress_tunnel_<id>_preshared_key` | yes, optional | text | base64 WG PSK (or absent / empty) |
 
 Constraints:
@@ -115,7 +113,7 @@ To restrict a SOCKS5 route to specific exchanges, add an
 
 ```json
 {
-  "id": "eset-pl1", "kind": "socks5",
+  "id": "wg-eu-1", "kind": "socks5",
   "proxy_url": "socks5h://snapper-egress:1084",
   "priority": 10,
   "allowed_exchanges": ["walutomat"],

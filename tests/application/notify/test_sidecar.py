@@ -1,6 +1,6 @@
-"""Tests for ``snapper.application.notify.sidecar.NotifySidecar`` (BE-3b rule-dispatch flow).
+"""Tests for ``snapper.application.notify.sidecar.NotifySidecar`` rule-dispatch flow.
 
-Exercises the new BE-3b pipeline: receive a domain event (orders.events.* /
+Exercises the rule-dispatch pipeline: receive a domain event (orders.events.* /
 plans.decisions.* / system.heartbeats.*) -> ``_dispatch`` runs rules ->
 each produced ``AlertEventInsertRow`` is persisted + routed via the
 4-level precedence cascade + fanned out to matching devices via APNs.
@@ -70,7 +70,7 @@ async def _seed_user(
     """Insert a minimal active ``User`` row the fanout will target.
 
     ``default_language`` lets a test scenario pin the SCD2 row to a
-    specific catalog language code (Phase C i18n) without going
+    specific catalog language code (the i18n path) without going
     through the full update path.
     """
     async with repo.session() as s:
@@ -117,8 +117,8 @@ async def _seed_device(
 class _SingleRowRule(AlertRule):
     """Minimal rule emitting exactly one alert per dispatch — for flow tests.
 
-    Optional ``row_payload`` lets a test pin Phase C loc_keys on the
-    emitted row so we can exercise the live-fanout localization path
+    Optional ``row_payload`` lets a test pin localization loc_keys on
+    the emitted row so we can exercise the live-fanout localization path
     (``sidecar._persist_and_fanout_row`` must look up the recipient's
     ``default_language`` and pass it through ``_attempt_once``).
     """
@@ -230,8 +230,8 @@ def _make_sidecar(
     """Construct a sidecar with a mock subscriber + mock APNs pool.
 
     The injected publisher is a ``_FakeMessagePublisher`` reachable via
-    ``sidecar._publisher`` for tests that assert on the Phase E
-    web-fanout path; tests that don't care about it ignore the
+    ``sidecar._publisher`` for tests that assert on the web (WebSocket)
+    fanout path; tests that don't care about it ignore the
     attribute. ``_publisher`` shares its ``SequenceTracker`` with the
     sidecar exactly like the production CLI wiring.
     """
@@ -487,8 +487,8 @@ class TestBuildApnsPayload:
         """Legacy rows without loc_keys emit EN even with a PL user.
 
         Given: An AlertEventRow whose payload lacks
-            ``title_loc_key``/``body_loc_key`` (predates Phase C, or
-            a rule that opted out).
+            ``title_loc_key``/``body_loc_key`` (predates localization,
+            or a rule that opted out).
         When: ``_build_apns_payload`` is called with
             ``user_language='pl'``.
         Then: The stored EN columns drive ``aps.alert`` — fallback
@@ -591,7 +591,7 @@ class TestBuildApnsPayload:
 
         Given: An event payload that carries the
             ``title_loc_key``/``body_loc_key``/``title_loc_args``/
-            ``body_loc_args`` set emitted by Phase C notify rules.
+            ``body_loc_args`` set emitted by the localizing notify rules.
         When: ``_build_apns_payload`` assembles the dict.
         Then: The APNs custom payload contains the public deep link
             but NOT the four localization keys — they're a backend-only
@@ -669,7 +669,7 @@ class TestDispatchFlow:
     async def test_dispatch_publishes_alert_event_frame_before_apns(
         self, repo: SQLAlchemyRepository
     ) -> None:
-        """The Phase E web fanout publishes onto the bus before APNs delivery.
+        """The web (WebSocket) fanout publishes onto the bus before APNs delivery.
 
         Given: A matching rule + one device for the recipient user.
         When: ``_dispatch`` runs the persist + fanout chain.
@@ -683,7 +683,7 @@ class TestDispatchFlow:
             (c) ``MessagePublisher.send`` is called before
                 ``ApnsClientPool.send`` — proves the publish step
                 landed in ``_persist_and_fanout_row`` ahead of the
-                APNs path, matching the Phase E latency-sensitivity
+                APNs path, matching the web-fanout latency-sensitivity
                 rationale.
         """
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
@@ -731,7 +731,7 @@ class TestDispatchFlow:
         """The first-attempt push (live fanout) localizes to the recipient.
 
         Given: A user pinned to ``default_language='pl'`` and a rule
-            emitting a row with the Phase C loc_key contract.
+            emitting a row with the localization loc_key contract.
         When: ``_dispatch`` runs the live path
             (``_persist_and_fanout_row`` → ``_attempt_once``).
         Then: ``apns.send`` receives an ``aps.alert.title`` rendered
@@ -832,7 +832,7 @@ class TestDispatchFlow:
 
 
 class TestScopeRevalidationDispatch:
-    """BE-3c: admin.scope_revoked + admin.user_deactivated routing."""
+    """Scope revalidation: admin.scope_revoked + admin.user_deactivated routing."""
 
     @pytest.mark.asyncio
     async def test_scope_revoked_routed_to_revalidator(self, repo: SQLAlchemyRepository) -> None:
@@ -860,10 +860,9 @@ class TestScopeRevalidationDispatch:
     async def test_scope_revoked_handler_exception_does_not_kill_loop(
         self, repo: SQLAlchemyRepository
     ) -> None:
-        """BE-3c R1: an exception from the scope-revoked handler is caught + logged.
+        """An exception from the scope-revoked handler is caught + logged.
 
-        Closes ``gpt-5.3-codex`` final-review Critical #1: a DB race
-        in bulk cancel (e.g. IntegrityError on a partial-unique index)
+        A DB race in bulk cancel (e.g. IntegrityError on a partial-unique index)
         previously bubbled out of the admin-topic handler and killed
         the sidecar's receive loop. ``_dispatch`` now wraps both
         admin handlers in try/except so a single event-handling
@@ -892,16 +891,15 @@ class TestScopeRevalidationDispatch:
 
 
 class TestScopePreSendSkip:
-    """BE-3c: ``should_skip_send`` gates the APNs call in ``_attempt_once``."""
+    """Scope pre-send skip: ``should_skip_send`` gates the APNs call in ``_attempt_once``."""
 
     @pytest.mark.asyncio
     async def test_attempt_aborts_when_bump_loses_to_concurrent_cancel(
         self, repo: SQLAlchemyRepository
     ) -> None:
-        """BE-3c R1: ``_bump_attempt`` returning None aborts the APNs call.
+        """``_bump_attempt`` returning None aborts the APNs call.
 
-        Closes ``gpt-5.3-codex`` final-review Critical #2: between the
-        ``should_skip_send`` check and the attempt-count bump, an
+        Between the ``should_skip_send`` check and the attempt-count bump, an
         admin handler can cancel the queued delivery. The attempt-count
         bump then sees the row is no longer queued and returns None.
         Without the guard in ``_attempt_once``, the sidecar would still
@@ -983,7 +981,7 @@ class TestScopePreSendSkip:
 
     @pytest.mark.asyncio
     async def test_410_path_writes_inactive_successor_row(self, repo: SQLAlchemyRepository) -> None:
-        """BE-3a R1 regression: 410 writes a tombstone successor, not a gap."""
+        """Regression: 410 writes a tombstone successor, not a gap."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
         device_pid = await _seed_device(repo, user)
@@ -1096,7 +1094,7 @@ class TestScopePreSendSkip:
         repo: SQLAlchemyRepository,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """BE-3a R1: exhaust emits ``logger.warning`` before terminal mark."""
+        """Retry exhaust emits ``logger.warning`` before terminal mark."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
         device_pid = await _seed_device(repo, user)

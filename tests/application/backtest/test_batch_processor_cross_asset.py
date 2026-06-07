@@ -1,6 +1,6 @@
 """Cross-asset attribution tests for batch_processor.process_time_batch.
 
-Locks the BE-1 contract: ``signal.instrument`` drives the recorded
+Locks the cross-asset attribution contract: ``signal.instrument`` drives the recorded
 target instrument and ``config.target_execution_exchange`` (when set)
 drives the recorded target venue, with byte-identical fallback to
 ``event.exchange`` / ``event.instrument`` when the carrier is None or
@@ -95,7 +95,7 @@ def _event(
 
 
 class TestTargetAttribution:
-    """BE-1 target-exchange + target-instrument substitution at fill time."""
+    """Cross-asset target-exchange + target-instrument substitution at fill time."""
 
     @pytest.mark.asyncio
     async def test_signal_instrument_overrides_event_at_fill(self) -> None:
@@ -290,7 +290,7 @@ class TestTargetAttribution:
             instrument="BTC-USD",
             side=TradeSideEnum.BUY,
             strength=1.0,
-            reason="single_feed_phase2c",
+            reason="single_feed_baseline",
             price=999.0,
         )
         collector = ResultCollector()

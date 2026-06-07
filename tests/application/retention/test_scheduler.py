@@ -443,7 +443,7 @@ class TestSchedulerLoopBranchCoverage:
 
 
 class TestStartHelper:
-    """Lifespan startup helper — B22 attribute-absent contract."""
+    """Lifespan startup helper — fail-closed attribute-absent contract."""
 
     @pytest.mark.asyncio
     async def test_start_failure_leaves_attribute_unset(

@@ -16,10 +16,8 @@ Lookup semantics mirror the iOS ``LocaleStrings`` helper:
 - ``render(key, language, *args)`` looks up the template AND
   substitutes positional arguments via ``snapper.i18n.format.render``.
 
-This module is consumed by Phase C+D of
-``plan_2026_05_17_backend_user_language_i18n.md`` to localize APNs
-title/body and REST alert-history responses based on
-``user.default_language``.
+This module is consumed to localize APNs title/body and REST
+alert-history responses based on ``user.default_language``.
 """
 
 import json
@@ -85,7 +83,7 @@ def supported_catalog_languages() -> frozenset[str]:
 
     Mirrors ``snapper.i18n.supported_languages.SUPPORTED_LANGUAGES`` for
     the codes that actually have backend-side translation content
-    (subset until Phase B expands beyond alerts.*).
+    (currently a subset, scoped to alerts.*).
 
     Returns:
         Frozenset of installed catalog language codes.
@@ -155,7 +153,7 @@ def resolve_alert_strings(
 
     - ``user_language`` is ``None`` (user never set a preference)
     - ``payload`` lacks string ``title_loc_key`` / ``body_loc_key``
-      (legacy row predating Phase C, or a rule that opted out)
+      (legacy row predating localization, or a rule that opted out)
     - ``title_loc_args`` / ``body_loc_args`` are not lists
     - The catalog lookup misses (``render`` returns the key verbatim)
       on either field — all-or-nothing so the alert never goes out

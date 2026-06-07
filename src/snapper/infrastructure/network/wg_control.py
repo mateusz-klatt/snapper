@@ -1,9 +1,8 @@
 """WireGuard control plane for the snapper-egress sidecar.
 
-This module is the SC.1 slice of
-``proprietary/plans/plan_2026_05_21_snapper_egress_sidecar.md``. It
-wraps ``pyroute2`` to bring up and tear down per-tunnel WireGuard
-interfaces with source-based routing inside the sidecar container.
+This module wraps ``pyroute2`` to bring up and tear down per-tunnel
+WireGuard interfaces with source-based routing inside the sidecar
+container.
 
 Each tunnel ``T`` gets:
 
@@ -15,9 +14,9 @@ Each tunnel ``T`` gets:
 
 The matching ``Socks5Server`` listener binds outbound sockets to
 ``T.address`` so the kernel's rule sends those packets through
-``wg-<T.interface>``. The pattern mirrors the user's working host
-setup (``eset-de1`` interface with ``Table = off`` + PostUp custom
-routing).
+``wg-<T.interface>``. The pattern mirrors a standard split-tunnel
+WireGuard host setup (a dedicated interface with ``Table = off`` plus
+a custom PostUp routing rule).
 
 Operational notes:
 
@@ -111,8 +110,7 @@ def check_kernel_wireguard() -> str | None:
         except NetlinkError as exc:
             if exc.code == errno.EOPNOTSUPP:
                 return (
-                    "kernel WireGuard not available — "
-                    "run `modprobe wireguard` on the Docker host"
+                    "kernel WireGuard not available — run `modprobe wireguard` on the Docker host"
                 )
             if exc.code == errno.EPERM:
                 return (
@@ -427,7 +425,7 @@ def _remove_rules_by_table(ipr: IPRoute, rtable: int) -> None:
     for rule in rules:
         try:
             rule_table = rule.get_attr("FRA_TABLE")
-        except (AttributeError, KeyError):
+        except AttributeError, KeyError:
             continue
         if rule_table != rtable:
             continue

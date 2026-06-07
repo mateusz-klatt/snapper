@@ -5,7 +5,7 @@ BTC-USD) actually trades BTC-USD on the configured target venue
 (``kraken``) when backtested under the new
 ``BacktestConfig.target_execution_exchange`` contract — not on the source
 TradFi feed (``kraken_equities``). This is the objective acceptance
-criterion for BE-2.
+criterion for the cross-asset reference strategy.
 
 ``snapper.strategies.models.is_tradeable`` is patched to True because
 ``DirectDbEngine.run`` currently hardcodes ``StrategyConfig.outputs`` to
@@ -15,7 +15,7 @@ MNQU6-CME as non-tradeable on paper. Widening the output derivation to
 only the target instrument is pre-existing drift (non-goal v1 — REST
 API + engine output construction stay single-feed; cross-asset runs
 targeted via direct BacktestConfig use); this test focuses strictly on
-the BE-1 attribution invariants.
+the cross-asset attribution invariants.
 """
 
 from datetime import UTC
@@ -140,7 +140,7 @@ def _repo_stub(mnqu6_rows: list[dict[str, Any]], btc_rows: list[dict[str, Any]])
 
 
 class TestCrossAssetReferenceStrategy:
-    """BE-2 — reference strategy end-to-end through DirectDbEngine.run()."""
+    """Reference strategy end-to-end through DirectDbEngine.run()."""
 
     @pytest.mark.asyncio
     async def test_tradfi_observe_crypto_execute_routes_fill_to_target_venue(
@@ -158,8 +158,8 @@ class TestCrossAssetReferenceStrategy:
             * at least one signal fired (EMA crossover on rising MNQU6),
             * every recorded trade carries instrument='BTC-USD' (target),
             * every simulate_market_fill call was invoked with
-              exchange='kraken' and instrument='BTC-USD' (proves BE-1
-              attribution switch ran on the target, not the source),
+              exchange='kraken' and instrument='BTC-USD' (proves the
+              cross-asset attribution switch ran on the target, not the source),
             * portfolio holds a BTC-USD position (not MNQU6-CME),
             * cross_asset_blocked_fills == 0 because both feeds are
               primed before the first post-warmup candle.

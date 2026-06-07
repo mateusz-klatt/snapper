@@ -267,7 +267,9 @@ the system metrics surface).
 The route returns HTTP `503` with one of three details:
 
 - `"retention scheduler not available"` — singleton failed to start
-  at lifespan time (B22 attribute-absent contract).
+  at lifespan time (the lifespan hook leaves
+  `app.state.retention_scheduler` absent so the route falls through
+  to 503).
 - `"retention scheduler disabled"` — the operator set
   `RETENTION_DISABLED=true`; the scheduler is parked.
 - `"retention scheduler not yet run"` — eager run did not populate
@@ -374,7 +376,7 @@ poll-with-backoff using the `Retry-After` header.
 |---|---|---|
 | `table` | `str` | Table name (key in `EVENT_TABLES` or `STATE_TABLES`). |
 | `table_kind` | `"event"` \| `"state"` | Discriminates wire semantics. |
-| `total` | `int \| null` | Total row count. `null` only on per-table query failure with no prior sample to clone. |
+| `total` | `int \| null` | Total row count. On PostgreSQL this is a `pg_class.reltuples` planner estimate (`GREATEST(reltuples, 0)` — fast, accurate within `ANALYZE`/autovacuum drift, intended for growth-trend monitoring); on the SQLite dev fixture it is an exact `COUNT(*)`. `null` only on per-table query failure with no prior sample to clone. |
 | `current` | `int \| null` | Active SCD2 versions (rows whose `known_to` equals the SCD2 sentinel) for state tables; `null` for event tables (no SCD2 lifecycle — reporting `0` would imply the dimension exists). |
 | `closed` | `int \| null` | Superseded SCD2 versions for state tables; `null` for event tables. |
 | `archivable` | `int \| null` | Row count in the policy retention window when a `RETENTION_POLICIES` entry applies; `null` when no policy applies (semantically distinct from `0`). |
@@ -393,16 +395,20 @@ poll-with-backoff using the `Retry-After` header.
 ## Per-kind semantics
 
 - **EVENT tables** (append-only — `ticks`, `trades`, `signals`,
-  `executions`, `telemetry`, `control`): `total = COUNT(*)`. The
-  `current` / `closed` axes are `null` because event tables have no
-  SCD2 lifecycle. `archivable` is non-null only for tables with a
+  `executions`, `telemetry`, `control`): `total` comes from the
+  dialect-aware row-count primitive — a `pg_class.reltuples` planner
+  estimate on PostgreSQL, an exact `COUNT(*)` on the SQLite fixture.
+  The `current` / `closed` axes are `null` because event tables have
+  no SCD2 lifecycle. `archivable` is non-null only for tables with a
   registered policy (currently only `telemetry`).
 - **STATE tables** (SCD2-versioned — `orders`, `positions`,
-  `instruments`, etc.): `current` counts rows whose `known_to` equals
-  the SCD2 sentinel; `closed` counts superseded versions;
-  `total = current + closed` (Python addition trusted on the SCD2
-  invariant). `archivable` is `null` until a policy is registered for
-  the table.
+  `instruments`, etc.): `current = COUNT(known_to == sentinel)`
+  (exact) counts active SCD2 versions; `total` comes from the
+  dialect-aware row-count primitive (PG planner estimate / SQLite
+  exact); `closed = max(0, total - current)` is derived and clamped
+  at 0 to absorb stale PostgreSQL planner estimates where the exact
+  `current` temporarily exceeds the estimated `total`. `archivable`
+  is `null` until a policy is registered for the table.
 
 ## Cluster B/C alignment
 

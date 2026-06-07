@@ -79,7 +79,7 @@ Topic format varies by category (see per-category tables below).
 | ----- | ----------- |
 | `market.kraken.BTC-USD.candles.1h` | Hourly BTC/USD candles from Kraken |
 | `market.kraken.BTC-USD.ticks` | BTC/USD ticks from Kraken |
-| `market.kraken.AAPL.candles.1d` | Daily AAPL candles from Kraken Equities (note: live `market.*` topics exclude `polygon` — Polygon is replay-only via `market.paper.polygon.…`) |
+| `market.kraken_equities.AAPL.candles.1d` | Daily AAPL candles from Kraken Equities (note: live `market.*` topics exclude `polygon` — Polygon is replay-only via `market.paper.polygon.…`) |
 
 ### Signals
 
@@ -314,6 +314,8 @@ tick = TickData(
 | `ask` | float \| None | Best ask price |
 | `last` | float \| None | Last traded price |
 | `volume` | float | Volume |
+| `is_delayed` | bool | Whether the feed delivers exchange-delayed ticks (e.g. ~10 min for TradFi index futures); strategies must gate on this before treating the price as current |
+| `is_extended_hours` | bool \| None | Whether the tick occurred during an extended-hours TradFi session; `None` means the feed does not distinguish extended-hours ticks |
 | `timestamp` | datetime | Timestamp |
 | `session_id` | string | Producer session (inherited) |
 | `sequence_id` | int | Monotonic counter per topic or logical stream (inherited) |
@@ -483,13 +485,18 @@ its React Query cache entry wholesale — no diff reconciliation.
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `type` | string | `"process_summary_event"` |
+| `coordinator` | string | Topic-safe slug of the emitting node (default `coord-0`); mirrors the topic suffix so consumers can attribute rows to the coordinator that sampled them |
 | `processes` | list[`ProcessSummaryItem`] | Unordered snapshot of per-process rows (configured first in repository row order, then runtime per-wallet instances — consumers must not rely on this order) |
 | `snapshot_at` | datetime | Bus time the snapshot was assembled |
 
 `ProcessSummaryItem` fields: `name`, `running`, `enabled`, `role`,
-`lifecycle`, `active_public_id`. PID / command / exit_code are
-intentionally absent — they only exist for native subprocesses, so
-detailed status is fetched via REST when needed.
+`lifecycle`, `active_public_id`, `rss_bytes` (int | None, subprocess
+resident set size in bytes; `None` for thread-mode/unsampled
+processes), and `cpu_percent` (float | None, whole-process CPU% which
+can exceed 100 on multi-threaded children; `None` under the same
+conditions and `0.0` on the first sample after a restart). PID /
+command / exit_code are intentionally absent — they only exist for
+native subprocesses, so detailed status is fetched via REST when needed.
 
 ### ProcessConfiguredEventData
 
@@ -814,10 +821,9 @@ TopicSchema defines throttling per topic:
 
 ```python
 TopicSchema(
-    name="market",
     pattern="market.",
+    category="market",
     throttle_ms=100,  # Max 10 msg/s
-    ...
 )
 ```
 

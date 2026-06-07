@@ -2,8 +2,8 @@
 
 Mirrors the test pattern used by retention
 (``tests/application/retention/test_scheduler.py::TestStartHelper`` /
-``TestStopHelper``) so the B22 attribute-absent contract is exercised
-across all snapshotter helpers in the same shape.
+``TestStopHelper``) so the fail-closed attribute-absent contract is
+exercised across all snapshotter helpers in the same shape.
 """
 
 from types import SimpleNamespace
@@ -17,7 +17,7 @@ from snapper.server.app import _stop_db_stats_snapshotter
 
 
 class TestStartHelper:
-    """Lifespan startup helper — B22 attribute-absent contract."""
+    """Lifespan startup helper — fail-closed attribute-absent contract."""
 
     @pytest.mark.asyncio
     async def test_start_success_assigns_attribute(self, monkeypatch: pytest.MonkeyPatch) -> None:

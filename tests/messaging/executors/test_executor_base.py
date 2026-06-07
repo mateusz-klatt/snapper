@@ -4951,7 +4951,7 @@ class TestCancelReplaceHandlers:
 
 
 class TestDeltaFillSemantics:
-    """Tests for Stage A: delta fill fields and order status cleanup."""
+    """Tests for delta fill fields and order status cleanup."""
 
     @pytest.mark.asyncio
     async def test_build_execution_data_uses_last_qty_when_available(self) -> None:
@@ -5262,7 +5262,7 @@ class TestDeltaFillSemantics:
 
 
 class TestExecutorBasePersistence:
-    """Tests for Stage C: DB persistence in executor base."""
+    """Tests for DB persistence in executor base."""
 
     @pytest.mark.asyncio
     async def test_process_execution_logs_to_db_on_fill(self) -> None:
@@ -5483,7 +5483,7 @@ def _make_db_order(
 
 
 class TestExecutorRecovery:
-    """Tests for Stage D: executor startup recovery."""
+    """Tests for executor startup recovery."""
 
     @pytest.mark.asyncio
     async def test_recover_pending_from_exchange_open_order(self) -> None:

@@ -255,7 +255,7 @@ class TestKrakenEquitiesMarketDataPublisher:
         This proves the SDK connect shim will read this publisher's
         ``_get_exchange_name()`` ("kraken_equities") instead of the
         legacy hardcoded ``"kraken"`` tag when reserving an
-        egress-pool route — required so the Phase B'.5
+        egress-pool route — required so the
         ``allowed_exchanges=["kraken_equities"]`` filter pins this
         publisher to the dedicated NYC tunnel.
         """

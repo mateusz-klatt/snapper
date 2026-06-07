@@ -165,12 +165,12 @@ snapper feed [OPTIONS]
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
-| `--symbols` | string | `BTC/USD` | Comma-separated symbols passed to the Kraken publisher. |
+| `--symbols` | string | `BTC/USD` | Comma-separated symbols passed to the Kraken publisher. Symbols must be in native dash format (e.g. `BTC-USD`); the literal code default `BTC/USD` is the WebSocket output format, and only native symbols actually subscribe (slash-format inputs are skipped as unknown). |
 
 **Example:**
 
 ```bash
-snapper feed --symbols "BTC/USD,ETH/USD"
+snapper feed --symbols "BTC-USD,ETH-USD"
 ```
 
 ### `feed-engine`
@@ -986,7 +986,7 @@ snapper backtest-list --status completed --limit 10
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
 | `--strategy` | str | None | Filter by strategy name |
-| `--status` | str | None | Filter by status (`pending`, `running`, `completed`, `failed`, `cancelled`) |
+| `--status` | str | None | Filter by status (`pending`, `running`, `completed`, `failed`, `cancel_requested`, `cancelled`) |
 | `--wallet` | str | None | Filter by wallet public ID |
 | `--limit` | int | `20` | Maximum number of rows to return |
 
