@@ -206,6 +206,29 @@ class TestSettingsService:
         assert service.zmq_broker_xsub == "tcp://127.0.0.1:7500"
 
     @pytest.mark.asyncio
+    async def test_initialize_gates_load_on_db_readiness(self) -> None:
+        """initialize() waits for the DB before loading settings.
+
+        Given: A repository whose wait_until_ready raises (DB never ready),
+        When: initialize() runs,
+        Then: the error propagates and the settings load never runs — proving
+            the load is gated behind the readiness check (host-reboot race fix).
+        """
+        service = SettingsService(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
+        )
+        mock_repo = MagicMock()
+        mock_repo.wait_until_ready = AsyncMock(side_effect=RuntimeError("db not ready"))
+        with (
+            patch("snapper.application.services.settings.get_repository", return_value=mock_repo),
+            pytest.raises(RuntimeError, match="db not ready"),
+        ):
+            await service.initialize()
+        mock_repo.wait_until_ready.assert_awaited_once()
+        assert service._loaded is False
+
+    @pytest.mark.asyncio
     async def test_setup_zmq_publisher_connects_to_xsub_endpoint(self) -> None:
         """R3 follow-up: PUB socket MUST connect to XSUB endpoint.
 

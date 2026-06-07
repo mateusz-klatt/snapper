@@ -28,6 +28,7 @@ Example:
         inserted = await repo.upsert_candles(rows)
 """
 
+import asyncio
 import os
 import weakref
 from abc import ABC
@@ -70,6 +71,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.engine import Engine as SyncEngine
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -602,6 +604,98 @@ class Repository(ABC):
     def session(self) -> AbstractAsyncContextManager[AsyncSession]:
         """Return async context manager for database session."""
         ...
+
+    async def wait_until_ready(self, *, timeout_s: float = 120.0, interval_s: float = 1.0) -> None:
+        """Block until the database accepts a trivial query, or raise on timeout.
+
+        Startup gate for host reboots: the snapper containers can start
+        before Postgres is accepting connections (Postgres is external to
+        the compose stack, so ``depends_on`` cannot order it), and the first
+        DB query then fails with asyncpg ``ConnectionRefusedError``. This
+        retries ``SELECT 1`` every ``interval_s`` until it succeeds or
+        ``timeout_s`` elapses, so the settings load and the process-manager
+        summary loop never race a not-yet-ready database.
+
+        Only a transient connection/startup failure is retried (see
+        :meth:`_is_transient_db_connection_error`): any ``OSError`` (asyncpg
+        ``ConnectionRefusedError`` and other network-layer failures) and a
+        ``DBAPIError`` whose PostgreSQL SQLSTATE is absent, in the
+        connection-exception class ``08*``, or ``57P03`` (server starting up).
+        A permanent ``DBAPIError`` — bad credentials (``28P01``), wrong
+        database (``3D000``), etc. — is re-raised IMMEDIATELY so a
+        misconfiguration is not hidden behind a 120s "not ready" wait. On a
+        retried failure the first one logs a concise WARNING, later attempts
+        retry silently to avoid traceback spam, and a single INFO is logged
+        once the wait clears. On timeout a ``RuntimeError`` is raised; with
+        ``restart: unless-stopped`` a genuine prolonged outage then surfaces
+        as a visible restart rather than a process running against a dead
+        database.
+
+        Args:
+            timeout_s: Maximum seconds to wait before raising. Default 120s
+                covers Postgres coming up during a slow host reboot without
+                churning container restarts.
+            interval_s: Seconds slept between connection attempts.
+
+        Returns:
+            None once the database answers ``SELECT 1``.
+
+        Raises:
+            RuntimeError: If the database is still unreachable after
+                ``timeout_s``.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        warned = False
+        waited = False
+        while True:
+            try:
+                async with self.session() as session:
+                    await session.execute(text("SELECT 1"))
+            except (OSError, DBAPIError) as exc:
+                if not self._is_transient_db_connection_error(exc):
+                    raise
+                if loop.time() >= deadline:
+                    raise RuntimeError(f"database not ready after {timeout_s}s") from exc
+                if not warned:
+                    logger.warning("database not ready, waiting up to {}s: {}", timeout_s, exc)
+                    warned = True
+                waited = True
+                await asyncio.sleep(interval_s)
+                continue
+            if waited:
+                logger.info("database ready")
+            return
+
+    @staticmethod
+    def _is_transient_db_connection_error(exc: OSError | DBAPIError) -> bool:
+        """Return True if a readiness-probe failure is retryable.
+
+        Distinguishes "database not up yet" from a permanent misconfiguration
+        so :meth:`wait_until_ready` retries only the former and surfaces the
+        latter immediately — a bad password or database name must not be
+        hidden behind a 120s "not ready" wait + crash loop.
+
+        Retryable: any ``OSError`` (asyncpg ``ConnectionRefusedError`` and
+        other network-layer failures while the server comes up), and any
+        ``DBAPIError`` whose underlying PostgreSQL SQLSTATE is absent (a bare
+        connection-establishment failure with no server code), in the
+        connection-exception class ``08*``, or ``57P03`` ("cannot_connect_now"
+        — the server is starting up). Every other ``DBAPIError`` (for example
+        ``28P01`` invalid_password, ``3D000`` invalid_catalog_name) is a
+        permanent fault and is not retried.
+
+        Args:
+            exc: The probe exception, already narrowed to ``OSError`` or
+                ``DBAPIError`` by the caller's ``except`` clause.
+
+        Returns:
+            True to retry the probe, False to re-raise the exception.
+        """
+        if isinstance(exc, OSError):
+            return True
+        sqlstate: str | None = getattr(getattr(exc, "orig", None), "sqlstate", None)
+        return sqlstate is None or sqlstate.startswith("08") or sqlstate == "57P03"
 
     @abstractmethod
     async def create_all(self) -> None:

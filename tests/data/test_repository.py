@@ -25,6 +25,7 @@ import pytest
 from sqlalchemy import select as _sa_select
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9558,3 +9559,163 @@ class TestPostgresPoolClamp:
         kwargs = mock_engine.call_args.kwargs
         assert "pool_size" not in kwargs
         assert "max_overflow" not in kwargs
+
+
+class _ReadinessProbeSession:
+    """Async session for wait_until_ready tests.
+
+    ``execute`` raises a queued sequence of errors, then succeeds; tracks the
+    call count so tests can assert how many probes ran.
+    """
+
+    def __init__(self, errors: list[Exception]) -> None:
+        self._errors = list(errors)
+        self.execute_calls = 0
+        self.rollback_called = False
+
+    async def execute(self, stmt: Any, params: Any | None = None) -> Any:
+        self.execute_calls += 1
+        if self._errors:
+            raise self._errors.pop(0)
+        return SimpleNamespace(rowcount=1)
+
+    async def commit(self) -> None:
+        """No-op commit for the readiness probe."""
+
+    async def rollback(self) -> None:
+        self.rollback_called = True
+
+
+@asynccontextmanager
+async def _readiness_factory(
+    session: _ReadinessProbeSession,
+) -> AsyncIterator[_ReadinessProbeSession]:
+    yield session
+
+
+class _FakePgError(Exception):
+    """asyncpg-style error carrying a PostgreSQL SQLSTATE for readiness tests."""
+
+    def __init__(self, sqlstate: str) -> None:
+        super().__init__(f"postgres error {sqlstate}")
+        self.sqlstate = sqlstate
+
+
+def _dbapi_error(orig: Exception) -> DBAPIError:
+    """Wrap an underlying error in a SQLAlchemy DBAPIError like the driver does."""
+    return DBAPIError("SELECT 1", {}, orig)
+
+
+class TestRepositoryWaitUntilReady:
+    """Tests for the Repository.wait_until_ready startup gate."""
+
+    @pytest.mark.asyncio
+    async def test_ready_on_first_attempt_returns_after_one_probe(self) -> None:
+        """A reachable DB returns after a single SELECT 1.
+
+        Given: A repository whose probe succeeds immediately,
+        When: wait_until_ready is awaited,
+        Then: it returns after exactly one execute, with no retry.
+        """
+        sess = _ReadinessProbeSession([])
+        repo = _make_repo(lambda: _readiness_factory(sess))
+        await repo.wait_until_ready(timeout_s=1.0, interval_s=0.001)
+        assert sess.execute_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_retries_connection_refused_then_succeeds(self) -> None:
+        """Transient ConnectionRefusedError is retried until the DB answers.
+
+        Given: The probe raises ConnectionRefusedError twice then succeeds,
+        When: wait_until_ready is awaited,
+        Then: it retries and returns after the probe succeeds (3 calls).
+        """
+        sess = _ReadinessProbeSession([ConnectionRefusedError(), ConnectionRefusedError()])
+        repo = _make_repo(lambda: _readiness_factory(sess))
+        await repo.wait_until_ready(timeout_s=1.0, interval_s=0.001)
+        assert sess.execute_calls == 3
+
+    @pytest.mark.asyncio
+    async def test_dbapi_error_without_sqlstate_is_retried(self) -> None:
+        """A DBAPIError wrapping a bare connection error (no SQLSTATE) retries.
+
+        Given: The probe raises a DBAPIError whose orig has no SQLSTATE once
+            then succeeds,
+        When: wait_until_ready is awaited,
+        Then: it retries and returns (2 calls).
+        """
+        sess = _ReadinessProbeSession([_dbapi_error(OSError("connection refused"))])
+        repo = _make_repo(lambda: _readiness_factory(sess))
+        await repo.wait_until_ready(timeout_s=1.0, interval_s=0.001)
+        assert sess.execute_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_db_starting_up_57P03_is_retried(self) -> None:
+        """SQLSTATE 57P03 (server starting up) is retried.
+
+        Given: The probe raises a DBAPIError with SQLSTATE 57P03 once then
+            succeeds,
+        When: wait_until_ready is awaited,
+        Then: it retries and returns (2 calls).
+        """
+        sess = _ReadinessProbeSession([_dbapi_error(_FakePgError("57P03"))])
+        repo = _make_repo(lambda: _readiness_factory(sess))
+        await repo.wait_until_ready(timeout_s=1.0, interval_s=0.001)
+        assert sess.execute_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_connection_exception_class_08_is_retried(self) -> None:
+        """SQLSTATE class 08 (connection exception) is retried.
+
+        Given: The probe raises a DBAPIError with SQLSTATE 08006 once then
+            succeeds,
+        When: wait_until_ready is awaited,
+        Then: it retries and returns (2 calls).
+        """
+        sess = _ReadinessProbeSession([_dbapi_error(_FakePgError("08006"))])
+        repo = _make_repo(lambda: _readiness_factory(sess))
+        await repo.wait_until_ready(timeout_s=1.0, interval_s=0.001)
+        assert sess.execute_calls == 2
+
+    @pytest.mark.asyncio
+    async def test_auth_error_propagates_without_retry(self) -> None:
+        """A permanent DBAPIError (bad credentials) is re-raised immediately.
+
+        Given: The probe raises a DBAPIError with SQLSTATE 28P01
+            (invalid_password),
+        When: wait_until_ready is awaited,
+        Then: the DBAPIError propagates immediately with no retry (1 call) —
+            a misconfiguration is not hidden behind a "not ready" wait.
+        """
+        sess = _ReadinessProbeSession([_dbapi_error(_FakePgError("28P01"))])
+        repo = _make_repo(lambda: _readiness_factory(sess))
+        with pytest.raises(DBAPIError):
+            await repo.wait_until_ready(timeout_s=1.0, interval_s=0.001)
+        assert sess.execute_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_raises_runtimeerror_after_timeout(self) -> None:
+        """A DB that never answers raises RuntimeError once the deadline passes.
+
+        Given: The probe always raises ConnectionRefusedError,
+        When: wait_until_ready is awaited with a short timeout,
+        Then: RuntimeError is raised.
+        """
+        sess = _ReadinessProbeSession([ConnectionRefusedError() for _ in range(100000)])
+        repo = _make_repo(lambda: _readiness_factory(sess))
+        with pytest.raises(RuntimeError, match="database not ready"):
+            await repo.wait_until_ready(timeout_s=0.02, interval_s=0.001)
+
+    @pytest.mark.asyncio
+    async def test_non_connection_error_propagates_immediately(self) -> None:
+        """A non-connection error is not masked as "not ready".
+
+        Given: The probe raises ValueError,
+        When: wait_until_ready is awaited,
+        Then: the ValueError propagates immediately with no retry.
+        """
+        sess = _ReadinessProbeSession([ValueError("boom")])
+        repo = _make_repo(lambda: _readiness_factory(sess))
+        with pytest.raises(ValueError, match="boom"):
+            await repo.wait_until_ready(timeout_s=1.0, interval_s=0.001)
+        assert sess.execute_calls == 1

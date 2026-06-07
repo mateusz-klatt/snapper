@@ -142,7 +142,17 @@ class SettingsService:
         self._initialized = True
 
     async def initialize(self) -> None:
-        """Initialize the service by loading settings and setting up ZMQ."""
+        """Initialize the service by loading settings and setting up ZMQ.
+
+        Waits for the database to accept connections before the first query
+        (:meth:`Repository.wait_until_ready`) so a host reboot that starts
+        this container ahead of Postgres does not surface as
+        ConnectionRefusedError tracebacks during boot. This is the earliest
+        DB access for both the ``server`` and ``feed-engine`` boots (both
+        reach it via ``get_settings_service``), so gating it here covers the
+        whole startup.
+        """
+        await get_repository(self.db_url).wait_until_ready()
         await self._load_all_settings()
         await self._setup_zmq_publisher()
 
