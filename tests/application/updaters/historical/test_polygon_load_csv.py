@@ -47,6 +47,7 @@ class _StubAsyncRepo:
 
     def __init__(self) -> None:
         self.upsert_batches: list[int] = []
+        self.upserted_rows: list[dict[str, Any]] = []
         self.ensure_calls: list[str] = []
         self.engine = _StubEngine()
 
@@ -63,6 +64,7 @@ class _StubAsyncRepo:
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
         self.upsert_batches.append(len(rows))
+        self.upserted_rows.extend(rows)
         return len(rows)
 
 
@@ -531,6 +533,54 @@ async def test_load_archive_symbol_batches_and_filters(
     await service._load_archive_symbol("BTC-USD", "pid-btc")
     assert async_repo.ensure_calls == ["pid-btc"]
     assert async_repo.upsert_batches == [2, 1]
+
+
+@pytest.mark.asyncio
+async def test_load_archive_symbol_stamps_load_time_as_bus_time(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Stamp ``open_at`` from the bar event-time and ``timestamp`` from now.
+
+    Given: a single in-range cached candle whose bar event-time is in 2024,
+    When: _load_archive_symbol runs,
+    Then: the upserted row's ``open_at`` equals the bar event-time while its
+          ``timestamp`` (bus-time) is the load wall-clock — distinct from the
+          event-time — so an SCD2 amend closes the prior version at the moment
+          the correction was learned and as-of reads stay free of lookahead.
+    """
+    monkeypatch.setattr(csv_loader_module, "_CACHE_ROOT", tmp_path)
+    service = _build_service(
+        monkeypatch,
+        symbols=None,
+        all_mapped=True,
+        since=date(2024, 1, 1),
+        until=date(2024, 1, 1),
+    )
+    async_repo = _StubAsyncRepo()
+    service._db_async = cast(Any, async_repo)
+    event_time = datetime(2024, 1, 1, 9, tzinfo=UTC)
+    files = [(tmp_path / "in-range.csv", date(2024, 1, 1))]
+
+    class _StubLoader:
+        def iter_aggregate_csv_files(
+            self, archive_symbol: str, timespan: str
+        ) -> list[tuple[Path, date]]:
+            return files
+
+    service._loader = cast(Any, _StubLoader())
+    monkeypatch.setattr(
+        csv_loader_module,
+        "read_aggregate_csv",
+        lambda path, ticker: [_candle(event_time)],
+    )
+    before = datetime.now(UTC)
+    await service._load_archive_symbol("BTC-USD", "pid-btc")
+    after = datetime.now(UTC)
+    assert len(async_repo.upserted_rows) == 1
+    row = async_repo.upserted_rows[0]
+    assert row["open_at"] == event_time
+    assert row["timestamp"] != event_time
+    assert before <= row["timestamp"] <= after
 
 
 @pytest.mark.asyncio

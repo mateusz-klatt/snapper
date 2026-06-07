@@ -281,6 +281,7 @@ class KrakenEquitiesAggregatesBackfillService(RegisterableProcess):
                 self._timeframe,
                 self._tracker.session_id,
                 lambda: self._tracker.next_sequence("candles"),
+                now,
             )
             total_inserted = 0
             for i in range(0, len(rows), self.BATCH_COMMIT_SIZE):
@@ -301,6 +302,7 @@ class KrakenEquitiesAggregatesBackfillService(RegisterableProcess):
         timeframe: str,
         session_id: str,
         sequence_id_fn: Callable[[], int],
+        bus_time: datetime,
     ) -> list[CandleUpsertRow]:
         """Convert OhlcvSnapshot list to CandleUpsertRow list.
 
@@ -310,6 +312,11 @@ class KrakenEquitiesAggregatesBackfillService(RegisterableProcess):
             timeframe: Timeframe label string.
             session_id: Session identifier for provenance.
             sequence_id_fn: Callable returning next sequence number.
+            bus_time: Wall-clock load time stamped as each row's
+                ``timestamp`` (bus-time), kept distinct from ``open_at``
+                (the bar event-time) so an SCD2 amend closes the prior
+                version with a non-empty validity interval (no lookahead
+                bias in as-of reads).
 
         Returns:
             List of row dicts ready for database upsert.
@@ -318,7 +325,7 @@ class KrakenEquitiesAggregatesBackfillService(RegisterableProcess):
             {
                 "instrument_public_id": instrument_public_id,
                 "open_at": datetime.fromtimestamp(candle.timestamp, tz=UTC),
-                "timestamp": datetime.fromtimestamp(candle.timestamp, tz=UTC),
+                "timestamp": bus_time,
                 "timeframe": timeframe,
                 "open": candle.open,
                 "high": candle.high,

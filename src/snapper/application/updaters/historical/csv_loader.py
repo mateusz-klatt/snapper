@@ -367,6 +367,7 @@ class PolygonCsvLoaderService(RegisterableProcess):
         assert self._db_async is not None
         timeframe = _timeframe_label(1, self._timespan)
         instrument_public_id = await self._ensure_instrument(symbol_public_id)
+        load_time = datetime.now(UTC)
         files = self._loader.iter_aggregate_csv_files(archive_symbol, self._timespan)
         total_inserted = 0
         total_rows = 0
@@ -383,6 +384,7 @@ class PolygonCsvLoaderService(RegisterableProcess):
                 timeframe,
                 self._tracker.session_id,
                 lambda: self._tracker.next_sequence("candles"),
+                load_time,
             )
             total_rows += len(rows)
             for i in range(0, len(rows), self.BATCH_COMMIT_SIZE):

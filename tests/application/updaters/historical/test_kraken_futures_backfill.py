@@ -140,12 +140,14 @@ class TestBuildCandleRows:
             ),
         ]
         seq_counter = iter(range(100))
+        bus_time = datetime(2026, 1, 1, tzinfo=UTC)
         rows = KrakenFuturesAggregatesBackfillService._build_candle_rows(
             candles,
             "inst-001",
             "1h",
             "sess-001",
             lambda: next(seq_counter),
+            bus_time,
         )
         assert len(rows) == 1
         row = rows[0]
@@ -157,6 +159,9 @@ class TestBuildCandleRows:
         assert row["vwap"] is None
         assert row["trades"] is None
         assert row["session_id"] == "sess-001"
+        assert row["open_at"] == datetime.fromtimestamp(1700000000.0, tz=UTC)
+        assert row["timestamp"] == bus_time
+        assert row["open_at"] != row["timestamp"]
 
     def test_empty_candles_returns_empty(self) -> None:
         """Empty input produces empty output.
@@ -171,6 +176,7 @@ class TestBuildCandleRows:
             "1h",
             "sess-001",
             lambda: 0,
+            datetime(2026, 1, 1, tzinfo=UTC),
         )
         assert rows == []
 
