@@ -60,14 +60,14 @@ async def test_ownership_filters_foreign_shards_out_of_cycle() -> None:
 
 @pytest.mark.asyncio
 async def test_no_ownership_preserves_pre_phase4_behavior() -> None:
-    """With ``ownership=None`` every shard is reconciled (pre-Phase-4 path).
+    """With ``ownership=None`` every shard is reconciled (legacy path).
 
     Given: a ReconciliationLoop constructed without an ``ownership``
         kwarg (default ``None``),
     When: ``_reconcile_cycle`` runs against an active set of two
         shards on different hash buckets,
     Then: both shards appear in ``record_recon_success`` calls —
-        the byte-identical pre-Phase-4 behavior.
+        the byte-identical legacy behavior.
     """
     repo = AsyncMock()
     repo.get_active_commands_for_exchange = AsyncMock(

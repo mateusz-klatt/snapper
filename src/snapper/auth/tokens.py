@@ -70,7 +70,7 @@ _ADMIN_LISTEN_RECV_BACKOFF_S: Final[float] = 0.1
 class _VerifyCacheEntry:
     """Frozen verdict returned by the DB-backed verify path.
 
-    Shape extended per so the admin-bus subscriber can evict
+    Shape carries ``user_public_id`` so the admin-bus subscriber can evict
     every cached token for a deactivated user without scanning the
     raw JWTs (which we never retain). ``expires_at_ts`` holds the
     JWT ``exp`` claim as a unix timestamp so expired entries are
@@ -117,10 +117,10 @@ their key-management hygiene; revocation still works via the per-JTI
 blacklist + the ``user_active_tokens.revoked_at`` inventory flip, so
 this window is a ceiling, not a commitment.
 
-The constant was 3650 (ten years) before 2026-05-27; the OSS-readiness
-audit flagged that as excessive default lifetime — revocation works
-but security reviewers will (rightly) treat a ten-year default as a
-liability for tokens that may live in CI secret stores or IDE config.
+The constant was 3650 (ten years) before 2026-05-27; that was reduced
+because a ten-year default lifetime is excessive — revocation works
+but a ten-year default is a liability for tokens that may live in CI
+secret stores or IDE config.
 """
 
 
@@ -326,7 +326,7 @@ class TokenManager:
             (e.g. :meth:`refresh_tokens`) never match on it.
 
         Boundary time is passed in (not minted inside the helper)
-        per feedback_timestamp_discipline.md — the ``DelegateService``
+        for timestamp discipline — the ``DelegateService``
         already computes ``now`` at the transaction boundary and
         threads it into this helper so every inserted row, audit
         entry, and token claim agrees on the same instant.
@@ -475,9 +475,9 @@ class TokenManager:
         ``create_tokens`` returns so every outstanding token is
         reflected in the DB inventory. This is the precondition for
         the DB-backed ``verify_token`` path: any JWT without
-        a matching row fails verification per 's deployment
-        note ("pre-existing JWTs issued before migration have no
-        row → verify_token() will 401 them").
+        a matching row fails verification, so pre-existing JWTs
+        issued before the inventory migration have no row and
+        ``verify_token()`` will 401 them.
         Insertion is batched through
         meth:`Repository.insert_user_active_tokens` so both the
         access and refresh rows land in one transaction. If the
@@ -688,7 +688,7 @@ class TokenManager:
                invalid tokens) and return the claims when every
                gate passes.
         Cross-instance invariant: the 30-second TTL is a staleness
-        ceiling; the admin-bus subscriber wired in calls
+        ceiling; the admin-bus subscriber calls
         meth:`invalidate_user_cache` on ``admin.user_deactivated``
         so kill-switch latency collapses to one bus-message-round
         trip instead of 30 s.
@@ -794,7 +794,7 @@ class TokenManager:
         """Insert a verdict row, prune on overflow, and skip on stale generation.
 
         The ``gen_before`` parameter guards against a race:
-        race finding: if the caller sampled the per-user generation
+        if the caller sampled the per-user generation
         before the DB read and a concurrent
         meth:`invalidate_user_cache` incremented it during that
         read, the verdict we are about to cache may reflect a user
@@ -811,7 +811,7 @@ class TokenManager:
         The safe resolution is to skip caching blank-claim tokens
         completely — fail-closed. These legacy tokens pay a perf
         penalty (always DB-backed) but cannot slip a stale positive
-        into cache during a race. issuance never emits
+        into cache during a race. Current token issuance never emits
         blank-claim tokens, so the penalty is bounded by legacy
         session lifetimes (≤ 15 min access-token TTL).
 
@@ -905,7 +905,7 @@ class TokenManager:
         Called by the admin-bus subscriber on receipt of
         ``admin.user_deactivated`` so a cross-instance deactivation
         propagates to this TokenManager's LRU without waiting for
-        the 30-second TTL. resolution of +.
+        the 30-second TTL.
         The user's
         generation counter is bumped FIRST so any ``verify_token_with_reason``
         that is mid-flight on this user (already past the DB read)
@@ -1126,10 +1126,10 @@ class TokenManager:
     async def start_admin_listener(self, zmq_broker_xpub: str) -> None:
         """Open the admin-bus subscriber and start the dispatch task.
 
-        Subscribes to ``admin.user_deactivated`` (
-        deliverable 1a) so a cross-instance kill-switch event
-        published by ``UserService.deactivate_user`` collapses the
-        30-second LRU TTL ceiling to one bus-message round-trip.
+        Subscribes to ``admin.user_deactivated`` so a cross-instance
+        kill-switch event published by ``UserService.deactivate_user``
+        collapses the 30-second LRU TTL ceiling to one bus-message
+        round-trip.
         On receipt, :meth:`invalidate_user_cache` walks
         ``_verify_cache`` and drops every entry whose cached
         ``user_public_id`` matches the deactivated user's UUID.

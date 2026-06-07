@@ -144,7 +144,7 @@ class TestTargetAttribution:
         When: process_time_batch runs,
         Then: the fill is attributed to the source candle's exchange —
             simulate_market_fill invoked with ``exchange='kraken'``
-            (spy-captured). Closes the : the prior
+            (spy-captured). Closes the venue-attribution gap: the prior
             assertion only checked the recorded instrument, so a
             venue-attribution regression could have slipped through.
         """
@@ -236,11 +236,10 @@ class TestTargetAttribution:
               latest_closes, NOT signal.price, NOT event.row['close']) and
               instrument == 'BTC-USD',
             * the trade row's signal_public_id == signal row's public_id
-              (FK-style linkage preserved across the b4f2c9b helper
-              extraction — ),
+              (FK-style linkage preserved across the helper extraction),
             * the trade sequence_id < signal sequence_id (trade-then-
               signal ordering maintained under _process_signal / _resolve_
-              target_fill_price — ).
+              target_fill_price).
         """
         signal = StrategySignal(
             instrument="BTC-USD",
@@ -325,7 +324,7 @@ class TestPairedSignalDrain:
         Given: a strategy whose ``_handle_candle_data`` returns a primary
             BUY signal on BTC-USD AND queues a paired SELL signal on
             ETH-USD via ``drain_pending_signals`` (the contract used by
-            CointegrationPairs after the Bug L fix),
+            CointegrationPairs for paired-signal entries),
         When: ``process_time_batch`` runs over a single candle event,
         Then: both signals get fills — the trades collection contains
             one BTC-USD entry and one ETH-USD entry.

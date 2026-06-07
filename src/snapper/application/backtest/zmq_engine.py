@@ -141,11 +141,11 @@ class ZmqReplayEngine:
         Args:
             repository: Source of historical candles.
             snapshot_as_of: Bitemporal snapshot for all DB reads.
-            cancel_probe: Optional shared CancelProbe (
-                Step 3). When supplied, the strategy mixin's ``_listen_loop``
-                calls ``await probe.check()`` per processed candle so a
-                cancel_requested status is detected within ``cancel_poll_ms``
-                + ``probe_timeout_s``.
+            cancel_probe: Optional shared CancelProbe. When supplied, the
+                strategy mixin's ``_listen_loop`` calls ``await
+                probe.check()`` per processed candle so a cancel_requested
+                status is detected within ``cancel_poll_ms`` +
+                ``probe_timeout_s``.
             emitter: Optional progress emitter shared with
                 ``DirectDbEngine`` so both replay modes emit identical
                 WS progress events.

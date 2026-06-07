@@ -1,7 +1,7 @@
 """UUID7 format helpers used across transport validation layers.
 
-UUID7 is the canonical public-id format across Snapper (see
-``feedback_uuid7_over_uuid5``): time-ordered, collision-resistant,
+UUID7 is the canonical public-id format across Snapper (chosen over
+UUID5 for time-ordering): time-ordered, collision-resistant,
 128-bit. Segments embedded in WebSocket topics and HTTP paths must be
 proven to carry that format before the dispatcher trusts them —
 length-only checks would accept a random 36-byte string while a

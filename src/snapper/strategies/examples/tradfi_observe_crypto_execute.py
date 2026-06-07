@@ -1,7 +1,7 @@
 """Reference strategy — observe TradFi index futures, execute on crypto.
 
-**NOT auto-registered.** This module demonstrates the cross-asset pattern
-supported by Snapper / TradFi Market Data P3: subscribe to
+**NOT auto-registered.** This module demonstrates the cross-asset
+TradFi market-data pattern supported by Snapper: subscribe to
 market-data-only instruments (``can_trade=False`` on ``SymbolExchangeCapability``
 rows, e.g. Kraken FCM index futures) and emit signals whose target is an
 execution-capable instrument (``can_trade=True``) on a different venue.

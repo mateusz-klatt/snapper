@@ -3,12 +3,11 @@
 Covers the multi-tenant foundation: the
 ``create_scope_grant`` / ``handover_grant`` methods on
 ``SQLAlchemyRepository`` and the cross-scope overlap detection that
-enforces the instrument-exclusive rule (D2).
+enforces the instrument-exclusive rule.
 
 These tests run against a real on-disk SQLite database (no mocks) so
 the partial unique indexes, advisory-lock no-op, and SCD2 close+insert
 flow are exercised end-to-end.
-Sections 3.6, 3.7, 14.6 D2/D3, 14.7.1, 14.7.2, 14.7.4, 14.7.8.
 """
 
 from contextlib import asynccontextmanager
@@ -311,7 +310,7 @@ class TestCreateScopeGrant:
     ) -> None:
         """Duplicate underlying grants conflict even when mappings are empty.
 
-        Regression for a Codex phase-close finding: when an underlying has
+        Regression for a correctness finding: when an underlying has
         zero active ``instrument_underlying_mappings`` rows, scope expansion
         returns an empty set on both sides and the set-intersection overlap
         check would fall through to the DB partial unique index,

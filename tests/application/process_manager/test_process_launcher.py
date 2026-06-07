@@ -6224,12 +6224,11 @@ class TestStartPerWalletInstanceByName:
     ) -> None:
         """A failed manual restart preserves the previously stopped instance.
 
-        Codex review on parent PR #50 caught that the original
-        register-before-start pattern unconditionally popped the
-        instance on failure, dropping a stopped-but-configured per-wallet
-        executor from the summary/configured snapshots on a transient
-        startup hiccup. Fix: capture the prior entry and restore it on
-        exception instead of popping.
+        The original register-before-start pattern unconditionally
+        popped the instance on failure, dropping a stopped-but-configured
+        per-wallet executor from the summary/configured snapshots on a
+        transient startup hiccup. The current behaviour captures the
+        prior entry and restores it on exception instead of popping.
 
         Given: A factory with an existing ``instance_configs[name]``
             entry (the legitimate stopped instance),
@@ -7371,7 +7370,7 @@ class TestMaybeScheduleRestart:
     async def test_double_schedule_suppressed_by_lock(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A live pending restart task suppresses a second schedule (Fix 1).
+        """A live pending restart task suppresses a second schedule.
 
         Given: a FAILED death that scheduled a restart task still asleep in
             its backoff (not done),
@@ -7432,7 +7431,7 @@ class TestRestartEscalation:
 
         Given: a CORE publisher whose uptime is always 95s (< 120s healthy),
         When: _maybe_schedule_restart processes six consecutive FAILED deaths,
-        Then: the feed failure event trips — the v2 livelock case is closed.
+        Then: the feed failure event trips — the slow-crash livelock case is closed.
         """
         factory = ProcessLauncherService(MagicMock())
         config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
@@ -7484,7 +7483,7 @@ class TestRestartEscalation:
             healthy uptime, repeated 30 times,
         When: _maybe_schedule_restart processes each FAILED death,
         Then: the long healthy run resets the backstop every cycle and the
-            feed failure event never trips (v3.1 false-escalation fix).
+            feed failure event never trips (the false-escalation guard holds).
         """
         factory = ProcessLauncherService(MagicMock())
         config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ALWAYS)
@@ -7955,7 +7954,7 @@ class TestStartProcessWatchdogMarkers:
     async def test_records_config_and_uptime_but_not_desired(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A successful start records config + uptime, NOT desired (R5-1).
+        """A successful start records config + uptime, NOT desired.
 
         Given: a config started via start_process (subprocess spawn stubbed),
         When: start_process completes,
@@ -7978,7 +7977,7 @@ class TestStartProcessWatchdogMarkers:
 
     @pytest.mark.asyncio
     async def test_arm_desired_running_sets_running(self) -> None:
-        """``_arm_desired_running`` is the lock-owned desired=RUNNING write (R5-1).
+        """``_arm_desired_running`` is the lock-owned desired=RUNNING write.
 
         Given: a launcher with no desired state for a name,
         When: ``_arm_desired_running`` is called,
@@ -7993,7 +7992,7 @@ class TestStartProcessWatchdogMarkers:
     async def test_start_failure_retains_watchdog_markers(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A startup failure leaves the watchdog markers in place (R2-1).
+        """A startup failure leaves the watchdog markers in place.
 
         Given: a name already armed desired=RUNNING (a respawn / manual caller
             arms it before calling start_process) whose subprocess spawn raises,
@@ -8219,7 +8218,7 @@ class TestClearWatchdogState:
         When: _clear_watchdog_state runs,
         Then: every per-name dict drops the name EXCEPT _restart_locks — the
             lock is deliberately retained so a caller queued on it can never
-            be split onto a second freshly-minted lock (Fix 3). The lock is
+            be split onto a second freshly-minted lock. The lock is
             garbage collected only in the fully-drained stop_all_processes
             context.
         """
@@ -8592,7 +8591,7 @@ class _RaceLock:
     On ``__aenter__`` it deterministically inserts ``name`` into the
     shared ``started_processes`` mapping, modelling a watchdog respawn
     that started the process while a manual caller was waiting to acquire
-    the lock. This drives the in-lock re-check branch (Fix 4) without
+    the lock. This drives the in-lock re-check branch without
     spawning helper tasks, so the test leaks no pending coroutine.
     """
 
@@ -8633,11 +8632,11 @@ class _RaceLock:
 
 
 class TestWatchdogConcurrencyRegressions:
-    """Focused regressions for the six v3.1 watchdog concurrency fixes.
+    """Focused regressions for the six watchdog concurrency fixes.
 
-    Each test drives the exact race the converged Codex+Copilot review
-    flagged on the production feed-container watchdog: double-schedule,
-    abandoned failed-respawn, lock-pop split, manual-start TOCTOU,
+    Each test drives one of the exact races identified on the
+    production feed-container watchdog: double-schedule, abandoned
+    failed-respawn, lock-pop split, manual-start TOCTOU,
     stop-during-backoff, and terminal-state leak on non-native paths.
     """
 
@@ -8645,7 +8644,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_fix1_pending_restart_blocks_second_schedule(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A live pending restart task suppresses a second schedule (Fix 1).
+        """A live pending restart task suppresses a second schedule.
 
         Given: a FAILED death scheduled a restart task still asleep in its
             backoff (not done), with create_task tracked,
@@ -8685,7 +8684,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_fix2_failed_respawn_rearms_so_next_attempt_proceeds(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failed respawn reschedules so the next attempt spawns (Fix 2).
+        """A failed respawn reschedules so the next attempt spawns.
 
         Given: start_process RETAINS desired/config/uptime on a failing
             call (as the production primitive now does — it no longer
@@ -8722,7 +8721,7 @@ class TestWatchdogConcurrencyRegressions:
 
     @pytest.mark.asyncio()
     async def test_fix3_clear_preserves_lock_identity_for_waiter(self) -> None:
-        """clear_watchdog_state keeps the lock so a waiter is not split (Fix 3).
+        """clear_watchdog_state keeps the lock so a waiter is not split.
 
         Given: a per-name lock that a caller currently holds, with another
             coroutine queued to acquire it,
@@ -8757,7 +8756,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_fix4_manual_start_rechecks_running_inside_lock(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Manual start re-checks started_processes inside the lock (Fix 4).
+        """Manual start re-checks started_processes inside the lock.
 
         Given: a manual start_process_by_name that passes the pre-lock
             not-running check, then blocks on the per-name lock held by a
@@ -8813,7 +8812,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_fix4_per_wallet_start_rechecks_running_inside_lock(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Per-wallet manual start re-checks running inside the lock (Fix 4).
+        """Per-wallet manual start re-checks running inside the lock.
 
         Given: a per-wallet start that passes the pre-lock not-running check,
             then blocks on the per-name lock held by a simulated watchdog
@@ -8875,7 +8874,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_fix4_per_wallet_in_lock_recheck_without_prior_config(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """In-lock recheck with no prior instance config still short-circuits (Fix 4).
+        """In-lock recheck with no prior instance config still short-circuits.
 
         Given: a per-wallet start for an instance NOT previously registered
             in instance_configs (so prior_instance_config is None); the
@@ -8884,7 +8883,7 @@ class TestWatchdogConcurrencyRegressions:
         When: the per-wallet start acquires the lock,
         Then: the in-lock re-check returns ALREADY_RUNNING without calling
             start_process and without a prior-config restore (the no-prior
-            branch), exercising the 2192->2194 branch.
+            branch).
         """
         name = "executor_kraken_w0123456789ab"
         settings = MagicMock()
@@ -8934,7 +8933,7 @@ class TestWatchdogConcurrencyRegressions:
 
     @pytest.mark.asyncio()
     async def test_fix5_stop_wins_when_process_already_gone(self) -> None:
-        """A stop cancels a pending respawn even with no live process (Fix 5).
+        """A stop cancels a pending respawn even with no live process.
 
         Given: a process already gone from started_processes but with
             desired=RUNNING and a pending restart task still queued (a
@@ -8963,7 +8962,7 @@ class TestWatchdogConcurrencyRegressions:
 
     @pytest.mark.asyncio()
     async def test_fix6_one_shot_completion_clears_watchdog_state(self) -> None:
-        """A completed non-native ONE_SHOT clears its watchdog state (Fix 6).
+        """A completed non-native ONE_SHOT clears its watchdog state.
 
         Given: a ONE_SHOT thread-mode process whose markers start_process
             armed before spawning,
@@ -8988,7 +8987,7 @@ class TestWatchdogConcurrencyRegressions:
 
     @pytest.mark.asyncio()
     async def test_fix6_task_completion_clears_watchdog_state(self) -> None:
-        """A completed asyncio-task process clears its watchdog state (Fix 6).
+        """A completed asyncio-task process clears its watchdog state.
 
         Given: a thread/async-task process with watchdog markers armed,
         When: _handle_task_completion runs on its finished task,
@@ -9015,7 +9014,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_r2_1_failed_respawn_does_not_resurrect_a_stopped_process(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failing respawn that races a stop neither resurrects nor orphans (R2-1).
+        """A failing respawn that races a stop neither resurrects nor orphans.
 
         Given: a watchdog-managed publisher whose respawn is in flight; the
             respawning start_process RAISES, and while it runs a concurrent
@@ -9049,7 +9048,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_r2_1_cancel_pending_restart_cancels_successor_task(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A stop's cancel loops until the successor task is also gone (R2-1).
+        """A stop's cancel loops until the successor task is also gone.
 
         Given: a pending restart task T1 that, when cancelled+awaited,
             installs a fresh successor task T2 into _restart_tasks[name]
@@ -9097,7 +9096,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_r2_2_duplicate_completion_while_pending_is_noop(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A duplicate FAILED completion while a restart sleeps is a no-op (R2-2).
+        """A duplicate FAILED completion while a restart sleeps is a no-op.
 
         Given: a watchdog-managed publisher with a live pending restart task
             (still asleep in its backoff) and the escalation counters parked
@@ -9136,7 +9135,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_r2_3_cancel_mid_start_finalizes_run_record(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A cancel landing mid-start_process finalizes the run record (R2-3).
+        """A cancel landing mid-start_process finalizes the run record.
 
         Given: start_process that has created the active run record and is
             suspended in the spawn region (before the process is live) when
@@ -9185,7 +9184,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_r2_4_failed_manual_start_keeps_managed_name_recoverable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failed manual start of a managed name stays recoverable (R2-4).
+        """A failed manual start of a managed name stays recoverable.
 
         Given: a watchdog-managed publisher (desired=RUNNING + config armed)
             with a pending restart during backoff; an operator triggers a
@@ -9195,9 +9194,9 @@ class TestWatchdogConcurrencyRegressions:
         Then: because the name was already watchdog-managed before the manual
             start, the watchdog markers are NOT cleared — desired stays
             RUNNING and the config is retained — and recovery is re-armed
-            with a fresh pending restart task (R3-1) so the publisher is not
+            with a fresh pending restart task so the publisher is not
             left permanently disarmed (it can still be recovered) rather than
-            left dead with no desired/config (the R2-4 regression).
+            left dead with no desired/config.
         """
         factory = ProcessLauncherService(MagicMock())
         config = _watchdog_config(name="zmq_broker", role=ProcessRoleEnum.CORE)
@@ -9240,7 +9239,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_r2_4_failed_manual_start_of_new_name_clears_markers(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failed manual start of a brand-new name leaks no markers (R2-1/R2-4).
+        """A failed manual start of a brand-new name leaks no markers.
 
         Given: a name that is NOT watchdog-managed before the manual start;
             the manual start_process_by_name calls start_process which arms
@@ -9282,7 +9281,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_r2_4_failed_per_wallet_start_keeps_managed_instance_recoverable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failed per-wallet start of a managed instance stays recoverable (R2-4).
+        """A failed per-wallet start of a managed instance stays recoverable.
 
         Given: a watchdog-managed per-wallet executor instance (desired=RUNNING
             + config armed) whose manual start_per_wallet_instance_by_name then
@@ -9291,7 +9290,7 @@ class TestWatchdogConcurrencyRegressions:
         Then: because the instance was already watchdog-managed before the
             manual start, the markers are NOT cleared — desired stays RUNNING
             and the config is retained — and recovery is re-armed with a
-            fresh pending restart task (R3-1), so the instance is not
+            fresh pending restart task, so the instance is not
             permanently disarmed (it can still be recovered), exercising the
             managed (re-arm) branch of the per-wallet failure path.
         """
@@ -9356,7 +9355,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_r3_1_failed_manual_start_rearms_recovery_for_managed_name(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failed manual start of a managed name re-arms recovery (R3-1).
+        """A failed manual start of a managed name re-arms recovery.
 
         Given: a watchdog-managed publisher with a pending restart task armed
             during backoff; an operator's manual start_process_by_name cancels
@@ -9412,7 +9411,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_r3_1_failed_manual_start_of_new_name_does_not_rearm(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failed manual start of an unmanaged name re-arms nothing (R3-1).
+        """A failed manual start of an unmanaged name re-arms nothing.
 
         Given: a name that is NOT watchdog-managed before the manual start;
             start_process arms fresh markers then RAISES,
@@ -9451,7 +9450,7 @@ class TestWatchdogConcurrencyRegressions:
 
     @pytest.mark.asyncio()
     async def test_r3_1_rearm_does_not_stack_when_task_already_live(self) -> None:
-        """Re-arm is a no-op when a live restart task is already pending (R3-1).
+        """Re-arm is a no-op when a live restart task is already pending.
 
         Given: a managed name whose _restart_tasks entry is still a live (not
             done) task when _rearm_recovery_after_manual_start_failure is
@@ -9481,7 +9480,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_r3_2_cancel_during_create_run_record_finalizes_run(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A cancel inside _try_create_run_record finalizes the run (R3-2).
+        """A cancel inside _try_create_run_record finalizes the run.
 
         Given: start_process whose _try_create_run_record has stamped
             active_runs and is suspended awaiting the run-event emit when a
@@ -9529,7 +9528,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_r3_2_normal_exception_failure_does_not_double_finalize(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A normal start_process failure does not double-finalize (R3-2).
+        """A normal start_process failure does not double-finalize.
 
         Given: start_process whose spawn raises an ordinary Exception after the
             run record was created — the normal except-Exception path runs
@@ -9576,7 +9575,7 @@ class TestWatchdogConcurrencyRegressions:
 
     @pytest.mark.asyncio()
     async def test_r4_1_handle_manual_start_stop_race_returns_none_when_running(self) -> None:
-        """The post-spawn re-check is a no-op when desired stays RUNNING (R4-1).
+        """The post-spawn re-check is a no-op when desired stays RUNNING.
 
         Given: a watchdog-managed name whose desired state is still RUNNING
             after the in-flight manual start spawned it (no racing stop),
@@ -9595,7 +9594,7 @@ class TestWatchdogConcurrencyRegressions:
 
     @pytest.mark.asyncio()
     async def test_r4_1_manual_start_post_spawn_recheck_tears_down(self) -> None:
-        """A manual start whose post-spawn re-check sees STOPPED tears down (R4-1).
+        """A manual start whose post-spawn re-check sees STOPPED tears down.
 
         Given: the in-flight manual start spawned a live process, but a
             concurrent stop flipped desired to STOPPED before the post-spawn
@@ -9624,7 +9623,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_r4_1_bare_start_post_spawn_stopped_tears_down(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A bare manual start whose stop won post-spawn returns the stop (R4-1).
+        """A bare manual start whose stop won post-spawn returns the stop.
 
         Given: a manual ``start_process_by_name`` where ``start_process``
             registers the live process but a concurrent stop set desired to
@@ -9665,7 +9664,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_r4_1_per_wallet_start_post_spawn_stopped_tears_down(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A per-wallet manual start whose stop won post-spawn tears down (R4-1).
+        """A per-wallet manual start whose stop won post-spawn tears down.
 
         Given: a per-wallet executor manual start where ``start_process``
             registers the live instance but a concurrent stop set desired to
@@ -9726,7 +9725,7 @@ class TestWatchdogConcurrencyRegressions:
 
     @pytest.mark.asyncio()
     async def test_r4_1_rearm_gated_when_stop_set_desired_stopped(self) -> None:
-        """The R3-1 re-arm is suppressed when a stop set desired=STOPPED (R4-1).
+        """The recovery re-arm is suppressed when a stop set desired=STOPPED.
 
         Given: a watchdog-managed name whose desired state was flipped to
             STOPPED by a concurrent stop, with no pending restart task,
@@ -9744,7 +9743,7 @@ class TestWatchdogConcurrencyRegressions:
 
     @pytest.mark.asyncio()
     async def test_r4_1_stop_racing_inflight_manual_start_wins_via_lock(self) -> None:
-        """Stop racing an in-flight manual start wins and leaves no orphan (R4-1).
+        """Stop racing an in-flight manual start wins and leaves no orphan.
 
         Given: a watchdog-managed publisher; an in-flight manual start holds the
             per-name lock and is suspended inside ``start_process`` after it set
@@ -9796,7 +9795,7 @@ class TestWatchdogConcurrencyRegressions:
 
     @pytest.mark.asyncio()
     async def test_r4_1_stop_takes_lock_no_self_deadlock(self) -> None:
-        """Stop takes the lock for its decision without self-deadlock (R4-1).
+        """Stop takes the lock for its decision without self-deadlock.
 
         Given: a watchdog-managed publisher with a live process and a pending
             delayed-restart task,
@@ -9824,13 +9823,13 @@ class TestWatchdogConcurrencyRegressions:
 
     @pytest.mark.asyncio()
     async def test_r5_1_stop_recancels_task_created_in_prelock_window(self) -> None:
-        """Stop kills a restart task armed during its pre-lock window (R5-1).
+        """Stop kills a restart task armed during its pre-lock window.
 
         Given: a watchdog-managed, not-running publisher with a pending sleeping
             ``_restart_tasks[name]``; a manual start fails and re-arms recovery
             DURING the stop's pre-lock ``_cancel_pending_restart`` window, and
-            the failing manual start clobbered desired back to RUNNING (the R5-1
-            race),
+            the failing manual start clobbered desired back to RUNNING (the
+            re-arm race),
         When: the stop acquires the per-name lock,
         Then: the in-lock re-cancel (:meth:`_cancel_restart_tasks_locked`) kills
             the window-created task; after both settle there is NO surviving
@@ -9881,7 +9880,7 @@ class TestWatchdogConcurrencyRegressions:
     async def test_r5_1_start_process_does_not_arm_desired(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """start_process never sets desired=RUNNING by itself (R5-1 Option 1).
+        """start_process never sets desired=RUNNING by itself.
 
         Given: a stop has declared desired=STOPPED for a name,
         When: ``start_process`` runs the LOCK-FREE primitive for that name,
@@ -9903,7 +9902,7 @@ class TestWatchdogConcurrencyRegressions:
 
     @pytest.mark.asyncio()
     async def test_r5_1_in_lock_recancel_terminates_no_deadlock(self) -> None:
-        """In-lock re-cancel of a window task terminates without deadlock (R5-1).
+        """In-lock re-cancel of a window task terminates without deadlock.
 
         Given: a not-running name whose ``_restart_tasks`` entry is a live
             delayed-restart task sleeping its backoff OUTSIDE the per-name lock,

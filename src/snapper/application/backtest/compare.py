@@ -3,7 +3,7 @@
 Pure functions that turn two sets of run artifacts into the diff
 shapes exposed by ``GET /api/backtests/compare/{id}``. Diff is
 always recomputed on GET from the current artifact rows so a
-metric-schema change never stales a persisted diff — see.
+metric-schema change never stales a persisted diff.
 """
 
 from collections import Counter

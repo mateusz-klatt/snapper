@@ -49,6 +49,33 @@ route is quarantined and the next handshake uses an alternate.
 
 ## Adding a tunnel
 
+Preferred path: run the provisioning helper from a checkout that has
+`scripts/` available. The production Docker image does not copy
+`scripts/` into `/app`, so run it on the host or bind-mount the
+checkout into a maintenance container with the same `DB_URL`.
+
+```bash
+poetry run python scripts/provision_egress_tunnel.py \
+  --tunnel-id wg-uk-1 \
+  --interface wg-uk-1 \
+  --address 10.64.12.34 \
+  --prefix-length 32 \
+  --private-key-file ./secrets/wg-uk-1.key \
+  --peer-pubkey "<peer-public-key>" \
+  --peer-endpoint vpn.example.com:51820 \
+  --socks5-listen-port 1081 \
+  --priority 10 \
+  --dry-run
+```
+
+Remove `--dry-run` after validation. The helper writes the descriptor,
+encrypted private/optional preshared key settings, and merges the SOCKS5
+route into `egress_pool`. It can also restart the sidecar with
+`--restart-sidecar`; snapper-api still needs a restart after `egress_pool`
+changes so the pool is rebuilt during lifespan startup.
+
+Manual path:
+
 Three DB settings per tunnel:
 
 | Key | Encrypted? | Type | Example |

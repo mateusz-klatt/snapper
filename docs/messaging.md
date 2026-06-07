@@ -289,16 +289,21 @@ The old `messaging.schemas.messages` module still exists but only contains `pars
 ### TickData
 
 ```python
+from datetime import UTC, datetime
+
 from snapper.messaging.schemas.data import TickData
 
 tick = TickData(
+    public_id="019e1a2b-0000-7000-8000-000000000101",
+    session_id="019e1a2b-0000-7000-8000-000000000001",
+    sequence_id=1,
+    timestamp=datetime.now(UTC),
     instrument="BTC-USD",
     exchange="kraken",
     bid=41990.0,
     ask=42010.0,
     last=42000.0,
     volume=0.5,
-    timestamp=datetime.now(UTC),
 )
 ```
 
@@ -323,9 +328,15 @@ tick = TickData(
 ### CandleData
 
 ```python
+from datetime import UTC, datetime
+
 from snapper.messaging.schemas.data import CandleData
 
 candle = CandleData(
+    public_id="019e1a2b-0000-7000-8000-000000000102",
+    session_id="019e1a2b-0000-7000-8000-000000000001",
+    sequence_id=2,
+    timestamp=datetime.now(UTC),
     instrument="BTC-USD",
     exchange="kraken",
     timeframe="1h",
@@ -335,7 +346,6 @@ candle = CandleData(
     low=41800.0,
     close=42300.0,
     volume=1234.56,
-    timestamp=datetime.now(UTC),
 )
 ```
 
@@ -361,9 +371,15 @@ candle = CandleData(
 ### SignalData
 
 ```python
+from datetime import UTC, datetime
+
 from snapper.messaging.schemas.data import SignalData
 
 signal = SignalData(
+    public_id="019e1a2b-0000-7000-8000-000000000201",
+    session_id="019e1a2b-0000-7000-8000-000000000010",
+    sequence_id=1,
+    timestamp=datetime.now(UTC),
     instrument="BTC-USD",
     exchange="paper",
     side="buy",
@@ -397,9 +413,15 @@ enforces this invariant at construction time so invalid paper signals cannot be 
 ### OrderRequestData
 
 ```python
+from datetime import UTC, datetime
+
 from snapper.messaging.schemas.data import OrderRequestData
 
 order = OrderRequestData(
+    public_id="019e1a2b-0000-7000-8000-000000000301",
+    session_id="019e1a2b-0000-7000-8000-000000000020",
+    sequence_id=1,
+    timestamp=datetime.now(UTC),
     instrument="BTC-USD",
     exchange="kraken",
     client_order_id="ord_123",
@@ -415,9 +437,15 @@ order = OrderRequestData(
 ### ExecutionData
 
 ```python
+from datetime import UTC, datetime
+
 from snapper.messaging.schemas.data import ExecutionData
 
 execution = ExecutionData(
+    public_id="019e1a2b-0000-7000-8000-000000000401",
+    session_id="019e1a2b-0000-7000-8000-000000000030",
+    sequence_id=1,
+    timestamp=datetime.now(UTC),
     instrument="BTC-USD",
     exchange="kraken",
     client_order_id="ord_123",
@@ -430,6 +458,7 @@ execution = ExecutionData(
     fee=0.001,
     fee_asset="USD",
     status="filled",
+    executed_at=datetime.now(UTC),
 )
 ```
 
@@ -441,9 +470,15 @@ REST `/orders` endpoint, so the frontend can render shorts and reduce-only
 intent.
 
 ```python
+from datetime import UTC, datetime
+
 from snapper.messaging.schemas.data import OrderData
 
 order_status = OrderData(
+    public_id="019e1a2b-0000-7000-8000-000000000501",
+    session_id="019e1a2b-0000-7000-8000-000000000020",
+    sequence_id=2,
+    timestamp=datetime.now(UTC),
     instrument="BTC-USD",
     exchange="kraken",
     client_order_id="ord_123",
@@ -454,6 +489,7 @@ order_status = OrderData(
     filled_size=0.0,
     status="accepted",
     price=42000.0,
+    created_at=datetime.now(UTC),
     leverage=3,
     reduce_only=False,
 )
@@ -462,11 +498,15 @@ order_status = OrderData(
 ### HeartbeatData
 
 ```python
+from datetime import UTC, datetime
+
 from snapper.messaging.schemas.data import HeartbeatData
 
 heartbeat = HeartbeatData(
+    public_id="019e1a2b-0000-7000-8000-000000000601",
     session_id="019e1a2b-0000-7000-8000-000000000001",
     sequence_id=1,
+    timestamp=datetime.now(UTC),
     component="zmq_broker",
     status="healthy",
     sequence=1,
@@ -624,7 +664,7 @@ raw_socket.connect("tcp://127.0.0.1:7500")
 publisher = ValidatedPublisher(raw_socket)
 
 topic = "market.kraken.BTC-USD.candles.1h"
-payload = candle_data.to_json().encode()
+payload = candle_data.publish_to(topic)
 await publisher.send_multipart(topic, payload)
 publisher.close()
 ```

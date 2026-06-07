@@ -1,7 +1,7 @@
 """REST API routes for wallet credential management.
 
-All endpoints require ``MANAGE_WALLET_CREDENTIALS`` (ADMIN only at
- Launch). The GET listing returns ``CredentialSummary``
+All endpoints require ``MANAGE_WALLET_CREDENTIALS`` (ADMIN only).
+The GET listing returns ``CredentialSummary``
 projections that deliberately omit the ``encrypted_payload`` column
 so ciphertext never reaches the wire. Create and rotate accept
 plaintext credential fields in the request body and Fernet-encrypt

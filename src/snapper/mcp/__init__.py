@@ -14,8 +14,7 @@ Composed layers inside :func:`build_mcp_app` (outermost first)
        verify + admin-bus-driven cache eviction.
     3. :class:`PrincipalRateLimitMiddleware` — per-principal
        throttle reading ``request.state.token_claims`` set by the
-       middleware above (, closure of the
-         Finding).
+       middleware above.
     4. Downstream FastMCP Streamable HTTP dispatcher with tools
        registered via :func:`register_mcp_tools`.
 CORS is NOT re-applied: :class:`~fastapi.middleware.cors.CORSMiddleware`

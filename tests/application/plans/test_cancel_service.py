@@ -485,7 +485,7 @@ def test_compensate_module_logs_secondary_failure(caplog: Any) -> None:
 
 
 class TestPlansCancelServiceR1:
-    """R1 fix-up coverage for the post-2-model-gate findings."""
+    """Follow-up coverage for the cancel-claim race-reclassification paths."""
 
     @pytest.mark.asyncio
     async def test_cancel_command_stamps_source_surface_mcp(self) -> None:

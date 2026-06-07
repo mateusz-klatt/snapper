@@ -212,7 +212,7 @@ class StrategySignal:
     strength: float
     reason: str
     price: float
-    timestamp: datetime | None
+    timestamp: datetime | None = None
 ```
 
 ## Built-in Strategies
@@ -365,6 +365,7 @@ semantics").
 
 ```python
 from snapper.messaging.schemas.data import CandleData
+from snapper.core.types import TradeSide
 from snapper.strategies.base import BaseStrategy, StrategyConfig, StrategySignal
 from snapper.strategies.decorators import register_strategy, create_strategy_process
 from snapper.strategies.multi_leg import MultiLegSpreadMixin

@@ -1250,7 +1250,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     def _cleanup_expired_orphans(self) -> None:
         """Remove orphaned executions that exceeded TTL.
 
-        Called from two sites (HV2-M13):
+        Called from two sites:
 
         - The scheduled 60s cleanup task — handles steady-state cases
           where no new orphans arrive to trigger lazy eviction.

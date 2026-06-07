@@ -5,8 +5,7 @@ sub-apps mounted via ``app.mount`` (the same reason
 class:`snapper.mcp.server.BearerAuthMiddleware` is re-applied
 here). Without a dedicated limiter, an automated AI client in a
 retry loop could pound ``/api/mcp`` faster than any other surface
-in Snapper — exactly the traffic pattern the MCP surface was
-designed to absorb. closes that by wiring a
+in Snapper. This module closes that gap by wiring a
 Starlette middleware that consumes one
 class:`~limits.limits.RateLimitItem` per request, keyed by the
 authenticated principal.

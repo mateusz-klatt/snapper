@@ -1,4 +1,4 @@
-"""Tests for the push-beta rollout gate helpers (iOS-5 sub-scope b)."""
+"""Tests for the push-beta rollout gate helpers."""
 
 import json
 

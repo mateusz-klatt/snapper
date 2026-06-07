@@ -112,7 +112,7 @@ uvicorn deployments and parallel `trade-zmq` instances.
 | -------- | ------- | ----------- |
 | `SNAPPER_COORDINATOR_INSTANCE_ID` | `0` | Zero-based shard index for this instance |
 | `SNAPPER_COORDINATOR_INSTANCE_COUNT` | `1` | Total number of instances in the cluster |
-| `SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS` | `1000` | Per-tick upper bound on outbox rows scanned by this shard |
+| `SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS` | `1000` | Per-tick upper bound on outbox rows scanned by this shard; set to `unbounded`, `none`, or an empty value to disable the cap. Positive integers are accepted. |
 
 ### Observability Pipeline
 

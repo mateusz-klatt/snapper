@@ -85,7 +85,7 @@ BACKTEST_EVENTS: frozenset[str] = frozenset(typing.get_args(BacktestProgressEven
 Single source of truth: the Literal type in
 ``snapper.messaging.schemas.data.BacktestProgressEvent`` is mirrored
 here via ``typing.get_args`` so the topic validator, the emitter
-payload schema (Step 2b), and every test read from the same tuple.
+payload schema, and every test read from the same tuple.
 """
 logger = logging.getLogger(__name__)
 
@@ -735,7 +735,7 @@ def _validate_accruals_topic(topic: str) -> tuple[bool, str]:
 
 
 def _validate_alerts_topic(topic: str) -> tuple[bool, str]:
-    """Validate an iOS Push Foundation alert topic.
+    """Validate an iOS push-notification alert topic.
 
     Expected shape: ``alerts.{user_public_id}.{alert_type}`` where
     ``user_public_id`` is a UUID7 string and ``alert_type`` is one of

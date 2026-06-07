@@ -5,7 +5,7 @@ threshold breach it emits a single reduce_only market close order and
 transitions to active (via service fill tracking). Brackets are stateless:
 trigger thresholds live in plan.params (immutable after create).
 
-Decision C1: brackets require ``supports_reduce_only`` on the venue.
+Brackets require ``supports_reduce_only`` on the venue.
 """
 
 from datetime import datetime
@@ -177,7 +177,7 @@ class BracketEvaluator(PlanEvaluator):
             raise ValueError("At least one of sl_price or tp_price required")
 
     def requires_capabilities(self) -> list[str]:
-        """Brackets require reduce_only support (Decision C1).
+        """Brackets require reduce_only support.
 
         Returns:
             List containing supports_reduce_only flag name.

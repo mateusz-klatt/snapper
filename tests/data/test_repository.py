@@ -1556,9 +1556,8 @@ async def test_sqlalchemy_repository_forgets_closed_aiosqlite_connections(
     """Disposing the engine empties the aiosqlite tracker.
 
     Given: file-backed SQLite now uses a small ``AsyncAdaptedQueuePool``
-        (architect review 2026-05-15) so each session checks a
-        connection back to the pool on close instead of tearing it
-        down,
+        so each session checks a connection back to the pool on close
+        instead of tearing it down,
     When: ``engine.dispose()`` runs,
     Then: every aiosqlite worker connection ever registered in the
         shutdown tracker is forgotten — the engine close path closes
@@ -7929,7 +7928,7 @@ async def test_claim_execution_plan_cancel_key_mismatch_blocks_overwrite(tmp_pat
 async def test_claim_execution_plan_cancel_key_mismatch_precedence_over_terminal(
     tmp_path: Path,
 ) -> None:
-    """R5 final: ``key_mismatch`` precedence over ``terminal``.
+    """``key_mismatch`` takes precedence over ``terminal``.
 
     Given: a plan that ran to terminal under key-A,
     When: caller B claims with key-B,

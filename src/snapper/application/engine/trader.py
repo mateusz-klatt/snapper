@@ -251,8 +251,7 @@ class TraderCoordinator(RegisterableProcess):
                 without going through the DB-backed settings service.
                 When ``None`` (production), :meth:`_initialize_settings`
                 upgrades ``self.settings`` via
-                func:`get_settings_with_service` exactly as before
-                   Contract — see
+                func:`get_settings_with_service` exactly as before.
         """
         self.settings = get_settings()
         self._injected_settings: AppSettings | None = settings
@@ -317,7 +316,7 @@ class TraderCoordinator(RegisterableProcess):
         compatibility with the single-wallet template path.
 
         The wallet-aware key is what unblocks the
-        ``_on_signal`` fail-closed guard lifted in this same commit:
+        ``_on_signal`` fail-closed guard:
         the recovery sites at :meth:`_recover_from_checkpoints`,
         :meth:`_recover_from_executions`, and
         :meth:`_recover_active_orders` all parse the persisted
@@ -371,7 +370,7 @@ class TraderCoordinator(RegisterableProcess):
         and enters the main trading loop.
         ``self._ownership`` is built AFTER settings resolve
         (``_initialize_settings``) and BEFORE the trade service / outbox
-        / reconciliation loops are constructed — see.
+        / reconciliation loops are constructed.
         """
         logger.info("Starting ZMQ Signal TraderCoordinator")
         logger.info(f"Signal Topics: {self.signal_topics}")
@@ -1105,7 +1104,7 @@ class TraderCoordinator(RegisterableProcess):
 
         Issues a single ``get_active_orders_for_recovery`` call with
         ``exchange=None``; the repository then returns rows for every
-        exchange in one round-trip (HV2-M3). The legacy implementation
+        exchange in one round-trip. An earlier implementation
         looped over each :class:`OrderExchange` value and paid one
         request per exchange.
         """
@@ -1365,7 +1364,7 @@ class TraderCoordinator(RegisterableProcess):
         ``existing`` and ``now`` are supplied by the parent
         :meth:`_reconcile_position_cycles` so the entire engine-set
         shares one batched ``get_open_position_cycles_for_shards``
-        result (HV2-M4) and one bus timestamp.
+        result and one bus timestamp.
         """
         if not engine.wallet_public_id:
             logger.warning(
@@ -1734,7 +1733,8 @@ class TraderCoordinator(RegisterableProcess):
         ExecutionData -> _handle_execution_fill
         OrderData -> _handle_order_status
         OrderEventData -> _handle_order_event
-          V1.2 — under multi-instance partitioning
+
+        Under multi-instance partitioning
         (``instance_count > 1``) the shared ZMQ broker delivers every
         venue event to every coordinator. This method drops events that
         don't belong to this coordinator BEFORE the handlers would

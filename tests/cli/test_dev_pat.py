@@ -595,7 +595,7 @@ class TestDecodeJwtExp:
 
 
 class TestDevMintPatFileWriteHardening:
-    """Cover Codex post-impl review fixes — atomic file create + parent mode warning + mkdir failure."""
+    """Cover file-write hardening — atomic file create + parent mode warning + mkdir failure."""
 
     def test_mkdir_failure_routes_through_fatal_stderr(
         self,
@@ -706,7 +706,7 @@ class TestDevMintPatFileWriteHardening:
 
 
 class TestDevMintPatConnectionFailure:
-    """Cover delegate-create connection failure (Codex post-impl review finding)."""
+    """Cover delegate-create connection failure (a post-implementation review finding)."""
 
     def test_delegate_connect_error_after_login_routes_through_fatal(
         self,

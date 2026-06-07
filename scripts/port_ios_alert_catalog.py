@@ -54,7 +54,7 @@ NAV_LABEL_KEY: Final[str] = "alerts.navTitle"
 
 NOTE: this is ``alerts.navTitle`` (top-level), NOT
 ``alerts.detail.navTitle`` (which is the alert-detail screen header).
-Plan Reviewer (Copilot 2026-05-18) caught this misattribution in v1.
+An earlier revision misattributed this to the detail-screen key.
 """
 
 

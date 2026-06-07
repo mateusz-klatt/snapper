@@ -19,7 +19,7 @@ Run inside the ``snapper`` container so it shares ``DB_URL`` +
     docker exec -i snapper python /app/scripts/provision_egress_tunnel.py \\
         --tunnel-id wg-eu-1 \\
         --interface wg-eu1 \\
-        --address 10.64.131.201 \\
+        --address 192.0.2.10 \\
         --prefix-length 32 \\
         --private-key-file /app/.local-secrets/wg/wg-eu-1.privkey \\
         --peer-pubkey '<peer-pubkey-44ch>' \\
@@ -51,7 +51,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--tunnel-id", required=True, help="Stable id without underscores (used in setting key)"
     )
     p.add_argument("--interface", required=True, help="WG interface name, ≤15 chars, prefix wg-")
-    p.add_argument("--address", required=True, help="Tunnel local IPv4 (e.g. 10.64.131.201)")
+    p.add_argument("--address", required=True, help="Tunnel local IPv4 (e.g. 192.0.2.10)")
     p.add_argument(
         "--prefix-length", type=int, required=True, help="Usually 32 for a single-address WG peer"
     )

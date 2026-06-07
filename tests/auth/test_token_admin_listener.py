@@ -1,11 +1,11 @@
-"""Tests for  admin-bus listener on :class:`TokenManager`.
+"""Tests for the admin-bus listener on :class:`TokenManager`.
 
-Covers the cross-instance cache-eviction half of.6.1
-deliverable 1a: on receipt of ``admin.user_deactivated`` the token
+Covers the cross-instance cache-eviction half of the kill switch:
+on receipt of ``admin.user_deactivated`` the token
 manager walks its 30-second LRU and drops every entry whose cached
 ``user_public_id`` matches the deactivated user.
 
-The ZMQ socket layer is mocked (same rationale as 's
+The ZMQ socket layer is mocked (same rationale as the WebSocket
 `test_admin_listener.py`): the recv + dispatch halves are factored
 into helpers (`_admin_recv_one_frame` + `_admin_dispatch_frame`) that
 are individually testable without a running broker.

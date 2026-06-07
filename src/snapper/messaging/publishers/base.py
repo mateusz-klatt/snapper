@@ -685,7 +685,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     async def stop(self) -> None:
         """Stop the publisher service and disconnect from exchange.
 
-        Shutdown ordering — Codex+Copilot review 2026-05-11:
+        Shutdown ordering:
 
         1. Flip ``self.running = False`` so every loop sees the stop
            signal at its next checkpoint.
@@ -1219,7 +1219,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     async def _candle_loop(self, symbols: list[str], timeframe: str) -> None:
         """Subscribe to candle data, publish to ZMQ, and hand off DB rows to the writer.
 
-        Ingest-only mirror of :meth:`_tick_loop` (HV2-H7 pattern):
+        Ingest-only mirror of :meth:`_tick_loop`:
         drains the exchange WS iterator, publishes to ZMQ via
         :meth:`_process_candle`, and enqueues the resulting row on
         :attr:`_candle_write_queue` for the dedicated writer task.
@@ -1508,7 +1508,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         the SQLite per-flush connection-acquire cost — under ``NullPool``
         a fresh session opens a new connection every time, which
         dominated the publisher's CPU once Core bulk insert eliminated
-        the ORM overhead (Codex 2026-05-11 post-HV2-H7 review).
+        the ORM overhead.
 
         When the repository is absent (tests / partial setup) yields
         ``None``; ``_flush_tick_batch`` then falls back to the no-session
@@ -1535,7 +1535,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
 
         Captures ``flushed_count`` **before** awaiting the flush so a
         future mutation of ``batch`` during ``_flush_tick_batch`` cannot
-        desync the ``task_done`` count (Codex reviewer guardrail).
+        desync the ``task_done`` count.
 
         Args:
             batch: In-flight write batch. Cleared in place on a
@@ -1631,7 +1631,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     async def _trade_loop(self, symbols: list[str]) -> None:
         """Subscribe to trade data, publish to ZMQ, and hand off DB rows to the writer.
 
-        Ingest-only mirror of :meth:`_tick_loop` (HV2-H7 pattern):
+        Ingest-only mirror of :meth:`_tick_loop`:
         drains the exchange WS iterator, publishes to ZMQ via
         :meth:`_process_trade`, and enqueues the resulting row on
         :attr:`_trade_write_queue` for the dedicated writer task.

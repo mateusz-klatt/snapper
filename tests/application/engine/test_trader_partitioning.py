@@ -4,7 +4,7 @@ Covers:
     - :meth:`TraderCoordinator._build_ownership` validation contract.
     - :meth:`TraderCoordinator._on_signal` drops foreign shards.
     - BOTH engine construction paths populate ``engine._ownership``
-      (signal at :2243 + recovery at :1055).
+      (the signal path and the recovery path).
     - :meth:`TraderCoordinator._dispatch_order_event` CID guard
       matrix: empty CID under N>1 → drop, unknown CID under N>1 →
       drop, unknown CID under N=1 → fallthrough, foreign shard under
@@ -93,7 +93,7 @@ class TestInitializeSettingsInjectedBranch:
     ) -> None:
         """With ``settings=`` kwarg, DB service upgrade is skipped.
 
-        The  contract requires ``_initialize_settings`` to
+        The contract requires ``_initialize_settings`` to
         take the injected-settings branch when ``self._injected_settings``
         is non-None: ``self.settings`` becomes the injected object, the
         DB-backed ``get_settings_with_service`` path is NOT taken, and
@@ -228,7 +228,7 @@ class TestOnSignalOwnershipFilter:
     ) -> None:
         """Halt check for a brand-new signal uses the same shard_key as engine creation.
 
-        Regression guard: Copilot R1 review of  flagged that
+        Regression guard: an earlier revision flagged that
         ``halt_key`` on the no-engine path previously used
         ``parsed.signal_type`` (i.e., the strategy tag for paper
         signals) instead of the canonical execution mode. For a paper
@@ -320,7 +320,7 @@ class TestDispatchOrderEventCIDGuard:
 
     @pytest.mark.asyncio
     async def test_unknown_cid_under_n1_fallsthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Unknown CID under N=1 falls through to the handler (pre-Phase-4 behavior)."""
+        """Unknown CID under N=1 falls through to the handler (single-instance behavior)."""
         coord = _make_coordinator_with_ownership(monkeypatch, instance_id=0, instance_count=1)
         handled_event = MagicMock()
         monkeypatch.setattr(coord, "_handle_order_event", handled_event)

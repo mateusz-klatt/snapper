@@ -39,7 +39,7 @@ class TestShardOwnershipValidation:
             ShardOwnership(**empty_kwargs)
 
     def test_valid_single_instance(self) -> None:
-        """``(0, 1)`` is the pre-Phase-4 default and must validate."""
+        """``(0, 1)`` is the single-instance default and must validate."""
         ownership = ShardOwnership(instance_id=0, instance_count=1)
         assert ownership.instance_id == 0
         assert ownership.instance_count == 1
@@ -126,7 +126,7 @@ class TestShardOwnershipOwns:
     """``owns`` semantics under single- and multi-instance deployments."""
 
     def test_single_instance_always_owns(self) -> None:
-        """At ``instance_count=1`` every key is owned — the Phase-4 no-op case."""
+        """At ``instance_count=1`` every key is owned — the no-op partitioning case."""
         ownership = ShardOwnership(instance_id=0, instance_count=1)
         for key in ("", "a", "kraken.BTC-USD.live", "paper.ETH-USD.paper.tag"):
             assert ownership.owns(key) is True

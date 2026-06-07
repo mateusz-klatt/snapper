@@ -10,10 +10,9 @@ must answer on every call
     invocation?*
 Token claims are snapshotted at login time; the enclosing scope
 grant row can be revoked at any later moment by an admin without
-invalidating the token itself. The plan's WS design addresses
-this for subscriptions via the ``admin.scope_revoked`` subscriber
-'s synchronous MCP tool dispatch needs an equivalent
-per-call gate.
+invalidating the token itself. WebSocket subscriptions handle this
+via the ``admin.scope_revoked`` subscriber, but synchronous MCP
+tool dispatch needs an equivalent per-call gate.
 func:`validate_user_wallet_scope` is that gate. It is a thin
 adapter over
 meth:`snapper.data.repository.Repository.list_accessible_wallets_for_operators`

@@ -95,8 +95,8 @@ class BrokerStatus:
 class ZmqBrokerProcess(RegisterableProcess):
     """Threaded blocking ZMQ XPUB/XSUB broker as a RegisterableProcess.
 
-    Refactored 2026-05-18 from an asyncio-loop proxy to a blocking
-    proxy running in a dedicated daemon thread. The async event loop
+    Runs a blocking proxy in a dedicated daemon thread rather than an
+    asyncio-loop proxy. The async event loop
     no longer participates in message forwarding, freeing FastAPI
     request handlers + DB writer coroutines to run without
     competition. Public ``start()``/``stop()``/``get_status()``/

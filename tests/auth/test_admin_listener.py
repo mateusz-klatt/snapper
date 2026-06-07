@@ -180,7 +180,7 @@ class TestCloseUserConnections:
     async def test_multibyte_reason_truncated_on_utf8_boundary(self) -> None:
         """Multi-byte (CJK / emoji) reason is truncated by ENCODED bytes, not chars.
 
-        Codex + Copilot : previously used `reason[:120]`
+        An earlier revision used `reason[:120]`
         which counts codepoints. A CJK or emoji-heavy reason could
         therefore push the encoded close frame above the 123-byte
         protocol limit and make `ws.close()` itself fail (then get
@@ -275,8 +275,8 @@ class TestAdminDispatchFrame:
         """Topics outside the subscribed set are silently dropped.
 
         Defensive — a misrouted frame from the broker (e.g.
-        admin.scope_revoked once  wires it but before the
-        listener restarts) must not raise out of the dispatch loop.
+        admin.scope_revoked once another listener wires it but before
+        this listener restarts) must not raise out of the dispatch loop.
         """
         manager = _make_manager()
         with patch.object(manager, "_handle_user_deactivated", new=AsyncMock()) as mock_handler:
@@ -348,7 +348,7 @@ class TestAdminRecvOneFrame:
     async def test_unicode_decode_error_returns_none_does_not_kill_loop(self) -> None:
         """Invalid UTF-8 in topic OR payload → ``None`` (loop continues).
 
-        Codex : previously the bytes→str decode happened
+        An earlier revision performed the bytes→str decode
         OUTSIDE the recv `try` block, so a `UnicodeDecodeError` could
         escape the helper and unwind `_admin_listen_loop`. Combined
         with the original `is_not_none` idempotency check on
@@ -430,7 +430,7 @@ class TestAdminListenerLifecycle:
     async def test_start_restarts_after_previous_task_finished(self) -> None:
         """A previous listener task that finished early is reaped + restarted.
 
-        Codex : original idempotency check was
+        An earlier revision used an idempotency check of
         `is not None`, which kept stale `_admin_listen_task` /
         `_admin_subscriber` / `_admin_zmq_context` refs around AFTER
         the task crashed and exited. The fix treats `task.done()` as
@@ -459,7 +459,7 @@ class TestAdminListenerLifecycle:
     async def test_concurrent_start_stop_serialised_by_lock(self) -> None:
         """`asyncio.Lock` prevents overlapping start/stop from racing.
 
-        Codex : without serialisation, a `stop` clearing the
+        Without serialisation, a `stop` clearing the
         task ref could let a concurrent `start` allocate a fresh
         socket which the in-progress `stop` would then close — losing
         the listener. The fix serialises both methods via

@@ -9,7 +9,7 @@ a key in :data:`snapper.data.archiver.EVENT_TABLES`. v1 supports event
 tables only; ``StateArchiver`` is a future-iteration extension.
 
 Three operator-controlled env vars (read directly via
-``os.environ.get`` per the A1 MVP pattern):
+``os.environ.get``):
 
 * ``RETENTION_INTERVAL_SECONDS`` (default 3600) — scheduler loop period.
 * ``RETENTION_DISABLED`` (default ``false``) — disables the loop + eager

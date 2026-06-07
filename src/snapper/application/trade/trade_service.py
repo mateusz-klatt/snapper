@@ -51,7 +51,7 @@ class PositionProjection:
     ``position_opened_at`` records the venue timestamp at which the
     current open cycle was opened (zero-crossing on the long or short
     side). It is reset to ``None`` whenever the position returns to
-    flat. The funding accrual subsystem (Stream B funding fee model)
+    flat. The funding accrual subsystem (the funding fee model)
     uses it to clamp catch-up boundaries to the current open cycle so
     accruals from a previous cycle do not retro-charge a freshly
     reopened position.

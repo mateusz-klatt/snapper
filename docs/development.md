@@ -8,7 +8,9 @@ Guidelines for developers working on the Snapper project.
 - Poetry
 - Node.js 26+ and pnpm 11+ (frontend engines, Docker UI build, and CI
   workflows all standardize on Node 26)
-- TA-Lib (C library)
+- Build tools for Python packages. TA-Lib is optional at runtime: the
+  indicator adapter uses TA-Lib when importable and falls back to pure
+  Python implementations otherwise.
 - Pre-commit hooks
 
 ## Environment Setup
@@ -418,7 +420,7 @@ Pipeline executes the same consolidated gate used locally:
 For debugging a failing pipeline locally, the equivalent steps are:
 
 1.  `make check` — Backend quality checks
-2.  `make ui-check` — Frontend lint, format, dead-code, and type checks (`ui-lint ui-format ui-dead-code ui-typecheck`)
+2.  `make ui-check` — Frontend lint, format, dead-code, type, and i18n catalog checks (`ui-lint ui-format ui-dead-code ui-typecheck ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market`)
 3.  `make check-exclusions` — No pragma/noqa/ignore bypasses
 4.  `make cov` — Backend tests with coverage
 5.  `make ui-cov` — Frontend tests with coverage

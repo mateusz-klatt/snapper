@@ -1,4 +1,4 @@
-"""Tests for  admin.scope_revoked listener on WebSocketAuthManager.
+"""Tests for the admin.scope_revoked listener on WebSocketAuthManager.
 
 Covers the mid-session revalidation half: for each
 AI_DELEGATE connection whose principal is on the affected operator,
@@ -6,8 +6,8 @@ recompute the allowed ``(exchange, symbol)`` pair set and narrow the
 client's subscriptions to the still-covered topics. The WS stays
 open — only wallet-scoped out-of-scope topics are unsubscribed; every
 other category (market, system, backtest, paper signals) keeps
-flowing.  (subscribe-time filter) ships in Commit 2; this
-test module owns the post-subscribe revalidation contract.
+flowing. The complementary subscribe-time filter is covered elsewhere;
+this test module owns the post-subscribe revalidation contract.
 
 The ZMQ socket layer is mocked; only the handler + fanout logic is
 exercised.
@@ -275,8 +275,8 @@ class TestHandleScopeRevoked:
     async def test_ws_send_text_failure_swallowed(self) -> None:
         """A broken WS client's error frame must not block the unsubscribe walk.
 
-        Per the handler is best-effort; a dead WS is cleaned up
-        elsewhere. The unsubscribe + bridge-removal happens regardless.
+        The error-frame notification is best-effort; a dead WS is cleaned
+        up elsewhere. The unsubscribe + bridge-removal happens regardless.
         """
         ws = MagicMock()
         ws.send_text = AsyncMock(side_effect=RuntimeError("socket closed"))
@@ -302,7 +302,7 @@ class TestHandleScopeRevoked:
 
         Rather than exercise the full ZMQ loop, we hit
         ``_admin_dispatch_frame`` directly with the serialised payload
-        to verify the branch added in Commit 3 wires ScopeRevokedData
+        to verify the dispatch branch wires ScopeRevokedData
         → _handle_scope_revoked cleanly without affecting the
         user-deactivated branch.
         """

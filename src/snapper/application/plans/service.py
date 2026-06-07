@@ -4,8 +4,8 @@ Subscribes to tick and execution ZMQ topics and dispatches events to
 the correct PlanEvaluator instance for each active plan. Handles plan
 lifecycle (create → active → completed/cancelled/failed), periodic
 checkpointing, and crash recovery from persisted checkpoints.
-Only ManualOnceEvaluator. Other evaluators added in
-Phases 2-5.
+Dispatches to the registered evaluator set (manual_once, bracket,
+trailing_stop).
 """
 
 import asyncio
@@ -301,7 +301,7 @@ class PlanExecutorService(RegisterableProcess):
         Args:
             plan: Recovered plan row in ``cancel_requested`` status.
 
-        Performance (HV2-M16): The child->parent plan lookup is now
+        Performance: The child->parent plan lookup is now
         batched via :meth:`Repository.get_plan_public_ids_for_client_order_ids`
         once per plan instead of one round-trip per child id. Wide
         plans (10-100 children) used to issue that many sequential
@@ -336,7 +336,7 @@ class PlanExecutorService(RegisterableProcess):
     ) -> dict[str, str | None]:
         """Resolve each child client_order_id to its linked plan public id.
 
-        Prefers a single batched repository call (HV2-M16). If the
+        Prefers a single batched repository call. If the
         batched call fails, falls back to per-child single-row
         lookups so one transient DB error does not skip the whole
         plan's recovery — matching the legacy per-child fail-soft
@@ -464,7 +464,7 @@ class PlanExecutorService(RegisterableProcess):
             child_client_order_id: Child order to cancel.
             native_instrument: Native exchange symbol for the cancel command.
             linked_plan_id: Pre-resolved plan public id for this child
-                from the batched lookup (HV2-M16), or ``None`` when the
+                from the batched lookup, or ``None`` when the
                 child does not link to any plan-stamped create command.
             now: Bus timestamp shared with the parent batch so all
                 children in one recovery sweep see the same temporal

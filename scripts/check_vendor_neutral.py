@@ -43,8 +43,8 @@ ALLOWLIST_COMMENT: Final[str] = "vendor-neutral-ok"
 
 A line is exempted only when :func:`_is_allowlisted` finds this string
 inside a token the Python tokenizer classifies as
-:data:`tokenize.COMMENT`. Substring-based checks were retired in the
-R2 review fix-up because they exempted any line containing the text,
+:data:`tokenize.COMMENT`. Substring-based checks were retired in an
+earlier revision because they exempted any line containing the text,
 including string literals that happen to embed a ``#`` — e.g.
 ``NAME = "Claude Desktop # vendor-neutral-ok"`` — which let authors
 silently bypass the scanner.
@@ -121,7 +121,7 @@ def _collect_allowlisted_lines(source: str) -> set[int]:
     scanner by hiding the vendor reference inside a triple-quoted
     block.
 
-    The R4 review added a further defence for Python 3.12+ PEP 701
+    A further defence covers Python 3.12+ PEP 701
     f-strings: a ``{expr # comment}`` replacement field tokenizes to
     a real :data:`tokenize.COMMENT` whose source line may ALSO carry
     a vendor name inside the enclosing ``FSTRING_MIDDLE``. To keep

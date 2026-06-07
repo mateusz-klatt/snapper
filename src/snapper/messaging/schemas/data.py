@@ -329,7 +329,8 @@ class PositionData(StrictDataSchema[Literal["position"]]):
         wallet_public_id: Owning wallet UUID7 — non-null on the ORM
             so always present in projection. Surfaces here so iOS /
             UI clients can wallet-scope the position list without an
-            extra position-cycle join (Plan iOS-NP backlog item 4).
+            extra position-cycle join (the wallet-scoped position-cycle
+            join shortcut).
     """
 
     type: Literal["position"] = "position"
@@ -1546,7 +1547,7 @@ AlertType = Literal[
     "margin_warning",
     "critical_system_error",
 ]
-"""Canonical alert type enumeration for iOS Push Foundation.
+"""Canonical alert type enumeration for iOS push notifications.
 
 Mirrored by:
 - ``DeviceAlertPrefBody.alert_type`` (wire schema Literal)
@@ -1683,8 +1684,7 @@ class ExecutionPlanDecisionEventData(StrictDataSchema[Literal["execution_plan_de
     ``"Cycle <x> closed before command dispatch"`` alongside the
     well-known ``"sl_hit"`` / ``"tp_hit"`` / ``"trailing_stop_hit"``
     values. The stop-loss rule filters on known-loss reasons at
-    evaluation time rather than at the schema layer (Plan v1.12
-    R10.B-3 closure).
+    evaluation time rather than at the schema layer.
 
     Attributes:
         type: Payload discriminator (always
@@ -1693,9 +1693,8 @@ class ExecutionPlanDecisionEventData(StrictDataSchema[Literal["execution_plan_de
             ``insert_execution_plan_decision``.
         plan_public_id: Parent ``ExecutionPlan`` UUID7 — mirrored
             into the topic segment so subscribers can filter at the
-            ZMQ layer without parsing the payload (Plan v1.12 R10.B-2
-            closure: real field name is ``plan_public_id``, not
-            ``execution_plan_public_id``).
+            ZMQ layer without parsing the payload (the real field name
+            is ``plan_public_id``, not ``execution_plan_public_id``).
         decision_type: Free-form discriminator —
             ``"evaluator"`` / ``"lifecycle"`` / similar. Preserved
             verbatim from ``ExecutionPlanDecisionInsertRow``.

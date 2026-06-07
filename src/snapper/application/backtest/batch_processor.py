@@ -145,8 +145,8 @@ def _process_signal(
 
     Extracted from ``process_time_batch`` to keep the outer function's
     cognitive complexity under the Sonar S3776 threshold. The per-signal
-    control flow carries the cross-asset attribution branch (D6) +
-    missing-target-close fallback (D3) + always-emit signal contract.
+    control flow carries the cross-asset attribution branch +
+    missing-target-close fallback + always-emit signal contract.
     """
     sig_pid = str(uuid7())
     recorded_price = _resolve_target_fill_price(

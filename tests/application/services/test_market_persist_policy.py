@@ -290,7 +290,7 @@ class TestIntrospection:
 class TestMalformedSettingsPreservation:
     """Strict shape validation: top-level malformed settings preserve prior state.
 
-    Per plan v6 Branch B contract: a top-level shape mismatch on any of
+    Per the Branch B contract: a top-level shape mismatch on any of
     the five ``market_persist_*`` settings aborts the refresh and leaves
     the previously-applied policy state intact. Per-element drops
     (non-string symbols, unknown exchanges within an otherwise-valid

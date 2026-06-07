@@ -226,8 +226,18 @@ Authorization: Bearer <access_token>
 ```json
 {
     "type": "ws_token_response",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:15:00Z",
+    "topic": null,
     "payload": {
         "type": "ws_token",
+        "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5c",
+        "session_id": "<server-session>",
+        "sequence_id": 1,
+        "timestamp": "2026-01-18T12:15:00Z",
+        "topic": null,
         "message": "ws_token issued",
         "ws_token": "eyJhbGciOi...",
         "ws_token_exp": "2026-01-18T12:30:00Z",
@@ -575,7 +585,6 @@ Fetch OHLCV candlestick data. Requires `read:market_data` permission.
 
 ```http
 GET /api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h&limit=100
-X-CSRF-Token: <csrf_token>
 ```
 
 **Parameters:**
@@ -650,7 +659,6 @@ Fetch orders with optional filtering. Requires `read:orders` permission.
 
 ```http
 GET /api/orders?symbol=BTC-USD&exchange=kraken&limit=100&offset=0
-X-CSRF-Token: <csrf_token>
 ```
 
 **Parameters:**
@@ -866,7 +874,6 @@ permission.
 
 ```http
 GET /api/signals?instrument=BTC-USD&strategy=rsi_btc_1h&exchange=paper&hours=24&limit=100
-X-CSRF-Token: <csrf_token>
 ```
 
 **Parameters:**
@@ -879,6 +886,8 @@ X-CSRF-Token: <csrf_token>
 | `hours` | int | no | Hours of history, max 168 (default 24) |
 | `limit` | int | no | Number of signals, max 1000 (default 100) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
+| `operator_public_id` | string | no | Scope to a single operator (403 if foreign) |
+| `wallet_public_id` | string | no | Scope to a single wallet (403 if inaccessible) |
 
 **Response (200):**
 
@@ -917,7 +926,6 @@ Fetch order fills/executions. Requires `read:orders` permission.
 
 ```http
 GET /api/executions?limit=100
-X-CSRF-Token: <csrf_token>
 ```
 
 **Parameters:**
@@ -952,6 +960,8 @@ X-CSRF-Token: <csrf_token>
             "side": "buy",
             "size": 0.1,
             "price": 42000.0,
+            "last_size": 0.1,
+            "last_price": 42000.0,
             "fee": 0.001,
             "fee_asset": "USD",
             "status": "filled",
@@ -970,7 +980,6 @@ Fetch current portfolio positions. Requires `read:positions` permission.
 
 ```http
 GET /api/positions
-X-CSRF-Token: <csrf_token>
 ```
 
 **Parameters:**
@@ -1144,9 +1153,10 @@ diagnosing orphaned cycles (open cycles without a matching trading engine).
 
 **Permission:** `manage:users` (admin only).
 
-**Response (200):** List of open cycles with `cycle_public_id`, `shard_key`,
-`instrument_public_id`, `exchange`, `mode`, `wallet_public_id`, `direction`,
-`max_qty` (per-cycle peak, not lifetime), `opened_at`, and `age_hours`.
+**Response (200):** `PositionCycleListResponse` envelope whose payload
+items carry `cycle_public_id`, `shard_key`, `instrument_public_id`,
+`exchange`, `mode`, `wallet_public_id`, `direction`, `max_qty`
+(per-cycle peak, not lifetime), `opened_at`, and `age_hours`.
 
 ### POST /api/position-cycles/close-orphan
 
@@ -1159,7 +1169,8 @@ Close a specific orphaned position cycle. The operator should verify via
 
 **Permission:** `manage:users` (admin only). CSRF token required.
 
-**Response (200):** `{ "closed_count": 1, "closed_cycle_ids": ["<id>"] }`
+**Response (200):** `OrphanSweepResponse` envelope with payload
+`{ "closed_count": 1, "closed_cycle_ids": ["<id>"] }`.
 
 **Response (404):** No active open cycle found for the given public_id.
 
@@ -1175,7 +1186,8 @@ before running.
 
 **Permission:** `manage:users` (admin only). CSRF token required.
 
-**Response (200):** `{ "closed_count": N, "closed_cycle_ids": [...] }`
+**Response (200):** `OrphanSweepResponse` envelope with payload
+`{ "closed_count": N, "closed_cycle_ids": [...] }`.
 
 **Response (400):** `min_age_hours` must be at least 1.
 
@@ -1188,7 +1200,6 @@ List distinct exchange names from active symbol aliases. Requires
 
 ```http
 GET /api/exchanges
-X-CSRF-Token: <csrf_token>
 ```
 
 **Response (200):**
@@ -1215,7 +1226,6 @@ List distinct native symbols available on a given exchange. Requires
 
 ```http
 GET /api/exchanges/kraken/instruments
-X-CSRF-Token: <csrf_token>
 ```
 
 **Response (200):**
@@ -1256,10 +1266,12 @@ strategies. Requires `read:system_status` permission.
 
 ```http
 GET /api/status
-X-CSRF-Token: <csrf_token>
 ```
 
-**Response (200):**
+**Response payload excerpt (200):**
+
+The actual response is a `SystemStatusResponse` envelope with provenance
+fields and this object under `payload`.
 
 ```json
 {
@@ -1298,7 +1310,6 @@ permission.
 
 ```http
 GET /api/ws/stats
-X-CSRF-Token: <csrf_token>
 ```
 
 **Response payload excerpt (200):**
@@ -1366,7 +1377,6 @@ ZMQ bridge health check. Requires `read:system_status` permission.
 
 ```http
 GET /api/zmq/health
-X-CSRF-Token: <csrf_token>
 ```
 
 **Response payload excerpt (200):**
@@ -1593,6 +1603,11 @@ X-CSRF-Token: <csrf_token>
     "topic": null,
     "payload": {
         "type": "process_create",
+        "public_id": "<uuid7>",
+        "session_id": "<server-session>",
+        "sequence_id": 1,
+        "timestamp": "2026-01-18T12:00:00Z",
+        "topic": null,
         "status": "created",
         "process": {
             "name": "kraken_feed_btc",
@@ -1611,14 +1626,28 @@ Requires `manage:processes` permission.
 
 ```json
 {
-    "name": "kraken_feed_publisher",
-    "description": "Kraken market data feed publisher",
-    "class_path": "snapper.messaging.publishers.kraken.KrakenMarketDataPublisher",
-    "method": "start",
-    "default_enabled": true,
-    "default_mode": "thread",
-    "default_parameters": {},
-    "lifecycle": "long_running"
+    "type": "process_schema_response",
+    "public_id": "<uuid7>",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": {
+        "type": "process_schema",
+        "public_id": "<uuid7>",
+        "session_id": "<server-session>",
+        "sequence_id": 1,
+        "timestamp": "2026-01-18T12:00:00Z",
+        "topic": null,
+        "name": "kraken_feed_publisher",
+        "description": "Kraken market data feed publisher",
+        "class_path": "snapper.messaging.publishers.kraken.KrakenMarketDataPublisher",
+        "method": "start",
+        "default_enabled": true,
+        "default_mode": "thread",
+        "default_parameters": {},
+        "lifecycle": "long_running"
+    }
 }
 ```
 
@@ -1661,6 +1690,11 @@ stored value.
     "topic": null,
     "payload": {
         "type": "process_start",
+        "public_id": "<uuid7>",
+        "session_id": "<server-session>",
+        "sequence_id": 1,
+        "timestamp": "2026-01-18T12:00:00Z",
+        "topic": null,
         "status": "success",
         "name": "zmq_broker",
         "process_public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
@@ -1684,9 +1718,23 @@ X-CSRF-Token: <csrf_token>
 
 ```json
 {
-    "status": "success",
-    "name": "zmq_broker",
-    "message": "Process stopped"
+    "type": "process_stop_response",
+    "public_id": "<uuid7>",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": {
+        "type": "process_stop",
+        "public_id": "<uuid7>",
+        "session_id": "<server-session>",
+        "sequence_id": 1,
+        "timestamp": "2026-01-18T12:00:00Z",
+        "topic": null,
+        "status": "success",
+        "name": "zmq_broker",
+        "message": "Process stopped"
+    }
 }
 ```
 
@@ -1763,7 +1811,8 @@ List configured strategy processes with lightweight status. Requires
 
 ## Settings
 
-Settings endpoints require `configure:system` permission (admin only).
+Settings-management endpoints require `configure:system` permission
+(admin only). `GET /api/settings/features` is the public exception.
 
 ### GET /api/settings
 
@@ -1778,16 +1827,31 @@ List all settings, optionally filtered by category.
 **Response (200):**
 
 ```json
-[
-    {
-        "key": "polygon_api_key",
-        "value": "IvLG...",
-        "category": "api",
-        "description": "Polygon.io market-data API key",
-        "updated_at": "2026-01-15T10:00:00Z",
-        "updated_by": "admin"
-    }
-]
+{
+    "type": "setting_list",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": [
+        {
+            "type": "setting_read",
+            "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5c",
+            "session_id": "<server-session>",
+            "sequence_id": 1,
+            "timestamp": "2026-01-18T12:00:00Z",
+            "topic": null,
+            "key": "polygon_api_key",
+            "value": "IvLG...",
+            "category": "api",
+            "description": "Polygon.io market-data API key",
+            "updated_at": "2026-01-15T10:00:00Z",
+            "updated_by": "admin"
+        }
+    ],
+    "count": 1
+}
 ```
 
 Note: per-wallet trading credentials (kraken, walutomat,
@@ -1816,7 +1880,14 @@ List distinct setting category names.
 
 ```json
 {
-    "categories": ["exchanges", "strategy", "system"]
+    "type": "setting_categories",
+    "public_id": "019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": ["exchanges", "strategy", "system"],
+    "count": 3
 }
 ```
 
@@ -2082,12 +2153,15 @@ before encrypting.
 ### Connection and Authentication
 
 The WebSocket endpoint is at `/api/ws`. Authentication is message-based,
-not query-parameter-based.
+not query-parameter-based, but the connection must already carry the
+active auth session cookie. Missing or invalid cookies are rejected with
+close code `4401` before the `auth_required` challenge.
 
 **Connection flow:**
 
 1. Client connects to `ws://host:port/api/ws` (or `wss://` over TLS)
-2. Server accepts the connection and validates the origin header
+   with the active auth session cookie
+2. Server validates the origin header and session cookie
 3. Server sends `auth_required` message
 4. Client sends `authenticate` message with a WebSocket token
 5. Server validates the token and sends `auth_ok`
@@ -2102,6 +2176,12 @@ without rotating the refresh-token pair. `POST /api/auth/refresh` can
 also return `ws_token` during session rotation, but long-running clients
 should prefer `/api/auth/ws_token`.
 
+Client-originated control frames (`authenticate`, `reauth`,
+`subscribe`, `unsubscribe`, `get_subscriptions`, `ping`) inherit
+`StrictDataSchema`; clients must stamp `public_id`, `session_id`,
+`sequence_id`, and `timestamp` before sending. `topic` defaults to
+`null` and can be omitted on client frames.
+
 ### Authentication Messages
 
 **Server sends after connection:**
@@ -2109,8 +2189,12 @@ should prefer `/api/auth/ws_token`.
 ```json
 {
     "type": "auth_required",
-    "timeout": 30,
-    "timestamp": "2026-01-18T12:00:00Z"
+    "public_id": "019e1a2b-0000-7000-8000-000000000901",
+    "session_id": "<server-ws-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "timeout": 10
 }
 ```
 
@@ -2119,8 +2203,11 @@ should prefer `/api/auth/ws_token`.
 ```json
 {
     "type": "authenticate",
-    "ws_token": "eyJhbGciOi...",
-    "timestamp": "2026-01-18T12:00:00Z"
+    "public_id": "019e1a2b-0000-7000-8000-000000000a01",
+    "session_id": "<client-ws-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "ws_token": "eyJhbGciOi..."
 }
 ```
 
@@ -2129,8 +2216,12 @@ should prefer `/api/auth/ws_token`.
 ```json
 {
     "type": "auth_ok",
-    "exp": "2026-01-18T12:30:00Z",
-    "timestamp": "2026-01-18T12:00:00Z"
+    "public_id": "019e1a2b-0000-7000-8000-000000000902",
+    "session_id": "<server-ws-session>",
+    "sequence_id": 2,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "exp": "2026-01-18T12:30:00Z"
 }
 ```
 
@@ -2139,6 +2230,11 @@ should prefer `/api/auth/ws_token`.
 ```json
 {
     "type": "auth_complete",
+    "public_id": "019e1a2b-0000-7000-8000-000000000903",
+    "session_id": "<server-ws-session>",
+    "sequence_id": 3,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
     "available_topics": [
         "market.",
         "signals.",
@@ -2158,8 +2254,7 @@ should prefer `/api/auth/ws_token`.
     ],
     "user_role": "operator",
     "session_expires_at": "2026-01-18T12:15:00Z",
-    "ws_token_exp": "2026-01-18T12:30:00Z",
-    "timestamp": "2026-01-18T12:00:00Z"
+    "ws_token_exp": "2026-01-18T12:30:00Z"
 }
 ```
 
@@ -2176,8 +2271,12 @@ wallet scope.
 ```json
 {
     "type": "auth_failed",
-    "reason": "Invalid token",
-    "timestamp": "2026-01-18T12:00:00Z"
+    "public_id": "019e1a2b-0000-7000-8000-000000000904",
+    "session_id": "<server-ws-session>",
+    "sequence_id": 4,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "reason": "Invalid token"
 }
 ```
 
@@ -2193,8 +2292,12 @@ a `reauth` message.
 ```json
 {
     "type": "reauth_required",
-    "deadline": "2026-01-18T12:29:00Z",
-    "timestamp": "2026-01-18T12:28:00Z"
+    "public_id": "019e1a2b-0000-7000-8000-000000000905",
+    "session_id": "<server-ws-session>",
+    "sequence_id": 5,
+    "timestamp": "2026-01-18T12:28:00Z",
+    "topic": null,
+    "deadline": "2026-01-18T12:29:00Z"
 }
 ```
 
@@ -2203,8 +2306,11 @@ a `reauth` message.
 ```json
 {
     "type": "reauth",
-    "ws_token": "eyJhbGciOi...(new token)...",
-    "timestamp": "2026-01-18T12:28:30Z"
+    "public_id": "019e1a2b-0000-7000-8000-000000000a02",
+    "session_id": "<client-ws-session>",
+    "sequence_id": 2,
+    "timestamp": "2026-01-18T12:28:30Z",
+    "ws_token": "eyJhbGciOi...(new token)..."
 }
 ```
 
@@ -2213,8 +2319,12 @@ a `reauth` message.
 ```json
 {
     "type": "reauth_ok",
-    "exp": "2026-01-18T13:00:00Z",
-    "timestamp": "2026-01-18T12:28:30Z"
+    "public_id": "019e1a2b-0000-7000-8000-000000000906",
+    "session_id": "<server-ws-session>",
+    "sequence_id": 6,
+    "timestamp": "2026-01-18T12:28:30Z",
+    "topic": null,
+    "exp": "2026-01-18T13:00:00Z"
 }
 ```
 
@@ -2223,7 +2333,11 @@ If the client does not reauthenticate in time:
 ```json
 {
     "type": "auth_expired",
-    "timestamp": "2026-01-18T12:30:00Z"
+    "public_id": "019e1a2b-0000-7000-8000-000000000907",
+    "session_id": "<server-ws-session>",
+    "sequence_id": 7,
+    "timestamp": "2026-01-18T12:30:00Z",
+    "topic": null
 }
 ```
 
@@ -2234,6 +2348,10 @@ If the client does not reauthenticate in time:
 ```json
 {
     "type": "subscribe",
+    "public_id": "019e1a2b-0000-7000-8000-000000000a03",
+    "session_id": "<client-ws-session>",
+    "sequence_id": 3,
+    "timestamp": "2026-01-18T12:00:01Z",
     "topics": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD.rsi_btc_1h"]
 }
 ```
@@ -2243,13 +2361,17 @@ If the client does not reauthenticate in time:
 ```json
 {
     "type": "subscription_success",
+    "public_id": "019e1a2b-0000-7000-8000-000000000908",
+    "session_id": "<server-ws-session>",
+    "sequence_id": 8,
+    "timestamp": "2026-01-18T12:00:01Z",
+    "topic": null,
     "action": "subscribe",
     "status": "subscribed",
     "topics": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD.rsi_btc_1h"],
     "denied_topics": [],
     "active_subscriptions": ["market.kraken.BTC-USD.candles.1h", "signals.paper.BTC-USD.rsi_btc_1h"],
-    "message": null,
-    "timestamp": "2026-01-18T12:00:01Z"
+    "message": null
 }
 ```
 
@@ -2258,6 +2380,10 @@ If the client does not reauthenticate in time:
 ```json
 {
     "type": "unsubscribe",
+    "public_id": "019e1a2b-0000-7000-8000-000000000a04",
+    "session_id": "<client-ws-session>",
+    "sequence_id": 4,
+    "timestamp": "2026-01-18T12:00:02Z",
     "topics": ["market.kraken.BTC-USD.candles.1h"]
 }
 ```
@@ -2266,7 +2392,11 @@ If the client does not reauthenticate in time:
 
 ```json
 {
-    "type": "get_subscriptions"
+    "type": "get_subscriptions",
+    "public_id": "019e1a2b-0000-7000-8000-000000000a05",
+    "session_id": "<client-ws-session>",
+    "sequence_id": 5,
+    "timestamp": "2026-01-18T12:00:02Z"
 }
 ```
 
@@ -2275,10 +2405,14 @@ If the client does not reauthenticate in time:
 ```json
 {
     "type": "subscriptions_list",
+    "public_id": "019e1a2b-0000-7000-8000-000000000909",
+    "session_id": "<server-ws-session>",
+    "sequence_id": 9,
+    "timestamp": "2026-01-18T12:00:02Z",
+    "topic": null,
     "subscriptions": ["signals.paper.BTC-USD.rsi_btc_1h"],
     "available_topics": ["market.", "signals.", "system.heartbeats.", "orders.events.", "alerts.", "backtest."],
-    "total_available": 6,
-    "timestamp": "2026-01-18T12:00:02Z"
+    "total_available": 6
 }
 ```
 
@@ -2288,7 +2422,11 @@ If the client does not reauthenticate in time:
 
 ```json
 {
-    "type": "ping"
+    "type": "ping",
+    "public_id": "019e1a2b-0000-7000-8000-000000000a06",
+    "session_id": "<client-ws-session>",
+    "sequence_id": 6,
+    "timestamp": "2026-01-18T12:00:30Z"
 }
 ```
 
@@ -2297,7 +2435,11 @@ If the client does not reauthenticate in time:
 ```json
 {
     "type": "pong",
-    "timestamp": "2026-01-18T12:00:00Z",
+    "public_id": "019e1a2b-0000-7000-8000-00000000090a",
+    "session_id": "<server-ws-session>",
+    "sequence_id": 10,
+    "timestamp": "2026-01-18T12:00:30Z",
+    "topic": null,
     "active_connections": 5
 }
 ```
@@ -2502,7 +2644,12 @@ the scoped prefixes documented in the WebSocket auth section above.
 
 #### System
 
-- `system.heartbeats.{component}.{name}[.{source}]` -- Component heartbeats
+- `system.heartbeats` -- Global heartbeat
+- `system.heartbeats.strategy.{name}` -- Strategy heartbeat
+- `system.heartbeats.executor.{exchange}` -- Single-wallet executor heartbeat
+- `system.heartbeats.executor.{exchange}.{wallet_short}` -- Per-wallet executor heartbeat; `wallet_short` is exactly 12 lowercase hex characters
+- `system.heartbeats.feed.{exchange}` -- Live feed heartbeat
+- `system.heartbeats.feed.paper.{source}` -- Paper replay feed heartbeat
 - `admin.{resource}` -- Administrative events (admin only)
 - `processes.events.summary.{coord_slug}` -- Process summary snapshots
 - `processes.events.configured.{coord_slug}` -- Configured process-name snapshots
@@ -2554,7 +2701,6 @@ async def main():
                 },
             },
         )
-        csrf_token = client.cookies.get("csrf_token")
 
         refresh_resp = await client.post(f"{BASE_URL}/auth/refresh")
         # RefreshResponse envelope: ws_token lives under .payload
@@ -2567,7 +2713,6 @@ async def main():
                 "exchange": "kraken",
                 "timeframe": "1h",
             },
-            headers={"X-CSRF-Token": csrf_token},
         )
         candles = candles_resp.json()
         print(candles)
@@ -2591,6 +2736,17 @@ async function connect() {
 
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${protocol}//${location.host}/api/ws`);
+    const clientSessionId = crypto.randomUUID();
+    let sequenceId = 0;
+
+    const controlFrame = (type, body = {}) => ({
+        type,
+        public_id: crypto.randomUUID(),
+        session_id: clientSessionId,
+        sequence_id: ++sequenceId,
+        timestamp: new Date().toISOString(),
+        ...body,
+    });
 
     ws.onopen = () => {
         console.log("Connected, waiting for auth_required...");
@@ -2600,18 +2756,16 @@ async function connect() {
         const msg = JSON.parse(event.data);
 
         if (msg.type === "auth_required") {
-            ws.send(JSON.stringify({
-                type: "authenticate",
-                ws_token: ws_token,
-            }));
+            ws.send(JSON.stringify(controlFrame("authenticate", {
+                ws_token,
+            })));
         }
 
         if (msg.type === "auth_complete") {
             console.log("Authenticated. Topics:", msg.available_topics);
-            ws.send(JSON.stringify({
-                type: "subscribe",
+            ws.send(JSON.stringify(controlFrame("subscribe", {
                 topics: ["market.kraken.BTC-USD.candles.1h"],
-            }));
+            })));
         }
 
         if (msg.type === "candle" || msg.type === "tick") {
@@ -2625,7 +2779,7 @@ async function connect() {
 
     setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "ping" }));
+            ws.send(JSON.stringify(controlFrame("ping")));
         }
     }, 30000);
 }
@@ -2736,9 +2890,8 @@ Get paginated equity curve points for a run.
 
 Endpoints for the human-in-the-loop review queue. Strategies emit
 `ai_reviews.*` requests via the `create_ai_review_and_await()`
-primitive (see [strategies.md](strategies.md)); the selected
-AI delegate (or an operator with the AI_DELEGATE role) replies via
-these routes.
+primitive (see [strategies.md](strategies.md)); the selected,
+registered AI delegate replies via these routes.
 
 ### POST /api/ai-reviews/{review_public_id}/decision
 
@@ -2765,8 +2918,10 @@ REST mirror of the `submit_ai_review_decision` MCP tool. Body is
 `AiReviewDecisionEnum`; unknown values yield `422` with
 `error_code='invalid_decision'`). `rationale` is optional free
 text, ≤ 4096 chars per the `ai_reviews.rationale` column
-constraint. Requires `Permission.CREATE_ORDERS`. The dispatch
-fans out on `bus.ai_review_decision` and emits
+constraint. Requires `Permission.CREATE_ORDERS`, but that permission is
+not sufficient by itself: the caller must resolve to a registered
+`ai_delegates` row and have a live scope grant for the review wallet and
+instrument. The dispatch fans out on `bus.ai_review_decision` and emits
 `ai_reviews.{user}.{strategy}.decision_ack` on the WS surface.
 
 Responses use `AiReviewDecisionResponse` — the canonical envelope

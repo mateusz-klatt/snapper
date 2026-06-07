@@ -2,7 +2,7 @@
 
 Covers:
     - ``guard()`` fails closed when ``submission.user_public_id``
-      is None (.4 canonical rule — prevents silent cap
+      is None (the fail-closed principal rule — prevents silent cap
       bypass from a REST handler that forgets to thread the user).
     - ``guard_service_principal()`` bypasses all caps AND releases
       no lock (strategy hot path).
@@ -778,10 +778,9 @@ class TestCapsViolationAfterAiApprovePublish:
     async def test_get_ai_review_raising_does_not_mask_caps_violation(self) -> None:
         """Race-safety: a DB error in get_ai_review must NOT replace the cap rejection.
 
-        Codex review on e46dfba flagged that the original best-effort
-        branch only wrapped ``send()`` in try/except. Any pre-send
-        failure (DB hiccup on get_ai_review, payload validation error,
-        tracker race during shutdown) would replace the
+        An earlier revision wrapped only ``send()`` in try/except. Any
+        pre-send failure (DB hiccup on get_ai_review, payload validation
+        error, tracker race during shutdown) would replace the
         :class:`CapsViolationError` with the unrelated transport
         exception — the trade would still be rejected by the caller's
         flow but the error surface would be wrong. Pin the contract

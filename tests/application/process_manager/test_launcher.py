@@ -2848,10 +2848,9 @@ class TestEmitSitesIntegration:
     ) -> None:
         """`create_process_config` emits configured + summary + strategy-list events.
 
-        The summary emit is required (Codex P1 fix 2026-05-14): without
-        it, REST `useProcessSummary` totals stay stale after a create
-        until the next reconnect because the hook now uses
-        `staleTime: Infinity`.
+        The summary emit is required: without it, REST
+        `useProcessSummary` totals stay stale after a create until the
+        next reconnect because the hook now uses `staleTime: Infinity`.
         """
         publisher = _RecordingPublisher()
         launcher.set_msg_publisher(publisher)
@@ -2906,10 +2905,10 @@ class TestEmitSitesIntegration:
     ) -> None:
         """`stop_all_processes` clears both active_runs + active_run_started_at.
 
-        Without the explicit `active_runs.clear()` (Codex P1 fix
-        2026-05-14), a task that never completes via its done-callback
-        leaves a stale `(name, run_public_id)` entry and the next emit
-        would re-attach the dead run_public_id to a new launch.
+        Without the explicit `active_runs.clear()`, a task that never
+        completes via its done-callback leaves a stale
+        `(name, run_public_id)` entry and the next emit would re-attach
+        the dead run_public_id to a new launch.
         """
         publisher = _RecordingPublisher()
         launcher.set_msg_publisher(publisher)

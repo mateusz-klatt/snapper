@@ -1,7 +1,8 @@
-"""Repository-method coverage for  TradingCapsEnforcer accessors.
+"""Repository-method coverage for TradingCapsEnforcer accessors.
 
-Exercises the four new concrete methods on
-:class:`SQLAlchemyRepository` added in - :meth:`get_user_trading_caps`
+Exercises the four concrete methods on
+:class:`SQLAlchemyRepository`:
+    - :meth:`get_user_trading_caps`
     - :meth:`count_user_open_commands`
     - :meth:`get_user_recent_submits`
     - :meth:`count_user_rolling_cancels`

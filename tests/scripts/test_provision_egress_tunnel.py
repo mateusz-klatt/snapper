@@ -50,7 +50,7 @@ def _required_args(privkey_file: Path) -> list[str]:
         "--private-key-file",
         str(privkey_file),
         "--peer-pubkey",
-        "fO4beJGkKZxosCZz1qunktieuPyzPnEVKVQNhzanjnA=",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         "--peer-endpoint",
         "203.0.113.66:51820",
         "--socks5-listen-port",

@@ -325,6 +325,6 @@ class TestBracketRequiresCapabilities:
     """Tests for BracketEvaluator.requires_capabilities."""
 
     def test_requires_reduce_only(self) -> None:
-        """Bracket requires supports_reduce_only (Decision C1)."""
+        """Bracket requires supports_reduce_only."""
         evaluator = BracketEvaluator()
         assert evaluator.requires_capabilities() == ["supports_reduce_only"]

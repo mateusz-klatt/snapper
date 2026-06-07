@@ -164,8 +164,7 @@ def _enqueue_or_drop_oldest(queue: asyncio.Queue[Any], item: Any, label: str) ->
     Logs are rate-limited to one summary line per ``_DROP_LOG_INTERVAL_S``
     seconds per ``label`` — the previous per-drop ``logger.warning`` cost
     ~29 us each, which at sustained drop rates of hundreds per second
-    became its own non-trivial fraction of the publisher hot path
-    (Codex 2026-05-11 post-HV2-H5 review).
+    became its own non-trivial fraction of the publisher hot path.
 
     Args:
         queue: Bounded asyncio queue.

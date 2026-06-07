@@ -82,9 +82,9 @@ async def _create_repo_with_instrument(
 ) -> tuple[SQLAlchemyRepository, int, str]:
     """Create a repository with a single instrument ready for SCD2 tests.
 
-    Inline duplicate of the helper in ``tests/data/test_bitemporal.py``.2 (local-helper option) — the helper has no public home in
-    ``tests/helpers/db.py`` today and the copy-paste matches the existing
-    convention across the data test suite.
+    Inline duplicate of the helper in ``tests/data/test_bitemporal.py``
+    — the helper has no shared home in ``tests/helpers/db.py`` today and
+    the copy matches the existing convention across the data test suite.
     """
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     await repo.create_all()
@@ -354,8 +354,7 @@ async def test_concurrent_upsert_candles_serializes() -> None:
     multi-connection serialization) with two separate ``SQLAlchemyRepository``
     instances to exercise the actual write-lock contention path.
 
-    Accepted outcomes (v1.4 per 2/2 opus+codex consensus on SQLite
-    semantics):
+    Accepted outcomes (per the documented SQLite isolation semantics):
 
     - **PostgreSQL**: both tasks complete without exception thanks to
       MVCC row locks acquired by ``SELECT ... FOR UPDATE``. Final DB

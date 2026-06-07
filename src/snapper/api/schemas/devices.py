@@ -10,8 +10,8 @@ without leaking SCD2 plumbing (``known_to``) beyond provenance
 (``session_id`` / ``sequence_id`` / ``timestamp``) that every Snapper
 REST/WS payload carries.
 
-Per the bitemporal invariant (``feedback_bitemporal_all_tables``) every
-row lifecycle is SCD2 close-and-insert and the ``known_to == MAX``
+Per the bitemporal invariant (every state table is SCD2-versioned)
+every row lifecycle is SCD2 close-and-insert and the ``known_to == MAX``
 active predicate is applied server-side; clients see only the currently
 active projection through these schemas.
 """
@@ -233,8 +233,8 @@ class RevokeDevicePrefCommand(
     Backend convention is POST + envelope (not DELETE) so every
     write carries client-side provenance for the gap detector — same
     pattern as ``CancelOrderCommand`` / ``RevokeScopeGrantCommand``.
-    See ``feedback_no_delete_use_post`` (referenced indirectly by
-    every existing revoke / cancel route) for the rule rationale.
+    The no-DELETE/use-POST convention keeps every revoke / cancel
+    route consistent on this provenance-carrying write pattern.
     """
 
     type: Literal["revoke_device_pref_command"] = "revoke_device_pref_command"

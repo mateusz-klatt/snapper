@@ -134,7 +134,7 @@ Client-side heartbeat MUST send at ``heartbeat_interval ≤ window/2``
 DEFAULT_FANOUT_AFTER_SECONDS = 30
 """When fanout fires if the selected delegate stays silent.
 
-Cross-plan invariant: fanout_after MUST be > heartbeat_window so the offline
+Invariant: fanout_after MUST be > heartbeat_window so the offline
 scanner has at least one window's worth of evidence the delegate is gone
 before re-dispatch fires.
 """
@@ -288,7 +288,7 @@ class AiReviewCreateRequest:
 class AiReviewAdmissionPolicy:
     """Liveness + fanout windows for admission control.
 
-    Cross-plan invariant: ``fanout_after_seconds`` MUST exceed
+    Invariant: ``fanout_after_seconds`` MUST exceed
     ``heartbeat_window_seconds`` so the offline scanner has at least one
     window's worth of evidence the delegate is gone before re-dispatch
     fires. The invariant is enforced at construction via
@@ -672,7 +672,7 @@ class AiReviewService:
                 fixed value so the deadline + audit timestamps are
                 deterministic.
             policy: Liveness + fanout windows. Defaults to the
-                cross-plan locks (15s heartbeat / 30s fanout);
+                standard windows (15s heartbeat / 30s fanout);
                 tests override for fast-clock scenarios.
 
         Returns:

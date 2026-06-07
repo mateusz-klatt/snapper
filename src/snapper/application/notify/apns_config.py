@@ -25,9 +25,9 @@ class ApnsConfig:
     """Fully-hydrated APNs configuration for ``ApnsClientPool`` construction.
 
     Attributes:
-        team_id: Apple Developer team ID (e.g. ``26MP7QQP95``).
-        key_id: APNs auth key id (e.g. ``2V2KBT3VMQ``).
-        bundle_id: iOS app bundle identifier (e.g. ``ie.klatt.snapper``).
+        team_id: Apple Developer team ID.
+        key_id: APNs auth key id.
+        bundle_id: iOS app bundle identifier (reverse-DNS form).
         topic: APNs topic — normally identical to ``bundle_id`` for
             alert pushes.
         environment: ``sandbox``, ``production`` or

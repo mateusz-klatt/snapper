@@ -70,9 +70,9 @@ async def _count_expected_batches(
     and trigger 25 / 50 / 75 pct milestones.
     Returns ``None`` on any query failure so the runner silently degrades
     (milestones disabled, ``progress_pct`` pinned at 0.0) instead of
-    aborting the run. Matches : "``total_candles`` is
-    pre-computed by the runner via a cheap repository count before
-    ``engine.run()``; ``None`` only if the count query fails".
+    aborting the run. ``total_candles`` is pre-computed by the runner via
+    a cheap repository count before ``engine.run()``; ``None`` only if the
+    count query fails.
     """
     try:
         open_times: set[datetime] = set()

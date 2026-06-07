@@ -5,19 +5,18 @@ must stay callable by any standards-compliant WebSocket client
 (``websockets``, browser ``WebSocket``, ``wscat``, ...) using only:
 
     - the standard ``Authorization: Bearer <jwt>`` upgrade header
-      (.7 item 3 — MCP / CLI clients without cookie jars),
+      (for MCP / CLI clients without cookie jars),
     - JSON frames over a plain WebSocket — no vendor envelope,
     - documented close codes (``4401`` auth, ``4003`` deactivation).
 
- ships the subscribe-time AI_DELEGATE wallet-scope filter —
-the wire contract is that an AI_DELEGATE subscribing to a mix of
-in-scope and out-of-scope wallet-scoped topics gets a standard
+This suite also covers the subscribe-time AI_DELEGATE wallet-scope
+filter — the wire contract is that an AI_DELEGATE subscribing to a mix
+of in-scope and out-of-scope wallet-scoped topics gets a standard
 ``WSSubscriptionSuccessResponse`` with out-of-scope topics listed in
 ``denied_topics`` (no vendor envelope, no hidden error code).
-(mid-session revalidation via ``admin.scope_revoked``) lands in the
-next commit and is out of scope here. The suite pairs with
-``make check-vendor-neutral`` so the wire contract and the source-text
-contract both guard the seam.
+Mid-session revalidation via ``admin.scope_revoked`` is out of scope
+here. The suite pairs with ``make check-vendor-neutral`` so the wire
+contract and the source-text contract both guard the seam.
 """
 
 import json as _json
@@ -141,7 +140,7 @@ class TestWsBearerTransportContract:
 
     @pytest.mark.asyncio
     async def test_bearer_preferred_over_cookie_when_both_present(self) -> None:
-        """Header takes precedence over cookie.7 item 3.
+        """Header takes precedence over cookie.
 
         Given: both ``Authorization: Bearer …`` and ``access_token``
             cookie are present,
@@ -339,7 +338,7 @@ class TestWsSingletonStateIsolation:
 
 
 class TestWsAiDelegateWalletScopeContract:
-    """the subscribe-time wallet-scope filter wire contract.
+    """The subscribe-time wallet-scope filter wire contract.
 
     AI_DELEGATE subscribes to a mix of in-scope and out-of-scope
     wallet-scoped topics. The response MUST be a standard

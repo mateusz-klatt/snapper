@@ -64,7 +64,7 @@ output — documented in the operator runbook (docs/snapper-egress.md).
 """
 
 _EGRESS_SERVICE_NAME: Final[str] = "snapper-egress"
-"""Service name pinned by the sidecar plan; the lint hook matches on this exactly."""
+"""Service name pinned by the sidecar contract; the lint hook matches on this exactly."""
 
 _MONOLITH_SERVICE_NAME: Final[str] = "snapper"
 """Monolith (FastAPI + bootstrap) service name used for unified-image cross-checks.

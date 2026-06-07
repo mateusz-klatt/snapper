@@ -182,7 +182,7 @@ class TestCheckpointRecovery:
         """Old checkpoints without position_opened_at restore as None.
 
         Given: a checkpoint where position_opened_at is None (legacy
-            row written before this plan shipped),
+            row written before this feature shipped),
         When: _recover_engine_state runs,
         Then: TradeService projection has position_opened_at=None and
             recovery does not crash.

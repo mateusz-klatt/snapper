@@ -221,8 +221,8 @@ class TestRotateUserActiveToken:
         Then: the INSERT raises ``IntegrityError`` inside the same
             ``async with self.session()`` scope so the UPDATE-revoke
             is ALSO rolled back — the old refresh JWT remains
-            usable for retry (R2 NICE-TO-HAVE strict-atomicity
-            coverage requested by Codex + Copilot).
+            usable for retry (strict-atomicity coverage for the
+            revoke+insert rotation).
         """
         now = datetime.now(UTC)
         await repo.insert_user_active_tokens(
@@ -440,8 +440,8 @@ class TestGetActiveTokenByHash:
             shape written by ``UserService.deactivate_user``,
         When: ``get_active_token_by_hash`` runs,
         Then: the join selects the NEW row (KNOWN_TO_MAX) and
-            returns ``user_is_active=False`` — covers the R1 Codex
-            SCD2 correctness concern with production-shape fixtures
+            returns ``user_is_active=False`` — covers the SCD2
+            correctness concern with production-shape fixtures
             instead of the single-row simplification.
         """
         seed_time = datetime(2026, 1, 1, tzinfo=UTC)

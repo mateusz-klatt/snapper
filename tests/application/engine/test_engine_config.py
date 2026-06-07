@@ -2652,7 +2652,7 @@ async def test_reconcile_degraded_identity_engine_is_skipped() -> None:
     When: _reconcile_position_cycles runs,
     Then: no repository methods are called for that engine. The batched
         ``get_open_position_cycles_for_shards`` is short-circuited because
-        the eligible-shard list is empty (HV2-M4 guard).
+        the eligible-shard list is empty (the empty-shard-list guard).
     """
     repo = AsyncMock()
     coord = _make_reconcile_coord(repo)

@@ -120,7 +120,7 @@ def _foreign(shard_key: str, *, instance_count: int = 2) -> ShardOwnership:
 
 
 class TestOutboxOwnershipPassthrough:
-    """``ownership=None`` preserves pre-Phase-4 straight-fetch behavior."""
+    """``ownership=None`` preserves the legacy straight-fetch behavior."""
 
     @pytest.mark.asyncio
     async def test_none_ownership_returns_raw_batch(self) -> None:
@@ -165,7 +165,7 @@ class TestOutboxOwnershipFilter:
     async def test_mixed_foreign_prefix_paginates_past(self) -> None:
         """Foreign prefix is skipped; owned rows at the tail are found.
 
-        Regression guard against the v1.1 ``10 × batch_size`` cap —
+        Regression guard against the former ``10 × batch_size`` cap —
         with 15 foreign rows in front of 5 owned rows, the scan must
         reach the owned rows.
         """
@@ -204,7 +204,7 @@ class TestOutboxOwnershipFilter:
     async def test_max_scan_rows_none_scans_until_exhaustion(self) -> None:
         """Unbounded scan reaches owned rows past arbitrary foreign prefixes.
 
-        Regression guard against the v1.1 ``10 × batch_size`` cap —
+        Regression guard against the former ``10 × batch_size`` cap —
         with ``max_scan_rows=None`` the starvation-avoidance contract
         holds no matter how big the foreign-owner backlog grows.
         """

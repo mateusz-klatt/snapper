@@ -31,7 +31,7 @@ def test_trader_coordinator_build_caps_enforcer_none_for_non_sqlalchemy_repo() -
         a :class:`MagicMock` (test fixture pattern),
     When: ``_build_caps_enforcer`` is invoked directly,
     Then: ``None`` is returned — the coordinator preserves the
-        pre-Phase-A no-enforcement path so existing unit tests
+        legacy no-enforcement path so existing unit tests
         stay byte-identical.
     """
     coord = TraderCoordinator()
@@ -215,7 +215,7 @@ async def test_plan_executor_emit_trade_command_direct_path_when_no_enforcer() -
         ``caps_enforcer=None`` (legacy test fixture),
     When: ``_emit_trade_command`` is invoked,
     Then: the insert happens without any enforcer wrap — covers
-        the plans/service.py pre-Phase-A-compat branch.
+        the plans/service.py legacy-compat branch.
     """
     service = PlanExecutorService()
     service._caps_enforcer = None

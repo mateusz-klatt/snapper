@@ -43,7 +43,7 @@ async def check_dedup_window(
             ``order_fill_full`` with ``window=0``) pay nothing for the
             lookup.
         now: Entry-boundary timestamp threaded from the caller per
-            ``feedback_timestamp_discipline.md``.
+            the timestamp-discipline invariant.
 
     Returns:
         ``True`` when at least one active row exists in the window —

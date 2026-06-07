@@ -230,19 +230,19 @@ class TestSettingsService:
 
     @pytest.mark.asyncio
     async def test_setup_zmq_publisher_connects_to_xsub_endpoint(self) -> None:
-        """R3 follow-up: PUB socket MUST connect to XSUB endpoint.
+        """PUB socket MUST connect to XSUB endpoint.
 
         Per the broker proxy contract documented in
         `BootstrapSettingsLoader` (publishers ──[connect]──> XSUB
         ── proxy ── XPUB ──[connect]──> Subscribers), publishers
-        connect to the broker's XSUB side. The pre-fix code wired
+        connect to the broker's XSUB side. Wiring
         `_setup_zmq_publisher` to `zmq_broker_xpub` (subscriber-
-        facing) which silently dropped every `system.settings`
-        broadcast since .
+        facing) instead silently drops every `system.settings`
+        broadcast.
 
         This test pins the endpoint so a future refactor that
         flips it back to xpub fails CI loudly. Mirrors the
-         R2 pinning pattern in
+        endpoint-pinning pattern in
         `test_build_user_service_publisher_connects_to_broker_xsub`.
         """
         SettingsService.clear_instance()

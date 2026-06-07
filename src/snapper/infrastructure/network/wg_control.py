@@ -164,7 +164,7 @@ def _resolve_endpoint(host_port: str) -> tuple[str, int]:
 
     Args:
         host_port: An endpoint string in WireGuard ``Endpoint = ...``
-            format, e.g. ``"fra-113-wg.whiskergalaxy.com:443"`` or
+            format, e.g. ``"vpn.example.com:443"`` or
             ``"[2001:db8::1]:51820"``.
 
     Returns:

@@ -507,7 +507,7 @@ Most entity tables inherit `TemporalMixin` which provides `id`,
 `public_id`, `timestamp` (bus-time / known_from), and `known_to`
 columns. A small number of tables that manage their own
 lifecycle (notably `user_active_tokens`, `ai_delegates`,
-`ai_reviews`, `ai_review_events`) opt out.
+`ai_reviews`, `ai_review_events`, and `instrument_feed_health`) opt out.
 
 Key concepts:
 
@@ -868,13 +868,15 @@ flowchart TB
 ### Backtesting
 
 The backtesting subsystem runs strategy simulations against historical candle
-data. DirectDbEngine performs direct repository-backed candle streaming
-without routing through the live ZMQ broker.
+data. It supports both direct repository-backed candle streaming and ZMQ replay
+through the same strategy processing contract.
 
 **Architecture:**
 
 - **BacktestConfig** (Pydantic): Strategy, instruments, date range, fill model
 - **DirectDbEngine**: Candle-driven simulation loop with time-batched processing
+- **ZmqReplayEngine**: Replay mode that publishes historical candles through
+  `ReplayPublisher` on the same topic shape used by live feeds
 - **ResultCollector**: In-memory artifact buffer (signals, trades, equity)
 - **BacktestMetrics**: Pure-math metrics computation (Sharpe, Sortino, CAGR, etc.)
 - **BacktestRunnerProcess**: ONE_SHOT RegisterableProcess orchestrating lifecycle
@@ -956,16 +958,12 @@ signals whose `instrument` targets a `can_trade=True` execution
 instrument (crypto spot, xStocks). See
 `src/snapper/strategies/examples/tradfi_observe_crypto_execute.py`
 for an illustrative EMA-crossover implementation + activation
-instructions in the module docstring. Cross-asset execution at the
-backtest-engine level is partially supported:
-`BacktestConfig.target_execution_exchange` (in
-`application/backtest/config.py`) routes simulated fills to a
-different venue from the source feed, and `batch_processor` already
-attributes those fills to `signal.instrument` /
-`config.target_execution_exchange` via the cross-asset attribution
-branch. Multi-feed `domain_time` alignment across heterogeneous
-source feeds is the remaining engine work for fully general
-cross-asset backtests.
+instructions in the module docstring. The backtest engines process
+multi-feed batches and route simulated fills to the signalled
+execution instrument. `BacktestConfig.target_execution_exchange`
+selects the fill venue when it differs from the source feed, and both
+direct-DB and ZMQ replay modes build topics for every configured
+exchange/instrument feed.
 
 ### Operational runbook
 

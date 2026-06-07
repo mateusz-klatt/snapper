@@ -57,7 +57,9 @@ or rotate after first login via
 - Python 3.14+
 - Poetry
 - Node.js 26+ and pnpm 11+ (for frontend)
-- TA-Lib (C library)
+- Build tools for Python packages. The TA-Lib adapter uses TA-Lib when
+  importable and falls back to pure Python indicators otherwise; install
+  the native TA-Lib C library only if your local wheel build requires it.
 
 ### Installation
 
@@ -66,8 +68,8 @@ or rotate after first login via
 git clone https://github.com/mateusz-klatt/snapper.git
 cd snapper
 
-# Install system dependencies (macOS)
-brew install ta-lib
+# Install system dependencies
+make system-deps
 
 # Install Python dependencies
 make setup

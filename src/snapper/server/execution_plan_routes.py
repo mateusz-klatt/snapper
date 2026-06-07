@@ -265,7 +265,7 @@ async def create_bracket(
     """Create a bracket (SL/TP) execution plan on an open position cycle.
 
     Validates the cycle is open, the caller has wallet access, the venue
-    supports reduce_only (Decision C1), price thresholds are on the
+    supports reduce_only, price thresholds are on the
     correct side, and at least one leg is present. The bracket is created
     with status=armed and immediately starts watching ticks.
 

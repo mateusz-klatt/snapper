@@ -105,13 +105,13 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
         ``_get_exchange_name()`` ("kraken_futures") when reserving an
         egress-pool route. This lets ``egress_pool``'s
         ``allowed_exchanges`` filter pin Futures to a specific tunnel
-        (e.g. NYC alongside Equities) without affecting Spot.
+        (e.g. alongside Equities) without affecting Spot.
 
         Without this override the shim falls back to the legacy
         hardcoded ``"kraken"`` tag — pool routing still works, but
         routes pinned to ``["kraken_futures"]`` would silently
         reject every Futures reservation and force fallback to a
-        wildcard EU tunnel.
+        wildcard tunnel.
 
         The token is reset in ``finally`` so the ContextVar does not
         leak across publisher restarts.

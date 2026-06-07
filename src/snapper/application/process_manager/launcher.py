@@ -540,7 +540,7 @@ class ProcessLauncherService:
         in-process receives the same policy reference. Subprocess
         publishers reconstruct the policy from settings independently;
         the launcher-side injection only covers thread / in-process mode
-        per the v1 deployment contract documented in plan v6 step 8.
+        per the deployment contract.
 
         Args:
             policy: Configured policy singleton or ``None`` to clear.
@@ -934,7 +934,7 @@ class ProcessLauncherService:
         This is the LOCK-FREE start primitive. It synchronously records
         the respawn config snapshot and the uptime origin BEFORE its
         first await so a death that arrives later can be reconciled. It
-        does NOT own the desired-state RUNNING transition (R5-1): the
+        does NOT own the desired-state RUNNING transition: the
         ``desired=RUNNING`` write belongs to the lock-holding callers
         (:meth:`start_process_by_name`,
         :meth:`start_per_wallet_instance_by_name`,
@@ -946,7 +946,7 @@ class ProcessLauncherService:
         desired-state/config/uptime on a startup failure: ownership of
         those markers belongs to the watchdog and to a deliberate stop,
         so a respawn failure cannot clobber a concurrent stop's
-        ``STOPPED`` marker (see R2-1). The lock-taking manual callers
+        ``STOPPED`` marker. The lock-taking manual callers
         (:meth:`start_process_by_name`,
         :meth:`start_per_wallet_instance_by_name`) own the first-start
         leak cleanup for names they themselves armed. The ``try`` opens
@@ -956,7 +956,7 @@ class ProcessLauncherService:
         the ``except Exception`` cleanup), the ``finally`` finalizes a
         still-dangling active run record so a cancel landing inside
         run-record creation, or between it and the spawn, never leaks a
-        RUNNING run (see R2-3 / R3-2). The ``finally`` guards on
+        RUNNING run. The ``finally`` guards on
         ``config.name in self.active_runs`` so the normal ``except``
         path (which already pops ``active_runs`` via
         :meth:`_handle_start_failure`) is never double-finalized. Per
@@ -1786,8 +1786,8 @@ class ProcessLauncherService:
     def _arm_desired_running(self, name: str) -> None:
         """Declare ``name`` desired-RUNNING (the lock-owned transition).
 
-        :meth:`start_process` no longer writes ``desired=RUNNING`` itself
-        (R5-1); the transition belongs here so only deliberate starters
+        :meth:`start_process` no longer writes ``desired=RUNNING`` itself;
+        the transition belongs here so only deliberate starters
         own it. The lock-holding manual callers
         (:meth:`start_process_by_name`,
         :meth:`start_per_wallet_instance_by_name`) call this UNDER
@@ -1808,7 +1808,7 @@ class ProcessLauncherService:
     async def _cancel_restart_tasks_locked(self, name: str) -> None:
         """Cancel every pending restart task for ``name``, under the lock.
 
-        The R5-1 defense-in-depth: a :meth:`stop_process_by_name` runs
+        A defense-in-depth step: a :meth:`stop_process_by_name` runs
         ``await _cancel_pending_restart`` BEFORE acquiring the per-name
         lock, so a manual start that fails and re-arms recovery during
         that pre-lock window can create a fresh :meth:`_delayed_restart`
@@ -1940,7 +1940,7 @@ class ProcessLauncherService:
         live-task guard runs BEFORE any counter/escalation mutation, so a
         re-entrant FAILED completion arriving while a restart sleeps can
         neither burn restart budget nor escalate without a real new
-        attempt — see R2-2). Otherwise it decides whether the death
+        attempt). Otherwise it decides whether the death
         warrants a restart based on the desired state, the registered
         ``restart_policy``, and the run status. Escalation is driven by
         FAILED deaths ONLY, via two counters: :attr:`_restart_attempts`
@@ -1997,13 +1997,13 @@ class ProcessLauncherService:
         )
 
     def _rearm_recovery_after_manual_start_failure(self, name: str) -> None:
-        """Re-arm watchdog recovery after a failed manual start (R3-1).
+        """Re-arm watchdog recovery after a failed manual start.
 
         A manual start of a watchdog-managed name cancels the pending
         delayed-restart task (via :meth:`_cancel_pending_restart`) before
         calling :meth:`start_process`. When that start raises, the
         managed-failure branch RETAINS desired=RUNNING and the respawn
-        config (R2-1) but would otherwise leave ``_restart_tasks`` empty,
+        config but would otherwise leave ``_restart_tasks`` empty,
         so nothing would ever re-fire — :meth:`_maybe_schedule_restart`
         only runs from a (now-spent) completion event. This schedules a
         fresh :meth:`_delayed_restart` so the watchdog resumes its backoff
@@ -2018,7 +2018,7 @@ class ProcessLauncherService:
         the live-task guard here additionally prevents stacking a second
         task if one is somehow still pending.
 
-        The re-arm is gated on ``desired==RUNNING`` (R4-1): a concurrent
+        The re-arm is gated on ``desired==RUNNING``: a concurrent
         :meth:`stop_process_by_name` that set desired=STOPPED while the
         manual start was in flight owns the lifecycle now, so no successor
         restart task may be created (it would only orphan-sleep and bail at
@@ -2051,7 +2051,7 @@ class ProcessLauncherService:
         concurrent stop flipped it away from RUNNING (or cleared it), it
         clears the watchdog state and returns WITHOUT re-arming or
         rescheduling, so a stop that raced the failing respawn can never
-        be resurrected and never orphans a successor task (see R2-1).
+        be resurrected and never orphans a successor task.
         Only when desired is still RUNNING does it bump both escalation
         counters and either escalate or schedule the next backoff — it
         never abandons a still-wanted process. Because
@@ -2378,7 +2378,7 @@ class ProcessLauncherService:
         )
 
     async def _handle_manual_start_stop_race(self, name: str) -> ProcessStartResult | None:
-        """Tear down a just-started process when a stop won the race (R4-1).
+        """Tear down a just-started process when a stop won the race.
 
         The manual lock-takers (:meth:`start_process_by_name`,
         :meth:`start_per_wallet_instance_by_name`) call this immediately
@@ -2582,7 +2582,7 @@ class ProcessLauncherService:
         watchdog markers only when the instance was NOT already
         watchdog-managed before the start began, so a failed manual start
         of an already-managed instance leaves the watchdog able to
-        recover it (see R2-1 / R2-4).
+        recover it.
 
         Args:
             name: Per-wallet instance name in the form
@@ -2645,8 +2645,7 @@ class ProcessLauncherService:
         clears the watchdog markers so a failed manual start of a
         brand-new name leaks nothing. Conversely, a failed manual start
         of an already-managed name (e.g. a publisher mid-backoff) does
-        NOT clear the markers, so the watchdog can still recover it (see
-        R2-1 / R2-4).
+        NOT clear the markers, so the watchdog can still recover it.
 
         Args:
             name: Process name from registry.
@@ -2743,7 +2742,7 @@ class ProcessLauncherService:
         task can schedule a SUCCESSOR ``_delayed_restart`` into
         ``_restart_tasks[name]`` while it runs, so cancelling a single
         entry is not enough — awaiting the cancelled task lets that
-        successor be observed and cancelled in turn (see R2-1). The
+        successor be observed and cancelled in turn. The
         bound is the escalation ceiling, so the loop always terminates.
 
         Args:
@@ -2789,7 +2788,7 @@ class ProcessLauncherService:
         backoff sleep and is already cancelled, so there is no contention
         and no self-deadlock). The not-running check, the real stop, and
         ``_clear_watchdog_state`` then ALL run INSIDE the per-name restart
-        lock (R4-1) so the stop serializes against an in-flight manual
+        lock so the stop serializes against an in-flight manual
         start or a watchdog respawn that holds the same lock: the stop
         waits, then either sees the now-started process and stops it, or
         the in-flight start sees desired=STOPPED in its post-spawn re-check
@@ -2797,7 +2796,7 @@ class ProcessLauncherService:
         clears the watchdog state so the STOPPED marker never leaks.
 
         Once the lock is held the stop re-cancels every restart task for
-        the name via :meth:`_cancel_restart_tasks_locked` (R5-1): a manual
+        the name via :meth:`_cancel_restart_tasks_locked`: a manual
         start that failed and re-armed recovery during the pre-lock
         ``_cancel_pending_restart`` window could have created a fresh
         delayed-restart task that ``_clear_watchdog_state`` would only POP

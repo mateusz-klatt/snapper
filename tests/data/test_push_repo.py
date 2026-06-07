@@ -1,11 +1,11 @@
-"""Repository-level tests for the iOS Push Foundation surface.
+"""Repository-level tests for the push-notification persistence surface.
 
 Covers the 21 SCD2 methods introduced for the five new
 bitemporal tables ``notification_devices``, ``device_alert_prefs``,
 ``user_alert_defaults``, ``alert_events``, ``alert_deliveries``.
-Per project invariant (``feedback_bitemporal_all_tables``)
-every row lifecycle is SCD2 close-and-insert; reads gate on
-``known_to == KNOWN_TO_MAX`` via partial active indexes.
+Per the bitemporal/SCD2 invariant, every row lifecycle is SCD2
+close-and-insert; reads gate on ``known_to == KNOWN_TO_MAX`` via
+partial active indexes.
 
 Each test uses a fresh on-disk SQLite database via the ``repo`` fixture
 (tmp_path-scoped, engine disposed after yield). AAA layout.
@@ -631,11 +631,11 @@ class TestAlertEventRepo:
     ) -> None:
         """Keyset cursor stays correct even if the anchor is SCD2-revised.
 
-        Before R3 the cursor was just ``public_id`` and the repo re-read
-        the anchor's current ``(timestamp, public_id)`` — a mid-session
-        revision that moved the anchor's timestamp would silently shift
-        pagination. With the opaque cursor, we filter on the snapshotted
-        pair directly, so paging is immune to anchor churn.
+        An earlier design used just ``public_id`` as the cursor and the
+        repo re-read the anchor's current ``(timestamp, public_id)`` — a
+        mid-session revision that moved the anchor's timestamp would
+        silently shift pagination. With the opaque cursor, we filter on
+        the snapshotted pair directly, so paging is immune to anchor churn.
         """
         public_ids: list[str] = []
         for idx in range(3):
@@ -895,7 +895,7 @@ class TestAlertDeliveryRepo:
 
 
 class TestListUsersWithPermission:
-    """Rule 4 fan-out helper."""
+    """Permission-based user fan-out helper."""
 
     @pytest.mark.asyncio
     async def test_returns_users_with_matching_role(self, repo: SQLAlchemyRepository) -> None:
@@ -1116,11 +1116,11 @@ class TestBulkCancelRaceSafety:
     ) -> None:
         """A row transitioned to ``sent`` mid-cancel is skipped silently.
 
-        Closes ``gpt-5.3-codex`` final-review Critical #1: a naive
+        Regression coverage for a correctness fix: a naive
         close+insert on a row the retry loop already transitioned to
         ``sent`` collided on the partial-unique
         ``(public_id, known_to=MAX)`` index and raised
-        ``IntegrityError``. The R1 pattern does an atomic close
+        ``IntegrityError``. The current pattern does an atomic close
         ``UPDATE ... WHERE status='queued' AND known_to=MAX`` and
         only inserts the ``cancelled_scope`` successor when the
         rowcount is 1. A winner that already transitioned the row
@@ -1416,10 +1416,10 @@ class TestScopeHelpers:
     ) -> None:
         """Cancel bulk-transitions matching scope via denormalised cols (no event JOIN).
 
-        This is the closure for the Copilot R1 finding on SCD2-join
-        correctness: even if the source ``alert_event`` is later closed
-        or its scope changes, the scope-cancel path filters on the
-        delivery row's own denormalised columns.
+        This is the closure for an SCD2-join correctness finding: even
+        if the source ``alert_event`` is later closed or its scope
+        changes, the scope-cancel path filters on the delivery row's
+        own denormalised columns.
         """
         matching_pid = await repo.insert_alert_delivery(
             AlertDeliveryInsertRow(
@@ -1635,7 +1635,7 @@ class TestScopeHelpers:
 
 
 class TestConcurrencyInvariants:
-    """Close Copilot R2 findings: atomic close + idempotent upsert convergence.
+    """Atomic close + idempotent upsert convergence under concurrency.
 
     We cannot easily drive true concurrent commits against a single
     SQLite file (writes serialise), but we can drive the "lost-race"
@@ -1652,7 +1652,7 @@ class TestConcurrencyInvariants:
     ) -> None:
         """Retry after a successful send is a no-op (no spurious successor row).
 
-        Before R3 a racing timeout+retry could both pass the
+        Earlier a racing timeout+retry could both pass the
         ``require_queued`` guard in Python and both emit close+insert;
         the second would collide on the active-``public_id`` partial
         unique index and leak an IntegrityError. Now the second call

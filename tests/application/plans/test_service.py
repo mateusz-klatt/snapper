@@ -307,7 +307,7 @@ class TestPlanExecutorService:
         ``get_plan_public_id_for_client_order_id`` calls so a single
         transient DB error during recovery only impacts the one child
         whose individual lookup also fails — not the entire plan.
-        Mirrors the pre-HV2-M16 per-child fail-soft contract.
+        Mirrors the earlier per-child fail-soft contract.
         """
         mock_repo = AsyncMock()
         mock_repo.get_plan_public_ids_for_client_order_ids = AsyncMock(
@@ -410,7 +410,7 @@ class TestPlanExecutorService:
     ) -> None:
         """A corrupt child_client_order_id linking to a different plan is skipped.
 
-        Round 3 fix: verify the lookup result matches the recovered
+        Verify the lookup result matches the recovered
         plan's public_id before emitting a cancel so a mis-stamped child
         id does not cause a cancel to be emitted for the wrong plan.
         """
@@ -438,7 +438,7 @@ class TestPlanExecutorService:
     ) -> None:
         """Recovery does not re-emit a cancel if one is already pending.
 
-        Round 3 fix: every restart while a plan is still in
+        Every restart while a plan is still in
         cancel_requested would otherwise enqueue a duplicate venue
         cancel. ``has_pending_cancel_command`` is the idempotency
         guard.
@@ -493,7 +493,7 @@ class TestPlanExecutorService:
     ) -> None:
         """``start()`` wires the ZMQ subscriber BEFORE recovery runs.
 
-        Round 3 fix: if a stranded cancel is re-emitted during
+        If a stranded cancel is re-emitted during
         recovery, the venue can publish the cancelled event before the
         service's subscriber is ready. Subscriber must be up first.
         """
@@ -524,7 +524,7 @@ class TestPlanExecutorService:
     async def test_start_sleeps_for_slow_joiner_when_subscriber_active(
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock
     ) -> None:
-        """Round 4 fix: start() awaits a slow-joiner sleep after subscriber setup.
+        """start() awaits a slow-joiner sleep after subscriber setup.
 
         When the subscriber is connected, ``start()`` sleeps briefly
         so the XPUB/XSUB broker can propagate the subscription before
@@ -1920,7 +1920,7 @@ class TestMultiChildIds:
 
 
 class TestTickRoutingSymbolIndex:
-    """Tests for _runtime_symbol_index tick routing (deliverable 1.5)."""
+    """Tests for _runtime_symbol_index tick routing."""
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
@@ -1979,7 +1979,7 @@ class TestTickRoutingSymbolIndex:
 
 
 class TestClockLoop:
-    """Tests for _clock_loop (deliverable 1.2)."""
+    """Tests for _clock_loop."""
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
@@ -2082,7 +2082,7 @@ class TestClockLoop:
 
 
 class TestCapabilityGating:
-    """Tests for _check_capabilities (deliverable 1.6)."""
+    """Tests for _check_capabilities."""
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
@@ -2136,7 +2136,7 @@ class TestCapabilityGating:
 
 
 class TestExecutionPlanDataFields:
-    """Tests for ExecutionPlanData response field additions (deliverable 1.7)."""
+    """Tests for ExecutionPlanData response field additions."""
 
     def test_plan_to_data_includes_new_fields(self) -> None:
         """_plan_to_data maps position_cycle_public_id and parent_plan_public_id."""
@@ -2387,7 +2387,7 @@ class TestLogDecisionPublishesEvent:
     async def test_publishes_with_correct_plan_public_id_field(
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock
     ) -> None:
-        """Published payload uses ``plan_public_id`` (Plan v1.12 R10.B-2)."""
+        """Published payload uses ``plan_public_id``."""
         mock_repo = AsyncMock()
         mock_repo.insert_execution_plan_decision = AsyncMock(return_value="decision-pid-3")
         mock_repo_fn.return_value = mock_repo
@@ -2672,7 +2672,7 @@ class TestTickRoutingStaleIndex:
 
 
 class TestHandleTickStatusGuards:
-    """Tests for F1: _handle_tick must skip terminal and paused plans."""
+    """Tests that _handle_tick must skip terminal and paused plans."""
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
@@ -2732,7 +2732,7 @@ class TestHandleTickStatusGuards:
 
 
 class TestTickEvaluatorErrorLogging:
-    """Tests for F6: evaluator exceptions must be logged, not silently suppressed."""
+    """Tests that evaluator exceptions must be logged, not silently suppressed."""
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
@@ -2781,7 +2781,7 @@ class TestTickEvaluatorErrorLogging:
 
 
 class TestDispatchFailureIsolation:
-    """Tests for F7: dispatch failure must not break sibling plans."""
+    """Tests that dispatch failure must not break sibling plans."""
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")

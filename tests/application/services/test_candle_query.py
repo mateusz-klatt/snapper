@@ -607,7 +607,7 @@ class TestFetchCandlesBackfill:
     async def test_backfill_dedups_overlapping_derived_db_row(self) -> None:
         """Derived 5m cache bar at canonical boundary dedupes a DB 5m row at same open_at_ms.
 
-        Closes the dedup hole the 2026-05-14 reviewer pair flagged:
+        Closes a dedup hole at the canonical-boundary case:
         when the derived bar's ``open_at_ms`` lands on a canonical
         boundary (e.g. ``300_000``) and the DB returns a 5m row at
         the same boundary, the cache wins and the DB row is dropped.

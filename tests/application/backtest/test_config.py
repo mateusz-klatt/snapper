@@ -276,7 +276,7 @@ class TestTargetExecutionExchangeFingerprint:
         Given: two configs with None target exchange,
         When: compute_fingerprint(..., for_pairing=True) is called,
         Then: hashes match — auto-pair detection at backtest_routes.py:348
-            still groups legacy runs correctly. Closes R3.7.
+            still groups legacy runs correctly.
         """
         c1 = BacktestConfig(**_valid_config())
         c2 = BacktestConfig(**_valid_config(target_execution_exchange=None))
@@ -291,7 +291,7 @@ class TestTargetExecutionExchangeFingerprint:
         Given: a default config vs. a cross-asset config,
         When: compute_fingerprint(..., for_pairing=True) is called on each,
         Then: hashes differ — cross-asset runs do not auto-pair against
-            single-venue baselines. Closes R3.7.
+            single-venue baselines.
         """
         c_default = BacktestConfig(**_valid_config())
         c_cross = BacktestConfig(**_valid_config(target_execution_exchange="kraken"))

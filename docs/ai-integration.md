@@ -58,8 +58,8 @@ mints per MCP client. Delegates:
 
 - Cannot log in via the web UI password form (the placeholder password
     hash is opaque to humans).
-- Cannot see other delegates, operators, or wallets — they're scoped
-    to the owning operator's visible wallet set.
+- Cannot see other delegates, operators, or wallets — their wallet scope
+    comes from the operator they are bound to.
 - Carry per-delegate safety caps independent of the operating
     operator's caps.
 
@@ -77,6 +77,7 @@ curl -X POST http://localhost:8000/api/ai-delegates \
     "timestamp": "2026-04-20T00:00:00Z",
     "payload": {
       "label": "Claude Desktop",
+      "operator_public_id": "<operator-public-id>",
       "caps": {
         "max_open_orders": 3,
         "max_daily_notional_usd": 1000.0,
@@ -85,6 +86,13 @@ curl -X POST http://localhost:8000/api/ai-delegates \
     }
   }'
 ```
+
+`payload.operator_public_id` is optional. When omitted, Snapper binds the
+delegate to the caller's `primary_operator_public_id`; when supplied, it
+must be one of the caller's authenticated operator claims. The minted
+delegate token inherits scope from that bound operator, so later scope
+grant changes for that operator control which wallets/instruments the
+delegate can act on.
 
 The response is **one-shot**. Copy the tokens out of the HTTP session
 immediately — Snapper never re-serves them:
@@ -274,10 +282,10 @@ only on the cancel paths that affect open exposure, and
 `submit_ai_review_decision` is not wired to
 `caps_enforcer_getter` at registration.
 
-- **`list_instruments(exchange: str)`** — returns sorted instrument
-    symbols visible to the delegate's operator for the given exchange.
-    Read-only; requires `READ_MARKET_DATA` permission (AI_DELEGATE
-    role satisfies).
+- **`list_instruments(exchange: str)`** — returns sorted native symbols
+    for the exchange inventory. It is not wallet/operator scoped;
+    read-only access is gated by `READ_MARKET_DATA` permission
+    (AI_DELEGATE role satisfies).
 
 - **`list_orders(wallet_public_id?, status?, exchange?, instrument?,
     limit=50, offset=0)`** — paged read of the delegate's order
@@ -420,9 +428,17 @@ at 80/95% utilisation.
 
 ## Error catalog
 
-MCP responses use standard HTTP status codes + a Snapper-specific
-`error_code` in the JSON body. Clients should branch on `error_code`,
-not on status text.
+Transport and middleware failures on `/api/mcp` use standard HTTP status
+codes plus a Snapper-specific `error_code` in the JSON body. Clients
+should branch on `error_code`, not on status text.
+
+Envelope-based MCP tools return a normal MCP `CallToolResult` instead:
+the single `TextContent.text` entry contains JSON with `success`,
+`error_code`, `message`, and `details`, and `CallToolResult.isError`
+mirrors `not success`. A few older tools still return raw dictionaries
+on success or surface FastMCP `ToolError`/permission exceptions on
+failure; client code should handle both shapes until those tools are
+migrated.
 
 | Status | `error_code`               | When it fires                                    | Client action                                         |
 | ------ | -------------------------- | ------------------------------------------------ | ----------------------------------------------------- |

@@ -119,7 +119,7 @@ class TestTwoContractStitch:
     async def test_panama_preserves_absolute_difference(self) -> None:
         """Panama method adjusts early bars by cumulative delta.
 
-        Given: C1 close=100 at roll, C2 close=110 at roll �� delta=10,
+        Given: C1 close=100 at roll, C2 close=110 at roll → delta=10,
         When: build with method=panama,
         Then: C1 bars shifted by +10.
         """
@@ -302,7 +302,7 @@ class TestEdgeCases:
 
     @pytest.mark.asyncio
     async def test_contracts_used_truncated_on_failed_roll(self) -> None:
-        """R1: contracts_used reports only the truncated chain on failed roll.
+        """contracts_used reports only the truncated chain on failed roll.
 
         Given: a 3-contract chain where the 2->3 roll fails (no common
         bar between ESU6 and ESZ6),
@@ -419,7 +419,7 @@ class TestEdgeCases:
 
     @pytest.mark.asyncio
     async def test_build_rejects_negative_rollover_days(self) -> None:
-        """R2: builder raises ValueError when rollover_days_before < 0."""
+        """Builder raises ValueError when rollover_days_before < 0."""
         c1 = _contract("ESM6", expiry_days=3)
         repo = _mock_repo([c1], {"ESM6": [_candle(D1, 100.0)]})
         builder = ContinuousContractBuilder(repository=repo)
@@ -437,7 +437,7 @@ class TestEdgeCases:
 
     @pytest.mark.asyncio
     async def test_build_rejects_excessive_rollover_days(self) -> None:
-        """R2: builder raises ValueError when rollover_days_before > 365."""
+        """Builder raises ValueError when rollover_days_before > 365."""
         c1 = _contract("ESM6", expiry_days=3)
         repo = _mock_repo([c1], {"ESM6": [_candle(D1, 100.0)]})
         builder = ContinuousContractBuilder(repository=repo)

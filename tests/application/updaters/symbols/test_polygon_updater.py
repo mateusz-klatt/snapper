@@ -1297,10 +1297,9 @@ async def test_polygon_update_database_closes_deactivated_aliases(
     Then: The open alias row gets ``known_to = now`` — i.e. Polygon
         is wired through to the shared ``_reconcile_aliases`` helper
         identically to kraken / kraken_futures / kraken_equities /
-        walutomat. Regression coverage for the Codex round-1 critical
-        finding on plan item #4 — the helper call was originally
-        missing from ``polygon._update_database`` even though
-        Polygon was in the CLI backfill exchange set.
+        walutomat. Regression coverage for a case where the helper
+        call was originally missing from ``polygon._update_database``
+        even though Polygon was in the CLI backfill exchange set.
     """
     updater, repository = polygon_updater
     seed_time = datetime(2024, 6, 1, tzinfo=UTC)

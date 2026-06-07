@@ -282,7 +282,7 @@ class TestHandleAiReviewDecisionBusMessage:
 class TestRegisterAfterCreateRace:
     """Cache-driven fix for the register-after-create race.
 
-    Closes Codex P2 finding on commit 7d26a03: a fast delegate could
+    Closes the register-after-create race: a fast delegate could
     submit a decision in the gap between :meth:`create_review`'s
     INSERT-commit and the strategy primitive's :meth:`register_future`
     invocation. Pre-fix the listener no-op'd. Post-fix the listener

@@ -550,7 +550,7 @@ async def test_custom_policy_overrides_fanout_after_seconds(
 async def test_admission_policy_rejects_invalid_fanout_window() -> None:
     """``fanout_after_seconds <= heartbeat_window_seconds`` raises ValueError.
 
-    Given the cross-plan invariant requires
+    Given the admission invariant requires
     ``fanout_after > heartbeat_window``,
     When AiReviewAdmissionPolicy is constructed with the relation flipped
     (less-than) or equal,

@@ -341,7 +341,7 @@ async def dispatch_messages(
 
     The dispatch table is built once per connection (not per message) to
     avoid repeated ``get_settings()``/``get_repository()`` calls and
-    closure allocations in the hot path (HV2-M1 micro-optimization).
+    closure allocations in the hot path.
 
     Args:
         websocket: The authenticated WebSocket connection.

@@ -1079,9 +1079,8 @@ class WebSocketAuthManager:
            connection's `warn_task` + `hard_task` timers so a pending
            expiration handler cannot wake during the `await
            ws.close()` yield and try to write/close the socket
-           concurrently with the kill switch (
-             flagged the original
-           close-then-disconnect order as a race).
+           concurrently with the kill switch (the original
+           close-then-disconnect order was a race).
         2. `await ws.close(code=4003, reason=…)` — the kill-switch
            close itself.
         Iterates a snapshot so the `disconnect` side-effect (which

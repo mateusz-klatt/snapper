@@ -2,8 +2,8 @@
 
 The probe lets an operator identify which step in :meth:`MarketDataPublisherService._process_tick`
 caps single-consumer throughput when a publisher reports sustained
-``_enqueue_or_drop_oldest`` drops (see Kraken spot wildcard scenario,
-2026-05-15 brainstorm by Codex + Copilot architects).
+``_enqueue_or_drop_oldest`` drops (e.g. the Kraken spot wildcard
+subscribe-all scenario).
 
 Activation
 ----------

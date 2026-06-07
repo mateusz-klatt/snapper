@@ -2379,7 +2379,7 @@ class UserActiveToken(Base):
 class NotificationDevice(TemporalMixin, Base):
     """Temporal (SCD2) inventory of iOS devices registered for APNs push.
 
-    Per project invariant (``feedback_bitemporal_all_tables``): every
+    Per the bitemporal/SCD2 invariant, every
     table must carry ``TemporalMixin`` (``timestamp`` + ``known_to``).
     Device lifecycle is versioned via SCD2: an active row is
     ``known_to = KNOWN_TO_MAX AND token_status = 'active'``. Close +
@@ -2932,7 +2932,7 @@ class AiReviewEvent(Base):
             :class:`AiReviewEventTypeEnum`).
         actor_delegate_public_id: Which delegate triggered the
             event. NULL for reaper / strategy-supersede events
-            (Sonnet m1 v1.3 — event_type fully discriminates).
+            (``event_type`` fully discriminates).
         previous_status: ``ai_reviews.status`` before this event.
             NULL acceptable for reaper-driven transitions.
         new_status: ``ai_reviews.status`` after this event.

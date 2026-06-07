@@ -2122,7 +2122,7 @@ def test_reconcile_aliases_closes_when_capability_deactivated(
     Then: Exactly ONE alias row closes (ETH-USD's WS alias) and the
         BTC-USD alias stays open. The closure is the canonical cleanup
         for the architectural rule that capabilities are the
-        operational gate (see feedback-capability-gate-on-symbol-aliases).
+        operational gate for symbol aliases.
     """
     updater = updater_factory(3, False)
     seed_time = datetime(2024, 6, 1, tzinfo=UTC)

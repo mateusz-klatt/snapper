@@ -543,8 +543,8 @@ class PaperExchangeClient(ExchangeClientBase):
         """Implement historical ticker streaming for paper trading.
 
         Streams snapshots via :meth:`Repository.iter_market_snapshots`
-        (H8 — paper backtest streaming) so multi-day windows keep RSS
-        flat. The legacy materialising path
+        (bounded-memory paper backtest streaming) so multi-day windows
+        keep RSS flat. The legacy materialising path
         (:meth:`Repository.get_market_snapshots`) is reserved for
         bounded UI / one-shot lookups.
 
@@ -732,7 +732,7 @@ class PaperExchangeClient(ExchangeClientBase):
 
         Streams per-symbol via :meth:`Repository.iter_trades` and
         merges the resulting time-ordered streams with a k-way async
-        heap merge (H7 — paper backtest streaming). The legacy
+        heap merge (bounded-memory paper backtest streaming). The legacy
         materialising path (``get_trades`` + in-memory sort across
         every symbol) was OOM-prone on multi-day, multi-symbol
         replays; this version keeps RSS bounded by the number of

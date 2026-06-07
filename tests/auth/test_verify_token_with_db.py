@@ -1,4 +1,4 @@
-"""Tests for  DB-backed async verify_token + 30s LRU cache.
+"""Tests for the DB-backed async verify_token + 30s LRU cache.
 
 Covers :meth:`TokenManager.verify_token_with_db`:
 
@@ -278,13 +278,13 @@ class TestVerifyTokenWithReasonBranches:
 
 
 class TestInvalidateUserCache:
-    """Cross-instance LRU eviction for the admin-bus subscriber (3d-C)."""
+    """Cross-instance LRU eviction for the admin-bus subscriber."""
 
     def test_evicts_matching_user_entries_only(self) -> None:
         """Entries whose user_public_id matches are dropped; others stay.
 
         Simulates the ``admin.user_deactivated`` dispatch: the
-        TokenManager subscribes to the bus (wired in 3d-C) and calls
+        TokenManager subscribes to the bus and calls
         :meth:`invalidate_user_cache` on receipt. Unaffected users
         keep their cached verdicts.
         """
@@ -321,7 +321,7 @@ class TestVerifyCachePrune:
     async def test_hard_cap_applies_when_all_entries_fresh(self) -> None:
         """Fresh-only burst → oldest entries hard-evicted to stay at cap.
 
-        Codex regression guard: a burst of unique tokens
+        Regression guard: a burst of unique tokens
         within TTL must not let the cache grow unbounded past
         ``VERIFY_CACHE_MAX_ENTRIES``. The stale pass would find
         nothing to evict; the hard-cap pass drops the oldest by
@@ -450,16 +450,16 @@ class TestVerifyCacheGenerationRace:
         """Legacy blank-claim tokens are NEVER cached — fail-closed.
 
         Given: a token whose claim ``user_public_id=""`` (legacy
-            pre-Day-1c issuance) and a successful DB-row lookup,
+            issuance shape) and a successful DB-row lookup,
         When: :meth:`_cache_verdict` runs,
         Then: the cache is NOT written — the race guard needs a
             pre-DB-read sample keyed off the same identifier the
             admin-bus listener bumps, but a blank claim has no such
-            identifier before the await. Closes the R2
-            codex finding that sampling the row id post-await
-            cannot detect an invalidate-during-DB-read race.
-            never issues blank-claim tokens; legacy tokens pay a
-            perf penalty (always DB-backed) until they expire.
+            identifier before the await. This closes the gap where
+            sampling the row id post-await cannot detect an
+            invalidate-during-DB-read race. Current issuance never
+            mints blank-claim tokens; legacy tokens pay a perf
+            penalty (always DB-backed) until they expire.
         """
         manager = _fresh_manager()
         now = int(datetime.now(UTC).timestamp())

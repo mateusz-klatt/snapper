@@ -1,4 +1,4 @@
-"""Pydantic schemas for iOS Push Foundation alert read endpoints.
+"""Pydantic schemas for the iOS push-notification alert read endpoints.
 
 Covers the two alert endpoints:
 ``GET /api/alerts/history?limit=&before=`` and ``GET /api/alerts/{id}``.

@@ -24,7 +24,7 @@ class DummyWebSocket:
 
     Matches :class:`fastapi.WebSocket` for the fields the
     :class:`WebSocketAuthManager.verify_session_cookie` path reads —
-    header (for the Bearer token fast-path.7) and cookie
+    header (for the Bearer token fast-path) and cookie
     (for the browser fallback).
     """
 

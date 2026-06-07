@@ -4,7 +4,8 @@
 outgoing REST call to an external exchange and exposes rolling-window
 rates + utilization against the published per-exchange limit. The goal
 is to close the "we have no idea how close we are to 429" blind spot
-that every exchange-integration roadmap has flagged since
+that affects every exchange integration.
+
 Known upstream limits (public API docs)
 Walutomat: 20 req/s per account.
 Kraken Spot (REST): 15 req/s per nonce window.

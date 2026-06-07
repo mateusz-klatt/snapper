@@ -7,7 +7,7 @@ market.* topics; persisted instruments are additionally pre-warmed
 from :class:`Repository` at lifespan start so a freshly-rebooted
 server has chart data immediately without waiting on the first close.
 
-Design constraints from plan v6:
+Design constraints:
 
 - **1-minute candles only.** Other timeframes either derive from the
   1m deque (5m, 15m, 30m via the read route) or fall through to the

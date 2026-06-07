@@ -1,4 +1,4 @@
-"""Tests for the domain order-lifecycle StrEnums added in Batch 4.
+"""Tests for the domain order-lifecycle StrEnums.
 
 Pins the byte-identical string values, the Literal-alias membership
 contracts, and the ``StrEnum`` string-operation ergonomics for

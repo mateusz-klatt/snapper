@@ -319,7 +319,7 @@ def _find_owner_and_non_owner_instances(
 
 @pytest.mark.asyncio
 async def test_publishes_when_no_shard_ownership_injected_legacy_compat() -> None:
-    """Pre-lifespan / pre-P2-8 single-instance behaviour.
+    """Pre-lifespan single-instance behaviour before sharding is wired.
 
     The lifespan injects :class:`ShardOwnership` AFTER the publisher seam
     but BEFORE the bus listener subscribes. Under partial-startup races,
@@ -347,7 +347,7 @@ async def test_publishes_when_instance_count_is_one_unconditional_owner() -> Non
 
     Default deployment (no SNAPPER_COORDINATOR_INSTANCE_COUNT override) is
     instance_count=1 — the gate must be a deterministic no-op so behaviour
-    is byte-identical to pre-P2-8a.
+    is byte-identical to the pre-sharding single-instance path.
 
     Given a service with ShardOwnership(0, 1),
     When the handler is invoked,

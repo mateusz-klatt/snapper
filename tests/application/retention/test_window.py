@@ -16,7 +16,7 @@ class TestComputeRetentionWindow:
     """Per-tick boundary formula."""
 
     def test_telemetry_policy_today_2026_05_01(self) -> None:
-        """SC#4 fixture — ``retain_days=1, backlog_lookback_days=30``."""
+        """Telemetry fixture — ``retain_days=1, backlog_lookback_days=30``."""
         policy = RetentionPolicy(table="telemetry", retain_days=1, backlog_lookback_days=30)
         day_start, day_end = compute_retention_window(date(2026, 5, 1), policy)
         assert day_start == date(2026, 3, 30)

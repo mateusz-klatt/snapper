@@ -185,8 +185,8 @@ class TestRevokeUserSessions:
             ``_blacklisted_tokens`` observed at call time,
         When: revoke_user_sessions runs,
         Then: at the moment the DB revoke is called, the in-memory
-            blacklist is STILL empty — confirming the sequence
-            "load JTIs → DB revoke → blacklist" from the plan.
+            blacklist is STILL empty — confirming the documented
+            sequence "load JTIs → DB revoke → blacklist".
         """
         manager = self._fresh_manager()
         observations: dict[str, set[str]] = {}

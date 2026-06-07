@@ -271,7 +271,7 @@ def accrual_topic(
 
 
 def alerts_topic(user_public_id: str, alert_type: str) -> str:
-    """Build an iOS Push Foundation alert topic string.
+    """Build an iOS push-notification alert topic string.
 
     Args:
         user_public_id: Recipient user UUID7.

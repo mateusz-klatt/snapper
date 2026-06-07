@@ -771,8 +771,8 @@ class TradingEngineService:
             signaled_at: Unix timestamp when signal was generated.
             ai_review_public_id: Optional citation forwarded from
                 :class:`SignalData` so the strategy hot-path can route through
-                :meth:`TradingCapsEnforcer.guard_with_ai_review_attribution`
-                in a future chunk. ``None`` preserves the existing
+                :meth:`TradingCapsEnforcer.guard_with_ai_review_attribution`.
+                ``None`` preserves the existing
                 ``guard_service_principal()`` audit-bypass behavior.
             ai_review_dispatch_version: Companion to
                 ``ai_review_public_id``; transport-only — the

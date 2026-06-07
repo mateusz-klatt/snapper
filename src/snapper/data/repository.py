@@ -1279,7 +1279,7 @@ class Repository(ABC):
                 the exchange filter and return orders across every
                 exchange in a single query. ZMQ trader recovery uses
                 ``None`` to collapse the legacy per-exchange waterfall
-                (HV2-M3) into one round-trip.
+                into one round-trip.
             as_of: Point-in-time for temporal query.
             wallet_public_id: Multi-tenant filter. When
                 non-empty, only orders matching ``Order.wallet_public_id
@@ -1710,9 +1710,8 @@ class Repository(ABC):
         Bitemporal query: ``as_of`` filters the active SCD2 versions,
         and ``range_start`` / ``range_end`` constrain the
         ``effective_from`` exchange-side timestamp. Range bounds follow
-        the project temporal-query convention from
-        ``feedback_temporal_query`` (always pass an explicit window
-        instead of relying on KNOWN_TO_MAX).
+        the project temporal-query convention (always pass an explicit
+        window instead of relying on KNOWN_TO_MAX).
 
         Args:
             instrument_public_id: Public ID of the instrument.
@@ -2477,7 +2476,7 @@ class Repository(ABC):
         """Resolve many client_order_id -> plan_public_id in one query.
 
         Batched variant of :meth:`get_plan_public_id_for_client_order_id`
-        used by plan recovery (HV2-M16) when ``_reemit_stranded_cancel``
+        used by plan recovery when ``_reemit_stranded_cancel``
         sweeps every child of a recovered plan. Per-id RTTs in the
         legacy loop scale linearly with child count (10-100 RTTs for
         wide grid plans on startup); the batched ``IN`` query keeps
@@ -2620,7 +2619,7 @@ class Repository(ABC):
     ) -> dict[str, PositionCycleRow]:
         """Return open cycles for many shards in a single query.
 
-        Used by ZMQ trader recovery (HV2-M4) to collapse a
+        Used by ZMQ trader recovery to collapse a
         per-engine ``get_open_position_cycle`` waterfall into one
         round-trip. Shards with no active open cycle are simply
         absent from the returned dict.
@@ -4452,8 +4451,7 @@ class SQLAlchemyRepository(Repository):
         * File-backed SQLite — SQLAlchemy's default
           :class:`AsyncAdaptedQueuePool`. Earlier revisions forced
           :class:`NullPool` here on the theory that aiosqlite
-          serialises writes anyway, but the 2026-05-15 architect
-          review (Codex + Copilot panel) showed the per-commit
+          serialises writes anyway, but profiling showed the per-commit
           connection release-and-reacquire churn against
           ``NullPool`` dominated publisher CPU. The default queue
           pool keeps connections alive across ``session.commit()``
@@ -5167,8 +5165,7 @@ class SQLAlchemyRepository(Repository):
         path. Append-only ticks do not need the identity-map, dirty
         tracking, or per-row constructor work that the ORM provides;
         ``insert(Tick).values(rows)`` emits a single SQL statement with
-        all rows inline and is materially cheaper at publisher rates
-        (Codex 2026-05-11 post-HV2-H7 review).
+        all rows inline and is materially cheaper at publisher rates.
 
         When ``session`` is provided the caller owns the transaction —
         no commit fires inside this method. Publisher writer tasks
@@ -5345,7 +5342,7 @@ class SQLAlchemyRepository(Repository):
         """Resolve active Instrument from native symbol and exchange.
 
         Collapses the legacy Symbol→Instrument lookup waterfall into
-        a single joined query (HV2-M5). Every market-data read API
+        a single joined query. Every market-data read API
         (``get_candles`` / ``get_ticks`` / ``get_trades`` /
         :meth:`iter_ticks` / :meth:`iter_trades`) hit this method
         twice: one SELECT to look up the Symbol's ``public_id``,
@@ -7111,7 +7108,7 @@ class SQLAlchemyRepository(Repository):
         client_order_ids: list[str],
         as_of: datetime,
     ) -> dict[str, str]:
-        """Batched child->parent plan resolver (HV2-M16).
+        """Batched child->parent plan resolver.
 
         Returns at most one ``plan_public_id`` per ``client_order_id``
         (the most recent active ``create`` row by ``created_at`` desc /
@@ -9675,7 +9672,7 @@ class SQLAlchemyRepository(Repository):
         shard_keys: list[str],
         as_of: datetime,
     ) -> dict[str, PositionCycleRow]:
-        """Batch-fetch open position cycles for many shards (HV2-M4)."""
+        """Batch-fetch open position cycles for many shards."""
         if not shard_keys:
             return {}
         async with self.session() as s:
@@ -11888,8 +11885,7 @@ class SQLAlchemyRepository(Repository):
         ``sent`` / ``failed`` would collide on the partial unique
         index ``(public_id, known_to=KNOWN_TO_MAX)`` and raise
         ``IntegrityError`` out of the admin-topic dispatcher — which
-        in turn would kill the sidecar's receive loop (race-safety
-        fix from `gpt-5.3-codex` final review).
+        in turn would kill the sidecar's receive loop.
         """
         async with self.session() as s:
             rows = await self._select_queued_deliveries_by_user(s, user_public_id)

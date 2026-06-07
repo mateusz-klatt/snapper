@@ -151,8 +151,7 @@ class FeatureFlagMiddleware(BaseHTTPMiddleware):
 def _build_rejection_response(rejection_reason: str | None) -> JSONResponse:
     """Return a 401 JSONResponse whose ``error_code`` matches ``rejection_reason``.
 
-     +
-    the reason comes straight from
+    The reason comes straight from
     meth:`TokenManager.verify_token_with_reason` so the classifier
     cannot be fooled by a stale cache entry left over from an
     earlier request. Success is
@@ -313,7 +312,7 @@ def build_mcp_app(
         2. :class:`BearerAuthMiddleware` — auth gate; populates
            ``request.state.token_claims`` before tool dispatch.
         3. :class:`PrincipalRateLimitMiddleware` — per-principal
-           throttle keyed off the claims set by (2). +
+           throttle keyed off the claims set by (2).
         4. Downstream FastMCP Streamable HTTP app with tools
            registered via :func:`register_mcp_tools`.
 

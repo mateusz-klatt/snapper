@@ -368,7 +368,7 @@ class TestDeactivateUserOrchestration:
 class TestDeactivateUserRaceLoss:
     """Race-loss safety verified against a real in-memory aiosqlite DB.
 
-    Codex : original `deactivate_user` query filtered by
+    An earlier revision of `deactivate_user` filtered by
     `where_active_now(User)` only — it did NOT filter by
     `User.is_active`. So if Admin B deactivated a user between Admin
     A's route lookup and Admin A's service call, the service would
@@ -477,7 +477,7 @@ class TestDeactivateUserRoute:
         Then: `UserService.deactivate_user` is awaited with the
             resolved `public_id` and the supplied `reason` — proving
             the username→public_id translation happens at the route
-            layer (so the service contract stays public_id-only.6.1).
+            layer (so the service contract stays public_id-only).
         """
         target_profile = UserProfile(
             session_id="t-sid",

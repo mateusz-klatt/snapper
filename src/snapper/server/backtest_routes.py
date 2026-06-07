@@ -460,7 +460,7 @@ async def list_backtests(
         strategy: Optional strategy filter.
         run_status: Optional status filter.
         config_hash: pairing-stable SHA-256 filter used by
-            the Step 4 auto-pair UI to fetch sibling runs.
+            the auto-pair UI to fetch sibling runs.
         limit: Page size.
         offset: Page offset.
 
@@ -561,7 +561,7 @@ async def _resolve_auto_pair(
     if available; same for the reverse). Falls back to any
     most-recent-OTHER when no opposite-mode candidate exists. Without
     an anchor: pair the two most-recent terminal runs, preferring one
-    Direct-DB plus one ZMQ-replay (the line 763
+    Direct-DB plus one ZMQ-replay (the
     "cross-execution-mode when available" contract). Falls back to the
     two most-recent terminal runs when only one mode is present.
     """

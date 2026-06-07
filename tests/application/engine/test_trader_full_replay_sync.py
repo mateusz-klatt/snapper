@@ -7,8 +7,7 @@ this refactor the method updated engine state directly and left
 TradeService flat, producing a latent ``old_qty == 0`` hazard on the
 first live fill into a non-flat recovered shard.
 
-Follow-up (b) from ``project_position_cycles_followups.md``. Plan
-this project
+Follow-up to the position-cycle recovery work.
 """
 
 from collections.abc import Iterable

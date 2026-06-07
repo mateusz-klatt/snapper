@@ -5,7 +5,7 @@ insertion pipeline. Every tool
     Reads the authenticated :class:`TokenClaims` from
       data:`snapper.mcp.server.TOKEN_CLAIMS_CTX` via a caller-supplied
       ``claims_getter``.
-    Enforces the plan's permission matrix: AI_DELEGATE (and every
+    Enforces the permission matrix: AI_DELEGATE (and every
       higher role) is admitted for read tools; write tools additionally
       require the caller to hold the corresponding Permission (e.g.
       ``CREATE_ORDERS`` for ``submit_manual_order``).
@@ -18,8 +18,11 @@ insertion pipeline. Every tool
       class:`ExecutionPlan` + its initial ``TradeCommand`` with
       ``source_surface="mcp"`` and ``idempotency_key`` required. Caps
       evaluated via the shared enforcer before persistence.
-Additional tools (cancel_order, list_positions, list_signals
-list_plans, get_status) are / scope.
+Additional read and write tools (``cancel_order``,
+``list_orders``, ``get_order_status``, ``list_positions``,
+``get_position_cycle``, ``get_ohlcv``, ``list_recent_signals``,
+``submit_ai_review_decision``) follow the same access and
+wallet-scope checks.
 """
 
 import datetime as dt

@@ -826,7 +826,7 @@ async def _make_bt_repo(tmp_path: Path) -> BacktestRepository:
 
 
 class TestRunnerProgressPublisher:
-    """Tests for the Codex F1 fix — runner owns a real ZMQ publisher."""
+    """Tests for the runner owning a real ZMQ publisher."""
 
     def test_override_is_used_verbatim(self) -> None:
         """Test-injected publish override replaces the owned publisher.

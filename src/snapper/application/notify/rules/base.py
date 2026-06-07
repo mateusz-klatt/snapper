@@ -7,9 +7,9 @@ at dispatch time to look up which rules apply to a given topic via
 ``get_longest_match`` (stable registration-order tiebreak).
 
 The registry DOES NOT live in ``__init__.py`` per the project
-invariant on empty init files (Plan 2 R10 INV-3 closure) — this module
+invariant on empty init files — this module
 owns the class plus a ``load_default_registry()`` factory that wires
-in all four P0 rules.
+in all the core rules.
 """
 
 from abc import ABC
@@ -25,16 +25,15 @@ class AlertRule(ABC):
     """Observes upstream ZMQ event topic(s) and produces alert rows.
 
     Attributes:
-        alert_type: One of the 5 enumerated P0 alert types —
+        alert_type: One of the 5 enumerated alert types —
             ``"order_fill_full"`` / ``"order_rejected"`` /
             ``"position_stop_loss_fired"`` / ``"critical_system_error"``
             / ``"margin_warning"``.
         subscribe_topic_prefixes: Tuple of ZMQ topic prefix strings
             the sidecar subscribes on behalf of this rule. Tuple
-            (rather than a single string) is required by Rule 4's
-            historical design which allowed multi-prefix
-            subscriptions; the current v1.11 rules each use a single
-            prefix but the contract stays multi-prefix-capable.
+            (rather than a single string) supports rules that need
+            multi-prefix subscriptions; the current rules each use a
+            single prefix but the contract stays multi-prefix-capable.
         priority: ``AlertPriority`` Literal — ``"low"`` / ``"medium"``
             / ``"high"``. Rendered into ``AlertEventInsertRow.priority``.
         is_safety_critical: When True the routing layer bypasses
@@ -71,7 +70,7 @@ class AlertRule(ABC):
             repo: Repository for enrichment reads (instruments,
                 orders, users, dedup-window scan).
             now: Entry-boundary timestamp threaded by the sidecar per
-                ``feedback_timestamp_discipline.md``.
+                the timestamp-discipline invariant.
 
         Returns:
             List of zero or more ``AlertEventInsertRow`` TypedDicts —
