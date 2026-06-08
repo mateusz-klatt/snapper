@@ -154,6 +154,9 @@ __all__ = [
     "Telemetry",
     "TradeCommand",
     "VenueEvent",
+    "PairedExecutionGroup",
+    "PairedExecutionLeg",
+    "PairedExecutionHalt",
     "TradeProjectionCheckpoint",
     "FundingRate",
     "AccrualLedger",
@@ -182,6 +185,7 @@ __all__ = [
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 _KNOWN_TO_ACTIVE_PG = text("known_to = '9999-12-31T23:59:59+00:00'")
 _KNOWN_TO_ACTIVE_SQLITE = text("known_to = '9999-12-31 23:59:59.000000'")
+_PAIRED_GROUP_ID_NOT_NULL = text("paired_group_id IS NOT NULL")
 _NOTIFICATION_DEVICE_ACTIVE_PG = text(
     "known_to = '9999-12-31T23:59:59+00:00' AND token_status = 'active'"
 )
@@ -549,6 +553,12 @@ class Signal(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
+        Index(
+            "ix_signals_paired_group_id",
+            "paired_group_id",
+            sqlite_where=_PAIRED_GROUP_ID_NOT_NULL,
+            postgresql_where=_PAIRED_GROUP_ID_NOT_NULL,
+        ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
@@ -559,6 +569,7 @@ class Signal(TemporalMixin, Base):
     reason: Mapped[str] = mapped_column(String(256))
     strategy_name: Mapped[str | None] = mapped_column(String(64))
     price: Mapped[float | None] = mapped_column(Float)
+    paired_group_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
 
 
 class User(TemporalMixin, Base):
@@ -1105,6 +1116,12 @@ class VenueEvent(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
+        Index(
+            "ix_venue_events_paired_group_id",
+            "paired_group_id",
+            sqlite_where=_PAIRED_GROUP_ID_NOT_NULL,
+            postgresql_where=_PAIRED_GROUP_ID_NOT_NULL,
+        ),
     )
     event_type: Mapped[str] = mapped_column(String(32))
     shard_key: Mapped[str] = mapped_column(String(256))
@@ -1130,6 +1147,162 @@ class VenueEvent(TemporalMixin, Base):
     received_at: Mapped[datetime] = mapped_column(TZDateTime())
     payload_json: Mapped[str | None] = mapped_column(Text)
     liquidity_role: Mapped[str] = mapped_column(String(16), default="unknown")
+    paired_group_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+
+
+class PairedExecutionGroup(TemporalMixin, Base):
+    """SCD2 group record for the multi-leg paired-execution guard.
+
+    One row per multi-leg signal group (``correlation_id`` of the
+    legs' trade commands == this ``public_id``). Tracks the
+    bounded-compensation FSM (see :class:`PairedExecutionGroupStatusEnum`)
+    from ``assembling`` through arming, breakage, compensation and a
+    terminal state. ``group_key`` is the canonical sorted set of
+    per-leg ``exchange:instrument:mode`` tokens joined by ``|`` so a
+    halt can recognise the same strategy pair. ``status`` is not
+    constrained by a DB CHECK (the FSM is extended across later guard
+    phases); only the immutable ``policy`` is pinned.
+    """
+
+    __tablename__ = "paired_execution_groups"
+    __table_args__ = (
+        Index(
+            "ix_peg_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index("ix_peg_status", "status"),
+        Index("ix_peg_group_key", "group_key"),
+        CheckConstraint(
+            "policy IN ('simultaneous', 'sequential_handoff')",
+            name="ck_peg_policy",
+        ),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    strategy_id: Mapped[str] = mapped_column(String(64))
+    policy: Mapped[str] = mapped_column(String(24))
+    expected_leg_count: Mapped[int] = mapped_column(Integer)
+    group_key: Mapped[str] = mapped_column(String(512))
+    status: Mapped[str] = mapped_column(String(32))
+    assembly_deadline: Mapped[datetime] = mapped_column(TZDateTime())
+    fill_deadline: Mapped[datetime] = mapped_column(TZDateTime())
+    failure_reason: Mapped[str | None] = mapped_column(String(512))
+    halted_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
+
+
+class PairedExecutionLeg(TemporalMixin, Base):
+    """SCD2 authoritative per-leg record for the paired-execution guard.
+
+    One logical leg per ``(group_public_id, leg_index)``; SCD2 versions
+    advance its status and fill/compensation accounting. Carries the
+    durable ``exchange`` / ``mode`` (never reconstructed by parsing
+    ``shard_key``) plus the venue identifiers and signed quantities the
+    compensator needs: ``open_group_qty = filled_signed_qty -
+    compensated_signed_qty``. ``status`` is not constrained by a DB
+    CHECK (the FSM is extended across later guard phases); only the
+    immutable ``side`` and ``mode`` are pinned.
+    """
+
+    __tablename__ = "paired_execution_legs"
+    __table_args__ = (
+        Index(
+            "ix_pel_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "uq_pel_group_leg",
+            "group_public_id",
+            "leg_index",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "uq_pel_command",
+            "command_public_id",
+            unique=True,
+            sqlite_where=text(
+                "command_public_id IS NOT NULL AND known_to = '9999-12-31 23:59:59.000000'"
+            ),
+            postgresql_where=text(
+                "command_public_id IS NOT NULL AND known_to = '9999-12-31T23:59:59+00:00'"
+            ),
+        ),
+        Index("ix_pel_group", "group_public_id"),
+        Index("ix_pel_client_order_id", "client_order_id"),
+        Index("ix_pel_exchange_order_id", "exchange_order_id"),
+        Index("ix_pel_shard_status", "shard_key", "status"),
+        CheckConstraint("side IN ('buy', 'sell')", name="ck_pel_side"),
+        CheckConstraint("mode IN ('live', 'paper')", name="ck_pel_mode"),
+    )
+    group_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    leg_index: Mapped[int] = mapped_column(Integer)
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8))
+    instrument: Mapped[str] = mapped_column(String(64))
+    shard_key: Mapped[str] = mapped_column(String(256))
+    side: Mapped[str] = mapped_column(String(4))
+    target_qty: Mapped[float] = mapped_column(Float)
+    signal_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    command_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    client_order_id: Mapped[str | None] = mapped_column(String(64))
+    exchange_order_id: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32))
+    filled_signed_qty: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    compensated_signed_qty: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    compensation_seq: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_venue_event_id: Mapped[int | None] = mapped_column(Integer)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
+
+
+class PairedExecutionHalt(TemporalMixin, Base):
+    """SCD2 halt projection for the paired-execution guard.
+
+    Prevents a strategy pair from opening a NEW group while a prior
+    group is broken / compensating. Active-unique on
+    ``(wallet_public_id, strategy_id, group_key)`` so the ``_on_signal``
+    fast-reject can match a pending halt cheaply. The schema lands in
+    Phase 2; the halt projection / clear behaviour is wired in Phase 4.
+    """
+
+    __tablename__ = "paired_execution_halts"
+    __table_args__ = (
+        Index(
+            "ix_peh_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "uq_peh_scope",
+            "wallet_public_id",
+            "strategy_id",
+            "group_key",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index("ix_peh_group_key", "group_key"),
+        CheckConstraint("mode IN ('live', 'paper')", name="ck_peh_mode"),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    strategy_id: Mapped[str] = mapped_column(String(64))
+    mode: Mapped[str] = mapped_column(String(8))
+    group_key: Mapped[str] = mapped_column(String(512))
+    group_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    reason: Mapped[str] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
 
 
 class TradeProjectionCheckpoint(TemporalMixin, Base):

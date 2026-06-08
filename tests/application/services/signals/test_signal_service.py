@@ -200,6 +200,47 @@ class TestSignalService:
             assert stored.wallet_public_id == wallet_pid
             assert stored.operator_public_id == operator_pid
 
+    async def test_store_signal_persists_paired_group_id(
+        self,
+        signal_service: SignalReadService,
+        sample_signal: StrategySignal,
+        test_repository: SQLAlchemyRepository,
+    ) -> None:
+        """Verify store_signal persists the paired-execution group id.
+
+        Given: Repository with BTCUSD instrument and a multi-leg signal whose
+            coordinator supplies the shared group correlation id,
+        When: store_signal is called with paired_group_id,
+        Then: The persisted Signal row carries paired_group_id verbatim for
+            guard provenance.
+        """
+        await test_repository.ensure_instrument(
+            symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
+            exchange="testexchange",
+            session_id="test-session",
+            sequence_id=1,
+            timestamp=FIXED_TEST_TIME,
+        )
+        tracker = SequenceTracker()
+        group_id = "01975a8b-3c7d-7000-8000-cccccccccccc"
+        signal_id = await signal_service.store_signal(
+            signal=sample_signal,
+            exchange="testexchange",
+            strategy_name="test_strategy",
+            price=50000.0,
+            session_id="",
+            sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
+            tracker=tracker,
+            paired_group_id=group_id,
+        )
+        assert signal_id
+        async with test_repository.session() as session:
+            result = await session.execute(select(Signal).where(Signal.public_id == signal_id))
+            stored = result.scalars().first()
+            assert stored is not None
+            assert stored.paired_group_id == group_id
+
     async def test_store_signal_empty_wallet_stored_as_empty_string_post_0c6(
         self,
         signal_service: SignalReadService,

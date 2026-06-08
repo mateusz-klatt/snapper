@@ -264,6 +264,75 @@ class ExecutionPlanStatusEnum(StrEnum):
     EXPIRED = "expired"
 
 
+class PairedExecutionGroupStatusEnum(StrEnum):
+    """Lifecycle state of a ``paired_execution_groups`` SCD2 row.
+
+    Drives the multi-leg execution guard's bounded-compensation FSM:
+    ``assembling`` (legs registering, no venue order dispatched yet);
+    ``armed`` (all expected legs durably registered, owned outboxes may
+    dispatch); ``broken`` (a leg rejected / expired / missed a deadline,
+    no further dispatch, compensation pending); ``compensating``
+    (reduce-only flatten of filled legs in progress); ``completed``
+    (all legs reached a consistent terminal state); and
+    ``manual_intervention`` (compensation could not complete
+    automatically, operator action required). Persisted as the column
+    string value; not enforced by a DB CHECK so later phases may extend
+    the FSM without a constraint-widening migration.
+    """
+
+    ASSEMBLING = "assembling"
+    ARMED = "armed"
+    BROKEN = "broken"
+    COMPENSATING = "compensating"
+    COMPLETED = "completed"
+    MANUAL_INTERVENTION = "manual_intervention"
+
+
+class PairedExecutionLegStatusEnum(StrEnum):
+    """Lifecycle state of a ``paired_execution_legs`` SCD2 row.
+
+    A leg is the authoritative per-instrument record inside a paired
+    group: ``pending`` (registered, command inserted, not yet armed);
+    ``armed`` (group armed, command may dispatch); ``working`` (venue
+    order acked / live, no fill yet); ``partially_filled`` / ``filled``
+    (fill progress); ``rejected`` / ``cancelled`` / ``expired`` (venue
+    terminal without full fill); ``broken`` (flagged for compensation
+    because the group broke); ``compensating`` (reduce-only flatten in
+    flight); ``flattened`` (net group exposure for this leg returned to
+    zero); ``manual_intervention`` (compensation needs an operator).
+    Persisted as the column string value; not enforced by a DB CHECK.
+    """
+
+    PENDING = "pending"
+    ARMED = "armed"
+    WORKING = "working"
+    PARTIALLY_FILLED = "partially_filled"
+    FILLED = "filled"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+    BROKEN = "broken"
+    COMPENSATING = "compensating"
+    FLATTENED = "flattened"
+    MANUAL_INTERVENTION = "manual_intervention"
+
+
+class PairedExecutionPolicyEnum(StrEnum):
+    """Execution-coordination policy for a paired-execution group.
+
+    ``simultaneous`` arms all legs together behind one barrier
+    (``CointegrationPairs`` and other same-instant spreads).
+    ``sequential_handoff`` arms leg N+1 only once leg N is terminal
+    (``ParlayCascade``-style exit-then-enter transitions), where
+    flattening a successful prior leg would be wrong. Stored as the
+    column string value and pinned by a DB CHECK because the policy set
+    is immutable.
+    """
+
+    SIMULTANEOUS = "simultaneous"
+    SEQUENTIAL_HANDOFF = "sequential_handoff"
+
+
 class AiReviewStatusEnum(StrEnum):
     """Lifecycle state of an AI delegate review (CONSULT pattern).
 
@@ -664,6 +733,12 @@ OrderEvent = Literal[
 ]
 """Order event types for orders.events.* ZMQ topics."""
 
+PairedExecutionPolicy = Literal[
+    PairedExecutionPolicyEnum.SIMULTANEOUS,
+    PairedExecutionPolicyEnum.SEQUENTIAL_HANDOFF,
+]
+"""Coordination policy carried on grouped signals: simultaneous or sequential."""
+
 __all__ = [
     "AliasChannel",
     "AliasChannelEnum",
@@ -697,6 +772,10 @@ __all__ = [
     "OrderStatusEnum",
     "OrderType",
     "OrderTypeEnum",
+    "PairedExecutionGroupStatusEnum",
+    "PairedExecutionLegStatusEnum",
+    "PairedExecutionPolicy",
+    "PairedExecutionPolicyEnum",
     "ProcessLifecycleEnum",
     "ProcessLifecycleType",
     "ProcessMode",

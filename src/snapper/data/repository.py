@@ -7649,6 +7649,7 @@ class SQLAlchemyRepository(Repository):
                         "venue_timestamp": ve.venue_timestamp,
                         "received_at": ve.received_at,
                         "liquidity_role": getattr(ve, "liquidity_role", "unknown"),
+                        "paired_group_id": ve.paired_group_id,
                     }
                 )
             return rows

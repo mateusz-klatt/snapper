@@ -471,6 +471,7 @@ class VenueEventRow(TypedDict):
     venue_timestamp: datetime | None
     received_at: datetime
     liquidity_role: NotRequired[str]
+    paired_group_id: NotRequired[str | None]
 
 
 class TradeProjectionCheckpointRow(TypedDict):
@@ -593,6 +594,7 @@ class VenueEventInsertRow(TypedDict, total=False):
     payload_json: str | None
     wallet_public_id: str
     liquidity_role: str
+    paired_group_id: str | None
 
 
 class InstrumentSpecRow(TypedDict):

@@ -103,6 +103,7 @@ class SignalReadService:
         public_id: str | None = None,
         wallet_public_id: str | None = None,
         operator_public_id: str | None = None,
+        paired_group_id: str | None = None,
     ) -> str:
         """Store a trading signal in the database.
 
@@ -128,6 +129,10 @@ class SignalReadService:
                 the strategy's StrategyConfig. Stays
                 nullable per the ORM; empty or None values still collapse
                 to SQL NULL on the persisted row.
+            paired_group_id: Optional paired-execution group id (the
+                shared ``correlation_id`` of a multi-leg group). Persisted
+                verbatim on ``signals.paired_group_id`` for provenance;
+                None for standalone single-leg signals.
 
         Returns:
             Signal event UUID or empty string on error.
@@ -151,6 +156,7 @@ class SignalReadService:
                     "sequence_id": sequence_id,
                     "wallet_public_id": wallet_public_id or "",
                     "operator_public_id": operator_public_id or None,
+                    "paired_group_id": paired_group_id,
                 }
                 if public_id is not None:
                     init_kwargs["public_id"] = public_id

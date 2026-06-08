@@ -6075,6 +6075,54 @@ async def test_get_venue_events_after(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_insert_venue_event_persists_paired_group_id(tmp_path: Path) -> None:
+    """Venue events carry the optional paired-execution group id end to end.
+
+    Given: a database with one venue event inserted with a paired_group_id and
+        one inserted without,
+    When: get_venue_events_after replays both rows,
+    Then: the first row exposes paired_group_id verbatim and the second
+        defaults to None (the denormalised guard fast-path column).
+    """
+    db_path = tmp_path / "ve_paired.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    group_id = "01975a8b-3c7d-7000-8000-dddddddddddd"
+    await r.insert_venue_event(
+        {
+            "event_type": "fill_observed",
+            "shard_key": "kraken.ETH-USD.live",
+            "exchange": "kraken",
+            "instrument": "ETH-USD",
+            "mode": "live",
+            "received_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+            "paired_group_id": group_id,
+        }
+    )
+    await r.insert_venue_event(
+        {
+            "event_type": "fill_observed",
+            "shard_key": "kraken.ETH-USD.live",
+            "exchange": "kraken",
+            "instrument": "ETH-USD",
+            "mode": "live",
+            "received_at": now,
+            "session_id": "s1",
+            "sequence_id": 2,
+            "timestamp": now,
+        }
+    )
+    events = await r.get_venue_events_after("kraken.ETH-USD.live", 0)
+    assert len(events) == 2
+    assert events[0]["paired_group_id"] == group_id
+    assert events[1]["paired_group_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_upsert_checkpoint_and_get(tmp_path: Path) -> None:
     """Upsert checkpoint creates and updates checkpoint rows via SCD2.
 

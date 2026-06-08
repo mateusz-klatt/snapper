@@ -48,6 +48,7 @@ from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import OrderEventType
 from snapper.core.types import OrderExchange
+from snapper.core.types import PairedExecutionPolicy
 from snapper.interface.websocket.schemas import ExecutionMode
 from snapper.interface.websocket.schemas import FillStatus
 from snapper.interface.websocket.schemas import HealthStatus
@@ -190,6 +191,10 @@ class SignalData(StrictDataSchema[Literal["signal"]]):
     user_public_id: str | None = None
     ai_review_public_id: str | None = None
     ai_review_dispatch_version: int | None = None
+    paired_group_id: str | None = None
+    paired_group_size: int | None = None
+    paired_group_index: int | None = None
+    paired_group_policy: PairedExecutionPolicy | None = None
 
     @model_validator(mode="after")
     def _paper_requires_strategy_name(self) -> Self:
@@ -199,6 +204,42 @@ class SignalData(StrictDataSchema[Literal["signal"]]):
                 "Paper signals require strategy_name to be set "
                 "for topic derivation (signals.paper.{instrument}.{strategy_name})"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _paired_group_fields_consistent(self) -> Self:
+        """A grouped signal carries a full, consistent paired-group descriptor.
+
+        Either every paired-group field is unset (a standalone signal) or
+        all are set together with ``paired_group_size >= 2`` and
+        ``0 <= paired_group_index < paired_group_size``. This is the
+        fail-closed origination check for the paired-execution guard; the
+        descriptor is carried transport-only on the downstream schemas.
+        """
+        if self.paired_group_id is None:
+            if (
+                self.paired_group_size is not None
+                or self.paired_group_index is not None
+                or self.paired_group_policy is not None
+            ):
+                raise ValueError(
+                    "paired_group_size, paired_group_index and "
+                    "paired_group_policy require paired_group_id to be set"
+                )
+            return self
+        size = self.paired_group_size
+        index = self.paired_group_index
+        if size is None or index is None or self.paired_group_policy is None:
+            raise ValueError(
+                "a paired group requires paired_group_size, paired_group_index "
+                "and paired_group_policy alongside paired_group_id"
+            )
+        if not self.paired_group_id.strip():
+            raise ValueError("paired_group_id must be a non-empty group identifier")
+        if size < 2:
+            raise ValueError("paired_group_size must be >= 2 for a paired group")
+        if not 0 <= index < size:
+            raise ValueError("paired_group_index must satisfy 0 <= index < paired_group_size")
         return self
 
 
@@ -246,6 +287,10 @@ class ExecutionData(StrictDataSchema[Literal["execution"]]):
     operator_public_id: str | None = None
     user_public_id: str | None = None
     liquidity_role: str = "unknown"
+    paired_group_id: str | None = None
+    paired_group_size: int | None = None
+    paired_group_index: int | None = None
+    paired_group_policy: PairedExecutionPolicy | None = None
 
 
 class OrderData(StrictDataSchema[Literal["order"]]):
@@ -302,6 +347,10 @@ class OrderData(StrictDataSchema[Literal["order"]]):
     operator_public_id: str | None = None
     user_public_id: str | None = None
     plan_public_id: str | None = None
+    paired_group_id: str | None = None
+    paired_group_size: int | None = None
+    paired_group_index: int | None = None
+    paired_group_policy: PairedExecutionPolicy | None = None
 
 
 class PositionData(StrictDataSchema[Literal["position"]]):
@@ -385,6 +434,10 @@ class OrderRequestData(StrictDataSchema[Literal["order_request"]]):
     wallet_public_id: str = ""
     operator_public_id: str | None = None
     user_public_id: str | None = None
+    paired_group_id: str | None = None
+    paired_group_size: int | None = None
+    paired_group_index: int | None = None
+    paired_group_policy: PairedExecutionPolicy | None = None
 
 
 class OrderCancelData(StrictDataSchema[Literal["order_cancel"]]):
@@ -467,6 +520,10 @@ class OrderEventData(StrictDataSchema[Literal["order_event"]]):
     wallet_public_id: str = ""
     operator_public_id: str | None = None
     user_public_id: str | None = None
+    paired_group_id: str | None = None
+    paired_group_size: int | None = None
+    paired_group_index: int | None = None
+    paired_group_policy: PairedExecutionPolicy | None = None
 
 
 class HeartbeatData(StrictDataSchema[Literal["heartbeat"]]):
