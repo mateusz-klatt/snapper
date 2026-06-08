@@ -26,6 +26,7 @@ from snapper.application.ai_review.service import AiReviewDecisionOutcome
 from snapper.application.services.signals.service import signal_service
 from snapper.cli.app import _alembic_cfg
 from snapper.core.types import AiReviewStatusEnum
+from snapper.core.types import PairedExecutionPolicyEnum
 from snapper.core.types import TradeSideEnum
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
@@ -909,6 +910,7 @@ async def test_emit_signal_persists_with_stamped_provenance(
         tracker: object = None,
         wallet_public_id: str | None = None,
         operator_public_id: str | None = None,
+        paired_group_id: str | None = None,
     ) -> str:
         captured.append(
             {
@@ -6324,3 +6326,150 @@ def test_check_gap_parsed_handles_valid_message() -> None:
     )
     strategy._check_gap_parsed("market.kraken.BTC-USD.ticks", tick.to_json())
     assert strategy._gap_detector.stats.mid_stream_joins == 0
+
+
+class _PairedTestStrategy(BaseStrategy):
+    """Minimal strategy declaring a simultaneous policy for paired-emission tests."""
+
+    PAIRED_EXECUTION_POLICY = PairedExecutionPolicyEnum.SIMULTANEOUS
+
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignalResult:
+        """Unused: the group-emission path is driven directly in these tests."""
+        await asyncio.sleep(0)
+        return None
+
+    async def reset(self) -> None:
+        """Reset strategy state (no-op for these emission tests)."""
+        await asyncio.sleep(0)
+
+
+def _paired_mock_publisher(strategy: BaseStrategy) -> MagicMock:
+    """Wire a strategy with a mock publisher and return it."""
+    publisher = MagicMock()
+    publisher.send = AsyncMock()
+    publisher.tracker = SequenceTracker()
+    publisher.session_id = publisher.tracker.session_id
+    strategy.msg_publisher = publisher
+    strategy._last_data_ts = 200.0
+    return publisher
+
+
+class TestPairedGroupEmission:
+    """BaseStrategy stamps the paired-group descriptor on multi-leg emissions."""
+
+    @pytest.mark.asyncio
+    async def test_single_leg_group_carries_no_descriptor(self) -> None:
+        """A one-leg group emits a standalone signal with no descriptor.
+
+        Given: a strategy whose group has exactly one leg,
+        When: the group is emitted,
+        Then: the published envelope leaves every paired_group_* field None.
+        """
+        strategy = _PairedTestStrategy(_strategy_config(exchange="paper", name="paired"))
+        publisher = _paired_mock_publisher(strategy)
+        await strategy._emit_signal_group(
+            [
+                StrategySignal(
+                    instrument="BTC-USD", side="buy", strength=0.5, reason="solo", price=10.0
+                )
+            ]
+        )
+        publisher.send.assert_called_once()
+        envelope = publisher.send.call_args.args[1]
+        assert envelope.paired_group_id is None
+        assert envelope.paired_group_size is None
+        assert envelope.paired_group_index is None
+        assert envelope.paired_group_policy is None
+        assert envelope.paired_group_key is None
+
+    @pytest.mark.asyncio
+    async def test_empty_group_is_a_noop(self) -> None:
+        """An empty group publishes nothing.
+
+        Given: a strategy and an empty (no-signal) group,
+        When: the group is emitted,
+        Then: no envelope is published.
+        """
+        strategy = _PairedTestStrategy(_strategy_config(exchange="paper", name="paired"))
+        publisher = _paired_mock_publisher(strategy)
+        await strategy._emit_signal_group([])
+        publisher.send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_multi_leg_group_stamps_shared_descriptor(self) -> None:
+        """A multi-leg group shares one id/key/policy with per-leg indices.
+
+        Given: a simultaneous strategy emitting a two-leg group,
+        When: the group is emitted,
+        Then: both envelopes carry the same paired_group_id, size, policy and
+            canonical key, with indices 0 and 1 in declared order, and the
+            persisted signals carry the same paired_group_id.
+        """
+        strategy = _PairedTestStrategy(
+            _strategy_config(exchange="paper", name="paired", outputs=["BTC-USD", "ETH-USD"])
+        )
+        publisher = _paired_mock_publisher(strategy)
+        await strategy._emit_signal_group(
+            [
+                StrategySignal(
+                    instrument="BTC-USD", side="buy", strength=0.5, reason="leg0", price=10.0
+                ),
+                StrategySignal(
+                    instrument="ETH-USD", side="sell", strength=0.5, reason="leg1", price=20.0
+                ),
+            ]
+        )
+        assert publisher.send.call_count == 2
+        first = publisher.send.call_args_list[0].args[1]
+        second = publisher.send.call_args_list[1].args[1]
+        assert first.paired_group_id == second.paired_group_id
+        assert first.paired_group_id
+        assert first.paired_group_size == 2
+        assert second.paired_group_size == 2
+        assert first.paired_group_index == 0
+        assert second.paired_group_index == 1
+        assert first.paired_group_policy == "simultaneous"
+        assert second.paired_group_policy == "simultaneous"
+        expected_key = "paper:BTC-USD:paper|paper:ETH-USD:paper"
+        assert first.paired_group_key == expected_key
+        assert second.paired_group_key == expected_key
+        store = signal_service.store_signal
+        assert store.await_count == 2
+        assert store.await_args_list[0].kwargs["paired_group_id"] == first.paired_group_id
+
+    @pytest.mark.asyncio
+    async def test_multi_leg_without_policy_fails_closed(self) -> None:
+        """A multi-leg group with no declared policy raises before any publish.
+
+        Given: a strategy that does NOT declare PAIRED_EXECUTION_POLICY,
+        When: a two-leg group is emitted,
+        Then: a ValueError is raised and nothing is published, so an
+            undeclared group can never arm.
+        """
+        strategy = FakeStrategy(_strategy_config(exchange="paper", name="nopolicy"))
+        publisher = _paired_mock_publisher(strategy)
+        with pytest.raises(ValueError, match="PAIRED_EXECUTION_POLICY"):
+            await strategy._emit_signal_group(
+                [
+                    StrategySignal(
+                        instrument="BTC-USD", side="buy", strength=0.5, reason="l0", price=1.0
+                    ),
+                    StrategySignal(
+                        instrument="ETH-USD", side="sell", strength=0.5, reason="l1", price=2.0
+                    ),
+                ]
+            )
+        publisher.send.assert_not_called()
+
+    def test_execution_mode_reflects_exchange(self) -> None:
+        """Execution mode is paper for the paper exchange and live otherwise.
+
+        Given: a paper strategy and a live (kraken) strategy,
+        When: _execution_mode is queried,
+        Then: it returns 'paper' and 'live' respectively, matching the engine
+            mode stamped on each paired-execution leg.
+        """
+        paper = _PairedTestStrategy(_strategy_config(exchange="paper", name="p"))
+        live = _PairedTestStrategy(_strategy_config(exchange="kraken", name="l"))
+        assert paper._execution_mode() == "paper"
+        assert live._execution_mode() == "live"

@@ -195,6 +195,7 @@ class SignalData(StrictDataSchema[Literal["signal"]]):
     paired_group_size: int | None = None
     paired_group_index: int | None = None
     paired_group_policy: PairedExecutionPolicy | None = None
+    paired_group_key: str | None = None
 
     @model_validator(mode="after")
     def _paper_requires_strategy_name(self) -> Self:
@@ -211,31 +212,42 @@ class SignalData(StrictDataSchema[Literal["signal"]]):
         """A grouped signal carries a full, consistent paired-group descriptor.
 
         Either every paired-group field is unset (a standalone signal) or
-        all are set together with ``paired_group_size >= 2`` and
-        ``0 <= paired_group_index < paired_group_size``. This is the
-        fail-closed origination check for the paired-execution guard; the
-        descriptor is carried transport-only on the downstream schemas.
+        all are set together with ``paired_group_size >= 2``,
+        ``0 <= paired_group_index < paired_group_size`` and a non-empty
+        ``paired_group_key``. This is the fail-closed origination check for
+        the paired-execution guard; the descriptor is carried transport-only
+        on the downstream schemas. ``paired_group_key`` is the canonical
+        sorted ``{exchange}:{instrument}:{mode}`` leg-set key that lets the
+        arming barrier validate a group's full leg set from any single leg.
         """
         if self.paired_group_id is None:
             if (
                 self.paired_group_size is not None
                 or self.paired_group_index is not None
                 or self.paired_group_policy is not None
+                or self.paired_group_key is not None
             ):
                 raise ValueError(
-                    "paired_group_size, paired_group_index and "
-                    "paired_group_policy require paired_group_id to be set"
+                    "paired_group_size, paired_group_index, paired_group_policy "
+                    "and paired_group_key require paired_group_id to be set"
                 )
             return self
         size = self.paired_group_size
         index = self.paired_group_index
-        if size is None or index is None or self.paired_group_policy is None:
+        if (
+            size is None
+            or index is None
+            or self.paired_group_policy is None
+            or self.paired_group_key is None
+        ):
             raise ValueError(
-                "a paired group requires paired_group_size, paired_group_index "
-                "and paired_group_policy alongside paired_group_id"
+                "a paired group requires paired_group_size, paired_group_index, "
+                "paired_group_policy and paired_group_key alongside paired_group_id"
             )
         if not self.paired_group_id.strip():
             raise ValueError("paired_group_id must be a non-empty group identifier")
+        if not self.paired_group_key.strip():
+            raise ValueError("paired_group_key must be a non-empty group key")
         if size < 2:
             raise ValueError("paired_group_size must be >= 2 for a paired group")
         if not 0 <= index < size:

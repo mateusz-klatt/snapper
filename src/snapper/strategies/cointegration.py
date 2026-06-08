@@ -10,6 +10,7 @@ import pandas as pd
 from loguru import logger
 
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import PairedExecutionPolicyEnum
 from snapper.core.types import TradeSide
 from snapper.core.types import TradeSideEnum
 from snapper.messaging.schemas.data import CandleData
@@ -84,6 +85,9 @@ class CointegrationPairs(BaseStrategy, MultiLegSpreadMixin):
             for ``self.legs[0]``.
         instrument2: Second instrument symbol — alias for ``self.legs[1]``.
     """
+
+    PAIRED_EXECUTION_POLICY = PairedExecutionPolicyEnum.SIMULTANEOUS
+    """Both spread legs are armed and dispatched together (simultaneous)."""
 
     def __init__(self, config: StrategyConfig) -> None:
         """Initialize cointegration strategy.

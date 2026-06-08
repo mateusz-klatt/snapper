@@ -25,7 +25,11 @@ import zmq.asyncio
 from snapper.application.ai_review.service import AiReviewDecisionOutcome
 from snapper.application.services.signals.service import signal_service
 from snapper.config.settings import get_bootstrap_settings
+from snapper.core.paired_execution import compute_paired_group_key
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import ExecutionMode
+from snapper.core.types import ExecutionModeEnum
+from snapper.core.types import PairedExecutionPolicy
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -104,6 +108,17 @@ class BaseStrategy(ABC):
         params: Strategy parameters.
         output_topics: Generated output topic names.
         candle_buffer: Buffer of recent candles per instrument.
+    """
+
+    PAIRED_EXECUTION_POLICY: PairedExecutionPolicy | None = None
+    """Paired-execution policy for multi-leg emissions, or ``None``.
+
+    A strategy that can return a ``list[StrategySignal]`` (a leg group) MUST
+    declare the policy that governs the group so the paired-execution arming
+    barrier knows how to coordinate the legs (``"simultaneous"`` arms all legs
+    together; ``"sequential_handoff"`` arms leg N+1 only after leg N is
+    terminal). Single-leg strategies leave this ``None``; emitting a multi-leg
+    group with no declared policy is a fail-closed error.
     """
 
     def __init__(self, config: StrategyConfig) -> None:
@@ -541,8 +556,7 @@ class BaseStrategy(ABC):
                         continue
                     instrument = parsed.instrument
                     signals = await self._dispatch_market_data(topic_str, instrument, payload_str)
-                    for signal in signals:
-                        await self.emit_signal(signal)
+                    await self._emit_signal_group(signals)
         except asyncio.CancelledError:
             logger.info(f"Strategy {self.name}: Listen loop cancelled")
             raise
@@ -600,11 +614,84 @@ class BaseStrategy(ABC):
         logger.warning(f"Strategy {self.name}: Unknown market data topic type: {topic}")
         return []
 
+    def _execution_mode(self) -> ExecutionMode:
+        """Return the execution mode implied by the strategy exchange.
+
+        Returns:
+            ``"paper"`` for the paper exchange, otherwise ``"live"``. The
+            value mirrors the engine ``mode`` that the coordinator stamps on
+            each paired-execution leg, so the canonical ``group_key`` computed
+            here matches the leg-set the arming barrier validates.
+        """
+        if self.exchange == ExchangeEnum.PAPER:
+            return ExecutionModeEnum.PAPER
+        return ExecutionModeEnum.LIVE
+
+    def _resolve_paired_execution_policy(self) -> PairedExecutionPolicy:
+        """Return the declared paired-execution policy, failing closed.
+
+        Returns:
+            The strategy's declared :attr:`PAIRED_EXECUTION_POLICY`.
+
+        Raises:
+            ValueError: If the strategy emits a multi-leg group without
+                declaring a policy, so an undeclared group can never arm.
+        """
+        policy = self.PAIRED_EXECUTION_POLICY
+        if policy is None:
+            raise ValueError(
+                f"Strategy {self.name}: emitting a multi-leg signal group requires "
+                f"PAIRED_EXECUTION_POLICY to be declared on the strategy class"
+            )
+        return policy
+
+    async def _emit_signal_group(self, signals: list[StrategySignal]) -> None:
+        """Emit a validated signal group, stamping the paired-group descriptor.
+
+        A single-leg group is emitted unchanged (no paired-group descriptor).
+        A multi-leg group is assigned ONE ``paired_group_id`` (UUID7) and one
+        canonical ``paired_group_key`` (sorted ``{exchange}:{instrument}:{mode}``
+        tokens) shared verbatim across every leg, with the per-leg index in
+        strategy-declared order, so the paired-execution arming barrier can
+        coordinate the legs across coordinators. The group id is generated
+        exactly once per group so the legs share a group identity.
+
+        Args:
+            signals: The validated signal group in strategy-declared order
+                (empty when the callback produced no signal).
+        """
+        if not signals:
+            return
+        if len(signals) == 1:
+            await self.emit_signal(signals[0])
+            return
+        group_id = str(uuid7())
+        policy = self._resolve_paired_execution_policy()
+        mode = self._execution_mode()
+        group_key = compute_paired_group_key(
+            [(self.exchange, signal.instrument, mode) for signal in signals]
+        )
+        size = len(signals)
+        for index, signal in enumerate(signals):
+            await self.emit_signal(
+                signal,
+                paired_group_id=group_id,
+                paired_group_size=size,
+                paired_group_index=index,
+                paired_group_policy=policy,
+                paired_group_key=group_key,
+            )
+
     async def emit_signal(
         self,
         signal: StrategySignal,
         *,
         outcome: AiReviewDecisionOutcome | None = None,
+        paired_group_id: str | None = None,
+        paired_group_size: int | None = None,
+        paired_group_index: int | None = None,
+        paired_group_policy: PairedExecutionPolicy | None = None,
+        paired_group_key: str | None = None,
     ) -> None:
         """Emit a trading signal to the output topic.
 
@@ -620,6 +707,18 @@ class BaseStrategy(ABC):
                 transport-only end-to-end. Default ``None`` keeps
                 non-AI strategy emits byte-identical for downstream
                 consumers.
+            paired_group_id: Shared group identity for a multi-leg
+                emission, or ``None`` for a standalone signal. When set,
+                the remaining ``paired_group_*`` arguments must all be set
+                too (enforced by the :class:`SignalData` validator) and are
+                stamped onto the envelope and the persisted signal so the
+                paired-execution arming barrier can coordinate the legs.
+            paired_group_size: Total leg count of the group.
+            paired_group_index: This leg's index in strategy-declared
+                order, ``0 <= index < paired_group_size``.
+            paired_group_policy: The group's coordination policy.
+            paired_group_key: Canonical sorted ``{exchange}:{instrument}:{mode}``
+                leg-set key, identical across all legs of the group.
 
         Raises:
             ValueError: If signal instrument is not in configured outputs.
@@ -655,6 +754,11 @@ class BaseStrategy(ABC):
             operator_public_id=self.config.operator_public_id or None,
             ai_review_public_id=outcome.review_public_id if outcome is not None else None,
             ai_review_dispatch_version=(outcome.dispatch_version if outcome is not None else None),
+            paired_group_id=paired_group_id,
+            paired_group_size=paired_group_size,
+            paired_group_index=paired_group_index,
+            paired_group_policy=paired_group_policy,
+            paired_group_key=paired_group_key,
         )
 
         if self.msg_publisher is not None:
@@ -671,6 +775,7 @@ class BaseStrategy(ABC):
             tracker=self._tracker,
             wallet_public_id=self.config.wallet_public_id or None,
             operator_public_id=self.config.operator_public_id or None,
+            paired_group_id=paired_group_id,
         )
         logger.debug(
             f"Strategy {self.name}: Signal {signal.side.upper()} {signal.instrument} "

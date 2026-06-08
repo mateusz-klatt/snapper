@@ -69,12 +69,13 @@ class TestSignalDataPairedGroupValidation:
         assert signal.paired_group_size is None
         assert signal.paired_group_index is None
         assert signal.paired_group_policy is None
+        assert signal.paired_group_key is None
 
     def test_full_group_descriptor_is_accepted(self) -> None:
         """A complete, in-range group descriptor validates.
 
-        Given: a SignalData with id, size, index and policy all set and
-            ``0 <= index < size`` with ``size >= 2``,
+        Given: a SignalData with id, size, index, policy and key all set
+            and ``0 <= index < size`` with ``size >= 2``,
         When: the schema is constructed,
         Then: every paired-group field round-trips verbatim.
         """
@@ -84,12 +85,14 @@ class TestSignalDataPairedGroupValidation:
                 paired_group_size=2,
                 paired_group_index=1,
                 paired_group_policy="simultaneous",
+                paired_group_key="kraken:BTC-USD:live|kraken:ETH-USD:live",
             )
         )
         assert signal.paired_group_id == "grp-1"
         assert signal.paired_group_size == 2
         assert signal.paired_group_index == 1
         assert signal.paired_group_policy == "simultaneous"
+        assert signal.paired_group_key == "kraken:BTC-USD:live|kraken:ETH-USD:live"
 
     def test_group_member_without_id_is_rejected(self) -> None:
         """Paired-group members require an explicit group id.
@@ -125,6 +128,7 @@ class TestSignalDataPairedGroupValidation:
                     paired_group_size=1,
                     paired_group_index=0,
                     paired_group_policy="simultaneous",
+                    paired_group_key="kraken:BTC-USD:live",
                 )
             )
 
@@ -142,6 +146,7 @@ class TestSignalDataPairedGroupValidation:
                     paired_group_size=2,
                     paired_group_index=2,
                     paired_group_policy="sequential_handoff",
+                    paired_group_key="kraken:BTC-USD:live",
                 )
             )
 
@@ -161,8 +166,58 @@ class TestSignalDataPairedGroupValidation:
                     paired_group_size=2,
                     paired_group_index=0,
                     paired_group_policy="simultaneous",
+                    paired_group_key="kraken:BTC-USD:live",
                 )
             )
+
+    def test_group_without_key_is_rejected(self) -> None:
+        """A group id requires a paired_group_key alongside it.
+
+        Given: a SignalData with id, size, index and policy set but no
+            paired_group_key,
+        When: the schema is constructed,
+        Then: a ValidationError is raised so a group can never be created
+            without the canonical leg-set key the arming barrier validates.
+        """
+        with pytest.raises(ValidationError, match="paired_group_key alongside"):
+            SignalData(
+                **_signal_kwargs(
+                    paired_group_id="grp-1",
+                    paired_group_size=2,
+                    paired_group_index=0,
+                    paired_group_policy="simultaneous",
+                )
+            )
+
+    def test_blank_group_key_is_rejected(self) -> None:
+        """A whitespace-only group key is rejected.
+
+        Given: a descriptor whose paired_group_key is whitespace-only while
+            id, size, index and policy are otherwise valid,
+        When: the schema is constructed,
+        Then: a ValidationError is raised so an empty leg-set key never
+            silently fails every arming validation.
+        """
+        with pytest.raises(ValidationError, match="non-empty group key"):
+            SignalData(
+                **_signal_kwargs(
+                    paired_group_id="grp-1",
+                    paired_group_size=2,
+                    paired_group_index=0,
+                    paired_group_policy="simultaneous",
+                    paired_group_key="   ",
+                )
+            )
+
+    def test_group_key_without_id_is_rejected(self) -> None:
+        """A paired_group_key requires an explicit group id.
+
+        Given: a SignalData with paired_group_key but no paired_group_id,
+        When: the schema is constructed,
+        Then: a ValidationError is raised.
+        """
+        with pytest.raises(ValidationError, match="require paired_group_id"):
+            SignalData(**_signal_kwargs(paired_group_key="kraken:BTC-USD:live"))
 
 
 def test_downstream_schemas_carry_paired_group_descriptor() -> None:
@@ -173,6 +228,9 @@ def test_downstream_schemas_carry_paired_group_descriptor() -> None:
     When: the schemas are built,
     Then: each carries the four paired-group fields unchanged (transport
         only, no re-validation downstream of the signal origin).
+        ``paired_group_key`` is intentionally SignalData-only: it is
+        origination metadata the coordinator consumes to build/validate the
+        group, so it is not threaded onto the downstream schemas.
     """
     group = {
         "paired_group_id": "grp-1",
