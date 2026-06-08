@@ -60,6 +60,8 @@ from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import OrderCommandEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import OrderType
+from snapper.core.types import PairedExecutionGroupStatusEnum
+from snapper.core.types import PairedExecutionLegStatusEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import TradeSideEnum
@@ -70,6 +72,8 @@ from snapper.data.repository import get_repository
 from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import OrderRow
+from snapper.data.repository_types import PairedExecutionGroupInsertRow
+from snapper.data.repository_types import PairedExecutionLegInsertRow
 from snapper.data.repository_types import PositionCycleInsertRow
 from snapper.data.repository_types import PositionCycleRow
 from snapper.data.repository_types import TradeCommandRow
@@ -3113,16 +3117,129 @@ class TraderCoordinator(RegisterableProcess):
         )
         signaled_at = signal.fired_at.timestamp()
         prev_oid = engine.pending_client_order_id
-        await engine.execute_desired_units(
+        group_public_id = await self._ensure_paired_execution_group(signal)
+        command_public_id = await engine.execute_desired_units(
             desired_units,
             price,
             signaled_at=signaled_at,
             ai_review_public_id=signal.ai_review_public_id,
             ai_review_dispatch_version=signal.ai_review_dispatch_version,
+            grouped_correlation_id=group_public_id,
         )
         new_oid = engine.pending_client_order_id
         if new_oid and new_oid != prev_oid:
             self._register_order_shard_key(new_oid, engine._shard_key)
+            if group_public_id is not None and command_public_id is not None:
+                await self._register_and_arm_paired_leg(
+                    signal,
+                    engine,
+                    group_public_id=group_public_id,
+                    command_public_id=command_public_id,
+                    client_order_id=new_oid,
+                )
+
+    async def _ensure_paired_execution_group(self, signal: SignalData) -> str | None:
+        """Ensure a paired-execution group row exists for a grouped signal.
+
+        Returns the group ``public_id`` (== ``signal.paired_group_id``) so the
+        engine stamps it as the command ``correlation_id`` — held by the outbox
+        arming gate until the group arms — or ``None`` for a standalone signal
+        or a non-SQL repository (tests). ``ensure_paired_execution_group`` is
+        idempotent, so sibling coordinators that each own a leg of the same
+        group race safely on the active-unique ``public_id``: the first creates
+        the assembling group, the rest no-op. The group must be committed
+        BEFORE the leg's command is inserted so the gate classifies the command
+        as grouped (held) rather than non-grouped (dispatchable).
+        """
+        group_id = signal.paired_group_id
+        if group_id is None:
+            return None
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return None
+        size = signal.paired_group_size
+        policy = signal.paired_group_policy
+        group_key = signal.paired_group_key
+        if size is None or policy is None or group_key is None:
+            return None
+        now = datetime.now(UTC)
+        row: PairedExecutionGroupInsertRow = {
+            "public_id": group_id,
+            "wallet_public_id": signal.wallet_public_id or "",
+            "operator_public_id": signal.operator_public_id or None,
+            "strategy_id": signal.strategy_name or "unknown",
+            "policy": policy,
+            "expected_leg_count": size,
+            "group_key": group_key,
+            "status": PairedExecutionGroupStatusEnum.ASSEMBLING.value,
+            "assembly_deadline": now
+            + timedelta(seconds=_bootstrap_settings.paired_execution_assembly_timeout_s),
+            "fill_deadline": now
+            + timedelta(seconds=_bootstrap_settings.paired_execution_fill_timeout_s),
+            "created_at": now,
+            "session_id": self._tracker.session_id,
+            "sequence_id": self._tracker.next_sequence(f"paired.group.{group_id}"),
+            "timestamp": now,
+        }
+        await self.repository.ensure_paired_execution_group(row)
+        return group_id
+
+    async def _register_and_arm_paired_leg(
+        self,
+        signal: SignalData,
+        engine: TradingEngineService,
+        *,
+        group_public_id: str,
+        command_public_id: str,
+        client_order_id: str,
+    ) -> None:
+        """Register this coordinator's leg, then arm the group when complete.
+
+        Inserts the ``paired_execution_leg`` bound to the just-inserted command
+        (so the outbox gate can match the leg to its command), then attempts the
+        validated ``assembling -> armed`` CAS. On a successful arm the outbox is
+        notified so the now-armed group's held commands dispatch together.
+        Cross-coordinator, the last leg to register sees the full set and wins
+        the arm; the others' CAS no-ops. If a sibling never registers, the group
+        never arms and no command dispatches — safe (the Phase-4 scanner breaks
+        the stalled group).
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return
+        leg_index = signal.paired_group_index
+        if leg_index is None:
+            return
+        now = datetime.now(UTC)
+        leg_row: PairedExecutionLegInsertRow = {
+            "public_id": str(uuid7()),
+            "group_public_id": group_public_id,
+            "leg_index": leg_index,
+            "exchange": engine.exchange,
+            "mode": engine.mode,
+            "instrument": signal.instrument,
+            "shard_key": engine._shard_key,
+            "side": signal.side,
+            "target_qty": abs(signal.strength),
+            "signal_public_id": signal.public_id,
+            "command_public_id": command_public_id,
+            "client_order_id": client_order_id,
+            "status": PairedExecutionLegStatusEnum.PENDING.value,
+            "wallet_public_id": signal.wallet_public_id or "",
+            "operator_public_id": signal.operator_public_id or None,
+            "created_at": now,
+            "session_id": self._tracker.session_id,
+            "sequence_id": self._tracker.next_sequence(f"paired.leg.{group_public_id}"),
+            "timestamp": now,
+        }
+        await self.repository.insert_paired_execution_leg(leg_row)
+        armed = await self.repository.try_arm_paired_execution_group_if_complete(
+            group_public_id,
+            now,
+            self._tracker.session_id,
+            self._tracker.next_sequence(f"paired.arm.{group_public_id}"),
+        )
+        if armed and self.outbox is not None:
+            self.outbox.notify()
+            logger.info(f"Paired-execution group armed, outbox notified: {group_public_id}")
 
     def _build_signal_routing_context(self, signal: SignalData) -> SignalRoutingContext | None:
         """Parse and validate the routing identity for one signal."""

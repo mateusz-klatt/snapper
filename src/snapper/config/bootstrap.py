@@ -122,6 +122,15 @@ class BootstrapSettingsLoader(BaseSettings):
             ``True`` only once the full paired-execution guard
             (group-armed dispatch + cross-coordinator halt + compensating
             flatten) is deployed. Paper multi-leg is always allowed.
+        paired_execution_assembly_timeout_s: Seconds a paired-execution
+            group waits for ALL sibling legs to register a durable command
+            before it is considered stalled. Each new group's
+            ``assembly_deadline = created_at + this``; a group cannot arm
+            after its assembly_deadline, and the (Phase-4) guard scanner
+            breaks groups still assembling past it — no venue order was sent.
+        paired_execution_fill_timeout_s: Seconds an armed paired-execution
+            group waits for its legs to fill before the guard treats a
+            laggard as a breakage. Sets ``fill_deadline = created_at + this``.
     """
 
     model_config = SettingsConfigDict(
@@ -152,6 +161,12 @@ class BootstrapSettingsLoader(BaseSettings):
     )
     paired_execution_guard_enabled: bool = Field(
         default=False, alias="PAIRED_EXECUTION_GUARD_ENABLED"
+    )
+    paired_execution_assembly_timeout_s: float = Field(
+        default=5.0, alias="PAIRED_EXECUTION_ASSEMBLY_TIMEOUT_S"
+    )
+    paired_execution_fill_timeout_s: float = Field(
+        default=30.0, alias="PAIRED_EXECUTION_FILL_TIMEOUT_S"
     )
 
     @model_validator(mode="before")

@@ -19,6 +19,7 @@ from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.service import InstrumentSpec
 from snapper.application.engine.service import InstrumentSpecMissingError
 from snapper.application.engine.service import TradingEngineService
+from snapper.application.engine.service import _OrderDispatch
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
@@ -1124,9 +1125,11 @@ async def test_maybe_stop_triggers_using_entry_price(monkeypatch: pytest.MonkeyP
     engine.entry_price = 100.0
     captured: list[tuple[Any, ...]] = []
 
-    async def _capture_send(*args: Any, **kwargs: Any) -> str:
+    async def _capture_send(*args: Any, **kwargs: Any) -> _OrderDispatch:
         captured.append((args, kwargs))
-        return "test-client-order-id"
+        return _OrderDispatch(
+            client_order_id="test-client-order-id", command_public_id="test-client-order-id"
+        )
 
     monkeypatch.setattr(engine, "_send_order", _capture_send)
     assert await engine._maybe_stop(last_close=90.0, prev_close=95.0) is True
@@ -1151,9 +1154,11 @@ async def test_maybe_stop_short_triggers_on_price_rise(monkeypatch: pytest.Monke
     engine.entry_price = 100.0
     captured: list[tuple[Any, ...]] = []
 
-    async def _capture_send(*args: Any, **kwargs: Any) -> str:
+    async def _capture_send(*args: Any, **kwargs: Any) -> _OrderDispatch:
         captured.append((args, kwargs))
-        return "test-stop-short"
+        return _OrderDispatch(
+            client_order_id="test-stop-short", command_public_id="test-stop-short"
+        )
 
     monkeypatch.setattr(engine, "_send_order", _capture_send)
     assert await engine._maybe_stop(last_close=103.0) is True
@@ -1200,9 +1205,9 @@ async def test_maybe_stop_short_uses_portfolio_avg_price(monkeypatch: pytest.Mon
     )
     captured: list[tuple[Any, ...]] = []
 
-    async def _capture_send(*args: Any, **kwargs: Any) -> str:
+    async def _capture_send(*args: Any, **kwargs: Any) -> _OrderDispatch:
         captured.append((args, kwargs))
-        return "test-stop-avg"
+        return _OrderDispatch(client_order_id="test-stop-avg", command_public_id="test-stop-avg")
 
     monkeypatch.setattr(engine, "_send_order", _capture_send)
     assert await engine._maybe_stop(last_close=106.0) is True
@@ -1344,15 +1349,49 @@ async def test_send_order_writes_trade_command_to_db() -> None:
         repository=repo_mock,
         outbox=outbox_mock,
     )
-    client_id = await engine._send_order(side="buy", size=1.0, price=10.0, reason="unit-test")
-    assert len(client_id) == 36
+    dispatch = await engine._send_order(side="buy", size=1.0, price=10.0, reason="unit-test")
+    assert len(dispatch.client_order_id) == 36
+    assert dispatch.command_public_id == "cmd-pub-1"
     repo_mock.insert_trade_command.assert_called_once()
+    ungrouped_row = repo_mock.insert_trade_command.call_args.args[0]
+    assert ungrouped_row["correlation_id"] == dispatch.client_order_id
     call_row = repo_mock.insert_trade_command.call_args.args[0]
     assert call_row["command_type"] == "submit"
     assert call_row["side"] == "buy"
     assert call_row["status"] == "created"
     outbox_mock.notify.assert_called_once()
     assert not socket.sent
+
+
+@pytest.mark.asyncio
+async def test_send_order_grouped_stamps_group_correlation_id() -> None:
+    """A grouped leg command carries the group id as its correlation_id.
+
+    Given: a TradingEngine with a mocked repository,
+    When: _send_order is called with ``grouped_correlation_id`` set,
+    Then: the inserted TradeCommand's correlation_id is the group id (so the
+        outbox arming gate holds the command until the group arms) rather
+        than the order's own public id, and the returned command_public_id
+        is the durable DB row id.
+    """
+    socket = _SocketStub()
+    repo_mock = AsyncMock()
+    repo_mock.insert_trade_command = AsyncMock(return_value=(1, "cmd-pub-g"))
+    engine = TradingEngineService(
+        instrument="BTC-USD",
+        execution_socket=cast(Any, socket),
+        cfg=EngineConfigModel(initial_cash=1_000.0, fee_bps=10.0),
+        exchange="paper",
+        repository=repo_mock,
+        outbox=MagicMock(),
+    )
+    dispatch = await engine._send_order(
+        side="buy", size=1.0, price=10.0, reason="unit-test", grouped_correlation_id="grp-9"
+    )
+    call_row = repo_mock.insert_trade_command.call_args.args[0]
+    assert call_row["correlation_id"] == "grp-9"
+    assert dispatch.command_public_id == "cmd-pub-g"
+    assert dispatch.client_order_id != "grp-9"
 
 
 @pytest.mark.asyncio

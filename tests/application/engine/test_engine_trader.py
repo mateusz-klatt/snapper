@@ -770,7 +770,9 @@ class _EngineStub:
         signaled_at: Any,
         ai_review_public_id: str | None = None,
         ai_review_dispatch_version: int | None = None,
+        grouped_correlation_id: str | None = None,
     ) -> None:
+        del grouped_correlation_id
         self.execute_calls.append(
             {
                 "desired_units": desired_units,
@@ -2348,9 +2350,10 @@ class StubEngine:
         *,
         ai_review_public_id: str | None = None,
         ai_review_dispatch_version: int | None = None,
+        grouped_correlation_id: str | None = None,
     ) -> None:
         """Record desired units and timestamp for verification."""
-        del ai_review_public_id, ai_review_dispatch_version
+        del ai_review_public_id, ai_review_dispatch_version, grouped_correlation_id
         self.calls.append((desired_units, signaled_at))
 
 
