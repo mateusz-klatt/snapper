@@ -653,6 +653,24 @@ def generate_swift_struct(
         if swift_name != prop_name:
             coding_keys.append((swift_name, prop_name))
 
+    prop_names = list(properties)
+    lines.append("")
+    lines.append("    init(")
+    for index, prop_name in enumerate(prop_names):
+        swift_name = to_camel_case(prop_name)
+        is_required = prop_name in required
+        swift_type = json_type_to_swift(
+            properties[prop_name], definitions, optional=not is_required
+        )
+        default = "" if is_required else " = nil"
+        comma = "," if index < len(prop_names) - 1 else ""
+        lines.append(f"        {swift_name}: {swift_type}{default}{comma}")
+    lines.append("    ) {")
+    for prop_name in prop_names:
+        swift_name = to_camel_case(prop_name)
+        lines.append(f"        self.{swift_name} = {swift_name}")
+    lines.append("    }")
+
     if coding_keys:
         lines.append("")
         lines.append("    enum CodingKeys: String, CodingKey {")
