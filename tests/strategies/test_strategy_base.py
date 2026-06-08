@@ -1130,6 +1130,42 @@ class TestSignalGroupNormalization:
         with pytest.raises(TypeError, match="callback must return"):
             s._normalize_signal_group(cast(Any, 123))
 
+    @staticmethod
+    def _live_strategy() -> FakeStrategy:
+        """Two-output LIVE (non-paper) strategy for the guard-gate tests."""
+        return FakeStrategy(
+            _strategy_config(
+                inputs=["market.kraken.BTC-USD.candles.1h"],
+                outputs=["BTC-USD", "ETH-USD"],
+                exchange="kraken",
+            )
+        )
+
+    def test_live_multi_leg_blocked_when_guard_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-closed: a live multi-leg group is refused while the guard is off."""
+        monkeypatch.setattr(
+            "snapper.strategies.base._bootstrap_settings.paired_execution_guard_enabled",
+            False,
+        )
+        s = self._live_strategy()
+        legs = [self._signal("BTC-USD", "buy"), self._signal("ETH-USD", "sell")]
+        with pytest.raises(ValueError, match="PAIRED_EXECUTION_GUARD_ENABLED"):
+            s._normalize_signal_group(legs)
+
+    def test_live_multi_leg_allowed_when_guard_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live multi-leg group is allowed once the guard flag is enabled."""
+        monkeypatch.setattr(
+            "snapper.strategies.base._bootstrap_settings.paired_execution_guard_enabled",
+            True,
+        )
+        s = self._live_strategy()
+        legs = [self._signal("BTC-USD", "buy"), self._signal("ETH-USD", "sell")]
+        assert s._normalize_signal_group(legs) == legs
+
 
 @pytest.mark.asyncio
 async def test_emit_signal_auto_timestamp_and_setup_publisher(

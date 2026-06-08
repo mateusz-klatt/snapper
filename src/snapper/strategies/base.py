@@ -216,6 +216,18 @@ class BaseStrategy(ABC):
                     f"not allowed; not in configured outputs: {self.outputs} "
                     f"(generated topic: {topic})"
                 )
+        if (
+            len(signals) > 1
+            and self.exchange != ExchangeEnum.PAPER
+            and not _bootstrap_settings.paired_execution_guard_enabled
+        ):
+            raise ValueError(
+                f"Strategy {self.name}: refusing to emit a {len(signals)}-leg signal group on "
+                f"live exchange '{self.exchange}'. Multi-leg emission is not venue-execution "
+                f"atomic on its own, so one leg could reject or fill late and leave one-sided "
+                f"exposure. Set PAIRED_EXECUTION_GUARD_ENABLED=true only once the paired-execution "
+                f"guard is deployed. Paper multi-leg is always allowed."
+            )
         return signals
 
     @property

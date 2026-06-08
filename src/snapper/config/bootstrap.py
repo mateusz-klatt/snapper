@@ -113,6 +113,15 @@ class BootstrapSettingsLoader(BaseSettings):
             strings and the sentinel values ``""``, ``"unbounded"``,
             and ``"none"`` need to survive round-trip. The parsed
             ``int | None`` form lives on ``AppSettings``.
+        paired_execution_guard_enabled: Fail-closed gate for real-money
+            multi-leg strategies. Default ``False`` makes a strategy that
+            emits a multi-leg signal group on a LIVE (non-paper) exchange
+            refuse to publish, because paired EMISSION (Issue A) is not
+            venue-execution-atomic on its own — one leg could reject or
+            fill late and leave one-sided exposure. Operators flip this to
+            ``True`` only once the full paired-execution guard
+            (group-armed dispatch + cross-coordinator halt + compensating
+            flatten) is deployed. Paper multi-leg is always allowed.
     """
 
     model_config = SettingsConfigDict(
@@ -140,6 +149,9 @@ class BootstrapSettingsLoader(BaseSettings):
     coordinator_instance_count: int = Field(default=1, alias="SNAPPER_COORDINATOR_INSTANCE_COUNT")
     coordinator_outbox_max_scan_rows: str | None = Field(
         default="1000", alias="SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS"
+    )
+    paired_execution_guard_enabled: bool = Field(
+        default=False, alias="PAIRED_EXECUTION_GUARD_ENABLED"
     )
 
     @model_validator(mode="before")

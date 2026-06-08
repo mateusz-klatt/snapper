@@ -78,6 +78,7 @@ BOOTSTRAP_ENV_VARS: frozenset[str] = frozenset(
         "SNAPPER_COORDINATOR_INSTANCE_ID",
         "SNAPPER_COORDINATOR_INSTANCE_COUNT",
         "SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS",
+        "PAIRED_EXECUTION_GUARD_ENABLED",
     }
 )
 """Aliases of every field on :class:`BootstrapSettingsLoader`.
