@@ -7320,6 +7320,95 @@ class SQLAlchemyRepository(Repository):
             await s.refresh(new_cmd)
             return new_cmd.id
 
+    async def cas_trade_command_status(
+        self,
+        public_id: str,
+        expected_status: str,
+        new_status: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+        terminal_at: datetime | None = None,
+        last_error: str | None = None,
+    ) -> bool:
+        """SCD2 compare-and-swap for a trade command status transition.
+
+        Unlike :meth:`update_trade_command_status` (which transitions the
+        active row unconditionally), this guards on ``expected_status`` under
+        the ``FOR UPDATE`` row lock of the CURRENT active row
+        (``known_to == KNOWN_TO_MAX``, not a temporal ``as_of`` view): the
+        command moves only if its current active row is still at
+        ``expected_status``. So even with a stale ``bus_time``, a command that
+        already moved ``created -> dispatched`` (reached the venue) is seen at
+        its current ``dispatched`` status and the CAS returns ``False`` rather
+        than locking the historical ``created`` row and inserting a duplicate
+        active successor. The paired-execution guard scanner uses it to cancel
+        a HELD ``created`` command of a broken assembling group. Returns
+        ``True`` iff the transition was applied.
+        """
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(TradeCommand)
+                        .where(
+                            TradeCommand.public_id == public_id,
+                            TradeCommand.known_to == KNOWN_TO_MAX,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                return False
+            if existing.status != expected_status:
+                return False
+            await s.execute(
+                update(TradeCommand).where(TradeCommand.id == existing.id).values(known_to=bus_time)
+            )
+            s.add(
+                TradeCommand(
+                    public_id=existing.public_id,
+                    command_type=existing.command_type,
+                    shard_key=existing.shard_key,
+                    exchange=existing.exchange,
+                    instrument=existing.instrument,
+                    mode=existing.mode,
+                    strategy_id=existing.strategy_id,
+                    client_order_id=existing.client_order_id,
+                    venue_client_id=existing.venue_client_id,
+                    idempotency_key=existing.idempotency_key,
+                    side=existing.side,
+                    order_type=existing.order_type,
+                    quantity=existing.quantity,
+                    price=existing.price,
+                    leverage=existing.leverage,
+                    reduce_only=existing.reduce_only,
+                    status=new_status,
+                    attempt_count=existing.attempt_count,
+                    last_error=last_error,
+                    created_at=existing.created_at,
+                    dispatched_at=existing.dispatched_at,
+                    acked_at=existing.acked_at,
+                    terminal_at=terminal_at if terminal_at is not None else existing.terminal_at,
+                    exchange_order_id=existing.exchange_order_id,
+                    supersedes_command_id=existing.supersedes_command_id,
+                    correlation_id=existing.correlation_id,
+                    plan_public_id=existing.plan_public_id,
+                    source_surface=existing.source_surface,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                    timestamp=bus_time,
+                    wallet_public_id=existing.wallet_public_id,
+                    operator_public_id=existing.operator_public_id,
+                    user_public_id=existing.user_public_id,
+                )
+            )
+            await s.commit()
+            return True
+
     async def bulk_dispatch_trade_commands(self, updates: list[TradeCommandDispatchUpdate]) -> int:
         """Apply N CREATED -> DISPATCHED SCD2 transitions in one session + commit.
 

@@ -32,6 +32,7 @@ from loguru import logger
 from sqlalchemy.exc import IntegrityError
 
 from snapper.application.engine.config import EngineConfigModel
+from snapper.application.engine.guard_scanner import PairedExecutionGuardScanner
 from snapper.application.engine.service import InstrumentSpec
 from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.service import compute_shard_key
@@ -277,6 +278,7 @@ class TraderCoordinator(RegisterableProcess):
         self.trade_service: TradeService = TradeService()
         self.balance_service: BalanceService = BalanceService()
         self.outbox: OutboxDispatcher | None = None
+        self.guard_scanner: PairedExecutionGuardScanner | None = None
         self._order_shard_keys: dict[str, str] = {}
         self._wallet_short_to_id: dict[str, str] = {}
         self._ownership: ShardOwnership | None = None
@@ -2647,6 +2649,8 @@ class TraderCoordinator(RegisterableProcess):
         logger.info("Stopping ZMQ Signal TraderCoordinator")
         if self.outbox is not None:
             self.outbox.stop()
+        if self.guard_scanner is not None:
+            self.guard_scanner.stop()
         if self.signal_subscriber:
             self.signal_subscriber.setsockopt(zmq.LINGER, 0)
             self.signal_subscriber.close()
@@ -2761,6 +2765,24 @@ class TraderCoordinator(RegisterableProcess):
             logger.info("TraderCoordinator: durable command mode (outbox active)")
         else:
             logger.info("TraderCoordinator: no SQL repo, outbox disabled for tests only")
+
+    def _create_guard_scanner_task(self) -> asyncio.Task[None] | None:
+        """Create the paired-execution guard scanner task.
+
+        Returns the started scan-loop task (and stores the scanner on
+        ``self.guard_scanner`` so ``stop()`` can halt it), or ``None`` when no
+        SQL repository or shard ownership is wired (tests). The interval is
+        half the assembly timeout so a stalled group is broken within roughly
+        one timeout of its deadline.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository) or self._ownership is None:
+            return None
+        self.guard_scanner = PairedExecutionGuardScanner(
+            repository=self.repository,
+            ownership=self._ownership,
+            interval_seconds=max(1.0, _bootstrap_settings.paired_execution_assembly_timeout_s / 2),
+        )
+        return asyncio.create_task(self.guard_scanner.run())
 
     def _create_reconciliation_tasks(self) -> list[asyncio.Task[None]]:
         """Create per-exchange reconciliation background tasks.
@@ -3028,6 +3050,9 @@ class TraderCoordinator(RegisterableProcess):
         ]
         if self.outbox is not None:
             tasks.append(asyncio.create_task(self.outbox.run()))
+        scanner_task = self._create_guard_scanner_task()
+        if scanner_task is not None:
+            tasks.append(scanner_task)
         tasks.extend(self._create_reconciliation_tasks())
         try:
             await asyncio.gather(*tasks)

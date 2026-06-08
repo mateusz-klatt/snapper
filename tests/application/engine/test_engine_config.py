@@ -26,6 +26,7 @@ from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.trade.balance_service import BalanceService
 from snapper.application.trade.trade_service import TradeService
+from snapper.core.partitioning import ShardOwnership
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionData
@@ -1986,10 +1987,31 @@ async def test_stop_stops_outbox() -> None:
     coord.zmq_context = None
     coord.execution_publisher = None
     coord.execution_context = None
+    coord.guard_scanner = None
     mock_outbox = MagicMock()
     coord.outbox = mock_outbox
     await coord.stop()
     mock_outbox.stop.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_stops_guard_scanner() -> None:
+    """Coordinator stop calls the guard scanner stop when one is set.
+
+    Given: a TraderCoordinator with a mocked guard scanner and no outbox,
+    When: stop is called,
+    Then: the guard scanner stop is called so the scan loop exits.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.signal_subscriber = None
+    coord.zmq_context = None
+    coord.execution_publisher = None
+    coord.execution_context = None
+    coord.outbox = None
+    mock_scanner = MagicMock()
+    coord.guard_scanner = mock_scanner
+    await coord.stop()
+    mock_scanner.stop.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2012,6 +2034,85 @@ async def test_run_trading_loop_includes_outbox_task() -> None:
     with pytest.raises(asyncio.CancelledError):
         await coord._run_trading_loop()
     mock_outbox.run.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_create_guard_scanner_task_with_sql_repo_and_ownership() -> None:
+    """The guard scanner task is created with a SQL repo and shard ownership.
+
+    Given: a coordinator with a SQLAlchemyRepository and shard ownership,
+    When: _create_guard_scanner_task is called,
+    Then: a running scan task is returned and self.guard_scanner is set.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.guard_scanner = None
+    coord.repository = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    task = coord._create_guard_scanner_task()
+    assert task is not None
+    assert coord.guard_scanner is not None
+    coord.guard_scanner.stop()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    await coord.repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_create_guard_scanner_task_none_without_sql_repo() -> None:
+    """No guard scanner task is created without a SQL repository.
+
+    Given: a coordinator whose repository is not SQL-backed,
+    When: _create_guard_scanner_task is called,
+    Then: it returns None and no scanner is set.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.guard_scanner = None
+    coord.repository = MagicMock()
+    coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    assert coord._create_guard_scanner_task() is None
+    assert coord.guard_scanner is None
+
+
+@pytest.mark.asyncio
+async def test_create_guard_scanner_task_none_without_ownership() -> None:
+    """No guard scanner task is created without shard ownership.
+
+    Given: a coordinator with a SQL repository but no shard ownership,
+    When: _create_guard_scanner_task is called,
+    Then: it returns None and no scanner is set.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.guard_scanner = None
+    coord.repository = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    coord._ownership = None
+    assert coord._create_guard_scanner_task() is None
+    assert coord.guard_scanner is None
+    await coord.repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_run_trading_loop_includes_guard_scanner_task() -> None:
+    """The trading loop appends a guard scanner task with a SQL repo + ownership.
+
+    Given: a coordinator with a SQLAlchemyRepository and shard ownership,
+    When: the trading loop is started and immediately cancelled,
+    Then: a guard scanner was created and appended (self.guard_scanner is set).
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.outbox = None
+    coord.guard_scanner = None
+    coord.settings = MagicMock()
+    coord.repository = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    coord._create_reconciliation_tasks = MagicMock(return_value=[])
+    mock_sub = AsyncMock()
+    mock_sub.recv_multipart = AsyncMock(side_effect=asyncio.CancelledError)
+    coord.signal_subscriber = mock_sub
+    with pytest.raises(asyncio.CancelledError):
+        await coord._run_trading_loop()
+    assert coord.guard_scanner is not None
+    await coord.repository.engine.dispose()
 
 
 @pytest.mark.asyncio
