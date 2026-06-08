@@ -1,5 +1,6 @@
 """Tests for logical sharding — paper mode strategy isolation."""
 
+import json
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -217,6 +218,68 @@ class TestCoordinatorSharding:
         await coord._on_signal(_make_signal(strength=1.0))
 
         assert coord._order_shard_keys.get("order-456") == "paper.BTC-USD.paper.scalp"
+
+
+class TestRecoveryShardingClusterGuards:
+    """N>=2 recovery-cluster guards: shard-key registration + paper refusal."""
+
+    def test_register_order_shard_key_idempotent_and_conflict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-registering the same key is a no-op; a conflicting key is refused.
+
+        Given: a coordinator with a registered client_order_id -> shard_key,
+        When: the same id is registered again with the same and then a different key,
+        Then: the idempotent re-register keeps the mapping, and the conflicting
+            re-register DROPS the mapping entirely so the order's fills hard-drop
+            as unknown rather than risk a mis-routed fill.
+        """
+        coord = _make_coord(monkeypatch)
+        coord._register_order_shard_key("cid-1", "kraken.BTC-USD.live.wabcdef012345")
+        coord._register_order_shard_key("cid-1", "kraken.BTC-USD.live.wabcdef012345")
+        assert coord._order_shard_keys["cid-1"] == "kraken.BTC-USD.live.wabcdef012345"
+        coord._register_order_shard_key("cid-1", "kraken.ETH-USD.live")
+        assert "cid-1" not in coord._order_shard_keys
+
+    @pytest.mark.asyncio
+    async def test_paper_signal_refused_under_n_gt_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Paper routing is refused loudly under N>1 (recovery cannot reconstruct).
+
+        Given: a coordinator partitioned across 2 instances,
+        When: a paper signal's routing context is built,
+        Then: it returns None (refused) so no paper engine is created — paper shard
+            keys embed the strategy tag, which the Order table cannot persist.
+        """
+        coord = _make_coord(monkeypatch)
+        coord._ownership = ShardOwnership(instance_id=0, instance_count=2)
+        coord._current_topic = "signals.paper.BTC-USD.scalp"
+        assert coord._build_signal_routing_context(_make_signal()) is None
+
+    @pytest.mark.asyncio
+    async def test_register_checkpoint_open_orders(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Owned-checkpoint open commands register cid->shard_key, shard-matched only.
+
+        Given: a checkpoint whose open_command_ids resolve to a mix of a matching
+            command, a non-string id, a missing command, a foreign-shard command,
+            and a command with an empty client_order_id,
+        When: _register_checkpoint_open_orders runs,
+        Then: only the matching command's client_order_id is registered.
+        """
+        coord = _make_coord(monkeypatch)
+        shard_key = "kraken.BTC-USD.live"
+        coord.repository.get_trade_command_by_public_id = AsyncMock(
+            side_effect=[
+                {"client_order_id": "cid-ok", "shard_key": shard_key},
+                None,
+                {"client_order_id": "cid-foreign", "shard_key": "kraken.ETH-USD.live"},
+                {"client_order_id": "", "shard_key": shard_key},
+            ]
+        )
+        checkpoint = cast(Any, {"open_command_ids": json.dumps(["c1", 123, "c2", "c3", "c4"])})
+        await coord._register_checkpoint_open_orders(
+            checkpoint, shard_key, datetime(2024, 1, 1, tzinfo=UTC)
+        )
+        assert coord._order_shard_keys == {"cid-ok": shard_key}
 
 
 class TestStatusEventRouting:

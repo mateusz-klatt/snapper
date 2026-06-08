@@ -637,6 +637,7 @@ class TraderCoordinator(RegisterableProcess):
         if delta_events is None:
             return None
         self._restore_trade_service_from_checkpoint(checkpoint, shard_key, delta_events)
+        await self._register_checkpoint_open_orders(checkpoint, shard_key, now)
         await self._replay_checkpoint_accruals(
             checkpoint=checkpoint,
             now=now,
@@ -671,6 +672,39 @@ class TraderCoordinator(RegisterableProcess):
             f"cash={engine.portfolio.cash:.2f}"
         )
         return engine_key
+
+    async def _register_checkpoint_open_orders(
+        self,
+        checkpoint: TradeProjectionCheckpointRow,
+        shard_key: str,
+        now: datetime,
+    ) -> None:
+        """Register ``cid -> shard_key`` for each open command in a recovered checkpoint.
+
+        Closes the gap where a still-open command is durable in the checkpoint /
+        ``trade_commands`` table but its active ``Order`` row is unrecoverable, so
+        the active-order recovery pass never registers it and the N>1 CID filter
+        would hard-drop the order's fills. Each command is registered ONLY when
+        its own persisted ``shard_key`` equals this checkpoint's shard, so a
+        stale or foreign command can never claim a foreign shard.
+
+        Args:
+            checkpoint: The owned checkpoint row being recovered.
+            shard_key: This checkpoint's shard key (the owning engine's key).
+            now: Bitemporal ``as_of`` anchor for the command lookups.
+        """
+        raw_command_ids: list[object] = json.loads(checkpoint["open_command_ids"] or "[]")
+        for command_public_id in raw_command_ids:
+            if not isinstance(command_public_id, str):
+                continue
+            command = await self.repository.get_trade_command_by_public_id(
+                command_public_id, as_of=now
+            )
+            if command is None:
+                continue
+            client_order_id = command["client_order_id"]
+            if client_order_id and command["shard_key"] == shard_key:
+                self._register_order_shard_key(client_order_id, shard_key)
 
     def _resolve_checkpoint_wallet_public_id(self, shard_key: str, wallet_short: str) -> str:
         """Resolve checkpoint wallet attribution from the cached short-id map."""
@@ -1248,6 +1282,40 @@ class TraderCoordinator(RegisterableProcess):
                 f"or a stale recovery row."
             )
 
+    def _register_order_shard_key(self, client_order_id: str, shard_key: str) -> None:
+        """Register ``client_order_id -> full shard_key`` for the N>1 CID filter.
+
+        Single registration point so the N>1 venue-event admission filter can
+        route ACK/fills for an order to the owning coordinator. Only the FULL
+        persisted shard key is ever stored — never a wallet-less or
+        strategy-tag-less reconstruction, which would hash to a different owner.
+
+        Idempotent on an identical mapping. A CONFLICT (same client_order_id,
+        different shard_key) is data corruption: since we cannot know which key
+        is correct, the mapping is DROPPED entirely and logged loudly, so the
+        order's venue events hard-drop as unknown rather than risk routing a fill
+        to the wrong wallet/engine. A lost fill is recoverable by reconciliation;
+        a mis-applied fill corrupts a position.
+
+        Args:
+            client_order_id: The venue client order id (unique per order).
+            shard_key: The order's full persisted shard key.
+        """
+        existing = self._order_shard_keys.get(client_order_id)
+        if existing is not None and existing != shard_key:
+            logger.error(
+                "ZMQTrader: conflicting shard_key for client_order_id {}: "
+                "existing={} incoming={}; dropping the mapping so its venue events "
+                "hard-drop as unknown rather than risk a mis-routed fill "
+                "(investigate shard-key corruption)",
+                client_order_id,
+                existing,
+                shard_key,
+            )
+            self._order_shard_keys.pop(client_order_id, None)
+            return
+        self._order_shard_keys[client_order_id] = shard_key
+
     def _mark_order_in_flight(
         self,
         engine: TradingEngineService,
@@ -1257,7 +1325,7 @@ class TraderCoordinator(RegisterableProcess):
         engine.order_in_flight = True
         engine.pending_client_order_id = client_order_id
         engine._in_flight_since = time.monotonic()
-        self._order_shard_keys[client_order_id] = engine._shard_key
+        self._register_order_shard_key(client_order_id, engine._shard_key)
 
     def _build_position_cycle_insert_row(
         self,
@@ -2788,7 +2856,7 @@ class TraderCoordinator(RegisterableProcess):
             user_public_id=cmd.get("user_public_id"),
         )
         if command_type in ("create", OrderCommandEnum.SUBMIT.value):
-            self._order_shard_keys[cmd["client_order_id"]] = cmd["shard_key"]
+            self._register_order_shard_key(cmd["client_order_id"], cmd["shard_key"])
         await self.msg_publisher.send(topic, order)
 
     async def _funding_accrual_loop(self) -> None:
@@ -3054,7 +3122,7 @@ class TraderCoordinator(RegisterableProcess):
         )
         new_oid = engine.pending_client_order_id
         if new_oid and new_oid != prev_oid:
-            self._order_shard_keys[new_oid] = engine._shard_key
+            self._register_order_shard_key(new_oid, engine._shard_key)
 
     def _build_signal_routing_context(self, signal: SignalData) -> SignalRoutingContext | None:
         """Parse and validate the routing identity for one signal."""
@@ -3072,6 +3140,23 @@ class TraderCoordinator(RegisterableProcess):
         execution_mode = (
             ExecutionModeEnum.PAPER if exchange == ExchangeEnum.PAPER else ExecutionModeEnum.LIVE
         )
+        if (
+            exchange == ExchangeEnum.PAPER
+            and self._ownership is not None
+            and self._ownership.instance_count > 1
+        ):
+            logger.error(
+                "ZMQTrader: refusing paper signal for {} under N>1 partitioning "
+                "(instance {}/{}). Paper shard keys embed the strategy tag, which the "
+                "Order table cannot persist, so an in-flight paper order cannot be "
+                "recovered after a crash and its fills would be silently lost. Run paper "
+                "strategies on a single coordinator instance until durable paper shard "
+                "identity lands.",
+                signal.instrument,
+                self._ownership.instance_id,
+                self._ownership.instance_count,
+            )
+            return None
         return SignalRoutingContext(
             exchange=exchange,
             mode=parsed.signal_type,
