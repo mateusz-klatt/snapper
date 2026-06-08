@@ -918,7 +918,7 @@ class TestOnWsMessage:
                     quantity=10.0,
                     price=66621.0,
                     ord_type="fill",
-                    timestamp=MagicMock(),
+                    timestamp=datetime(2022, 1, 1, tzinfo=UTC),
                     trade_id="abc-123",
                 ),
             ),
@@ -2472,7 +2472,7 @@ class TestSubscribeTradesImpl:
             quantity=10.0,
             price=66621.0,
             ord_type="fill",
-            timestamp=MagicMock(),
+            timestamp=datetime(2022, 1, 1, tzinfo=UTC),
             trade_id="abc-123",
         )
 
@@ -2871,7 +2871,7 @@ class TestSubscribeImplGuardPaths:
             quantity=10.0,
             price=66621.0,
             ord_type="fill",
-            timestamp=MagicMock(),
+            timestamp=datetime(2022, 1, 1, tzinfo=UTC),
             trade_id="abc-123",
         )
 

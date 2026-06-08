@@ -17,6 +17,7 @@ implementation in :mod:`snapper.infrastructure.exchanges.implementations.walutom
 """
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from time import monotonic
@@ -43,6 +44,8 @@ class _CandleAccumulator:
     trades: int
     vwap_sum: float
     interval_begin: datetime
+    open_ts: datetime
+    close_ts: datetime
 
 
 def enqueue_or_drop_oldest_candle(
@@ -87,8 +90,11 @@ class TradeCandleBuilder:
     bucket is keyed by ``(symbol, minute_ts)`` where ``minute_ts`` is
     the floor of the trade's timestamp to its minute. :meth:`pop_completed`
     returns the candles for every minute strictly older than the
-    caller's "now" and removes them from the accumulator, so the
-    accumulator only ever holds at most one bucket per active symbol.
+    caller's "now" and removes them from the accumulator. The wall-clock
+    path holds at most one bucket per active symbol; the event-watermark
+    path (:meth:`pop_completed_by_event_watermark`) may buffer the current
+    minute plus any minute within ``interval + grace`` of the watermark, so
+    a delayed feed can hold a few buckets per symbol at once.
 
     The builder is single-thread by design — callers drive it from
     the exchange client's WS callback and a once-per-second background
@@ -109,19 +115,30 @@ class TradeCandleBuilder:
         """
         self._interval_s = interval_seconds
         self._builders: dict[str, _CandleAccumulator] = {}
+        self._watermark: datetime | None = None
+        self._update_count: int = 0
 
     def update(self, trade: TradeUpdate) -> None:
         """Fold a single trade into its symbol's open minute-bucket.
 
         First trade in a bucket sets OHLC = trade.price; subsequent
-        trades widen ``high`` / ``low``, advance ``close``, and
-        accumulate ``volume`` + ``vwap_sum``.
+        trades widen ``high`` / ``low`` and accumulate ``volume`` +
+        ``vwap_sum``. ``open`` / ``close`` track the EARLIEST / LATEST trade
+        by EVENT time (``trade.timestamp``), not arrival order, so a delayed
+        feed's out-of-order same-minute batches still yield the correct open
+        and close. Also advances the event-time
+        watermark (the highest ``trade.timestamp`` folded so far, consumed by
+        :meth:`pop_completed_by_event_watermark`) and the activity counter
+        (consumed by the idle-flush driver — see :meth:`update_count`).
 
         Args:
             trade: The :class:`TradeUpdate` to fold into the
                 ``(symbol, minute)`` bucket derived from
                 ``trade.timestamp``.
         """
+        self._update_count += 1
+        if self._watermark is None or trade.timestamp > self._watermark:
+            self._watermark = trade.timestamp
         floor = trade.timestamp.replace(second=0, microsecond=0)
         minute_ts = int(floor.timestamp())
         key = f"{trade.symbol}_{minute_ts}"
@@ -137,11 +154,18 @@ class TradeCandleBuilder:
                 trades=1,
                 vwap_sum=trade.price * trade.quantity,
                 interval_begin=floor,
+                open_ts=trade.timestamp,
+                close_ts=trade.timestamp,
             )
             return
         existing.high = max(existing.high, trade.price)
         existing.low = min(existing.low, trade.price)
-        existing.close = trade.price
+        if trade.timestamp < existing.open_ts:
+            existing.open = trade.price
+            existing.open_ts = trade.timestamp
+        if trade.timestamp >= existing.close_ts:
+            existing.close = trade.price
+            existing.close_ts = trade.timestamp
         existing.volume += trade.quantity
         existing.trades += 1
         existing.vwap_sum += trade.price * trade.quantity
@@ -165,13 +189,107 @@ class TradeCandleBuilder:
             The caller is responsible for routing them downstream (eg.
             via :func:`enqueue_or_drop_oldest_candle`).
         """
-        current_minute_floor = now_utc.replace(second=0, microsecond=0)
-        current_minute_ts = int(current_minute_floor.timestamp())
+        current_minute_ts = int(now_utc.replace(second=0, microsecond=0).timestamp())
+        return self._emit_and_remove(lambda begin_ts: begin_ts < current_minute_ts)
+
+    def pop_completed_by_event_watermark(self, grace_seconds: float) -> list[CandleUpdate]:
+        """Emit buckets the feed's own event-clock has already moved past.
+
+        Wall-clock completion (:meth:`pop_completed`) is correct only for a
+        real-time feed. For a DELAYED feed (e.g. Kraken Equities ~10 min) an
+        event-minute's trades arrive across many wall-clock minutes, so
+        wall-clock close fragments each minute into partial, mutually-
+        superseding candles (the last fragment wrongly becoming current).
+        This instead closes a bucket only once the event watermark (the
+        highest ``trade.timestamp`` folded so far) has advanced past the
+        bucket's minute END by ``grace_seconds`` of skew tolerance, so every
+        delayed batch for a minute accumulates into ONE candle before it is
+        emitted. Returns ``[]`` until the first trade sets the watermark.
+
+        Args:
+            grace_seconds: Event-time slack beyond a bucket's minute end
+                before it is final — absorbs cross-symbol arrival skew
+                within the same feed. A trade arriving more than this past
+                its minute's close (reordering beyond ``interval + grace``)
+                lands in a fresh bucket and yields a separate corrective
+                candle; the feed is delayed-but-monotonic so that is not
+                expected — widen ``grace`` rather than rely on it.
+
+        Returns:
+            Completed :class:`CandleUpdate` items; the watermark's own
+            minute and any minute within ``interval + grace_seconds`` of the
+            watermark stay in place to keep accumulating.
+        """
+        if self._watermark is None:
+            return []
+        cutoff = self._watermark.timestamp() - self._interval_s - grace_seconds
+        return self._emit_and_remove(lambda begin_ts: begin_ts <= cutoff)
+
+    def pop_all(self) -> list[CandleUpdate]:
+        """Emit and discard EVERY remaining bucket regardless of completion.
+
+        Idle/shutdown flush: when a delayed feed goes quiet the event
+        watermark stalls and :meth:`pop_completed_by_event_watermark` would
+        strand the final minute's bucket indefinitely. A driver invokes this
+        only after a wall-clock silence threshold so the last bar is not lost
+        until the feed resumes.
+
+        Returns:
+            All buffered :class:`CandleUpdate` items; the accumulator is
+            empty afterwards.
+        """
+        return self._emit_and_remove(lambda _begin_ts: True)
+
+    @property
+    def watermark(self) -> datetime | None:
+        """Return the highest ``trade.timestamp`` folded so far, or ``None``.
+
+        Monotonic non-decreasing across :meth:`update` calls. Exposed so a
+        driver loop can detect whether the feed's event-clock is still
+        advancing and trigger an idle flush when it stalls.
+
+        Returns:
+            The event watermark, or ``None`` before the first trade.
+        """
+        return self._watermark
+
+    @property
+    def update_count(self) -> int:
+        """Return the total number of trades folded so far.
+
+        A monotonically increasing activity counter (exposed for the
+        idle-flush driver and tests/metrics, like :meth:`active_buckets`). A
+        driver compares it across ticks to distinguish "the feed delivered
+        trades" (which must DEFER an idle flush) from "the feed is silent" —
+        crucially even when those trades do NOT advance the event watermark
+        (out-of-order, duplicate, or same-minute delayed batches whose
+        timestamp is ``<=`` the watermark). Keying idle detection on the
+        watermark alone would wrongly flush mid-activity.
+
+        Returns:
+            Count of :meth:`update` calls since construction.
+        """
+        return self._update_count
+
+    def _emit_and_remove(self, should_emit: Callable[[int], bool]) -> list[CandleUpdate]:
+        """Emit + discard every bucket whose minute satisfies ``should_emit``.
+
+        Shared kernel behind :meth:`pop_completed`,
+        :meth:`pop_completed_by_event_watermark`, and :meth:`pop_all` so the
+        OHLCV-to-:class:`CandleUpdate` projection lives in one place.
+
+        Args:
+            should_emit: Predicate over a bucket's minute-start UNIX
+                timestamp (int seconds); ``True`` emits + removes that
+                bucket, ``False`` leaves it in place.
+
+        Returns:
+            The emitted candles, in arbitrary order.
+        """
         out: list[CandleUpdate] = []
         to_remove: list[str] = []
         for key, b in self._builders.items():
-            bucket_minute = int(b.interval_begin.timestamp())
-            if bucket_minute >= current_minute_ts:
+            if not should_emit(int(b.interval_begin.timestamp())):
                 continue
             vwap = b.vwap_sum / b.volume if b.volume > 0 else 0.0
             out.append(
@@ -197,9 +315,12 @@ class TradeCandleBuilder:
         """Return the number of in-flight buckets — exposed for tests / metrics.
 
         Returns:
-            Count of ``(symbol, minute)`` accumulators currently
-            holding state. Equal to the number of distinct symbols
-            with at least one trade in the current (still-open)
-            minute — past minutes are popped by :meth:`pop_completed`.
+            Count of ``(symbol, minute)`` accumulators currently holding
+            state. On the wall-clock path this equals the distinct symbols
+            with a trade in the current still-open minute; on the
+            event-watermark path it also includes minutes still inside the
+            watermark's ``interval + grace`` window (a delayed feed can hold
+            a few minutes per symbol). Past minutes are popped by
+            :meth:`pop_completed` / :meth:`pop_completed_by_event_watermark`.
         """
         return len(self._builders)

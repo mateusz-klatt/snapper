@@ -152,6 +152,204 @@ class TestTradeCandleBuilder:
         assert candles[0].vwap == pytest.approx(0.0)
 
 
+class TestTradeCandleBuilderEventWatermark:
+    """Tests for the delayed-feed event-clock completion path."""
+
+    def test_watermark_none_until_first_trade_then_monotonic(self) -> None:
+        """The watermark starts ``None`` and only ever advances forward.
+
+        Given: A fresh builder,
+        When: Trades fold in out-of-order timestamps,
+        Then: ``watermark`` is ``None`` initially, becomes the first
+            trade's timestamp, ignores an earlier trade, and advances on a
+            later trade.
+        """
+        b = TradeCandleBuilder()
+        assert b.watermark is None
+        m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        b.update(_trade("MCLQ6-CME", 89.5, 1.0, m + timedelta(seconds=30)))
+        assert b.watermark == m + timedelta(seconds=30)
+        b.update(_trade("MCLQ6-CME", 89.6, 1.0, m + timedelta(seconds=10)))
+        assert b.watermark == m + timedelta(seconds=30)
+        b.update(_trade("MCLQ6-CME", 89.7, 1.0, m + timedelta(seconds=50)))
+        assert b.watermark == m + timedelta(seconds=50)
+
+    def test_event_watermark_returns_empty_before_first_trade(self) -> None:
+        """No watermark yet → the event-clock pop is a no-op.
+
+        Given: A fresh builder with no trades,
+        When: ``pop_completed_by_event_watermark`` runs,
+        Then: It returns ``[]`` (the ``watermark is None`` guard).
+        """
+        b = TradeCandleBuilder()
+        assert b.pop_completed_by_event_watermark(60.0) == []
+
+    def test_event_watermark_keeps_minute_open_within_grace(self) -> None:
+        """A minute stays open while the watermark is within interval+grace.
+
+        Given: A single trade in minute M (watermark == M's region),
+        When: ``pop_completed_by_event_watermark(60)`` runs,
+        Then: Nothing is emitted and the bucket stays live — the feed's
+            event-clock has not yet advanced an interval + grace past M.
+        """
+        m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        b = TradeCandleBuilder()
+        b.update(_trade("MCLQ6-CME", 89.5, 1.0, m + timedelta(seconds=30)))
+        assert b.pop_completed_by_event_watermark(60.0) == []
+        assert b.active_buckets() == 1
+
+    def test_event_watermark_accumulates_delayed_batches_into_one_candle(self) -> None:
+        """Delayed multi-batch trades for one minute fold into ONE candle.
+
+        Regression guard for the delayed-feed fragmentation bug: three trades
+        for minute M arrive across batches, then a later trade in M+2 advances
+        the event watermark past M's end + grace.
+
+        Given: M trades (89.59 / 90.00 / 89.74; volumes 1 / 33 / 8) then an
+            M+2 trade,
+        When: ``pop_completed_by_event_watermark(60)`` runs,
+        Then: Exactly ONE candle for M is emitted carrying the FULL minute
+            (open 89.59, high 90.00, low 89.59, close 89.74, volume 42,
+            trades 3); the M+2 bucket stays open.
+        """
+        m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        b = TradeCandleBuilder()
+        b.update(_trade("MCLQ6-CME", 89.59, 1.0, m + timedelta(seconds=5)))
+        b.update(_trade("MCLQ6-CME", 90.00, 33.0, m + timedelta(seconds=30)))
+        b.update(_trade("MCLQ6-CME", 89.74, 8.0, m + timedelta(seconds=58)))
+        assert b.pop_completed_by_event_watermark(60.0) == []
+        b.update(_trade("MCLQ6-CME", 89.80, 1.0, m + timedelta(minutes=2)))
+        candles = b.pop_completed_by_event_watermark(60.0)
+        assert len(candles) == 1
+        c = candles[0]
+        assert c.open == pytest.approx(89.59)
+        assert c.high == pytest.approx(90.00)
+        assert c.low == pytest.approx(89.59)
+        assert c.close == pytest.approx(89.74)
+        assert c.volume == pytest.approx(42.0)
+        assert c.trades == 3
+        assert b.active_buckets() == 1
+
+    def test_pop_all_emits_every_remaining_bucket(self) -> None:
+        """``pop_all`` flushes all buckets regardless of completion.
+
+        Given: Two live buckets for different symbols,
+        When: ``pop_all`` is called,
+        Then: Both are emitted, the accumulator is empty, and a second
+            ``pop_all`` returns ``[]``.
+        """
+        m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        b = TradeCandleBuilder()
+        b.update(_trade("A-USD", 1.0, 1.0, m + timedelta(seconds=5)))
+        b.update(_trade("B-USD", 2.0, 1.0, m + timedelta(seconds=5)))
+        flushed = b.pop_all()
+        assert len(flushed) == 2
+        assert b.active_buckets() == 0
+        assert b.pop_all() == []
+
+    def test_update_count_increments_per_trade(self) -> None:
+        """``update_count`` counts every folded trade, including out-of-order.
+
+        Given: A fresh builder,
+        When: Two trades fold (the second with an earlier timestamp),
+        Then: ``update_count`` is 0, then 2 — it tracks activity regardless
+            of whether a trade advances the watermark (the property the
+            idle-flush driver relies on).
+        """
+        m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        b = TradeCandleBuilder()
+        assert b.update_count == 0
+        b.update(_trade("X-USD", 1.0, 1.0, m))
+        b.update(_trade("X-USD", 1.0, 1.0, m - timedelta(minutes=5)))
+        assert b.update_count == 2
+
+    def test_event_watermark_boundary_at_and_just_before_cutoff(self) -> None:
+        """A bucket closes exactly at watermark = begin + interval + grace.
+
+        Given: Bucket M (interval 60, grace 60 → closes when watermark
+            reaches M+120s),
+        When: The watermark is advanced to M+119s (one short) then M+120s,
+        Then: Nothing closes at M+119s; bucket M closes at exactly M+120s.
+        """
+        m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        b = TradeCandleBuilder()
+        b.update(_trade("X-USD", 1.0, 1.0, m + timedelta(seconds=10)))
+        b.update(_trade("X-USD", 1.0, 1.0, m + timedelta(seconds=119)))
+        assert b.pop_completed_by_event_watermark(60.0) == []
+        b.update(_trade("X-USD", 1.0, 1.0, m + timedelta(seconds=120)))
+        candles = b.pop_completed_by_event_watermark(60.0)
+        assert [c.interval_begin for c in candles] == [m]
+
+    def test_global_watermark_closes_a_quiet_symbol_bucket(self) -> None:
+        """The GLOBAL watermark closes a quiet symbol's bucket via other activity.
+
+        Given: Symbol A trades once in minute M then goes quiet, while symbol
+            B trades into M+2,
+        When: B's trades advance the global event watermark past
+            M + interval + grace and ``pop_completed_by_event_watermark`` runs,
+        Then: A's M bucket is closed — no per-symbol stall — proving the
+            global (not per-symbol) watermark design. B's later bucket stays.
+        """
+        m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        b = TradeCandleBuilder()
+        b.update(_trade("A-USD", 1.0, 1.0, m + timedelta(seconds=10)))
+        b.update(_trade("B-USD", 2.0, 1.0, m + timedelta(minutes=2)))
+        candles = b.pop_completed_by_event_watermark(60.0)
+        assert {c.symbol for c in candles} == {"A-USD"}
+        assert b.active_buckets() == 1
+
+    def test_open_close_track_event_order_not_arrival_order(self) -> None:
+        """``open`` / ``close`` follow event-time, not arrival order.
+
+        Regression for delayed out-of-order same-minute batches: a late older
+        trade must not overwrite ``close`` and a late earliest trade must set
+        ``open``.
+
+        Given: four trades for one minute folded in NON-event order — mid
+            (m+30s, 100), latest (m+50s, 105), earliest (m+5s, 95), inner
+            (m+40s, 110) — then a trade that advances the watermark,
+        When: the minute closes,
+        Then: ``open`` = earliest-EVENT price (95), ``close`` = latest-EVENT
+            price (105), ``high``=110, ``low``=95 — independent of arrival
+            order.
+        """
+        m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        b = TradeCandleBuilder()
+        b.update(_trade("X-USD", 100.0, 1.0, m + timedelta(seconds=30)))
+        b.update(_trade("X-USD", 105.0, 1.0, m + timedelta(seconds=50)))
+        b.update(_trade("X-USD", 95.0, 1.0, m + timedelta(seconds=5)))
+        b.update(_trade("X-USD", 110.0, 1.0, m + timedelta(seconds=40)))
+        b.update(_trade("X-USD", 1.0, 1.0, m + timedelta(minutes=2)))
+        candles = [c for c in b.pop_completed_by_event_watermark(60.0) if c.interval_begin == m]
+        assert len(candles) == 1
+        c = candles[0]
+        assert c.open == pytest.approx(95.0)
+        assert c.close == pytest.approx(105.0)
+        assert c.high == pytest.approx(110.0)
+        assert c.low == pytest.approx(95.0)
+
+    def test_open_close_tie_semantics_on_equal_timestamps(self) -> None:
+        """Equal-timestamp ties: open keeps first-arriving, close takes last.
+
+        Given: three trades at the SAME event timestamp, arriving in sequence
+            (100, 105, 110), then a trade that advances the watermark,
+        When: the minute closes,
+        Then: open = first-arriving (100, strict ``<`` never replaces a tie)
+            and close = last-arriving (110, ``>=`` takes the latest tie) —
+            the documented tie rule.
+        """
+        m = datetime(2026, 6, 8, 14, 39, tzinfo=UTC)
+        ts = m + timedelta(seconds=30)
+        b = TradeCandleBuilder()
+        b.update(_trade("X-USD", 100.0, 1.0, ts))
+        b.update(_trade("X-USD", 105.0, 1.0, ts))
+        b.update(_trade("X-USD", 110.0, 1.0, ts))
+        b.update(_trade("X-USD", 1.0, 1.0, m + timedelta(minutes=2)))
+        c = [x for x in b.pop_completed_by_event_watermark(60.0) if x.interval_begin == m][0]
+        assert c.open == pytest.approx(100.0)
+        assert c.close == pytest.approx(110.0)
+
+
 class TestEnqueueOrDropOldestCandle:
     """Tests for the bounded candle queue helper."""
 

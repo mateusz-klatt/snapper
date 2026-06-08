@@ -744,29 +744,40 @@ class TestNotImplementedMethods:
     async def test_subscribe_candles_emits_built_from_trades(
         self, client: KrakenEquitiesExchangeClient
     ) -> None:
-        """subscribe_candles emits a candle once its minute closes.
+        """subscribe_candles emits a candle once the EVENT watermark passes it.
 
-        Given: A trade with a timestamp deep in the past is folded
-            into the builder (its minute is therefore strictly before
-            the aggregator's ``now``),
-        When: subscribe_candles is iterated and the aggregator's
-            ``asyncio.sleep`` is collapsed so it tick-runs immediately,
-        Then: A ``CandleUpdate`` carrying the trade's OHLCV is yielded.
-            ``datetime.now()`` is not mocked — the past-trade timestamp
-            does the same thing without breaking the
-            ``replace().timestamp()`` chain inside the builder.
+        Given: A trade in past minute M, plus a later (still past) trade in
+            M+2 that advances the builder's event watermark beyond M's end +
+            grace. Kraken Equities closes candles by the feed's event-clock,
+            not wall-clock (the delayed-feed fix), so a lone trade does NOT
+            finalize — a later trade must move the watermark,
+        When: subscribe_candles is iterated with ``asyncio.sleep`` collapsed,
+        Then: A ``CandleUpdate`` carrying M's OHLCV is yielded; the M+2
+            bucket stays open.
         """
         past_minute = (_dt.now(_UTC) - _td(minutes=5)).replace(second=0, microsecond=0)
-        trade = TradeUpdate(
-            symbol="MNQM6-CME",
-            side="buy",
-            quantity=2.0,
-            price=22500.0,
-            ord_type="fill",
-            timestamp=past_minute,
-            trade_id="t1",
+        client._candle_builder.update(
+            TradeUpdate(
+                symbol="MNQM6-CME",
+                side="buy",
+                quantity=2.0,
+                price=22500.0,
+                ord_type="fill",
+                timestamp=past_minute,
+                trade_id="t1",
+            )
         )
-        client._candle_builder.update(trade)
+        client._candle_builder.update(
+            TradeUpdate(
+                symbol="MNQM6-CME",
+                side="buy",
+                quantity=1.0,
+                price=22510.0,
+                ord_type="fill",
+                timestamp=past_minute + _td(minutes=2),
+                trade_id="t2",
+            )
+        )
 
         real_sleep = asyncio.sleep
 
@@ -785,6 +796,128 @@ class TestNotImplementedMethods:
         assert result.volume == pytest.approx(2.0)
         assert result.trades == 1
         assert result.interval == 60
+
+    @pytest.mark.asyncio
+    async def test_candle_aggregator_idle_flush_emits_stranded_bucket(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """A quiet feed triggers the idle flush so the final bar is not stranded.
+
+        Given: One trade whose minute the event watermark never passes (no
+            later trade arrives), so the watermark-close path leaves it open,
+        When: wall-clock silence exceeds ``_CANDLE_IDLE_FLUSH_S`` — simulated
+            by a ``monotonic`` stub that jumps past the threshold,
+        Then: ``pop_all`` flushes the stranded bucket and subscribe_candles
+            yields it.
+        """
+        minute = _dt(2026, 6, 8, 14, 39, tzinfo=_UTC)
+        client._candle_builder.update(
+            TradeUpdate(
+                symbol="MNQM6-CME",
+                side="buy",
+                quantity=3.0,
+                price=22500.0,
+                ord_type="fill",
+                timestamp=minute,
+                trade_id="t1",
+            )
+        )
+
+        real_sleep = asyncio.sleep
+
+        async def fast_sleep(_: float) -> None:
+            await real_sleep(0)
+
+        mono_values = iter([0.0, 0.0, 1000.0])
+
+        def fake_monotonic() -> float:
+            try:
+                return next(mono_values)
+            except StopIteration:
+                return 1000.0
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.asyncio.sleep",
+                new=fast_sleep,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.monotonic",
+                new=fake_monotonic,
+            ),
+        ):
+            iterator = client.subscribe_candles(["MNQM6-CME"], "1m")
+            result = await asyncio.wait_for(iterator.__anext__(), timeout=2.0)
+        assert isinstance(result, CandleUpdate)
+        assert result.symbol == "MNQM6-CME"
+        assert result.volume == pytest.approx(3.0)
+        assert result.trades == 1
+
+    @pytest.mark.asyncio
+    async def test_candle_aggregator_idle_flush_deferred_while_trades_arrive(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Ongoing trade activity defers the idle flush even with a stuck watermark.
+
+        Regression for the review finding: keying the idle timer on watermark
+        movement would flush mid-activity when out-of-order / same-minute
+        delayed trades keep arriving (they do NOT advance the watermark).
+
+        Given: A bucket open within grace, with a trade arriving every tick at
+            a timestamp that does NOT advance the watermark (so the activity
+            counter changes but the watermark is stuck),
+        When: wall-clock jumps far past ``_CANDLE_IDLE_FLUSH_S``,
+        Then: the idle flush does NOT fire (activity resets the timer) and no
+            premature/fragmented candle is emitted — the iterator times out.
+        """
+        minute = _dt(2026, 6, 8, 14, 39, tzinfo=_UTC)
+        builder = client._candle_builder
+        builder.update(
+            TradeUpdate(
+                symbol="MNQM6-CME",
+                side="buy",
+                quantity=1.0,
+                price=22500.0,
+                ord_type="fill",
+                timestamp=minute,
+                trade_id="t0",
+            )
+        )
+
+        real_sleep = asyncio.sleep
+        state = {"n": 0}
+
+        async def fast_sleep_with_trade(_: float) -> None:
+            state["n"] += 1
+            builder.update(
+                TradeUpdate(
+                    symbol="MNQM6-CME",
+                    side="buy",
+                    quantity=1.0,
+                    price=22500.0,
+                    ord_type="fill",
+                    timestamp=minute + _td(seconds=5),
+                    trade_id=f"t{state['n']}",
+                )
+            )
+            await real_sleep(0)
+
+        def fake_monotonic() -> float:
+            return state["n"] * 1000.0
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.asyncio.sleep",
+                new=fast_sleep_with_trade,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.monotonic",
+                new=fake_monotonic,
+            ),
+        ):
+            iterator = client.subscribe_candles(["MNQM6-CME"], "1m")
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(iterator.__anext__(), timeout=0.3)
 
     def test_subscribe_executions_raises(self, client: KrakenEquitiesExchangeClient) -> None:
         """subscribe_executions raises NotImplementedError.

@@ -35,8 +35,6 @@ import contextlib
 import json
 from collections.abc import AsyncIterator
 from collections.abc import Callable
-from datetime import UTC
-from datetime import datetime
 from time import monotonic
 from typing import Any
 from typing import cast
@@ -110,6 +108,28 @@ _CANDLE_QUEUE_MAX_SIZE = 30000
 
 Candles are derived/aggregated at lower frequency than raw trades;
 the same 30k headroom that works for tickers works for candles.
+"""
+
+_CANDLE_WATERMARK_GRACE_S = 60.0
+"""Event-time slack beyond a minute's end before its candle is finalized.
+
+Kraken Equities is a ~10-min DELAYED feed (see module docstring): a single
+event-minute's trades arrive across many WS batches. Closing buckets by the
+feed's own event watermark (max folded ``trade.timestamp``) plus this grace
+lets every batch accumulate into ONE candle instead of fragmenting the minute
+into partial, mutually-superseding rows where the last fragment wrongly
+becomes the current SCD2 version.
+"""
+
+_CANDLE_IDLE_FLUSH_S = 120.0
+"""Wall-clock silence after which stranded buckets are flushed.
+
+When the whole delayed feed goes quiet (e.g. session close) no trades arrive
+and the event watermark stalls, so the final minute's bucket would never
+close. After this much wall-clock time with no trade activity at all (keyed
+on the builder's activity counter, not watermark movement) the aggregator
+flushes whatever remains so the last bar is not stranded until the next
+session reopens.
 """
 
 _WS_THROTTLE_MS = 5000
@@ -826,18 +846,42 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                     await task
 
     async def _candle_aggregator(self) -> None:
-        """Emit completed 1-minute candles roughly once per second.
+        """Emit completed 1-minute candles using the feed's EVENT clock.
 
-        Wakes every second, asks :attr:`_candle_builder` for any
-        bucket whose minute has finished, and routes each into
-        :attr:`_candle_queue`. The 1 s tick is intentionally tight
-        relative to the 60 s bucket width: it bounds the delay
-        between a minute closing and its candle reaching the queue to
-        at most one second.
+        Kraken Equities has no WS OHLC channel and its trade feed is
+        delayed ~10 min, so candles are synthesized from trades. Closing
+        buckets by wall-clock (the kraken_futures path) would fragment each
+        delayed minute into many partial, mutually-superseding rows — the
+        last fragment wrongly becoming the current SCD2 version. Instead
+        this closes a bucket once the builder's event watermark (the highest
+        folded ``trade.timestamp``) has passed the bucket's minute by
+        :data:`_CANDLE_WATERMARK_GRACE_S`, so every delayed batch for a
+        minute accumulates into ONE correct candle. If the feed goes quiet
+        (NO trades at all) the remaining buckets are flushed after
+        :data:`_CANDLE_IDLE_FLUSH_S` of wall-clock silence so the final bar
+        is not stranded until the next session. The idle timer is keyed on
+        the builder's trade-activity counter, NOT on watermark movement, so
+        a stream of out-of-order / duplicate / same-minute delayed trades
+        (which do not advance the watermark) still counts as activity and
+        correctly DEFERS the flush — otherwise the flush could fire
+        mid-activity and re-fragment a minute.
         """
+        last_update_count = self._candle_builder.update_count
+        last_advance = monotonic()
         while True:
             await asyncio.sleep(1.0)
-            for candle in self._candle_builder.pop_completed(datetime.now(UTC)):
+            now_mono = monotonic()
+            update_count = self._candle_builder.update_count
+            if update_count != last_update_count:
+                last_update_count = update_count
+                last_advance = now_mono
+            candles = self._candle_builder.pop_completed_by_event_watermark(
+                _CANDLE_WATERMARK_GRACE_S
+            )
+            if not candles and now_mono - last_advance >= _CANDLE_IDLE_FLUSH_S:
+                candles = self._candle_builder.pop_all()
+                last_advance = now_mono
+            for candle in candles:
                 enqueue_or_drop_oldest_candle(self._candle_queue, candle, "Candle")
 
     def subscribe_trades(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
