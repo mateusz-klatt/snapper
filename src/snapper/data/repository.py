@@ -73,6 +73,7 @@ from sqlalchemy import delete
 from sqlalchemy import desc
 from sqlalchemy import distinct
 from sqlalchemy import event
+from sqlalchemy import exists
 from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import or_
@@ -99,9 +100,11 @@ from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.roles import UserRole
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
+from snapper.core.paired_execution import compute_paired_group_key
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
 from snapper.core.types import AllExchange
+from snapper.core.types import PairedExecutionGroupStatusEnum
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.archive_symbols import resolve_archive_symbols
 from snapper.data.db_stats_types import TableCounters
@@ -7429,10 +7432,37 @@ class SQLAlchemyRepository(Repository):
         ``OFFSET`` pagination could skip or duplicate rows across pages
         → double-dispatch.
         """
+        dispatchable_paired_gate = or_(
+            TradeCommand.supersedes_command_id.isnot(None),
+            ~exists(
+                select(PairedExecutionGroup.id).where(
+                    PairedExecutionGroup.public_id == TradeCommand.correlation_id,
+                    *where_active(PairedExecutionGroup, as_of),
+                )
+            ),
+            exists(
+                select(PairedExecutionLeg.id)
+                .join(
+                    PairedExecutionGroup,
+                    PairedExecutionLeg.group_public_id == PairedExecutionGroup.public_id,
+                )
+                .where(
+                    PairedExecutionGroup.public_id == TradeCommand.correlation_id,
+                    PairedExecutionGroup.status == PairedExecutionGroupStatusEnum.ARMED,
+                    PairedExecutionLeg.command_public_id == TradeCommand.public_id,
+                    *where_active(PairedExecutionGroup, as_of),
+                    *where_active(PairedExecutionLeg, as_of),
+                )
+            ),
+        )
         async with self.session() as s:
             result = await s.execute(
                 select(TradeCommand)
-                .where(TradeCommand.status == "created", *where_active(TradeCommand, as_of))
+                .where(
+                    TradeCommand.status == "created",
+                    *where_active(TradeCommand, as_of),
+                    dispatchable_paired_gate,
+                )
                 .order_by(TradeCommand.created_at, TradeCommand.id)
                 .offset(offset)
                 .limit(limit)
@@ -7891,6 +7921,148 @@ class SQLAlchemyRepository(Repository):
                 for key, value in updates.items():
                     setattr(new_row, key, value)
             s.add(new_row)
+            await s.commit()
+            return True
+
+    @staticmethod
+    def _paired_execution_leg_set_is_complete(
+        legs: list[PairedExecutionLeg],
+        group: PairedExecutionGroup,
+    ) -> bool:
+        """Return whether a group's active legs form its complete leg set.
+
+        Complete means exactly ``expected_leg_count`` active legs with
+        indices ``0 .. n-1``, each carrying a ``command_public_id``, whose
+        canonical sorted ``{exchange}:{instrument}:{mode}`` key equals the
+        group's ``group_key``. The index, command and key checks together
+        reject a partial set, a duplicate-index set (e.g. two legs of the
+        same instrument), and a wrong-instrument set, so a mismatched group
+        can never arm and dispatch one leg naked.
+        """
+        if len(legs) != group.expected_leg_count:
+            return False
+        if sorted(leg.leg_index for leg in legs) != list(range(group.expected_leg_count)):
+            return False
+        if any(leg.command_public_id is None for leg in legs):
+            return False
+        reconstructed = compute_paired_group_key(
+            [(leg.exchange, leg.instrument, leg.mode) for leg in legs]
+        )
+        return reconstructed == group.group_key
+
+    async def ensure_paired_execution_group(self, row: PairedExecutionGroupInsertRow) -> bool:
+        """Insert a paired-execution group unless an active one already exists.
+
+        Idempotent across racing coordinators that each own a leg of the
+        same group: the active-unique ``public_id`` index admits exactly one
+        active group row. On an ``IntegrityError`` the method re-checks for an
+        active group with the same ``public_id``; if one exists the error was
+        the expected active-unique collision and ``False`` is returned, but
+        ANY other integrity failure (a malformed row violating a different
+        constraint) is RE-RAISED rather than silently swallowed. Swallowing a
+        non-collision error would leave no group row, so the legs' commands
+        would later pass the outbox gate as ungrouped and dispatch naked.
+        Returns ``True`` iff this call created the group.
+        """
+        async with self.session() as s:
+            s.add(PairedExecutionGroup(**row))
+            try:
+                await s.commit()
+            except IntegrityError:
+                await s.rollback()
+                active = (
+                    await s.execute(
+                        select(PairedExecutionGroup.id).where(
+                            PairedExecutionGroup.public_id == row.get("public_id"),
+                            PairedExecutionGroup.known_to == KNOWN_TO_MAX,
+                        )
+                    )
+                ).first()
+                if active is None:
+                    raise
+                return False
+            return True
+
+    async def try_arm_paired_execution_group_if_complete(
+        self,
+        group_public_id: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> bool:
+        """Validate a group's full leg set and CAS ``assembling -> armed``.
+
+        Locks the active group ``FOR UPDATE`` then arms it iff: status is
+        ``assembling``; ``bus_time <= assembly_deadline``; and the active
+        legs form the complete, command-bearing, key-matching leg set
+        (:meth:`_paired_execution_leg_set_is_complete`). Any failed check
+        returns ``False`` without arming, upholding the safety invariant
+        that no grouped command dispatches until every sibling leg is
+        durably registered with a command. The ``FOR UPDATE`` lock
+        serialises concurrent arm attempts from sibling coordinators; a
+        loser sees ``armed`` and returns ``False``. Returns ``True`` iff
+        this call armed the group.
+        """
+        async with self.session() as s:
+            group = (
+                (
+                    await s.execute(
+                        select(PairedExecutionGroup)
+                        .where(
+                            PairedExecutionGroup.public_id == group_public_id,
+                            *where_active(PairedExecutionGroup, bus_time),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if group is None:
+                return False
+            if group.status != PairedExecutionGroupStatusEnum.ASSEMBLING:
+                return False
+            if bus_time > group.assembly_deadline:
+                return False
+            legs = (
+                (
+                    await s.execute(
+                        select(PairedExecutionLeg).where(
+                            PairedExecutionLeg.group_public_id == group_public_id,
+                            *where_active(PairedExecutionLeg, bus_time),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not self._paired_execution_leg_set_is_complete(list(legs), group):
+                return False
+            await s.execute(
+                update(PairedExecutionGroup)
+                .where(PairedExecutionGroup.id == group.id)
+                .values(known_to=bus_time)
+            )
+            s.add(
+                PairedExecutionGroup(
+                    public_id=group.public_id,
+                    wallet_public_id=group.wallet_public_id,
+                    operator_public_id=group.operator_public_id,
+                    strategy_id=group.strategy_id,
+                    policy=group.policy,
+                    expected_leg_count=group.expected_leg_count,
+                    group_key=group.group_key,
+                    status=PairedExecutionGroupStatusEnum.ARMED,
+                    assembly_deadline=group.assembly_deadline,
+                    fill_deadline=group.fill_deadline,
+                    failure_reason=group.failure_reason,
+                    halted_at=group.halted_at,
+                    created_at=group.created_at,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                    timestamp=bus_time,
+                )
+            )
             await s.commit()
             return True
 

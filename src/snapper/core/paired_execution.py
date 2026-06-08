@@ -9,13 +9,15 @@ formula MUST be byte-identical between the strategy that emits the key
 ``compute_shard_key``. Keeping it in one leaf module prevents drift that would
 either fail every arming (legs never match the key) or, worse, let a wrong leg
 set arm.
+
+The token components are plain strings: callers pass exchange/mode enum
+members (which are ``str`` subclasses) at emission time and the persisted
+``str`` leg columns at validation time, so a ``str`` signature serves both
+without casts while the values themselves remain the canonical enum strings.
 """
 
-from snapper.core.types import ExecutionMode
-from snapper.core.types import OrderExchange
 
-
-def paired_group_leg_token(exchange: OrderExchange, instrument: str, mode: ExecutionMode) -> str:
+def paired_group_leg_token(exchange: str, instrument: str, mode: str) -> str:
     """Return the canonical single-leg token ``{exchange}:{instrument}:{mode}``.
 
     Args:
@@ -29,7 +31,7 @@ def paired_group_leg_token(exchange: OrderExchange, instrument: str, mode: Execu
     return f"{exchange}:{instrument}:{mode}"
 
 
-def compute_paired_group_key(legs: list[tuple[OrderExchange, str, ExecutionMode]]) -> str:
+def compute_paired_group_key(legs: list[tuple[str, str, str]]) -> str:
     """Return the canonical ``group_key`` for a paired-execution leg set.
 
     The key is the sorted per-leg tokens joined with ``"|"``. Sorting makes

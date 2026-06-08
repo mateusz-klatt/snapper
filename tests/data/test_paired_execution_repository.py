@@ -13,6 +13,7 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from snapper.core.types import PairedExecutionGroupStatusEnum
 from snapper.core.types import PairedExecutionLegStatusEnum
@@ -21,6 +22,7 @@ from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import PairedExecutionGroup
 from snapper.data.models import PairedExecutionHalt
 from snapper.data.models import PairedExecutionLeg
+from snapper.data.models import TradeCommand
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import where_active
 from snapper.data.repository_types import PairedExecutionGroupInsertRow
@@ -822,3 +824,414 @@ async def test_group_cas_carries_every_non_status_column(
             continue
         assert getattr(after, column.name) == carried[column.name], column.name
     assert after.status == PairedExecutionGroupStatusEnum.COMPENSATING.value
+
+
+async def _insert_created_command(
+    repo: SQLAlchemyRepository,
+    *,
+    public_id: str,
+    correlation_id: str,
+    supersedes_command_id: str | None = None,
+    now: datetime = _T0,
+) -> None:
+    """Insert a 'created' submit command with an explicit public_id.
+
+    Inserts the ORM row directly (rather than via ``insert_trade_command``)
+    so the outbox-gate tests can pin the command's ``public_id`` and bind a
+    paired-execution leg to it.
+    """
+    async with repo.session() as session:
+        session.add(
+            TradeCommand(
+                public_id=public_id,
+                command_type="submit",
+                shard_key="kraken.BTC-USD.live",
+                exchange="kraken",
+                instrument="BTC-USD",
+                mode="live",
+                strategy_id="engine",
+                client_order_id=public_id,
+                venue_client_id=public_id,
+                side="buy",
+                order_type="market",
+                quantity=1.0,
+                price=None,
+                status="created",
+                created_at=now,
+                correlation_id=correlation_id,
+                supersedes_command_id=supersedes_command_id,
+                wallet_public_id="",
+                session_id=_SESSION_ID,
+                sequence_id=1,
+                timestamp=now,
+            )
+        )
+        await session.commit()
+
+
+async def _seed_two_leg_group(
+    repo: SQLAlchemyRepository,
+    *,
+    group_public_id: str,
+    status: str = PairedExecutionGroupStatusEnum.ASSEMBLING.value,
+    assembly_deadline: datetime = _T2,
+    leg0_instrument: str = "BTC-USD",
+    leg1_instrument: str = "ETH-USD",
+    leg0_command: str | None = "cmd-0",
+    leg1_command: str | None = "cmd-1",
+    leg0_index: int = 0,
+    leg1_index: int = 1,
+) -> None:
+    """Seed an assembling 2-leg group with its two legs (BTC + ETH by default)."""
+    await repo.insert_paired_execution_group(
+        _group_insert_row(
+            public_id=group_public_id,
+            status=status,
+            assembly_deadline=assembly_deadline,
+        )
+    )
+    await repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=_pid(200),
+            group_public_id=group_public_id,
+            leg_index=leg0_index,
+            instrument=leg0_instrument,
+            shard_key=f"kraken:{leg0_instrument}:live",
+            command_public_id=leg0_command,
+        )
+    )
+    await repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=_pid(201),
+            group_public_id=group_public_id,
+            leg_index=leg1_index,
+            instrument=leg1_instrument,
+            shard_key=f"kraken:{leg1_instrument}:live",
+            command_public_id=leg1_command,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_group_creates_then_skips_active_duplicate(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """ensure_paired_execution_group is idempotent on the active public_id.
+
+    Given: no active group for a public_id,
+    When: ensure is called twice for the same public_id,
+    Then: the first call creates it (True) and the second loses the
+        active-unique race (False), leaving exactly one active group.
+    """
+    group_id = _pid(100)
+    assert await _repo.ensure_paired_execution_group(_group_insert_row(public_id=group_id)) is True
+    assert await _repo.ensure_paired_execution_group(_group_insert_row(public_id=group_id)) is False
+    active = await _active_group_versions(_repo, group_id, _T0)
+    assert len(active) == 1
+
+
+@pytest.mark.asyncio
+async def test_try_arm_succeeds_when_leg_set_complete(_repo: SQLAlchemyRepository) -> None:
+    """A complete, command-bearing, key-matching leg set arms the group.
+
+    Given: an assembling group whose two active legs (BTC + ETH) each
+        carry a command and whose tokens match group_key,
+    When: try_arm is called before the assembly deadline,
+    Then: it returns True and the active group transitions to armed.
+    """
+    group_id = _pid(100)
+    await _seed_two_leg_group(_repo, group_public_id=group_id)
+    assert (
+        await _repo.try_arm_paired_execution_group_if_complete(group_id, _T1, _NEXT_SESSION_ID, 2)
+        is True
+    )
+    armed = await _repo.get_paired_execution_group(group_id, _T2)
+    assert armed is not None
+    assert armed["status"] == PairedExecutionGroupStatusEnum.ARMED.value
+
+
+@pytest.mark.asyncio
+async def test_try_arm_false_when_group_missing(_repo: SQLAlchemyRepository) -> None:
+    """Arming a non-existent group returns False."""
+    assert (
+        await _repo.try_arm_paired_execution_group_if_complete(_pid(999), _T1, _NEXT_SESSION_ID, 2)
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_try_arm_false_when_not_assembling(_repo: SQLAlchemyRepository) -> None:
+    """A group that is not assembling cannot be armed again."""
+    group_id = _pid(100)
+    await _seed_two_leg_group(
+        _repo, group_public_id=group_id, status=PairedExecutionGroupStatusEnum.ARMED.value
+    )
+    assert (
+        await _repo.try_arm_paired_execution_group_if_complete(group_id, _T1, _NEXT_SESSION_ID, 2)
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_try_arm_false_after_assembly_deadline(_repo: SQLAlchemyRepository) -> None:
+    """A complete group past its assembly deadline does not arm."""
+    group_id = _pid(100)
+    await _seed_two_leg_group(_repo, group_public_id=group_id, assembly_deadline=_T0)
+    assert (
+        await _repo.try_arm_paired_execution_group_if_complete(group_id, _T1, _NEXT_SESSION_ID, 2)
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_try_arm_false_when_leg_count_incomplete(_repo: SQLAlchemyRepository) -> None:
+    """A group missing a sibling leg never arms (no naked dispatch)."""
+    group_id = _pid(100)
+    await _repo.insert_paired_execution_group(_group_insert_row(public_id=group_id))
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(public_id=_pid(200), group_public_id=group_id, command_public_id="cmd-0")
+    )
+    assert (
+        await _repo.try_arm_paired_execution_group_if_complete(group_id, _T1, _NEXT_SESSION_ID, 2)
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_try_arm_false_when_indices_not_contiguous(_repo: SQLAlchemyRepository) -> None:
+    """A leg set with a gap in indices never arms even at the right count."""
+    group_id = _pid(100)
+    await _seed_two_leg_group(_repo, group_public_id=group_id, leg1_index=2)
+    assert (
+        await _repo.try_arm_paired_execution_group_if_complete(group_id, _T1, _NEXT_SESSION_ID, 2)
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_try_arm_false_when_a_leg_has_no_command(_repo: SQLAlchemyRepository) -> None:
+    """A leg without a durable command blocks arming (atomic pair release)."""
+    group_id = _pid(100)
+    await _seed_two_leg_group(_repo, group_public_id=group_id, leg1_command=None)
+    assert (
+        await _repo.try_arm_paired_execution_group_if_complete(group_id, _T1, _NEXT_SESSION_ID, 2)
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_try_arm_false_when_leg_set_key_mismatches(_repo: SQLAlchemyRepository) -> None:
+    """A wrong leg set (two same-instrument legs) never arms a BTC+ETH group.
+
+    Defends the count-only-arming hole: two BTC legs at indices 0 and 1
+    each carry a command and number exactly expected_leg_count, but their
+    canonical key is BTC|BTC which does not equal the group's BTC|ETH
+    group_key, so the group cannot arm with the ETH sibling absent.
+    """
+    group_id = _pid(100)
+    await _seed_two_leg_group(_repo, group_public_id=group_id, leg1_instrument="BTC-USD")
+    assert (
+        await _repo.try_arm_paired_execution_group_if_complete(group_id, _T1, _NEXT_SESSION_ID, 2)
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_outbox_dispatches_non_grouped_command(_repo: SQLAlchemyRepository) -> None:
+    """A command whose correlation_id names no group is always dispatchable.
+
+    Given: a 'created' command with a correlation_id that matches no
+        active paired-execution group,
+    When: get_undispatched_commands runs,
+    Then: the command is returned (the gate never holds non-grouped
+        traffic), preserving the pre-guard dispatch behaviour.
+    """
+    await _insert_created_command(_repo, public_id=_pid(300), correlation_id="solo-corr")
+    rows = await _repo.get_undispatched_commands(as_of=_T1, limit=10)
+    assert [row["public_id"] for row in rows] == [_pid(300)]
+
+
+@pytest.mark.asyncio
+async def test_outbox_holds_grouped_command_until_group_is_armed(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A grouped leg command dispatches only once its group is armed.
+
+    Given: an assembling group with two legs, each bound to a 'created'
+        command (correlation_id = group id),
+    When: get_undispatched_commands runs before and after arming,
+    Then: neither command is dispatchable while assembling, and both
+        become dispatchable once the group is armed.
+    """
+    group_id = _pid(100)
+    await _seed_two_leg_group(
+        _repo, group_public_id=group_id, leg0_command=_pid(300), leg1_command=_pid(301)
+    )
+    await _insert_created_command(_repo, public_id=_pid(300), correlation_id=group_id)
+    await _insert_created_command(_repo, public_id=_pid(301), correlation_id=group_id)
+    held = await _repo.get_undispatched_commands(as_of=_T1, limit=10)
+    assert held == []
+    assert (
+        await _repo.try_arm_paired_execution_group_if_complete(group_id, _T1, _NEXT_SESSION_ID, 2)
+        is True
+    )
+    released = await _repo.get_undispatched_commands(as_of=_T3, limit=10)
+    assert sorted(row["public_id"] for row in released) == [_pid(300), _pid(301)]
+
+
+@pytest.mark.asyncio
+async def test_outbox_never_dispatches_orphan_grouped_command(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """An armed group never releases a command no active leg points at.
+
+    Defends the crash/replay orphan hole: an extra 'created' command
+    carrying the group's correlation_id but bound to no leg
+    (command_public_id) must never dispatch, even after the group arms,
+    so a stale duplicate can never go naked alongside the real legs.
+    """
+    group_id = _pid(100)
+    await _seed_two_leg_group(
+        _repo,
+        group_public_id=group_id,
+        status=PairedExecutionGroupStatusEnum.ARMED.value,
+        leg0_command=_pid(300),
+        leg1_command=_pid(301),
+    )
+    await _insert_created_command(_repo, public_id=_pid(300), correlation_id=group_id)
+    await _insert_created_command(_repo, public_id=_pid(301), correlation_id=group_id)
+    await _insert_created_command(_repo, public_id=_pid(399), correlation_id=group_id)
+    rows = await _repo.get_undispatched_commands(as_of=_T1, limit=10)
+    assert sorted(row["public_id"] for row in rows) == [_pid(300), _pid(301)]
+
+
+@pytest.mark.asyncio
+async def test_outbox_dispatches_compensation_command_despite_unarmed_group(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A compensation command (supersedes set) bypasses the arming gate.
+
+    Given: an assembling (unarmed) group and a 'created' command that
+        carries the group's correlation_id AND a supersedes_command_id,
+    When: get_undispatched_commands runs,
+    Then: the compensation command is dispatchable despite the group not
+        being armed, so reduce-only flattening is never held by the gate.
+    """
+    group_id = _pid(100)
+    await _repo.insert_paired_execution_group(_group_insert_row(public_id=group_id))
+    await _insert_created_command(
+        _repo, public_id=_pid(400), correlation_id=group_id, supersedes_command_id=_pid(300)
+    )
+    rows = await _repo.get_undispatched_commands(as_of=_T1, limit=10)
+    assert [row["public_id"] for row in rows] == [_pid(400)]
+
+
+@pytest.mark.asyncio
+async def test_ensure_reraises_non_collision_integrity_error(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A non-uniqueness integrity failure is surfaced, not masked as duplicate.
+
+    Given: a group insert row that violates the immutable policy CHECK
+        constraint (not the active-unique public_id index), with no active
+        group present,
+    When: ensure_paired_execution_group runs,
+    Then: the IntegrityError propagates rather than being swallowed as
+        'already exists', so a malformed group can never silently leave its
+        legs' commands to dispatch ungrouped (naked).
+    """
+    with pytest.raises(IntegrityError):
+        await _repo.ensure_paired_execution_group(
+            _group_insert_row(public_id=_pid(100), policy="bogus-policy")
+        )
+
+
+@pytest.mark.asyncio
+async def test_outbox_ignores_historical_leg_command_binding(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Only an ACTIVE leg binding releases a grouped command.
+
+    Given: an armed group whose two active legs bind C0/C1, plus a CLOSED
+        (historical) leg version that once bound an orphan command, and that
+        orphan command in 'created',
+    When: get_undispatched_commands runs,
+    Then: the orphan command is held — the gate matches only active legs, so
+        a superseded historical binding never releases a stale command.
+    """
+    group_id = _pid(100)
+    await _seed_two_leg_group(
+        _repo,
+        group_public_id=group_id,
+        status=PairedExecutionGroupStatusEnum.ARMED.value,
+        leg0_command=_pid(300),
+        leg1_command=_pid(301),
+    )
+    async with _repo.session() as session:
+        session.add(
+            PairedExecutionLeg(
+                public_id=_pid(250),
+                group_public_id=group_id,
+                leg_index=0,
+                exchange="kraken",
+                mode="live",
+                instrument="BTC-USD",
+                shard_key="kraken:BTC-USD:live",
+                side="buy",
+                target_qty=1.0,
+                signal_public_id=_pid(900),
+                command_public_id=_pid(399),
+                status=PairedExecutionLegStatusEnum.PENDING.value,
+                filled_signed_qty=0.0,
+                compensated_signed_qty=0.0,
+                compensation_seq=0,
+                wallet_public_id=_WALLET_ID,
+                operator_public_id=_OPERATOR_ID,
+                created_at=_T0,
+                session_id=_SESSION_ID,
+                sequence_id=1,
+                timestamp=_T0,
+                known_to=_T1,
+            )
+        )
+        await session.commit()
+    await _insert_created_command(_repo, public_id=_pid(300), correlation_id=group_id)
+    await _insert_created_command(_repo, public_id=_pid(301), correlation_id=group_id)
+    await _insert_created_command(_repo, public_id=_pid(399), correlation_id=group_id)
+    rows = await _repo.get_undispatched_commands(as_of=_T1, limit=10)
+    assert sorted(row["public_id"] for row in rows) == [_pid(300), _pid(301)]
+
+
+@pytest.mark.asyncio
+async def test_try_arm_carries_group_columns_forward(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Arming carries every group column forward except the SCD2/status set.
+
+    Given: a complete assembling group,
+    When: try_arm arms it,
+    Then: the new active (armed) version preserves every column except
+        id/known_to/session_id/sequence_id/timestamp/status, and those carry
+        the new bus-time provenance.
+    """
+    group_id = _pid(100)
+    await _seed_two_leg_group(_repo, group_public_id=group_id)
+    before = (await _active_group_versions(_repo, group_id, _T0))[0]
+    carried = {
+        column.name: getattr(before, column.name)
+        for column in PairedExecutionGroup.__table__.columns
+    }
+    assert (
+        await _repo.try_arm_paired_execution_group_if_complete(group_id, _T1, _NEXT_SESSION_ID, 7)
+        is True
+    )
+    after = (await _active_group_versions(_repo, group_id, _T2))[0]
+    advanced = {"id", "known_to", "session_id", "sequence_id", "timestamp", "status"}
+    for column in PairedExecutionGroup.__table__.columns:
+        if column.name in advanced:
+            continue
+        assert getattr(after, column.name) == carried[column.name], column.name
+    assert after.status == PairedExecutionGroupStatusEnum.ARMED.value
+    assert after.session_id == _NEXT_SESSION_ID
+    assert after.sequence_id == 7
+    assert after.timestamp == _T1
