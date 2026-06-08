@@ -597,6 +597,165 @@ class VenueEventInsertRow(TypedDict, total=False):
     paired_group_id: str | None
 
 
+class PairedExecutionGroupInsertRow(TypedDict, total=False):
+    """Insert params for insert_paired_execution_group."""
+
+    public_id: str
+    wallet_public_id: str
+    operator_public_id: str | None
+    strategy_id: str
+    policy: str
+    expected_leg_count: int
+    group_key: str
+    status: str
+    assembly_deadline: datetime
+    fill_deadline: datetime
+    failure_reason: str | None
+    halted_at: datetime | None
+    created_at: datetime
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+class PairedExecutionGroupRow(TypedDict):
+    """Row dict returned by paired-execution group queries."""
+
+    id: int
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    known_to: datetime
+    wallet_public_id: str
+    operator_public_id: str | None
+    strategy_id: str
+    policy: str
+    expected_leg_count: int
+    group_key: str
+    status: str
+    assembly_deadline: datetime
+    fill_deadline: datetime
+    failure_reason: str | None
+    halted_at: datetime | None
+    created_at: datetime
+
+
+class PairedExecutionLegInsertRow(TypedDict, total=False):
+    """Insert params for insert_paired_execution_leg."""
+
+    public_id: str
+    group_public_id: str
+    leg_index: int
+    exchange: str
+    mode: str
+    instrument: str
+    shard_key: str
+    side: str
+    target_qty: float
+    signal_public_id: str
+    command_public_id: str | None
+    client_order_id: str | None
+    exchange_order_id: str | None
+    status: str
+    filled_signed_qty: float
+    compensated_signed_qty: float
+    compensation_seq: int
+    last_venue_event_id: int | None
+    wallet_public_id: str
+    operator_public_id: str | None
+    created_at: datetime
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+class PairedExecutionLegRow(TypedDict):
+    """Row dict returned by paired-execution leg queries."""
+
+    id: int
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    known_to: datetime
+    group_public_id: str
+    leg_index: int
+    exchange: str
+    mode: str
+    instrument: str
+    shard_key: str
+    side: str
+    target_qty: float
+    signal_public_id: str
+    command_public_id: str | None
+    client_order_id: str | None
+    exchange_order_id: str | None
+    status: str
+    filled_signed_qty: float
+    compensated_signed_qty: float
+    compensation_seq: int
+    last_venue_event_id: int | None
+    wallet_public_id: str
+    operator_public_id: str | None
+    created_at: datetime
+
+
+class PairedExecutionHaltInsertRow(TypedDict, total=False):
+    """Insert params for insert_paired_execution_halt."""
+
+    public_id: str
+    wallet_public_id: str
+    operator_public_id: str | None
+    strategy_id: str
+    mode: str
+    group_key: str
+    group_public_id: str
+    reason: str
+    created_at: datetime
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+class PairedExecutionHaltRow(TypedDict):
+    """Row dict returned by paired-execution halt queries."""
+
+    id: int
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    known_to: datetime
+    wallet_public_id: str
+    operator_public_id: str | None
+    strategy_id: str
+    mode: str
+    group_key: str
+    group_public_id: str
+    reason: str
+    created_at: datetime
+
+
+class PairedExecutionGroupFieldUpdate(TypedDict, total=False):
+    """Mutable group fields applied to a status-transition successor row."""
+
+    failure_reason: str | None
+    halted_at: datetime | None
+
+
+class PairedExecutionLegFieldUpdate(TypedDict, total=False):
+    """Mutable leg fields applied to a status-transition successor row."""
+
+    command_public_id: str | None
+    client_order_id: str | None
+    exchange_order_id: str | None
+    filled_signed_qty: float
+    compensated_signed_qty: float
+    compensation_seq: int
+    last_venue_event_id: int | None
+
+
 class InstrumentSpecRow(TypedDict):
     """Row dict returned by get_instrument_spec."""
 

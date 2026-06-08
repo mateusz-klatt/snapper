@@ -130,6 +130,9 @@ from snapper.data.models import MarketSnapshot
 from snapper.data.models import NotificationDevice
 from snapper.data.models import Operator
 from snapper.data.models import Order
+from snapper.data.models import PairedExecutionGroup
+from snapper.data.models import PairedExecutionHalt
+from snapper.data.models import PairedExecutionLeg
 from snapper.data.models import Position
 from snapper.data.models import PositionCycle
 from snapper.data.models import Setting
@@ -197,6 +200,14 @@ from snapper.data.repository_types import NotificationDeviceUpsertRow
 from snapper.data.repository_types import OperatorRow
 from snapper.data.repository_types import OrderInsertRow
 from snapper.data.repository_types import OrderRow
+from snapper.data.repository_types import PairedExecutionGroupFieldUpdate
+from snapper.data.repository_types import PairedExecutionGroupInsertRow
+from snapper.data.repository_types import PairedExecutionGroupRow
+from snapper.data.repository_types import PairedExecutionHaltInsertRow
+from snapper.data.repository_types import PairedExecutionHaltRow
+from snapper.data.repository_types import PairedExecutionLegFieldUpdate
+from snapper.data.repository_types import PairedExecutionLegInsertRow
+from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PendingReviewSummary
 from snapper.data.repository_types import PositionCycleInsertRow
 from snapper.data.repository_types import PositionCycleRow
@@ -7610,6 +7621,417 @@ class SQLAlchemyRepository(Repository):
             await s.refresh(ve)
             return ve.id
 
+    _PEG_UPDATABLE_FIELDS: frozenset[str] = frozenset({"failure_reason", "halted_at"})
+    _PEL_UPDATABLE_FIELDS: frozenset[str] = frozenset(
+        {
+            "command_public_id",
+            "client_order_id",
+            "exchange_order_id",
+            "filled_signed_qty",
+            "compensated_signed_qty",
+            "compensation_seq",
+            "last_venue_event_id",
+        }
+    )
+
+    @staticmethod
+    def _paired_execution_group_row_to_dict(
+        group: PairedExecutionGroup,
+    ) -> PairedExecutionGroupRow:
+        """Project a PairedExecutionGroup ORM row into the TypedDict shape."""
+        return PairedExecutionGroupRow(
+            id=group.id,
+            public_id=group.public_id,
+            session_id=group.session_id,
+            sequence_id=group.sequence_id,
+            timestamp=group.timestamp,
+            known_to=group.known_to,
+            wallet_public_id=group.wallet_public_id,
+            operator_public_id=group.operator_public_id,
+            strategy_id=group.strategy_id,
+            policy=group.policy,
+            expected_leg_count=group.expected_leg_count,
+            group_key=group.group_key,
+            status=group.status,
+            assembly_deadline=group.assembly_deadline,
+            fill_deadline=group.fill_deadline,
+            failure_reason=group.failure_reason,
+            halted_at=group.halted_at,
+            created_at=group.created_at,
+        )
+
+    @staticmethod
+    def _paired_execution_leg_row_to_dict(
+        leg: PairedExecutionLeg,
+    ) -> PairedExecutionLegRow:
+        """Project a PairedExecutionLeg ORM row into the TypedDict shape."""
+        return PairedExecutionLegRow(
+            id=leg.id,
+            public_id=leg.public_id,
+            session_id=leg.session_id,
+            sequence_id=leg.sequence_id,
+            timestamp=leg.timestamp,
+            known_to=leg.known_to,
+            group_public_id=leg.group_public_id,
+            leg_index=leg.leg_index,
+            exchange=leg.exchange,
+            mode=leg.mode,
+            instrument=leg.instrument,
+            shard_key=leg.shard_key,
+            side=leg.side,
+            target_qty=leg.target_qty,
+            signal_public_id=leg.signal_public_id,
+            command_public_id=leg.command_public_id,
+            client_order_id=leg.client_order_id,
+            exchange_order_id=leg.exchange_order_id,
+            status=leg.status,
+            filled_signed_qty=leg.filled_signed_qty,
+            compensated_signed_qty=leg.compensated_signed_qty,
+            compensation_seq=leg.compensation_seq,
+            last_venue_event_id=leg.last_venue_event_id,
+            wallet_public_id=leg.wallet_public_id,
+            operator_public_id=leg.operator_public_id,
+            created_at=leg.created_at,
+        )
+
+    @staticmethod
+    def _paired_execution_halt_row_to_dict(
+        halt: PairedExecutionHalt,
+    ) -> PairedExecutionHaltRow:
+        """Project a PairedExecutionHalt ORM row into the TypedDict shape."""
+        return PairedExecutionHaltRow(
+            id=halt.id,
+            public_id=halt.public_id,
+            session_id=halt.session_id,
+            sequence_id=halt.sequence_id,
+            timestamp=halt.timestamp,
+            known_to=halt.known_to,
+            wallet_public_id=halt.wallet_public_id,
+            operator_public_id=halt.operator_public_id,
+            strategy_id=halt.strategy_id,
+            mode=halt.mode,
+            group_key=halt.group_key,
+            group_public_id=halt.group_public_id,
+            reason=halt.reason,
+            created_at=halt.created_at,
+        )
+
+    async def insert_paired_execution_group(self, row: PairedExecutionGroupInsertRow) -> str:
+        """Insert a paired-execution group and return its public_id."""
+        async with self.session() as s:
+            group = PairedExecutionGroup(**row)
+            s.add(group)
+            await s.commit()
+            await s.refresh(group)
+            return group.public_id
+
+    async def insert_paired_execution_leg(self, row: PairedExecutionLegInsertRow) -> str:
+        """Insert a paired-execution leg and return its public_id."""
+        async with self.session() as s:
+            leg = PairedExecutionLeg(**row)
+            s.add(leg)
+            await s.commit()
+            await s.refresh(leg)
+            return leg.public_id
+
+    async def insert_paired_execution_halt(self, row: PairedExecutionHaltInsertRow) -> str:
+        """Insert a paired-execution halt and return its public_id."""
+        async with self.session() as s:
+            halt = PairedExecutionHalt(**row)
+            s.add(halt)
+            await s.commit()
+            await s.refresh(halt)
+            return halt.public_id
+
+    async def cas_paired_execution_group_status(
+        self,
+        public_id: str,
+        expected_status: str,
+        new_status: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+        updates: PairedExecutionGroupFieldUpdate | None = None,
+    ) -> bool:
+        """CAS a paired-execution group status via SCD2 close-and-insert.
+
+        ``updates`` may only carry mutable group fields
+        (``failure_reason`` / ``halted_at``); any other key — a typo or a
+        forbidden SCD2 column such as ``status`` / ``public_id`` /
+        ``known_to`` — raises ``ValueError`` before any row is touched, so
+        a bad caller can never silently drop a write or corrupt the SCD2
+        chain.
+        """
+        if updates is not None:
+            unknown = set(updates) - self._PEG_UPDATABLE_FIELDS
+            if unknown:
+                raise ValueError(f"unknown paired-execution group update fields: {sorted(unknown)}")
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(PairedExecutionGroup)
+                        .where(
+                            PairedExecutionGroup.public_id == public_id,
+                            *where_active(PairedExecutionGroup, bus_time),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                return False
+            if existing.status != expected_status:
+                return False
+            await s.execute(
+                update(PairedExecutionGroup)
+                .where(PairedExecutionGroup.id == existing.id)
+                .values(known_to=bus_time)
+            )
+            new_row = PairedExecutionGroup(
+                public_id=existing.public_id,
+                wallet_public_id=existing.wallet_public_id,
+                operator_public_id=existing.operator_public_id,
+                strategy_id=existing.strategy_id,
+                policy=existing.policy,
+                expected_leg_count=existing.expected_leg_count,
+                group_key=existing.group_key,
+                status=new_status,
+                assembly_deadline=existing.assembly_deadline,
+                fill_deadline=existing.fill_deadline,
+                failure_reason=existing.failure_reason,
+                halted_at=existing.halted_at,
+                created_at=existing.created_at,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=bus_time,
+            )
+            if updates is not None:
+                for key, value in updates.items():
+                    setattr(new_row, key, value)
+            s.add(new_row)
+            await s.commit()
+            return True
+
+    async def cas_paired_execution_leg_status(
+        self,
+        public_id: str,
+        expected_status: str,
+        new_status: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+        updates: PairedExecutionLegFieldUpdate | None = None,
+    ) -> bool:
+        """CAS a paired-execution leg status via SCD2 close-and-insert.
+
+        ``updates`` may only carry mutable leg fields (venue ids and the
+        signed fill / compensation accounting); any other key — a typo or
+        a forbidden SCD2 / identity column — raises ``ValueError`` before
+        any row is touched, so a bad caller can never silently drop a
+        write or corrupt the SCD2 chain.
+        """
+        if updates is not None:
+            unknown = set(updates) - self._PEL_UPDATABLE_FIELDS
+            if unknown:
+                raise ValueError(f"unknown paired-execution leg update fields: {sorted(unknown)}")
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(PairedExecutionLeg)
+                        .where(
+                            PairedExecutionLeg.public_id == public_id,
+                            *where_active(PairedExecutionLeg, bus_time),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                return False
+            if existing.status != expected_status:
+                return False
+            await s.execute(
+                update(PairedExecutionLeg)
+                .where(PairedExecutionLeg.id == existing.id)
+                .values(known_to=bus_time)
+            )
+            new_row = PairedExecutionLeg(
+                public_id=existing.public_id,
+                group_public_id=existing.group_public_id,
+                leg_index=existing.leg_index,
+                exchange=existing.exchange,
+                mode=existing.mode,
+                instrument=existing.instrument,
+                shard_key=existing.shard_key,
+                side=existing.side,
+                target_qty=existing.target_qty,
+                signal_public_id=existing.signal_public_id,
+                command_public_id=existing.command_public_id,
+                client_order_id=existing.client_order_id,
+                exchange_order_id=existing.exchange_order_id,
+                status=new_status,
+                filled_signed_qty=existing.filled_signed_qty,
+                compensated_signed_qty=existing.compensated_signed_qty,
+                compensation_seq=existing.compensation_seq,
+                last_venue_event_id=existing.last_venue_event_id,
+                wallet_public_id=existing.wallet_public_id,
+                operator_public_id=existing.operator_public_id,
+                created_at=existing.created_at,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=bus_time,
+            )
+            if updates is not None:
+                for key, value in updates.items():
+                    setattr(new_row, key, value)
+            s.add(new_row)
+            await s.commit()
+            return True
+
+    async def get_paired_execution_group(
+        self,
+        public_id: str,
+        as_of: datetime,
+    ) -> PairedExecutionGroupRow | None:
+        """Return the active paired-execution group by public_id."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(PairedExecutionGroup).where(
+                    PairedExecutionGroup.public_id == public_id,
+                    *where_active(PairedExecutionGroup, as_of),
+                )
+            )
+            group = result.scalars().first()
+            if group is None:
+                return None
+            return self._paired_execution_group_row_to_dict(group)
+
+    async def get_paired_execution_legs(
+        self,
+        group_public_id: str,
+        as_of: datetime,
+    ) -> list[PairedExecutionLegRow]:
+        """Return active paired-execution legs for a group ordered by leg index."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(PairedExecutionLeg)
+                .where(
+                    PairedExecutionLeg.group_public_id == group_public_id,
+                    *where_active(PairedExecutionLeg, as_of),
+                )
+                .order_by(PairedExecutionLeg.leg_index)
+            )
+            return [self._paired_execution_leg_row_to_dict(leg) for leg in result.scalars().all()]
+
+    async def list_active_paired_execution_legs_for_shards(
+        self,
+        shard_keys: list[str],
+        as_of: datetime,
+    ) -> list[PairedExecutionLegRow]:
+        """Return active paired-execution legs whose shard key is in the input set.
+
+        Intended for the guard scanner: callers pass the bounded set of
+        shard keys they own. The result is unbounded only in the number of
+        active legs on those shards, which the arming barrier and
+        compensation keep small.
+        """
+        if not shard_keys:
+            return []
+        async with self.session() as s:
+            result = await s.execute(
+                select(PairedExecutionLeg)
+                .where(
+                    PairedExecutionLeg.shard_key.in_(shard_keys),
+                    *where_active(PairedExecutionLeg, as_of),
+                )
+                .order_by(PairedExecutionLeg.group_public_id, PairedExecutionLeg.leg_index)
+            )
+            return [self._paired_execution_leg_row_to_dict(leg) for leg in result.scalars().all()]
+
+    async def list_active_paired_execution_groups(
+        self,
+        statuses: list[str],
+        as_of: datetime,
+    ) -> list[PairedExecutionGroupRow]:
+        """Return active paired-execution groups matching the status set.
+
+        Intended for the guard scanner with NON-terminal statuses
+        (``assembling`` / ``armed`` / ``broken`` / ``compensating``), which
+        bounds the result to in-flight groups. Terminal groups stay
+        SCD2-active until the completion path closes them, so listing by a
+        terminal status is unbounded over a long deployment. Ordered by
+        ``created_at`` then ``id`` for a deterministic page.
+        """
+        if not statuses:
+            return []
+        async with self.session() as s:
+            result = await s.execute(
+                select(PairedExecutionGroup)
+                .where(
+                    PairedExecutionGroup.status.in_(statuses),
+                    *where_active(PairedExecutionGroup, as_of),
+                )
+                .order_by(PairedExecutionGroup.created_at, PairedExecutionGroup.id)
+            )
+            return [
+                self._paired_execution_group_row_to_dict(group) for group in result.scalars().all()
+            ]
+
+    async def get_active_paired_execution_halt(
+        self,
+        wallet_public_id: str,
+        strategy_id: str,
+        group_key: str,
+        as_of: datetime,
+    ) -> PairedExecutionHaltRow | None:
+        """Return the active paired-execution halt for a wallet-strategy-group scope."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(PairedExecutionHalt).where(
+                    PairedExecutionHalt.wallet_public_id == wallet_public_id,
+                    PairedExecutionHalt.strategy_id == strategy_id,
+                    PairedExecutionHalt.group_key == group_key,
+                    *where_active(PairedExecutionHalt, as_of),
+                )
+            )
+            halt = result.scalars().first()
+            if halt is None:
+                return None
+            return self._paired_execution_halt_row_to_dict(halt)
+
+    async def clear_paired_execution_halt(self, public_id: str, bus_time: datetime) -> bool:
+        """Close an active paired-execution halt without inserting a successor row."""
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(PairedExecutionHalt)
+                        .where(
+                            PairedExecutionHalt.public_id == public_id,
+                            *where_active(PairedExecutionHalt, bus_time),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                return False
+            await s.execute(
+                update(PairedExecutionHalt)
+                .where(PairedExecutionHalt.id == existing.id)
+                .values(known_to=bus_time)
+            )
+            await s.commit()
+            return True
+
     async def get_venue_events_after(self, shard_key: str, after_id: int) -> list[VenueEventRow]:
         """Return venue events for a shard after the given watermark (id)."""
         async with self.session() as s:
@@ -10545,8 +10967,7 @@ class SQLAlchemyRepository(Repository):
             )
             if existing is None:
                 raise CredentialNotFoundError(
-                    f"active credential {credential_public_id} not found at "
-                    f"{timestamp.isoformat()}"
+                    f"active credential {credential_public_id} not found at {timestamp.isoformat()}"
                 )
             await s.execute(
                 update(WalletCredential)
