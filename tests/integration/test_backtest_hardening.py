@@ -81,18 +81,20 @@ class _StubStrategy(BaseStrategy):
     async def reset(self) -> None:
         """Reset is a no-op for the stub."""
 
-    async def _handle_candle_data(self, instrument: str, payload: str) -> StrategySignal | None:
+    async def _handle_candle_data(self, instrument: str, payload: str) -> list[StrategySignal]:
         """Emit a buy on the first candle per instrument; otherwise nothing."""
         self.candle_count[instrument] = self.candle_count.get(instrument, 0) + 1
         if self.candle_count[instrument] == 1:
-            return StrategySignal(
-                instrument=instrument,
-                side="buy",
-                strength=1.0,
-                reason="warmup-parity",
-                price=100.0,
-            )
-        return None
+            return [
+                StrategySignal(
+                    instrument=instrument,
+                    side="buy",
+                    strength=1.0,
+                    reason="warmup-parity",
+                    price=100.0,
+                )
+            ]
+        return []
 
 
 def _make_config(start_offset_hours: int = 0) -> BacktestConfig:

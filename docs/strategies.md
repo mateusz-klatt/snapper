@@ -353,20 +353,21 @@ Subclassing both `BaseStrategy` and `MultiLegSpreadMixin` gives you:
 | `self.legs: tuple[str, ...]` | Resolved leg instruments in declaration order. Populated by `self._init_legs(expected_count=N)` from `__init__`. |
 | `self._partner_legs(current)` | Tuple of leg names other than `current`, in declaration order. |
 | `self._partner_prices(current)` | `{leg: last_close}` for partners with at least one buffered candle. Partners with empty buffers are omitted (same warmup gate as 2-leg cointegration). |
-| `self._emit_partner_signals(current, builder)` | Calls `builder(leg, last_close)` for each buffered partner and queues the result via `self.emit_paired_signal`. The backtest batch processor (`process_time_batch`) drains every queued entry in the same timestep; the live `_listen_loop` does NOT drain the queue (see "Signal pairing semantics"). |
+| `self._build_partner_signals(current, builder)` | Pure builder: calls `builder(leg, last_close)` for each buffered partner and returns the resulting `list[StrategySignal]`. The host strategy concatenates these after its primary signal and returns `[primary, *partners]` from `on_candle`; `BaseStrategy` emits every leg atomically (see "Signal pairing semantics"). No side-channel queue. |
 
 ### Worked example — 3-leg equal-weight basket
 
-The partner-leg emission below (`_emit_partner_signals`) is drained
-only by the backtest engine. Run this strategy through `process_time_batch`
-(direct-DB or ZMQ replay) to exercise the synchronized N-leg rebalance;
-the live `_listen_loop` would drop the partner legs (see "Signal pairing
-semantics").
+The strategy builds its partner legs with `_build_partner_signals` and
+returns the whole group as `[primary, *partners]` from `on_candle`.
+`BaseStrategy` group-validates and emits every leg atomically on BOTH
+the live/paper path and the backtest path (`process_time_batch`), so the
+synchronized N-leg rebalance behaves identically across paths.
 
 ```python
 from snapper.messaging.schemas.data import CandleData
 from snapper.core.types import TradeSide
 from snapper.strategies.base import BaseStrategy, StrategyConfig, StrategySignal
+from snapper.strategies.base import StrategySignalResult
 from snapper.strategies.decorators import register_strategy, create_strategy_process
 from snapper.strategies.multi_leg import MultiLegSpreadMixin
 
@@ -396,7 +397,9 @@ class EqualWeightBasket(BaseStrategy, MultiLegSpreadMixin):
         self.z_exit = float(self.params.get("z_exit", 0.5))
         self._init_legs(expected_count=3)
 
-    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
+    async def on_candle(
+        self, instrument: str, candle: CandleData
+    ) -> StrategySignalResult:
         partner_prices = self._partner_prices(instrument)
         if len(partner_prices) < len(self.legs) - 1:
             return None
@@ -416,7 +419,7 @@ class EqualWeightBasket(BaseStrategy, MultiLegSpreadMixin):
             reason=f"basket_z={z:+.2f}",
         )
         opposite: TradeSide = "buy" if side == "sell" else "sell"
-        self._emit_partner_signals(
+        partners = self._build_partner_signals(
             instrument,
             lambda leg, price: StrategySignal(
                 instrument=leg,
@@ -426,28 +429,39 @@ class EqualWeightBasket(BaseStrategy, MultiLegSpreadMixin):
                 reason=f"basket_partner_of_{instrument}",
             ),
         )
-        return primary
+        return [primary, *partners]
 ```
 
 ### Signal pairing semantics
 
-`BaseStrategy.emit_paired_signal(signal)` enqueues partner-leg signals
-on the same timestep as the primary signal returned from `on_candle`.
-The drain is **backtest-only**: the batch processor
-(`process_time_batch`, used by the direct-DB and ZMQ replay backtest
-paths) drains the queue immediately after the primary signal, so on
-those paths the full N-leg basket is processed as one synchronized
-rebalance — no race between legs.
+A strategy callback (`on_candle` / `on_tick` / `on_trade`) returns its
+legs directly: `None`, a single `StrategySignal`, or a
+`list[StrategySignal]` in the order the strategy chooses. There is no
+side-channel queue. `BaseStrategy` normalizes the return to a list and
+runs a **fail-closed group preflight** at the callback boundary before
+anything is published or recorded:
 
-The live/paper production `BaseStrategy._listen_loop` does NOT drain
-the pending-signal queue: it emits only the single signal returned by
-`on_candle`. Paired live emission is not yet wired, so partner-leg
-signals queued via `emit_paired_signal` / `_emit_partner_signals` are
-dropped when a multi-leg strategy runs live. Treat the basket/N-leg
-pairing API as backtest-only until live draining is implemented.
+- every entry must be a `StrategySignal`;
+- no two legs may share an instrument;
+- every leg's instrument must map to a configured output topic.
 
-`on_tick` callbacks do not use the pairing queue; tick-level pairing
-must be implemented explicitly by the strategy.
+If any check fails the whole group is rejected (the call raises) and
+**nothing is emitted** — a malformed multi-leg return can never leave one
+leg of a spread naked. On success, `_listen_loop` emits each leg in order
+and `process_time_batch` records each leg, so the live/paper path and the
+backtest path behave identically: the full N-leg basket is one
+synchronized group.
+
+> **Scope — emission, not venue atomicity.** This wires up paired
+> *emission*: both legs are published together or not at all. It does
+> NOT provide venue-level execution atomicity. If one leg rejects,
+> partially fills, or fills late, exposure is still possible because the
+> two legs are independent sends to independent executors/coordinators
+> (and at N≥2 instances the legs can be owned by *different*
+> coordinators, since the shard key includes the instrument). Do NOT
+> enable real-money (non-paper) multi-leg strategies until the separate
+> paired-execution guard lands (group-id correlation, halt-both-shards
+> on one-leg failure/timeout, compensating reduce-only flatten).
 
 ### When NOT to use the mixin
 

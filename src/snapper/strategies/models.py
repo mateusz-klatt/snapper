@@ -38,6 +38,24 @@ class StrategySignal:
     timestamp: datetime | None = None
 
 
+StrategySignalResult = StrategySignal | list[StrategySignal] | None
+"""Return contract for strategy market-data callbacks.
+
+A strategy callback (``on_candle`` / ``on_tick`` / ``on_trade``) may return:
+
+- ``None`` — no signal this frame.
+- a single :class:`StrategySignal` — the common single-leg case.
+- a ``list[StrategySignal]`` — multiple legs the strategy emits together,
+  in the order it chooses (the strategy decides which instrument goes
+  first). Used by multi-leg strategies so both legs of a spread are
+  emitted atomically instead of through a side-channel queue.
+
+``BaseStrategy`` normalizes every callback return to ``list[StrategySignal]``
+at the callback boundary and group-validates it (fail-closed) before any
+signal is published or recorded.
+"""
+
+
 @dataclass
 class StrategyConfig:
     """Configuration for a trading strategy.

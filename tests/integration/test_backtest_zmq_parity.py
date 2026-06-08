@@ -61,19 +61,21 @@ class _DeterministicStrategy(BaseStrategy):
         """Clear per-instrument counters."""
         self.candle_count = {}
 
-    async def _handle_candle_data(self, instrument: str, payload: str) -> StrategySignal | None:
+    async def _handle_candle_data(self, instrument: str, payload: str) -> list[StrategySignal]:
         """Emit a buy on the 5th and 10th candle for the given instrument."""
         self.candle_count[instrument] = self.candle_count.get(instrument, 0) + 1
         idx = self.candle_count[instrument]
         if idx in (5, 10):
-            return StrategySignal(
-                instrument=instrument,
-                side="buy",
-                strength=1.0,
-                reason="parity-test",
-                price=100.0 + idx,
-            )
-        return None
+            return [
+                StrategySignal(
+                    instrument=instrument,
+                    side="buy",
+                    strength=1.0,
+                    reason="parity-test",
+                    price=100.0 + idx,
+                )
+            ]
+        return []
 
 
 def _make_config() -> BacktestConfig:

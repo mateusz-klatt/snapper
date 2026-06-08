@@ -44,6 +44,7 @@ from sqlalchemy.exc import IntegrityError
 from snapper.application.ai_review.citation import validate_ai_review_citation
 from snapper.application.ai_review.service import ERROR_DECISION_ALREADY_RECORDED
 from snapper.application.ai_review.service import get_ai_review_service
+from snapper.application.engine.service import compute_shard_key
 from snapper.application.plans.cancel_service import PlanAlreadyTerminalError
 from snapper.application.plans.cancel_service import PlanCancelEmitError
 from snapper.application.plans.cancel_service import PlanCancelIdempotencyKeyMismatchError
@@ -62,6 +63,8 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.core.types import AiReviewDecisionEnum
+from snapper.core.types import ExecutionModeEnum
+from snapper.core.types import OrderExchange
 from snapper.core.types import OrderStatusEnum
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import Repository
@@ -120,6 +123,7 @@ class _PreparedManualOrder:
     plan_row: ExecutionPlanInsertRow
     exchange: str
     instrument: str
+    mode: ExecutionModeEnum
     side: str
     order_type: str
     quantity: float
@@ -545,7 +549,12 @@ async def _prepare_manual_order(
     claims_getter: Callable[[], TokenClaims],
     order: _ManualOrderInput,
 ) -> _PreparedManualOrder:
-    """Validate access and precompute immutable rows for manual-order dispatch."""
+    """Validate access and precompute immutable rows for manual-order dispatch.
+
+    MCP manual orders are live-only because ``submit_manual_order``
+    exposes no mode parameter. The local mode value feeds both
+    persisted rows and the canonical shard-key helper.
+    """
     claims = claims_getter()
     _require_permission(claims, Permission.CREATE_ORDERS)
     repo, enforcer = _get_write_dependencies(repository_getter, caps_enforcer_getter)
@@ -560,7 +569,14 @@ async def _prepare_manual_order(
             expected_wallet_public_id=order.wallet_public_id,
         )
     bus_time = dt.datetime.now(dt.UTC)
-    shard_key = f"{order.exchange}.{order.instrument}.live"
+    manual_order_mode = ExecutionModeEnum.LIVE
+    shard_key = compute_shard_key(
+        instrument=order.instrument,
+        exchange=cast(OrderExchange, order.exchange),
+        mode=manual_order_mode,
+        wallet_public_id=order.wallet_public_id,
+        strategy_tag=None,
+    )
     client_order_id = str(uuid7())
     resolved_operator_public_id = order.operator_public_id or claims.primary_operator_public_id
     user_public_id = claims.user_public_id or claims.username
@@ -584,7 +600,7 @@ async def _prepare_manual_order(
         "created_via": "api",
         "instrument_public_id": order.instrument_public_id,
         "exchange": order.exchange,
-        "mode": "live",
+        "mode": manual_order_mode,
         "shard_key": shard_key,
         "wallet_public_id": order.wallet_public_id,
         "operator_public_id": resolved_operator_public_id,
@@ -612,6 +628,7 @@ async def _prepare_manual_order(
         plan_row=plan_row,
         exchange=order.exchange,
         instrument=order.instrument,
+        mode=manual_order_mode,
         side=order.side,
         order_type=order.order_type,
         quantity=order.quantity,
@@ -650,7 +667,7 @@ def _build_manual_order_command_row(
         "shard_key": prepared.shard_key,
         "exchange": prepared.exchange,
         "instrument": prepared.instrument,
-        "mode": "live",
+        "mode": prepared.mode,
         "strategy_id": "manual",
         "client_order_id": prepared.client_order_id,
         "venue_client_id": prepared.client_order_id,

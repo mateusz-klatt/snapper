@@ -31,6 +31,7 @@ from snapper.api.schemas.orders import CreateOrderCommand
 from snapper.api.schemas.orders import ExecutionPlanResponse
 from snapper.application.ai_review.citation import AiReviewCitationError
 from snapper.application.ai_review.citation import validate_ai_review_citation
+from snapper.application.engine.service import compute_shard_key
 from snapper.application.plans.cancel_service import PlanAlreadyTerminalError
 from snapper.application.plans.cancel_service import PlanCancelEmitError
 from snapper.application.plans.cancel_service import PlanCancelIdempotencyKeyMismatchError
@@ -48,6 +49,8 @@ from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.core.types import ExecutionMode
+from snapper.core.types import OrderExchange
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import ExecutionPlanInsertRow
@@ -266,7 +269,13 @@ async def create_order(
 
     await _validate_create_order_ai_review_citation(repo=repo, principal=principal, body=body)
 
-    shard_key = f"{body.exchange}.{body.instrument}.{body.mode}"
+    shard_key = compute_shard_key(
+        instrument=body.instrument,
+        exchange=cast(OrderExchange, body.exchange),
+        mode=cast(ExecutionMode, body.mode),
+        wallet_public_id=body.wallet_public_id,
+        strategy_tag=None,
+    )
     sid = tracker.session_id
     seq = tracker.next_sequence(_REST_STREAM)
     ts = dt.datetime.now(dt.UTC)

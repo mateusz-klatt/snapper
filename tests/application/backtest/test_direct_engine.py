@@ -154,7 +154,7 @@ class TestDirectDbEngine:
         """Engine with no-signal strategy produces zero trades."""
         mock_strategy_class = MagicMock()
         mock_instance = MagicMock(spec=BaseStrategy)
-        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_instance._handle_candle_data = AsyncMock(return_value=[])
         mock_instance.required_candle_history.return_value = 0
         mock_strategy_class.return_value = mock_instance
 
@@ -198,7 +198,7 @@ class TestDirectDbEngine:
         warmup_signal = StrategySignal(
             instrument="BTC-USD", side="buy", strength=1.0, reason="test", price=100.0
         )
-        mock_instance._handle_candle_data = AsyncMock(return_value=warmup_signal)
+        mock_instance._handle_candle_data = AsyncMock(return_value=[warmup_signal])
         mock_strategy_class.return_value = mock_instance
 
         with patch.dict(
@@ -238,7 +238,7 @@ class TestDirectDbEngine:
         buy_signal = StrategySignal(
             instrument="BTC-USD", side="buy", strength=1.0, reason="test_buy", price=100.0
         )
-        mock_instance._handle_candle_data = AsyncMock(return_value=buy_signal)
+        mock_instance._handle_candle_data = AsyncMock(return_value=[buy_signal])
         mock_strategy_class.return_value = mock_instance
 
         with patch.dict(
@@ -278,7 +278,7 @@ class TestDirectDbEngine:
         mock_strategy_class = MagicMock()
         mock_instance = MagicMock(spec=BaseStrategy)
         mock_instance.required_candle_history.return_value = 0
-        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_instance._handle_candle_data = AsyncMock(return_value=[])
         mock_strategy_class.return_value = mock_instance
 
         with patch.dict(
@@ -315,7 +315,7 @@ class TestDirectDbEngine:
         mock_strategy_class = MagicMock()
         mock_instance = MagicMock(spec=BaseStrategy)
         mock_instance.required_candle_history.return_value = 0
-        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_instance._handle_candle_data = AsyncMock(return_value=[])
         mock_strategy_class.return_value = mock_instance
 
         async def fake_iter_sorted_candle_chunks(
@@ -379,13 +379,15 @@ class TestDirectDbEngine:
         """Signal artifacts are kept even when no executable fill is produced."""
         strategy = MagicMock(spec=BaseStrategy)
         strategy._handle_candle_data = AsyncMock(
-            return_value=StrategySignal(
-                instrument="BTC-USD",
-                side="sell",
-                strength=1.0,
-                reason="close_without_position",
-                price=100.0,
-            )
+            return_value=[
+                StrategySignal(
+                    instrument="BTC-USD",
+                    side="sell",
+                    strength=1.0,
+                    reason="close_without_position",
+                    price=100.0,
+                )
+            ]
         )
 
         config = MagicMock(spec=BacktestConfig)
@@ -433,7 +435,7 @@ class TestDirectDbEngine:
         mock_strategy_class = MagicMock()
         mock_instance = MagicMock()
         mock_instance.required_candle_history.return_value = 0
-        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_instance._handle_candle_data = AsyncMock(return_value=[])
         mock_strategy_class.return_value = mock_instance
 
         with patch.dict(
@@ -506,7 +508,7 @@ class TestCooperativeCancel:
         mock_strategy_class = MagicMock()
         mock_instance = MagicMock(spec=BaseStrategy)
         mock_instance.required_candle_history.return_value = 0
-        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_instance._handle_candle_data = AsyncMock(return_value=[])
         mock_strategy_class.return_value = mock_instance
 
         fake_iter, _ = self._patch_chunks(5)
@@ -537,7 +539,7 @@ class TestCooperativeCancel:
         mock_strategy_class = MagicMock()
         mock_instance = MagicMock(spec=BaseStrategy)
         mock_instance.required_candle_history.return_value = 0
-        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_instance._handle_candle_data = AsyncMock(return_value=[])
         mock_strategy_class.return_value = mock_instance
 
         fake_iter, events = self._patch_chunks(2)
@@ -610,7 +612,7 @@ class TestCooperativeCancel:
         mock_strategy_class = MagicMock()
         mock_instance = MagicMock(spec=BaseStrategy)
         mock_instance.required_candle_history.return_value = 0
-        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_instance._handle_candle_data = AsyncMock(return_value=[])
         mock_strategy_class.return_value = mock_instance
 
         fake_iter, events = self._patch_chunks(3)
@@ -637,7 +639,7 @@ class TestCooperativeCancel:
         mock_strategy_class = MagicMock()
         mock_instance = MagicMock(spec=BaseStrategy)
         mock_instance.required_candle_history.return_value = 0
-        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_instance._handle_candle_data = AsyncMock(return_value=[])
         mock_strategy_class.return_value = mock_instance
 
         fake_iter, events = self._patch_chunks(3)
@@ -666,7 +668,7 @@ class TestCooperativeCancel:
         mock_strategy_class = MagicMock()
         mock_instance = MagicMock(spec=BaseStrategy)
         mock_instance.required_candle_history.return_value = 0
-        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_instance._handle_candle_data = AsyncMock(return_value=[])
         mock_strategy_class.return_value = mock_instance
 
         fake_iter, events = self._patch_chunks(5)

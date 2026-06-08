@@ -68,22 +68,22 @@ class TestHelpers:
 
         Given: a StrategySignal,
         When: the stub's _handle_candle_data is awaited,
-        Then: the configured signal is returned.
+        Then: a single-element list carrying the configured signal is returned.
         """
         sig = StrategySignal(instrument="BTC-USD", side="buy", strength=1.0, reason="t", price=1.0)
         strategy = _make_strategy(sig)
         result = asyncio.run(strategy._handle_candle_data("BTC-USD", "{}"))
-        assert result is sig
+        assert result == [sig]
 
     def test_make_strategy_stub_returns_none_when_no_signal(self) -> None:
-        """Verify strategy stub returns None when constructed with None.
+        """Verify strategy stub returns an empty list when constructed with None.
 
         Given: None signal,
         When: the stub's _handle_candle_data is awaited,
-        Then: None is returned.
+        Then: an empty list is returned.
         """
         strategy = _make_strategy(None)
-        assert asyncio.run(strategy._handle_candle_data("BTC-USD", "{}")) is None
+        assert asyncio.run(strategy._handle_candle_data("BTC-USD", "{}")) == []
 
 
 class TestSerialisers:

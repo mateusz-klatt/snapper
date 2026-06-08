@@ -34,7 +34,7 @@ from sqlalchemy.exc import IntegrityError
 from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.service import InstrumentSpec
 from snapper.application.engine.service import TradingEngineService
-from snapper.application.engine.service import _compute_shard_key
+from snapper.application.engine.service import compute_shard_key
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.process_manager.models import RegisterableProcess
@@ -973,7 +973,7 @@ class TraderCoordinator(RegisterableProcess):
             )
             return None
         wallet_public_id = execution.get("wallet_public_id") or ""
-        recovery_shard_key = _compute_shard_key(
+        recovery_shard_key = compute_shard_key(
             instrument=execution["instrument"],
             exchange=cast(OrderExchange, execution["exchange"]),
             mode=ExecutionModeEnum.LIVE,
@@ -1179,7 +1179,7 @@ class TraderCoordinator(RegisterableProcess):
             )
             return None
         wallet_public_id = db_order.get("wallet_public_id") or ""
-        recovery_shard_key = _compute_shard_key(
+        recovery_shard_key = compute_shard_key(
             instrument=instrument,
             exchange=cast(OrderExchange, exchange_str),
             mode=ExecutionModeEnum.LIVE,
@@ -2414,7 +2414,13 @@ class TraderCoordinator(RegisterableProcess):
             if parsed.exchange == ExchangeEnum.PAPER
             else ExecutionModeEnum.LIVE
         )
-        flat_key = f"{parsed.exchange}.{parsed.instrument}.{mode}"
+        flat_key = compute_shard_key(
+            instrument=parsed.instrument,
+            exchange=cast(OrderExchange, parsed.exchange),
+            mode=mode,
+            wallet_public_id="",
+            strategy_tag=None,
+        )
         shard_key = self._order_shard_keys.get(order_status.client_order_id, flat_key)
         event_type_map = {
             "accepted": "order_accepted",
@@ -2469,7 +2475,13 @@ class TraderCoordinator(RegisterableProcess):
             if parsed.exchange == ExchangeEnum.PAPER
             else ExecutionModeEnum.LIVE
         )
-        flat_key = f"{parsed.exchange}.{parsed.instrument}.{mode}"
+        flat_key = compute_shard_key(
+            instrument=parsed.instrument,
+            exchange=cast(OrderExchange, parsed.exchange),
+            mode=mode,
+            wallet_public_id="",
+            strategy_tag=None,
+        )
         shard_key = self._order_shard_keys.get(order_event.client_order_id, flat_key)
         venue_event: VenueEventRow = {
             "id": int(time.monotonic_ns()),
@@ -2775,6 +2787,8 @@ class TraderCoordinator(RegisterableProcess):
             operator_public_id=cmd.get("operator_public_id"),
             user_public_id=cmd.get("user_public_id"),
         )
+        if command_type in ("create", OrderCommandEnum.SUBMIT.value):
+            self._order_shard_keys[cmd["client_order_id"]] = cmd["shard_key"]
         await self.msg_publisher.send(topic, order)
 
     async def _funding_accrual_loop(self) -> None:
@@ -3070,7 +3084,7 @@ class TraderCoordinator(RegisterableProcess):
                 parsed.signal_type,
                 wallet_public_id,
             ),
-            shard_key=_compute_shard_key(
+            shard_key=compute_shard_key(
                 instrument=signal.instrument,
                 exchange=exchange,
                 mode=execution_mode,

@@ -12,6 +12,19 @@ Key Features:
     - Automatic timezone handling via TZDateTime type.
     - Cached repository instances via get_repository().
 
+Concurrency / row locking (SQLite is a known, accepted limitation):
+    The atomic-claim paths in this module use ``SELECT ... FOR UPDATE``
+    (``.with_for_update()``) to serialize concurrent writers on the same
+    row. This is a true row lock on PostgreSQL — the production backend.
+    On SQLite ``FOR UPDATE`` is silently ignored (a no-op); SQLite instead
+    serializes at the database/connection level, so single-writer dev and
+    test runs stay correct. Running multiple concurrent writer processes
+    against the SAME SQLite file is therefore NOT supported for these
+    claim paths. This is WON'T-FIX by design: SQLite is the dev/test
+    backend, PostgreSQL is the deployment backend, and the SCD2 atomicity
+    behaviour is covered by ``tests/.../test_scd2_batch_atomicity.py``. Do
+    not add application-level locking to paper over the SQLite no-op.
+
 Example:
     Using the async repository::
 

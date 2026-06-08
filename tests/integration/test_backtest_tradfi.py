@@ -29,7 +29,7 @@ The test reuses the zmq-parity-test fixture pattern:
 
 - mock repository returns canned TradFi candle rows,
 - a stub strategy with ``_handle_candle_data`` deliberately returns
-  ``None`` every time,
+  an empty ``list`` every time,
 - both engines (``DirectDbEngine`` + ``ZmqReplayEngine``) exercise
   the path via ``batch_processor.process_time_batch`` so the
   observation-only assertion holds for both.
@@ -111,8 +111,8 @@ class _SilentObservingStrategy(BaseStrategy):
         """Clear observation history for a warm-restart parity with live."""
         self.seen_candles = []
 
-    async def _handle_candle_data(self, instrument: str, payload: str) -> StrategySignal | None:
-        """Record the candle + return None. No signal is ever emitted.
+    async def _handle_candle_data(self, instrument: str, payload: str) -> list[StrategySignal]:
+        """Record the candle + return an empty list. No signal is ever emitted.
 
         Args:
             instrument: Native symbol of the source candle (e.g. ``MNQM6-CME``).
@@ -121,14 +121,14 @@ class _SilentObservingStrategy(BaseStrategy):
                 the TradFi series rather than only exchange metadata.
 
         Returns:
-            Always ``None``. The observation-only contract forbids
+            Always an empty ``list``. The observation-only contract forbids
             this class from emitting a signal against a ``can_trade=False``
             instrument.
         """
         candle = CandleData.from_json(payload)
         self.seen_candles.append((instrument, float(candle.close)))
 
-        return None
+        return []
 
 
 def _tradfi_config() -> BacktestConfig:

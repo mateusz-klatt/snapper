@@ -75,7 +75,7 @@ class InstrumentSpecMissingError(RuntimeError):
     """
 
 
-def _compute_shard_key(
+def compute_shard_key(
     *,
     instrument: str,
     exchange: OrderExchange,
@@ -85,21 +85,22 @@ def _compute_shard_key(
 ) -> str:
     """Build the canonical ``shard_key`` for a trading engine.
 
-    The formula MUST be byte-identical to the ``_shard_key`` built
-    inside :meth:`TradingEngineService.__init__` at runtime, because
-     Ownership checks (``TraderCoordinator._on_signal``
+    This is the single source of truth for shard-key construction, shared
+    by the engine, the executor, and the REST and MCP manual-order paths.
+    The formula MUST be byte-identical across every call site, because
+    ownership checks (``TraderCoordinator._on_signal`` /
     ``_recover_engine_state``) compute the key BEFORE the engine is
     constructed and compare hashes against
-    class:`snapper.core.partitioning.ShardOwnership`. Drift between
-    the two call sites would split ownership across instances.
-    Structure
-        Base: ``{exchange}.{instrument}.{mode}``
-        Wallet segment (appended when ``wallet_public_id`` is set)
-          ``.w{short}`` where ``short`` is the last 12 lowercase hex
-          characters of the wallet id with dashes stripped.
-        Strategy tag (paper mode only, when non-empty)
-          ``.{strategy_tag}``
-    Args
+    :class:`snapper.core.partitioning.ShardOwnership`. Drift between call
+    sites would split ownership across instances.
+
+    Structure: base ``{exchange}.{instrument}.{mode}``; a wallet segment
+    ``.w{short}`` is appended when ``wallet_public_id`` is set (``short``
+    is the last 12 lowercase hex characters of the wallet id with dashes
+    stripped); a ``.{strategy_tag}`` segment is appended for paper mode
+    only, when non-empty.
+
+    Args:
         instrument: The traded symbol (e.g., ``"BTC-USD"``).
         exchange: Order-capable exchange identifier.
         mode: Execution mode — ``"live"`` or ``"paper"``.
@@ -238,7 +239,7 @@ class TradingEngineService:
         self.operator_public_id = operator_public_id
         self._ownership = ownership
         self._caps_enforcer = caps_enforcer
-        self._shard_key = _compute_shard_key(
+        self._shard_key = compute_shard_key(
             instrument=instrument,
             exchange=exchange,
             mode=self.mode,

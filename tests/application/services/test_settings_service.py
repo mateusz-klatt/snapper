@@ -82,7 +82,10 @@ async def feed_bar_to_strategy(
     max_buffer_size = strategy.params.get("buffer_size", 100)
     if len(strategy.candle_buffer[instrument]) > max_buffer_size:
         strategy.candle_buffer[instrument].pop(0)
-    return await strategy.on_candle(instrument, candle)
+    result = await strategy.on_candle(instrument, candle)
+    if isinstance(result, list):
+        return result[0] if result else None
+    return result
 
 
 def _make_rest_request() -> MagicMock:

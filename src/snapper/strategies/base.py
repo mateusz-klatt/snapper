@@ -45,9 +45,16 @@ from snapper.messaging.topics.builders import signal_topic
 from snapper.strategies.health import StrategyHealthMonitor
 from snapper.strategies.models import StrategyConfig
 from snapper.strategies.models import StrategySignal
+from snapper.strategies.models import StrategySignalResult
 from snapper.strategies.system_events import SystemMessageRouter
 
-__all__ = ["BaseStrategy", "CompositeStrategy", "StrategySignal", "StrategyConfig"]
+__all__ = [
+    "BaseStrategy",
+    "CompositeStrategy",
+    "StrategySignal",
+    "StrategySignalResult",
+    "StrategyConfig",
+]
 
 
 logger = logging.getLogger(__name__)
@@ -112,12 +119,9 @@ class BaseStrategy(ABC):
         self.exchange = config.exchange
         self.params = config.params
         self._running = False
-        self.output_topics: list[str] = []
-        for instrument in self.outputs:
-            if self.exchange == ExchangeEnum.PAPER:
-                self.output_topics.append(signal_topic(self.exchange, instrument, self.name))
-            else:
-                self.output_topics.append(signal_topic(self.exchange, instrument, "live"))
+        self.output_topics: list[str] = [
+            self._signal_topic_for(instrument) for instrument in self.outputs
+        ]
         logger.info(
             f"Strategy {self.name} initialized with {len(self.output_topics)} output topics: {self.output_topics}"
         )
@@ -137,43 +141,82 @@ class BaseStrategy(ABC):
         self._is_paper_input = any(StrategyConfig._is_paper_or_replay(inp) for inp in self.inputs)
         self._health_monitor = StrategyHealthMonitor(self)
         self._system_router = SystemMessageRouter(self)
-        self._pending_signals: list[StrategySignal] = []
 
-    def emit_paired_signal(self, signal: StrategySignal) -> None:
-        """Queue a partner-leg signal alongside the current ``on_candle`` return.
+    def _signal_topic_for(self, instrument: str) -> str:
+        """Return the output topic a signal on ``instrument`` publishes to.
 
-        Pair-trade strategies need to emit signals for BOTH legs at the
-        same timestep (entry on instrument1 and instrument2 together,
-        same on exit). The ``on_candle`` contract returns one optional
-        signal per call, which is fine for single-instrument
-        strategies but cannot express paired emissions.
-
-        This helper accumulates extra signals on the strategy instance.
-        The ``batch_processor`` drains the queue immediately after the
-        primary ``on_candle`` return, so paired signals share the
-        timestamp + execution treatment of the primary signal.
-
-        Single-instrument strategies do not call this method and the
-        queue stays empty, preserving the legacy ``on_candle`` →
-        single signal flow byte-for-byte.
+        Single source of truth for the PAPER-vs-live topic shape, shared
+        by ``output_topics`` construction, group validation, and
+        ``emit_signal`` so the allowed-output check can never drift from
+        the actual publish topic.
 
         Args:
-            signal: The partner-leg ``StrategySignal`` to enqueue.
-        """
-        self._pending_signals.append(signal)
-
-    def drain_pending_signals(self) -> list[StrategySignal]:
-        """Take and clear the queue of partner-leg signals.
+            instrument: The instrument symbol.
 
         Returns:
-            All signals queued via ``emit_paired_signal`` since the
-            last drain.
+            The signal topic string. PAPER routes carry the strategy
+            name; live routes carry the ``"live"`` discriminator.
         """
-        if not self._pending_signals:
+        if self.exchange == ExchangeEnum.PAPER:
+            return signal_topic(self.exchange, instrument, self.name)
+        return signal_topic(self.exchange, instrument, "live")
+
+    def _normalize_signal_group(self, result: StrategySignalResult) -> list[StrategySignal]:
+        """Normalize and group-validate a callback return, fail-closed.
+
+        Converts the union return contract (``None`` / single
+        :class:`StrategySignal` / ``list[StrategySignal]``) into a flat
+        list, then enforces the multi-leg group invariants BEFORE any
+        signal is published or recorded. Validation raises rather than
+        emitting a partial group, so a malformed multi-leg return can
+        never leave one leg of a spread naked.
+
+        Args:
+            result: The value returned by ``on_candle`` / ``on_tick`` /
+                ``on_trade``.
+
+        Returns:
+            The validated signals in strategy-declared order; empty when
+            the callback returned ``None`` or an empty list.
+
+        Raises:
+            TypeError: If the return value, or any element of a returned
+                list, is not a :class:`StrategySignal`.
+            ValueError: If two legs share an instrument, or a leg's
+                instrument does not map to a configured output topic.
+        """
+        if result is None:
             return []
-        drained = self._pending_signals
-        self._pending_signals = []
-        return drained
+        if isinstance(result, StrategySignal):
+            signals = [result]
+        elif isinstance(result, list):
+            signals = result
+        else:
+            raise TypeError(
+                f"Strategy {self.name}: callback must return None, StrategySignal, "
+                f"or list[StrategySignal]; got {type(result).__name__}"
+            )
+        seen: set[str] = set()
+        for signal in signals:
+            if not isinstance(signal, StrategySignal):
+                raise TypeError(
+                    f"Strategy {self.name}: every leg must be a StrategySignal; "
+                    f"got {type(signal).__name__}"
+                )
+            if signal.instrument in seen:
+                raise ValueError(
+                    f"Strategy {self.name}: duplicate instrument '{signal.instrument}' "
+                    f"in one signal group"
+                )
+            seen.add(signal.instrument)
+            topic = self._signal_topic_for(signal.instrument)
+            if topic not in self.output_topics:
+                raise ValueError(
+                    f"Strategy {self.name}: signal for instrument '{signal.instrument}' "
+                    f"not allowed; not in configured outputs: {self.outputs} "
+                    f"(generated topic: {topic})"
+                )
+        return signals
 
     @property
     def is_running(self) -> bool:
@@ -195,7 +238,7 @@ class BaseStrategy(ABC):
         """
         return 0
 
-    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
+    async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignalResult:
         """Handle incoming candle data.
 
         Args:
@@ -203,12 +246,15 @@ class BaseStrategy(ABC):
             candle: The candle data with OHLCV data.
 
         Returns:
-            Optional signal if strategy logic triggers.
+            ``None``, a single :class:`StrategySignal`, or a
+            ``list[StrategySignal]`` (multiple legs emitted together, in
+            strategy-declared order). Single-leg strategies may keep the
+            narrower ``StrategySignal | None`` return.
         """
         await asyncio.sleep(0)
         return None
 
-    async def on_tick(self, instrument: str, tick: TickData) -> StrategySignal | None:
+    async def on_tick(self, instrument: str, tick: TickData) -> StrategySignalResult:
         """Handle incoming tick data.
 
         Args:
@@ -216,12 +262,13 @@ class BaseStrategy(ABC):
             tick: The tick data with bid/ask data.
 
         Returns:
-            Optional signal if strategy logic triggers.
+            ``None``, a single :class:`StrategySignal`, or a
+            ``list[StrategySignal]`` for multi-leg emission.
         """
         await asyncio.sleep(0)
         return None
 
-    async def on_trade(self, instrument: str, trade: TradeData) -> StrategySignal | None:
+    async def on_trade(self, instrument: str, trade: TradeData) -> StrategySignalResult:
         """Handle incoming trade data.
 
         Args:
@@ -229,7 +276,8 @@ class BaseStrategy(ABC):
             trade: The trade data with trade details.
 
         Returns:
-            Optional signal if strategy logic triggers.
+            ``None``, a single :class:`StrategySignal`, or a
+            ``list[StrategySignal]`` for multi-leg emission.
         """
         await asyncio.sleep(0)
         return None
@@ -480,8 +528,8 @@ class BaseStrategy(ABC):
                         logger.warning(f"Strategy {self.name}: Malformed market topic: {topic_str}")
                         continue
                     instrument = parsed.instrument
-                    signal = await self._dispatch_market_data(topic_str, instrument, payload_str)
-                    if signal:
+                    signals = await self._dispatch_market_data(topic_str, instrument, payload_str)
+                    for signal in signals:
                         await self.emit_signal(signal)
         except asyncio.CancelledError:
             logger.info(f"Strategy {self.name}: Listen loop cancelled")
@@ -490,7 +538,7 @@ class BaseStrategy(ABC):
             logger.exception(f"Strategy {self.name}: Error in listen loop: {e}")
             self._running = False
 
-    async def _handle_candle_data(self, instrument: str, payload: str) -> StrategySignal | None:
+    async def _handle_candle_data(self, instrument: str, payload: str) -> list[StrategySignal]:
         """Handle incoming candle data.
 
         Args:
@@ -498,7 +546,10 @@ class BaseStrategy(ABC):
             payload: The JSON payload string.
 
         Returns:
-            Optional signal from the candle handler.
+            The validated signal group from ``on_candle`` (empty when the
+            handler produced no signal). The group is normalized and
+            fail-closed-validated before return, so callers receive only
+            publishable signals.
         """
         candle = CandleData.from_json(payload)
         self._last_data_ts = candle.open_at.timestamp()
@@ -508,11 +559,11 @@ class BaseStrategy(ABC):
         max_buffer_size = self.params.get("buffer_size", 100)
         if len(self.candle_buffer[instrument]) > max_buffer_size:
             self.candle_buffer[instrument].pop(0)
-        return await self.on_candle(instrument, candle)
+        return self._normalize_signal_group(await self.on_candle(instrument, candle))
 
     async def _dispatch_market_data(
         self, topic: str, instrument: str, payload: str
-    ) -> StrategySignal | None:
+    ) -> list[StrategySignal]:
         """Dispatch market data to appropriate handler.
 
         Args:
@@ -521,20 +572,21 @@ class BaseStrategy(ABC):
             payload: The JSON payload string.
 
         Returns:
-            Optional signal from the handler.
+            The validated signal group from the matching handler (empty
+            when no handler matched or the handler produced no signal).
         """
         if ".candles." in topic:
             return await self._handle_candle_data(instrument, payload)
         if ".ticks" in topic:
             tick = TickData.from_json(payload)
             self._last_data_ts = tick.timestamp.timestamp()
-            return await self.on_tick(instrument, tick)
+            return self._normalize_signal_group(await self.on_tick(instrument, tick))
         if ".trades" in topic:
             trade = TradeData.from_json(payload)
             self._last_data_ts = (trade.executed_at or trade.timestamp).timestamp()
-            return await self.on_trade(instrument, trade)
+            return self._normalize_signal_group(await self.on_trade(instrument, trade))
         logger.warning(f"Strategy {self.name}: Unknown market data topic type: {topic}")
-        return None
+        return []
 
     async def emit_signal(
         self,
@@ -563,10 +615,7 @@ class BaseStrategy(ABC):
         if signal.timestamp is None:
             ts = self._last_data_ts or time.time()
             signal.timestamp = datetime.fromtimestamp(ts, tz=UTC)
-        if self.exchange == ExchangeEnum.PAPER:
-            topic = signal_topic(self.exchange, signal.instrument, self.name)
-        else:
-            topic = signal_topic(self.exchange, signal.instrument, "live")
+        topic = self._signal_topic_for(signal.instrument)
         if topic not in self.output_topics:
             raise ValueError(
                 f"Strategy {self.name}: Signal for instrument '{signal.instrument}' not allowed. "

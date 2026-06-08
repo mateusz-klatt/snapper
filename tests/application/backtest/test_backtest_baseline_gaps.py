@@ -108,7 +108,7 @@ class TestBatchProcessorEmitterBranch:
         batch = [CandleEvent(open_at=NOW, exchange="kraken", instrument="BTC-USD", row=candle_row)]
 
         strategy = MagicMock()
-        strategy._handle_candle_data = AsyncMock(return_value=None)
+        strategy._handle_candle_data = AsyncMock(return_value=[])
 
         portfolio = PortfolioTracker(cash=10_000.0)
         collector = ResultCollector()

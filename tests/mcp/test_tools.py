@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
@@ -26,12 +27,15 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from sqlalchemy.exc import IntegrityError
 
+from snapper.application.engine.service import compute_shard_key
 from snapper.application.plans import cancel_service
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.core.types import ExecutionMode
+from snapper.core.types import OrderExchange
 from snapper.mcp.server import TOKEN_CLAIMS_CTX
 from snapper.mcp.server import get_current_claims
 from snapper.mcp.tools import _map_cancel_exception_to_envelope
@@ -253,7 +257,20 @@ class TestSubmitManualOrderTool:
         assert result["source_surface"] == "mcp"
         scope_args = repo.list_accessible_wallets_for_operators.call_args.args
         assert scope_args[0] == ["op-1"]
+        expected_shard_key = compute_shard_key(
+            instrument="BTC-USD",
+            exchange=cast(OrderExchange, "kraken"),
+            mode=cast(ExecutionMode, "live"),
+            wallet_public_id="wallet-1",
+            strategy_tag=None,
+        )
+        plan_row = repo.insert_execution_plan.await_args.args[0]
         cmd_row = repo.insert_trade_command.await_args.args[0]
+        assert expected_shard_key != "kraken.BTC-USD.live"
+        assert plan_row["mode"] == "live"
+        assert cmd_row["mode"] == "live"
+        assert plan_row["shard_key"] == expected_shard_key
+        assert cmd_row["shard_key"] == expected_shard_key
         assert cmd_row["source_surface"] == "mcp"
 
     @pytest.mark.asyncio

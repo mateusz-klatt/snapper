@@ -24,6 +24,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from typing import cast
 from uuid import uuid7
 
 import pytest
@@ -32,7 +33,10 @@ import zmq
 import zmq.asyncio
 
 import snapper.config.settings as snapper_settings
+from snapper.application.engine.service import compute_shard_key
 from snapper.application.plans.service import PlanExecutorService
+from snapper.core.types import ExecutionMode
+from snapper.core.types import OrderExchange
 from snapper.data.repository import get_repository
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
 from snapper.messaging.schemas.data import ExecutionData
@@ -107,7 +111,13 @@ async def _insert_plan(
         "instrument_public_id": _INSTRUMENT_PUBLIC_ID,
         "exchange": _EXCHANGE,
         "mode": _MODE,
-        "shard_key": f"{_EXCHANGE}.{_NATIVE_INSTRUMENT}.{_MODE}",
+        "shard_key": compute_shard_key(
+            instrument=_NATIVE_INSTRUMENT,
+            exchange=cast(OrderExchange, _EXCHANGE),
+            mode=cast(ExecutionMode, _MODE),
+            wallet_public_id=_WALLET,
+            strategy_tag=None,
+        ),
         "wallet_public_id": _WALLET,
         "operator_public_id": None,
         "total_quantity": total_quantity,

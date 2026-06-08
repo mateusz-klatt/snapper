@@ -193,11 +193,6 @@ class _TestStrategy(MultiLegSpreadMixin):
         """Docstring for __init__."""
         self.config = config
         self.candle_buffer: dict[str, list[CandleData]] = {}
-        self._pending: list[StrategySignal] = []
-
-    def emit_paired_signal(self, signal: StrategySignal) -> None:
-        """Capture queued signals in a list for assertion."""
-        self._pending.append(signal)
 
 
 class TestMultiLegSpreadMixin:
@@ -247,8 +242,8 @@ class TestMultiLegSpreadMixin:
         prices = s._partner_prices("BTC-USD")
         assert prices == {"ETH-USD": 250.0}
 
-    def test_emit_partner_signals_drains_one_per_buffered_partner(self) -> None:
-        """One paired signal queued per buffered partner."""
+    def test_build_partner_signals_one_per_buffered_partner(self) -> None:
+        """One partner signal built per buffered partner, declaration order."""
         s = self._build(3)
         s.candle_buffer["ETH-USD"] = [_candle(NOW, 200.0)]
         s.candle_buffer["SOL-USD"] = [_candle(NOW, 50.0)]
@@ -263,13 +258,11 @@ class TestMultiLegSpreadMixin:
                 price=price,
             )
 
-        s._emit_partner_signals("BTC-USD", builder)
-        assert len(s._pending) == 2
-        legs = sorted(sig.instrument for sig in s._pending)
-        assert legs == ["ETH-USD", "SOL-USD"]
+        partners = s._build_partner_signals("BTC-USD", builder)
+        assert [sig.instrument for sig in partners] == ["ETH-USD", "SOL-USD"]
 
-    def test_emit_partner_signals_skips_unbuffered_partners(self) -> None:
-        """Unbuffered partners are skipped at emission time."""
+    def test_build_partner_signals_skips_unbuffered_partners(self) -> None:
+        """Unbuffered partners are skipped by the builder."""
         s = self._build(3)
         s.candle_buffer["ETH-USD"] = [_candle(NOW, 200.0)]
 
@@ -283,9 +276,9 @@ class TestMultiLegSpreadMixin:
                 price=price,
             )
 
-        s._emit_partner_signals("BTC-USD", builder)
-        assert len(s._pending) == 1
-        assert s._pending[0].instrument == "ETH-USD"
+        partners = s._build_partner_signals("BTC-USD", builder)
+        assert len(partners) == 1
+        assert partners[0].instrument == "ETH-USD"
 
 
 class TestMultiLegHostProtocol:
@@ -302,20 +295,17 @@ class TestMultiLegHostProtocol:
         legs = resolve_legs(host.config, expected_count=2)
         assert legs == ("A", "B")
 
-    def test_three_leg_strategy_emits_two_partner_signals(self) -> None:
-        """3-leg strategy emits 1 primary + 2 paired = 3 signals per timestep.
+    def test_three_leg_strategy_returns_primary_plus_two_partners(self) -> None:
+        """3-leg strategy returns 1 primary + 2 partner = 3 signals per timestep.
 
         Acceptance test: a strategy that uses
-        ``MultiLegSpreadMixin._emit_partner_signals`` for 3 legs
-        produces 1 primary signal returned from ``on_candle`` plus 2
-        partner signals queued via ``emit_paired_signal``. After the
-        primary returns, ``drain_pending_signals`` (BaseStrategy contract,
-        stubbed here on the test host) returns exactly 2 partner
-        signals.
+        ``MultiLegSpreadMixin._build_partner_signals`` for 3 legs builds 1
+        primary signal plus 2 partner signals and returns them as a single
+        ``[primary, *partners]`` list from ``on_candle``. ``BaseStrategy``
+        then emits every leg atomically — there is no side-channel queue.
 
-        This proves the N-leg generalization works for N>2 — the engine
-        already drains a list, so the only missing piece was the
-        strategy-side scaffolding the mixin provides.
+        This proves the N-leg generalization works for N>2: the strategy
+        returns the whole group in one call.
         """
 
         class _ThreeLegHost(MultiLegSpreadMixin):
@@ -323,20 +313,9 @@ class TestMultiLegHostProtocol:
                 """Construct a 3-leg test host."""
                 self.config = config
                 self.candle_buffer: dict[str, list[CandleData]] = {}
-                self._pending: list[StrategySignal] = []
 
-            def emit_paired_signal(self, signal: StrategySignal) -> None:
-                """Queue a partner-leg signal."""
-                self._pending.append(signal)
-
-            def drain_pending_signals(self) -> list[StrategySignal]:
-                """Return and clear the queue."""
-                out = list(self._pending)
-                self._pending.clear()
-                return out
-
-            def fire(self) -> StrategySignal:
-                """Simulate one timestep: emit 1 primary + queue 2 partners."""
+            def fire(self) -> list[StrategySignal]:
+                """Simulate one timestep: build 1 primary + 2 partners."""
                 primary = StrategySignal(
                     instrument=self.legs[0],
                     side="buy",
@@ -344,7 +323,7 @@ class TestMultiLegHostProtocol:
                     reason="primary",
                     price=self.candle_buffer[self.legs[0]][-1].close,
                 )
-                self._emit_partner_signals(
+                partners = self._build_partner_signals(
                     self.legs[0],
                     lambda leg, price: StrategySignal(
                         instrument=leg,
@@ -354,7 +333,7 @@ class TestMultiLegHostProtocol:
                         price=price,
                     ),
                 )
-                return primary
+                return [primary, *partners]
 
         config = _config(
             inputs=["candles.kraken.synthetic.1d"],
@@ -366,38 +345,9 @@ class TestMultiLegHostProtocol:
         host.candle_buffer["RENDER-USD"] = [_candle(NOW, 200.0)]
         host.candle_buffer["TAO-USD"] = [_candle(NOW, 300.0)]
 
-        primary = host.fire()
-        partners = host.drain_pending_signals()
+        signals = host.fire()
 
-        assert primary.instrument == "FET-USD"
-        assert primary.side == "buy"
-        assert len(partners) == 2
-        partner_legs = sorted(sig.instrument for sig in partners)
-        assert partner_legs == ["RENDER-USD", "TAO-USD"]
-        for sig in partners:
+        assert [sig.instrument for sig in signals] == ["FET-USD", "RENDER-USD", "TAO-USD"]
+        assert signals[0].side == "buy"
+        for sig in signals[1:]:
             assert sig.side == "sell"
-
-    def test_mixin_emit_paired_signal_stub_raises_without_host(self) -> None:
-        """Mixin's emit_paired_signal stub raises if no BaseStrategy host overrides it.
-
-        The mixin declares ``emit_paired_signal`` only as a type-checker
-        contract — the concrete implementation comes from ``BaseStrategy``
-        via the MRO. Calling the bare mixin method (i.e. without a
-        ``BaseStrategy`` host overriding it) must raise loudly so misuse
-        is caught at runtime instead of silently dropping signals.
-        """
-
-        class _BareHost(MultiLegSpreadMixin):
-            def __init__(self) -> None:
-                """Construct a bare mixin host without a BaseStrategy override."""
-
-        host = _BareHost()
-        sig = StrategySignal(
-            instrument="X",
-            side="buy",
-            strength=1.0,
-            reason="r",
-            price=1.0,
-        )
-        with pytest.raises(NotImplementedError, match="BaseStrategy host"):
-            MultiLegSpreadMixin.emit_paired_signal(host, sig)

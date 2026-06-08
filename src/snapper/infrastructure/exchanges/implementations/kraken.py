@@ -211,6 +211,36 @@ _CCXT_TYPE_MAP: Final[dict[str, ExchangeOrderTypeEnum]] = {
 }
 
 
+def _resolve_ccxt_fill_price(ccxt_order: dict[str, Any]) -> float | None:
+    """Resolve the snapshot price for a CCXT order.
+
+    Prefers the explicit ``price`` (the limit price). When ``price`` is
+    absent — the common case for market orders — falls back to the
+    executed average (``average``, the venue's VWAP across fills), but
+    only when the order has actually filled (``filled > 0``); an unfilled
+    order with no price stays ``None``. This lets fill-gap reconciliation
+    emit a corrective fill for filled market orders instead of skipping on
+    a missing price. The venue's own VWAP is used directly — the price is
+    never approximated from local ticks.
+
+    Args:
+        ccxt_order: Raw CCXT order dict (external SDK boundary).
+
+    Returns:
+        The resolved fill price, or ``None`` when neither a limit price
+        nor an executed average is available for a filled order.
+    """
+    price = ccxt_order.get("price")
+    if price:
+        return float(price)
+    average = ccxt_order.get("average")
+    if not average:
+        return None
+    if float(ccxt_order.get("filled") or 0) <= 0:
+        return None
+    return float(average)
+
+
 class KrakenExchangeClient(ExchangeClientBase):
     """Kraken exchange client with REST and WebSocket support.
 
@@ -2090,7 +2120,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             side=_CCXT_SIDE_MAP.get(ccxt_order.get("side", ""), OrderSideEnum.BUY),
             type=_CCXT_TYPE_MAP.get(ccxt_order.get("type", ""), ExchangeOrderTypeEnum.LIMIT),
             amount=float(ccxt_order.get("amount") or 0),
-            price=float(ccxt_order["price"]) if ccxt_order.get("price") else None,
+            price=_resolve_ccxt_fill_price(ccxt_order),
             status=_CCXT_STATUS_MAP[ccxt_order["status"]],
             filled=float(ccxt_order.get("filled") or 0),
             remaining=float(ccxt_order.get("remaining") or 0),

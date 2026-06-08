@@ -35,6 +35,7 @@ from snapper.data.repository_types import CandleRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import CandleData
 from snapper.strategies.base import BaseStrategy
+from snapper.strategies.models import StrategySignal
 
 
 class CandleEvent(NamedTuple):
@@ -217,15 +218,13 @@ async def process_time_batch(
     for event in batch:
         latest_closes[event.instrument] = float(event.row["close"])
 
-    signals_and_events: list[tuple[Any, CandleEvent]] = []
+    signals_and_events: list[tuple[StrategySignal, CandleEvent]] = []
     for event in batch:
         candle_data = candle_row_to_data(event, config.timeframe)
         payload = candle_data.model_dump_json()
-        signal = await strategy._handle_candle_data(event.instrument, payload)
-        if signal is not None:
+        signals = await strategy._handle_candle_data(event.instrument, payload)
+        for signal in signals:
             signals_and_events.append((signal, event))
-        for paired in strategy.drain_pending_signals():
-            signals_and_events.append((paired, event))
 
     if batch[0].open_at < config.start_date:
         return

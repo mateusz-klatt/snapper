@@ -88,7 +88,7 @@ def _pick_instruments_per_instance() -> tuple[list[str], list[str]]:
         - ``TradingEngineService.mode`` returns ``PAPER`` for paper
           exchange, so the base is ``paper.{instrument}.paper``.
         - ``_on_signal`` sets ``strategy_tag = parsed.signal_type`` for
-          paper exchange, and ``_compute_shard_key`` appends the tag.
+          paper exchange, and ``compute_shard_key`` appends the tag.
 
     Tests publish on ``signals.paper.{instrument}.live``, so
     ``signal_type = "live"``. Hence the canonical shard_key is

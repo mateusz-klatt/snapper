@@ -41,10 +41,10 @@ class _NoopStrategy(BaseStrategy):
     async def reset(self) -> None:
         """Reset is a no-op for the test strategy."""
 
-    async def _handle_candle_data(self, instrument: str, payload: str) -> StrategySignal | None:
+    async def _handle_candle_data(self, instrument: str, payload: str) -> list[StrategySignal]:
         """Record but do not emit."""
         self.handled_calls.append((instrument, payload))
-        return None
+        return []
 
 
 def _make_state(

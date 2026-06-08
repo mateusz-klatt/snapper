@@ -5310,6 +5310,54 @@ class TestKrakenLiveFixtures:
         "remaining": 0.0,
     }
 
+    CCXT_MARKET_AVG_FETCH: dict[str, Any] = {
+        "id": "OAVG01",
+        "clientOrderId": None,
+        "symbol": "BTC/EUR",
+        "type": "market",
+        "side": "sell",
+        "amount": 0.0001,
+        "price": None,
+        "average": 58000.0,
+        "status": "closed",
+        "timestamp": 1743800400000,
+        "fee": {"cost": 0.02329, "currency": "EUR"},
+        "filled": 0.0001,
+        "remaining": 0.0,
+    }
+
+    CCXT_MARKET_NOPRICE_NOAVG_FETCH: dict[str, Any] = {
+        "id": "ONOPX1",
+        "clientOrderId": None,
+        "symbol": "BTC/EUR",
+        "type": "market",
+        "side": "sell",
+        "amount": 0.0001,
+        "price": None,
+        "average": None,
+        "status": "closed",
+        "timestamp": 1743800400000,
+        "fee": None,
+        "filled": 0.0001,
+        "remaining": 0.0,
+    }
+
+    CCXT_MARKET_AVG_UNFILLED_FETCH: dict[str, Any] = {
+        "id": "OUNFIL",
+        "clientOrderId": None,
+        "symbol": "BTC/EUR",
+        "type": "market",
+        "side": "sell",
+        "amount": 0.0001,
+        "price": None,
+        "average": 58000.0,
+        "status": "open",
+        "timestamp": 1743800400000,
+        "fee": None,
+        "filled": 0.0,
+        "remaining": 0.0001,
+    }
+
     CCXT_CANCEL_INFLIGHT_CREATE: dict[str, Any] = {
         "id": "OLKARR",
         "clientOrderId": None,
@@ -5592,6 +5640,60 @@ class TestKrakenLiveFixtures:
         assert snapshot.status == ExchangeOrderStatusEnum.CLOSED
         assert snapshot.type == ExchangeOrderTypeEnum.MARKET
         assert snapshot.fee == pytest.approx(0.02329)
+
+    @pytest.mark.asyncio
+    async def test_ccxt_market_fetch_backfills_price_from_average(
+        self, client: KrakenExchangeClient
+    ) -> None:
+        """Verify a filled market order with no price backfills from average.
+
+        Given: A filled market order whose snapshot has ``price=None`` but
+            an executed ``average`` (the venue VWAP),
+        When: get_order is called,
+        Then: The snapshot price is taken from ``average`` so fill-gap
+            reconciliation can emit a corrective fill.
+        """
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_MARKET_AVG_FETCH))
+            snapshot = await client.get_order("OAVG01", "BTC-EUR")
+        assert snapshot.price == pytest.approx(58000.0)
+
+    @pytest.mark.asyncio
+    async def test_ccxt_market_fetch_no_price_no_average_is_none(
+        self, client: KrakenExchangeClient
+    ) -> None:
+        """Verify a market order with neither price nor average stays None.
+
+        Given: A filled market order whose snapshot has ``price=None`` and
+            ``average=None``,
+        When: get_order is called,
+        Then: The snapshot price is None (nothing to backfill from).
+        """
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.fetch_order = AsyncMock(
+                return_value=dict(self.CCXT_MARKET_NOPRICE_NOAVG_FETCH)
+            )
+            snapshot = await client.get_order("ONOPX1", "BTC-EUR")
+        assert snapshot.price is None
+
+    @pytest.mark.asyncio
+    async def test_ccxt_market_fetch_average_ignored_when_unfilled(
+        self, client: KrakenExchangeClient
+    ) -> None:
+        """Verify an unfilled market order does not backfill from average.
+
+        Given: An unfilled market order with ``price=None`` but a non-zero
+            ``average`` (filled=0),
+        When: get_order is called,
+        Then: The snapshot price stays None — average is only trusted once
+            the order has actually filled.
+        """
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.fetch_order = AsyncMock(
+                return_value=dict(self.CCXT_MARKET_AVG_UNFILLED_FETCH)
+            )
+            snapshot = await client.get_order("OUNFIL", "BTC-EUR")
+        assert snapshot.price is None
 
     @pytest.mark.asyncio
     async def test_ccxt_cancel_inflight_create_then_cancel(

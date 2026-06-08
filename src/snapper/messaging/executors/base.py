@@ -21,6 +21,7 @@ import zmq
 import zmq.asyncio
 from loguru import logger
 
+from snapper.application.engine.service import compute_shard_key
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import SettingsService
 from snapper.config.credentials import CredentialResolver
@@ -981,12 +982,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             else ExecutionModeEnum.LIVE
         )
         strategy_tag = params.get("strategy_tag")
-        base = f"{exchange_name}.{instrument}.{mode}"
-        if self.wallet_public_id:
-            wallet_short = compute_wallet_short(self.wallet_public_id)
-            base = f"{base}.w{wallet_short}"
-        shard_key = (
-            f"{base}.{strategy_tag}" if mode == ExecutionModeEnum.PAPER and strategy_tag else base
+        shard_key = compute_shard_key(
+            instrument=instrument,
+            exchange=cast(OrderExchange, exchange_name),
+            mode=mode,
+            wallet_public_id=self.wallet_public_id,
+            strategy_tag=strategy_tag,
         )
         now = datetime.now(UTC)
         try:
@@ -1167,11 +1168,18 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             (``"no price on market order, skipping corrective fill"``) and
             returns without emitting a corrective fill.
 
+            The CCXT snapshot builder backfills ``price`` from the
+            order's executed ``average`` (the venue's VWAP) when the limit
+            price is absent and the order has filled, so this skip now
+            only fires when the venue reports neither a price nor an
+            executed average for the order.
+
             Rationale: the executor does not subscribe to ticks and thus
             cannot approximate the fill price locally. Cross-process RPC
             against the publisher adds latency + rate-limit cost and still
             drifts relative to the true VWAP. Forcing an approximate price
-            would degrade position-projection accuracy silently.
+            would degrade position-projection accuracy silently — so when
+            even the venue's own average is missing, the skip is correct.
 
             Impact: the local position projection lags the exchange by the
             gap quantity. Whether the gap recovers on a later iteration

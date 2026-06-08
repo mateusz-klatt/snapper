@@ -12,7 +12,9 @@ import pytest
 
 import snapper.application.engine.trader as trader_module
 from snapper.application.engine.service import TradingEngineService
+from snapper.application.engine.service import compute_shard_key
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.data.repository import SQLAlchemyRepository
@@ -67,6 +69,15 @@ def _make_signal(
         strategy_name="test",
         fired_at=datetime.now(UTC),
     )
+
+
+def _owning_partition(shard_key: str) -> ShardOwnership:
+    """Return the owner for ``shard_key`` in a two-instance deployment."""
+    for instance_id in range(2):
+        ownership = ShardOwnership(instance_id=instance_id, instance_count=2)
+        if ownership.owns(shard_key):
+            return ownership
+    raise AssertionError(f"No owner resolved for shard_key={shard_key}")
 
 
 class TestShardKeyFormat:
@@ -303,6 +314,58 @@ class TestStatusEventRouting:
         coord._sync_status_to_trade_service(order_status, parsed)
 
         assert "paper.BTC-USD.paper" in coord.trade_service._shards
+
+
+class TestPartitionedManualOrderRouting:
+    """Manual order CIDs pass the N>=2 venue-event ownership filter."""
+
+    @pytest.mark.asyncio
+    async def test_registered_manual_cid_is_not_dropped_under_partitioning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Registered manual CID reaches the order-status handler.
+
+        Given: a two-instance coordinator that owns the wallet-aware
+            shard key persisted by REST or MCP for a manual order,
+        When: a venue ACK arrives with that registered
+            ``client_order_id``,
+        Then: ``_dispatch_order_event`` does not drop the event at the
+            N>=2 CID filter.
+        """
+        coord = _make_coord(monkeypatch)
+        shard_key = compute_shard_key(
+            instrument="BTC-USD",
+            exchange="kraken",
+            mode=ExecutionModeEnum.LIVE,
+            wallet_public_id="wallet-1",
+            strategy_tag=None,
+        )
+        coord._ownership = _owning_partition(shard_key)
+        coord._order_shard_keys["cid-manual"] = shard_key
+        coord._handle_order_status = MagicMock()
+        order_status = OrderData(
+            public_id="order-status-1",
+            timestamp=datetime(2026, 4, 10, tzinfo=UTC),
+            session_id="s1",
+            sequence_id=1,
+            exchange_order_id="ex-1",
+            client_order_id="cid-manual",
+            instrument="BTC-USD",
+            exchange="kraken",
+            mode=ExecutionModeEnum.LIVE,
+            side="buy",
+            status="accepted",
+            order_type="market",
+            size=0.5,
+            filled_size=0.0,
+            created_at=datetime(2026, 4, 10, tzinfo=UTC),
+            wallet_public_id="wallet-1",
+        )
+        await coord._dispatch_order_event(
+            "orders.events.kraken.BTC-USD.accepted",
+            order_status.to_json().encode("utf-8"),
+        )
+        coord._handle_order_status.assert_called_once()
 
 
 class TestCheckpointRecoveryWithSharding:

@@ -72,9 +72,10 @@ def _config(
 
 
 def _strategy(signal: StrategySignal | None) -> MagicMock:
-    """Stub strategy returning ``signal`` on every candle."""
+    """Stub strategy returning ``signal`` (as a one-leg group) on every candle."""
     strategy = MagicMock(spec=BaseStrategy)
-    strategy._handle_candle_data = AsyncMock(return_value=signal)
+    signals = [signal] if signal is not None else []
+    strategy._handle_candle_data = AsyncMock(return_value=signals)
     return strategy
 
 
@@ -314,20 +315,19 @@ class TestTargetAttribution:
         assert collector.trades[0]["instrument"] == "BTC-USD"
 
 
-class TestPairedSignalDrain:
-    """``process_time_batch`` drains paired signals queued by the strategy."""
+class TestPairedSignalGroup:
+    """``process_time_batch`` processes every leg of a returned signal group."""
 
     @pytest.mark.asyncio
     async def test_paired_signals_are_processed_alongside_primary(self) -> None:
-        """Drained paired signals reach the fill simulation.
+        """Every leg of the returned group reaches the fill simulation.
 
-        Given: a strategy whose ``_handle_candle_data`` returns a primary
-            BUY signal on BTC-USD AND queues a paired SELL signal on
-            ETH-USD via ``drain_pending_signals`` (the contract used by
-            CointegrationPairs for paired-signal entries),
+        Given: a strategy whose ``_handle_candle_data`` returns a group
+            ``[primary BUY on BTC-USD, partner BUY on ETH-USD]`` (the
+            contract used by CointegrationPairs for paired-signal entries),
         When: ``process_time_batch`` runs over a single candle event,
-        Then: both signals get fills — the trades collection contains
-            one BTC-USD entry and one ETH-USD entry.
+        Then: both legs get fills — the trades collection contains one
+            BTC-USD entry and one ETH-USD entry.
         """
         primary = StrategySignal(
             instrument="BTC-USD",
@@ -344,8 +344,7 @@ class TestPairedSignalDrain:
             price=2_500.0,
         )
         strategy = MagicMock(spec=BaseStrategy)
-        strategy._handle_candle_data = AsyncMock(return_value=primary)
-        strategy.drain_pending_signals = MagicMock(side_effect=[[partner], []])
+        strategy._handle_candle_data = AsyncMock(return_value=[primary, partner])
 
         collector = ResultCollector()
         portfolio = PortfolioTracker(cash=10_000.0)

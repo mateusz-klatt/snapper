@@ -48,6 +48,7 @@ from snapper.strategies.base import BaseStrategy
 from snapper.strategies.base import CompositeStrategy
 from snapper.strategies.base import StrategyConfig
 from snapper.strategies.base import StrategySignal
+from snapper.strategies.base import StrategySignalResult
 from snapper.strategies.cointegration import CointegrationPairs
 from snapper.strategies.factory import StrategyFactory
 from snapper.strategies.factory import StrategyNotFoundError
@@ -89,13 +90,19 @@ def make_candle_envelope(
     )
 
 
-async def feed_bar_to_strategy(
+async def feed_bar_returning_group(
     strategy: BaseStrategy,
     instrument: str,
     close: float,
     exchange: str = "kraken",
-) -> StrategySignal | None:
-    """Feed a single candle to strategy and return resulting signal."""
+) -> StrategySignalResult:
+    """Feed a candle and return the RAW callback result (list / single / None).
+
+    Unlike :func:`feed_bar_to_strategy` (which collapses a multi-leg list
+    to its primary leg so single-signal assertions keep working), this
+    returns the full group so multi-leg emission can be asserted leg by
+    leg.
+    """
     candle = make_candle_envelope(instrument, close, exchange=exchange)
     if instrument not in strategy.candle_buffer:
         strategy.candle_buffer[instrument] = []
@@ -104,6 +111,25 @@ async def feed_bar_to_strategy(
     if len(strategy.candle_buffer[instrument]) > max_buffer_size:
         strategy.candle_buffer[instrument].pop(0)
     return await strategy.on_candle(instrument, candle)
+
+
+async def feed_bar_to_strategy(
+    strategy: BaseStrategy,
+    instrument: str,
+    close: float,
+    exchange: str = "kraken",
+) -> StrategySignal | None:
+    """Feed a single candle and return the primary resulting signal.
+
+    Collapses the multi-leg return contract to a single signal for the
+    many single-signal assertions: a returned ``list[StrategySignal]``
+    yields its first (primary / current-instrument) leg, an empty list
+    yields ``None``, and a single signal / ``None`` passes through.
+    """
+    result = await feed_bar_returning_group(strategy, instrument, close, exchange)
+    if isinstance(result, list):
+        return result[0] if result else None
+    return result
 
 
 async def feed_closes_to_strategy(
@@ -1027,16 +1053,82 @@ async def test_listen_loop_handles_trade_data() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_market_data_unknown_topic_returns_none() -> None:
-    """Verify dispatcher returns None for unsupported market topic type.
+async def test_dispatch_market_data_unknown_topic_returns_empty() -> None:
+    """Verify dispatcher returns an empty group for unsupported market topic type.
 
     Given: Strategy instance and unsupported market topic suffix,
     When: _dispatch_market_data is called,
-    Then: Method returns None without raising.
+    Then: Method returns an empty list without raising.
     """
     strategy = FakeStrategy(_strategy_config(inputs=["market.kraken.BTC-USD.candles.1h"]))
     result = await strategy._dispatch_market_data("market.kraken.BTC-USD.book", "BTC-USD", "{}")
-    assert result is None
+    assert result == []
+
+
+class TestSignalGroupNormalization:
+    """Fail-closed group preflight for the multi-leg signal contract."""
+
+    @staticmethod
+    def _paper_strategy() -> FakeStrategy:
+        """Two-output PAPER strategy for group-validation tests."""
+        return FakeStrategy(
+            _strategy_config(
+                inputs=[
+                    "market.paper.kraken.BTC-USD.candles.1h",
+                    "market.paper.kraken.ETH-USD.candles.1h",
+                ],
+                outputs=["BTC-USD", "ETH-USD"],
+                exchange="paper",
+            )
+        )
+
+    @staticmethod
+    def _signal(instrument: str, side: str = "buy") -> StrategySignal:
+        """Build a minimal signal for one instrument."""
+        return StrategySignal(instrument=instrument, side=side, strength=1.0, reason="r", price=1.0)
+
+    def test_none_returns_empty_group(self) -> None:
+        """None collapses to an empty group."""
+        s = self._paper_strategy()
+        assert s._normalize_signal_group(None) == []
+
+    def test_single_signal_wrapped_in_list(self) -> None:
+        """A single signal is wrapped into a one-element group."""
+        s = self._paper_strategy()
+        sig = self._signal("BTC-USD")
+        assert s._normalize_signal_group(sig) == [sig]
+
+    def test_valid_multi_leg_group_order_preserved(self) -> None:
+        """A valid multi-leg list passes through in declared order."""
+        s = self._paper_strategy()
+        legs = [self._signal("BTC-USD", "sell"), self._signal("ETH-USD", "buy")]
+        assert s._normalize_signal_group(legs) == legs
+
+    def test_duplicate_instrument_raises(self) -> None:
+        """Two legs on the same instrument fail closed."""
+        s = self._paper_strategy()
+        legs = [self._signal("BTC-USD"), self._signal("BTC-USD")]
+        with pytest.raises(ValueError, match="duplicate instrument"):
+            s._normalize_signal_group(legs)
+
+    def test_instrument_not_in_outputs_raises(self) -> None:
+        """A leg whose instrument is not a configured output fails closed."""
+        s = self._paper_strategy()
+        legs = [self._signal("BTC-USD"), self._signal("SOL-USD")]
+        with pytest.raises(ValueError, match="not allowed"):
+            s._normalize_signal_group(legs)
+
+    def test_non_signal_element_raises(self) -> None:
+        """A non-StrategySignal element fails closed."""
+        s = self._paper_strategy()
+        with pytest.raises(TypeError, match="every leg"):
+            s._normalize_signal_group(cast(Any, [self._signal("BTC-USD"), "nope"]))
+
+    def test_non_signal_non_list_return_raises(self) -> None:
+        """A return that is neither None, signal, nor list fails closed."""
+        s = self._paper_strategy()
+        with pytest.raises(TypeError, match="callback must return"):
+            s._normalize_signal_group(cast(Any, 123))
 
 
 @pytest.mark.asyncio
@@ -4373,19 +4465,19 @@ class TestCointegrationInitialization:
             CointegrationPairs(config=strategy_config)
 
     @pytest.mark.asyncio
-    async def test_entry_emits_paired_signal_for_partner_leg(
+    async def test_entry_returns_both_legs_as_a_group(
         self, coint_strategy_config: StrategyConfig
     ) -> None:
-        """Verify spread entry queues a partner-leg signal alongside the primary.
+        """Verify spread entry returns BOTH legs as a single ordered group.
 
         Given: A CointegrationPairs strategy with two legs buffered to
             min_data_points + lookback_window with prices that diverge
             enough on the last candle to push the z-score past the
             entry threshold,
         When: ``on_candle`` is called for instrument1,
-        Then: the returned signal is for instrument1 AND
-            ``drain_pending_signals`` returns exactly one signal for
-            instrument2 with the opposite side and proportional strength.
+        Then: it returns ``[primary, hedge]`` — the primary leg for
+            instrument1 followed by the hedge leg for instrument2 with the
+            opposite side — and there is no side-channel queue.
         """
         coint_strategy_config.params = {
             "beta": 1.0,
@@ -4399,46 +4491,13 @@ class TestCointegrationInitialization:
             await feed_bar_to_strategy(strategy, "BTC-USD", 100.0)
             await feed_bar_to_strategy(strategy, "ETH-USD", 100.0)
 
-        signal = await feed_bar_to_strategy(strategy, "BTC-USD", 130.0)
+        group = await feed_bar_returning_group(strategy, "BTC-USD", 130.0)
 
-        assert signal is not None
-        assert signal.instrument == "BTC-USD"
-        assert signal.side == TradeSideEnum.SELL
-        paired = strategy.drain_pending_signals()
-        assert len(paired) == 1
-        assert paired[0].instrument == "ETH-USD"
-        assert paired[0].side == TradeSideEnum.BUY
-        assert strategy.drain_pending_signals() == []
-
-    @pytest.mark.asyncio
-    async def test_drain_pending_signals_returns_empty_after_drain(
-        self, coint_strategy_config: StrategyConfig
-    ) -> None:
-        """Verify the queue is one-shot per drain.
-
-        Given: A strategy with a paired signal queued,
-        When: ``drain_pending_signals`` is called twice,
-        Then: the first call returns the signals; the second returns
-            an empty list (queue cleared).
-        """
-        coint_strategy_config.params = {
-            "beta": 1.0,
-            "entry_threshold": 1.5,
-            "exit_threshold": 0.5,
-            "lookback_window": 30,
-            "min_data_points": 30,
-        }
-        strategy = CointegrationPairs(config=coint_strategy_config)
-        for _ in range(40):
-            await feed_bar_to_strategy(strategy, "BTC-USD", 100.0)
-            await feed_bar_to_strategy(strategy, "ETH-USD", 100.0)
-        await feed_bar_to_strategy(strategy, "BTC-USD", 130.0)
-
-        first = strategy.drain_pending_signals()
-        second = strategy.drain_pending_signals()
-
-        assert len(first) == 1
-        assert second == []
+        assert isinstance(group, list)
+        assert [sig.instrument for sig in group] == ["BTC-USD", "ETH-USD"]
+        assert group[0].side == TradeSideEnum.SELL
+        assert group[1].side == TradeSideEnum.BUY
+        assert not hasattr(strategy, "_pending_signals")
 
     def test_extract_instrument_from_topic(self) -> None:
         """Verify _extract_instrument parses topic correctly.
@@ -4606,6 +4665,22 @@ class TestCointegrationSignalGeneration:
         assert signal_btc.strength > 0
         assert "long spread" in signal_btc.reason.lower()
         assert strategy._position == "long_spread"
+
+    def test_entry_skipped_when_partner_price_missing(self, strategy: CointegrationPairs) -> None:
+        """No naked leg: a triggered entry with no partner price stays flat.
+
+        Given: a flat strategy whose partner (instrument2) candle buffer
+            is empty,
+        When: ``_generate_signal_from_zscore`` resolves an entry decision
+            (z-score well past the threshold),
+        Then: it returns ``None`` (no signal group built) and leaves
+            ``_position`` unchanged, so a single naked leg is never emitted
+            or internally entered.
+        """
+        strategy.candle_buffer["ETH-USD"] = []
+        result = strategy._generate_signal_from_zscore(100.0, "BTC-USD", 100.0)
+        assert result is None
+        assert strategy._position is None
 
     @pytest.mark.asyncio
     async def test_entry_signal_instrument2_hedge(self, strategy: CointegrationPairs) -> None:

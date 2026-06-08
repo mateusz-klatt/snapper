@@ -101,7 +101,10 @@ async def feed_bar_to_strategy(
     max_buffer_size = strategy.params.get("buffer_size", 100)
     if len(strategy.candle_buffer[instrument]) > max_buffer_size:
         strategy.candle_buffer[instrument].pop(0)
-    return await strategy.on_candle(instrument, candle)
+    result = await strategy.on_candle(instrument, candle)
+    if isinstance(result, list):
+        return result[0] if result else None
+    return result
 
 
 class TestDispatcherReauthFailure:
@@ -296,7 +299,8 @@ class TestCointegrationInstrument2ExitDirect:
 
         Given: Strategy with short_spread position and exit z-score,
         When: _generate_signal_from_zscore is called for ETH-USD,
-        Then: Sell signal with "Exit short spread hedge" reason returned.
+        Then: The returned group's ETH leg is a sell with "Exit short
+            spread hedge" reason (the BTC partner is built alongside it).
         """
         config = StrategyConfig(
             name="test_coint",
@@ -316,17 +320,19 @@ class TestCointegrationInstrument2ExitDirect:
             },
         )
         strategy = CointegrationPairs(config)
+        strategy.candle_buffer["BTC-USD"] = [make_candle_envelope("BTC-USD", 50000.0)]
         strategy._position = "short_spread"
-        signal = strategy._generate_signal_from_zscore(
+        signals = strategy._generate_signal_from_zscore(
             z_score=0.3,
             instrument="ETH-USD",
             price=3000.0,
         )
-        assert signal is not None
-        assert signal.instrument == "ETH-USD"
-        assert signal.side == "sell"
-        assert signal.strength == pytest.approx(0.0)
-        assert "Exit short spread hedge" in signal.reason
+        assert signals is not None
+        eth_leg = signals[0]
+        assert eth_leg.instrument == "ETH-USD"
+        assert eth_leg.side == "sell"
+        assert eth_leg.strength == pytest.approx(0.0)
+        assert "Exit short spread hedge" in eth_leg.reason
 
     @pytest.mark.asyncio
     async def test_generate_signal_long_spread_no_exit(self) -> None:
@@ -368,7 +374,8 @@ class TestCointegrationInstrument2ExitDirect:
 
         Given: Strategy with long_spread position and exit z-score,
         When: _generate_signal_from_zscore is called for ETH-USD,
-        Then: Buy signal with "Exit long spread hedge" reason returned.
+        Then: The returned group's ETH leg is a buy with "Exit long spread
+            hedge" reason and the position is cleared.
         """
         config = StrategyConfig(
             name="test_coint",
@@ -388,17 +395,19 @@ class TestCointegrationInstrument2ExitDirect:
             },
         )
         strategy = CointegrationPairs(config)
+        strategy.candle_buffer["BTC-USD"] = [make_candle_envelope("BTC-USD", 50000.0)]
         strategy._position = "long_spread"
-        signal = strategy._generate_signal_from_zscore(
+        signals = strategy._generate_signal_from_zscore(
             z_score=-0.1,
             instrument="ETH-USD",
             price=3000.0,
         )
-        assert signal is not None
-        assert signal.instrument == "ETH-USD"
-        assert signal.side == "buy"
-        assert signal.strength == pytest.approx(0.0)
-        assert "Exit long spread hedge" in signal.reason
+        assert signals is not None
+        eth_leg = signals[0]
+        assert eth_leg.instrument == "ETH-USD"
+        assert eth_leg.side == "buy"
+        assert eth_leg.strength == pytest.approx(0.0)
+        assert "Exit long spread hedge" in eth_leg.reason
         assert strategy._position is None
 
     def test_generate_signal_exit_long_spread_instrument1(self) -> None:
@@ -406,7 +415,8 @@ class TestCointegrationInstrument2ExitDirect:
 
         Given: Strategy with long_spread position and exit z-score,
         When: _generate_signal_from_zscore is called for BTC-USD,
-        Then: Sell signal with "Exit long spread" reason returned.
+        Then: The returned group's BTC leg is a sell with "Exit long
+            spread" reason and the position is cleared.
         """
         config = StrategyConfig(
             name="test_coint",
@@ -426,17 +436,19 @@ class TestCointegrationInstrument2ExitDirect:
             },
         )
         strategy = CointegrationPairs(config)
+        strategy.candle_buffer["ETH-USD"] = [make_candle_envelope("ETH-USD", 3000.0)]
         strategy._position = "long_spread"
-        signal = strategy._generate_signal_from_zscore(
+        signals = strategy._generate_signal_from_zscore(
             z_score=-0.1,
             instrument="BTC-USD",
             price=50000.0,
         )
-        assert signal is not None
-        assert signal.instrument == "BTC-USD"
-        assert signal.side == "sell"
-        assert signal.strength == pytest.approx(0.0)
-        assert "Exit long spread" in signal.reason
+        assert signals is not None
+        btc_leg = signals[0]
+        assert btc_leg.instrument == "BTC-USD"
+        assert btc_leg.side == "sell"
+        assert btc_leg.strength == pytest.approx(0.0)
+        assert "Exit long spread" in btc_leg.reason
         assert strategy._position is None
 
     def test_generate_signal_unknown_position_returns_none(self) -> None:

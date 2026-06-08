@@ -14,10 +14,11 @@ Two pieces ship here:
   synthetic shape (one synthetic input plus N output instruments).
 
 - :class:`MultiLegSpreadMixin` — adds ``self.legs``, partner-leg
-  iteration helpers, and a paired-signal emission convenience that
-  drives ``BaseStrategy.emit_paired_signal`` for each partner leg in
-  declaration order. ``BaseStrategy.drain_pending_signals`` already
-  handles N>1 entries (the batch processor drains a list).
+  iteration helpers, and a pure partner-signal builder that returns one
+  ``StrategySignal`` per partner leg in declaration order. The host
+  strategy returns ``[primary, *partners]`` from its ``on_candle`` so
+  ``BaseStrategy`` emits every leg atomically; there is no side-channel
+  queue.
 """
 
 from collections.abc import Callable
@@ -116,10 +117,10 @@ class MultiLegSpreadMixin:
     - ``self._partner_prices(current_instrument)`` — dict mapping
       partner leg to last buffered close, omitting partners with empty
       buffers (the same warmup gate the cointegration strategy uses).
-    - ``self._emit_partner_signals(current_instrument, builder)`` —
-      builds and queues one ``StrategySignal`` per buffered partner via
-      the host's ``emit_paired_signal``. The batch processor drains
-      every queued entry in the same timestep.
+    - ``self._build_partner_signals(current_instrument, builder)`` —
+      a PURE builder returning one ``StrategySignal`` per buffered
+      partner. The host strategy returns ``[primary, *partners]`` from
+      ``on_candle`` so ``BaseStrategy`` emits every leg atomically.
 
     The mixin does not subclass ``BaseStrategy``; subclasses do that
     on their own. That keeps the ``BaseStrategy`` MRO linear and avoids
@@ -131,33 +132,11 @@ class MultiLegSpreadMixin:
     - ``config: StrategyConfig`` — read by ``_init_legs``.
     - ``candle_buffer: dict[str, list[CandleData]]`` — read by
       ``_partner_prices``.
-    - ``emit_paired_signal(signal)`` — called by
-      ``_emit_partner_signals``.
     """
 
     config: StrategyConfig
     candle_buffer: dict[str, list[CandleData]]
     legs: tuple[str, ...]
-
-    def emit_paired_signal(self, signal: StrategySignal) -> None:
-        """Queue a partner-leg signal — implemented by ``BaseStrategy``.
-
-        This stub exists for static type checkers; the real
-        implementation comes from the cooperating ``BaseStrategy``
-        subclass and the ``BaseStrategy.emit_paired_signal`` method
-        will be the one actually called at runtime via the MRO.
-
-        Args:
-            signal: The partner-leg ``StrategySignal`` to enqueue.
-
-        Raises:
-            NotImplementedError: When the mixin is used without a
-                cooperating ``BaseStrategy`` host that supplies the
-                concrete ``emit_paired_signal`` implementation.
-        """
-        raise NotImplementedError(
-            "MultiLegSpreadMixin requires a BaseStrategy host providing emit_paired_signal"
-        )
 
     def _init_legs(self, expected_count: int | None = None) -> None:
         """Populate ``self.legs`` from ``self.config``.
@@ -191,18 +170,29 @@ class MultiLegSpreadMixin:
                 out[leg] = float(bars[-1].close)
         return out
 
-    def _emit_partner_signals(
+    def _build_partner_signals(
         self,
         current_instrument: str,
         builder: Callable[[str, float], StrategySignal],
-    ) -> None:
-        """Queue a partner-leg ``StrategySignal`` for each buffered partner.
+    ) -> list[StrategySignal]:
+        """Build one partner-leg ``StrategySignal`` per buffered partner.
 
-        For each partner leg with at least one buffered candle, calls
-        ``builder(leg, last_close)`` and queues the result via
-        ``self.emit_paired_signal``. The primary signal returned by
-        ``on_candle`` is unaffected; the batch processor drains the
-        queued entries immediately after.
+        Pure function of ``self.candle_buffer`` and ``self.legs`` — no
+        shared mutable state, no emission side effects. For each partner
+        leg with at least one buffered candle, calls
+        ``builder(leg, last_close)``. The host strategy concatenates the
+        result after its primary signal and returns the combined list
+        from ``on_candle`` so every leg is emitted atomically.
+
+        Args:
+            current_instrument: The leg whose candle is being processed.
+            builder: Callable mapping ``(partner_leg, last_close)`` to a
+                partner ``StrategySignal``.
+
+        Returns:
+            One ``StrategySignal`` per buffered partner, in declaration
+            order; empty when no partner has a buffered candle yet.
         """
-        for leg, price in self._partner_prices(current_instrument).items():
-            self.emit_paired_signal(builder(leg, price))
+        return [
+            builder(leg, price) for leg, price in self._partner_prices(current_instrument).items()
+        ]

@@ -29,6 +29,7 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderCancelData
+from snapper.messaging.schemas.data import OrderRequestData
 from snapper.messaging.schemas.data import SignalData
 
 
@@ -1659,6 +1660,7 @@ async def test_outbox_publish_sends_to_zmq() -> None:
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.msg_publisher = AsyncMock()
+    coord._order_shard_keys = {}
     cmd: dict[str, Any] = {
         "public_id": "cmd-1",
         "client_order_id": "cid-1",
@@ -1679,6 +1681,80 @@ async def test_outbox_publish_sends_to_zmq() -> None:
     }
     await coord._outbox_publish(cmd)
     coord.msg_publisher.send.assert_called_once()
+    sent_order = coord.msg_publisher.send.call_args.args[1]
+    assert isinstance(sent_order, OrderRequestData)
+    assert coord._order_shard_keys == {"cid-1": "kraken.BTC-USD.live"}
+
+
+@pytest.mark.asyncio
+async def test_outbox_publish_submit_registers_order_shard_key() -> None:
+    """Outbox publish registers submit CID to shard-key mapping.
+
+    Given: a TraderCoordinator with a mocked msg_publisher and a
+        ``command_type='submit'`` TradeCommandRow,
+    When: ``_outbox_publish`` successfully sends the order request,
+    Then: ``_order_shard_keys`` maps the client order id to the
+        persisted shard key so N>=2 venue events can pass the CID
+        ownership filter.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.msg_publisher = AsyncMock()
+    coord._order_shard_keys = {}
+    cmd: dict[str, Any] = {
+        "public_id": "cmd-submit",
+        "client_order_id": "cid-submit",
+        "command_type": "submit",
+        "shard_key": "kraken.BTC-USD.live.w123456789abc",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "manual",
+        "side": "buy",
+        "order_type": "market",
+        "quantity": 0.5,
+        "price": None,
+        "leverage": None,
+        "reduce_only": False,
+        "session_id": "s1",
+        "sequence_id": 4,
+    }
+    await coord._outbox_publish(cmd)
+    coord.msg_publisher.send.assert_called_once()
+    assert coord._order_shard_keys == {"cid-submit": "kraken.BTC-USD.live.w123456789abc"}
+
+
+@pytest.mark.asyncio
+async def test_outbox_publish_replace_does_not_register_order_shard_key() -> None:
+    """Outbox publish leaves CID mapping unchanged for replace rows.
+
+    Given: a non-cancel command that is not a create/submit manual order,
+    When: ``_outbox_publish`` publishes the current compatibility frame,
+    Then: ``_order_shard_keys`` is not populated for that client order id.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.msg_publisher = AsyncMock()
+    coord._order_shard_keys = {}
+    cmd: dict[str, Any] = {
+        "public_id": "cmd-replace",
+        "client_order_id": "cid-replace",
+        "command_type": "replace",
+        "shard_key": "kraken.BTC-USD.live.w123456789abc",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "manual",
+        "side": "buy",
+        "order_type": "limit",
+        "quantity": 0.5,
+        "price": 50000.0,
+        "leverage": None,
+        "reduce_only": False,
+        "session_id": "s1",
+        "sequence_id": 5,
+    }
+    await coord._outbox_publish(cmd)
+    coord.msg_publisher.send.assert_called_once()
+    assert coord._order_shard_keys == {}
 
 
 @pytest.mark.asyncio
@@ -1694,6 +1770,7 @@ async def test_outbox_publish_cancel_sends_order_cancel_data() -> None:
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.msg_publisher = AsyncMock()
+    coord._order_shard_keys = {}
     cmd: dict[str, Any] = {
         "public_id": "cmd-cancel",
         "client_order_id": "cid-cancel",
@@ -1724,6 +1801,7 @@ async def test_outbox_publish_cancel_sends_order_cancel_data() -> None:
     assert isinstance(sent_msg, OrderCancelData)
     assert sent_msg.client_order_id == "cid-cancel"
     assert sent_msg.exchange_order_id == "ex-1"
+    assert coord._order_shard_keys == {}
 
 
 @pytest.mark.asyncio
@@ -1830,6 +1908,7 @@ async def test_outbox_publish_propagates_leverage_and_reduce_only() -> None:
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.msg_publisher = AsyncMock()
+    coord._order_shard_keys = {}
     cmd: dict[str, Any] = {
         "public_id": "cmd-lev",
         "client_order_id": "cid-lev",

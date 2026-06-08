@@ -105,9 +105,10 @@ def _make_config(
 
 
 def _make_strategy(signal: StrategySignal | None) -> MagicMock:
-    """Stub strategy returning a fixed signal (or None) on every candle."""
+    """Stub strategy returning a fixed signal group (or empty) on every candle."""
     strategy = MagicMock(spec=BaseStrategy)
-    strategy._handle_candle_data = AsyncMock(return_value=signal)
+    signals = [signal] if signal is not None else []
+    strategy._handle_candle_data = AsyncMock(return_value=signals)
     return strategy
 
 
