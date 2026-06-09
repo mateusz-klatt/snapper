@@ -350,6 +350,27 @@ class AppSettings:
         return self._get_db_setting("ws_token_ttl_seconds", 900)
 
     @property
+    def feed_egress_enabled(self) -> bool:
+        """Return whether feed publishers route market data through the egress pool.
+
+        Default off: feed publishers connect directly to the exchanges. When
+        enabled, each publisher process initializes the egress pool at startup
+        so the Kraken connect shim and Walutomat's pooled HTTP transport route
+        through the configured WireGuard/SOCKS tunnels (direct stays the
+        fallback). Coerced defensively so a string ``"false"`` setting value
+        does not read as truthy.
+
+        Returns:
+            True when the feed should use the egress pool, else False.
+        """
+        raw = self._get_db_setting("feed_egress_enabled", False)
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            return raw.strip().lower() in ("true", "1", "yes", "on")
+        return bool(raw)
+
+    @property
     def instruments(self) -> dict[str, list[str]]:
         """Return configured trading instruments per exchange.
 

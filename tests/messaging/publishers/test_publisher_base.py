@@ -909,6 +909,43 @@ async def test_default_attempt_liveness_recovery_logs_error_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_maybe_init_egress_pool_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """feed_egress_enabled initializes the egress pool in the publisher process.
+
+    Given: A publisher whose feed_egress_enabled is True,
+    When: _maybe_init_egress_pool runs,
+    Then: The shared safe egress-pool init is awaited with the settings service.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.settings = SimpleNamespace(feed_egress_enabled=True)
+    init_mock = AsyncMock()
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.safely_initialize_egress_pool", init_mock
+    )
+    service = MagicMock()
+    await pub._maybe_init_egress_pool(service)
+    init_mock.assert_awaited_once_with(service)
+
+
+@pytest.mark.asyncio
+async def test_maybe_init_egress_pool_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default-off gate leaves feeds on their direct connections.
+
+    Given: A publisher whose feed_egress_enabled is False,
+    When: _maybe_init_egress_pool runs,
+    Then: The egress-pool init is not called.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.settings = SimpleNamespace(feed_egress_enabled=False)
+    init_mock = AsyncMock()
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.safely_initialize_egress_pool", init_mock
+    )
+    await pub._maybe_init_egress_pool(MagicMock())
+    init_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_liveness_fires_recovery_within_one_heartbeat_after_threshold_crossed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -445,6 +445,34 @@ async def initialize_egress_pool(
     return configure_egress_pool(effective)
 
 
+async def safely_initialize_egress_pool(settings_service: SettingsService) -> None:
+    """Run the egress-pool preflight without crashing the caller on failure.
+
+    Reads the ``egress_pool`` setting, validates the schema, resolves SOCKS5
+    DNS, and installs the process-local singleton. Errors (malformed JSON,
+    Pydantic mismatch, DNS timeouts) are logged but never propagate — the pool
+    is best-effort infrastructure. This is called once per process during
+    startup (the singleton is empty beforehand), so on failure the pool stays
+    empty and the connect shim falls back to the direct path; it does not reset
+    a previously-installed pool, so it is not safe for hot-reload as written.
+    Shared by the API lifespan and the feed publisher startup so both processes
+    initialize identically.
+
+    Args:
+        settings_service: Initialized SettingsService whose cache holds the
+            ``egress_pool`` setting.
+
+    Returns:
+        None.
+    """
+    try:
+        await initialize_egress_pool(settings_service)
+    except Exception:
+        logger.exception(
+            "egress_pool: preflight failed; pool disabled and callers fall back to direct egress"
+        )
+
+
 def _parse_egress_pool_setting(
     raw: object,
 ) -> dict[str, object] | None:

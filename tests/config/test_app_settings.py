@@ -85,6 +85,44 @@ class TestAppSettingsMarketDataProperties:
         assert settings.polygon_api_key == "poly-key"
 
 
+class TestAppSettingsFeedEgress:
+    """Tests for the feed_egress_enabled gate (default off, robust coercion)."""
+
+    def test_defaults_off_when_absent(self) -> None:
+        """Verify an absent setting reads as False (feeds stay direct)."""
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        settings = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert settings.feed_egress_enabled is False
+
+    def test_true_bool_enables(self) -> None:
+        """Verify a boolean True enables feed egress."""
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({"feed_egress_enabled": True})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.feed_egress_enabled is True
+
+    def test_truthy_string_enables(self) -> None:
+        """Verify a 'true' string value enables feed egress."""
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({"feed_egress_enabled": "true"})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.feed_egress_enabled is True
+
+    def test_false_string_does_not_enable(self) -> None:
+        """Verify a 'false' string value does NOT read as truthy (footgun guard)."""
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({"feed_egress_enabled": "false"})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.feed_egress_enabled is False
+
+    def test_nonstring_nonbool_coerced(self) -> None:
+        """Verify a non-bool/non-string truthy value is coerced via bool()."""
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({"feed_egress_enabled": 1})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.feed_egress_enabled is True
+
+
 class TestAppSettingsAuthProperties:
     """Tests for AppSettings authentication property accessors."""
 

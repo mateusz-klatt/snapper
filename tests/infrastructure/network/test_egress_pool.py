@@ -6,7 +6,9 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -24,6 +26,7 @@ from snapper.infrastructure.network.egress_pool import configure_egress_pool
 from snapper.infrastructure.network.egress_pool import get_egress_pool
 from snapper.infrastructure.network.egress_pool import initialize_egress_pool
 from snapper.infrastructure.network.egress_pool import reset_egress_pool
+from snapper.infrastructure.network.egress_pool import safely_initialize_egress_pool
 
 
 @pytest.fixture(autouse=True)
@@ -1407,3 +1410,38 @@ class TestInitializeEgressPool:
         result = await initialize_egress_pool(service)
         assert result is not None
         assert result.size() == 1
+
+
+class TestSafelyInitializeEgressPool:
+    """Best-effort wrapper shared by the API lifespan and feed publishers."""
+
+    @pytest.mark.asyncio
+    async def test_invokes_initialize_with_service(self) -> None:
+        """Verify the wrapper runs the preflight with the settings_service.
+
+        Given: A settings service and a successful preflight,
+        When: safely_initialize_egress_pool is awaited,
+        Then: initialize_egress_pool is awaited once with that service.
+        """
+        service = MagicMock()
+        with patch.object(
+            pool_module, "initialize_egress_pool", new_callable=AsyncMock
+        ) as init_mock:
+            await safely_initialize_egress_pool(service)
+        init_mock.assert_awaited_once_with(service)
+
+    @pytest.mark.asyncio
+    async def test_swallows_preflight_exception(self) -> None:
+        """Verify a failed preflight is logged but never propagates.
+
+        Given: initialize_egress_pool raises,
+        When: safely_initialize_egress_pool is awaited,
+        Then: No exception escapes (callers fall back to direct egress).
+        """
+        with patch.object(
+            pool_module,
+            "initialize_egress_pool",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("simulated preflight failure"),
+        ):
+            await safely_initialize_egress_pool(MagicMock())

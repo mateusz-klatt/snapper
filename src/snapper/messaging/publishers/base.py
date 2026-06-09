@@ -57,6 +57,7 @@ from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.network.egress_pool import safely_initialize_egress_pool
 from snapper.infrastructure.symbols.functions import get_market_data_capability_exclusions
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
@@ -644,6 +645,31 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         )
         logger.debug("{}: market-data-excluded symbols: {}", exchange_name, excluded)
 
+    async def _maybe_init_egress_pool(self, settings_service: SettingsService) -> None:
+        """Initialize the egress pool in this publisher process when enabled.
+
+        The egress pool is a process-local singleton; the API/coordinator
+        process initializes its own, but feed publishers run in separate
+        subprocesses, so each must initialize the pool here for the Kraken
+        connect shim and Walutomat's pooled HTTP transport to route through the
+        configured tunnels. Gated on ``feed_egress_enabled`` (default off);
+        when off the feeds keep their direct-to-exchange connections.
+
+        Args:
+            settings_service: The publisher's initialized settings service.
+
+        Returns:
+            None.
+        """
+        if not self.settings.feed_egress_enabled:
+            return
+        await safely_initialize_egress_pool(settings_service)
+        logger.info(
+            f"{self._get_process_name()}: egress pool initialization attempted "
+            "(feed_egress_enabled) — confirm routing via `ss` (a malformed/absent "
+            "egress_pool setting leaves the pool empty and feeds stay direct)"
+        )
+
     async def start(self) -> None:
         """Start the publisher service and connect to exchange."""
         exchange_name = self._get_exchange_name()
@@ -660,6 +686,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         )
         self.settings = get_settings_with_service(settings_service)
         logger.info(f"{process_name}: AppSettings initialized with database access")
+        await self._maybe_init_egress_pool(settings_service)
         self._candle_batch_max_rows = self.settings.write_buffer_candle_max_rows
         self._tick_batch_max_rows = self.settings.write_buffer_tick_max_rows
         self._trade_batch_max_rows = self.settings.write_buffer_trade_max_rows

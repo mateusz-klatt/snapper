@@ -336,6 +336,29 @@ DB_URL=... python scripts/resilience_fault_injection.py \
 Run it in a low-impact window — it darkens live market data for the hold
 duration.
 
+### Egress routing for feeds (`feed_egress_enabled`)
+
+By default the feed publishers connect **directly** to the exchanges — they do
+NOT route through the egress WireGuard/SOCKS multiplexer (the pool is only
+initialized in the API/coordinator process). Set the `feed_egress_enabled`
+setting to enable per-publisher egress routing: each feed subprocess then
+initializes the egress pool at startup so the Kraken connect shim and
+Walutomat's pooled HTTP transport route through the configured tunnels
+(per-exchange pins apply; direct stays the fallback).
+
+This is gated off by default because routing live market data through shared
+VPN IPs changes latency and can make Kraken/Cloudflare throttle the feed
+differently than the host IP. Roll it out cautiously:
+
+1. Set `feed_egress_enabled=true` and restart the feed (the setting is read at
+    publisher startup, not live).
+2. In `snapper-feed`, confirm `ss -tnp` shows connections to
+    `snapper-egress:1081-1085` (SOCKS) rather than direct exchange `:443`.
+3. Compare candle freshness, tick/trade lag, and dark-instrument counts to the
+    direct baseline; watch the reconnect logs for throttling/close codes.
+4. Revert instantly by setting `feed_egress_enabled=false` and restarting the
+    feed.
+
 ## Per-wallet executors
 
 Executor process configs are templates named `executor_<exchange>`.
