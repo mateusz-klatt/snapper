@@ -3163,3 +3163,16 @@ The routes are documented end-to-end in
 Claude Desktop / Cursor / Windsurf wire-up instructions. They follow
 the same `PayloadResponse` envelope convention used by the auth routes
 above.
+
+## Paired Execution (operator surface)
+
+Operator endpoints for the paired-execution guard (dark behind
+`PAIRED_EXECUTION_GUARD_ENABLED`; usable regardless for reading state).
+Both narrow to the SQL repository (503 otherwise). The operator workflow —
+triage, manual venue resolution, attestation — is documented in
+[paired-execution.md](paired-execution.md).
+
+| Route | Description |
+| ----- | ----------- |
+| `GET /api/paired-execution/incidents` | Per-scope incidents: active halts ∪ exposed groups with per-leg signed exposure (`READ_POSITIONS`, wallet-scoped) |
+| `POST /api/paired-execution/groups/{group_public_id}/terminalize` | Attest a `manual_intervention` group resolved at the venue (`MANAGE_PAIRED_EXECUTION`, CSRF; 404 also covers out-of-scope wallets, 409 when not attestable) |
