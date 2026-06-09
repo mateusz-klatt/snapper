@@ -254,7 +254,15 @@ class EgressPool(EgressPoolBase):
         deadline: datetime,
         reason: QuarantineReason,
     ) -> None:
-        """Mark a route quarantined until ``deadline``. Extend-only."""
+        """Mark a route quarantined until ``deadline``. Extend-only.
+
+        The reason-specific timestamp markers are recorded only for the cause
+        they name: ``http-429`` sets ``last_handshake_429_at`` and ``close-1015``
+        sets ``last_close_1015_at``. Connect-level reasons (``http-connect-error``,
+        ``ws-connect-error``) only advance ``quarantine_until`` so a SOCKS
+        timeout/blackhole is not mis-reported to operators as a Cloudflare 1015
+        close; their cause is carried by the quarantine log line.
+        """
         with self._lock:
             state = self._states.get(route_id)
             if state is None:
@@ -264,7 +272,7 @@ class EgressPool(EgressPoolBase):
                 state.quarantine_until = deadline
             if reason == "http-429":
                 state.last_handshake_429_at = datetime.now(UTC)
-            else:
+            elif reason == "close-1015":
                 state.last_close_1015_at = datetime.now(UTC)
 
     def _is_available_locked(self, state: RouteState, now: datetime) -> bool:

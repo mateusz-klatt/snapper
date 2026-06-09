@@ -205,6 +205,23 @@ class TestQuarantine:
         assert snapshot.last_close_1015_at is not None
         assert snapshot.last_handshake_429_at is None
 
+    def test_quarantine_reason_ws_connect_error_records_no_cause_marker(self) -> None:
+        """Spec — reason="ws-connect-error" advances quarantine, sets no marker.
+
+        Given a fresh reservation,
+        When quarantine(30, reason="ws-connect-error") is called,
+        Then quarantine_until is set but NEITHER last_close_1015_at NOR
+            last_handshake_429_at is touched — a SOCKS connect failure must not
+            be mis-reported to operators as a Cloudflare 1015 close or a 429.
+        """
+        pool = _build_pool()
+        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        reservation.quarantine(30.0, reason="ws-connect-error")
+        snapshot = pool.snapshot()[0]
+        assert snapshot.quarantine_until is not None
+        assert snapshot.last_close_1015_at is None
+        assert snapshot.last_handshake_429_at is None
+
 
 class TestWebsocketKwargs:
     """Tests for ``EgressReservation.websocket_kwargs`` output."""

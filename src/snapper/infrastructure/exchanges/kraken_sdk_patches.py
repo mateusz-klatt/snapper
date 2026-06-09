@@ -48,6 +48,7 @@ from kraken.spot.websocket.connectors import ConnectSpotWebsocketBase
 from loguru import logger
 from websockets.exceptions import ConnectionClosed
 from websockets.exceptions import InvalidStatus
+from websockets.exceptions import ProxyError
 
 from snapper.core.json_types import JsonObject
 from snapper.infrastructure.network.egress_pool import get_egress_pool
@@ -268,6 +269,21 @@ observed during the 2026-05-21 incident. Operator-visible quarantine
 deadline is recorded on ``RouteState.last_close_1015_at``.
 """
 
+_WS_CONNECT_ERROR_QUARANTINE_S: Final[float] = 30.0
+"""Quarantine duration (seconds) for a WS connect-level failure on a proxy route.
+
+Applied when opening the handshake through a SOCKS route raises a TCP/SOCKS
+connect error — timeout, connection refused, or a silent blackhole (the egress
+tunnel went dark mid-flight). Without quarantining, the SDK's reconnect loop
+re-reserves and re-dials the same dead route every attempt and never fails over
+to another tunnel or to the direct fallback. Thirty seconds is shorter than the
+1015 quarantine because a connect timeout is often a transient tunnel hiccup
+worth retrying sooner, while still long enough to let the pool route around a
+genuinely down tunnel across several reconnect attempts. Direct routes are never
+quarantined here — a connect error with no proxy means the exchange or the local
+uplink is down, not the route, and the pool would only fall back to that same
+direct route anyway."""
+
 
 class _ConnectShim:
     """Async context manager wrapping the SDK's ``connect(...)`` call.
@@ -282,7 +298,11 @@ class _ConnectShim:
        the reservation.
     2. ``__aenter__``: opens the handshake. On HTTP 429,
        quarantine the active route (pool path) or stash the
-       Retry-After (legacy path), release, re-raise.
+       Retry-After (legacy path), release, re-raise. On a TCP/SOCKS
+       connect-level failure (timeout, refused, or blackhole) through a
+       proxy route, quarantine the route with ``reason="ws-connect-error"``
+       so the next reconnect fails over instead of re-dialing the dead
+       tunnel; release, re-raise.
     3. Caller's ``async with`` body runs.
     4. ``__aexit__``: if the exit carries
        ``ConnectionClosed(rcvd.code=1015)`` (Cloudflare
@@ -327,6 +347,12 @@ class _ConnectShim:
                 self._reservation.release()
                 self._reservation = None
             raise
+        except (OSError, ProxyError) as exc:
+            self._maybe_quarantine_on_connect_error(exc)
+            if self._reservation is not None:
+                self._reservation.release()
+                self._reservation = None
+            raise
         except BaseException:
             if self._reservation is not None:
                 self._reservation.release()
@@ -367,6 +393,33 @@ class _ConnectShim:
             connector_id,
         )
         _PENDING_RETRY_AFTER_S[connector_id] = retry_after
+
+    def _maybe_quarantine_on_connect_error(self, exc: BaseException) -> None:
+        """Quarantine the active proxy route on a WS connect-level failure.
+
+        Fires from ``__aenter__`` when opening the handshake raises a
+        TCP/SOCKS connect error (timeout, refused, or blackhole). Quarantining
+        the route makes the SDK's next reconnect re-reserve a different route
+        (or the direct fallback) instead of re-dialing the same dead tunnel.
+        Direct routes (``proxy_url is None``) are left untouched — a connect
+        error with no proxy points at the exchange or the local uplink, and the
+        pool's only fallback would be that same direct route.
+
+        Args:
+            exc: The connect-level exception raised by ``__aenter__``.
+        """
+        if self._reservation is None:
+            return
+        if self._reservation.proxy_url is None:
+            return
+        logger.warning(
+            "kraken WS connect error on route '{}' ({}: {}); quarantining for {}s",
+            self._reservation.route_id,
+            type(exc).__name__,
+            exc,
+            _WS_CONNECT_ERROR_QUARANTINE_S,
+        )
+        self._reservation.quarantine(_WS_CONNECT_ERROR_QUARANTINE_S, reason="ws-connect-error")
 
     def _maybe_quarantine_on_close(self, exc: BaseException | None) -> None:
         """Quarantine the active route on Cloudflare close-frame 1015."""

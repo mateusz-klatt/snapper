@@ -31,6 +31,7 @@ from kraken.spot.websocket.connectors import ConnectSpotWebsocketBase
 from loguru import logger as _logger
 from websockets.exceptions import ConnectionClosedError
 from websockets.exceptions import InvalidStatus
+from websockets.exceptions import ProxyError
 from websockets.frames import Close
 from websockets.http11 import Headers
 from websockets.http11 import Response
@@ -1177,17 +1178,21 @@ class TestPhaseBPrimeShim:
         assert snap.quarantine_until is None
 
     @pytest.mark.asyncio
-    async def test_shim_non_invalid_status_exception_releases(self) -> None:
-        """Spec — arbitrary exception in __aenter__ releases the reservation.
+    async def test_shim_connect_timeout_quarantines_proxy_route(self) -> None:
+        """Spec — a WS connect timeout quarantines the borrowed SOCKS route.
 
-        Given the pool is enabled,
-        When the handshake raises OSError,
-        Then in_use_count is back to 0.
+        Given the pool has a SOCKS5 route reserved (direct quarantined so
+            socks wins selection),
+        When the handshake raises TimeoutError (a blackholed/timed-out tunnel),
+        Then the SOCKS route is quarantined for ~_WS_CONNECT_ERROR_QUARANTINE_S
+            and its in_use_count returns to 0, so the next reconnect fails over
+            instead of re-dialing the dead tunnel.
         """
-        pool = self._enable_pool()
+        pool = self._enable_pool(with_socks5=True)
+        pool._quarantine_route("default", datetime.now(UTC) + timedelta(seconds=600), "http-429")
 
         async def fake_aenter(_: Any) -> Any:
-            raise OSError("net unreachable")
+            raise TimeoutError("handshake timed out")
 
         class FakeCm:
             __aenter__ = fake_aenter
@@ -1200,7 +1205,197 @@ class TestPhaseBPrimeShim:
 
         shim_cls = _wrap_connect_factory(fake_connect)
         shim = shim_cls("wss://kraken")
-        with pytest.raises(OSError):
+        before = datetime.now(UTC)
+        with pytest.raises(TimeoutError):
+            await shim.__aenter__()
+        socks = next(s for s in pool.snapshot() if s.id == "wg-uk-1")
+        assert socks.quarantine_until is not None
+        held_s = (socks.quarantine_until - before).total_seconds()
+        assert 25.0 <= held_s <= 31.0
+        assert socks.in_use_count == 0
+        assert socks.last_close_1015_at is None
+
+    @pytest.mark.asyncio
+    async def test_shim_proxy_error_quarantines_proxy_route(self) -> None:
+        """Spec — a websockets ProxyError quarantines the SOCKS route.
+
+        Given the pool has a SOCKS5 route reserved,
+        When the handshake raises ``websockets.exceptions.ProxyError`` — the
+            InvalidHandshake subclass (NOT an OSError) that websockets-16 wraps
+            every non-OSError SOCKS connect failure into, and therefore the type
+            actually reaching the shim,
+        Then the SOCKS route is quarantined — proving the connect-error handler
+            catches the real exposed ProxyError, not only OSError/TimeoutError.
+        """
+        pool = self._enable_pool(with_socks5=True)
+        pool._quarantine_route("default", datetime.now(UTC) + timedelta(seconds=600), "http-429")
+
+        async def fake_aenter(_: Any) -> Any:
+            raise ProxyError("failed to connect to SOCKS proxy")
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        with pytest.raises(ProxyError):
+            await shim.__aenter__()
+        socks = next(s for s in pool.snapshot() if s.id == "wg-uk-1")
+        assert socks.quarantine_until is not None
+        assert socks.in_use_count == 0
+        assert socks.last_close_1015_at is None
+
+    @pytest.mark.asyncio
+    async def test_shim_cancelled_during_aenter_releases_without_quarantine(self) -> None:
+        """Spec — a cancellation during the handshake never quarantines.
+
+        Given the pool has a SOCKS5 route reserved,
+        When the handshake is cancelled (process shutdown),
+        Then the reservation is released and the SOCKS route is NOT quarantined —
+            ``CancelledError`` is a ``BaseException`` that bypasses the
+            connect-error clause and only hits the catch-all release path, so a
+            clean shutdown does not penalize an otherwise-healthy route.
+        """
+        pool = self._enable_pool(with_socks5=True)
+        pool._quarantine_route("default", datetime.now(UTC) + timedelta(seconds=600), "http-429")
+
+        async def fake_aenter(_: Any) -> Any:
+            raise asyncio.CancelledError()
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        with pytest.raises(asyncio.CancelledError):
+            await shim.__aenter__()
+        socks = next(s for s in pool.snapshot() if s.id == "wg-uk-1")
+        assert socks.quarantine_until is None
+        assert socks.in_use_count == 0
+
+    @pytest.mark.asyncio
+    async def test_shim_connect_error_on_direct_route_does_not_quarantine(self) -> None:
+        """Spec — a connect error on a DIRECT route does not quarantine it.
+
+        Given the pool has only the direct route reserved,
+        When the handshake raises ConnectionRefusedError,
+        Then the direct route is NOT quarantined (a no-proxy connect error means
+            the exchange or local uplink is down, and the pool's only fallback is
+            that same direct route) but the reservation is still released.
+        """
+        pool = self._enable_pool()
+
+        async def fake_aenter(_: Any) -> Any:
+            raise ConnectionRefusedError("connection refused")
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        with pytest.raises(ConnectionRefusedError):
+            await shim.__aenter__()
+        snap = pool.snapshot()[0]
+        assert snap.quarantine_until is None
+        assert snap.in_use_count == 0
+
+    @pytest.mark.asyncio
+    async def test_shim_connect_error_pool_disabled_just_propagates(self) -> None:
+        """Spec — a connect error with no pool has nothing to quarantine.
+
+        Given get_egress_pool() returns None (no reservation taken),
+        When the handshake raises a connect error,
+        Then it propagates unchanged with no quarantine attempt.
+        """
+
+        async def fake_aenter(_: Any) -> Any:
+            raise TimeoutError("handshake timed out")
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        with pytest.raises(TimeoutError):
+            await shim.__aenter__()
+
+    @pytest.mark.asyncio
+    async def test_shim_generic_error_pool_disabled_just_propagates(self) -> None:
+        """Spec — a generic error with no pool propagates via the catch-all.
+
+        Given get_egress_pool() returns None (no reservation taken),
+        When the handshake raises a generic non-connect exception,
+        Then it propagates through the catch-all with no reservation to release.
+        """
+
+        async def fake_aenter(_: Any) -> Any:
+            raise RuntimeError("unexpected handshake bug")
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        with pytest.raises(RuntimeError):
+            await shim.__aenter__()
+
+    @pytest.mark.asyncio
+    async def test_shim_non_invalid_status_exception_releases(self) -> None:
+        """Spec — a generic exception in __aenter__ releases the reservation.
+
+        Given the pool is enabled,
+        When the handshake raises a generic exception that is neither an
+            InvalidStatus 429 nor a connect-level OSError/ProxyError,
+        Then in_use_count is back to 0 (the catch-all release path; connect
+            errors are covered separately and do quarantine).
+        """
+        pool = self._enable_pool()
+
+        async def fake_aenter(_: Any) -> Any:
+            raise RuntimeError("unexpected handshake bug")
+
+        class FakeCm:
+            __aenter__ = fake_aenter
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
+            return FakeCm()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim = shim_cls("wss://kraken")
+        with pytest.raises(RuntimeError):
             await shim.__aenter__()
         assert pool.snapshot()[0].in_use_count == 0
 
