@@ -359,7 +359,7 @@ async def test_scanner_breaks_armed_group_on_fill_timeout(_repo: SQLAlchemyRepos
         command_public_id="cmd-1",
         status=PairedExecutionLegStatusEnum.WORKING.value,
     )
-    await _scanner(_repo)._scan_cycle(_T0)
+    await _scanner(_repo)._sweep_armed(_T0)
     group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
     assert group is not None
     assert group["status"] == PairedExecutionGroupStatusEnum.BROKEN.value
@@ -413,7 +413,7 @@ async def test_scanner_breaks_armed_group_on_terminal_leg(
         command_public_id="cmd-1",
         status=terminal_status,
     )
-    await _scanner(_repo)._scan_cycle(_T0)
+    await _scanner(_repo)._sweep_armed(_T0)
     group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
     assert group is not None
     assert group["status"] == PairedExecutionGroupStatusEnum.BROKEN.value
@@ -557,18 +557,20 @@ async def test_scanner_leaves_armed_group_with_no_legs(_repo: SQLAlchemyReposito
 
 
 async def test_scanner_armed_break_halts_exposed_group_same_cycle(
-    _repo: SQLAlchemyRepository,
+    _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An armed group broken by fill timeout with a filled leg is halted same cycle.
 
     Given: an armed group past its fill_deadline with one filled (exposed) leg and
-        one working leg,
-    When: a single scan cycle runs (armed sweep then halt sweep),
-    Then: the group is broken AND a durable halt is projected within the same
-        cycle, with the owned filled-leg shard mirrored into the trade service —
-        the exposed atomicity failure is halted immediately, not a cycle later.
+        one working leg, on a reduce-only-capable instrument,
+    When: a single scan cycle runs (armed -> broken -> compensating -> halt),
+    Then: within the SAME cycle the group is broken, its filled leg is flattened
+        (so the group is now compensating), AND a durable halt is projected with
+        the owned filled-leg shard mirrored into the trade service — the exposed
+        atomicity failure is halted immediately, not a cycle later.
     """
     trade_service = TradeService()
+    _stub_instrument_lookups(monkeypatch, _repo)
     await _insert_group(
         _repo,
         public_id="grp-1",
@@ -599,7 +601,7 @@ async def test_scanner_armed_break_halts_exposed_group_same_cycle(
     await _scanner(_repo, trade_service=trade_service)._scan_cycle(_T0)
     group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
     assert group is not None
-    assert group["status"] == PairedExecutionGroupStatusEnum.BROKEN.value
+    assert group["status"] == PairedExecutionGroupStatusEnum.COMPENSATING.value
     halt = await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY)
     assert halt is not None
     assert trade_service.is_halted(_BTC_SHARD) is True
@@ -1593,3 +1595,631 @@ async def test_insert_paired_compensation_command_reraises_other_integrity_error
     }
     with pytest.raises(IntegrityError):
         await _repo.insert_paired_compensation_command(cast(Any, row))
+
+
+async def _flatten_commands(repo: SQLAlchemyRepository, correlation_id: str) -> list[TradeCommand]:
+    """Return active reduce-only flatten TradeCommands for a group."""
+    async with repo.session() as session:
+        result = await session.execute(
+            select(TradeCommand).where(
+                TradeCommand.correlation_id == correlation_id,
+                TradeCommand.reduce_only.is_(True),
+                *where_active(TradeCommand, _FUTURE),
+            )
+        )
+        return list(result.scalars().all())
+
+
+def _stub_instrument_lookups(
+    monkeypatch: pytest.MonkeyPatch,
+    repo: SQLAlchemyRepository,
+    *,
+    instrument_public_id: str | None = "inst-btc",
+    supports_reduce_only: bool = True,
+    lot_size: float | None = 0.1,
+    min_order_size: float | None = 0.1,
+    spec_present: bool = True,
+) -> None:
+    """Stub the scanner's instrument resolution / capability / spec reads."""
+    monkeypatch.setattr(
+        repo,
+        "get_instrument_public_id_by_symbol",
+        AsyncMock(return_value=instrument_public_id),
+    )
+    monkeypatch.setattr(
+        repo,
+        "get_instrument_capabilities",
+        AsyncMock(return_value=[cast(Any, {"supports_reduce_only": supports_reduce_only})]),
+    )
+    spec = (
+        cast(Any, {"lot_size": lot_size, "tick_size": 0.01, "min_order_size": min_order_size})
+        if spec_present
+        else None
+    )
+    monkeypatch.setattr(repo, "get_instrument_spec", AsyncMock(return_value=spec))
+
+
+async def test_claim_leg_and_insert_flatten_command_claims_and_inserts(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """The atomic claim moves the leg to compensating and inserts the flatten.
+
+    Given: an active filled leg,
+    When: claim_leg_and_insert_flatten_command runs,
+    Then: the leg becomes compensating with a bumped compensation_seq (filled qty
+        preserved) and a reduce-only flatten command is inserted, both in one
+        transaction.
+    """
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    command_row: dict[str, object] = {
+        "command_type": "submit",
+        "shard_key": _BTC_SHARD,
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "pairs-alpha",
+        "client_order_id": "flatten-1",
+        "venue_client_id": "flatten-1",
+        "side": "sell",
+        "order_type": "market",
+        "quantity": 1.0,
+        "price": None,
+        "reduce_only": True,
+        "status": "created",
+        "created_at": _T0,
+        "correlation_id": "grp-1",
+        "session_id": _SESSION,
+        "sequence_id": 2,
+        "timestamp": _T0,
+        "idempotency_key": "paired:grp-1:leg-0:flatten:1",
+        "supersedes_command_id": "cmd-0",
+        "wallet_public_id": _WALLET,
+        "operator_public_id": _OPERATOR,
+        "source_surface": "strategy",
+    }
+    inserted = await _repo.claim_leg_and_insert_flatten_command(
+        leg_public_id="leg-0",
+        expected_status=PairedExecutionLegStatusEnum.FILLED.value,
+        new_compensation_seq=1,
+        command_row=cast(Any, command_row),
+        bus_time=_T1,
+        session_id=_SESSION,
+        sequence_id=3,
+    )
+    assert inserted is not None
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.COMPENSATING.value
+    assert legs[0]["compensation_seq"] == 1
+    assert legs[0]["filled_signed_qty"] == 1.0
+    assert len(await _flatten_commands(_repo, "grp-1")) == 1
+
+
+async def test_claim_leg_and_insert_flatten_command_status_mismatch_is_noop(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A leg whose status changed since it was observed is not claimed.
+
+    Given: an active leg in compensating status,
+    When: claim runs with expected_status filled (stale observation),
+    Then: it returns None and inserts no flatten — the optimistic CAS lost.
+    """
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.COMPENSATING.value,
+        filled_signed_qty=1.0,
+    )
+    command_row: dict[str, object] = {
+        "command_type": "submit",
+        "shard_key": _BTC_SHARD,
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "pairs-alpha",
+        "client_order_id": "flatten-1",
+        "venue_client_id": "flatten-1",
+        "side": "sell",
+        "order_type": "market",
+        "quantity": 1.0,
+        "price": None,
+        "reduce_only": True,
+        "status": "created",
+        "created_at": _T0,
+        "correlation_id": "grp-1",
+        "session_id": _SESSION,
+        "sequence_id": 2,
+        "timestamp": _T0,
+        "idempotency_key": "paired:grp-1:leg-0:flatten:1",
+        "supersedes_command_id": "cmd-0",
+        "wallet_public_id": _WALLET,
+        "operator_public_id": _OPERATOR,
+        "source_surface": "strategy",
+    }
+    inserted = await _repo.claim_leg_and_insert_flatten_command(
+        leg_public_id="leg-0",
+        expected_status=PairedExecutionLegStatusEnum.FILLED.value,
+        new_compensation_seq=1,
+        command_row=cast(Any, command_row),
+        bus_time=_T1,
+        session_id=_SESSION,
+        sequence_id=3,
+    )
+    assert inserted is None
+    assert len(await _flatten_commands(_repo, "grp-1")) == 0
+
+
+async def test_claim_leg_and_insert_flatten_command_requires_idempotency_key(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """The flatten claim rejects a command row without an idempotency_key.
+
+    Given: a flatten command row whose idempotency_key is None,
+    When: claim_leg_and_insert_flatten_command runs,
+    Then: it raises ValueError before touching the leg — the idempotent dedup
+        requires a concrete key.
+    """
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    with pytest.raises(ValueError, match="non-empty idempotency_key"):
+        await _repo.claim_leg_and_insert_flatten_command(
+            leg_public_id="leg-0",
+            expected_status=PairedExecutionLegStatusEnum.FILLED.value,
+            new_compensation_seq=1,
+            command_row=cast(Any, {"idempotency_key": None}),
+            bus_time=_T1,
+            session_id=_SESSION,
+            sequence_id=3,
+        )
+
+
+async def _seed_flatten_leg(
+    repo: SQLAlchemyRepository,
+    *,
+    filled_signed_qty: float = 1.0,
+    status: str = "filled",
+    group_status: str = "broken",
+) -> None:
+    """Insert a broken group with one owned terminal exposed leg.
+
+    The flatten side is derived from the SIGNED open qty, not the leg side, so a
+    net-short leg is produced simply with a negative ``filled_signed_qty``.
+    """
+    await _insert_group(repo, public_id="grp-1", status=group_status)
+    await _insert_leg(
+        repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=status,
+        filled_signed_qty=filled_signed_qty,
+    )
+
+
+async def test_sweep_compensating_flattens_terminal_long_leg(
+    _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A filled long leg of a broken group is flattened with a reduce-only sell.
+
+    Given: a broken group with an owned filled (net long) leg and a reduce-only
+        capable instrument,
+    When: a scan cycle runs,
+    Then: the group moves to compensating, the leg is claimed (compensating), and
+        a reduce-only MARKET sell flatten command for the open qty is emitted.
+    """
+    outbox = MagicMock()
+    _stub_instrument_lookups(monkeypatch, _repo)
+    await _seed_flatten_leg(_repo, filled_signed_qty=1.0)
+    await _scanner(_repo, outbox=outbox)._scan_cycle(_T0)
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.COMPENSATING.value
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.COMPENSATING.value
+    flattens = await _flatten_commands(_repo, "grp-1")
+    assert len(flattens) == 1
+    assert flattens[0].side == "sell"
+    assert flattens[0].reduce_only is True
+    assert flattens[0].supersedes_command_id == "cmd-0"
+    outbox.notify.assert_called()
+
+
+async def test_sweep_compensating_flattens_short_leg_with_buy(
+    _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A net-short leg is flattened with a reduce-only buy (sign-based side).
+
+    Given: a broken group with an owned net-short leg (negative open qty) on a
+        reduce-only capable instrument,
+    When: a scan cycle runs,
+    Then: a reduce-only MARKET buy flatten is emitted — the flatten side follows
+        the signed open qty, not the leg side.
+    """
+    _stub_instrument_lookups(monkeypatch, _repo)
+    await _seed_flatten_leg(_repo, filled_signed_qty=-1.0)
+    await _scanner(_repo)._scan_cycle(_T0)
+    flattens = await _flatten_commands(_repo, "grp-1")
+    assert len(flattens) == 1
+    assert flattens[0].side == "buy"
+
+
+async def test_sweep_compensating_escalates_when_no_reduce_only(
+    _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An instrument without reduce-only support escalates leg and group to manual.
+
+    Given: a filled exposed leg on an instrument that does not support reduce-only,
+    When: a scan cycle runs,
+    Then: no flatten is emitted and both the leg and group become
+        manual_intervention — never an order that could open fresh exposure.
+    """
+    _stub_instrument_lookups(monkeypatch, _repo, supports_reduce_only=False)
+    await _seed_flatten_leg(_repo, filled_signed_qty=1.0)
+    await _scanner(_repo)._scan_cycle(_T0)
+    assert len(await _flatten_commands(_repo, "grp-1")) == 0
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value
+
+
+async def test_sweep_compensating_escalates_on_subunit_dust(
+    _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An open qty that rounds below one lot escalates to manual (no dust order).
+
+    Given: a filled exposed leg whose open qty is smaller than the instrument lot
+        size,
+    When: a scan cycle runs,
+    Then: no flatten is emitted and the group escalates to manual_intervention —
+        a sub-lot residual cannot be flattened without over-shooting into
+        opposite exposure.
+    """
+    _stub_instrument_lookups(monkeypatch, _repo, lot_size=1.0, min_order_size=1.0)
+    await _seed_flatten_leg(_repo, filled_signed_qty=0.3)
+    await _scanner(_repo)._scan_cycle(_T0)
+    assert len(await _flatten_commands(_repo, "grp-1")) == 0
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value
+
+
+async def test_sweep_compensating_escalates_when_instrument_unresolved(
+    _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unresolvable instrument escalates to manual rather than flatten blind.
+
+    Given: a filled exposed leg whose instrument cannot be resolved to a public
+        id,
+    When: a scan cycle runs,
+    Then: no flatten is emitted and the group escalates to manual_intervention —
+        without an instrument the capability and lot size are unknown.
+    """
+    _stub_instrument_lookups(monkeypatch, _repo, instrument_public_id=None)
+    await _seed_flatten_leg(_repo, filled_signed_qty=1.0)
+    await _scanner(_repo)._scan_cycle(_T0)
+    assert len(await _flatten_commands(_repo, "grp-1")) == 0
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value
+
+
+async def test_sweep_compensating_escalates_when_spec_missing(
+    _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing instrument spec escalates to manual (cannot lot-round safely).
+
+    Given: a filled exposed leg on a reduce-only capable instrument with NO spec
+        row, in a group already moved to compensating by a sibling,
+    When: a scan cycle runs,
+    Then: no flatten is emitted and the group escalates to manual_intervention
+        (the compensating -> manual transition, since the broken -> manual CAS
+        finds no broken row) — the lot size needed to round the order is unknown.
+    """
+    _stub_instrument_lookups(monkeypatch, _repo, spec_present=False)
+    await _seed_flatten_leg(_repo, filled_signed_qty=1.0, group_status="compensating")
+    await _scanner(_repo)._scan_cycle(_T0)
+    assert len(await _flatten_commands(_repo, "grp-1")) == 0
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value
+
+
+async def test_sweep_compensating_skips_terminal_leg_without_exposure(
+    _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled leg that never filled is a no-op (no flatten, no escalation).
+
+    Given: a broken group with an owned cancelled leg that carries zero fill,
+    When: a scan cycle runs,
+    Then: no flatten is emitted and the group stays broken — there is no exposure
+        to compensate (completion is Phase 5d).
+    """
+    _stub_instrument_lookups(monkeypatch, _repo)
+    await _seed_flatten_leg(_repo, status="cancelled", filled_signed_qty=0.0)
+    await _scanner(_repo)._scan_cycle(_T0)
+    assert len(await _flatten_commands(_repo, "grp-1")) == 0
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.BROKEN.value
+
+
+async def test_sweep_compensating_flatten_is_idempotent_across_cycles(
+    _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-running the sweep emits exactly one flatten per compensation round.
+
+    Given: a broken group with an owned filled exposed leg,
+    When: two scan cycles run,
+    Then: exactly one reduce-only flatten command exists — the first cycle claims
+        the leg (compensating) so the second cycle no longer sees it as
+        flatten-eligible.
+    """
+    _stub_instrument_lookups(monkeypatch, _repo)
+    await _seed_flatten_leg(_repo, filled_signed_qty=1.0)
+    scanner = _scanner(_repo)
+    await scanner._scan_cycle(_T0)
+    await scanner._scan_cycle(_T1)
+    assert len(await _flatten_commands(_repo, "grp-1")) == 1
+
+
+async def test_sweep_halts_halts_manual_intervention_group(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A manual_intervention group with exposure is halted and mirrored.
+
+    Given: a manual_intervention group with an owned filled leg,
+    When: a scan cycle runs,
+    Then: a durable halt is projected and the owned shard is mirrored — a leg
+        that could not be auto-flattened stays halted until an operator acts.
+    """
+    trade_service = TradeService()
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value,
+        filled_signed_qty=1.0,
+    )
+    await _scanner(_repo, trade_service=trade_service)._scan_cycle(_T0)
+    halt = await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY)
+    assert halt is not None
+    assert trade_service.is_halted(_BTC_SHARD) is True
+
+
+async def test_sweep_compensating_escalates_on_nonpositive_lot_size(
+    _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spec with a non-positive lot size escalates to manual, never a raw order.
+
+    Given: a filled exposed leg whose instrument spec reports lot_size 0,
+    When: a scan cycle runs,
+    Then: no flatten is emitted and the group escalates to manual_intervention —
+        round_down_to_step would otherwise pass the UNROUNDED qty through, so a
+        non-positive lot size must escalate rather than emit a live MARKET order.
+    """
+    _stub_instrument_lookups(monkeypatch, _repo, lot_size=0.0, min_order_size=None)
+    await _seed_flatten_leg(_repo, filled_signed_qty=1.0)
+    await _scanner(_repo)._scan_cycle(_T0)
+    assert len(await _flatten_commands(_repo, "grp-1")) == 0
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value
+
+
+async def test_escalate_to_manual_skips_group_when_leg_already_claimed(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """The group is not forced to manual when another instance already claimed the leg.
+
+    Given: a compensating group whose leg has already been claimed (compensating)
+        by a concurrent coordinator's flatten, but a stale snapshot still reports
+        the leg as filled,
+    When: _escalate_to_manual runs on the stale snapshot,
+    Then: the leg CAS fails (status no longer filled) and the group is left
+        compensating — the in-flight flatten is not overridden by a false manual.
+    """
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.COMPENSATING.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.COMPENSATING.value,
+        filled_signed_qty=1.0,
+    )
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert group is not None
+    stale_leg = dict(legs[0])
+    stale_leg["status"] = PairedExecutionLegStatusEnum.FILLED.value
+    await _scanner(_repo)._escalate_to_manual(cast(Any, group), cast(Any, stale_leg), _T0)
+    refreshed = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert refreshed is not None
+    assert refreshed["status"] == PairedExecutionGroupStatusEnum.COMPENSATING.value
+    refreshed_legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert refreshed_legs[0]["status"] == PairedExecutionLegStatusEnum.COMPENSATING.value
+
+
+async def test_escalate_to_manual_noop_when_group_already_manual(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Escalating a leg whose group is already manual leaves the group manual.
+
+    Given: a group already in manual_intervention with an owned filled leg,
+    When: _escalate_to_manual runs (the leg CAS wins, but both group CAS attempts
+        find no broken / compensating row),
+    Then: the leg becomes manual_intervention and the group stays
+        manual_intervention — the group CAS loop completes without a transition.
+    """
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert group is not None
+    await _scanner(_repo)._escalate_to_manual(cast(Any, group), cast(Any, legs[0]), _T0)
+    refreshed = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert refreshed is not None
+    assert refreshed["status"] == PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value
+    refreshed_legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert refreshed_legs[0]["status"] == PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value
+
+
+def _flatten_claim_row(
+    idempotency_key: str | None, *, omit_side: bool = False
+) -> dict[str, object]:
+    """Build a flatten command row for the claim DAL (optionally malformed)."""
+    row: dict[str, object] = {
+        "command_type": "submit",
+        "shard_key": _BTC_SHARD,
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "pairs-alpha",
+        "client_order_id": "flatten-x",
+        "venue_client_id": "flatten-x",
+        "side": "sell",
+        "order_type": "market",
+        "quantity": 1.0,
+        "price": None,
+        "reduce_only": True,
+        "status": "created",
+        "created_at": _T0,
+        "correlation_id": "grp-1",
+        "session_id": _SESSION,
+        "sequence_id": 2,
+        "timestamp": _T0,
+        "idempotency_key": idempotency_key,
+        "supersedes_command_id": "cmd-0",
+        "wallet_public_id": _WALLET,
+        "operator_public_id": _OPERATOR,
+        "source_surface": "strategy",
+    }
+    if omit_side:
+        del row["side"]
+    return row
+
+
+async def test_claim_leg_and_insert_flatten_command_idempotency_collision_is_noop(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A flatten whose idempotency_key already exists is a no-op claim.
+
+    Given: an active filled leg and a compensation command already holding the
+        flatten idempotency_key,
+    When: claim_leg_and_insert_flatten_command runs with that same key,
+    Then: it returns None and rolls back the leg claim — the existing command
+        wins, so no duplicate flatten and the leg stays filled.
+    """
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    key = "paired:grp-1:leg-0:flatten:1"
+    await _repo.insert_paired_compensation_command(cast(Any, _flatten_claim_row(key)))
+    inserted = await _repo.claim_leg_and_insert_flatten_command(
+        leg_public_id="leg-0",
+        expected_status=PairedExecutionLegStatusEnum.FILLED.value,
+        new_compensation_seq=1,
+        command_row=cast(Any, _flatten_claim_row(key)),
+        bus_time=_T1,
+        session_id=_SESSION,
+        sequence_id=3,
+    )
+    assert inserted is None
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.FILLED.value
+
+
+async def test_claim_leg_and_insert_flatten_command_reraises_other_integrity_error(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A non-idempotency integrity failure in the flatten claim is re-raised.
+
+    Given: an active filled leg and a flatten command row that omits a NOT NULL
+        column (side) with a non-colliding idempotency_key,
+    When: claim_leg_and_insert_flatten_command runs,
+    Then: the IntegrityError propagates — the dedup re-check finds no active row
+        for the key, so the failure is surfaced rather than silently dropped.
+    """
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    with pytest.raises(IntegrityError):
+        await _repo.claim_leg_and_insert_flatten_command(
+            leg_public_id="leg-0",
+            expected_status=PairedExecutionLegStatusEnum.FILLED.value,
+            new_compensation_seq=1,
+            command_row=cast(
+                Any, _flatten_claim_row("paired:grp-1:leg-0:flatten:9", omit_side=True)
+            ),
+            bus_time=_T1,
+            session_id=_SESSION,
+            sequence_id=3,
+        )

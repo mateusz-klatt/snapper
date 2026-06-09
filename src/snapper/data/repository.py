@@ -6877,6 +6877,97 @@ class SQLAlchemyRepository(Repository):
             await s.refresh(cmd)
             return cmd.public_id
 
+    async def claim_leg_and_insert_flatten_command(
+        self,
+        *,
+        leg_public_id: str,
+        expected_status: str,
+        new_compensation_seq: int,
+        command_row: TradeCommandInsertRow,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> str | None:
+        """Atomically claim a leg for compensation and insert its flatten command.
+
+        In ONE transaction (Phase 5c.2): re-reads the CURRENT active leg
+        (``known_to == KNOWN_TO_MAX``) ``FOR UPDATE``; if the leg is gone or its
+        status no longer equals ``expected_status`` (another instance / cycle
+        already claimed it — optimistic CAS) it returns ``None`` WITHOUT inserting;
+        otherwise it SCD2 close-and-inserts the leg successor as
+        ``compensating`` with ``compensation_seq = new_compensation_seq`` (keeping
+        the ORIGINAL ``client_order_id`` — the leg is NOT rebound to the flatten),
+        clamping the close / successor bus time to ``max(bus_time,
+        existing.timestamp)`` for the same clock-skew SCD2 non-inversion reason as
+        the fill projection, AND inserts the flatten ``TradeCommand``. Doing both
+        in one commit means a crash rolls back both — never a claimed leg with no
+        flatten command (or vice versa). On the flatten command's
+        ``idempotency_key`` IntegrityError it RE-CHECKS the active key (a racing
+        duplicate) and returns ``None``, else RE-RAISES. ``command_row`` MUST carry
+        an ``idempotency_key``. Returns the flatten command ``public_id`` iff this
+        call claimed-and-inserted, else ``None``.
+        """
+        idempotency_key = command_row.get("idempotency_key")
+        if not idempotency_key:
+            raise ValueError(
+                "claim_leg_and_insert_flatten_command requires a non-empty idempotency_key"
+            )
+        async with self.session() as s:
+            leg = (
+                (
+                    await s.execute(
+                        select(PairedExecutionLeg)
+                        .where(
+                            PairedExecutionLeg.public_id == leg_public_id,
+                            PairedExecutionLeg.known_to == KNOWN_TO_MAX,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if leg is None or leg.status != expected_status:
+                return None
+            effective_bus_time = max(bus_time, leg.timestamp)
+            await s.execute(
+                update(PairedExecutionLeg)
+                .where(PairedExecutionLeg.id == leg.id)
+                .values(known_to=effective_bus_time)
+            )
+            s.add(
+                self._leg_successor(
+                    leg,
+                    status=PairedExecutionLegStatusEnum.COMPENSATING.value,
+                    filled_signed_qty=leg.filled_signed_qty,
+                    exchange_order_id=leg.exchange_order_id,
+                    last_venue_event_id=leg.last_venue_event_id,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                    timestamp=effective_bus_time,
+                    compensation_seq=new_compensation_seq,
+                )
+            )
+            cmd = TradeCommand(**{"wallet_public_id": "", **command_row})
+            s.add(cmd)
+            try:
+                await s.commit()
+            except IntegrityError:
+                await s.rollback()
+                existing = (
+                    await s.execute(
+                        select(TradeCommand.id).where(
+                            TradeCommand.idempotency_key == idempotency_key,
+                            TradeCommand.known_to == KNOWN_TO_MAX,
+                        )
+                    )
+                ).first()
+                if existing is None:
+                    raise
+                return None
+            await s.refresh(cmd)
+            return cmd.public_id
+
     async def get_current_trade_command_status(self, command_public_id: str) -> str | None:
         """Return the CURRENT active trade command's status, or None if absent.
 
@@ -8314,16 +8405,18 @@ class SQLAlchemyRepository(Repository):
         session_id: str,
         sequence_id: int,
         timestamp: datetime,
+        compensation_seq: int | None = None,
     ) -> PairedExecutionLeg:
         """Build an SCD2 successor leg row carrying every column forward.
 
-        Shared by the fill and terminal projections: every immutable / carried
-        column (identity, group, venue, side, target, signal/command ids,
-        compensation accounting) is copied from ``existing`` and only the
+        Shared by the fill, terminal and flatten-claim projections: every
+        immutable / carried column (identity, group, venue, side, target,
+        signal/command ids) is copied from ``existing`` and only the
         explicitly-overridden ``status`` / ``filled_signed_qty`` / venue ids /
-        provenance / ``timestamp`` differ. ``compensated_signed_qty`` and
-        ``compensation_seq`` are always carried forward here (the compensator in
-        Phase 5c/5d owns them). The caller closes ``existing`` and adds this row.
+        provenance / ``timestamp`` differ. ``compensated_signed_qty`` is always
+        carried forward; ``compensation_seq`` is carried forward unless an
+        override is given (the flatten claim in Phase 5c.2 bumps it). The caller
+        closes ``existing`` and adds this row.
         """
         return PairedExecutionLeg(
             public_id=existing.public_id,
@@ -8342,7 +8435,9 @@ class SQLAlchemyRepository(Repository):
             status=status,
             filled_signed_qty=filled_signed_qty,
             compensated_signed_qty=existing.compensated_signed_qty,
-            compensation_seq=existing.compensation_seq,
+            compensation_seq=(
+                existing.compensation_seq if compensation_seq is None else compensation_seq
+            ),
             last_venue_event_id=last_venue_event_id,
             wallet_public_id=existing.wallet_public_id,
             operator_public_id=existing.operator_public_id,
