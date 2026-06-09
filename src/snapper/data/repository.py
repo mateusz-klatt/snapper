@@ -6831,6 +6831,72 @@ class SQLAlchemyRepository(Repository):
             await s.refresh(cmd)
             return (cmd.id, cmd.public_id)
 
+    async def insert_paired_compensation_command(self, row: TradeCommandInsertRow) -> str | None:
+        """Insert a paired-execution compensation command, idempotent on idempotency_key.
+
+        Used by the guard scanner to emit a venue cancel of a still-live original
+        order (Phase 5c.1) or a reduce-only flatten (Phase 5c.2) for a broken /
+        compensating group. The row MUST carry an ``idempotency_key``; the
+        active-unique ``(idempotency_key)`` index dedups re-emission across scan
+        cycles and coordinator instances. On an ``IntegrityError`` the method
+        RE-CHECKS that an active row already holds this ``idempotency_key``; if so
+        the collision was the expected idempotent dedup and ``None`` is returned,
+        but ANY other integrity failure (a malformed row violating a different
+        constraint) is RE-RAISED rather than silently swallowed — swallowing it
+        would drop a compensation command and leave exposure unflattened. Returns
+        the new command ``public_id`` iff this call inserted it, else ``None``.
+
+        Raises ``ValueError`` when the row carries no ``idempotency_key``: the
+        idempotent dedup hinges on a concrete key, and a null key would make the
+        ``IntegrityError`` re-check match any active null-key command and swallow
+        an unrelated constraint failure.
+        """
+        idempotency_key = row.get("idempotency_key")
+        if not idempotency_key:
+            raise ValueError(
+                "insert_paired_compensation_command requires a non-empty idempotency_key"
+            )
+        async with self.session() as s:
+            cmd = TradeCommand(**{"wallet_public_id": "", **row})
+            s.add(cmd)
+            try:
+                await s.commit()
+            except IntegrityError:
+                await s.rollback()
+                existing = (
+                    await s.execute(
+                        select(TradeCommand.id).where(
+                            TradeCommand.idempotency_key == idempotency_key,
+                            TradeCommand.known_to == KNOWN_TO_MAX,
+                        )
+                    )
+                ).first()
+                if existing is None:
+                    raise
+                return None
+            await s.refresh(cmd)
+            return cmd.public_id
+
+    async def get_current_trade_command_status(self, command_public_id: str) -> str | None:
+        """Return the CURRENT active trade command's status, or None if absent.
+
+        Guards on the current active row (``known_to == KNOWN_TO_MAX``), NOT a
+        temporal ``as_of`` view, so the compensation sweep's venue-liveness
+        decision is not fooled by a command row stamped with a slightly future
+        ``timestamp`` under cross-coordinator clock skew (a ``where_active(now)``
+        read would exclude it and wrongly treat a live original as gone). Mirrors
+        the current-active guard the trade-command CAS uses.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(TradeCommand.status).where(
+                    TradeCommand.public_id == command_public_id,
+                    TradeCommand.known_to == KNOWN_TO_MAX,
+                )
+            )
+            row = result.first()
+            return row[0] if row is not None else None
+
     async def get_user_trading_caps(self, user_public_id: str) -> UserTradingCapsRow | None:
         """Return the active ``user_trading_caps`` row or ``None``.
 

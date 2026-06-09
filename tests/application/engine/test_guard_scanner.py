@@ -11,11 +11,14 @@ from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from typing import Any
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from snapper.application.engine.guard_scanner import PairedExecutionGuardScanner
 from snapper.application.trade.trade_service import TradeService
@@ -56,6 +59,7 @@ def _scanner(
     *,
     instance_count: int = 1,
     trade_service: TradeService | None = None,
+    outbox: object | None = None,
 ) -> PairedExecutionGuardScanner:
     """Build a scanner owning everything (instance_count=1) by default."""
     return PairedExecutionGuardScanner(
@@ -63,6 +67,7 @@ def _scanner(
         ownership=ShardOwnership(instance_id=0, instance_count=instance_count),
         trade_service=trade_service if trade_service is not None else TradeService(),
         interval_seconds=0.01,
+        outbox=cast(Any, outbox),
     )
 
 
@@ -1123,3 +1128,468 @@ async def test_sweep_halts_is_idempotent_across_cycles(
         )
     assert len(list(active)) == 1
     assert trade_service.is_halted(_BTC_SHARD) is True
+
+
+async def _cancel_commands(repo: SQLAlchemyRepository, correlation_id: str) -> list[TradeCommand]:
+    """Return active cancel TradeCommands for a group's correlation id."""
+    async with repo.session() as session:
+        result = await session.execute(
+            select(TradeCommand).where(
+                TradeCommand.correlation_id == correlation_id,
+                TradeCommand.command_type == "cancel",
+                *where_active(TradeCommand, _FUTURE),
+            )
+        )
+        return list(result.scalars().all())
+
+
+async def test_insert_paired_compensation_command_is_idempotent(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Re-inserting the same idempotency_key returns None without a duplicate row.
+
+    Given: a compensation command inserted with an idempotency_key,
+    When: a second insert uses the same idempotency_key,
+    Then: the first returns a public_id and the second returns None, leaving a
+        single active row — the active-unique index dedups re-emission.
+    """
+    row: dict[str, object] = {
+        "command_type": "cancel",
+        "shard_key": _BTC_SHARD,
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "pairs-alpha",
+        "client_order_id": "orig-1",
+        "venue_client_id": "orig-1",
+        "side": "buy",
+        "order_type": "market",
+        "quantity": 1.0,
+        "price": None,
+        "reduce_only": False,
+        "status": "created",
+        "created_at": _T0,
+        "correlation_id": "grp-1",
+        "session_id": _SESSION,
+        "sequence_id": 1,
+        "timestamp": _T0,
+        "idempotency_key": "paired:grp-1:leg-0:cancel",
+        "supersedes_command_id": "cmd-0",
+        "wallet_public_id": _WALLET,
+        "operator_public_id": _OPERATOR,
+        "source_surface": "strategy",
+    }
+    first = await _repo.insert_paired_compensation_command(cast(Any, dict(row)))
+    second = await _repo.insert_paired_compensation_command(cast(Any, dict(row)))
+    assert first is not None
+    assert second is None
+    assert len(await _cancel_commands(_repo, "grp-1")) == 1
+
+
+async def test_sweep_compensating_cancels_live_original_and_compensates_group(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A broken group's owned leg with a live original is cancelled at the venue.
+
+    Given: a broken group with an owned leg bound to a DISPATCHED (live) command,
+    When: a scan cycle runs,
+    Then: the group moves to compensating, an idempotent venue cancel command is
+        emitted for the original order (supersedes the original, reduce_only
+        False), and the outbox is notified so the cancel dispatches promptly.
+    """
+    outbox = MagicMock()
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+    )
+    await _insert_command(
+        _repo, public_id="cmd-0", correlation_id="grp-1", shard_key=_BTC_SHARD, status="dispatched"
+    )
+    await _scanner(_repo, outbox=outbox)._scan_cycle(_T0)
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.COMPENSATING.value
+    cancels = await _cancel_commands(_repo, "grp-1")
+    assert len(cancels) == 1
+    assert cancels[0].client_order_id == "cmd-0"
+    assert cancels[0].supersedes_command_id == "cmd-0"
+    assert cancels[0].reduce_only is False
+    outbox.notify.assert_called()
+
+
+async def test_sweep_compensating_skips_non_live_original(_repo: SQLAlchemyRepository) -> None:
+    """A broken group's leg whose original is not live emits no venue cancel.
+
+    Given: a broken group with an owned leg bound to a CREATED (held, never
+        dispatched) command,
+    When: a scan cycle runs,
+    Then: no cancel command is emitted by the compensation sweep — the held
+        command is cancelled-as-a-row by the broken sweep, never sent to the
+        venue. (The group is not moved to compensating by this sweep.)
+    """
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+    )
+    await _insert_command(
+        _repo, public_id="cmd-0", correlation_id="grp-1", shard_key=_BTC_SHARD, status="created"
+    )
+    await _scanner(_repo)._scan_cycle(_T0)
+    assert len(await _cancel_commands(_repo, "grp-1")) == 0
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.BROKEN.value
+
+
+async def test_sweep_compensating_is_idempotent_across_cycles(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Re-running the compensation sweep emits exactly one cancel per live leg.
+
+    Given: a broken group with an owned leg bound to a live command,
+    When: two scan cycles run,
+    Then: only one venue cancel command exists — the idempotency_key dedups the
+        second cycle's emission.
+    """
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+    )
+    await _insert_command(
+        _repo, public_id="cmd-0", correlation_id="grp-1", shard_key=_BTC_SHARD, status="dispatched"
+    )
+    scanner = _scanner(_repo)
+    await scanner._scan_cycle(_T0)
+    await scanner._scan_cycle(_T1)
+    assert len(await _cancel_commands(_repo, "grp-1")) == 1
+
+
+async def test_sweep_compensating_skips_non_owned_leg(_repo: SQLAlchemyRepository) -> None:
+    """A non-owned leg's live original is not cancelled by this coordinator.
+
+    Given: a broken group whose only live leg is on a foreign shard,
+    When: a scan cycle runs on an instance that does not own that shard,
+    Then: no cancel command is emitted (a sibling coordinator owns it).
+    """
+    foreign_shard = "kraken.FOREIGN.live"
+    hash_val = ShardOwnership._hash(foreign_shard)
+    owner_id = 1 - (hash_val % 2)
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="FOREIGN",
+        shard_key=foreign_shard,
+        command_public_id="cmd-0",
+    )
+    await _insert_command(
+        _repo,
+        public_id="cmd-0",
+        correlation_id="grp-1",
+        shard_key=foreign_shard,
+        status="dispatched",
+    )
+    scanner = PairedExecutionGuardScanner(
+        repository=_repo,
+        ownership=ShardOwnership(instance_id=owner_id, instance_count=2),
+        trade_service=TradeService(),
+        interval_seconds=0.01,
+    )
+    await scanner._scan_cycle(_T0)
+    assert len(await _cancel_commands(_repo, "grp-1")) == 0
+
+
+async def test_sweep_compensating_skips_already_handled_leg(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A leg already compensating is not re-cancelled by the compensation sweep.
+
+    Given: a compensating group whose owned leg is already in compensating status
+        but still bound to a (stale) live command,
+    When: a scan cycle runs,
+    Then: no new cancel command is emitted — a claimed leg is skipped.
+    """
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.COMPENSATING.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.COMPENSATING.value,
+    )
+    await _insert_command(
+        _repo, public_id="cmd-0", correlation_id="grp-1", shard_key=_BTC_SHARD, status="dispatched"
+    )
+    await _scanner(_repo)._scan_cycle(_T0)
+    assert len(await _cancel_commands(_repo, "grp-1")) == 0
+
+
+async def test_sweep_compensating_skips_sequential_handoff(_repo: SQLAlchemyRepository) -> None:
+    """A sequential_handoff group is left untouched by the compensation sweep.
+
+    Given: a broken sequential_handoff group with a live owned leg,
+    When: a scan cycle runs,
+    Then: no cancel is emitted and it stays broken (sweep is simultaneous-only).
+    """
+    await _insert_group(
+        _repo,
+        public_id="grp-1",
+        status=PairedExecutionGroupStatusEnum.BROKEN.value,
+        policy=PairedExecutionPolicyEnum.SEQUENTIAL_HANDOFF.value,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+    )
+    await _insert_command(
+        _repo, public_id="cmd-0", correlation_id="grp-1", shard_key=_BTC_SHARD, status="dispatched"
+    )
+    await _scanner(_repo)._scan_cycle(_T0)
+    assert len(await _cancel_commands(_repo, "grp-1")) == 0
+
+
+async def test_sweep_broken_leaves_pending_leg_with_live_command(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A PENDING leg whose original already dispatched is NOT force-cancelled.
+
+    Given: a broken group with a PENDING owned leg bound to a DISPATCHED (live)
+        command,
+    When: a scan cycle runs,
+    Then: the broken sweep leaves the leg PENDING (its venue order may still be
+        live), so a late fill stays projectable; the compensation sweep cancels
+        the original at the venue instead.
+    """
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.PENDING.value,
+    )
+    await _insert_command(
+        _repo, public_id="cmd-0", correlation_id="grp-1", shard_key=_BTC_SHARD, status="dispatched"
+    )
+    await _scanner(_repo)._scan_cycle(_T0)
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.PENDING.value
+
+
+async def test_sweep_compensating_skips_filled_leg_with_live_command(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A FILLED leg is not cancelled even if its command still reads dispatched.
+
+    Given: a broken group with an owned FILLED leg whose original command status
+        is still ``dispatched`` (venue terminals project onto the leg, not back
+        onto the command),
+    When: a scan cycle runs,
+    Then: no venue cancel is emitted — the original already filled, so the leg
+        status (terminal) overrides the stale command status.
+    """
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    await _insert_command(
+        _repo, public_id="cmd-0", correlation_id="grp-1", shard_key=_BTC_SHARD, status="dispatched"
+    )
+    await _scanner(_repo)._scan_cycle(_T0)
+    assert len(await _cancel_commands(_repo, "grp-1")) == 0
+
+
+async def test_insert_paired_compensation_command_requires_idempotency_key(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A compensation command insert without an idempotency_key is rejected.
+
+    Given: a compensation command row with no idempotency_key,
+    When: insert_paired_compensation_command runs,
+    Then: it raises ValueError before insert — a null key would make the
+        IntegrityError re-check match unrelated null-key commands and swallow a
+        real constraint failure.
+    """
+    row: dict[str, object] = {
+        "command_type": "cancel",
+        "shard_key": _BTC_SHARD,
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "pairs-alpha",
+        "client_order_id": "orig-1",
+        "venue_client_id": "orig-1",
+        "side": "buy",
+        "order_type": "market",
+        "quantity": 1.0,
+        "price": None,
+        "reduce_only": False,
+        "status": "created",
+        "created_at": _T0,
+        "correlation_id": "grp-1",
+        "session_id": _SESSION,
+        "sequence_id": 1,
+        "timestamp": _T0,
+        "supersedes_command_id": "cmd-0",
+        "wallet_public_id": _WALLET,
+        "operator_public_id": _OPERATOR,
+        "source_surface": "strategy",
+    }
+    with pytest.raises(ValueError, match="non-empty idempotency_key"):
+        await _repo.insert_paired_compensation_command(cast(Any, row))
+
+
+async def test_sweep_broken_cleans_held_leg_of_compensating_group(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A held-command leg of a COMPENSATING group is still cleaned up.
+
+    Given: a group already moved to compensating (e.g. by a sibling owner that
+        saw a live original on its shard) with an owned leg bound to a held
+        ``created`` command,
+    When: a scan cycle runs,
+    Then: the broken sweep — which now covers compensating groups — cancels the
+        held command and terminalizes the never-dispatched leg, so a sibling's
+        held leg never lingers pending after another owner flipped the group.
+    """
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.COMPENSATING.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.PENDING.value,
+    )
+    await _insert_command(
+        _repo, public_id="cmd-0", correlation_id="grp-1", shard_key=_BTC_SHARD, status="created"
+    )
+    await _scanner(_repo)._scan_cycle(_T0)
+    assert await _command_status(_repo, "cmd-0") == "cancelled"
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.CANCELLED.value
+
+
+async def test_cancel_live_original_noop_for_leg_without_command(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A cancel-eligible leg with no bound command emits no venue cancel.
+
+    Given: a broken group with an owned PENDING leg that has no command_public_id,
+    When: the compensation sweep runs directly (so the broken sweep does not
+        terminalize it first),
+    Then: _cancel_live_original returns early — there is no original order to
+        cancel.
+    """
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id=None,
+        status=PairedExecutionLegStatusEnum.PENDING.value,
+    )
+    await _scanner(_repo)._sweep_compensating(_T0)
+    assert len(await _cancel_commands(_repo, "grp-1")) == 0
+
+
+async def test_insert_paired_compensation_command_reraises_other_integrity_error(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A non-idempotency integrity failure is re-raised, not swallowed.
+
+    Given: a compensation row carrying a valid (non-colliding) idempotency_key but
+        omitting a NOT NULL column (side),
+    When: insert_paired_compensation_command runs,
+    Then: the IntegrityError propagates — the dedup re-check finds no active row
+        for the key, so the failure is surfaced rather than silently dropped.
+    """
+    row: dict[str, object] = {
+        "command_type": "cancel",
+        "shard_key": _BTC_SHARD,
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "pairs-alpha",
+        "client_order_id": "orig-1",
+        "venue_client_id": "orig-1",
+        "order_type": "market",
+        "quantity": 1.0,
+        "price": None,
+        "reduce_only": False,
+        "status": "created",
+        "created_at": _T0,
+        "correlation_id": "grp-1",
+        "session_id": _SESSION,
+        "sequence_id": 1,
+        "timestamp": _T0,
+        "idempotency_key": "paired:grp-1:leg-0:cancel",
+        "supersedes_command_id": "cmd-0",
+        "wallet_public_id": _WALLET,
+        "operator_public_id": _OPERATOR,
+        "source_surface": "strategy",
+    }
+    with pytest.raises(IntegrityError):
+        await _repo.insert_paired_compensation_command(cast(Any, row))

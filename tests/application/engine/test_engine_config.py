@@ -2049,6 +2049,7 @@ async def test_create_guard_scanner_task_with_sql_repo_and_ownership() -> None:
     coord.repository = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
     coord.trade_service = TradeService()
+    coord.outbox = None
     task = coord._create_guard_scanner_task()
     assert task is not None
     assert coord.guard_scanner is not None

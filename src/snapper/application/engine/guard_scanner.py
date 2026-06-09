@@ -41,6 +41,7 @@ from datetime import datetime
 
 from loguru import logger
 
+from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import PairedExecutionGroupStatusEnum
@@ -51,6 +52,7 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PairedExecutionGroupRow
 from snapper.data.repository_types import PairedExecutionHaltInsertRow
 from snapper.data.repository_types import PairedExecutionLegRow
+from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 _GROUP_BROKEN_REASON = "paired-execution group broken"
@@ -63,6 +65,22 @@ _LEG_TERMINAL_NO_FILL_STATUSES = frozenset(
 )
 _ARMED_FILL_TIMEOUT_REASON = "fill timeout"
 _ARMED_LEG_TERMINAL_REASON = "leg terminal before fill"
+_LIVE_COMMAND_STATUSES = frozenset(
+    {
+        TradeCommandStatusEnum.DISPATCHED.value,
+        TradeCommandStatusEnum.DIRECT_DISPATCHED.value,
+        TradeCommandStatusEnum.ACCEPTED.value,
+        TradeCommandStatusEnum.PARTIALLY_FILLED.value,
+    }
+)
+_LEG_CANCEL_ELIGIBLE_STATUSES = frozenset(
+    {
+        PairedExecutionLegStatusEnum.PENDING.value,
+        PairedExecutionLegStatusEnum.ARMED.value,
+        PairedExecutionLegStatusEnum.WORKING.value,
+        PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value,
+    }
+)
 
 
 class PairedExecutionGuardScanner:
@@ -82,6 +100,7 @@ class PairedExecutionGuardScanner:
         ownership: ShardOwnership,
         trade_service: TradeService,
         interval_seconds: float,
+        outbox: OutboxDispatcher | None = None,
     ) -> None:
         """Initialize the scanner.
 
@@ -91,11 +110,16 @@ class PairedExecutionGuardScanner:
             trade_service: The in-memory trade service whose owned shard halts
                 mirror durable paired-execution halts.
             interval_seconds: Seconds between scan cycles.
+            outbox: The durable-command outbox dispatcher, notified after a
+                compensation command is emitted so it dispatches promptly
+                (None in tests / no-SQL setups; the outbox poll loop still
+                picks the command up on its next tick).
         """
         self._repo = repository
         self._ownership = ownership
         self._trade_service = trade_service
         self._interval = interval_seconds
+        self._outbox = outbox
         self._tracker = SequenceTracker()
         self._running = False
 
@@ -123,11 +147,13 @@ class PairedExecutionGuardScanner:
         self._running = False
 
     async def _scan_cycle(self, now: datetime | None = None) -> None:
-        """Run one full scan: assembling, armed, broken, then halt projection.
+        """Run one scan: assembling, armed, broken, compensating, halt projection.
 
         The ``armed`` sweep runs AFTER ``assembling`` and BEFORE ``broken`` so a
         group broken this tick for a fill timeout or a terminal leg is cleaned up
-        and halted (if exposed) within the SAME cycle by the later sweeps.
+        within the SAME cycle. ``compensating`` runs AFTER ``broken`` (so the held
+        original commands are already cancelled) and BEFORE ``halts`` (so a group
+        moved to ``compensating`` is halted the same cycle).
 
         Args:
             now: Scan wall-clock; defaults to ``datetime.now(UTC)`` in the
@@ -137,6 +163,7 @@ class PairedExecutionGuardScanner:
         await self._sweep_assembling(scan_at)
         await self._sweep_armed(scan_at)
         await self._sweep_broken(scan_at)
+        await self._sweep_compensating(scan_at)
         await self._sweep_halts(scan_at)
 
     async def _sweep_assembling(self, now: datetime) -> None:
@@ -236,9 +263,29 @@ class PairedExecutionGuardScanner:
         )
 
     async def _sweep_broken(self, now: datetime) -> None:
-        """Cancel owned held commands and terminalize owned legs of broken groups."""
+        """Cancel owned held commands and terminalize owned never-dispatched legs.
+
+        A PENDING leg is force-terminalized to ``cancelled`` ONLY when its
+        original command was a HELD ``created`` row (the cancel CAS returned
+        True) or it has no command — i.e. the order NEVER reached the venue.
+        A PENDING leg whose command already dispatched is left PENDING: its
+        venue order may still be live, so the compensation sweep cancels it at
+        the venue and lets the venue terminal (or a fill) drive the leg status,
+        rather than prematurely marking it ``cancelled`` (which would make a
+        late fill invisible to the fill projection).
+
+        Covers BOTH ``broken`` and ``compensating`` groups: once one coordinator
+        moves a group to ``compensating`` for a live original on its shard, the
+        held-command / never-dispatched-leg cleanup for a SIBLING coordinator's
+        owned legs must still run, or a held-``created`` / no-command leg owned
+        by that sibling would linger ``pending`` forever.
+        """
         broken = await self._repo.list_active_paired_execution_groups(
-            [PairedExecutionGroupStatusEnum.BROKEN.value], now
+            [
+                PairedExecutionGroupStatusEnum.BROKEN.value,
+                PairedExecutionGroupStatusEnum.COMPENSATING.value,
+            ],
+            now,
         )
         for group in broken:
             legs = await self._repo.get_paired_execution_legs(group["public_id"], now)
@@ -246,8 +293,9 @@ class PairedExecutionGuardScanner:
                 if not self._ownership.owns(leg["shard_key"]):
                     continue
                 command_public_id = leg["command_public_id"]
+                cancelled_held = False
                 if command_public_id is not None:
-                    await self._repo.cas_trade_command_status(
+                    cancelled_held = await self._repo.cas_trade_command_status(
                         command_public_id,
                         TradeCommandStatusEnum.CREATED.value,
                         TradeCommandStatusEnum.CANCELLED.value,
@@ -257,7 +305,8 @@ class PairedExecutionGuardScanner:
                         terminal_at=now,
                         last_error=_GROUP_BROKEN_REASON,
                     )
-                if leg["status"] == PairedExecutionLegStatusEnum.PENDING.value:
+                never_dispatched = command_public_id is None or cancelled_held
+                if leg["status"] == PairedExecutionLegStatusEnum.PENDING.value and never_dispatched:
                     await self._repo.cas_paired_execution_leg_status(
                         leg["public_id"],
                         PairedExecutionLegStatusEnum.PENDING.value,
@@ -266,6 +315,136 @@ class PairedExecutionGuardScanner:
                         self._tracker.session_id,
                         self._tracker.next_sequence("guard.leg"),
                     )
+
+    async def _sweep_compensating(self, now: datetime) -> None:
+        """Cancel the still-live original orders of broken / compensating groups.
+
+        Phase 5c.1 (cancel only): for each active ``broken`` / ``compensating``
+        ``simultaneous`` group, for each OWNED leg still in a non-terminal status
+        (:data:`_LEG_CANCEL_ELIGIBLE_STATUSES`) whose ORIGINAL command is still
+        LIVE at the venue (command status in :data:`_LIVE_COMMAND_STATUSES`), the
+        group is moved ``broken`` → ``compensating`` (dedup-safe CAS) and an
+        idempotent venue cancel command is emitted for the original order. BOTH
+        guards are required: leg status alone is not a venue-liveness signal (a
+        dispatched leg stays ``pending`` until a fill / venue terminal is
+        projected), and command status alone is not either (venue terminals are
+        projected onto the LEG, not back onto the command, so a FILLED / CANCELLED
+        leg can still read command status ``dispatched``). The leg is NOT claimed
+        or flattened here — it stays fill-projectable until the venue cancel /
+        expire / reject (or a fill) terminalizes it; Phase 5c.2 then flattens any
+        residual exposure. Lists ``broken`` AND ``compensating`` so a CAS loser, a
+        re-scan, or a leg that turns live after the group flipped is still
+        handled. Scoped to ``simultaneous`` policy.
+        """
+        groups = await self._repo.list_active_paired_execution_groups(
+            [
+                PairedExecutionGroupStatusEnum.BROKEN.value,
+                PairedExecutionGroupStatusEnum.COMPENSATING.value,
+            ],
+            now,
+        )
+        for group in groups:
+            if group["policy"] != PairedExecutionPolicyEnum.SIMULTANEOUS.value:
+                continue
+            legs = await self._repo.get_paired_execution_legs(group["public_id"], now)
+            for leg in legs:
+                if not self._ownership.owns(leg["shard_key"]):
+                    continue
+                if leg["status"] not in _LEG_CANCEL_ELIGIBLE_STATUSES:
+                    continue
+                await self._cancel_live_original(group, leg, now)
+
+    async def _cancel_live_original(
+        self,
+        group: PairedExecutionGroupRow,
+        leg: PairedExecutionLegRow,
+        now: datetime,
+    ) -> None:
+        """Emit an idempotent venue cancel for one owned leg with a live original.
+
+        No-op unless the leg binds a command whose status is venue-live. On a live
+        original the group is moved to ``compensating`` (so :meth:`_sweep_halts`
+        halts the pair this cycle even at zero exposure) and a
+        ``command_type='cancel'`` command is inserted with an
+        ``idempotency_key`` that dedups re-emission across cycles and instances;
+        the ``supersedes_command_id`` lets the broken-group outbox gate release
+        it. The outbox is notified only when a command was actually inserted.
+        """
+        command_public_id = leg["command_public_id"]
+        client_order_id = leg["client_order_id"]
+        if command_public_id is None or client_order_id is None:
+            return
+        command_status = await self._repo.get_current_trade_command_status(command_public_id)
+        if command_status not in _LIVE_COMMAND_STATUSES:
+            return
+        await self._ensure_group_compensating(group, now)
+        inserted = await self._repo.insert_paired_compensation_command(
+            self._paired_cancel_row(group, leg, client_order_id, command_public_id, now)
+        )
+        if inserted is not None and self._outbox is not None:
+            self._outbox.notify()
+
+    async def _ensure_group_compensating(
+        self, group: PairedExecutionGroupRow, now: datetime
+    ) -> None:
+        """CAS a broken group to compensating (dedup-safe; no-op if already so)."""
+        if group["status"] != PairedExecutionGroupStatusEnum.BROKEN.value:
+            return
+        await self._repo.cas_paired_execution_group_status(
+            group["public_id"],
+            PairedExecutionGroupStatusEnum.BROKEN.value,
+            PairedExecutionGroupStatusEnum.COMPENSATING.value,
+            now,
+            self._tracker.session_id,
+            self._tracker.next_sequence("guard.compensate"),
+        )
+
+    def _paired_cancel_row(
+        self,
+        group: PairedExecutionGroupRow,
+        leg: PairedExecutionLegRow,
+        client_order_id: str,
+        command_public_id: str,
+        now: datetime,
+    ) -> TradeCommandInsertRow:
+        """Build the venue cancel command row for a leg's live original order.
+
+        ``client_order_id`` / ``venue_client_id`` target the ORIGINAL order so the
+        executor cancels it at the venue; ``supersedes_command_id`` is the
+        original command id (releasing the broken-group outbox gate); the
+        ``idempotency_key`` is unique per ``(group, leg)`` cancel so re-emission
+        across scan cycles is deduped by the active-unique index. The leg's
+        ``exchange_order_id`` is carried when known (a partially-filled leg has
+        one) so the cancel dispatch does not depend on the orders projection to
+        hydrate the venue id.
+        """
+        return {
+            "command_type": "cancel",
+            "shard_key": leg["shard_key"],
+            "exchange": leg["exchange"],
+            "instrument": leg["instrument"],
+            "mode": leg["mode"],
+            "strategy_id": group["strategy_id"],
+            "client_order_id": client_order_id,
+            "venue_client_id": client_order_id,
+            "side": leg["side"],
+            "order_type": "market",
+            "quantity": leg["target_qty"],
+            "price": None,
+            "reduce_only": False,
+            "status": TradeCommandStatusEnum.CREATED.value,
+            "created_at": now,
+            "correlation_id": group["public_id"],
+            "session_id": self._tracker.session_id,
+            "sequence_id": self._tracker.next_sequence("guard.cancel.cmd"),
+            "timestamp": now,
+            "idempotency_key": f"paired:{group['public_id']}:{leg['public_id']}:cancel",
+            "supersedes_command_id": command_public_id,
+            "exchange_order_id": leg["exchange_order_id"],
+            "wallet_public_id": leg["wallet_public_id"],
+            "operator_public_id": leg["operator_public_id"],
+            "source_surface": "strategy",
+        }
 
     async def _sweep_halts(self, now: datetime) -> None:
         """Project durable halts and shard mirrors for EXPOSED broken groups.

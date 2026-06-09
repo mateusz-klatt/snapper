@@ -3067,6 +3067,7 @@ class TraderCoordinator(RegisterableProcess):
             ownership=self._ownership,
             trade_service=self.trade_service,
             interval_seconds=max(1.0, _bootstrap_settings.paired_execution_assembly_timeout_s / 2),
+            outbox=self.outbox,
         )
         return asyncio.create_task(self.guard_scanner.run())
 
