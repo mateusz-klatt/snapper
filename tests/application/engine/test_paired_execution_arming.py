@@ -21,6 +21,9 @@ import pytest
 import snapper.application.engine.trader as trader_module
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.core.partitioning import ShardOwnership
+from snapper.core.types import PairedExecutionLegStatusEnum
+from snapper.core.types import TradeCommandStatusEnum
+from snapper.data.models import TradeCommand
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import VenueEventRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -439,6 +442,9 @@ async def _insert_guard_leg(
     timestamp: datetime | None = None,
     side: str = "buy",
     client_order_id: str | None = None,
+    command_public_id: str | None = None,
+    filled_signed_qty: float = 0.0,
+    compensated_signed_qty: float = 0.0,
     status: str = "pending",
 ) -> None:
     """Insert a paired-execution leg for recovery / fill-projection tests."""
@@ -455,8 +461,10 @@ async def _insert_guard_leg(
             "side": side,
             "target_qty": 1.0,
             "signal_public_id": f"sig-{public_id}",
-            "command_public_id": None,
+            "command_public_id": command_public_id,
             "client_order_id": client_order_id,
+            "filled_signed_qty": filled_signed_qty,
+            "compensated_signed_qty": compensated_signed_qty,
             "status": status,
             "wallet_public_id": "",
             "operator_public_id": None,
@@ -466,6 +474,47 @@ async def _insert_guard_leg(
             "timestamp": stamp,
         }
     )
+
+
+async def _insert_flatten_cmd(
+    repo: SQLAlchemyRepository,
+    *,
+    public_id: str,
+    supersedes_command_id: str,
+    client_order_id: str,
+    side: str,
+) -> None:
+    """Insert an active reduce-only flatten command superseding a leg's original."""
+    stamp = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
+    async with repo.session() as session:
+        session.add(
+            TradeCommand(
+                public_id=public_id,
+                command_type="submit",
+                shard_key="kraken.BTC-USD.live",
+                exchange="kraken",
+                instrument="BTC-USD",
+                mode="live",
+                strategy_id="engine",
+                client_order_id=client_order_id,
+                venue_client_id=client_order_id,
+                side=side,
+                order_type="market",
+                quantity=1.0,
+                price=None,
+                reduce_only=True,
+                status=TradeCommandStatusEnum.CREATED.value,
+                created_at=stamp,
+                correlation_id="00000000-0000-0000-0000-000000000111",
+                supersedes_command_id=supersedes_command_id,
+                idempotency_key=f"flatten:{client_order_id}",
+                wallet_public_id="",
+                session_id="00000000-0000-0000-0000-000000000003",
+                sequence_id=1,
+                timestamp=stamp,
+            )
+        )
+        await session.commit()
 
 
 def _fill(
@@ -1025,6 +1074,162 @@ async def test_project_leg_fill_noop_without_sql_repository(_coord: TraderCoordi
         cast(VenueEventRow, {"id": 1}),
     )
     repo.project_paired_execution_leg_fill.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_project_leg_fill_routes_flatten_fill_to_compensation_when_enabled(
+    _coord: TraderCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A flatten order's live fill lands on the leg's compensated qty when the guard is on.
+
+    Given: the guard enabled, a compensating long leg (filled=+5) bound to original
+        command 'cmd-x', and a reduce-only SELL flatten order (fresh client_order_id
+        'flat') superseding 'cmd-x' that filled 5,
+    When: _project_paired_execution_leg_fill runs for the flatten order's fill (which
+        matches no leg directly, so the original projection is NO_MATCH),
+    Then: the fill is re-routed to the compensation projection, compensated_signed_qty
+        becomes +5 and the leg is FLATTENED.
+    """
+    monkeypatch.setattr(
+        trader_module._bootstrap_settings, "paired_execution_guard_enabled", True, raising=True
+    )
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-c", status="compensating")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-c",
+        group_public_id="grp-c",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        side="buy",
+        client_order_id="orig-c",
+        command_public_id="cmd-x",
+        filled_signed_qty=5.0,
+        status=PairedExecutionLegStatusEnum.COMPENSATING.value,
+    )
+    await _insert_flatten_cmd(
+        _sql_repo(_coord),
+        public_id="flatcmd-1",
+        supersedes_command_id="cmd-x",
+        client_order_id="flat",
+        side="sell",
+    )
+    await _insert_fill_event(_sql_repo(_coord), client_order_id="flat", cum_fill_size=5.0)
+    await _coord._project_paired_execution_leg_fill(
+        _fill(client_order_id="flat", side="sell", size=5.0, status="filled"),
+        cast(VenueEventRow, {"id": 1}),
+    )
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-c")
+    assert legs[0]["compensated_signed_qty"] == 5.0
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.FLATTENED.value
+
+
+@pytest.mark.asyncio
+async def test_project_leg_fill_skips_compensation_when_guard_disabled(
+    _coord: TraderCoordinator,
+) -> None:
+    """A non-matching fill never reaches the compensation projection while the guard is dark.
+
+    Given: the guard disabled (default) and a fill whose client_order_id matches no
+        leg,
+    When: _project_paired_execution_leg_fill runs,
+    Then: the original projection returns NO_MATCH but the compensation projection is
+        NOT called, so a non-paired deployment never pays the second lookup.
+    """
+    _sql_repo(_coord).project_paired_execution_compensation_fill = AsyncMock()
+    await _coord._project_paired_execution_leg_fill(
+        _fill(client_order_id="unmatched", side="sell", size=5.0, status="filled"),
+        cast(VenueEventRow, {"id": 1}),
+    )
+    _sql_repo(_coord).project_paired_execution_compensation_fill.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_reprojects_compensation_when_enabled(
+    _coord: TraderCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recovery restores a leg's compensated qty from a downtime flatten fill when enabled.
+
+    Given: the guard enabled, an owned compensating long leg (filled=+5, stale
+        compensated=0) whose SELL flatten order filled 5 while the coordinator was
+        down,
+    When: the recovery leg-fill pass runs,
+    Then: it re-derives compensated=+5 from venue_events and FLATTENS the leg —
+        compensation recovery parity, gated on the feature flag.
+    """
+    monkeypatch.setattr(
+        trader_module._bootstrap_settings, "paired_execution_guard_enabled", True, raising=True
+    )
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-r", status="compensating")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-r",
+        group_public_id="grp-r",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        side="buy",
+        client_order_id="orig-r",
+        command_public_id="cmd-r",
+        filled_signed_qty=5.0,
+        status=PairedExecutionLegStatusEnum.COMPENSATING.value,
+    )
+    await _insert_flatten_cmd(
+        _sql_repo(_coord),
+        public_id="flatcmd-r",
+        supersedes_command_id="cmd-r",
+        client_order_id="flat-r",
+        side="sell",
+    )
+    await _insert_fill_event(_sql_repo(_coord), client_order_id="flat-r", cum_fill_size=5.0)
+    await _coord._recover_paired_execution_leg_fills()
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-r")
+    assert legs[0]["compensated_signed_qty"] == 5.0
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.FLATTENED.value
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_covers_manual_intervention_group(
+    _coord: TraderCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recovery re-derives compensation for a manual_intervention group's leg too.
+
+    Given: the guard enabled and an owned manual_intervention long leg (filled=+5,
+        stale compensated=0) whose SELL flatten filled 5 during downtime — a leg can
+        be manual while a sibling's flatten is still in flight,
+    When: the recovery leg-fill pass runs,
+    Then: it restores compensated=+5 but leaves the status manual_intervention
+        (auto-flatten never clears an operator escalation), proving the recovery
+        group list covers manual_intervention.
+    """
+    monkeypatch.setattr(
+        trader_module._bootstrap_settings, "paired_execution_guard_enabled", True, raising=True
+    )
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-m", status="manual_intervention")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-m",
+        group_public_id="grp-m",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        side="buy",
+        client_order_id="orig-m",
+        command_public_id="cmd-m",
+        filled_signed_qty=5.0,
+        status=PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value,
+    )
+    await _insert_flatten_cmd(
+        _sql_repo(_coord),
+        public_id="flatcmd-m",
+        supersedes_command_id="cmd-m",
+        client_order_id="flat-m",
+        side="sell",
+    )
+    await _insert_fill_event(_sql_repo(_coord), client_order_id="flat-m", cum_fill_size=5.0)
+    await _coord._recover_paired_execution_leg_fills()
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-m")
+    assert legs[0]["compensated_signed_qty"] == 5.0
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value
 
 
 def _order_status(*, client_order_id: str, status: str, instrument: str = "BTC-USD") -> OrderData:

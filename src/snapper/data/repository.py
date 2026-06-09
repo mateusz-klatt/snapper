@@ -106,7 +106,9 @@ from snapper.core.partitioning import ShardOwnershipError
 from snapper.core.types import AllExchange
 from snapper.core.types import PairedExecutionGroupStatusEnum
 from snapper.core.types import PairedExecutionLegStatusEnum
+from snapper.core.types import PairedFillProjection
 from snapper.core.types import TradeCommandStatusEnum
+from snapper.core.types import TradeSideEnum
 from snapper.data.archive_symbols import resolve_archive_symbols
 from snapper.data.db_stats_types import TableCounters
 from snapper.data.db_stats_types import TableEntry
@@ -7924,6 +7926,7 @@ class SQLAlchemyRepository(Repository):
     _PEL_TERMINAL_PROJECT_SKIP_STATUSES: frozenset[str] = _PEL_FILL_TERMINAL_STATUSES | frozenset(
         {PairedExecutionLegStatusEnum.FILLED.value}
     )
+    _PEC_QTY_EPSILON: float = 1e-12
 
     @staticmethod
     def _paired_execution_group_row_to_dict(
@@ -8231,21 +8234,26 @@ class SQLAlchemyRepository(Repository):
         sequence_id: int,
         exchange_order_id: str | None = None,
         last_venue_event_id: int | None = None,
-    ) -> bool:
+    ) -> PairedFillProjection:
         """Project a venue fill onto the CURRENT active paired-execution leg.
 
-        Resolves the leg by its ``client_order_id`` (the leg's original order
-        id; a non-grouped fill matches no leg and is a no-op). Guards the
-        CURRENT active row (``known_to == KNOWN_TO_MAX``) under ``FOR UPDATE``,
-        skips a leg already in a fill-terminal state (a late post-terminal fill
-        is Phase-5d's re-compensation concern, not fill projection), and applies
+        Resolves the leg by its ``client_order_id`` (the leg's ORIGINAL order
+        id; a non-grouped fill matches no leg and returns
+        :attr:`PairedFillProjection.NO_MATCH`, the signal the live hook uses to
+        then try the compensation projection). Guards the CURRENT active row
+        (``known_to == KNOWN_TO_MAX``) under ``FOR UPDATE``, skips a leg already
+        in a fill-terminal state (a late post-terminal fill is Phase-5d.2's
+        re-compensation concern, not original fill projection), and applies
         MONOTONIC cumulative accounting: ``filled_signed_qty`` is replaced only
         when the incoming signed cumulative MAGNITUDE strictly exceeds the
         stored one, so a duplicate / out-of-order replay never regresses the
         leg. On apply it SCD2 close-and-inserts the successor carrying the new
         ``filled_signed_qty`` / ``status`` / ``exchange_order_id`` /
         ``last_venue_event_id`` (and all other columns forward). Returns
-        ``True`` iff a successor was written.
+        :attr:`PairedFillProjection.ORIGINAL_APPLIED` iff a successor was
+        written, :attr:`~PairedFillProjection.ORIGINAL_NOOP` when a leg matched
+        but the monotonic / terminal guard left it unchanged, and
+        :attr:`~PairedFillProjection.NO_MATCH` when no leg owns the order.
 
         Unlike the generic :func:`close_and_insert` helper (which matches the
         predecessor with a temporal ``timestamp <= bus_time`` filter and so
@@ -8282,11 +8290,11 @@ class SQLAlchemyRepository(Repository):
                 )
             existing = matches[0] if matches else None
             if existing is None:
-                return False
+                return PairedFillProjection.NO_MATCH
             if existing.status in self._PEL_FILL_TERMINAL_STATUSES:
-                return False
+                return PairedFillProjection.ORIGINAL_NOOP
             if abs(filled_signed_qty) <= abs(existing.filled_signed_qty):
-                return False
+                return PairedFillProjection.ORIGINAL_NOOP
             effective_bus_time = max(bus_time, existing.timestamp)
             await s.execute(
                 update(PairedExecutionLeg)
@@ -8314,7 +8322,256 @@ class SQLAlchemyRepository(Repository):
                 )
             )
             await s.commit()
-            return True
+            return PairedFillProjection.ORIGINAL_APPLIED
+
+    async def project_paired_execution_compensation_fill(
+        self,
+        flatten_client_order_id: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> PairedFillProjection:
+        """Project a reduce-only FLATTEN order's fill onto its leg's compensated qty.
+
+        A compensation (flatten) order carries a FRESH ``client_order_id`` and a
+        command whose ``supersedes_command_id`` is the leg's ORIGINAL command, so
+        its venue fill matches NO leg by ``client_order_id`` — the original
+        projection returns ``NO_MATCH`` and the live hook routes here. This
+        resolves the active flatten ``TradeCommand`` by ``client_order_id`` (a
+        ``reduce_only`` ``submit`` with a non-null ``supersedes_command_id``;
+        ``NO_MATCH`` when none, so an ordinary reduce-only order that supersedes
+        nothing is ignored), follows ``supersedes_command_id`` to the leg whose
+        ``command_public_id`` matches (``NO_MATCH`` when the superseded command is
+        not a leg's), then recomputes ``compensated_signed_qty`` from the
+        AUTHORITATIVE ``venue_events`` via :meth:`_apply_leg_compensation`. Raises
+        on a data-integrity duplicate (two active commands sharing the flatten id);
+        the superseded original command is active-unique on the leg, so at most one
+        leg matches. Returns
+        :attr:`PairedFillProjection.COMPENSATION_APPLIED` /
+        :attr:`~PairedFillProjection.COMPENSATION_NOOP` /
+        :attr:`~PairedFillProjection.NO_MATCH`.
+        """
+        async with self.session() as s:
+            commands = (
+                (
+                    await s.execute(
+                        select(TradeCommand)
+                        .where(
+                            TradeCommand.client_order_id == flatten_client_order_id,
+                            TradeCommand.known_to == KNOWN_TO_MAX,
+                            TradeCommand.command_type == "submit",
+                            TradeCommand.reduce_only.is_(True),
+                            TradeCommand.supersedes_command_id.isnot(None),
+                        )
+                        .limit(2)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if len(commands) > 1:
+                raise ValueError(
+                    "paired-execution data integrity: "
+                    f"{len(commands)} active flatten commands share "
+                    f"client_order_id {flatten_client_order_id}"
+                )
+            command = commands[0] if commands else None
+            if command is None:
+                return PairedFillProjection.NO_MATCH
+            leg = (
+                (
+                    await s.execute(
+                        select(PairedExecutionLeg)
+                        .where(
+                            PairedExecutionLeg.command_public_id == command.supersedes_command_id,
+                            PairedExecutionLeg.known_to == KNOWN_TO_MAX,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if leg is None:
+                return PairedFillProjection.NO_MATCH
+            return await self._apply_leg_compensation(s, leg, bus_time, session_id, sequence_id)
+
+    async def reproject_paired_execution_leg_compensation(
+        self,
+        leg_public_id: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> PairedFillProjection:
+        """Recompute one leg's compensated qty from venue_events on startup recovery.
+
+        The live compensation-fill projection only runs on the live fill path, so
+        a flatten order that filled while the coordinator was DOWN would recover
+        with a stale ``compensated_signed_qty``. This pass re-derives it from the
+        AUTHORITATIVE ``venue_events`` for the leg resolved by ``public_id``
+        (current-active, ``FOR UPDATE``), mirroring the original-fill recovery
+        parity. A leg already projected live is a ``COMPENSATION_NOOP``; a
+        downtime flatten fill is restored. Returns ``NO_MATCH`` when the leg is
+        gone. The leg ``public_id`` is active-unique, so at most one row matches.
+        """
+        async with self.session() as s:
+            leg = (
+                (
+                    await s.execute(
+                        select(PairedExecutionLeg)
+                        .where(
+                            PairedExecutionLeg.public_id == leg_public_id,
+                            PairedExecutionLeg.known_to == KNOWN_TO_MAX,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if leg is None:
+                return PairedFillProjection.NO_MATCH
+            return await self._apply_leg_compensation(s, leg, bus_time, session_id, sequence_id)
+
+    async def _apply_leg_compensation(
+        self,
+        s: AsyncSession,
+        leg: PairedExecutionLeg,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> PairedFillProjection:
+        """Recompute and persist a leg's ``compensated_signed_qty`` from venue_events.
+
+        Shared by the live compensation-fill projection and startup recovery, on a
+        leg already locked ``FOR UPDATE``. ``compensated_signed_qty`` is the SIGNED
+        sum (buy +, sell −) of EVERY reduce-only flatten command superseding the
+        leg's ORIGINAL command, NEGATED so it moves toward ``filled_signed_qty``
+        under the guard's ``open_qty = filled_signed_qty − compensated_signed_qty``
+        convention (a net-long leg flattens by SELLING, so its flatten fills are
+        negative and ``compensated`` grows positive toward the positive
+        ``filled``). The sign uses the COMMAND side, not the venue-event side, so a
+        mislabelled venue echo cannot invert it. Each flatten order contributes its
+        MAX cumulative fill (replay-safe and additive across re-compensation
+        rounds, unlike a single monotonic scalar whose round-2 order restarts at
+        zero). When the leg is ``compensating`` and the recomputed open residual
+        collapses to zero (within :data:`_PEC_QTY_EPSILON`) the successor is
+        ``flattened``; ``manual_intervention`` and every other status are carried
+        forward UNCHANGED (auto-flatten must never override an operator escalation).
+        Writes an SCD2 successor (bus time clamped to ``max(bus_time,
+        leg.timestamp)``) only when the value or status actually changes, else
+        returns ``COMPENSATION_NOOP``.
+
+        FAILS CLOSED on corruption rather than mis-accounting real money: two
+        active flatten commands sharing a ``client_order_id`` would each read the
+        SAME venue max-cumulative and double-count it (falsely zeroing ``open_qty``
+        and FLATTENING the leg), and an unexpected command ``side`` would be
+        silently treated as a buy — both raise ``ValueError`` here instead.
+
+        SCOPE (Phase 5d.1): the ``flattened`` decision TRUSTS the leg's stored
+        ``filled_signed_qty`` as the authoritative original exposure. A late fill on
+        the ORIGINAL order after the leg has gone ``broken`` / ``compensating`` /
+        terminal is dropped by :meth:`project_paired_execution_leg_fill` (those are
+        fill-terminal states), so until Phase 5d.2 re-projects such late fills the
+        stored ``filled`` can lag the true venue exposure and a leg could be
+        FLATTENED with residual exposure. This is CONTAINED because the guard ships
+        DARK and 5d.1 never COMPLETES a group — a flattened leg's group stays
+        ``compensating`` and HALTED; un-halting requires Phase 5d.3's locked
+        all-legs-settled check. Do NOT enable the flag before 5d.2/5d.3 land.
+        """
+        original_command_id = leg.command_public_id
+        if original_command_id is None:
+            return PairedFillProjection.COMPENSATION_NOOP
+        flatten_orders = (
+            await s.execute(
+                select(TradeCommand.client_order_id, TradeCommand.side).where(
+                    TradeCommand.supersedes_command_id == original_command_id,
+                    TradeCommand.known_to == KNOWN_TO_MAX,
+                    TradeCommand.command_type == "submit",
+                    TradeCommand.reduce_only.is_(True),
+                )
+            )
+        ).all()
+        compensated = 0.0
+        seen_orders: set[str] = set()
+        for client_order_id, side in flatten_orders:
+            if client_order_id in seen_orders:
+                raise ValueError(
+                    "paired-execution data integrity: duplicate active flatten "
+                    f"client_order_id {client_order_id} supersedes command "
+                    f"{original_command_id}"
+                )
+            seen_orders.add(client_order_id)
+            if side == TradeSideEnum.SELL.value:
+                direction = 1.0
+            elif side == TradeSideEnum.BUY.value:
+                direction = -1.0
+            else:
+                raise ValueError(
+                    "paired-execution data integrity: flatten command "
+                    f"{client_order_id} has unexpected side {side!r}"
+                )
+            cum_fill = await self._max_cumulative_fill(s, client_order_id)
+            if cum_fill <= 0.0:
+                continue
+            compensated += direction * cum_fill
+        new_status = leg.status
+        if (
+            leg.status == PairedExecutionLegStatusEnum.COMPENSATING.value
+            and abs(leg.filled_signed_qty - compensated) < self._PEC_QTY_EPSILON
+        ):
+            new_status = PairedExecutionLegStatusEnum.FLATTENED.value
+        if (
+            abs(compensated - leg.compensated_signed_qty) < self._PEC_QTY_EPSILON
+            and new_status == leg.status
+        ):
+            return PairedFillProjection.COMPENSATION_NOOP
+        effective_bus_time = max(bus_time, leg.timestamp)
+        await s.execute(
+            update(PairedExecutionLeg)
+            .where(PairedExecutionLeg.id == leg.id)
+            .values(known_to=effective_bus_time)
+        )
+        s.add(
+            self._leg_successor(
+                leg,
+                status=new_status,
+                filled_signed_qty=leg.filled_signed_qty,
+                exchange_order_id=leg.exchange_order_id,
+                last_venue_event_id=leg.last_venue_event_id,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=effective_bus_time,
+                compensated_signed_qty=compensated,
+            )
+        )
+        await s.commit()
+        return PairedFillProjection.COMPENSATION_APPLIED
+
+    @staticmethod
+    async def _max_cumulative_fill(s: AsyncSession, client_order_id: str) -> float:
+        """Return the MAX cumulative ``fill_observed`` size for an order, or 0.0.
+
+        Session-bound twin of :meth:`get_max_cumulative_fill_venue_event` used
+        inside the compensation recompute so the leg lock and the venue-event read
+        share one transaction. Selects the greatest non-null ``cum_fill_size`` so
+        an out-of-order executor write can never make the recompute read a smaller
+        cumulative than was actually filled.
+        """
+        result = await s.execute(
+            select(VenueEvent.cum_fill_size)
+            .where(
+                VenueEvent.client_order_id == client_order_id,
+                VenueEvent.event_type == "fill_observed",
+                VenueEvent.cum_fill_size.isnot(None),
+            )
+            .order_by(VenueEvent.cum_fill_size.desc(), VenueEvent.id.desc())
+            .limit(1)
+        )
+        row = result.first()
+        if row is None:
+            return 0.0
+        return float(row[0])
 
     async def project_paired_execution_leg_terminal(
         self,
@@ -8406,17 +8663,20 @@ class SQLAlchemyRepository(Repository):
         sequence_id: int,
         timestamp: datetime,
         compensation_seq: int | None = None,
+        compensated_signed_qty: float | None = None,
     ) -> PairedExecutionLeg:
         """Build an SCD2 successor leg row carrying every column forward.
 
-        Shared by the fill, terminal and flatten-claim projections: every
-        immutable / carried column (identity, group, venue, side, target,
-        signal/command ids) is copied from ``existing`` and only the
-        explicitly-overridden ``status`` / ``filled_signed_qty`` / venue ids /
-        provenance / ``timestamp`` differ. ``compensated_signed_qty`` is always
-        carried forward; ``compensation_seq`` is carried forward unless an
-        override is given (the flatten claim in Phase 5c.2 bumps it). The caller
-        closes ``existing`` and adds this row.
+        Shared by the fill, terminal, flatten-claim and compensation-fill
+        projections: every immutable / carried column (identity, group, venue,
+        side, target, signal/command ids) is copied from ``existing`` and only
+        the explicitly-overridden ``status`` / ``filled_signed_qty`` / venue ids
+        / provenance / ``timestamp`` differ. ``compensated_signed_qty`` is
+        carried forward unless an override is given (the Phase 5d.1
+        compensation-fill projection writes the recomputed value);
+        ``compensation_seq`` is carried forward unless an override is given (the
+        flatten claim in Phase 5c.2 bumps it). The caller closes ``existing``
+        and adds this row.
         """
         return PairedExecutionLeg(
             public_id=existing.public_id,
@@ -8434,7 +8694,11 @@ class SQLAlchemyRepository(Repository):
             exchange_order_id=exchange_order_id,
             status=status,
             filled_signed_qty=filled_signed_qty,
-            compensated_signed_qty=existing.compensated_signed_qty,
+            compensated_signed_qty=(
+                existing.compensated_signed_qty
+                if compensated_signed_qty is None
+                else compensated_signed_qty
+            ),
             compensation_seq=(
                 existing.compensation_seq if compensation_seq is None else compensation_seq
             ),

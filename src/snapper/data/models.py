@@ -1042,6 +1042,7 @@ class TradeCommand(TemporalMixin, Base):
             "id",
         ),
         Index("ix_trade_commands_shard_key", "shard_key"),
+        Index("ix_trade_commands_client_order_id", "client_order_id"),
         Index(
             "uq_trade_commands_idempotency",
             "idempotency_key",

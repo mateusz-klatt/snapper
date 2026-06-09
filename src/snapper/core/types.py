@@ -333,6 +333,30 @@ class PairedExecutionPolicyEnum(StrEnum):
     SEQUENTIAL_HANDOFF = "sequential_handoff"
 
 
+class PairedFillProjection(StrEnum):
+    """Outcome of projecting a venue fill onto the paired-execution tables.
+
+    Distinguishes WHICH leg-accounting field a fill landed on, and whether
+    it changed anything, so the live fill hook can route a single venue
+    event correctly. A fill on a leg's ORIGINAL order updates
+    ``filled_signed_qty`` (``ORIGINAL_*``); a fill on a reduce-only FLATTEN
+    order (whose command ``supersedes`` the leg's original) updates
+    ``compensated_signed_qty`` (``COMPENSATION_*``). ``*_APPLIED`` wrote an
+    SCD2 successor; ``*_NOOP`` matched a leg but the monotonic accounting
+    left it unchanged (a duplicate / out-of-order / post-terminal replay);
+    ``NO_MATCH`` resolved no leg at all (an ungrouped order). The original
+    projection returns one of ``ORIGINAL_APPLIED`` / ``ORIGINAL_NOOP`` /
+    ``NO_MATCH``; only on ``NO_MATCH`` does the caller try the compensation
+    projection, so a non-paired fill never pays the second lookup twice.
+    """
+
+    ORIGINAL_APPLIED = "original_applied"
+    ORIGINAL_NOOP = "original_noop"
+    COMPENSATION_APPLIED = "compensation_applied"
+    COMPENSATION_NOOP = "compensation_noop"
+    NO_MATCH = "no_match"
+
+
 class AiReviewStatusEnum(StrEnum):
     """Lifecycle state of an AI delegate review (CONSULT pattern).
 
@@ -776,6 +800,7 @@ __all__ = [
     "PairedExecutionLegStatusEnum",
     "PairedExecutionPolicy",
     "PairedExecutionPolicyEnum",
+    "PairedFillProjection",
     "ProcessLifecycleEnum",
     "ProcessLifecycleType",
     "ProcessMode",

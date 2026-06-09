@@ -64,6 +64,7 @@ from snapper.core.types import OrderExchange
 from snapper.core.types import OrderType
 from snapper.core.types import PairedExecutionGroupStatusEnum
 from snapper.core.types import PairedExecutionLegStatusEnum
+from snapper.core.types import PairedFillProjection
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import TradeSideEnum
@@ -605,8 +606,13 @@ class TraderCoordinator(RegisterableProcess):
         recovery. This pass re-reads the AUTHORITATIVE durable ``venue_events``
         (the executor writes them fail-closed with the cumulative ``cum_fill_size``
         BEFORE publishing) and re-projects each owned active leg's MAX cumulative
-        fill via the monotonic projection DAL — a leg already projected live is a
-        no-op; a downtime fill is restored. Runs AFTER ``_recover_engine_state``
+        ORIGINAL fill via the monotonic projection DAL — a leg already projected
+        live is a no-op; a downtime fill is restored. When the guard is enabled it
+        ALSO re-derives each leg's ``compensated_signed_qty`` from its reduce-only
+        flatten orders (Phase 5d.1 compensation parity), so a flatten that filled
+        during downtime is restored too. Covers ``armed`` / ``broken`` /
+        ``compensating`` / ``manual_intervention`` groups — a leg can be in any of
+        these while a sibling's flatten is mid-flight. Runs AFTER ``_recover_engine_state``
         and BEFORE the trading loop, so the post-recovery guard scanner sees the
         restored exposure. Gated on a SQL repository + shard ownership; per-leg
         fail-soft so one bad leg (e.g. the data-integrity duplicate-client_order_id
@@ -623,6 +629,7 @@ class TraderCoordinator(RegisterableProcess):
                     PairedExecutionGroupStatusEnum.ARMED.value,
                     PairedExecutionGroupStatusEnum.BROKEN.value,
                     PairedExecutionGroupStatusEnum.COMPENSATING.value,
+                    PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value,
                 ]
             )
         except Exception as exc:
@@ -677,27 +684,42 @@ class TraderCoordinator(RegisterableProcess):
         client_order_id: str,
         now: datetime,
     ) -> None:
-        """Project one owned leg's max cumulative venue fill, if any, onto the leg."""
+        """Project one owned leg's max cumulative venue fill, if any, onto the leg.
+
+        Re-derives the ORIGINAL fill (``filled_signed_qty``) from the leg's
+        ``client_order_id`` and then, when the guard is enabled, re-derives the
+        COMPENSATION fill (``compensated_signed_qty``) from the leg's reduce-only
+        flatten orders (Phase 5d.1 recovery parity) so a flatten that filled while
+        the coordinator was down is restored. Both projections read the
+        authoritative ``venue_events`` and are idempotent no-ops when the live
+        path already applied them.
+        """
         event = await repository.get_max_cumulative_fill_venue_event(client_order_id)
-        if event is None:
-            return
-        cum_fill_size = event["cum_fill_size"] or 0.0
-        signed_qty = cum_fill_size if leg["side"] == TradeSideEnum.BUY else -cum_fill_size
-        new_status = (
-            PairedExecutionLegStatusEnum.FILLED.value
-            if event["status"] == FillStatusEnum.FILLED.value
-            else PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value
-        )
-        await repository.project_paired_execution_leg_fill(
-            client_order_id,
-            signed_qty,
-            new_status,
-            now,
-            self._tracker.session_id,
-            self._tracker.next_sequence(f"paired.fill.recover.{client_order_id}"),
-            exchange_order_id=event["exchange_order_id"],
-            last_venue_event_id=event["id"],
-        )
+        if event is not None:
+            cum_fill_size = event["cum_fill_size"] or 0.0
+            signed_qty = cum_fill_size if leg["side"] == TradeSideEnum.BUY else -cum_fill_size
+            new_status = (
+                PairedExecutionLegStatusEnum.FILLED.value
+                if event["status"] == FillStatusEnum.FILLED.value
+                else PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value
+            )
+            await repository.project_paired_execution_leg_fill(
+                client_order_id,
+                signed_qty,
+                new_status,
+                now,
+                self._tracker.session_id,
+                self._tracker.next_sequence(f"paired.fill.recover.{client_order_id}"),
+                exchange_order_id=event["exchange_order_id"],
+                last_venue_event_id=event["id"],
+            )
+        if _bootstrap_settings.paired_execution_guard_enabled:
+            await repository.reproject_paired_execution_leg_compensation(
+                leg["public_id"],
+                now,
+                self._tracker.session_id,
+                self._tracker.next_sequence(f"paired.comp.recover.{leg['public_id']}"),
+            )
 
     async def _recover_paired_execution_guard_state(self) -> None:
         """Rebuild paired-execution guard in-memory state from the DB on startup.
@@ -2394,6 +2416,13 @@ class TraderCoordinator(RegisterableProcess):
         repository (the paired-execution tables do not exist there). This is the
         LIVE path only; recovery-replay parity (projecting fills observed while
         the coordinator was down) is Phase 5a.2.
+
+        When the fill matched no leg directly (``NO_MATCH``) AND the guard is
+        enabled, the fill is re-routed to the Phase-5d.1 compensation projection:
+        a reduce-only FLATTEN order carries a fresh ``client_order_id`` whose
+        command supersedes a leg's original, so its fill lands on that leg's
+        ``compensated_signed_qty`` instead. The compensation lookup is gated on
+        the feature flag so a non-paired deployment never pays the second query.
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
             return
@@ -2403,7 +2432,7 @@ class TraderCoordinator(RegisterableProcess):
             if fill.status == FillStatusEnum.FILLED
             else PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value
         )
-        await self.repository.project_paired_execution_leg_fill(
+        result = await self.repository.project_paired_execution_leg_fill(
             fill.client_order_id,
             signed_qty,
             new_status,
@@ -2413,6 +2442,16 @@ class TraderCoordinator(RegisterableProcess):
             exchange_order_id=fill.exchange_order_id,
             last_venue_event_id=venue_event["id"],
         )
+        if (
+            result == PairedFillProjection.NO_MATCH
+            and _bootstrap_settings.paired_execution_guard_enabled
+        ):
+            await self.repository.project_paired_execution_compensation_fill(
+                fill.client_order_id,
+                datetime.now(UTC),
+                self._tracker.session_id,
+                self._tracker.next_sequence(f"paired.comp.{fill.client_order_id}"),
+            )
 
     async def _project_paired_execution_leg_terminal(
         self, client_order_id: str, leg_status: str, exchange_order_id: str | None
