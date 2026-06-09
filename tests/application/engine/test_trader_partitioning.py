@@ -322,7 +322,7 @@ class TestDispatchOrderEventCIDGuard:
     async def test_unknown_cid_under_n1_fallsthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Unknown CID under N=1 falls through to the handler (single-instance behavior)."""
         coord = _make_coordinator_with_ownership(monkeypatch, instance_id=0, instance_count=1)
-        handled_event = MagicMock()
+        handled_event = AsyncMock()
         monkeypatch.setattr(coord, "_handle_order_event", handled_event)
         msg = self._order_event(cid="unknown-cid")
         payload = msg.to_json().encode("utf-8")
@@ -360,7 +360,7 @@ class TestDispatchOrderEventCIDGuard:
             monkeypatch, instance_id=owner_id, instance_count=2
         )
         coord._order_shard_keys["cid-owned"] = owned_shard
-        handled_event = MagicMock()
+        handled_event = AsyncMock()
         monkeypatch.setattr(coord, "_handle_order_event", handled_event)
         msg = self._order_event(cid="cid-owned")
         payload = msg.to_json().encode("utf-8")

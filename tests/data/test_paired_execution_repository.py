@@ -1706,6 +1706,201 @@ async def test_project_leg_fill_carries_forward_venue_ids_when_none(
 
 
 @pytest.mark.asyncio
+async def test_project_leg_terminal_sets_status_and_preserves_fill(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A venue terminal projects the leg status while preserving exposure.
+
+    Given: an active partially-filled buy leg carrying filled_signed_qty,
+    When: project_paired_execution_leg_terminal runs for its client_order_id with
+        a 'cancelled' status and a new exchange_order_id,
+    Then: it returns True and the active successor carries the cancelled status
+        and the new exchange_order_id while PRESERVING filled_signed_qty, so the
+        compensator still sees the real partial exposure.
+    """
+    leg_id = _pid(240)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            leg_index=0,
+            side="buy",
+            client_order_id="cid-term",
+            status=PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value,
+            filled_signed_qty=2.0,
+        )
+    )
+    applied = await _repo.project_paired_execution_leg_terminal(
+        "cid-term",
+        PairedExecutionLegStatusEnum.CANCELLED.value,
+        _T1,
+        _NEXT_SESSION_ID,
+        2,
+        exchange_order_id="exch-term",
+    )
+    assert applied is True
+    active = await _active_leg_versions(_repo, leg_id, _T2)
+    assert len(active) == 1
+    assert active[0].status == PairedExecutionLegStatusEnum.CANCELLED.value
+    assert active[0].filled_signed_qty == 2.0
+    assert active[0].exchange_order_id == "exch-term"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "skip_status",
+    [
+        PairedExecutionLegStatusEnum.FILLED.value,
+        PairedExecutionLegStatusEnum.REJECTED.value,
+        PairedExecutionLegStatusEnum.CANCELLED.value,
+        PairedExecutionLegStatusEnum.EXPIRED.value,
+        PairedExecutionLegStatusEnum.BROKEN.value,
+        PairedExecutionLegStatusEnum.COMPENSATING.value,
+        PairedExecutionLegStatusEnum.FLATTENED.value,
+        PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value,
+    ],
+)
+async def test_project_leg_terminal_skips_filled_and_terminal(
+    _repo: SQLAlchemyRepository, skip_status: str
+) -> None:
+    """A leg already FILLED or in any terminal state is not re-projected.
+
+    Given: an active leg already FILLED or in a terminal state,
+    When: project_paired_execution_leg_terminal runs,
+    Then: it returns False without writing a successor — a fully filled order
+        needs no breakage and a re-delivered terminal event is idempotent.
+    """
+    leg_id = _pid(241)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            leg_index=0,
+            side="buy",
+            client_order_id="cid-skip",
+            status=skip_status,
+        )
+    )
+    applied = await _repo.project_paired_execution_leg_terminal(
+        "cid-skip",
+        PairedExecutionLegStatusEnum.EXPIRED.value,
+        _T1,
+        _NEXT_SESSION_ID,
+        2,
+    )
+    assert applied is False
+    active = await _active_leg_versions(_repo, leg_id, _T2)
+    assert len(active) == 1
+    assert active[0].status == skip_status
+
+
+@pytest.mark.asyncio
+async def test_project_leg_terminal_no_matching_leg_is_noop(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A terminal whose client_order_id matches no leg is a no-op (non-grouped)."""
+    applied = await _repo.project_paired_execution_leg_terminal(
+        "cid-absent",
+        PairedExecutionLegStatusEnum.REJECTED.value,
+        _T1,
+        _NEXT_SESSION_ID,
+        1,
+    )
+    assert applied is False
+
+
+@pytest.mark.asyncio
+async def test_project_leg_terminal_raises_on_duplicate_active_client_order_id(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Two active legs sharing a client_order_id is a data-integrity error.
+
+    Given: two active legs bound to the same client_order_id,
+    When: project_paired_execution_leg_terminal resolves the leg,
+    Then: it raises ValueError rather than terminalizing an arbitrary leg — the
+        scanner isolates this per leg so it never blocks the rest.
+    """
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=_pid(242),
+            leg_index=0,
+            side="buy",
+            client_order_id="cid-dup-term",
+            status=PairedExecutionLegStatusEnum.WORKING.value,
+        )
+    )
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=_pid(243),
+            group_public_id=_pid(101),
+            leg_index=1,
+            side="sell",
+            client_order_id="cid-dup-term",
+            status=PairedExecutionLegStatusEnum.WORKING.value,
+        )
+    )
+    with pytest.raises(ValueError, match="2 active legs share client_order_id cid-dup-term"):
+        await _repo.project_paired_execution_leg_terminal(
+            "cid-dup-term",
+            PairedExecutionLegStatusEnum.CANCELLED.value,
+            _T1,
+            _NEXT_SESSION_ID,
+            2,
+        )
+
+
+@pytest.mark.asyncio
+async def test_project_leg_terminal_clamps_bus_time_for_future_stamped_leg(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A future-stamped active leg keeps a non-inverted SCD2 interval on terminal.
+
+    Given: a current-active working leg whose ``timestamp`` is in the future,
+    When: project_paired_execution_leg_terminal runs with an EARLIER ``bus_time``,
+    Then: the close / successor bus time is clamped to the leg's own timestamp so
+        the SCD2 validity intervals stay ordered — the same clock-skew guard the
+        fill projection applies.
+    """
+    future = datetime(2099, 1, 1, tzinfo=UTC)
+    leg_id = _pid(244)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            leg_index=0,
+            side="buy",
+            client_order_id="cid-term-future",
+            status=PairedExecutionLegStatusEnum.WORKING.value,
+            timestamp=future,
+        )
+    )
+    applied = await _repo.project_paired_execution_leg_terminal(
+        "cid-term-future",
+        PairedExecutionLegStatusEnum.EXPIRED.value,
+        _T1,
+        _NEXT_SESSION_ID,
+        2,
+    )
+    assert applied is True
+    async with _repo.session() as session:
+        versions = list(
+            (
+                await session.execute(
+                    select(PairedExecutionLeg)
+                    .where(PairedExecutionLeg.public_id == leg_id)
+                    .order_by(PairedExecutionLeg.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(versions) == 2
+    predecessor, successor = versions
+    assert predecessor.known_to == future
+    assert successor.timestamp == future
+    assert successor.timestamp >= predecessor.timestamp
+    assert successor.known_to == KNOWN_TO_MAX
+    assert successor.status == PairedExecutionLegStatusEnum.EXPIRED.value
+
+
+@pytest.mark.asyncio
 async def test_outbox_ignores_historical_leg_command_binding(
     _repo: SQLAlchemyRepository,
 ) -> None:

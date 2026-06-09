@@ -25,6 +25,8 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import VenueEventRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import OrderData
+from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import SignalData
 
 _GROUP_KEY = "kraken:BTC-USD:live|kraken:ETH-USD:live"
@@ -1023,6 +1025,206 @@ async def test_project_leg_fill_noop_without_sql_repository(_coord: TraderCoordi
         cast(VenueEventRow, {"id": 1}),
     )
     repo.project_paired_execution_leg_fill.assert_not_called()
+
+
+def _order_status(*, client_order_id: str, status: str, instrument: str = "BTC-USD") -> OrderData:
+    """Build an OrderData status frame for a paired-execution leg's order."""
+    return OrderData(
+        public_id=f"os-{client_order_id}",
+        timestamp=datetime(2026, 6, 8, 12, 0, tzinfo=UTC),
+        session_id="",
+        sequence_id=0,
+        exchange_order_id=f"exch-{client_order_id}",
+        client_order_id=client_order_id,
+        instrument=instrument,
+        exchange="kraken",
+        side="buy",
+        size=1.0,
+        price=50000.0,
+        order_type="market",
+        status=status,
+        filled_size=0.0,
+        created_at=datetime(2026, 6, 8, 12, 0, tzinfo=UTC),
+    )
+
+
+def _order_event(
+    *, client_order_id: str, event: str, instrument: str = "BTC-USD"
+) -> OrderEventData:
+    """Build an OrderEventData frame for a paired-execution leg's order."""
+    return OrderEventData(
+        type="order_event",
+        public_id=f"oe-{client_order_id}",
+        timestamp=datetime(2026, 6, 8, 12, 0, tzinfo=UTC),
+        session_id="",
+        sequence_id=0,
+        event=event,
+        client_order_id=client_order_id,
+        exchange_order_id=f"exch-{client_order_id}",
+        instrument=instrument,
+        exchange="kraken",
+    )
+
+
+@pytest.mark.asyncio
+async def test_project_leg_terminal_marks_owned_leg_terminal(
+    _coord: TraderCoordinator,
+) -> None:
+    """A terminal projection records the leg's terminal status, preserving fill.
+
+    Given: a working leg bound to a client_order_id,
+    When: _project_paired_execution_leg_terminal runs with a 'cancelled' status,
+    Then: the leg records the cancelled status and the new exchange_order_id, so
+        the guard scanner's armed sweep can break the group on a terminal leg.
+    """
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-t", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-t",
+        group_public_id="grp-t",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        side="buy",
+        client_order_id="cid-t",
+        status="working",
+    )
+    await _coord._project_paired_execution_leg_terminal("cid-t", "cancelled", "exch-new")
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-t")
+    assert legs[0]["status"] == "cancelled"
+    assert legs[0]["exchange_order_id"] == "exch-new"
+
+
+@pytest.mark.asyncio
+async def test_project_leg_terminal_noop_without_sql_repository(
+    _coord: TraderCoordinator,
+) -> None:
+    """Terminal projection is skipped without a SQL repository.
+
+    Given: a non-SQL repository (tests),
+    When: _project_paired_execution_leg_terminal runs,
+    Then: the DAL projection is never called.
+    """
+    repo = AsyncMock()
+    _coord.repository = repo
+    await _coord._project_paired_execution_leg_terminal("cid-t", "cancelled", "exch")
+    repo.project_paired_execution_leg_terminal.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_order_status_rejected_projects_leg_rejected(
+    _coord: TraderCoordinator,
+) -> None:
+    """A submit rejection projects REJECTED onto the leg via the live handler.
+
+    Given: a working leg bound to a client_order_id,
+    When: a 'rejected' order-status frame for that client_order_id is handled,
+    Then: the leg becomes rejected — the armed sweep can break the group.
+    """
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-t", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-t",
+        group_public_id="grp-t",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        client_order_id="cid-t",
+        status="working",
+    )
+    await _coord._handle_order_status(
+        "orders.events.kraken.BTC-USD.rejected",
+        _order_status(client_order_id="cid-t", status="rejected"),
+    )
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-t")
+    assert legs[0]["status"] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_handle_order_status_accepted_does_not_project_leg(
+    _coord: TraderCoordinator,
+) -> None:
+    """A non-terminal status leaves the leg unchanged.
+
+    Given: a working leg bound to a client_order_id,
+    When: an 'accepted' order-status frame is handled,
+    Then: the leg stays working — only terminal statuses break the leg.
+    """
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-t", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-t",
+        group_public_id="grp-t",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        client_order_id="cid-t",
+        status="working",
+    )
+    await _coord._handle_order_status(
+        "orders.events.kraken.BTC-USD.accepted",
+        _order_status(client_order_id="cid-t", status="accepted"),
+    )
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-t")
+    assert legs[0]["status"] == "working"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event", "expected_status"),
+    [("cancelled", "cancelled"), ("expired", "expired")],
+)
+async def test_handle_order_event_terminal_projects_leg(
+    _coord: TraderCoordinator, event: str, expected_status: str
+) -> None:
+    """A cancelled / expired event projects the matching terminal leg status.
+
+    Given: a working leg bound to a client_order_id,
+    When: a 'cancelled' / 'expired' order event for that id is handled,
+    Then: the leg records the corresponding terminal status.
+    """
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-t", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-t",
+        group_public_id="grp-t",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        client_order_id="cid-t",
+        status="working",
+    )
+    await _coord._handle_order_event(
+        f"orders.events.kraken.BTC-USD.{event}",
+        _order_event(client_order_id="cid-t", event=event),
+    )
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-t")
+    assert legs[0]["status"] == expected_status
+
+
+@pytest.mark.asyncio
+async def test_handle_order_event_rejected_does_not_project_leg(
+    _coord: TraderCoordinator,
+) -> None:
+    """A cancel/replace rejection leaves the original order's leg unchanged.
+
+    Given: a working leg bound to a client_order_id,
+    When: a 'rejected' order EVENT (a rejected cancel/replace, not a submit
+        rejection) is handled,
+    Then: the leg stays working — the original order is still live.
+    """
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-t", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-t",
+        group_public_id="grp-t",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        client_order_id="cid-t",
+        status="working",
+    )
+    await _coord._handle_order_event(
+        "orders.events.kraken.BTC-USD.rejected",
+        _order_event(client_order_id="cid-t", event="rejected"),
+    )
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-t")
+    assert legs[0]["status"] == "working"
 
 
 async def _insert_fill_event(

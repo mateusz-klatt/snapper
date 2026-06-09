@@ -72,6 +72,7 @@ async def _insert_group(
     public_id: str,
     status: str = PairedExecutionGroupStatusEnum.ASSEMBLING.value,
     assembly_deadline: datetime = _FUTURE,
+    fill_deadline: datetime = _FUTURE,
     policy: str = PairedExecutionPolicyEnum.SIMULTANEOUS.value,
     expected_leg_count: int = 2,
     failure_reason: str | None = None,
@@ -88,7 +89,7 @@ async def _insert_group(
             "group_key": _GROUP_KEY,
             "status": status,
             "assembly_deadline": assembly_deadline,
-            "fill_deadline": _FUTURE,
+            "fill_deadline": fill_deadline,
             "failure_reason": failure_reason,
             "created_at": _T0,
             "session_id": _SESSION,
@@ -315,6 +316,288 @@ async def test_scanner_skips_sequential_handoff_policy(_repo: SQLAlchemyReposito
     group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
     assert group is not None
     assert group["status"] == PairedExecutionGroupStatusEnum.ASSEMBLING.value
+
+
+async def test_scanner_breaks_armed_group_on_fill_timeout(_repo: SQLAlchemyRepository) -> None:
+    """An armed group past its fill deadline with an unfilled leg is broken.
+
+    Given: an armed group whose fill_deadline is in the past, with one leg filled
+        and one still working,
+    When: a scan cycle runs,
+    Then: the group transitions to broken with the 'fill timeout' reason — the
+        atomicity failure where one sibling never completed by the deadline.
+    """
+    await _insert_group(
+        _repo,
+        public_id="grp-1",
+        status=PairedExecutionGroupStatusEnum.ARMED.value,
+        fill_deadline=_PAST,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-1",
+        group_public_id="grp-1",
+        leg_index=1,
+        instrument="ETH-USD",
+        shard_key=_ETH_SHARD,
+        command_public_id="cmd-1",
+        status=PairedExecutionLegStatusEnum.WORKING.value,
+    )
+    await _scanner(_repo)._scan_cycle(_T0)
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.BROKEN.value
+    assert group["failure_reason"] == "fill timeout"
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [
+        PairedExecutionLegStatusEnum.REJECTED.value,
+        PairedExecutionLegStatusEnum.CANCELLED.value,
+        PairedExecutionLegStatusEnum.EXPIRED.value,
+    ],
+)
+async def test_scanner_breaks_armed_group_on_terminal_leg(
+    _repo: SQLAlchemyRepository, terminal_status: str
+) -> None:
+    """An armed group with a terminal-without-fill leg breaks before the deadline.
+
+    Given: an armed group still within its fill_deadline, with one leg in a
+        terminal-without-fill state (rejected / cancelled / expired),
+    When: a scan cycle runs,
+    Then: the group breaks immediately with the 'leg terminal before fill' reason
+        — a sibling that can never complete should not keep the filled leg
+        exposed until the deadline.
+    """
+    await _insert_group(
+        _repo,
+        public_id="grp-1",
+        status=PairedExecutionGroupStatusEnum.ARMED.value,
+        fill_deadline=_FUTURE,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-1",
+        group_public_id="grp-1",
+        leg_index=1,
+        instrument="ETH-USD",
+        shard_key=_ETH_SHARD,
+        command_public_id="cmd-1",
+        status=terminal_status,
+    )
+    await _scanner(_repo)._scan_cycle(_T0)
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.BROKEN.value
+    assert group["failure_reason"] == "leg terminal before fill"
+
+
+async def test_scanner_leaves_armed_group_with_all_legs_filled(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """An armed group whose legs all fully filled stays armed (the success path).
+
+    Given: an armed group past its fill_deadline whose two legs are both filled,
+    When: a scan cycle runs,
+    Then: it stays armed — the deadline is irrelevant once every leg completed.
+    """
+    await _insert_group(
+        _repo,
+        public_id="grp-1",
+        status=PairedExecutionGroupStatusEnum.ARMED.value,
+        fill_deadline=_PAST,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-1",
+        group_public_id="grp-1",
+        leg_index=1,
+        instrument="ETH-USD",
+        shard_key=_ETH_SHARD,
+        command_public_id="cmd-1",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    await _scanner(_repo)._scan_cycle(_T0)
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.ARMED.value
+
+
+async def test_scanner_leaves_armed_group_working_before_deadline(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """An armed group still within its fill deadline with working legs stays armed.
+
+    Given: an armed group whose fill_deadline has not passed and whose legs are
+        still working (no fill yet, none terminal),
+    When: a scan cycle runs,
+    Then: it stays armed — there is no failure to break on yet.
+    """
+    await _insert_group(
+        _repo,
+        public_id="grp-1",
+        status=PairedExecutionGroupStatusEnum.ARMED.value,
+        fill_deadline=_FUTURE,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.WORKING.value,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-1",
+        group_public_id="grp-1",
+        leg_index=1,
+        instrument="ETH-USD",
+        shard_key=_ETH_SHARD,
+        command_public_id="cmd-1",
+        status=PairedExecutionLegStatusEnum.WORKING.value,
+    )
+    await _scanner(_repo)._scan_cycle(_T0)
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.ARMED.value
+
+
+async def test_scanner_skips_armed_sequential_handoff(_repo: SQLAlchemyRepository) -> None:
+    """An armed sequential_handoff group is left untouched by the armed sweep.
+
+    Given: an armed sequential_handoff group past its fill_deadline with a working
+        leg,
+    When: a scan cycle runs,
+    Then: it stays armed — the sweep is scoped to simultaneous policy.
+    """
+    await _insert_group(
+        _repo,
+        public_id="grp-1",
+        status=PairedExecutionGroupStatusEnum.ARMED.value,
+        fill_deadline=_PAST,
+        policy=PairedExecutionPolicyEnum.SEQUENTIAL_HANDOFF.value,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.WORKING.value,
+    )
+    await _scanner(_repo)._scan_cycle(_T0)
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.ARMED.value
+
+
+async def test_scanner_leaves_armed_group_with_no_legs(_repo: SQLAlchemyRepository) -> None:
+    """An armed group with no legs (corruption) is not broken by the armed sweep.
+
+    Given: an armed group past its fill_deadline carrying no active legs,
+    When: a scan cycle runs,
+    Then: it stays armed — an empty leg set carries no exposure and is left to
+        the assembling-stage validation rather than broken here.
+    """
+    await _insert_group(
+        _repo,
+        public_id="grp-1",
+        status=PairedExecutionGroupStatusEnum.ARMED.value,
+        fill_deadline=_PAST,
+    )
+    await _scanner(_repo)._scan_cycle(_T0)
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.ARMED.value
+
+
+async def test_scanner_armed_break_halts_exposed_group_same_cycle(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """An armed group broken by fill timeout with a filled leg is halted same cycle.
+
+    Given: an armed group past its fill_deadline with one filled (exposed) leg and
+        one working leg,
+    When: a single scan cycle runs (armed sweep then halt sweep),
+    Then: the group is broken AND a durable halt is projected within the same
+        cycle, with the owned filled-leg shard mirrored into the trade service —
+        the exposed atomicity failure is halted immediately, not a cycle later.
+    """
+    trade_service = TradeService()
+    await _insert_group(
+        _repo,
+        public_id="grp-1",
+        status=PairedExecutionGroupStatusEnum.ARMED.value,
+        fill_deadline=_PAST,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-1",
+        group_public_id="grp-1",
+        leg_index=1,
+        instrument="ETH-USD",
+        shard_key=_ETH_SHARD,
+        command_public_id="cmd-1",
+        status=PairedExecutionLegStatusEnum.WORKING.value,
+    )
+    await _scanner(_repo, trade_service=trade_service)._scan_cycle(_T0)
+    group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.BROKEN.value
+    halt = await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY)
+    assert halt is not None
+    assert trade_service.is_halted(_BTC_SHARD) is True
 
 
 async def test_scanner_cancels_owned_held_command_and_terminalizes_leg(

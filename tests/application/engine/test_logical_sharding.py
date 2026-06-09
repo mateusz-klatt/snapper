@@ -406,7 +406,7 @@ class TestPartitionedManualOrderRouting:
         )
         coord._ownership = _owning_partition(shard_key)
         coord._order_shard_keys["cid-manual"] = shard_key
-        coord._handle_order_status = MagicMock()
+        coord._handle_order_status = AsyncMock()
         order_status = OrderData(
             public_id="order-status-1",
             timestamp=datetime(2026, 4, 10, tzinfo=UTC),
@@ -429,7 +429,7 @@ class TestPartitionedManualOrderRouting:
             "orders.events.kraken.BTC-USD.accepted",
             order_status.to_json().encode("utf-8"),
         )
-        coord._handle_order_status.assert_called_once()
+        coord._handle_order_status.assert_awaited_once()
 
 
 class TestCheckpointRecoveryWithSharding:

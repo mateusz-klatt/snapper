@@ -7764,6 +7764,9 @@ class SQLAlchemyRepository(Repository):
             PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value,
         }
     )
+    _PEL_TERMINAL_PROJECT_SKIP_STATUSES: frozenset[str] = _PEL_FILL_TERMINAL_STATUSES | frozenset(
+        {PairedExecutionLegStatusEnum.FILLED.value}
+    )
 
     @staticmethod
     def _paired_execution_group_row_to_dict(
@@ -8134,36 +8137,20 @@ class SQLAlchemyRepository(Repository):
                 .values(known_to=effective_bus_time)
             )
             s.add(
-                PairedExecutionLeg(
-                    public_id=existing.public_id,
-                    group_public_id=existing.group_public_id,
-                    leg_index=existing.leg_index,
-                    exchange=existing.exchange,
-                    mode=existing.mode,
-                    instrument=existing.instrument,
-                    shard_key=existing.shard_key,
-                    side=existing.side,
-                    target_qty=existing.target_qty,
-                    signal_public_id=existing.signal_public_id,
-                    command_public_id=existing.command_public_id,
-                    client_order_id=existing.client_order_id,
+                self._leg_successor(
+                    existing,
+                    status=new_status,
+                    filled_signed_qty=filled_signed_qty,
                     exchange_order_id=(
                         exchange_order_id
                         if exchange_order_id is not None
                         else existing.exchange_order_id
                     ),
-                    status=new_status,
-                    filled_signed_qty=filled_signed_qty,
-                    compensated_signed_qty=existing.compensated_signed_qty,
-                    compensation_seq=existing.compensation_seq,
                     last_venue_event_id=(
                         last_venue_event_id
                         if last_venue_event_id is not None
                         else existing.last_venue_event_id
                     ),
-                    wallet_public_id=existing.wallet_public_id,
-                    operator_public_id=existing.operator_public_id,
-                    created_at=existing.created_at,
                     session_id=session_id,
                     sequence_id=sequence_id,
                     timestamp=effective_bus_time,
@@ -8171,6 +8158,133 @@ class SQLAlchemyRepository(Repository):
             )
             await s.commit()
             return True
+
+    async def project_paired_execution_leg_terminal(
+        self,
+        client_order_id: str,
+        new_status: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+        exchange_order_id: str | None = None,
+    ) -> bool:
+        """Project a venue terminal (reject / cancel / expire) onto the active leg.
+
+        Resolves the leg by its ``client_order_id`` (a non-grouped terminal
+        matches no leg and is a no-op). Guards the CURRENT active row
+        (``known_to == KNOWN_TO_MAX``) under ``FOR UPDATE`` and raises on >1
+        active legs sharing the id (the same data-integrity guard the fill
+        projection uses). Skips a leg already FILLED or already in a
+        fill-terminal state (``_PEL_TERMINAL_PROJECT_SKIP_STATUSES``): a fully
+        filled order needs no breakage, and a re-delivered terminal event is a
+        no-op. Otherwise it SCD2 close-and-inserts the successor carrying the new
+        terminal ``status`` while PRESERVING ``filled_signed_qty`` /
+        ``compensated_signed_qty`` (a partially-filled leg that then cancels keeps
+        its real exposure for the compensator) and every other column forward.
+        The close / successor bus time is clamped to
+        ``max(bus_time, existing.timestamp)`` for the same clock-skew SCD2
+        non-inversion reason as the fill projection. Returns ``True`` iff a
+        successor was written.
+        """
+        async with self.session() as s:
+            matches = (
+                (
+                    await s.execute(
+                        select(PairedExecutionLeg)
+                        .where(
+                            PairedExecutionLeg.client_order_id == client_order_id,
+                            PairedExecutionLeg.known_to == KNOWN_TO_MAX,
+                        )
+                        .with_for_update()
+                        .limit(2)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if len(matches) > 1:
+                raise ValueError(
+                    "paired-execution data integrity: "
+                    f"{len(matches)} active legs share client_order_id {client_order_id}"
+                )
+            existing = matches[0] if matches else None
+            if existing is None:
+                return False
+            if existing.status in self._PEL_TERMINAL_PROJECT_SKIP_STATUSES:
+                return False
+            effective_bus_time = max(bus_time, existing.timestamp)
+            await s.execute(
+                update(PairedExecutionLeg)
+                .where(PairedExecutionLeg.id == existing.id)
+                .values(known_to=effective_bus_time)
+            )
+            s.add(
+                self._leg_successor(
+                    existing,
+                    status=new_status,
+                    filled_signed_qty=existing.filled_signed_qty,
+                    exchange_order_id=(
+                        exchange_order_id
+                        if exchange_order_id is not None
+                        else existing.exchange_order_id
+                    ),
+                    last_venue_event_id=existing.last_venue_event_id,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                    timestamp=effective_bus_time,
+                )
+            )
+            await s.commit()
+            return True
+
+    @staticmethod
+    def _leg_successor(
+        existing: PairedExecutionLeg,
+        *,
+        status: str,
+        filled_signed_qty: float,
+        exchange_order_id: str | None,
+        last_venue_event_id: int | None,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> PairedExecutionLeg:
+        """Build an SCD2 successor leg row carrying every column forward.
+
+        Shared by the fill and terminal projections: every immutable / carried
+        column (identity, group, venue, side, target, signal/command ids,
+        compensation accounting) is copied from ``existing`` and only the
+        explicitly-overridden ``status`` / ``filled_signed_qty`` / venue ids /
+        provenance / ``timestamp`` differ. ``compensated_signed_qty`` and
+        ``compensation_seq`` are always carried forward here (the compensator in
+        Phase 5c/5d owns them). The caller closes ``existing`` and adds this row.
+        """
+        return PairedExecutionLeg(
+            public_id=existing.public_id,
+            group_public_id=existing.group_public_id,
+            leg_index=existing.leg_index,
+            exchange=existing.exchange,
+            mode=existing.mode,
+            instrument=existing.instrument,
+            shard_key=existing.shard_key,
+            side=existing.side,
+            target_qty=existing.target_qty,
+            signal_public_id=existing.signal_public_id,
+            command_public_id=existing.command_public_id,
+            client_order_id=existing.client_order_id,
+            exchange_order_id=exchange_order_id,
+            status=status,
+            filled_signed_qty=filled_signed_qty,
+            compensated_signed_qty=existing.compensated_signed_qty,
+            compensation_seq=existing.compensation_seq,
+            last_venue_event_id=last_venue_event_id,
+            wallet_public_id=existing.wallet_public_id,
+            operator_public_id=existing.operator_public_id,
+            created_at=existing.created_at,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            timestamp=timestamp,
+        )
 
     @staticmethod
     def _paired_execution_leg_set_is_complete(

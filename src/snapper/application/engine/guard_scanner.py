@@ -8,6 +8,11 @@ live ``_on_signal`` arming path could not finish:
   held by the outbox gate and never dispatched: no fills, nothing to flatten;
 - retries arming ``assembling`` groups that are already complete but did not arm
   live (e.g. the coordinator that registered the last leg crashed before its CAS);
+- breaks ``armed`` groups whose ``fill_deadline`` passed without every leg fully
+  filling, or that have a leg in a terminal-without-fill state (a venue reject /
+  cancel / expire projected onto the leg by the live terminal hook) — so a group
+  whose sibling can never complete stops holding the filled sibling exposed
+  (Phase 5b breaks + halts; Phase 5c flattens the exposure);
 - cancels this coordinator's owned held ``created`` commands and terminalizes its
   owned legs for any ``broken`` group, so a sibling-broken group's held commands
   never linger and never dispatch;
@@ -49,6 +54,15 @@ from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 _GROUP_BROKEN_REASON = "paired-execution group broken"
+_LEG_TERMINAL_NO_FILL_STATUSES = frozenset(
+    {
+        PairedExecutionLegStatusEnum.REJECTED.value,
+        PairedExecutionLegStatusEnum.CANCELLED.value,
+        PairedExecutionLegStatusEnum.EXPIRED.value,
+    }
+)
+_ARMED_FILL_TIMEOUT_REASON = "fill timeout"
+_ARMED_LEG_TERMINAL_REASON = "leg terminal before fill"
 
 
 class PairedExecutionGuardScanner:
@@ -109,7 +123,11 @@ class PairedExecutionGuardScanner:
         self._running = False
 
     async def _scan_cycle(self, now: datetime | None = None) -> None:
-        """Run one full scan: assembling, then broken, then halt projection.
+        """Run one full scan: assembling, armed, broken, then halt projection.
+
+        The ``armed`` sweep runs AFTER ``assembling`` and BEFORE ``broken`` so a
+        group broken this tick for a fill timeout or a terminal leg is cleaned up
+        and halted (if exposed) within the SAME cycle by the later sweeps.
 
         Args:
             now: Scan wall-clock; defaults to ``datetime.now(UTC)`` in the
@@ -117,6 +135,7 @@ class PairedExecutionGuardScanner:
         """
         scan_at = now if now is not None else datetime.now(UTC)
         await self._sweep_assembling(scan_at)
+        await self._sweep_armed(scan_at)
         await self._sweep_broken(scan_at)
         await self._sweep_halts(scan_at)
 
@@ -148,6 +167,72 @@ class PairedExecutionGuardScanner:
             self._tracker.session_id,
             self._tracker.next_sequence("guard.break"),
             updates={"failure_reason": "assembly timeout", "halted_at": now},
+        )
+
+    async def _sweep_armed(self, now: datetime) -> None:
+        """Break armed groups that timed out filling or have a terminal leg.
+
+        For each active ``armed`` ``simultaneous`` group, breaks it (``armed`` →
+        ``broken``, dedup-safe CAS) when EITHER a leg went terminal without a
+        full fill (a venue reject / cancel / expire projected onto the leg by the
+        live terminal hook) OR the group's ``fill_deadline`` passed with at least
+        one leg not fully ``filled``. A terminal leg is broken immediately (before
+        the deadline) because one sibling can never complete, so holding the
+        already-filled sibling exposed until the deadline is avoidable risk. The
+        break only flips the group status + records the reason; cancelling live
+        orders and flattening filled legs is Phase 5c — here the same cycle's
+        later ``broken`` / ``halt`` sweeps cancel owned held commands and (for an
+        exposed break) project the durable halt.
+        """
+        armed = await self._repo.list_active_paired_execution_groups(
+            [PairedExecutionGroupStatusEnum.ARMED.value], now
+        )
+        for group in armed:
+            if group["policy"] != PairedExecutionPolicyEnum.SIMULTANEOUS.value:
+                continue
+            legs = await self._repo.get_paired_execution_legs(group["public_id"], now)
+            reason = self._armed_break_reason(group, legs, now)
+            if reason is not None:
+                await self._break_armed_group(group, now, reason)
+
+    def _armed_break_reason(
+        self,
+        group: PairedExecutionGroupRow,
+        legs: list[PairedExecutionLegRow],
+        now: datetime,
+    ) -> str | None:
+        """Return why an armed group must break, or ``None`` to leave it armed.
+
+        A leg in a terminal-without-fill state (rejected / cancelled / expired)
+        breaks the group at once. Otherwise the group breaks only once its
+        ``fill_deadline`` has passed while at least one leg is not fully
+        ``filled``. A complete set of fully filled legs (the success path) and a
+        not-yet-expired group with all legs still working both stay armed. An
+        empty leg set (corruption) carries no exposure and is left for the
+        assembling-stage validation rather than broken here.
+        """
+        if not legs:
+            return None
+        if any(leg["status"] in _LEG_TERMINAL_NO_FILL_STATUSES for leg in legs):
+            return _ARMED_LEG_TERMINAL_REASON
+        if now > group["fill_deadline"] and not all(
+            leg["status"] == PairedExecutionLegStatusEnum.FILLED.value for leg in legs
+        ):
+            return _ARMED_FILL_TIMEOUT_REASON
+        return None
+
+    async def _break_armed_group(
+        self, group: PairedExecutionGroupRow, now: datetime, reason: str
+    ) -> None:
+        """CAS an armed group to broken with a failure reason (dedup-safe)."""
+        await self._repo.cas_paired_execution_group_status(
+            group["public_id"],
+            PairedExecutionGroupStatusEnum.ARMED.value,
+            PairedExecutionGroupStatusEnum.BROKEN.value,
+            now,
+            self._tracker.session_id,
+            self._tracker.next_sequence("guard.armed.break"),
+            updates={"failure_reason": reason, "halted_at": now},
         )
 
     async def _sweep_broken(self, now: datetime) -> None:

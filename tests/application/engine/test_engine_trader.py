@@ -1793,7 +1793,7 @@ async def test_handle_order_status_success(monkeypatch: pytest.MonkeyPatch) -> N
         filled_size=0.0,
         created_at=datetime.now(UTC),
     )
-    coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
+    await coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
 
 
 @pytest.mark.asyncio
@@ -1825,7 +1825,7 @@ async def test_handle_order_status_invariant_exchange_mismatch(
         filled_size=0.0,
         created_at=datetime.now(UTC),
     )
-    coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
+    await coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
 
 
 @pytest.mark.asyncio
@@ -1857,7 +1857,7 @@ async def test_handle_order_status_invariant_instrument_mismatch(
         filled_size=0.0,
         created_at=datetime.now(UTC),
     )
-    coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
+    await coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
 
 
 @pytest.mark.asyncio
@@ -1889,7 +1889,7 @@ async def test_handle_order_status_rejected_logs_envelope_type(
         filled_size=0.0,
         created_at=datetime.now(UTC),
     )
-    coord._handle_order_status("orders.events.kraken.BTC-USD.rejected", order_status)
+    await coord._handle_order_status("orders.events.kraken.BTC-USD.rejected", order_status)
 
 
 @pytest.mark.asyncio
@@ -1968,7 +1968,7 @@ async def test_handle_order_event_success(monkeypatch: pytest.MonkeyPatch) -> No
         instrument="BTC-USD",
         event="cancelled",
     )
-    coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", order_event)
+    await coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", order_event)
 
 
 @pytest.mark.asyncio
@@ -1994,7 +1994,7 @@ async def test_handle_order_event_invariant_exchange_mismatch(
         instrument="BTC-USD",
         event="cancelled",
     )
-    coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", order_event)
+    await coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", order_event)
 
 
 @pytest.mark.asyncio
@@ -2020,7 +2020,7 @@ async def test_handle_order_event_invariant_instrument_mismatch(
         instrument="ETH-USD",
         event="cancelled",
     )
-    coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", order_event)
+    await coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", order_event)
 
 
 @pytest.mark.asyncio
@@ -2044,7 +2044,7 @@ async def test_handle_order_event_malformed_topic(monkeypatch: pytest.MonkeyPatc
         instrument="BTC-USD",
         event="cancelled",
     )
-    coord._handle_order_event("orders.events.kraken", order_event)
+    await coord._handle_order_event("orders.events.kraken", order_event)
 
 
 @pytest.mark.asyncio
@@ -2070,7 +2070,7 @@ async def test_handle_order_event_topic_payload_mismatch(
         instrument="BTC-USD",
         event="rejected",
     )
-    coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", order_event)
+    await coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", order_event)
 
 
 @pytest.mark.asyncio
@@ -2096,7 +2096,7 @@ async def test_handle_order_event_rejected_logs_envelope_type(
         instrument="BTC-USD",
         event="rejected",
     )
-    coord._handle_order_event("orders.events.kraken.BTC-USD.rejected", order_event)
+    await coord._handle_order_event("orders.events.kraken.BTC-USD.rejected", order_event)
 
 
 @pytest.mark.asyncio
@@ -2124,7 +2124,7 @@ async def test_handle_order_status_malformed_topic(monkeypatch: pytest.MonkeyPat
         filled_size=0.0,
         created_at=datetime.now(UTC),
     )
-    coord._handle_order_status("orders.events.kraken", order_status)
+    await coord._handle_order_status("orders.events.kraken", order_status)
 
 
 @pytest.mark.asyncio
@@ -2156,7 +2156,7 @@ async def test_handle_order_status_topic_payload_mismatch(
         filled_size=0.0,
         created_at=datetime.now(UTC),
     )
-    coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
+    await coord._handle_order_status("orders.events.kraken.BTC-USD.accepted", order_status)
 
 
 @pytest.mark.asyncio
@@ -2633,7 +2633,9 @@ class TestFillApplication:
 class TestRejectClearsIntent:
     """Tests for reject/cancel clearing pending intent."""
 
-    def test_reject_clears_matching_pending_intent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_reject_clears_matching_pending_intent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Verify order rejection clears in-flight state on matching engine.
 
         Given: Engine with order-123 in flight,
@@ -2656,10 +2658,12 @@ class TestRejectClearsIntent:
             filled_size=0.0,
             created_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
-        coord._handle_order_status("orders.events.kraken.BTC-USD.rejected", order_status)
+        await coord._handle_order_status("orders.events.kraken.BTC-USD.rejected", order_status)
         engine.clear_pending_intent.assert_called_once_with("order-123")
 
-    def test_reject_does_not_clear_different_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_reject_does_not_clear_different_order(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Verify reject for different order does not clear current intent.
 
         Given: Engine with new-order in flight,
@@ -2683,10 +2687,10 @@ class TestRejectClearsIntent:
             filled_size=0.0,
             created_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
-        coord._handle_order_status("orders.events.kraken.BTC-USD.rejected", order_status)
+        await coord._handle_order_status("orders.events.kraken.BTC-USD.rejected", order_status)
         engine.clear_pending_intent.assert_called_once_with("old-order")
 
-    def test_cancel_event_clears_matching_pending_intent(
+    async def test_cancel_event_clears_matching_pending_intent(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Verify cancel event clears in-flight state on matching engine.
@@ -2707,10 +2711,10 @@ class TestRejectClearsIntent:
             exchange="kraken",
             event="cancelled",
         )
-        coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", cancel_event)
+        await coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", cancel_event)
         engine.clear_pending_intent.assert_called_once_with("order-123")
 
-    def test_cancel_event_no_matching_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_cancel_event_no_matching_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify cancel for non-matching order iterates all engines without clearing.
 
         Given: Engine with different pending order,
@@ -2730,7 +2734,7 @@ class TestRejectClearsIntent:
             exchange="kraken",
             event="cancelled",
         )
-        coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", cancel_event)
+        await coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", cancel_event)
         engine.clear_pending_intent.assert_called_once_with("stale-order")
 
 

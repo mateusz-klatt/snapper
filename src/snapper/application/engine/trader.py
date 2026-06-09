@@ -2071,9 +2071,9 @@ class TraderCoordinator(RegisterableProcess):
         if isinstance(msg, ExecutionData):
             await self._handle_execution_fill(topic, msg)
         elif isinstance(msg, OrderData):
-            self._handle_order_status(topic, msg)
+            await self._handle_order_status(topic, msg)
         else:
-            self._handle_order_event(topic, msg)
+            await self._handle_order_event(topic, msg)
 
     def _find_engine_for_fill(self, fill: ExecutionData) -> TradingEngineService | None:
         """Find engine matching an execution fill by client_order_id or instrument.
@@ -2191,7 +2191,7 @@ class TraderCoordinator(RegisterableProcess):
                 f"trade_id={fill.trade_id} {fill.instrument} on {parsed.exchange}"
             )
 
-    def _handle_order_status(self, topic: str, order_status: OrderData) -> None:
+    async def _handle_order_status(self, topic: str, order_status: OrderData) -> None:
         """Handle order status event from ZMQ.
 
         Logs order status changes (submitted, accepted, rejected, etc.).
@@ -2201,7 +2201,9 @@ class TraderCoordinator(RegisterableProcess):
 
         For 'rejected' status, the log includes message type to disambiguate
         submit rejection (OrderData) vs cancel/replace rejection
-        (OrderEventData).
+        (OrderEventData). A submit rejection also projects the terminal state
+        onto its paired-execution leg (Phase 5b) so the guard scanner can break
+        an armed group whose sibling rejected before filling.
 
         Args:
             topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.accepted").
@@ -2242,8 +2244,14 @@ class TraderCoordinator(RegisterableProcess):
                 f"{order_status.instrument} on {parsed.exchange}"
             )
         self._sync_status_to_trade_service(order_status, parsed)
+        if parsed.suffix == "rejected":
+            await self._project_paired_execution_leg_terminal(
+                order_status.client_order_id,
+                PairedExecutionLegStatusEnum.REJECTED.value,
+                order_status.exchange_order_id,
+            )
 
-    def _handle_order_event(self, topic: str, order_event: OrderEventData) -> None:
+    async def _handle_order_event(self, topic: str, order_event: OrderEventData) -> None:
         """Handle lightweight order event from ZMQ (cancel/replace confirmations).
 
         Logs cancel/replace event confirmations (cancelled, replaced, rejected).
@@ -2253,7 +2261,10 @@ class TraderCoordinator(RegisterableProcess):
 
         For 'rejected' event, the log includes message type to disambiguate
         cancel/replace rejection (OrderEventData) vs submit rejection
-        (OrderData).
+        (OrderData). A 'cancelled' / 'expired' event projects the terminal
+        state onto its paired-execution leg (Phase 5b); a 'rejected' event does
+        NOT — a rejected cancel/replace leaves the original order live, so the
+        leg is not terminal.
 
         Args:
             topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.cancelled").
@@ -2295,6 +2306,17 @@ class TraderCoordinator(RegisterableProcess):
                 f"{order_event.instrument} on {parsed.exchange}"
             )
         self._sync_order_event_to_trade_service(order_event, parsed)
+        if parsed.suffix in ("cancelled", "expired"):
+            leg_status = (
+                PairedExecutionLegStatusEnum.CANCELLED.value
+                if parsed.suffix == "cancelled"
+                else PairedExecutionLegStatusEnum.EXPIRED.value
+            )
+            await self._project_paired_execution_leg_terminal(
+                order_event.client_order_id,
+                leg_status,
+                order_event.exchange_order_id,
+            )
 
     async def _sync_fill_to_trade_service(
         self, fill: ExecutionData, engine: TradingEngineService
@@ -2390,6 +2412,33 @@ class TraderCoordinator(RegisterableProcess):
             self._tracker.next_sequence(f"paired.fill.{fill.client_order_id}"),
             exchange_order_id=fill.exchange_order_id,
             last_venue_event_id=venue_event["id"],
+        )
+
+    async def _project_paired_execution_leg_terminal(
+        self, client_order_id: str, leg_status: str, exchange_order_id: str | None
+    ) -> None:
+        """Project a venue terminal (reject / cancel / expire) onto its leg, if grouped.
+
+        A submit rejection, cancel or expiry of the original order of a
+        paired-execution leg records the terminal ``leg_status`` so the guard
+        scanner's ``_sweep_armed`` can break an armed group whose sibling went
+        terminal before fully filling. The leg is resolved by
+        ``client_order_id``; a non-grouped or already-terminal / already-FILLED
+        leg is a no-op. ``filled_signed_qty`` is preserved, so a partially-filled
+        leg that then cancels keeps its exposure for Phase-5c compensation.
+        Skipped without a SQL repository (the paired-execution tables do not
+        exist there). The dispatcher already drops foreign-shard venue events,
+        so this is not ownership-gated here (matching the live fill projection).
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return
+        await self.repository.project_paired_execution_leg_terminal(
+            client_order_id,
+            leg_status,
+            datetime.now(UTC),
+            self._tracker.session_id,
+            self._tracker.next_sequence(f"paired.terminal.{client_order_id}"),
+            exchange_order_id=exchange_order_id,
         )
 
     async def _sync_position_cycle_on_fill(
