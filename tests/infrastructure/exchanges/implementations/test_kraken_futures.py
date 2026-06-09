@@ -332,6 +332,50 @@ async def test_ensure_ws_connected_auto_replays_after_reconnect(
 
 
 @pytest.mark.asyncio
+async def test_ensure_ws_connected_closes_partial_client_on_failure(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """A failed build closes the partial public client and re-raises.
+
+    Given: A Futures client whose public WS start raises,
+    When: _ensure_ws_connected runs,
+    Then: The partial client is closed, the reference cleared, and the error
+        propagates so a failed recovery cannot leak the client.
+    """
+    with patch(
+        "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
+    ) as ws_cls:
+        ws_cls.return_value.start = AsyncMock(side_effect=RuntimeError("boom"))
+        ws_cls.return_value.close = AsyncMock()
+        with pytest.raises(RuntimeError, match="boom"):
+            await client._ensure_ws_connected()
+        ws_cls.return_value.close.assert_awaited_once()
+    assert client._ws_client is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_ws_connected_cleanup_swallows_close_error(
+    client: KrakenFuturesExchangeClient,
+) -> None:
+    """A close error during failure-cleanup is swallowed; original re-raised.
+
+    Given: A Futures client whose start raises and whose cleanup close also
+        raises,
+    When: _ensure_ws_connected runs,
+    Then: The cleanup close error is swallowed and the ORIGINAL start error
+        propagates (not masked), with the client reference cleared.
+    """
+    with patch(
+        "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
+    ) as ws_cls:
+        ws_cls.return_value.start = AsyncMock(side_effect=RuntimeError("start boom"))
+        ws_cls.return_value.close = AsyncMock(side_effect=RuntimeError("close boom"))
+        with pytest.raises(RuntimeError, match="start boom"):
+            await client._ensure_ws_connected()
+    assert client._ws_client is None
+
+
+@pytest.mark.asyncio
 async def test_public_subscribe_paced_by_min_interval(
     client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -883,6 +927,38 @@ class TestConnect:
         auth_client._private_ws_client = mock_ws
         await auth_client.disconnect()
         mock_ws.close.assert_awaited_once()
+        assert auth_client._private_ws_client is None
+
+    @pytest.mark.asyncio
+    async def test_disconnect_public_ws_close_timeout(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Disconnect drops the public client when its close times out.
+
+        Given: Public WS close exceeds the close timeout,
+        When: disconnect() is called,
+        Then: The timeout is handled and the public WS client is set to None.
+        """
+        mock_ws = AsyncMock()
+        mock_ws.close.side_effect = TimeoutError
+        client._ws_client = mock_ws
+        await client.disconnect()
+        assert client._ws_client is None
+
+    @pytest.mark.asyncio
+    async def test_disconnect_private_ws_close_timeout(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Disconnect drops the private client when its close times out.
+
+        Given: Private WS close exceeds the close timeout,
+        When: disconnect() is called,
+        Then: The timeout is handled and the private WS client is set to None.
+        """
+        mock_ws = AsyncMock()
+        mock_ws.close.side_effect = TimeoutError
+        auth_client._private_ws_client = mock_ws
+        await auth_client.disconnect()
         assert auth_client._private_ws_client is None
 
 

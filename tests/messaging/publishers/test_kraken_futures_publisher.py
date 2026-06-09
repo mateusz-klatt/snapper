@@ -42,6 +42,16 @@ class TestKrakenFuturesMarketDataPublisher:
         publisher = KrakenFuturesMarketDataPublisher(symbols=["BTC-USD-PERP"])
         assert publisher._get_exchange_name() == "kraken_futures"
 
+    def test_liveness_threshold_is_60s(self) -> None:
+        """Verify the Futures liveness-recovery threshold is lowered to 60s.
+
+        Given: A KrakenFuturesMarketDataPublisher instance,
+        When: _get_liveness_recovery_threshold_s is called,
+        Then: Returns the 60 second realtime-venue threshold.
+        """
+        publisher = KrakenFuturesMarketDataPublisher(symbols=["BTC-USD-PERP"])
+        assert publisher._get_liveness_recovery_threshold_s() == 60
+
     def test_validate_symbols_filters_invalid(self) -> None:
         """Verify invalid symbols are filtered out.
 

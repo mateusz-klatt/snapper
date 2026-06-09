@@ -23,6 +23,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snapper.application.process_manager.launcher import _TOTAL_RESET_UPTIME_S
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
@@ -33,8 +34,10 @@ from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.messaging.publishers.base import _DARK_FEED_EXIT_CEILING_S
 from snapper.messaging.publishers.base import _FEED_HEALTH_FLUSH_INTERVAL_S
 from snapper.messaging.publishers.base import _TRADE_ID_LRU_MAX_PER_SYMBOL
+from snapper.messaging.publishers.base import FeedDarkTooLongError
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.base import _candle_writer_drop_counters
 from snapper.messaging.publishers.base import _cleanup_pending_future
@@ -595,12 +598,19 @@ def test_get_liveness_recovery_threshold_s_returns_300_default() -> None:
 async def test_spawn_recovery_tracks_and_runs_task(monkeypatch: pytest.MonkeyPatch) -> None:
     """Recovery spawning tracks the scheduled task.
 
-    Given: A publisher with an old recovery timestamp,
+    Given: A running publisher with an old recovery timestamp whose
+        attempt restores message flow,
     When: Recovery is spawned,
     Then: The recovery hook runs and the task is discarded after completion.
     """
     pub = DummyPublisher(symbols=["BTC-USD"])
-    attempt = AsyncMock()
+    pub.running = True
+    pub._last_message_at = 0.0
+
+    def _resume(_reason: str) -> None:
+        pub._last_message_at = 100.0
+
+    attempt = AsyncMock(side_effect=_resume)
     pub._attempt_liveness_recovery = attempt
     monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1000.0)
     pub._spawn_recovery("stale")
@@ -646,31 +656,228 @@ async def test_recovery_lock_prevents_concurrent_recovery(
 
 
 @pytest.mark.asyncio
-async def test_recovery_timeout_logs_error_and_releases_lock() -> None:
-    """Recovery timeout is handled inside the recovery task.
+async def test_recovery_returns_when_data_resumes() -> None:
+    """A single successful attempt that restores data ends recovery.
 
-    Given: A recovery hook that raises TimeoutError,
+    Given: A running publisher whose recovery attempt restores messages,
     When: Recovery runs under the lock,
-    Then: The lock is released after the timeout path.
+    Then: It returns after one attempt and releases the lock.
     """
     pub = DummyPublisher(symbols=["BTC-USD"])
-    pub._attempt_liveness_recovery = AsyncMock(side_effect=TimeoutError)
+    pub.running = True
+    pub._last_message_at = 0.0
+
+    def _resume(_reason: str) -> None:
+        pub._last_message_at = 100.0
+
+    attempt = AsyncMock(side_effect=_resume)
+    pub._attempt_liveness_recovery = attempt
     await pub._run_recovery_under_lock("stale")
+    attempt.assert_awaited_once_with("stale")
     assert not pub._recovery_lock.locked()
 
 
 @pytest.mark.asyncio
-async def test_recovery_exception_logs_and_releases_lock() -> None:
-    """Recovery exceptions are contained inside the recovery task.
+async def test_recovery_retries_with_backoff_until_data_resumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery keeps retrying with backoff instead of giving up.
 
-    Given: A recovery hook that raises RuntimeError,
+    Given: A running publisher whose first attempt does not restore data,
     When: Recovery runs under the lock,
-    Then: The exception is swallowed and the lock is released.
+    Then: It backs off, retries, and returns once data resumes.
     """
     pub = DummyPublisher(symbols=["BTC-USD"])
-    pub._attempt_liveness_recovery = AsyncMock(side_effect=RuntimeError("boom"))
+    pub.running = True
+    pub._last_message_at = 0.0
+    calls = {"n": 0}
+
+    def _attempt(_reason: str) -> None:
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            pub._last_message_at = 100.0
+
+    attempt = AsyncMock(side_effect=_attempt)
+    pub._attempt_liveness_recovery = attempt
+    pub._sleep_with_jitter = AsyncMock()
+    monkeypatch.setattr("snapper.messaging.publishers.base._RECOVERY_PROGRESS_GRACE_S", 0.0)
     await pub._run_recovery_under_lock("stale")
+    assert attempt.await_count == 2
+    pub._sleep_with_jitter.assert_awaited()
     assert not pub._recovery_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_recovery_attempt_exception_is_swallowed_and_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed attempt is logged and retried, not abandoned.
+
+    Given: A running publisher whose first attempt raises,
+    When: Recovery runs under the lock,
+    Then: The exception is swallowed, recovery retries, and returns once
+        data resumes.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._last_message_at = 0.0
+    calls = {"n": 0}
+
+    def _attempt(_reason: str) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        pub._last_message_at = 100.0
+
+    pub._attempt_liveness_recovery = AsyncMock(side_effect=_attempt)
+    pub._sleep_with_jitter = AsyncMock()
+    monkeypatch.setattr("snapper.messaging.publishers.base._RECOVERY_PROGRESS_GRACE_S", 0.0)
+    await pub._run_recovery_under_lock("stale")
+    assert pub._attempt_liveness_recovery.await_count == 2
+    assert not pub._recovery_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_recovery_loop_exits_when_publisher_stops() -> None:
+    """Recovery stops looping once the publisher is no longer running.
+
+    Given: A running publisher whose attempt clears the running flag,
+    When: Recovery runs under the lock,
+    Then: The loop exits without further attempts and releases the lock.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._last_message_at = 0.0
+
+    def _stop(_reason: str) -> None:
+        pub.running = False
+
+    pub._attempt_liveness_recovery = AsyncMock(side_effect=_stop)
+    pub._sleep_with_jitter = AsyncMock()
+    await pub._run_recovery_under_lock("stale")
+    pub._attempt_liveness_recovery.assert_awaited_once()
+    assert not pub._recovery_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_recovery_propagates_cancellation() -> None:
+    """Cancellation during an attempt propagates for clean shutdown.
+
+    Given: A running publisher whose attempt is cancelled,
+    When: Recovery runs under the lock,
+    Then: CancelledError propagates and the lock is released.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._attempt_liveness_recovery = AsyncMock(side_effect=asyncio.CancelledError)
+    with pytest.raises(asyncio.CancelledError):
+        await pub._run_recovery_under_lock("stale")
+    assert not pub._recovery_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_await_recovery_progress_true_when_data_advances() -> None:
+    """Progress is reported as soon as messages advance past baseline.
+
+    Given: A running publisher whose last message advanced past baseline,
+    When: Progress is observed,
+    Then: True is returned immediately.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._last_message_at = 100.0
+    assert await pub._await_recovery_progress(0.0) is True
+
+
+@pytest.mark.asyncio
+async def test_await_recovery_progress_polls_then_detects_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Progress observed after a poll interval is reported.
+
+    Given: A running publisher with no initial progress,
+    When: A poll-interval sleep lets a message arrive,
+    Then: True is returned.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._last_message_at = 0.0
+
+    async def _arrive(_seconds: float) -> None:
+        pub._last_message_at = 100.0
+
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.asyncio.sleep",
+        AsyncMock(side_effect=_arrive),
+    )
+    assert await pub._await_recovery_progress(0.0) is True
+
+
+@pytest.mark.asyncio
+async def test_await_recovery_progress_false_after_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No progress within the grace window reports False.
+
+    Given: A running publisher with no message progress and zero grace,
+    When: Progress is observed,
+    Then: False is returned.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._last_message_at = 0.0
+    monkeypatch.setattr("snapper.messaging.publishers.base._RECOVERY_PROGRESS_GRACE_S", 0.0)
+    assert await pub._await_recovery_progress(0.0) is False
+
+
+@pytest.mark.asyncio
+async def test_await_recovery_progress_true_after_stop_if_data_resumed() -> None:
+    """A stopped publisher still reports progress if data had resumed.
+
+    Given: A stopped publisher whose last message advanced past baseline,
+    When: Progress is observed,
+    Then: True is returned from the post-loop check.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = False
+    pub._last_message_at = 100.0
+    assert await pub._await_recovery_progress(0.0) is True
+
+
+@pytest.mark.asyncio
+async def test_sleep_with_jitter_applies_bounded_jitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backoff jitter adjusts the base sleep by the configured fraction.
+
+    Given: A base backoff and a deterministic positive jitter draw,
+    When: _sleep_with_jitter runs,
+    Then: It sleeps the base value adjusted by the jitter draw.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("snapper.messaging.publishers.base.asyncio.sleep", sleep_mock)
+    monkeypatch.setattr("snapper.messaging.publishers.base.random.uniform", lambda _a, b: b)
+    await pub._sleep_with_jitter(10.0)
+    sleep_mock.assert_awaited_once_with(12.0)
+
+
+@pytest.mark.asyncio
+async def test_sleep_with_jitter_floors_at_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative jitter draws are floored to a non-negative sleep.
+
+    Given: A base backoff and a jitter draw that would go negative,
+    When: _sleep_with_jitter runs,
+    Then: The sleep is clamped to a non-negative duration.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr("snapper.messaging.publishers.base.asyncio.sleep", sleep_mock)
+    monkeypatch.setattr("snapper.messaging.publishers.base.random.uniform", lambda _a, _b: -100.0)
+    await pub._sleep_with_jitter(10.0)
+    sleep_mock.assert_awaited_once_with(0.0)
 
 
 @pytest.mark.asyncio
@@ -775,6 +982,71 @@ async def test_liveness_check_skipped_when_threshold_is_zero() -> None:
     pub._publish_heartbeat = publish_once
     await pub._heartbeat_loop()
     pub._spawn_recovery.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dark_feed_exits_when_ceiling_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A feed dark past the exit ceiling raises to trigger a launcher restart.
+
+    Given: A running publisher dark longer than the dark-feed exit ceiling,
+    When: One heartbeat iteration runs,
+    Then: Recovery is spawned and FeedDarkTooLongError propagates out of the
+        loop so the process exits for the launcher to respawn.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.settings.zmq_heartbeat_interval_ms = 0
+    pub._last_message_at = 0.0
+    pub._get_liveness_recovery_threshold_s = Mock(return_value=60)
+    pub._spawn_recovery = Mock()
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.monotonic",
+        lambda: _DARK_FEED_EXIT_CEILING_S + 100.0,
+    )
+    with pytest.raises(FeedDarkTooLongError):
+        await pub._heartbeat_loop()
+    pub._spawn_recovery.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_dark_feed_exit_suppressed_when_threshold_zero() -> None:
+    """A suppressed venue does not exit even when very stale.
+
+    Given: A running publisher whose threshold hook returns zero (e.g. a
+        scheduled market closure) with a very stale last message,
+    When: One heartbeat iteration runs,
+    Then: No FeedDarkTooLongError is raised and recovery is not spawned.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.settings.zmq_heartbeat_interval_ms = 0
+    pub._last_message_at = 0.0
+    pub._get_liveness_recovery_threshold_s = Mock(return_value=0)
+    pub._spawn_recovery = Mock()
+
+    async def publish_once(_topic: str, _message: HeartbeatData) -> None:
+        pub.running = False
+
+    pub._publish_heartbeat = publish_once
+    await pub._heartbeat_loop()
+    pub._spawn_recovery.assert_not_called()
+
+
+def test_dark_feed_ceiling_exceeds_launcher_total_reset() -> None:
+    """The dark-feed exit ceiling must exceed the launcher total-reset uptime.
+
+    Given: The dark-feed exit ceiling and the launcher long-healthy uptime
+        threshold that resets the lifetime failed-restart counter,
+    When: They are compared,
+    Then: The ceiling is strictly greater, so every dark-exit process has
+        run long enough to register as long-healthy. The launcher therefore
+        resets its lifetime restart budget on each dark-exit, giving an
+        unbounded self-healing restart cadence during a prolonged outage
+        instead of permanently abandoning the feed once the budget is spent.
+    """
+    assert _DARK_FEED_EXIT_CEILING_S > _TOTAL_RESET_UPTIME_S
 
 
 @pytest.mark.asyncio

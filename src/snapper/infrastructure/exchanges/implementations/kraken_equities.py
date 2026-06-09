@@ -133,6 +133,9 @@ session reopens.
 """
 
 _WS_THROTTLE_MS = 5000
+_WS_CLOSE_TIMEOUT_S = 10.0
+"""Upper bound on the WebSocket close so a blackholed socket cannot hang the
+liveness-recovery teardown or process shutdown indefinitely."""
 """Kraken WS server-side throttle for ticker / trade subscriptions.
 
 Tuned 2026-05-22 from 1000ms → 5000ms. The server then batches updates
@@ -281,10 +284,19 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         logger.info("Kraken Equities client ready")
 
     async def disconnect(self) -> None:
-        """Close all Kraken Equities connections."""
+        """Close all Kraken Equities connections.
+
+        The close is bounded by ``_WS_CLOSE_TIMEOUT_S`` so a blackholed
+        socket cannot hang liveness recovery or shutdown; on timeout or
+        close error the client reference is dropped and a fresh one is
+        rebuilt on the next connect.
+        """
         if self._ws_client:
             try:
-                await self._ws_client.close()
+                async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
+                    await self._ws_client.close()
+            except TimeoutError:
+                logger.warning("Kraken Equities WS close timed out - forcing cleanup")
             except Exception as e:
                 logger.warning(f"Error closing Kraken Equities WS: {e}")
             self._ws_client = None
@@ -454,7 +466,13 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             self._candle_builder.update(trade)
 
     async def _ensure_ws_connected(self) -> None:
-        """Connect the SpotWSClient if not already connected."""
+        """Connect the SpotWSClient if not already connected.
+
+        On a build/replay failure or cancellation the partial client is
+        torn down via :meth:`disconnect` before the error propagates, so a
+        cancelled or failed recovery cannot leak the SDK client, its
+        background run task, or its aiohttp session.
+        """
         if self._ws_client is not None:
             return
         self._ws_client = SpotWSClient(
@@ -462,10 +480,14 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             callback=self._on_ws_message,
             no_public=False,
         )
-        await self._ws_client.start()
-        logger.info("Kraken Equities WebSocket connected")
-        if self._subscription_cache:
-            await self._replay_subscriptions()
+        try:
+            await self._ws_client.start()
+            logger.info("Kraken Equities WebSocket connected")
+            if self._subscription_cache:
+                await self._replay_subscriptions()
+        except BaseException:
+            await self.disconnect()
+            raise
 
     async def _replay_subscriptions(self) -> None:
         """Replay cached public subscriptions after reconnect."""

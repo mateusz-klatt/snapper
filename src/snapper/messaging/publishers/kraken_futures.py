@@ -16,6 +16,7 @@ The publisher uses public (anonymous) WebSocket connections.
 """
 
 from typing import Any
+from typing import Final
 
 from loguru import logger
 
@@ -37,6 +38,14 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
 
 apply_kraken_futures_pool_routing()
+
+_LIVENESS_RECOVERY_THRESHOLD_S: Final[int] = 60
+"""Message-silence threshold (seconds) before Futures liveness recovery fires.
+
+Lowered from the 300 s base default: the Futures trade feed aggregates the
+whole perpetuals universe, which trades effectively continuously, so a 60 s
+silence reliably indicates a dark feed rather than a quiet market, and a
+multi-minute outage is detected and recovered in ~1 minute rather than five."""
 
 
 @register_process(
@@ -180,3 +189,11 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
         if client is not None:
             await client.disconnect()
             await client._ensure_ws_connected()
+
+    def _get_liveness_recovery_threshold_s(self) -> int:
+        """Return the Futures message-silence threshold before recovery fires.
+
+        Returns:
+            ``_LIVENESS_RECOVERY_THRESHOLD_S`` seconds.
+        """
+        return _LIVENESS_RECOVERY_THRESHOLD_S

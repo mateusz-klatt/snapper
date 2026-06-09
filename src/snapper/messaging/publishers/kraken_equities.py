@@ -35,6 +35,7 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import (
     apply_kraken_already_subscribed_filter,
 )
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_resubscribe_pacing
+from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
 from snapper.infrastructure.symbols.functions import get_available_kraken_equities_symbols
 from snapper.infrastructure.symbols.functions import native_to_kraken_equities_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
@@ -58,8 +59,28 @@ a large Equities universe does not burst past Kraken's subscribe
 message-rate limit and dark the ticker stream on reconnect.
 """
 
+apply_kraken_retry_after_honoring()
+"""Install the kraken-sdk connect shim at module import.
+
+Idempotent — safe if `snapper.messaging.publishers.kraken` already installed
+it. Required here because an equities-only subprocess does not import the Spot
+publisher, so without this call the private/direct Equities ``SpotWSClient``
+handshake would never pass through ``_ConnectShim`` and would miss the
+enforced transport keepalive (``ping_timeout``/``close_timeout``) and the
+Cloudflare 429 Retry-After / close-code backoff handling — the same gap that
+left a silently dead socket undetected until the app-level silence threshold.
+"""
+
 _CME_DAILY_BREAK_START = datetime_time(hour=21)
 _CME_DAILY_BREAK_END = datetime_time(hour=22)
+
+_LIVENESS_RECOVERY_THRESHOLD_S = 120
+"""Message-silence threshold (seconds) before Equities liveness recovery fires.
+
+Lowered from the 300 s base default but kept above the realtime-venue 60 s:
+the Equities FCM feed is entitlement-delayed and thinner than Spot/Futures, so
+a slightly longer window avoids tearing down a quiet-but-healthy connection
+during genuine lulls. Scheduled CME closures still fully suppress recovery."""
 
 
 def _is_cme_closed(now_utc: datetime) -> bool:
@@ -228,10 +249,15 @@ class KrakenEquitiesMarketDataPublisher(
         await super()._candle_loop(symbols, timeframe)
 
     def _get_liveness_recovery_threshold_s(self) -> int:
-        """Disable liveness recovery during scheduled CME closure windows."""
+        """Return the Equities threshold, disabled during CME closures.
+
+        Returns:
+            ``0`` during a scheduled CME closure window (recovery
+            suppressed), else ``_LIVENESS_RECOVERY_THRESHOLD_S`` seconds.
+        """
         if _is_cme_closed(datetime.now(UTC)):
             return 0
-        return super()._get_liveness_recovery_threshold_s()
+        return _LIVENESS_RECOVERY_THRESHOLD_S
 
     async def _attempt_liveness_recovery(self, reason: str) -> None:
         """Recover stale market data by rebuilding the public WS client."""

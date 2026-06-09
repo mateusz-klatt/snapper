@@ -23,6 +23,7 @@ from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 from kraken.spot.websocket.connectors import ConnectSpotWebsocket
@@ -52,6 +53,9 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _RESUBSCRIBE_PAC
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RESUBSCRIBE_PACE_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RETRY_AFTER_MAX_SECONDS
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _RETRY_AFTER_MIN_SECONDS
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_CLOSE_TIMEOUT_S
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_PING_INTERVAL_S
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_PING_TIMEOUT_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _kraken_futures_ws
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _parse_retry_after
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _patched_get_reconnect_wait
@@ -896,13 +900,14 @@ class TestPhaseBPrimeShim:
         return configure_egress_pool(config)
 
     def test_shim_no_pool_preserves_phase_a_kwargs(self) -> None:
-        """Spec — pool disabled passes kwargs through unchanged.
+        """Spec — pool disabled passes caller kwargs through, adds keepalive.
 
         Given get_egress_pool() returns None,
         When _ConnectShim is constructed with arbitrary kwargs,
-        Then original_connect is called with those kwargs verbatim —
-        no proxy override, no new keys (preserves the
-        default of websockets-16 ``proxy=True`` env auto-detect).
+        Then original_connect is called with no proxy override (preserving
+        the websockets-16 ``proxy=True`` env auto-detect), the caller's
+        ``ping_interval`` preserved, and the enforced transport keepalive
+        (``ping_timeout``/``close_timeout``) merged in.
         """
         seen_kwargs: dict[str, Any] = {}
 
@@ -912,7 +917,33 @@ class TestPhaseBPrimeShim:
 
         shim_cls = _wrap_connect_factory(fake_connect)
         shim_cls("wss://kraken", ping_interval=20)
-        assert seen_kwargs == {"ping_interval": 20}
+        assert seen_kwargs == {
+            "ping_interval": 20,
+            "ping_timeout": _WS_PING_TIMEOUT_S,
+            "close_timeout": _WS_CLOSE_TIMEOUT_S,
+        }
+
+    def test_shim_injects_default_keepalive_when_absent(self) -> None:
+        """Spec — keepalive defaults are injected when the caller omits them.
+
+        Given get_egress_pool() returns None and no keepalive kwargs,
+        When _ConnectShim is constructed,
+        Then original_connect receives the default ping interval plus the
+        enforced ping/close timeouts.
+        """
+        seen_kwargs: dict[str, Any] = {}
+
+        def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
+            seen_kwargs.update(kwargs)
+            return MagicMock()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim_cls("wss://kraken")
+        assert seen_kwargs == {
+            "ping_interval": _WS_PING_INTERVAL_S,
+            "ping_timeout": _WS_PING_TIMEOUT_S,
+            "close_timeout": _WS_CLOSE_TIMEOUT_S,
+        }
 
     def test_shim_direct_route_injects_proxy_none(self) -> None:
         """Spec — direct route forces ``proxy=None`` to override env detection.
@@ -933,7 +964,12 @@ class TestPhaseBPrimeShim:
 
         shim_cls = _wrap_connect_factory(fake_connect)
         shim_cls("wss://kraken")
-        assert seen_kwargs == {"proxy": None}
+        assert seen_kwargs == {
+            "proxy": None,
+            "ping_interval": _WS_PING_INTERVAL_S,
+            "ping_timeout": _WS_PING_TIMEOUT_S,
+            "close_timeout": _WS_CLOSE_TIMEOUT_S,
+        }
 
     def test_shim_socks5_route_injects_proxy_url(self) -> None:
         """Spec — when socks5 is preferred, proxy=socks5h://... is injected.
@@ -958,7 +994,12 @@ class TestPhaseBPrimeShim:
 
         shim_cls = _wrap_connect_factory(fake_connect)
         shim_cls("wss://kraken")
-        assert seen_kwargs == {"proxy": "socks5h://snapper-egress:1081"}
+        assert seen_kwargs == {
+            "proxy": "socks5h://snapper-egress:1081",
+            "ping_interval": _WS_PING_INTERVAL_S,
+            "ping_timeout": _WS_PING_TIMEOUT_S,
+            "close_timeout": _WS_CLOSE_TIMEOUT_S,
+        }
 
     def test_shim_sync_construct_failure_releases_reservation(self) -> None:
         """Spec — original_connect raising in __init__ releases the reservation.
@@ -1344,7 +1385,12 @@ class TestPhaseBPrimeShim:
         finally:
             _CURRENT_PUBLISHER.reset(token)
 
-        assert seen_kwargs == {"proxy": "socks5h://snapper-egress:1085"}
+        assert seen_kwargs == {
+            "proxy": "socks5h://snapper-egress:1085",
+            "ping_interval": _WS_PING_INTERVAL_S,
+            "ping_timeout": _WS_PING_TIMEOUT_S,
+            "close_timeout": _WS_CLOSE_TIMEOUT_S,
+        }
 
     def test_shim_falls_back_to_kraken_when_no_publisher_context(self) -> None:
         """Spec — when ``_CURRENT_PUBLISHER`` is None, reservation tag falls back to ``"kraken"``.
@@ -1467,6 +1513,35 @@ class TestPhaseBPrimeGetReconnectWait:
         connector = MagicMock(spec=ConnectSpotWebsocketBase)
         wait = _patched_get_reconnect_wait(connector, 1)
         assert wait == _RETRY_AFTER_MIN_SECONDS
+
+    def test_pool_uses_registered_publisher_exchange(self) -> None:
+        """Spec — pool reconnect-wait queries the connector's own exchange.
+
+        Given a connector registered to a publisher whose exchange is
+        ``kraken_equities`` and an enabled pool,
+        When _patched_get_reconnect_wait consults the pool,
+        Then the pool is queried for the connector's exchange route set, not
+        the hardcoded Spot ``kraken`` set — so an Equities/direct connector
+        cannot make reconnect decisions against Spot's quarantine state.
+        """
+        connector = MagicMock(spec=ConnectSpotWebsocketBase)
+        connector_id = id(connector)
+        publisher = MagicMock()
+        publisher._get_exchange_name.return_value = "kraken_equities"
+        _CONNECTOR_PUBLISHERS[connector_id] = publisher
+        fake_pool = MagicMock()
+        fake_pool.size.return_value = 1
+        fake_pool.has_available.return_value = True
+        try:
+            with patch(
+                "snapper.infrastructure.exchanges.kraken_sdk_patches.get_egress_pool",
+                return_value=fake_pool,
+            ):
+                wait = _patched_get_reconnect_wait(connector, 1)
+            assert wait == _RETRY_AFTER_MIN_SECONDS
+            fake_pool.has_available.assert_called_once_with(exchange="kraken_equities")
+        finally:
+            _CONNECTOR_PUBLISHERS.pop(connector_id, None)
 
     def test_pool_enabled_all_quarantined_returns_earliest_release(self) -> None:
         """Spec — all routes quarantined returns earliest release deadline.

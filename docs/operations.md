@@ -270,6 +270,57 @@ natural key is `(coordinator, exchange, channel, symbol)`, where
 deployments can show which coordinator is publishing a stale or
 missing stream.
 
+## Feed resilience and outage recovery
+
+Market-data publishers self-recover from multi-minute network outages on
+both the public (egress) and private (direct) paths without operator
+action:
+
+- **Persistent recovery.** When a feed goes silent past its liveness
+  threshold, recovery runs as a single-flight loop with capped
+  exponential backoff (1→60 s + jitter) that retries until messages
+  resume or the publisher stops — it never gives up on a timeout.
+- **Per-venue liveness thresholds.** Kraken Spot and Futures recover
+  after 60 s of message silence (their wildcard/continuous universes
+  always tick, so 60 s reliably means a dark feed); Kraken Equities uses
+  120 s and is fully suppressed during scheduled CME closure windows.
+- **Transport keepalive.** Every Kraken WebSocket handshake is opened
+  with an explicit `ping_timeout`/`close_timeout` so a silently dead
+  socket (a yanked link with no close frame) surfaces in tens of seconds
+  rather than waiting out the app-level silence threshold.
+- **Dark-feed watchdog.** If a feed stays dark for ~25 min despite
+  recovery (a wedged SDK or recovery bug), the publisher exits non-zero
+  and `ProcessLauncherService` respawns it. The exit ceiling is kept
+  above the launcher's lifetime-restart reset window, so a prolonged
+  outage produces an unbounded slow restart-and-retry cadence that
+  self-heals the instant connectivity returns — it never permanently
+  abandons the feed.
+
+Watch recovery via `GET /api/market/feed-health` /
+`GET /api/market/coverage` and the `pub:<exchange>` log lines
+(`liveness recovery triggered`, `feed recovered after N attempt(s)`,
+`feed dark for …s … exiting for launcher restart`).
+
+### Fault-injection testing (staging only)
+
+`scripts/resilience_fault_injection.py` simulates an outage and asserts
+recovery. It blocks outbound HTTPS in a container via
+`docker exec <container> iptables` (always restored in a `finally`
+block) and measures candle-freshness recovery against the SLA.
+
+```bash
+# Public path (egress): drop for 5 min, expect recovery within 120 s.
+DB_URL=... python scripts/resilience_fault_injection.py --path public --hold-s 300
+
+# Private/direct path: target a NET_ADMIN-capable container; use a
+# longer SLA for the entitlement-delayed Equities feed.
+DB_URL=... python scripts/resilience_fault_injection.py \
+    --path private --private-container snapper-feed --hold-s 900 --sla-s 900
+```
+
+Never run it against production; the private-path container must be
+started with `NET_ADMIN` for the in-container `iptables` rule to apply.
+
 ## Per-wallet executors
 
 Executor process configs are templates named `executor_<exchange>`.

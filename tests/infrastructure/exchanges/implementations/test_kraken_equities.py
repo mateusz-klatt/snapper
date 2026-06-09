@@ -199,6 +199,27 @@ async def test_ensure_ws_connected_auto_replays_after_reconnect(
     replay_mock.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_ensure_ws_connected_closes_partial_client_on_failure(
+    client: KrakenEquitiesExchangeClient,
+) -> None:
+    """A failed build closes the partial client and re-raises.
+
+    Given: An Equities client whose WS start raises,
+    When: _ensure_ws_connected runs,
+    Then: The partial client is torn down (client reference cleared) and the
+        error propagates so a failed recovery cannot leak the client.
+    """
+    with patch(
+        "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient"
+    ) as ws_cls:
+        ws_cls.return_value.start = AsyncMock(side_effect=RuntimeError("boom"))
+        ws_cls.return_value.close = AsyncMock()
+        with pytest.raises(RuntimeError, match="boom"):
+            await client._ensure_ws_connected()
+    assert client._ws_client is None
+
+
 class TestEnqueueOrDropOldest:
     """Tests for _enqueue_or_drop_oldest module-level helper."""
 
@@ -298,6 +319,21 @@ class TestConnect:
         """
         mock_ws = AsyncMock()
         mock_ws.close.side_effect = RuntimeError("close failed")
+        client._ws_client = mock_ws
+        await client.disconnect()
+        assert client._ws_client is None
+
+    @pytest.mark.asyncio
+    async def test_disconnect_ws_close_timeout(self, client: KrakenEquitiesExchangeClient) -> None:
+        """Disconnect drops the client when the close times out.
+
+        Given: WS close exceeds the close timeout,
+        When: disconnect() is called,
+        Then: The timeout is handled and the WS client is set to None so a
+            blackholed socket cannot hang recovery or shutdown.
+        """
+        mock_ws = AsyncMock()
+        mock_ws.close.side_effect = TimeoutError
         client._ws_client = mock_ws
         await client.disconnect()
         assert client._ws_client is None

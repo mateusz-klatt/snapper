@@ -8,6 +8,7 @@ import asyncio
 import collections
 import contextlib
 import math
+import random
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import AsyncIterator
@@ -101,7 +102,50 @@ _TRADE_ID_LRU_MAX_PER_SYMBOL: int = 1000
 _CONSUMER_RESTART_BACKOFF_S = 2.0
 _LIVENESS_RECOVERY_THRESHOLD_S_DEFAULT = 300
 _MIN_RECOVERY_INTERVAL_S = 60.0
-_RECOVERY_TIMEOUT_S = 90.0
+_RECOVERY_BACKOFF_INITIAL_S: Final = 1.0
+"""First sleep between failed liveness-recovery attempts."""
+_RECOVERY_BACKOFF_CAP_S: Final = 60.0
+"""Upper bound on the capped-exponential backoff between recovery attempts.
+
+Recovery never abandons a dark feed: it keeps rebuilding the venue
+connection with this backoff ceiling until fresh messages resume or the
+publisher stops. This replaces the previous single ``asyncio.wait_for``
+attempt bounded at 90 seconds, which cancelled a Spot reconnect mid
+subscription-replay (~195 s of work) on every cycle and left the public
+feeds dark for hours after a multi-minute network outage."""
+_RECOVERY_JITTER_FRACTION: Final = 0.2
+"""Plus/minus fractional jitter applied to each recovery backoff so
+independent publishers do not synchronise their reconnect attempts."""
+_RECOVERY_PROGRESS_GRACE_S: Final = 45.0
+"""Window to observe for fresh messages after a recovery attempt before
+treating the attempt as unsuccessful and backing off for another try.
+
+Long enough for a successful reconnect plus paced subscription replay to
+start delivering data; a failed reconnect resumes the backoff loop as
+soon as the grace window elapses with no progress."""
+_RECOVERY_PROGRESS_POLL_S: Final = 1.0
+"""Poll cadence while observing for post-recovery message progress."""
+_DARK_FEED_EXIT_CEILING_S: Final = 1500.0
+"""Maximum continuous message-silence (seconds) a publisher tolerates before
+escalating from in-process recovery to a fatal process exit.
+
+Persistent recovery (:meth:`MarketDataPublisherService._run_recovery_under_lock`)
+handles the common case in process; this backstop only fires when a feed stays
+dark far longer than any real reconnect needs — e.g. a wedged SDK or a recovery
+bug. Exiting lets the process launcher respawn a fresh subprocess under its
+crash-loop guards. Set well above the per-venue liveness thresholds (60-120 s)
+so a normal multi-minute outage recovers in process without a restart.
+
+INVARIANT: this MUST stay strictly greater than the launcher's
+``_TOTAL_RESET_UPTIME_S`` (1200 s). A dark-exit process has run for at least
+this ceiling before exiting, so a larger value guarantees its uptime exceeds
+the launcher's long-healthy threshold — the launcher then treats every
+dark-exit as a long-healthy death and resets the lifetime failed-restart
+counter, so a genuinely prolonged outage produces an UNBOUNDED slow
+restart-and-retry cadence (self-healing the instant connectivity returns)
+rather than exhausting the lifetime restart budget and permanently abandoning
+the feed (which would recreate the multi-hour dark-feed incident this work
+fixes). The invariant is asserted in the test suite."""
 
 _FEED_HEALTH_FLUSH_INTERVAL_S = 30.0
 """Cadence for persisting the subscription-health snapshot to the DB.
@@ -139,6 +183,18 @@ _DISCONNECT_HINTS: Final = (
 connection died (Postgres restart, network reset, fwall idle-out) rather
 than a query-level problem (constraint violation, syntax error, timeout
 on a still-live connection)."""
+
+
+class FeedDarkTooLongError(RuntimeError):
+    """Raised by the heartbeat loop when a feed stays dark past the exit ceiling.
+
+    Persistent in-process recovery handles ordinary outages; this signals
+    that a feed has produced no messages for longer than
+    ``_DARK_FEED_EXIT_CEILING_S`` despite recovery, so the publisher should
+    exit non-zero and let the process launcher respawn a fresh subprocess
+    under its crash-loop guards. The heartbeat loop re-raises it explicitly
+    past its generic ``except Exception`` handler so it is never swallowed.
+    """
 
 
 class _WriterSessionLostError(Exception):
@@ -869,23 +925,89 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         task.add_done_callback(self._recovery_tasks.discard)
 
     async def _run_recovery_under_lock(self, reason: str) -> None:
-        """Run one recovery attempt under the publisher-level recovery lock."""
+        """Persistently recover a stale feed under the recovery lock.
+
+        Holds the publisher-level recovery lock for the whole recovery so
+        only one recovery runs at a time (the heartbeat loop's repeated
+        ``_spawn_recovery`` calls no-op while the lock is held). Each
+        iteration rebuilds the venue connection via
+        :meth:`_attempt_liveness_recovery`, then observes for fresh
+        messages for up to ``_RECOVERY_PROGRESS_GRACE_S``. If data
+        resumes the loop returns; otherwise it backs off with capped
+        exponential jitter and tries again. The loop never abandons a
+        dark feed on a timeout — it runs until messages resume or the
+        publisher stops — so a multi-minute network outage no longer
+        leaves the feed dark waiting for an operator.
+
+        Args:
+            reason: Human-readable trigger reason for log context.
+
+        Returns:
+            None.
+
+        Raises:
+            asyncio.CancelledError: Propagated on shutdown so
+                :meth:`stop` can join the recovery task cleanly.
+        """
         async with self._recovery_lock:
-            try:
-                await asyncio.wait_for(
-                    self._attempt_liveness_recovery(reason),
-                    timeout=_RECOVERY_TIMEOUT_S,
-                )
-            except TimeoutError:
-                logger.error(
-                    f"{self._get_exchange_name()}: liveness recovery timed out after "
-                    f"{_RECOVERY_TIMEOUT_S}s (reason={reason})"
-                )
-            except Exception as exc:
-                logger.exception(
-                    f"{self._get_exchange_name()}: liveness recovery raised {exc!r} "
-                    f"(reason={reason})"
-                )
+            baseline = self._last_message_at
+            backoff = _RECOVERY_BACKOFF_INITIAL_S
+            attempt = 0
+            while self.running:
+                attempt += 1
+                attempt_ok = True
+                try:
+                    await self._attempt_liveness_recovery(reason)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    attempt_ok = False
+                    logger.warning(
+                        f"{self._get_exchange_name()}: recovery attempt {attempt} "
+                        f"raised {exc!r} (reason={reason}); will retry"
+                    )
+                if attempt_ok and await self._await_recovery_progress(baseline):
+                    logger.info(
+                        f"{self._get_exchange_name()}: feed recovered after {attempt} "
+                        f"attempt(s) (reason={reason})"
+                    )
+                    return
+                await self._sleep_with_jitter(backoff)
+                backoff = min(backoff * 2.0, _RECOVERY_BACKOFF_CAP_S)
+
+    async def _await_recovery_progress(self, baseline: float) -> bool:
+        """Observe for fresh messages after a recovery attempt.
+
+        Args:
+            baseline: ``_last_message_at`` captured when recovery started;
+                progress means the feed advanced past this value.
+
+        Returns:
+            True as soon as ``_last_message_at`` advances past
+            ``baseline`` (data is flowing again), or False once the
+            ``_RECOVERY_PROGRESS_GRACE_S`` window elapses with no progress.
+        """
+        deadline = monotonic() + _RECOVERY_PROGRESS_GRACE_S
+        while self.running:
+            if self._last_message_at > baseline:
+                return True
+            if monotonic() >= deadline:
+                return False
+            await asyncio.sleep(_RECOVERY_PROGRESS_POLL_S)
+        return self._last_message_at > baseline
+
+    async def _sleep_with_jitter(self, seconds: float) -> None:
+        """Sleep ``seconds`` with plus/minus ``_RECOVERY_JITTER_FRACTION`` jitter.
+
+        Args:
+            seconds: Base backoff duration before jitter is applied.
+
+        Returns:
+            None.
+        """
+        spread = seconds * _RECOVERY_JITTER_FRACTION
+        jittered = seconds + random.uniform(-spread, spread)
+        await asyncio.sleep(max(0.0, jittered))
 
     async def _attempt_liveness_recovery(self, reason: str) -> None:
         """Default liveness recovery hook used by publishers without recovery."""
@@ -1888,6 +2010,15 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     stale_for = monotonic() - self._last_message_at
                     if stale_for > threshold_s:
                         self._spawn_recovery(reason=f"no_messages_for_{stale_for:.0f}s")
+                    if stale_for > _DARK_FEED_EXIT_CEILING_S:
+                        logger.error(
+                            f"{self._get_exchange_name()}: feed dark for {stale_for:.0f}s "
+                            f"(> {_DARK_FEED_EXIT_CEILING_S:.0f}s ceiling) despite recovery; "
+                            "exiting for launcher restart"
+                        )
+                        raise FeedDarkTooLongError(
+                            f"{self._get_exchange_name()} dark for {stale_for:.0f}s"
+                        )
                 hb_topic = heartbeat_topic_from_component(component_name)
                 hb_msg = HeartbeatData(
                     public_id=str(uuid7()),
@@ -1909,6 +2040,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     },
                 )
                 await self._publish_heartbeat(hb_topic, hb_msg)
+            except FeedDarkTooLongError:
+                raise
             except Exception as e:
                 logger.error(f"Heartbeat error: {e}")
 

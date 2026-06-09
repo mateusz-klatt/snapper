@@ -39,6 +39,7 @@ from snapper.infrastructure.exchanges.implementations.kraken import (
     _OHLC_DEPRECATED_TIMESTAMP_NOTICE,
 )
 from snapper.infrastructure.exchanges.implementations.kraken import _OHLC_NOTICES_LOGGED
+from snapper.infrastructure.exchanges.implementations.kraken import _RESUBSCRIBE_CHUNK_DELAY_S
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.implementations.kraken import _enqueue_or_drop_oldest
 
@@ -386,12 +387,13 @@ async def test_subscribe_dedup_replaces_entry_with_same_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_replay_iterates_cache_in_insertion_order_with_5s_delay() -> None:
+async def test_replay_iterates_cache_in_insertion_order_with_delay() -> None:
     """Replay resubscribes cached requests in insertion order with delay.
 
     Given: A Kraken client with two cached subscriptions,
     When: Subscriptions are replayed,
-    Then: The websocket receives subscribe calls in insertion order with one 5s sleep.
+    Then: The websocket receives subscribe calls in insertion order with one
+        paced ``_RESUBSCRIBE_CHUNK_DELAY_S`` sleep between them.
     """
     client = _client()
     ws = AsyncMock()
@@ -413,7 +415,7 @@ async def test_replay_iterates_cache_in_insertion_order_with_5s_delay() -> None:
         "channel": "trade",
         "symbol": ["ETH/USD"],
     }
-    sleep_mock.assert_awaited_once_with(5.0)
+    sleep_mock.assert_awaited_once_with(_RESUBSCRIBE_CHUNK_DELAY_S)
 
 
 @pytest.mark.asyncio
@@ -461,6 +463,31 @@ async def test_ensure_ws_connected_auto_replays_after_reconnect() -> None:
         ws_cls.return_value.start = AsyncMock()
         await client._ensure_ws_connected()
     replay_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ensure_ws_connected_closes_partial_client_on_failure() -> None:
+    """A failed build/replay closes the partial client and re-raises.
+
+    Given: A Kraken client whose subscription replay raises,
+    When: _ensure_ws_connected builds a new client,
+    Then: The partial client is closed and the error propagates so the
+        caller's recovery loop can retry without leaking the client.
+    """
+    client = KrakenExchangeClient(api_key="key", api_secret="secret")
+    req = SubscriptionRequest(channel="ticker", symbols=("BTC/USD",), parameters_json="{}")
+    client._subscription_cache[req.key()] = req
+    with (
+        patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient") as ws_cls,
+        patch.object(client, "_replay_subscriptions", new_callable=AsyncMock) as replay_mock,
+        patch.object(client, "_close_ws_client", new_callable=AsyncMock) as close_mock,
+    ):
+        ws_cls.return_value.start = AsyncMock()
+        replay_mock.side_effect = RuntimeError("boom")
+        with pytest.raises(RuntimeError, match="boom"):
+            await client._ensure_ws_connected()
+    close_mock.assert_awaited_once()
+    assert client._ws_connected is False
 
 
 class TestKrakenExchangeClient:
@@ -2206,14 +2233,23 @@ class TestCloseWsClientBranches:
         mock_session.close.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_close_ws_client_not_connected(self, kraken_client: KrakenExchangeClient) -> None:
-        """Verify close ws client not connected."""
+    async def test_close_ws_client_closes_when_flag_false(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Close tears down an orphaned client even when the flag is False.
+
+        Given: A client object present but ``_ws_connected`` left False
+            (as happens when a recovery attempt was cancelled mid-replay),
+        When: ``_close_ws_client`` runs,
+        Then: ``close()`` is still awaited so the SDK client and its
+            background task/session are torn down instead of leaked.
+        """
         mock_ws_client = MagicMock()
         mock_ws_client.close = AsyncMock()
         kraken_client._ws_client = mock_ws_client
         kraken_client._ws_connected = False
         await kraken_client._close_ws_client()
-        mock_ws_client.close.assert_not_awaited()
+        mock_ws_client.close.assert_awaited_once()
         assert kraken_client._ws_client is None
 
     @pytest.mark.asyncio
@@ -2245,6 +2281,25 @@ class TestCloseWsClientBranches:
         kraken_client._ws_client = mock_ws_client
         kraken_client._ws_connected = True
         kraken_client._WS_CLOSE_TIMEOUT_SECONDS = 0.05
+        await kraken_client._close_ws_client()
+        assert kraken_client._ws_client is None
+        assert kraken_client._ws_connected is False
+
+    @pytest.mark.asyncio
+    async def test_close_ws_client_swallows_close_error(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A non-timeout close error is swallowed, not propagated.
+
+        Given: A WebSocket client whose close raises a non-timeout error,
+        When: _close_ws_client runs (e.g. from the failure-cleanup path),
+        Then: The error is swallowed and the client is torn down so it
+            cannot mask the original connection failure being re-raised.
+        """
+        mock_ws_client = MagicMock()
+        mock_ws_client.close = AsyncMock(side_effect=RuntimeError("boom"))
+        kraken_client._ws_client = mock_ws_client
+        kraken_client._ws_connected = True
         await kraken_client._close_ws_client()
         assert kraken_client._ws_client is None
         assert kraken_client._ws_connected is False

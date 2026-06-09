@@ -75,6 +75,13 @@ the kraken-sdk patches.
 """
 
 _FORCE_WS_RESTART_BACKOFF_S: Final[float] = 5.0
+_LIVENESS_RECOVERY_THRESHOLD_S: Final[int] = 60
+"""Message-silence threshold (seconds) before Spot liveness recovery fires.
+
+Lowered from the 300 s base default: the wildcard ticker covers the whole
+~1900-symbol Spot universe, so ``_last_message_at`` only goes stale when the
+feed is genuinely dark (some symbol ticks every few seconds otherwise), and a
+multi-minute outage is detected and recovered in ~1 minute rather than five."""
 """Sleep between disconnect and reconnect during in-process WS restart."""
 
 
@@ -232,13 +239,17 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         ``KrakenExchangeClient.disconnect_websocket`` +
         ``_ensure_ws_connected`` cycle. Per the clean-signal-log rule the
         timestamp deque is cleared after a restart trigger so back-to-back
-        storms do not double-fire.
+        storms do not double-fire. A forced restart already in flight is
+        not re-scheduled, so a storm cannot spawn overlapping restart
+        tasks that race on the same WebSocket client.
         """
         now = time.monotonic()
         self._reconnect_timestamps.append(now)
         cutoff = now - _RECONNECT_WINDOW_S
         recent = [t for t in self._reconnect_timestamps if t >= cutoff]
         if len(recent) >= _RECONNECT_LIMIT:
+            if self._force_ws_restart_task is not None and not self._force_ws_restart_task.done():
+                return
             logger.error(
                 "kraken publisher: {} reconnects in {}s — forcing WS restart",
                 len(recent),
@@ -256,7 +267,9 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         introduced. A 5-second back-off between disconnect and reconnect
         gives the SDK a moment to settle internal state and gives
         Cloudflare time to release any in-flight 429 tracking against
-        the same source IP.
+        the same source IP. The rebuild is skipped when the publisher is
+        no longer running so a storm restart that overlaps :meth:`stop`
+        cannot re-establish a WebSocket after shutdown has begun.
         """
         async with self._restart_lock:
             client = self._exchange_client
@@ -267,9 +280,33 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             except Exception:
                 logger.exception("kraken publisher: disconnect_websocket failed during restart")
             await asyncio.sleep(_FORCE_WS_RESTART_BACKOFF_S)
+            if not self.running:
+                return
             await client._ensure_ws_connected()
+
+    async def stop(self) -> None:
+        """Cancel an in-flight forced WS restart, then stop normally.
+
+        The reconnect-storm watchdog schedules ``_force_ws_restart`` as a
+        standalone task outside the base recovery-task set; cancel and join
+        it here so a restart in progress cannot outlive shutdown or race the
+        base teardown.
+        """
+        task = self._force_ws_restart_task
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await super().stop()
 
     async def _attempt_liveness_recovery(self, reason: str) -> None:
         """Recover stale market data by forcing a WS restart."""
         logger.error("kraken publisher: liveness recovery triggered ({})", reason)
         await self._force_ws_restart()
+
+    def _get_liveness_recovery_threshold_s(self) -> int:
+        """Return the Spot message-silence threshold before recovery fires.
+
+        Returns:
+            ``_LIVENESS_RECOVERY_THRESHOLD_S`` seconds.
+        """
+        return _LIVENESS_RECOVERY_THRESHOLD_S

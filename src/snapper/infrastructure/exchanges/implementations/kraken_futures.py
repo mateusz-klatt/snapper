@@ -73,6 +73,9 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for authenticated operations"
 _PUBLIC_WS_NOT_CONNECTED_MSG = "WebSocket client not connected"
 _QUEUE_DRAIN_TIMEOUT = 0.1
+_WS_CLOSE_TIMEOUT_S = 10.0
+"""Upper bound on a WebSocket close so a blackholed socket cannot hang the
+liveness-recovery teardown or process shutdown indefinitely."""
 _QUEUE_MAX_SIZE = 10000
 _TICK_QUEUE_MAX_SIZE = 50000
 """Boot-time absorption budget for ticker and candle producer queues.
@@ -302,16 +305,28 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             raise
 
     async def disconnect(self) -> None:
-        """Close all Kraken Futures connections."""
+        """Close all Kraken Futures connections.
+
+        Each close is bounded by ``_WS_CLOSE_TIMEOUT_S`` so a blackholed
+        socket cannot hang liveness recovery or shutdown; on timeout or
+        close error the client reference is dropped and rebuilt on the next
+        connect.
+        """
         if self._ws_client:
             try:
-                await self._ws_client.close()
+                async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
+                    await self._ws_client.close()
+            except TimeoutError:
+                logger.warning("Kraken Futures WS close timed out - forcing cleanup")
             except Exception as e:
                 logger.warning(f"Error closing Kraken Futures WS: {e}")
             self._ws_client = None
         if self._private_ws_client:
             try:
-                await self._private_ws_client.close()
+                async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
+                    await self._private_ws_client.close()
+            except TimeoutError:
+                logger.warning("Kraken Futures private WS close timed out - forcing cleanup")
             except Exception as e:
                 logger.warning(f"Error closing Kraken Futures private WS: {e}")
             self._private_ws_client = None
@@ -536,14 +551,30 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                     logger.debug(f"Skipping unparseable fill WS message: {exc}")
 
     async def _ensure_ws_connected(self) -> None:
-        """Connect the FuturesWSClient if not already connected."""
+        """Connect the FuturesWSClient if not already connected.
+
+        On a build/replay failure or cancellation the partial public client
+        is torn down (bounded by ``_WS_CLOSE_TIMEOUT_S``) before the error
+        propagates, so a cancelled or failed recovery cannot leak the SDK
+        client, its background run task, or its aiohttp session.
+        """
         if self._ws_client is not None:
             return
-        self._ws_client = FuturesWSClient(callback=self._on_ws_message, sandbox=self.sandbox)
-        await self._ws_client.start()
-        logger.info("Kraken Futures WebSocket connected")
-        if self._subscription_cache:
-            await self._replay_subscriptions()
+        client = FuturesWSClient(callback=self._on_ws_message, sandbox=self.sandbox)
+        self._ws_client = client
+        try:
+            await client.start()
+            logger.info("Kraken Futures WebSocket connected")
+            if self._subscription_cache:
+                await self._replay_subscriptions()
+        except BaseException:
+            try:
+                async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
+                    await client.close()
+            except Exception as exc:
+                logger.warning(f"Error closing partial Kraken Futures WS: {exc!r}")
+            self._ws_client = None
+            raise
 
     async def _replay_subscriptions(self) -> None:
         """Replay cached public subscriptions after reconnect."""

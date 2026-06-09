@@ -175,6 +175,16 @@ class TestKrakenReconnectWatchdog:
         assert list(pub._reconnect_timestamps) == []
         assert pub._restart_lock is not None
 
+    def test_liveness_threshold_is_60s(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given a Spot publisher,
+        When the liveness-recovery threshold is read,
+        Then it is the lowered 60 second realtime-venue threshold.
+        """
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        assert pub._get_liveness_recovery_threshold_s() == 60
+
     def test_storm_under_limit_does_not_schedule_restart(self) -> None:
         """Spec — full Given/When/Then below.
 
@@ -205,6 +215,35 @@ class TestKrakenReconnectWatchdog:
         pub._force_ws_restart.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_storm_does_not_double_schedule_while_restart_in_flight(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given a forced WS restart already in flight,
+        When another storm crosses the limit,
+        Then no second restart task is scheduled and the in-flight task is
+        left untouched.
+        """
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        in_flight = asyncio.Event()
+
+        async def _hang() -> None:
+            await in_flight.wait()
+
+        pub._force_ws_restart = AsyncMock(side_effect=_hang)
+        for _ in range(_RECONNECT_LIMIT):
+            pub._on_sdk_reconnect_attempt()
+        await asyncio.sleep(0)
+        first_task = pub._force_ws_restart_task
+        for _ in range(_RECONNECT_LIMIT):
+            pub._on_sdk_reconnect_attempt()
+        await asyncio.sleep(0)
+        assert pub._force_ws_restart_task is first_task
+        pub._force_ws_restart.assert_called_once()
+        in_flight.set()
+        assert first_task is not None
+        await first_task
+
+    @pytest.mark.asyncio
     async def test_force_ws_restart_calls_disconnect_then_ensure(self) -> None:
         """Spec — full Given/When/Then below.
 
@@ -214,6 +253,7 @@ class TestKrakenReconnectWatchdog:
         and ``_ensure_ws_connected`` is called afterwards.
         """
         pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        pub.running = True
         client = MagicMock()
         client.disconnect_websocket = AsyncMock()
         client._ensure_ws_connected = AsyncMock()
@@ -224,6 +264,55 @@ class TestKrakenReconnectWatchdog:
         client.disconnect_websocket.assert_called_once()
         sleep_mock.assert_called_once()
         client._ensure_ws_connected.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_force_ws_restart_skips_reconnect_when_stopped(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given a storm restart that runs while the publisher is stopping,
+        When ``_force_ws_restart`` reaches the rebuild step with
+        ``running`` False,
+        Then it tears the socket down but does NOT re-establish a new one,
+        so a restart overlapping shutdown cannot revive the WebSocket.
+        """
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        pub.running = False
+        client = MagicMock()
+        client.disconnect_websocket = AsyncMock()
+        client._ensure_ws_connected = AsyncMock()
+        pub._exchange_client = client
+        with patch.object(kraken_module.asyncio, "sleep", new=AsyncMock()):
+            await pub._force_ws_restart()
+        client.disconnect_websocket.assert_called_once()
+        client._ensure_ws_connected.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_force_ws_restart_task(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given a publisher with an in-flight forced-restart task,
+        When ``stop`` is called,
+        Then the task is cancelled before the base shutdown runs.
+        """
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        pub.running = False
+        task = asyncio.create_task(asyncio.sleep(60))
+        pub._force_ws_restart_task = task
+        await pub.stop()
+        assert task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_stop_without_force_ws_restart_task(self) -> None:
+        """Spec — full Given/When/Then below.
+
+        Given a publisher with no in-flight forced-restart task,
+        When ``stop`` is called,
+        Then it proceeds to the base shutdown without error.
+        """
+        pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        pub.running = False
+        await pub.stop()
+        assert pub._force_ws_restart_task is None
 
     @pytest.mark.asyncio
     async def test_force_ws_restart_skips_when_no_client(self) -> None:
@@ -246,6 +335,7 @@ class TestKrakenReconnectWatchdog:
         Then the exception is logged and the rebuild path still proceeds.
         """
         pub = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        pub.running = True
         client = MagicMock()
         client.disconnect_websocket = AsyncMock(side_effect=RuntimeError("boom"))
         client._ensure_ws_connected = AsyncMock()

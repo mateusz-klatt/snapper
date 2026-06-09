@@ -66,6 +66,25 @@ _RECONNECT_WINDOW_S: Final[float] = 60.0
 _RECONNECT_LIMIT: Final[int] = 5
 """Maximum allowed reconnect attempts within ``_RECONNECT_WINDOW_S``."""
 
+_WS_PING_INTERVAL_S: Final[float] = 30.0
+"""Default WebSocket ping interval (seconds) injected into every Kraken
+handshake when the caller does not specify one. Matches the python-kraken-sdk
+default; set explicitly so transport keepalive does not silently depend on a
+library default and applies on both the egress (pool) and direct paths."""
+
+_WS_PING_TIMEOUT_S: Final[float] = 10.0
+"""WebSocket pong deadline (seconds), enforced over any caller value.
+
+A silently dead TCP connection (a yanked-internet outage with no close frame)
+surfaces as a ``ConnectionClosed`` within roughly
+``_WS_PING_INTERVAL_S + _WS_PING_TIMEOUT_S`` so the SDK reconnect path and the
+publisher liveness watchdog engage in tens of seconds instead of waiting out
+the multi-minute app-level message-silence threshold."""
+
+_WS_CLOSE_TIMEOUT_S: Final[float] = 10.0
+"""Closing-handshake deadline (seconds), enforced over any caller value, so a
+half-open socket cannot stall teardown during a reconnect."""
+
 _CLOSE_CODE_BACKOFF_S: Final[dict[int, float]] = {
     1008: 15.0,
     1011: 10.0,
@@ -256,9 +275,11 @@ class _ConnectShim:
     Reservation lifecycle for a single handshake:
 
     1. ``__init__`` (sync): reserve a route from the pool when
-       enabled, merge proxy kwarg, then build the underlying
-       ``original_connect(...)`` context manager. Synchronous
-       failure of ``original_connect`` releases the reservation.
+       enabled, merge the proxy kwarg, enforce transport keepalive
+       (``ping_timeout``/``close_timeout``, default ``ping_interval``),
+       then build the underlying ``original_connect(...)`` context
+       manager. Synchronous failure of ``original_connect`` releases
+       the reservation.
     2. ``__aenter__``: opens the handshake. On HTTP 429,
        quarantine the active route (pool path) or stash the
        Retry-After (legacy path), release, re-raise.
@@ -283,6 +304,12 @@ class _ConnectShim:
                 purpose="websocket",
             )
             kwargs = {**kwargs, **self._reservation.websocket_kwargs()}
+        kwargs = {
+            "ping_interval": _WS_PING_INTERVAL_S,
+            **kwargs,
+            "ping_timeout": _WS_PING_TIMEOUT_S,
+            "close_timeout": _WS_CLOSE_TIMEOUT_S,
+        }
         try:
             self._cm = original_connect(*args, **kwargs)
         except BaseException:
@@ -474,13 +501,15 @@ def _patched_get_reconnect_wait(self: ConnectSpotWebsocketBase, attempts: int) -
         )
         return wait
     if pool is not None and pool.size() > 0:
-        if pool.has_available(exchange="kraken"):
+        publisher = _CONNECTOR_PUBLISHERS.get(connector_id)
+        exchange_name = publisher._get_exchange_name() if publisher is not None else "kraken"
+        if pool.has_available(exchange=exchange_name):
             logger.info(
                 "kraken WS pool-aware reconnect: healthy route available (connector={})",
                 connector_id,
             )
             return _RETRY_AFTER_MIN_SECONDS
-        earliest = pool.earliest_release_in_seconds(exchange="kraken") or 0.0
+        earliest = pool.earliest_release_in_seconds(exchange=exchange_name) or 0.0
         logger.warning(
             "kraken WS pool-aware reconnect: all routes quarantined; "
             "sleeping {}s until earliest release (connector={})",

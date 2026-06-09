@@ -110,7 +110,19 @@ _TRADE_SUBSCRIBE_CHUNK_SIZE = 100
 _TRADE_SUBSCRIBE_CHUNK_DELAY_S = 0.1
 _CANDLE_SUBSCRIBE_CHUNK_SIZE = 100
 _CANDLE_SUBSCRIBE_CHUNK_DELAY_S = 0.1
-_RESUBSCRIBE_CHUNK_DELAY_S = 5.0
+_RESUBSCRIBE_CHUNK_DELAY_S = 0.5
+"""Delay between cached subscription chunks when the app-level recovery
+path rebuilds a fresh ``SpotWSClient`` and replays the subscription cache.
+
+A freshly built client has an empty SDK subscription set, so the SDK's own
+paced ``_recover_subscriptions`` cannot cover this rebuild path — the app
+must replay. At the previous 5.0 s/chunk, replaying the Spot universe
+(~39 cached chunks) took ~195 s, which the liveness-recovery path could
+never complete inside its bounding window, leaving the feed permanently
+dark after a multi-minute outage. 0.5 s/chunk replays the whole universe
+in ~20 s while staying well under Kraken's per-connection subscribe
+message-rate limit (the per-symbol chunk sends are themselves paced
+``_TRADE_SUBSCRIBE_CHUNK_DELAY_S``/``_CANDLE_SUBSCRIBE_CHUNK_DELAY_S``)."""
 _ALREADY_SUBSCRIBED_ERROR = "Already subscribed"
 _UNKNOWN_SUBSCRIPTION_ERROR = "unknown subscription error"
 
@@ -344,17 +356,28 @@ class KrakenExchangeClient(ExchangeClientBase):
     async def _close_ws_client(self) -> None:
         """Close WebSocket client with timeout protection.
 
+        Closes whenever a client object exists, regardless of the
+        ``_ws_connected`` flag. The flag is left ``False`` when a recovery
+        attempt is cancelled mid subscription-replay (the success line that
+        sets it is never reached); gating ``close()`` on the flag therefore
+        leaked the SDK client, its background run task, and its aiohttp
+        session on every cancelled recovery, accumulating orphaned
+        reconnecting clients that competed for the same egress route and
+        provoked rate-limit cascades. Closing by object existence tears the
+        prior client down cleanly before a new one is built.
+
         Ensures the process does not hang indefinitely when the Kraken
         SDK fails to close the connection or its underlying aiohttp
         session in a timely manner.
         """
         if not self._ws_client:
             return
+        was_connected = self._ws_connected
         try:
             async with asyncio.timeout(self._WS_CLOSE_TIMEOUT_SECONDS):
-                if self._ws_connected:
-                    await self._ws_client.close()
-                    self._ws_connected = False
+                await self._ws_client.close()
+                self._ws_connected = False
+                if was_connected:
                     logger.info("Kraken WebSocket disconnected")
                 if hasattr(self._ws_client, "_SpotAsyncClient__session"):
                     session = getattr(self._ws_client, "_SpotAsyncClient__session", None)
@@ -363,6 +386,9 @@ class KrakenExchangeClient(ExchangeClientBase):
                         logger.debug("Closed aiohttp session from kraken websocket client")
         except TimeoutError:
             logger.warning("WebSocket close timed out - forcing cleanup")
+            self._ws_connected = False
+        except Exception as exc:
+            logger.warning(f"WebSocket close failed - forcing cleanup: {exc!r}")
             self._ws_connected = False
         finally:
             self._ws_client = None
@@ -1912,10 +1938,14 @@ class KrakenExchangeClient(ExchangeClientBase):
                 callback=self._on_message,
             )
             logger.info("Kraken WebSocket client initialized")
-            await self._ws_client.start()
-            logger.info("Kraken WebSocket client started")
-            if self._subscription_cache:
-                await self._replay_subscriptions()
+            try:
+                await self._ws_client.start()
+                logger.info("Kraken WebSocket client started")
+                if self._subscription_cache:
+                    await self._replay_subscriptions()
+            except BaseException:
+                await self._close_ws_client()
+                raise
         self._ws_connected = True
 
     async def _replay_subscriptions(self) -> None:

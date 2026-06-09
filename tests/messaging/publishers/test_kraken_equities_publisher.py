@@ -174,16 +174,16 @@ class TestKrakenEquitiesMarketDataPublisher:
         with patch.object(equities_module, "_is_cme_closed", return_value=True):
             assert publisher._get_liveness_recovery_threshold_s() == 0
 
-    def test_threshold_300_during_cme_open(self) -> None:
-        """Equities liveness recovery uses the default threshold while open.
+    def test_threshold_during_cme_open(self) -> None:
+        """Equities liveness recovery uses the venue threshold while open.
 
         Given: The CME schedule helper reports an open market,
         When: The liveness threshold is read,
-        Then: The publisher returns the base 300 second threshold.
+        Then: The publisher returns the Equities 120 second threshold.
         """
         publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
         with patch.object(equities_module, "_is_cme_closed", return_value=False):
-            assert publisher._get_liveness_recovery_threshold_s() == 300
+            assert publisher._get_liveness_recovery_threshold_s() == 120
 
     @pytest.mark.parametrize(
         ("now_utc", "expected"),
