@@ -89,6 +89,17 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 _WS_CLIENT_CONNECTED_MSG = "WebSocket client should be connected"
+_WS_CONNECT_TIMEOUT_S = 20.0
+"""Upper bound on a WebSocket connect (``SpotWSClient.start``) so a connect that
+never completes cannot wedge liveness recovery.
+
+The python-kraken-sdk's ``start`` polls for the socket with a connect timeout
+that never fires (``while (timeout := 0.0) < 10`` resets the counter every
+iteration), so on a prolonged blackout — where the connector hits its reconnect
+ceiling and exits without ever setting the socket — ``start`` loops forever.
+Bounding it here turns that permanent hang into a timeout that tears the partial
+client down and lets the recovery loop retry with a fresh client, which
+reconnects once the network returns instead of requiring a process restart."""
 _QUEUE_MAX_SIZE = 10_000
 _TICK_QUEUE_MAX_SIZE = 50_000
 """Boot-time absorption budget for ticker and candle producer queues.
@@ -1939,7 +1950,8 @@ class KrakenExchangeClient(ExchangeClientBase):
             )
             logger.info("Kraken WebSocket client initialized")
             try:
-                await self._ws_client.start()
+                async with asyncio.timeout(_WS_CONNECT_TIMEOUT_S):
+                    await self._ws_client.start()
                 logger.info("Kraken WebSocket client started")
                 if self._subscription_cache:
                     await self._replay_subscriptions()

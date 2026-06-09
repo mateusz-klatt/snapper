@@ -76,6 +76,19 @@ _QUEUE_DRAIN_TIMEOUT = 0.1
 _WS_CLOSE_TIMEOUT_S = 10.0
 """Upper bound on a WebSocket close so a blackholed socket cannot hang the
 liveness-recovery teardown or process shutdown indefinitely."""
+
+_WS_CONNECT_TIMEOUT_S = 20.0
+"""Upper bound on a WebSocket connect (``FuturesWSClient.start``) so a connect
+that never completes cannot wedge liveness recovery.
+
+The python-kraken-sdk's ``start`` polls for the socket with a connect timeout
+that never fires (``while (timeout := 0.0) < 10`` resets the counter every
+iteration), so on a prolonged blackout — where the connector hits
+``MAX_RECONNECT_NUM`` and exits without ever setting the socket — ``start``
+loops forever. Bounding it here turns that permanent hang into a timeout that
+tears the partial client down and lets the recovery loop retry with a fresh
+client, which reconnects once the network returns instead of requiring a
+process restart."""
 _QUEUE_MAX_SIZE = 10000
 _TICK_QUEUE_MAX_SIZE = 50000
 """Boot-time absorption budget for ticker and candle producer queues.
@@ -563,7 +576,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         client = FuturesWSClient(callback=self._on_ws_message, sandbox=self.sandbox)
         self._ws_client = client
         try:
-            await client.start()
+            async with asyncio.timeout(_WS_CONNECT_TIMEOUT_S):
+                await client.start()
             logger.info("Kraken Futures WebSocket connected")
             if self._subscription_cache:
                 await self._replay_subscriptions()
@@ -616,14 +630,25 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         self._require_authenticated()
         if self._private_ws_client is not None:
             return
-        self._private_ws_client = FuturesWSClient(
+        client = FuturesWSClient(
             key=self._api_key or "",
             secret=self._api_secret or "",
             callback=self._on_execution_message,
             sandbox=self.sandbox,
         )
-        await self._private_ws_client.start()
-        logger.info("Kraken Futures private WebSocket connected")
+        self._private_ws_client = client
+        try:
+            async with asyncio.timeout(_WS_CONNECT_TIMEOUT_S):
+                await client.start()
+            logger.info("Kraken Futures private WebSocket connected")
+        except BaseException:
+            try:
+                async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
+                    await client.close()
+            except Exception as exc:
+                logger.warning(f"Error closing partial Kraken Futures private WS: {exc!r}")
+            self._private_ws_client = None
+            raise
 
     async def get_ticker(self, symbol: str) -> TickerSnapshot:
         """Fetch current ticker via CCXT.

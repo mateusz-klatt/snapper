@@ -354,6 +354,73 @@ async def test_ensure_ws_connected_closes_partial_client_on_failure(
 
 
 @pytest.mark.asyncio
+async def test_ensure_ws_connected_times_out_on_hung_start(
+    client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A connect that never completes is bounded so recovery can retry.
+
+    Given: A FuturesWSClient whose start() never returns (the SDK's connect
+        timeout never fires — its walrus-reset loop polls the socket forever, so
+        on a prolonged blackout the connector dies without ever setting the
+        socket and start() hangs).
+    When: _ensure_ws_connected runs,
+    Then: It times out within _WS_CONNECT_TIMEOUT_S, closes the partial client,
+        clears the reference, and raises — so the recovery loop retries with a
+        fresh client instead of wedging until a process restart.
+    """
+    monkeypatch.setattr(mod, "_WS_CONNECT_TIMEOUT_S", 0.05)
+
+    async def _hang() -> None:
+        await asyncio.Event().wait()
+
+    with patch(
+        "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
+    ) as ws_cls:
+        ws_cls.return_value.start = _hang
+        ws_cls.return_value.close = AsyncMock()
+        with pytest.raises(TimeoutError):
+            await client._ensure_ws_connected()
+        ws_cls.return_value.close.assert_awaited_once()
+    assert client._ws_client is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_ws_connected_retries_with_fresh_client_after_timeout(
+    client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hung connect fails, then a fresh attempt connects — the recovery contract.
+
+    Given: A first FuturesWSClient whose start() hangs and a second whose start()
+        succeeds,
+    When: _ensure_ws_connected is called twice (as the recovery loop would after
+        a timeout),
+    Then: The first times out and clears _ws_client so the next attempt rebuilds,
+        and the second connects and is retained — proving recovery re-establishes
+        once the network returns instead of wedging on the SDK's start() hang.
+    """
+    monkeypatch.setattr(mod, "_WS_CONNECT_TIMEOUT_S", 0.05)
+
+    async def _hang() -> None:
+        await asyncio.Event().wait()
+
+    hung = MagicMock()
+    hung.start = _hang
+    hung.close = AsyncMock()
+    good = MagicMock()
+    good.start = AsyncMock()
+    good.close = AsyncMock()
+    with patch(
+        "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+        side_effect=[hung, good],
+    ):
+        with pytest.raises(TimeoutError):
+            await client._ensure_ws_connected()
+        assert client._ws_client is None
+        await client._ensure_ws_connected()
+    assert client._ws_client is good
+
+
+@pytest.mark.asyncio
 async def test_ensure_ws_connected_cleanup_swallows_close_error(
     client: KrakenFuturesExchangeClient,
 ) -> None:
@@ -1998,6 +2065,54 @@ class TestEnsurePrivateWsConnected:
         """
         with pytest.raises(RuntimeError, match="API credentials required"):
             await client._ensure_private_ws_connected()
+
+    @pytest.mark.asyncio
+    async def test_private_ws_times_out_on_hung_start(
+        self, auth_client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A hung private-WS connect is bounded so authenticated flow can retry.
+
+        Given: A private FuturesWSClient whose start() never returns (the SDK's
+            connect-timeout walrus bug),
+        When: _ensure_private_ws_connected runs,
+        Then: It times out, tears the partial client down, clears the reference,
+            and raises — so the authenticated stream cannot wedge until restart.
+        """
+        monkeypatch.setattr(mod, "_WS_CONNECT_TIMEOUT_S", 0.05)
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
+        ) as ws_cls:
+            ws_cls.return_value.start = _hang
+            ws_cls.return_value.close = AsyncMock()
+            with pytest.raises(TimeoutError):
+                await auth_client._ensure_private_ws_connected()
+            ws_cls.return_value.close.assert_awaited_once()
+        assert auth_client._private_ws_client is None
+
+    @pytest.mark.asyncio
+    async def test_private_ws_cleanup_swallows_close_error(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A close error during private-WS failure-cleanup is swallowed.
+
+        Given: A private FuturesWSClient whose start raises and whose cleanup
+            close also raises,
+        When: _ensure_private_ws_connected runs,
+        Then: The cleanup close error is swallowed and the ORIGINAL start error
+            propagates, with the private client reference cleared.
+        """
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
+        ) as ws_cls:
+            ws_cls.return_value.start = AsyncMock(side_effect=RuntimeError("boom"))
+            ws_cls.return_value.close = AsyncMock(side_effect=RuntimeError("close fail"))
+            with pytest.raises(RuntimeError, match="boom"):
+                await auth_client._ensure_private_ws_connected()
+        assert auth_client._private_ws_client is None
 
 
 class TestCreateOrderStopPrice:

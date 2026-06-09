@@ -220,6 +220,34 @@ async def test_ensure_ws_connected_closes_partial_client_on_failure(
     assert client._ws_client is None
 
 
+@pytest.mark.asyncio
+async def test_ensure_ws_connected_times_out_on_hung_start(
+    client: KrakenEquitiesExchangeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A connect that never completes is bounded so recovery can retry.
+
+    Given: A SpotWSClient whose start() never returns (the SDK's connect timeout
+        never fires — its walrus-reset loop polls the socket forever).
+    When: _ensure_ws_connected runs,
+    Then: It times out within _WS_CONNECT_TIMEOUT_S, tears down the partial
+        client, and raises — so recovery retries with a fresh client instead of
+        wedging until a process restart.
+    """
+    monkeypatch.setattr(ke, "_WS_CONNECT_TIMEOUT_S", 0.05)
+
+    async def _hang() -> None:
+        await asyncio.Event().wait()
+
+    with patch(
+        "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient"
+    ) as ws_cls:
+        ws_cls.return_value.start = _hang
+        ws_cls.return_value.close = AsyncMock()
+        with pytest.raises(TimeoutError):
+            await client._ensure_ws_connected()
+    assert client._ws_client is None
+
+
 class TestEnqueueOrDropOldest:
     """Tests for _enqueue_or_drop_oldest module-level helper."""
 

@@ -136,6 +136,18 @@ _WS_THROTTLE_MS = 5000
 _WS_CLOSE_TIMEOUT_S = 10.0
 """Upper bound on the WebSocket close so a blackholed socket cannot hang the
 liveness-recovery teardown or process shutdown indefinitely."""
+
+_WS_CONNECT_TIMEOUT_S = 20.0
+"""Upper bound on a WebSocket connect (``SpotWSClient.start``) so a connect that
+never completes cannot wedge liveness recovery.
+
+The python-kraken-sdk's ``start`` polls for the socket with a connect timeout
+that never fires (``while (timeout := 0.0) < 10`` resets the counter every
+iteration), so on a prolonged blackout — where the connector hits its reconnect
+ceiling and exits without ever setting the socket — ``start`` loops forever.
+Bounding it here turns that permanent hang into a timeout that tears the partial
+client down and lets the recovery loop retry with a fresh client, which
+reconnects once the network returns instead of requiring a process restart."""
 """Kraken WS server-side throttle for ticker / trade subscriptions.
 
 Tuned 2026-05-22 from 1000ms → 5000ms. The server then batches updates
@@ -481,7 +493,8 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             no_public=False,
         )
         try:
-            await self._ws_client.start()
+            async with asyncio.timeout(_WS_CONNECT_TIMEOUT_S):
+                await self._ws_client.start()
             logger.info("Kraken Equities WebSocket connected")
             if self._subscription_cache:
                 await self._replay_subscriptions()
