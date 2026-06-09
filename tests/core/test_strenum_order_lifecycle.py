@@ -40,6 +40,7 @@ _ORDER_EVENT_VALUES = {
     OrderEventEnum.CANCELLED: "cancelled",
     OrderEventEnum.EXPIRED: "expired",
     OrderEventEnum.REPLACED: "replaced",
+    OrderEventEnum.UNKNOWN: "unknown",
 }
 
 _ORDER_EVENT_TYPE_MEMBERS = {
@@ -49,6 +50,7 @@ _ORDER_EVENT_TYPE_MEMBERS = {
     OrderEventEnum.CANCELLED,
     OrderEventEnum.EXPIRED,
     OrderEventEnum.REPLACED,
+    OrderEventEnum.UNKNOWN,
 }
 
 
@@ -83,7 +85,8 @@ def test_order_status_values(member: OrderStatusEnum, value: str) -> None:
 def test_order_event_values(member: OrderEventEnum, value: str) -> None:
     """Each OrderEventEnum member carries its documented wire value.
 
-    Given: the 7-event OrderEventEnum domain enum,
+    Given: the 8-event OrderEventEnum domain enum (UNKNOWN added by
+        #145 P0-1 for ambiguous submit outcomes),
     When: reading .value on every member,
     Then: every value matches the pre-rename Literal alias strings
         used as the ``orders.events.{exchange}.{instrument}.{event}``
@@ -173,6 +176,7 @@ def test_order_event_type_excludes_executed(member: OrderEventEnum) -> None:
         (OrderEventEnum, OrderEventEnum.CANCELLED),
         (OrderEventEnum, OrderEventEnum.EXPIRED),
         (OrderEventEnum, OrderEventEnum.REPLACED),
+        (OrderEventEnum, OrderEventEnum.UNKNOWN),
     ],
 )
 def test_enum_round_trip_from_string(

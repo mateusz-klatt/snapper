@@ -557,6 +557,12 @@ class OrderEventEnum(StrEnum):
     ``ExecutionData`` (with ``FillStatus``) — the ``OrderEventType``
     Literal alias at the bottom of this module intentionally excludes
     it, keeping non-execution events on a single type.
+
+    ``UNKNOWN`` marks an ambiguous submit outcome: the venue call
+    failed in a way where the order MAY exist on the venue (request
+    possibly executed, response lost). It is non-terminal — the engine
+    must keep the in-flight guard held until the executor resolves the
+    order to accepted or rejected via venue verification (#145 P0-1).
     """
 
     SUBMITTED = "submitted"
@@ -566,6 +572,7 @@ class OrderEventEnum(StrEnum):
     CANCELLED = "cancelled"
     EXPIRED = "expired"
     REPLACED = "replaced"
+    UNKNOWN = "unknown"
 
 
 TradeSide = Literal[TradeSideEnum.BUY, TradeSideEnum.SELL]
@@ -606,6 +613,7 @@ OrderEventType = Literal[
     OrderEventEnum.CANCELLED,
     OrderEventEnum.EXPIRED,
     OrderEventEnum.REPLACED,
+    OrderEventEnum.UNKNOWN,
 ]
 """Order event type for ZMQ topic suffix (non-execution events).
 
@@ -617,7 +625,7 @@ topic for non-execution events. Used by:
 Note: 'executed' is NOT in this type. Execution events use ExecutionData (with FillStatus),
 not OrderData. This separation ensures clear payload types:
 - orders.events.*.*.executed -> ExecutionData
-- orders.events.*.*.{submitted|accepted|rejected|expired} -> OrderData
+- orders.events.*.*.{submitted|accepted|rejected|expired|unknown} -> OrderData
 - orders.events.*.*.{cancelled|replaced|rejected} -> OrderEventData
 
 The 'rejected' event may come from either data type:
@@ -773,6 +781,7 @@ OrderEvent = Literal[
     OrderEventEnum.CANCELLED,
     OrderEventEnum.EXPIRED,
     OrderEventEnum.REPLACED,
+    OrderEventEnum.UNKNOWN,
 ]
 """Order event types for orders.events.* ZMQ topics."""
 
