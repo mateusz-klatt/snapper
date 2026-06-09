@@ -2848,8 +2848,12 @@ class TraderCoordinator(RegisterableProcess):
     def _sync_status_to_trade_service(self, order_status: OrderData, parsed: Any) -> None:
         """Shadow-write order status to TradeService.
 
-        Maps ZMQ OrderData status events (accepted, rejected) to
-        synthetic VenueEventRow and applies to TradeService.
+        Maps ZMQ OrderData status events (submitted, accepted, rejected,
+        unknown) to synthetic VenueEventRow and applies to TradeService.
+        The map is exhaustive on purpose: an unmapped suffix is skipped
+        with a warning rather than defaulted — the previous default of
+        ``order_accepted`` would have silently marked a command ACCEPTED
+        for any new event type (#145 P0-1 latent-bug fix).
 
         Args:
             order_status: Order status data from ZMQ.
@@ -2872,8 +2876,15 @@ class TraderCoordinator(RegisterableProcess):
             "accepted": "order_accepted",
             "rejected": "order_rejected",
             "submitted": "order_accepted",
+            "unknown": "order_submit_unknown",
         }
-        event_type = event_type_map.get(parsed.suffix, "order_accepted")
+        event_type = event_type_map.get(parsed.suffix)
+        if event_type is None:
+            logger.warning(
+                f"ZMQTrader: no venue-event mapping for order status suffix "
+                f"'{parsed.suffix}' ({order_status.client_order_id}), skipping shadow-write"
+            )
+            return
         venue_event: VenueEventRow = {
             "id": int(time.monotonic_ns()),
             "public_id": "",

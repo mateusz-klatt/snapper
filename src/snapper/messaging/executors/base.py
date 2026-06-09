@@ -962,7 +962,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """Write a VenueEvent row to DB if repository supports it.
 
         Silent no-op if repository is not an SQLAlchemyRepository
-        or is not set. Errors are logged but do not propagate.
+        or is not set. Write failures are FAIL-CLOSED: the error is
+        logged and RE-RAISED — durable mode requires every venue event
+        persisted before the corresponding ZMQ publish, so callers must
+        decide per call site whether a failed write may abort the flow
+        (it must NOT for an already-accepted live order, #145 P0-1).
 
         Args:
             params: Event data including event_type, exchange_name, instrument,

@@ -178,6 +178,32 @@ class TestTopicForMessage:
         )
         assert topic_for_message(data) == "orders.events.kraken.BTC-USD.submitted"
 
+    def test_order_data_unknown_status(self) -> None:
+        """OrderData with the ambiguous-submit status derives the unknown topic.
+
+        Given: An OrderData with status 'unknown' (#145 P0-1 — submit
+            outcome ambiguous, venue verification pending),
+        When: Deriving topic,
+        Then: Returns orders.events.kraken.BTC-USD.unknown.
+        """
+        data = OrderData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            client_order_id="ord-unk",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            status="unknown",
+            order_type="market",
+            size=1.0,
+            filled_size=0.0,
+            price=None,
+            created_at=datetime.now(UTC),
+        )
+        assert topic_for_message(data) == "orders.events.kraken.BTC-USD.unknown"
+
     def test_order_event_data(self) -> None:
         """OrderEventData maps to orders.events.{exchange}.{instrument}.{event}.
 

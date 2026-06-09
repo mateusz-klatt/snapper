@@ -51,7 +51,7 @@ def parse_wallet_scoped_topic(topic: str) -> tuple[str, str] | None:
 
     - ``signals.{exchange}.{instrument}.live`` (exchange != "paper")
     - ``orders.commands.{exchange}.{instrument}.{submit|cancel|replace}``
-    - ``orders.events.{exchange}.{instrument}.{submitted|accepted|rejected|executed|cancelled|expired|replaced}``
+    - ``orders.events.{exchange}.{instrument}.{submitted|accepted|rejected|executed|cancelled|expired|replaced|unknown}``
 
     Topic shape is already validated upstream by
     ``_validate_ws_topics``; this helper assumes well-formed segment

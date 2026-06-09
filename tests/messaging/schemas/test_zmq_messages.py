@@ -630,6 +630,30 @@ class TestMessages:
         assert parsed.event == "cancelled"
         assert parsed.reason is None
 
+    def test_order_event_unknown_round_trip(self) -> None:
+        """OrderEventData accepts and round-trips the unknown event type.
+
+        Given: An OrderEventData with event 'unknown' (#145 P0-1 — the
+            OrderEventType Literal gained the non-terminal ambiguous
+            member),
+        When: Serialized and parsed,
+        Then: The event survives the round trip unchanged.
+        """
+        msg = OrderEventData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            exchange_order_id="",
+            client_order_id="client_unk",
+            exchange="kraken",
+            instrument="BTC-USD",
+            event="unknown",
+        )
+        parsed = OrderEventData.from_json(msg.to_json())
+        assert isinstance(parsed, OrderEventData)
+        assert parsed.event == "unknown"
+
     def test_order_event_with_reason(self) -> None:
         """Test OrderEventData with rejection reason.
 

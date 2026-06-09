@@ -161,6 +161,18 @@ class TestTopicContractValidation:
             is_valid, error_msg = validate_topic(topic)
             assert is_valid is True, f"Expected {topic} to be valid but got: {error_msg}"
 
+    def test_orders_events_unknown_suffix_is_valid(self) -> None:
+        """Test the ambiguous-submit unknown event suffix is valid.
+
+        Given: An orders events topic with the unknown suffix
+            (#145 P0-1 — published when a submit outcome is ambiguous
+            and venue verification is pending),
+        When: Validated,
+        Then: The topic is accepted.
+        """
+        is_valid, error_msg = validate_topic("orders.events.kraken.BTC-USD.unknown")
+        assert is_valid is True, f"Expected unknown suffix to be valid but got: {error_msg}"
+
     def test_executor_orders_commands_topic_format_is_valid(self) -> None:
         """Test executor orders commands topics are valid.
 
@@ -1450,11 +1462,12 @@ class TestOrdersCommandsAndEventsTopics:
     def test_orders_events_topic_invalid_event(self) -> None:
         """Verify orders events topic with invalid event is rejected.
 
-        Given: An orders events topic with unknown event type,
+        Given: An orders events topic with an unrecognized event type
+            (note: 'unknown' itself is a VALID suffix since #145 P0-1),
         When: Validated,
         Then: Validation fails.
         """
-        valid, _err = validate_topic("orders.events.kraken.BTC-USD.unknown")
+        valid, _err = validate_topic("orders.events.kraken.BTC-USD.bogus")
         assert not valid
 
 
@@ -1768,11 +1781,12 @@ class TestOrdersEventsTopicValidationV2:
     def test_orders_events_invalid_type(self) -> None:
         """Verify orders.events topic with invalid event type is rejected.
 
-        Given: An orders.events topic with unknown event type,
+        Given: An orders.events topic with an unrecognized event type
+            (note: 'unknown' itself is a VALID suffix since #145 P0-1),
         When: Validated,
         Then: Validation fails with event type error.
         """
-        valid, _err = validate_topic("orders.events.kraken.BTC-USD.unknown")
+        valid, _err = validate_topic("orders.events.kraken.BTC-USD.bogus")
         assert not valid
         assert "order event" in _err.lower() or "accepted" in _err.lower()
 

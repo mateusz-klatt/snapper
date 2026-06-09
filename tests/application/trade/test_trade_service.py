@@ -226,6 +226,90 @@ def test_apply_order_rejected_clears_in_flight() -> None:
     assert svc.get_command_state("kraken.BTC-USD.live").status == "rejected"
 
 
+def test_apply_order_submit_unknown_holds_in_flight() -> None:
+    """Ambiguous submit event holds command state and advances the watermark.
+
+    Given: a TradeService with a registered in-flight command on a shard,
+    When: an order_submit_unknown venue event is applied, followed by a
+        replayed event with the same id and then a genuine rejection,
+    Then: the unknown event leaves in_flight True and status unchanged,
+        the same-id replay is deduped by the advanced watermark, and the
+        later rejection still resolves the command terminally.
+    """
+    svc = TradeService()
+    svc.register_command(
+        "kraken.BTC-USD.live",
+        {
+            "public_id": "cmd-1",
+            "timestamp": datetime.now(UTC),
+            "session_id": "s1",
+            "sequence_id": 1,
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-1",
+            "venue_client_id": "vcid-1",
+            "idempotency_key": None,
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "leverage": None,
+            "reduce_only": False,
+            "status": "created",
+            "attempt_count": 0,
+            "last_error": None,
+            "created_at": datetime.now(UTC),
+            "dispatched_at": None,
+            "acked_at": None,
+            "terminal_at": None,
+            "exchange_order_id": None,
+            "supersedes_command_id": None,
+            "correlation_id": "corr-1",
+            "wallet_public_id": None,
+            "operator_public_id": None,
+            "user_public_id": None,
+            "source_surface": "strategy",
+        },
+    )
+    unknown_event = _make_venue_event(
+        event_id=1,
+        event_type="order_submit_unknown",
+        side=None,
+        fill_price=None,
+        fill_size=None,
+        status=None,
+    )
+    svc.apply_venue_event(unknown_event)
+    cmd = svc.get_command_state("kraken.BTC-USD.live")
+    assert cmd.in_flight is True
+    assert cmd.status == "created"
+    replay_reject_same_id = _make_venue_event(
+        event_id=1,
+        event_type="order_rejected",
+        side=None,
+        fill_price=None,
+        fill_size=None,
+        status=None,
+    )
+    svc.apply_venue_event(replay_reject_same_id)
+    assert svc.get_command_state("kraken.BTC-USD.live").in_flight is True
+    resolution = _make_venue_event(
+        event_id=2,
+        event_type="order_rejected",
+        side=None,
+        fill_price=None,
+        fill_size=None,
+        status=None,
+    )
+    svc.apply_venue_event(resolution)
+    assert svc.get_command_state("kraken.BTC-USD.live").in_flight is False
+    assert svc.get_command_state("kraken.BTC-USD.live").status == "rejected"
+
+
 def test_watermark_prevents_reprocessing() -> None:
     """Events with id at or below the watermark are skipped.
 

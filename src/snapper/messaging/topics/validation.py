@@ -430,6 +430,7 @@ _ORDER_EVENTS: set[str] = {
     "cancelled",
     "expired",
     "replaced",
+    "unknown",
 }
 
 

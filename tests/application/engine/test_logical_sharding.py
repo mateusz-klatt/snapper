@@ -380,6 +380,79 @@ class TestStatusEventRouting:
         assert "paper.BTC-USD.paper" in coord.trade_service._shards
 
 
+class TestStatusShadowWriteMapping:
+    """Suffix-to-venue-event mapping is exhaustive with no silent default (#145 P0-1)."""
+
+    @pytest.mark.asyncio
+    async def test_unknown_suffix_maps_to_order_submit_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unknown suffix shadow-writes an order_submit_unknown event.
+
+        Given: an order status event arriving on the .unknown topic suffix,
+        When: _sync_status_to_trade_service processes it,
+        Then: the synthetic venue event carries event_type
+            order_submit_unknown (never the old order_accepted default).
+        """
+        coord = _make_coord(monkeypatch)
+        coord.trade_service.apply_venue_event = MagicMock()
+
+        parsed = MagicMock()
+        parsed.exchange = ExchangeEnum.PAPER
+        parsed.instrument = "BTC-USD"
+        parsed.suffix = "unknown"
+
+        order_status = MagicMock(spec=OrderData)
+        order_status.client_order_id = "oid-unk"
+        order_status.session_id = "s1"
+        order_status.sequence_id = 1
+        order_status.exchange = "paper"
+        order_status.instrument = "BTC-USD"
+        order_status.exchange_order_id = None
+        order_status.side = "buy"
+        order_status.error = "ambiguous submit"
+
+        coord._sync_status_to_trade_service(order_status, parsed)
+
+        coord.trade_service.apply_venue_event.assert_called_once()
+        event = coord.trade_service.apply_venue_event.call_args.args[0]
+        assert event["event_type"] == "order_submit_unknown"
+
+    @pytest.mark.asyncio
+    async def test_unmapped_suffix_skips_shadow_write(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unmapped suffix is skipped instead of defaulting to accepted.
+
+        Given: an order status event with a suffix absent from the
+            shadow-write map (the pre-fix code silently defaulted any
+            such suffix to order_accepted, corrupting command state),
+        When: _sync_status_to_trade_service processes it,
+        Then: no venue event is applied.
+        """
+        coord = _make_coord(monkeypatch)
+        coord.trade_service.apply_venue_event = MagicMock()
+
+        parsed = MagicMock()
+        parsed.exchange = ExchangeEnum.PAPER
+        parsed.instrument = "BTC-USD"
+        parsed.suffix = "cancelled"
+
+        order_status = MagicMock(spec=OrderData)
+        order_status.client_order_id = "oid-x"
+        order_status.session_id = "s1"
+        order_status.sequence_id = 1
+        order_status.exchange = "paper"
+        order_status.instrument = "BTC-USD"
+        order_status.exchange_order_id = None
+        order_status.side = "buy"
+        order_status.error = None
+
+        coord._sync_status_to_trade_service(order_status, parsed)
+
+        coord.trade_service.apply_venue_event.assert_not_called()
+
+
 class TestPartitionedManualOrderRouting:
     """Manual order CIDs pass the N>=2 venue-event ownership filter."""
 

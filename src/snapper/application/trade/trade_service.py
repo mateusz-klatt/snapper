@@ -245,8 +245,8 @@ class TradeService:
         """Apply a venue event to the in-memory projection.
 
         Handles all event types: order_accepted, order_rejected,
-        fill_observed, order_terminal. Updates position, command state,
-        cash, and watermark.
+        fill_observed, order_terminal, order_submit_unknown. Updates
+        position, command state, cash, and watermark.
 
         Args:
             event: Venue event row to apply. Must contain shard_key,
@@ -268,6 +268,8 @@ class TradeService:
             self._apply_fill(shard, event)
         elif event_type == "order_terminal":
             self._apply_order_terminal(shard, event)
+        elif event_type == "order_submit_unknown":
+            self._apply_order_submit_unknown(shard, event)
         else:
             logger.warning(f"TradeService: unknown venue event type: {event_type}")
 
@@ -277,6 +279,24 @@ class TradeService:
         """Update command state on venue acceptance."""
         shard.command.status = TradeCommandStatusEnum.ACCEPTED
         shard.command.exchange_order_id = event.get("exchange_order_id")
+
+    def _apply_order_submit_unknown(self, shard: ShardState, event: VenueEventRow) -> None:
+        """Hold command state on an ambiguous submit outcome.
+
+        The submit failed in a way where the order MAY exist on the
+        venue (#145 P0-1). Deliberately changes nothing: the command
+        stays non-terminal (in_flight remains True), no rejection is
+        recorded, and only the watermark advances — so a checkpoint
+        replay reproduces the held state instead of warning about an
+        unrecognized event type. Resolution arrives later as a regular
+        order_accepted or order_rejected event from the executor's
+        venue verification.
+        """
+        logger.warning(
+            f"TradeService: order submit UNKNOWN for "
+            f"{event.get('client_order_id')} on {event['shard_key']} — "
+            f"holding command state until venue verification resolves"
+        )
 
     def _apply_fill(self, shard: ShardState, event: VenueEventRow) -> None:
         """Apply a fill to position and cash projection."""
