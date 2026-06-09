@@ -31,6 +31,7 @@ from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.models import User
 from snapper.data.models import UserLoginEvent
+from snapper.data.repository import _CANDLE_ID_CACHE_LOOKBACK
 from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import close_and_insert
@@ -105,6 +106,7 @@ def _candle_row(
     open_at: datetime,
     timestamp: datetime,
     close: float = 1.5,
+    timeframe: str = "1m",
 ) -> CandleUpsertRow:
     """Build a candle row dict with sensible defaults.
 
@@ -113,13 +115,14 @@ def _candle_row(
         open_at: Candle interval start time.
         timestamp: Bus/domain timestamp.
         close: Close price, defaults to 1.5.
+        timeframe: Candle timeframe label, defaults to "1m".
 
     Returns:
         Dict suitable for upsert_candles.
     """
     return {
         "instrument_public_id": instrument_public_id,
-        "timeframe": "1m",
+        "timeframe": timeframe,
         "open_at": open_at,
         "timestamp": timestamp,
         "open": 1.0,
@@ -338,12 +341,67 @@ class TestCandleBitemporal:
             assert active_row is not None
             expected_public_id = active_row.public_id
 
-        latest = await repo.get_latest_candle_ids(as_of=datetime.now(UTC))
+        latest = await repo.get_latest_candle_ids(as_of=open_at + timedelta(hours=1))
         key = (inst_public_id, "1m")
         assert key in latest
         returned_open_at, returned_public_id = latest[key]
         assert returned_public_id == expected_public_id
         assert returned_open_at == open_at
+
+    @pytest.mark.asyncio
+    async def test_get_latest_candle_ids_excludes_series_older_than_lookback(
+        self, tmp_path: Path
+    ) -> None:
+        """get_latest_candle_ids drops a series whose only candle predates the window.
+
+        Given: A "1m" series with a recent candle and a separate "5m" series whose
+            only candle predates the lookback window,
+        When: get_latest_candle_ids is called as_of the recent candle's day,
+        Then: The recent series is returned but the stale series is absent. This
+            fails against the previous unbounded query (which would return the
+            stale series too), so it actually protects the open_at bound that keeps
+            the startup-cache lookup off a full table scan.
+        """
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
+        as_of = datetime(2024, 6, 10, 12, 0, 0, tzinfo=UTC)
+        recent_open_at = as_of - timedelta(hours=6)
+        stale_open_at = as_of - _CANDLE_ID_CACHE_LOOKBACK - timedelta(hours=6)
+
+        await repo.upsert_candles(
+            [_candle_row(inst_public_id, recent_open_at, recent_open_at, close=200.0)]
+        )
+        await repo.upsert_candles(
+            [_candle_row(inst_public_id, stale_open_at, stale_open_at, close=100.0, timeframe="5m")]
+        )
+
+        latest = await repo.get_latest_candle_ids(as_of=as_of)
+        assert (inst_public_id, "1m") in latest
+        assert (inst_public_id, "5m") not in latest
+        assert latest[(inst_public_id, "1m")][0] == recent_open_at
+
+    @pytest.mark.asyncio
+    async def test_get_latest_candle_ids_keeps_current_daily_candle_in_window(
+        self, tmp_path: Path
+    ) -> None:
+        """get_latest_candle_ids keeps a current daily candle inside the window.
+
+        Given: A "1d" candle whose open_at is one day before as_of (inside the
+            two-day lookback),
+        When: get_latest_candle_ids is called,
+        Then: The daily series is returned, confirming the window is wide enough to
+            cover the longest emitted timeframe's current bar.
+        """
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
+        as_of = datetime(2024, 6, 10, 12, 0, 0, tzinfo=UTC)
+        daily_open_at = as_of - timedelta(days=1)
+
+        await repo.upsert_candles(
+            [_candle_row(inst_public_id, daily_open_at, daily_open_at, timeframe="1d")]
+        )
+
+        latest = await repo.get_latest_candle_ids(as_of=as_of)
+        assert (inst_public_id, "1d") in latest
+        assert latest[(inst_public_id, "1d")][0] == daily_open_at
 
     @pytest.mark.asyncio
     async def test_partial_unique_allows_closed_duplicates(self, tmp_path: Path) -> None:

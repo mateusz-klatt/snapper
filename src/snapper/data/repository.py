@@ -421,6 +421,19 @@ _TRADE_COMMAND_TERMINAL_STATUSES: tuple[str, ...] = (
 )
 _CandleNaturalKey = tuple[str, str, datetime]
 _CANDLE_LOOKUP_CHUNK_SIZE = 300
+_CANDLE_ID_CACHE_LOOKBACK: Final[timedelta] = timedelta(days=2)
+"""How far back ``get_latest_candle_ids`` looks for the newest candle per
+``(instrument, timeframe)`` when warming the publisher's startup cache.
+
+The cache only needs the *current* candle per series so live upserts reuse its
+``public_id``; a current candle's ``open_at`` is always recent (at most one
+period old, and the longest emitted timeframe is daily). Bounding ``open_at``
+to this window lets the lookup ride ``ix_candle_instrument_open`` instead of a
+full scan of the (multi-hundred-million-row) candles table, which otherwise
+blocks every feed publisher's startup for minutes before its WebSocket
+connects. Two days comfortably covers the daily timeframe plus restart slack;
+candles older than the window are closed and never receive further updates, so
+omitting them from the cache cannot create duplicate versions."""
 _SnapshotNaturalKey = str
 _SNAPSHOT_LOOKUP_CHUNK_SIZE = 500
 _OUTBOX_BULK_LOOKUP_CHUNK_SIZE = 200
@@ -817,17 +830,25 @@ class Repository(ABC):
     async def get_latest_candle_ids(
         self, as_of: datetime
     ) -> dict[tuple[str, str], tuple[datetime, str]]:
-        """Load the latest candle public_id per (instrument_public_id, timeframe).
+        """Load the latest recent candle public_id per (instrument, timeframe).
 
-        Used by the publisher to populate the in-memory candle ID cache on
-        startup so that live upserts reuse existing public_ids for the
-        current open_at window.
+        Warms the publisher's in-memory candle ID cache on startup so live
+        upserts reuse existing public_ids for the current open_at window. This
+        is a deliberately bounded lookup, NOT a general point-in-time query:
+        only series with an active candle whose ``open_at`` falls within
+        ``_CANDLE_ID_CACHE_LOOKBACK`` of ``as_of`` are returned. Series whose
+        newest candle is older than that window are omitted (their candles are
+        closed and never receive further updates, and ``upsert_candles`` still
+        reuses any persisted public_id by natural key, so a cache miss cannot
+        create a duplicate version). The bound is what keeps this off a full
+        scan of the candles table.
 
         Args:
-            as_of: Point-in-time for temporal query. Defaults to now.
+            as_of: Upper bound of the temporal/open_at window (typically now).
 
         Returns:
-            Mapping of (instrument_public_id, timeframe) to (open_at, public_id).
+            Mapping of (instrument_public_id, timeframe) to (open_at, public_id),
+            limited to series with a candle in the recent lookback window.
         """
         ...
 
@@ -4583,8 +4604,15 @@ class SQLAlchemyRepository(Repository):
     async def get_latest_candle_ids(
         self, as_of: datetime
     ) -> dict[tuple[str, str], tuple[datetime, str]]:
-        """Load the latest candle public_id per (instrument_public_id, timeframe)."""
+        """Load the latest recent candle public_id per (instrument, timeframe).
+
+        Bounded to candles with ``open_at`` newer than ``_CANDLE_ID_CACHE_LOOKBACK``
+        before ``as_of`` so the lookup rides ``ix_candle_instrument_open`` instead
+        of scanning the full candles table. See the abstract method for the full
+        contract and why omitting older series is safe.
+        """
         now = as_of
+        open_at_floor = now - _CANDLE_ID_CACHE_LOOKBACK
         async with self.session() as s:
             latest = (
                 select(
@@ -4592,7 +4620,11 @@ class SQLAlchemyRepository(Repository):
                     Candle.timeframe,
                     func.max(Candle.open_at).label("max_open_at"),
                 )
-                .where(Candle.timestamp <= now, Candle.known_to > now)
+                .where(
+                    Candle.timestamp <= now,
+                    Candle.known_to > now,
+                    Candle.open_at > open_at_floor,
+                )
                 .group_by(Candle.instrument_public_id, Candle.timeframe)
                 .subquery()
             )
@@ -4603,7 +4635,11 @@ class SQLAlchemyRepository(Repository):
                     Candle.open_at,
                     Candle.public_id,
                 )
-                .where(Candle.timestamp <= now, Candle.known_to > now)
+                .where(
+                    Candle.timestamp <= now,
+                    Candle.known_to > now,
+                    Candle.open_at > open_at_floor,
+                )
                 .join(
                     latest,
                     and_(
