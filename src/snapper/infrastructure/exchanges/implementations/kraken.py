@@ -537,6 +537,15 @@ class KrakenExchangeClient(ExchangeClientBase):
     async def _create_order_via_ccxt(self, request: ExchangeOrderRequest) -> ExchangeOrderSnapshot:
         """Create order using CCXT client.
 
+        Order creation is sent with ``retry_network_errors=False``: it is
+        the one non-idempotent venue mutation on this client, and a blind
+        re-send after an ambiguous network failure (request possibly
+        executed, response lost) can double-place a market order because
+        Kraken's ``cl_ord_id`` dedupe covers only open orders (#145
+        audit, gap P0-2). The ambiguous failure propagates to the
+        executor instead of being retried here; venue-truth verification
+        before declaring the order dead is the executor's job (P0-1).
+
         Args:
             request: Order parameters.
 
@@ -559,6 +568,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             float(request.amount),
             float(request.price) if request.price else None,
             ccxt_params,
+            retry_network_errors=False,
         )
         exchange_id = str(order_data.get("id") or "")
         order = ExchangeOrderSnapshot(
@@ -2080,12 +2090,33 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.debug("Initialized native Kraken Trade REST API client")
         return self._trade_client
 
-    async def _with_retry(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    async def _with_retry(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        retry_network_errors: bool = True,
+        **kwargs: Any,
+    ) -> Any:
         """Execute function with retry and circuit breaker logic.
+
+        Non-idempotent venue mutations (order creation) MUST pass
+        ``retry_network_errors=False``: a network-class failure such as
+        ``ccxt.RequestTimeout`` is AMBIGUOUS — the request may have
+        reached Kraken and executed even though no response came back.
+        Kraken deduplicates ``cl_ord_id`` only among OPEN orders and all
+        strategy orders are MARKET (filled instantly, never open), so a
+        blind re-send after a send-then-timeout can double-place a real
+        position (#145 audit, gap P0-2). With the flag off, network
+        failures still feed the circuit breaker but raise immediately;
+        rate-limit retries remain enabled because a 429 is a definitive
+        venue-side rejection and re-sending cannot duplicate.
 
         Args:
             func: Function to call (sync or async).
             *args: Positional arguments for func.
+            retry_network_errors: When False, raise network-class errors
+                immediately after circuit-breaker accounting instead of
+                retrying. Required for non-idempotent venue mutations.
             **kwargs: Keyword arguments for func.
 
         Returns:
@@ -2109,6 +2140,9 @@ class KrakenExchangeClient(ExchangeClientBase):
             except ccxt.RateLimitExceeded:
                 attempt = await self._handle_rate_limit(attempt, max_retries, base_delay)
             except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
+                if not retry_network_errors:
+                    self._record_unretried_network_failure(e)
+                    raise
                 attempt = await self._handle_network_error(e, attempt, max_retries, base_delay)
             except Exception as e:
                 logger.error(f"Unexpected error: {e}")
@@ -2157,6 +2191,26 @@ class KrakenExchangeClient(ExchangeClientBase):
             await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             return attempt
         raise ccxt.RateLimitExceeded("Rate limit exceeded after max retries")
+
+    def _record_unretried_network_failure(self, error: Exception) -> None:
+        """Feed the circuit breaker for a network failure that will not be retried.
+
+        Mirrors the exhaustion path of ``_handle_network_error`` (failure
+        increment plus breaker-open check at raise time) so that
+        non-retried order submissions still trip the breaker under a
+        sustained outage instead of hammering the venue once per command.
+
+        Args:
+            error: The network error that occurred.
+
+        Returns:
+            None.
+        """
+        logger.warning(f"Network error (no retry, non-idempotent call): {error}")
+        self._circuit_failures += 1
+        if self._circuit_failures >= self._max_failures:
+            self._circuit_open_until = time.time() + self._circuit_timeout
+            logger.error("Circuit breaker opened due to repeated failures")
 
     async def _handle_network_error(
         self, error: Exception, attempt: int, max_retries: int, base_delay: float

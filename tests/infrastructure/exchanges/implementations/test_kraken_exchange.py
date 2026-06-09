@@ -2855,6 +2855,149 @@ class TestRetryMaxRetriesExceeded:
         assert call_count == 3
 
 
+class TestCreateOrderNetworkRetryExclusion:
+    """Tests for the P0-2 double-place guard (#145 audit).
+
+    Order creation is the one non-idempotent venue mutation on the spot
+    client: a network-class failure after send is ambiguous (the order
+    may have executed), Kraken dedupes cl_ord_id only among OPEN orders,
+    and all strategy orders are MARKET. These tests pin the contract
+    that create_order is never blindly re-sent on network errors while
+    rate-limit retries (definitive venue-side 429 rejection) and the
+    default retry behavior of idempotent calls remain intact.
+    """
+
+    @pytest.fixture
+    def kraken_client(self) -> KrakenExchangeClient:
+        """Provide test client instance."""
+        return KrakenExchangeClient(
+            api_key="test_key",
+            api_secret="test_secret",
+            sandbox=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_order_request_timeout_is_not_retried(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Verify create order is sent exactly once on request timeout.
+
+        Given: CCXT create_order raises RequestTimeout (ambiguous — the
+            order may have reached the venue and executed),
+        When: create_order is called,
+        Then: The venue call is made exactly once, the control flag is
+            consumed by _with_retry rather than forwarded to the venue
+            call, and the timeout propagates without any blind re-send.
+        """
+        mock_client = AsyncMock()
+        mock_client.create_order.side_effect = ccxt.RequestTimeout("request timed out")
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(ccxt.RequestTimeout),
+        ):
+            await kraken_client.create_order(
+                ExchangeOrderRequest(
+                    symbol="BTC-USD",
+                    side=OrderSideEnum.BUY,
+                    type=ExchangeOrderTypeEnum.MARKET,
+                    amount=float("0.1"),
+                    client_order_id="client_p02",
+                )
+            )
+        mock_client.create_order.assert_called_once()
+        assert "retry_network_errors" not in mock_client.create_order.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_unretried_network_failure_feeds_circuit_breaker(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Verify unretried network failures still trip the breaker.
+
+        Given: The breaker is one failure away from its threshold,
+        When: create_order fails with a network error that is not
+            retried,
+        Then: The breaker opens so subsequent calls fail fast instead of
+            hammering the venue once per command during an outage.
+        """
+        mock_client = AsyncMock()
+        mock_client.create_order.side_effect = ccxt.NetworkError("connection reset")
+        kraken_client._circuit_failures = kraken_client._max_failures - 1
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            pytest.raises(ccxt.NetworkError),
+        ):
+            await kraken_client.create_order(
+                ExchangeOrderRequest(
+                    symbol="BTC-USD",
+                    side=OrderSideEnum.BUY,
+                    type=ExchangeOrderTypeEnum.MARKET,
+                    amount=float("0.1"),
+                )
+            )
+        assert kraken_client._circuit_failures == kraken_client._max_failures
+        assert kraken_client._circuit_open_until > time.time()
+        with pytest.raises(RuntimeError, match="Circuit breaker open"):
+            await kraken_client._with_retry(mock_client.create_order)
+
+    @pytest.mark.asyncio
+    async def test_create_order_still_retries_rate_limit(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Verify rate-limit retries survive the network-retry exclusion.
+
+        Given: CCXT create_order raises RateLimitExceeded once (a 429 is
+            a definitive venue-side rejection — re-sending cannot
+            duplicate) and then succeeds,
+        When: create_order is called,
+        Then: The call is retried and the order snapshot is returned.
+        """
+        mock_client = AsyncMock()
+        mock_client.create_order.side_effect = [
+            ccxt.RateLimitExceeded("rate limited"),
+            {"id": "order_after_429"},
+        ]
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            patch.object(kraken_client, "_log_order_to_db", AsyncMock(return_value=None)),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            order = await kraken_client.create_order(
+                ExchangeOrderRequest(
+                    symbol="BTC-USD",
+                    side=OrderSideEnum.BUY,
+                    type=ExchangeOrderTypeEnum.MARKET,
+                    amount=float("0.1"),
+                )
+            )
+        assert order.id == "order_after_429"
+        assert mock_client.create_order.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_with_retry_default_still_retries_network_errors(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Verify idempotent calls keep the default network retry.
+
+        Given: A function raising NetworkError on every attempt,
+        When: _with_retry runs without the exclusion flag,
+        Then: All three attempts are made before the error propagates.
+        """
+        call_count = 0
+
+        async def failing_function() -> None:
+            nonlocal call_count
+            call_count += 1
+            raise ccxt.NetworkError("transient blip")
+
+        with (
+            patch("asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(ccxt.NetworkError),
+        ):
+            await kraken_client._with_retry(failing_function)
+        assert call_count == 3
+
+
 class TestStatusBranchInSubscriptions:
     """Tests for statusBranchInSubscriptions."""
 

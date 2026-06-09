@@ -325,6 +325,22 @@ Watch recovery via `GET /api/market/feed-health` /
 (`liveness recovery triggered`, `feed recovered after N attempt(s)`,
 `feed dark for …s … exiting for launcher restart`).
 
+### Order-path retry semantics (Kraken Spot REST)
+
+Order **creation** is deliberately excluded from the REST network-retry
+wrapper: a network-class failure such as a request timeout is ambiguous
+(the order may have reached Kraken and executed even though the response
+was lost), Kraken deduplicates `cl_ord_id` only among *open* orders, and
+strategy orders are market orders that fill instantly — so a blind
+re-send could double a real position. During a network blip an order
+submit therefore fails fast (one venue call, logged as
+`Network error (no retry, non-idempotent call)`) instead of silently
+retrying up to three times; the failure still feeds the REST circuit
+breaker so a sustained outage trips fail-fast mode. Idempotent calls
+(cancel, fetch, balance) keep the 3-attempt network retry. Expect more
+transient submit failures in logs during connectivity incidents — that
+is the guard working as intended, not a regression.
+
 ### Fault-injection testing
 
 `scripts/resilience_fault_injection.py` simulates a real exchange outage and
