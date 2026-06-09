@@ -75,7 +75,9 @@ from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import PairedExecutionGroupInsertRow
+from snapper.data.repository_types import PairedExecutionGroupRow
 from snapper.data.repository_types import PairedExecutionLegInsertRow
+from snapper.data.repository_types import PairedExecutionLegRow
 from snapper.data.repository_types import PositionCycleInsertRow
 from snapper.data.repository_types import PositionCycleRow
 from snapper.data.repository_types import TradeCommandRow
@@ -395,6 +397,7 @@ class TraderCoordinator(RegisterableProcess):
         self._setup_signal_subscriber()
         self._setup_trade_services()
         await self._recover_engine_state()
+        await self._recover_paired_execution_leg_fills()
         await self._recover_paired_execution_guard_state()
         await self._run_trading_loop()
 
@@ -591,6 +594,109 @@ class TraderCoordinator(RegisterableProcess):
             f"{len(self.engines)} engines, "
             f"{sum(1 for e in self.engines.values() if e.order_in_flight)} in-flight, "
             f"{sum(1 for e in self.engines.values() if e.read_only)} degraded"
+        )
+
+    async def _recover_paired_execution_leg_fills(self) -> None:
+        """Re-project paired-execution leg fills from authoritative venue_events on startup.
+
+        5a's live fill projection runs only on the live fill path, so a grouped
+        leg whose order filled while the coordinator was DOWN would recover with
+        ``filled_signed_qty == 0`` and stay invisible to the 4b halt scanner + 4c
+        recovery. This pass re-reads the AUTHORITATIVE durable ``venue_events``
+        (the executor writes them fail-closed with the cumulative ``cum_fill_size``
+        BEFORE publishing) and re-projects each owned active leg's MAX cumulative
+        fill via the monotonic projection DAL — a leg already projected live is a
+        no-op; a downtime fill is restored. Runs AFTER ``_recover_engine_state``
+        and BEFORE the trading loop, so the post-recovery guard scanner sees the
+        restored exposure. Gated on a SQL repository + shard ownership; per-leg
+        fail-soft so one bad leg (e.g. the data-integrity duplicate-client_order_id
+        guard) never blocks startup.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return
+        if self._ownership is None:
+            return
+        now = datetime.now(UTC)
+        try:
+            groups = await self.repository.list_current_paired_execution_groups(
+                [
+                    PairedExecutionGroupStatusEnum.ARMED.value,
+                    PairedExecutionGroupStatusEnum.BROKEN.value,
+                    PairedExecutionGroupStatusEnum.COMPENSATING.value,
+                ]
+            )
+        except Exception as exc:
+            logger.error(
+                f"ZMQTrader: paired-execution leg fill recovery group list failed, skipping: {exc}"
+            )
+            return
+        for group in groups:
+            try:
+                await self._reproject_group_leg_fills(self.repository, self._ownership, group, now)
+            except Exception as exc:
+                logger.error(
+                    f"ZMQTrader: paired-execution leg fill recovery for group "
+                    f"{group['public_id']} failed, continuing: {exc}"
+                )
+
+    async def _reproject_group_leg_fills(
+        self,
+        repository: SQLAlchemyRepository,
+        ownership: ShardOwnership,
+        group: PairedExecutionGroupRow,
+        now: datetime,
+    ) -> None:
+        """Re-project the max cumulative fill of each owned dispatched leg of one group.
+
+        Reads the group's CURRENT active legs (clock-skew-safe, pairing with the
+        current-active group list) and re-projects each owned leg bound to a
+        client order. A per-leg failure (e.g. the data-integrity
+        duplicate-client_order_id guard) is logged at HIGH severity and skipped so
+        one bad leg never blocks the rest; the leg-read failure for THIS group is
+        caught by the caller so one bad group never blocks the others.
+        """
+        legs = await repository.get_current_paired_execution_legs(group["public_id"])
+        for leg in legs:
+            if not ownership.owns(leg["shard_key"]):
+                continue
+            client_order_id = leg["client_order_id"]
+            if client_order_id is None:
+                continue
+            try:
+                await self._reproject_leg_fill(repository, leg, client_order_id, now)
+            except Exception as exc:
+                logger.error(
+                    f"ZMQTrader: paired-execution leg fill recovery failed for leg "
+                    f"{leg['public_id']} (client_order_id {client_order_id}), continuing: {exc}"
+                )
+
+    async def _reproject_leg_fill(
+        self,
+        repository: SQLAlchemyRepository,
+        leg: PairedExecutionLegRow,
+        client_order_id: str,
+        now: datetime,
+    ) -> None:
+        """Project one owned leg's max cumulative venue fill, if any, onto the leg."""
+        event = await repository.get_max_cumulative_fill_venue_event(client_order_id)
+        if event is None:
+            return
+        cum_fill_size = event["cum_fill_size"] or 0.0
+        signed_qty = cum_fill_size if leg["side"] == TradeSideEnum.BUY else -cum_fill_size
+        new_status = (
+            PairedExecutionLegStatusEnum.FILLED.value
+            if event["status"] == FillStatusEnum.FILLED.value
+            else PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value
+        )
+        await repository.project_paired_execution_leg_fill(
+            client_order_id,
+            signed_qty,
+            new_status,
+            now,
+            self._tracker.session_id,
+            self._tracker.next_sequence(f"paired.fill.recover.{client_order_id}"),
+            exchange_order_id=event["exchange_order_id"],
+            last_venue_event_id=event["id"],
         )
 
     async def _recover_paired_execution_guard_state(self) -> None:

@@ -1356,6 +1356,64 @@ async def test_project_leg_fill_is_monotonic_skipping_stale_and_duplicate(
 
 
 @pytest.mark.asyncio
+async def test_project_leg_fill_clamps_bus_time_for_future_stamped_leg(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A future-stamped active leg keeps a non-inverted SCD2 interval on projection.
+
+    Given: a current-active armed leg whose ``timestamp`` is in the future (a
+        sibling coordinator armed it with a clock running ahead),
+    When: project_paired_execution_leg_fill runs with an EARLIER ``bus_time``
+        (the recovering coordinator's wall clock),
+    Then: the close / successor bus time is clamped to the leg's own timestamp,
+        so the closed predecessor's ``known_to`` is not set before its
+        ``timestamp`` and the fill successor is not backdated before its
+        predecessor — the SCD2 validity intervals stay ordered.
+    """
+    future = datetime(2099, 1, 1, tzinfo=UTC)
+    leg_id = _pid(220)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            leg_index=0,
+            side="buy",
+            client_order_id="cid-future",
+            status=PairedExecutionLegStatusEnum.ARMED.value,
+            timestamp=future,
+        )
+    )
+    applied = await _repo.project_paired_execution_leg_fill(
+        "cid-future",
+        4.0,
+        PairedExecutionLegStatusEnum.FILLED.value,
+        _T1,
+        _NEXT_SESSION_ID,
+        2,
+    )
+    assert applied is True
+    async with _repo.session() as session:
+        versions = list(
+            (
+                await session.execute(
+                    select(PairedExecutionLeg)
+                    .where(PairedExecutionLeg.public_id == leg_id)
+                    .order_by(PairedExecutionLeg.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(versions) == 2
+    predecessor, successor = versions
+    assert predecessor.known_to == future
+    assert predecessor.known_to >= predecessor.timestamp
+    assert successor.timestamp == future
+    assert successor.timestamp >= predecessor.timestamp
+    assert successor.known_to == KNOWN_TO_MAX
+    assert successor.filled_signed_qty == 4.0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "terminal_status",
     [
@@ -1457,6 +1515,111 @@ async def test_project_leg_fill_carries_every_other_column(_repo: SQLAlchemyRepo
     assert after.filled_signed_qty == 6.0
     assert after.exchange_order_id == "exchange-new"
     assert after.last_venue_event_id == 42
+
+
+@pytest.mark.asyncio
+async def test_project_leg_fill_raises_on_duplicate_active_client_order_id(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Two active legs sharing a client_order_id is a data-integrity violation, not silent.
+
+    Given: two active legs in one group that share a client_order_id (the index is
+        not unique; order ids are UUID7 so this should be impossible),
+    When: project_paired_execution_leg_fill resolves the leg,
+    Then: it raises rather than silently picking the first, so a corrupt
+        client-order identity is surfaced (recovery catches it per leg).
+    """
+    group_id = _pid(100)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=_pid(200), group_public_id=group_id, leg_index=0, client_order_id="dup"
+        )
+    )
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=_pid(201), group_public_id=group_id, leg_index=1, client_order_id="dup"
+        )
+    )
+    with pytest.raises(ValueError, match="data integrity"):
+        await _repo.project_paired_execution_leg_fill(
+            "dup", 5.0, PairedExecutionLegStatusEnum.FILLED.value, _T1, _NEXT_SESSION_ID, 2
+        )
+
+
+async def _insert_fill_event(
+    repo: SQLAlchemyRepository,
+    *,
+    client_order_id: str,
+    cum_fill_size: float | None,
+    event_type: str = "fill_observed",
+    side: str = "buy",
+    status: str = "filled",
+) -> int:
+    """Insert a venue event and return its auto-increment id (id order = insert order)."""
+    new_id: int = await repo.insert_venue_event(
+        {
+            "event_type": event_type,
+            "shard_key": "kraken.BTC-USD.live",
+            "wallet_public_id": _WALLET_ID,
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "client_order_id": client_order_id,
+            "exchange_order_id": f"exch-{client_order_id}",
+            "side": side,
+            "status": status,
+            "fill_size": cum_fill_size,
+            "cum_fill_size": cum_fill_size,
+            "received_at": _T0,
+            "session_id": _SESSION_ID,
+            "sequence_id": 1,
+            "timestamp": _T0,
+        }
+    )
+    return new_id
+
+
+@pytest.mark.asyncio
+async def test_get_max_cumulative_fill_returns_largest_cumulative_not_latest_id(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """The recovery fill lookup returns the MAX cumulative event, not the latest id.
+
+    Given: three fill_observed events for one client order with cumulatives 3, 8, 5
+        inserted in that id order (so the largest, 8, is NOT the latest id), plus a
+        null-cumulative event, a non-fill event, and a different order's event,
+    When: get_max_cumulative_fill_venue_event runs,
+    Then: it returns the cum_fill_size=8 event (the true cumulative), ignoring the
+        later-but-smaller, null-cumulative, non-fill, and other-order rows — so an
+        out-of-order executor write cannot make recovery read a smaller cumulative.
+    """
+    await _insert_fill_event(_repo, client_order_id="cid-1", cum_fill_size=3.0)
+    id_of_max = await _insert_fill_event(_repo, client_order_id="cid-1", cum_fill_size=8.0)
+    await _insert_fill_event(_repo, client_order_id="cid-1", cum_fill_size=5.0)
+    await _insert_fill_event(_repo, client_order_id="cid-1", cum_fill_size=None)
+    await _insert_fill_event(
+        _repo, client_order_id="cid-1", cum_fill_size=99.0, event_type="order_accepted"
+    )
+    await _insert_fill_event(_repo, client_order_id="cid-other", cum_fill_size=42.0)
+    event = await _repo.get_max_cumulative_fill_venue_event("cid-1")
+    assert event is not None
+    assert event["cum_fill_size"] == 8.0
+    assert event["id"] == id_of_max
+    assert await _repo.get_max_cumulative_fill_venue_event("cid-absent") is None
+
+
+@pytest.mark.asyncio
+async def test_list_current_paired_execution_groups_empty_statuses_is_noop(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """An empty status set short-circuits to an empty list without querying.
+
+    Given: an empty ``statuses`` argument,
+    When: list_current_paired_execution_groups runs,
+    Then: it returns ``[]`` without issuing an ``IN ()`` query — mirroring the
+        defensive guard on the sibling ``list_active_paired_execution_groups``.
+    """
+    assert await _repo.list_current_paired_execution_groups([]) == []
 
 
 @pytest.mark.asyncio

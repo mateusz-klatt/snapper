@@ -896,12 +896,15 @@ async def test_trader_coordinator_start_runs_guard_recovery_after_engine_recover
     coordinator_any._setup_trading_components = MagicMock(side_effect=lambda: None)
     coordinator_any._setup_signal_subscriber = MagicMock(side_effect=lambda: None)
     coordinator_any._recover_engine_state = AsyncMock(side_effect=lambda: _record("engine_recover"))
+    coordinator_any._recover_paired_execution_leg_fills = AsyncMock(
+        side_effect=lambda: _record("leg_fills")
+    )
     coordinator_any._recover_paired_execution_guard_state = AsyncMock(
         side_effect=lambda: _record("guard_recover")
     )
     coordinator_any._run_trading_loop = AsyncMock(side_effect=lambda: _record("loop"))
     await coordinator.start()
-    assert calls == ["engine_recover", "guard_recover", "loop"]
+    assert calls == ["engine_recover", "leg_fills", "guard_recover", "loop"]
 
 
 def test_trader_coordinator_repr() -> None:

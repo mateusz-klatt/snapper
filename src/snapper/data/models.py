@@ -1122,6 +1122,7 @@ class VenueEvent(TemporalMixin, Base):
             sqlite_where=_PAIRED_GROUP_ID_NOT_NULL,
             postgresql_where=_PAIRED_GROUP_ID_NOT_NULL,
         ),
+        Index("ix_venue_events_cid_event_type", "client_order_id", "event_type"),
     )
     event_type: Mapped[str] = mapped_column(String(32))
     shard_key: Mapped[str] = mapped_column(String(256))

@@ -401,9 +401,11 @@ async def _insert_guard_group(
     *,
     public_id: str,
     status: str,
+    timestamp: datetime | None = None,
 ) -> None:
     """Insert a paired-execution group for recovery tests."""
     now = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
+    stamp = timestamp if timestamp is not None else now
     await repo.insert_paired_execution_group(
         {
             "public_id": public_id,
@@ -419,7 +421,7 @@ async def _insert_guard_group(
             "created_at": now,
             "session_id": "00000000-0000-0000-0000-000000000003",
             "sequence_id": 1,
-            "timestamp": now,
+            "timestamp": stamp,
         }
     )
 
@@ -1021,3 +1023,430 @@ async def test_project_leg_fill_noop_without_sql_repository(_coord: TraderCoordi
         cast(VenueEventRow, {"id": 1}),
     )
     repo.project_paired_execution_leg_fill.assert_not_called()
+
+
+async def _insert_fill_event(
+    repo: SQLAlchemyRepository,
+    *,
+    client_order_id: str,
+    cum_fill_size: float | None,
+    shard_key: str = _BTC_SHARD,
+    side: str = "buy",
+    status: str = "filled",
+    instrument: str = "BTC-USD",
+) -> None:
+    """Insert a fill_observed venue event for recovery fill-parity tests."""
+    await repo.insert_venue_event(
+        {
+            "event_type": "fill_observed",
+            "shard_key": shard_key,
+            "wallet_public_id": "",
+            "exchange": "kraken",
+            "instrument": instrument,
+            "mode": "live",
+            "client_order_id": client_order_id,
+            "exchange_order_id": f"exch-{client_order_id}",
+            "side": side,
+            "status": status,
+            "fill_size": cum_fill_size,
+            "cum_fill_size": cum_fill_size,
+            "received_at": datetime(2026, 6, 8, 12, 0, tzinfo=UTC),
+            "session_id": "00000000-0000-0000-0000-000000000003",
+            "sequence_id": 1,
+            "timestamp": datetime(2026, 6, 8, 12, 0, tzinfo=UTC),
+        }
+    )
+
+
+async def _leg_fill_qty(coord: TraderCoordinator, *, group: str, leg_index: int = 0) -> float:
+    """Return a recovered group's leg filled_signed_qty."""
+    legs = await _sql_repo(coord).get_current_paired_execution_legs(group)
+    qty: float = next(leg["filled_signed_qty"] for leg in legs if leg["leg_index"] == leg_index)
+    return qty
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_projects_owned_leg_from_venue_event(
+    _coord: TraderCoordinator,
+) -> None:
+    """A downtime fill in venue_events is re-projected onto its owned leg on restart.
+
+    Given: an armed group with an owned buy leg whose order has a fill_observed
+        venue event (cumulative 5, filled) but a leg still at filled_signed_qty 0,
+    When: the recovery leg-fill pass runs,
+    Then: the leg's filled_signed_qty becomes 5 and status FILLED, so a fill
+        observed while the coordinator was down is restored for the guard scanner.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-a", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-a",
+        group_public_id="grp-a",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        side="buy",
+        client_order_id="cid-1",
+        status="armed",
+    )
+    await _insert_fill_event(_sql_repo(_coord), client_order_id="cid-1", cum_fill_size=5.0)
+    await _coord._recover_paired_execution_leg_fills()
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-a")
+    assert legs[0]["filled_signed_qty"] == 5.0
+    assert legs[0]["status"] == "filled"
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_noop_when_no_venue_event(_coord: TraderCoordinator) -> None:
+    """A leg with no fill event is left at zero (no order filled while down).
+
+    Given: an armed group with an owned leg but NO fill_observed venue event,
+    When: the recovery leg-fill pass runs,
+    Then: the leg stays at filled_signed_qty 0 — nothing to restore.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-a", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-a",
+        group_public_id="grp-a",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        client_order_id="cid-1",
+        status="armed",
+    )
+    await _coord._recover_paired_execution_leg_fills()
+    assert await _leg_fill_qty(_coord, group="grp-a") == 0.0
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_skips_non_owned_leg(_coord: TraderCoordinator) -> None:
+    """A leg on a non-owned shard is left for its owning coordinator to recover.
+
+    Given: a 2-instance coordinator and an armed group whose leg is on a non-owned
+        shard with a fill event,
+    When: the recovery leg-fill pass runs,
+    Then: the non-owned leg is not projected (filled stays 0).
+    """
+    ownership = ShardOwnership(instance_id=0, instance_count=2)
+    not_owned = next(s for s in (_BTC_SHARD, _ETH_SHARD) if not ownership.owns(s))
+    _coord._ownership = ownership
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-a", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-a",
+        group_public_id="grp-a",
+        leg_index=0,
+        shard_key=not_owned,
+        client_order_id="cid-1",
+        status="armed",
+    )
+    await _insert_fill_event(
+        _sql_repo(_coord), client_order_id="cid-1", cum_fill_size=5.0, shard_key=not_owned
+    )
+    await _coord._recover_paired_execution_leg_fills()
+    assert await _leg_fill_qty(_coord, group="grp-a") == 0.0
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_skips_leg_without_client_order_id(
+    _coord: TraderCoordinator,
+) -> None:
+    """A leg with no client_order_id is skipped (never dispatched).
+
+    Given: an armed group with an owned leg whose client_order_id is None,
+    When: the recovery leg-fill pass runs,
+    Then: it is skipped without error.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-a", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-a",
+        group_public_id="grp-a",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        client_order_id=None,
+        status="armed",
+    )
+    await _coord._recover_paired_execution_leg_fills()
+    assert await _leg_fill_qty(_coord, group="grp-a") == 0.0
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_monotonic_noop_for_already_projected_leg(
+    _coord: TraderCoordinator,
+) -> None:
+    """An already-projected leg is not regressed by a smaller recovered cumulative.
+
+    Given: an owned leg already at filled_signed_qty 8 and a fill event with a
+        smaller cumulative 5,
+    When: the recovery leg-fill pass runs,
+    Then: the monotonic projection DAL leaves the leg at 8 (no regression), so a
+        live-projected leg is a recovery no-op.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-a", status="armed")
+    await _sql_repo(_coord).insert_paired_execution_leg(
+        {
+            "public_id": "leg-a",
+            "group_public_id": "grp-a",
+            "leg_index": 0,
+            "exchange": "kraken",
+            "mode": "live",
+            "instrument": "BTC-USD",
+            "shard_key": _BTC_SHARD,
+            "side": "buy",
+            "target_qty": 10.0,
+            "signal_public_id": "sig-leg-a",
+            "command_public_id": None,
+            "client_order_id": "cid-1",
+            "status": "partially_filled",
+            "filled_signed_qty": 8.0,
+            "wallet_public_id": "",
+            "operator_public_id": None,
+            "created_at": datetime(2026, 6, 8, 12, 0, tzinfo=UTC),
+            "session_id": "00000000-0000-0000-0000-000000000003",
+            "sequence_id": 1,
+            "timestamp": datetime(2026, 6, 8, 12, 0, tzinfo=UTC),
+        }
+    )
+    await _insert_fill_event(_sql_repo(_coord), client_order_id="cid-1", cum_fill_size=5.0)
+    await _coord._recover_paired_execution_leg_fills()
+    assert await _leg_fill_qty(_coord, group="grp-a") == 8.0
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_sell_leg_partial_and_zero_cumulative(
+    _coord: TraderCoordinator,
+) -> None:
+    """A sell-leg partial fill records a negative qty; a zero-cumulative event is a no-op.
+
+    Given: an armed group with an owned sell leg (partial fill cumulative 4) and a
+        second owned buy leg whose only fill event has cumulative 0,
+    When: the recovery leg-fill pass runs,
+    Then: the sell leg is filled_signed_qty -4 with status PARTIALLY_FILLED, and the
+        zero-cumulative leg stays at 0 (a 0 cumulative is a monotonic no-op).
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-a", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-sell",
+        group_public_id="grp-a",
+        leg_index=0,
+        shard_key=_ETH_SHARD,
+        instrument="ETH-USD",
+        side="sell",
+        client_order_id="cid-sell",
+        status="working",
+    )
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-zero",
+        group_public_id="grp-a",
+        leg_index=1,
+        shard_key=_BTC_SHARD,
+        side="buy",
+        client_order_id="cid-zero",
+        status="armed",
+    )
+    await _insert_fill_event(
+        _sql_repo(_coord),
+        client_order_id="cid-sell",
+        cum_fill_size=4.0,
+        shard_key=_ETH_SHARD,
+        side="sell",
+        status="partial",
+        instrument="ETH-USD",
+    )
+    await _insert_fill_event(_sql_repo(_coord), client_order_id="cid-zero", cum_fill_size=0.0)
+    await _coord._recover_paired_execution_leg_fills()
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-a")
+    by_index = {leg["leg_index"]: leg for leg in legs}
+    assert by_index[0]["filled_signed_qty"] == -4.0
+    assert by_index[0]["status"] == "partially_filled"
+    assert by_index[1]["filled_signed_qty"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_per_leg_failure_is_isolated(_coord: TraderCoordinator) -> None:
+    """A per-leg recovery error is logged and the other owned legs still recover.
+
+    Given: two owned legs where the fill lookup raises for the first leg's order,
+    When: the recovery leg-fill pass runs,
+    Then: the failing leg is logged and skipped while the second leg is still
+        projected, so one bad leg never blocks the rest nor startup.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-a", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-bad",
+        group_public_id="grp-a",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        client_order_id="cid-bad",
+        status="armed",
+    )
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-good",
+        group_public_id="grp-a",
+        leg_index=1,
+        shard_key=_ETH_SHARD,
+        instrument="ETH-USD",
+        client_order_id="cid-good",
+        status="armed",
+    )
+    await _insert_fill_event(
+        _sql_repo(_coord),
+        client_order_id="cid-good",
+        cum_fill_size=3.0,
+        shard_key=_ETH_SHARD,
+        instrument="ETH-USD",
+    )
+    real = _sql_repo(_coord).get_max_cumulative_fill_venue_event
+
+    async def _maybe_raise(client_order_id: str) -> object:
+        if client_order_id == "cid-bad":
+            raise RuntimeError("db down")
+        return await real(client_order_id)
+
+    _sql_repo(_coord).get_max_cumulative_fill_venue_event = AsyncMock(side_effect=_maybe_raise)
+    await _coord._recover_paired_execution_leg_fills()
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-a")
+    by_index = {leg["leg_index"]: leg for leg in legs}
+    assert by_index[0]["filled_signed_qty"] == 0.0
+    assert by_index[1]["filled_signed_qty"] == 3.0
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_noop_without_sql_repository(_coord: TraderCoordinator) -> None:
+    """The recovery leg-fill pass is skipped without a SQL repository.
+
+    Given: a non-SQL repository,
+    When: the recovery leg-fill pass runs,
+    Then: nothing is queried and it returns without error.
+    """
+    repo = AsyncMock()
+    _coord.repository = repo
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _coord._recover_paired_execution_leg_fills()
+    repo.list_current_paired_execution_groups.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_skips_without_ownership(_coord: TraderCoordinator) -> None:
+    """The recovery leg-fill pass is skipped without shard ownership.
+
+    Given: a SQL repository with a leg + fill event but no shard ownership,
+    When: the recovery leg-fill pass runs,
+    Then: nothing is projected.
+    """
+    _coord._ownership = None
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-a", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-a",
+        group_public_id="grp-a",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        client_order_id="cid-1",
+        status="armed",
+    )
+    await _insert_fill_event(_sql_repo(_coord), client_order_id="cid-1", cum_fill_size=5.0)
+    await _coord._recover_paired_execution_leg_fills()
+    assert await _leg_fill_qty(_coord, group="grp-a") == 0.0
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_includes_future_timestamped_group(
+    _coord: TraderCoordinator,
+) -> None:
+    """A clock-skewed future-timestamped current group's leg is still recovered.
+
+    Given: a current armed group stamped far in the FUTURE (a sibling's clock
+        skew) with an owned leg and a fill event,
+    When: the recovery leg-fill pass runs,
+    Then: the leg is still projected, because group discovery uses the
+        current-active (known_to==MAX) read — a temporal as-of list would exclude
+        the future-stamped group and leave its downtime fill unprojected.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(
+        _sql_repo(_coord),
+        public_id="grp-a",
+        status="armed",
+        timestamp=datetime(2099, 1, 1, tzinfo=UTC),
+    )
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-a",
+        group_public_id="grp-a",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        client_order_id="cid-1",
+        status="armed",
+    )
+    await _insert_fill_event(_sql_repo(_coord), client_order_id="cid-1", cum_fill_size=5.0)
+    await _coord._recover_paired_execution_leg_fills()
+    assert await _leg_fill_qty(_coord, group="grp-a") == 5.0
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_group_list_failure_is_fail_soft(
+    _coord: TraderCoordinator,
+) -> None:
+    """A failure listing groups is logged and never blocks startup.
+
+    Given: a SQL repository whose current-group list raises,
+    When: the recovery leg-fill pass runs,
+    Then: the error is swallowed (logged) and the method returns without raising,
+        so a transient DB error never blocks coordinator startup.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    _sql_repo(_coord).list_current_paired_execution_groups = AsyncMock(
+        side_effect=RuntimeError("db down")
+    )
+    await _coord._recover_paired_execution_leg_fills()
+    _sql_repo(_coord).list_current_paired_execution_groups.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_per_group_leg_read_failure_is_isolated(
+    _coord: TraderCoordinator,
+) -> None:
+    """A per-group leg-read failure skips only that group; other groups still recover.
+
+    Given: two current armed groups where the leg read raises for the first group
+        and returns an owned filled leg for the second,
+    When: the recovery leg-fill pass runs,
+    Then: the failing group is logged and skipped while the second group's leg is
+        still projected, so one bad group never blocks the rest.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-bad", status="armed")
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-good", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-good",
+        group_public_id="grp-good",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        client_order_id="cid-good",
+        status="armed",
+    )
+    await _insert_fill_event(_sql_repo(_coord), client_order_id="cid-good", cum_fill_size=6.0)
+    real = _sql_repo(_coord).get_current_paired_execution_legs
+
+    async def _maybe_raise(group_public_id: str) -> object:
+        if group_public_id == "grp-bad":
+            raise RuntimeError("db down")
+        return await real(group_public_id)
+
+    _sql_repo(_coord).get_current_paired_execution_legs = AsyncMock(side_effect=_maybe_raise)
+    await _coord._recover_paired_execution_leg_fills()
+    assert await real("grp-good") is not None
+    legs = await real("grp-good")
+    assert next(leg["filled_signed_qty"] for leg in legs if leg["leg_index"] == 0) == 6.0

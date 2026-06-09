@@ -8086,9 +8086,21 @@ class SQLAlchemyRepository(Repository):
         ``filled_signed_qty`` / ``status`` / ``exchange_order_id`` /
         ``last_venue_event_id`` (and all other columns forward). Returns
         ``True`` iff a successor was written.
+
+        Unlike the generic :func:`close_and_insert` helper (which matches the
+        predecessor with a temporal ``timestamp <= bus_time`` filter and so
+        silently skips a future-stamped row), this method matches the CURRENT
+        active row regardless of its ``timestamp`` — recovery deliberately
+        re-projects a leg armed by a sibling coordinator whose clock ran
+        slightly ahead. To keep the SCD2 validity intervals non-inverted in
+        that clock-skew case, the close / successor bus time is clamped to
+        ``max(bus_time, existing.timestamp)``: the predecessor's ``known_to``
+        is never set before its own ``timestamp`` and the successor is never
+        backdated before its predecessor. In the normal case
+        (``bus_time >= existing.timestamp``) the clamp is a no-op.
         """
         async with self.session() as s:
-            existing = (
+            matches = (
                 (
                     await s.execute(
                         select(PairedExecutionLeg)
@@ -8097,21 +8109,29 @@ class SQLAlchemyRepository(Repository):
                             PairedExecutionLeg.known_to == KNOWN_TO_MAX,
                         )
                         .with_for_update()
+                        .limit(2)
                     )
                 )
                 .scalars()
-                .first()
+                .all()
             )
+            if len(matches) > 1:
+                raise ValueError(
+                    "paired-execution data integrity: "
+                    f"{len(matches)} active legs share client_order_id {client_order_id}"
+                )
+            existing = matches[0] if matches else None
             if existing is None:
                 return False
             if existing.status in self._PEL_FILL_TERMINAL_STATUSES:
                 return False
             if abs(filled_signed_qty) <= abs(existing.filled_signed_qty):
                 return False
+            effective_bus_time = max(bus_time, existing.timestamp)
             await s.execute(
                 update(PairedExecutionLeg)
                 .where(PairedExecutionLeg.id == existing.id)
-                .values(known_to=bus_time)
+                .values(known_to=effective_bus_time)
             )
             s.add(
                 PairedExecutionLeg(
@@ -8146,7 +8166,7 @@ class SQLAlchemyRepository(Repository):
                     created_at=existing.created_at,
                     session_id=session_id,
                     sequence_id=sequence_id,
-                    timestamp=bus_time,
+                    timestamp=effective_bus_time,
                 )
             )
             await s.commit()
@@ -8408,6 +8428,34 @@ class SQLAlchemyRepository(Repository):
                 self._paired_execution_group_row_to_dict(group) for group in result.scalars().all()
             ]
 
+    async def list_current_paired_execution_groups(
+        self, statuses: list[str]
+    ) -> list[PairedExecutionGroupRow]:
+        """Return CURRENT active groups matching the status set.
+
+        Guards on the current active row (``known_to == KNOWN_TO_MAX``), not a
+        temporal ``as_of`` view, so startup recovery does not skip a current
+        ``armed`` / ``broken`` / ``compensating`` group stamped with a slightly
+        future ``timestamp`` under clock skew — pairing with
+        :meth:`get_current_paired_execution_legs` so the group and its legs use
+        the same current-active read. Ordered by ``created_at`` then ``id`` for a
+        deterministic page.
+        """
+        if not statuses:
+            return []
+        async with self.session() as s:
+            result = await s.execute(
+                select(PairedExecutionGroup)
+                .where(
+                    PairedExecutionGroup.status.in_(statuses),
+                    PairedExecutionGroup.known_to == KNOWN_TO_MAX,
+                )
+                .order_by(PairedExecutionGroup.created_at, PairedExecutionGroup.id)
+            )
+            return [
+                self._paired_execution_group_row_to_dict(group) for group in result.scalars().all()
+            ]
+
     async def get_active_paired_execution_halt(
         self,
         wallet_public_id: str,
@@ -8486,6 +8534,40 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             return True
 
+    @staticmethod
+    def _venue_event_to_row(ve: VenueEvent) -> VenueEventRow:
+        """Project a VenueEvent ORM row into the VenueEventRow TypedDict shape."""
+        return {
+            "id": ve.id,
+            "public_id": ve.public_id,
+            "timestamp": ve.timestamp,
+            "session_id": ve.session_id,
+            "sequence_id": ve.sequence_id,
+            "event_type": ve.event_type,
+            "shard_key": ve.shard_key,
+            "command_public_id": ve.command_public_id,
+            "exchange": ve.exchange,
+            "instrument": ve.instrument,
+            "mode": ve.mode,
+            "exchange_order_id": ve.exchange_order_id,
+            "client_order_id": ve.client_order_id,
+            "venue_client_id": ve.venue_client_id,
+            "side": ve.side,
+            "status": ve.status,
+            "fill_price": ve.fill_price,
+            "fill_size": ve.fill_size,
+            "cum_fill_size": ve.cum_fill_size,
+            "fee": ve.fee,
+            "fee_asset": ve.fee_asset,
+            "exec_id": ve.exec_id,
+            "trade_id": ve.trade_id,
+            "error": ve.error,
+            "venue_timestamp": ve.venue_timestamp,
+            "received_at": ve.received_at,
+            "liquidity_role": getattr(ve, "liquidity_role", "unknown"),
+            "paired_group_id": ve.paired_group_id,
+        }
+
     async def get_venue_events_after(self, shard_key: str, after_id: int) -> list[VenueEventRow]:
         """Return venue events for a shard after the given watermark (id)."""
         async with self.session() as s:
@@ -8494,41 +8576,38 @@ class SQLAlchemyRepository(Repository):
                 .where(VenueEvent.shard_key == shard_key, VenueEvent.id > after_id)
                 .order_by(VenueEvent.id)
             )
-            rows: list[VenueEventRow] = []
-            for ve in result.scalars().all():
-                rows.append(
-                    {
-                        "id": ve.id,
-                        "public_id": ve.public_id,
-                        "timestamp": ve.timestamp,
-                        "session_id": ve.session_id,
-                        "sequence_id": ve.sequence_id,
-                        "event_type": ve.event_type,
-                        "shard_key": ve.shard_key,
-                        "command_public_id": ve.command_public_id,
-                        "exchange": ve.exchange,
-                        "instrument": ve.instrument,
-                        "mode": ve.mode,
-                        "exchange_order_id": ve.exchange_order_id,
-                        "client_order_id": ve.client_order_id,
-                        "venue_client_id": ve.venue_client_id,
-                        "side": ve.side,
-                        "status": ve.status,
-                        "fill_price": ve.fill_price,
-                        "fill_size": ve.fill_size,
-                        "cum_fill_size": ve.cum_fill_size,
-                        "fee": ve.fee,
-                        "fee_asset": ve.fee_asset,
-                        "exec_id": ve.exec_id,
-                        "trade_id": ve.trade_id,
-                        "error": ve.error,
-                        "venue_timestamp": ve.venue_timestamp,
-                        "received_at": ve.received_at,
-                        "liquidity_role": getattr(ve, "liquidity_role", "unknown"),
-                        "paired_group_id": ve.paired_group_id,
-                    }
+            return [self._venue_event_to_row(ve) for ve in result.scalars().all()]
+
+    async def get_max_cumulative_fill_venue_event(
+        self, client_order_id: str
+    ) -> VenueEventRow | None:
+        """Return the ``fill_observed`` venue event with the MAX cumulative fill for an order.
+
+        Selects the row with the greatest non-null ``cum_fill_size`` (tie-broken by
+        highest ``id``) among the append-only ``fill_observed`` events for
+        ``client_order_id``. Recovery fill parity reads the AUTHORITATIVE
+        ``venue_events`` — the executor writes them fail-closed with the cumulative
+        ``cum_fill_size`` BEFORE publishing — so a leg whose order filled while the
+        coordinator was down is re-projected on restart. Selecting by MAX cumulative
+        (NOT latest ``id``) ensures an out-of-order executor write can never make
+        recovery read a smaller cumulative than was actually filled. Returns ``None``
+        when no cumulative fill event exists for the order.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(VenueEvent)
+                .where(
+                    VenueEvent.client_order_id == client_order_id,
+                    VenueEvent.event_type == "fill_observed",
+                    VenueEvent.cum_fill_size.isnot(None),
                 )
-            return rows
+                .order_by(VenueEvent.cum_fill_size.desc(), VenueEvent.id.desc())
+                .limit(1)
+            )
+            ve = result.scalars().first()
+            if ve is None:
+                return None
+            return self._venue_event_to_row(ve)
 
     async def upsert_checkpoint(self, row: CheckpointUpsertRow) -> int:
         """SCD2 upsert for trade projection checkpoint.
