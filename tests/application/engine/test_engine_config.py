@@ -2048,6 +2048,7 @@ async def test_create_guard_scanner_task_with_sql_repo_and_ownership() -> None:
     coord.guard_scanner = None
     coord.repository = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    coord.trade_service = TradeService()
     task = coord._create_guard_scanner_task()
     assert task is not None
     assert coord.guard_scanner is not None
@@ -2105,6 +2106,7 @@ async def test_run_trading_loop_includes_guard_scanner_task() -> None:
     coord.settings = MagicMock()
     coord.repository = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    coord.trade_service = TradeService()
     coord._create_reconciliation_tasks = MagicMock(return_value=[])
     mock_sub = AsyncMock()
     mock_sub.recv_multipart = AsyncMock(side_effect=asyncio.CancelledError)

@@ -18,10 +18,12 @@ import pytest
 from sqlalchemy import select
 
 from snapper.application.engine.guard_scanner import PairedExecutionGuardScanner
+from snapper.application.trade.trade_service import TradeService
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import PairedExecutionGroupStatusEnum
 from snapper.core.types import PairedExecutionLegStatusEnum
 from snapper.core.types import PairedExecutionPolicyEnum
+from snapper.data.models import PairedExecutionHalt
 from snapper.data.models import TradeCommand
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import where_active
@@ -49,11 +51,17 @@ async def _repo() -> AsyncIterator[SQLAlchemyRepository]:
         await repo.engine.dispose()
 
 
-def _scanner(repo: SQLAlchemyRepository, *, instance_count: int = 1) -> PairedExecutionGuardScanner:
+def _scanner(
+    repo: SQLAlchemyRepository,
+    *,
+    instance_count: int = 1,
+    trade_service: TradeService | None = None,
+) -> PairedExecutionGuardScanner:
     """Build a scanner owning everything (instance_count=1) by default."""
     return PairedExecutionGuardScanner(
         repository=repo,
         ownership=ShardOwnership(instance_id=0, instance_count=instance_count),
+        trade_service=trade_service if trade_service is not None else TradeService(),
         interval_seconds=0.01,
     )
 
@@ -66,6 +74,7 @@ async def _insert_group(
     assembly_deadline: datetime = _FUTURE,
     policy: str = PairedExecutionPolicyEnum.SIMULTANEOUS.value,
     expected_leg_count: int = 2,
+    failure_reason: str | None = None,
 ) -> None:
     """Insert a paired-execution group."""
     await repo.insert_paired_execution_group(
@@ -80,6 +89,7 @@ async def _insert_group(
             "status": status,
             "assembly_deadline": assembly_deadline,
             "fill_deadline": _FUTURE,
+            "failure_reason": failure_reason,
             "created_at": _T0,
             "session_id": _SESSION,
             "sequence_id": 1,
@@ -98,6 +108,7 @@ async def _insert_leg(
     shard_key: str,
     command_public_id: str | None,
     status: str = PairedExecutionLegStatusEnum.PENDING.value,
+    filled_signed_qty: float = 0.0,
 ) -> None:
     """Insert a paired-execution leg."""
     await repo.insert_paired_execution_leg(
@@ -115,6 +126,7 @@ async def _insert_leg(
             "command_public_id": command_public_id,
             "client_order_id": command_public_id,
             "status": status,
+            "filled_signed_qty": filled_signed_qty,
             "wallet_public_id": _WALLET,
             "operator_public_id": _OPERATOR,
             "created_at": _T0,
@@ -389,6 +401,7 @@ async def test_scanner_run_propagates_cancellation(_repo: SQLAlchemyRepository) 
     scanner = PairedExecutionGuardScanner(
         repository=_repo,
         ownership=ShardOwnership(instance_id=0, instance_count=1),
+        trade_service=TradeService(),
         interval_seconds=10.0,
     )
     task = asyncio.create_task(scanner.run())
@@ -583,3 +596,247 @@ async def test_scanner_run_survives_cycle_error(_repo: SQLAlchemyRepository) -> 
     scanner.stop()
     await asyncio.wait_for(task, timeout=2.0)
     assert scanner._running is False
+
+
+async def test_sweep_halts_skips_assembly_timeout_broken_group(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A broken group with no fills (assembly timeout) is NOT durably halted.
+
+    Given: a broken group whose owned leg has zero filled_signed_qty (a pure
+        assembly-timeout break, no venue exposure),
+    When: a scan cycle runs,
+    Then: no durable halt row is projected and the leg's shard stays un-halted,
+        so the strategy pair is free to re-assemble on the next tick.
+    """
+    trade_service = TradeService()
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id=None,
+        status=PairedExecutionLegStatusEnum.CANCELLED.value,
+        filled_signed_qty=0.0,
+    )
+    await _scanner(_repo, trade_service=trade_service)._scan_cycle(_T0)
+    halt = await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY)
+    assert halt is None
+    assert trade_service.is_halted(_BTC_SHARD) is False
+
+
+async def test_sweep_halts_projects_durable_halt_and_mirrors_owned_shard(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A broken group with a filled leg projects a durable halt + owned shard mirror.
+
+    Given: a broken group with a non-zero filled owned leg and a failure_reason,
+    When: a scan cycle runs,
+    Then: a durable halt row is inserted for the (wallet, strategy, group_key)
+        scope carrying the leg's mode and the group's failure_reason, and the
+        owned leg's shard is halted in memory for the cheap _on_signal gate.
+    """
+    trade_service = TradeService()
+    await _insert_group(
+        _repo,
+        public_id="grp-1",
+        status=PairedExecutionGroupStatusEnum.BROKEN.value,
+        failure_reason="fill timeout",
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id=None,
+        filled_signed_qty=1.0,
+    )
+    await _scanner(_repo, trade_service=trade_service)._scan_cycle(_T0)
+    halt = await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY)
+    assert halt is not None
+    assert halt["mode"] == "live"
+    assert halt["group_public_id"] == "grp-1"
+    assert halt["reason"] == "fill timeout"
+    assert trade_service.is_halted(_BTC_SHARD) is True
+
+
+async def test_sweep_halts_projects_for_compensating_group_without_fills(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A compensating group is halted even with zero fills; reason falls back.
+
+    Given: a compensating group (status exposure) whose leg has zero fills and
+        whose failure_reason is None,
+    When: a scan cycle runs,
+    Then: a durable halt is still projected with the generic broken reason and
+        the owned shard is halted, because compensating means flatten-in-flight.
+    """
+    trade_service = TradeService()
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.COMPENSATING.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id=None,
+        filled_signed_qty=0.0,
+    )
+    await _scanner(_repo, trade_service=trade_service)._scan_cycle(_T0)
+    halt = await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY)
+    assert halt is not None
+    assert halt["reason"] == "paired-execution group broken"
+    assert trade_service.is_halted(_BTC_SHARD) is True
+
+
+async def test_sweep_halts_inserts_global_halt_but_skips_non_owned_shard_mirror(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """The durable halt is global; only owned shards are mirrored in memory.
+
+    Given: a broken, filled group whose only leg sits on a shard this 2-instance
+        coordinator does NOT own,
+    When: a scan cycle runs,
+    Then: the durable halt row is still inserted (any coordinator may win the
+        idempotent scope), but the non-owned shard is left un-halted in memory
+        for its owning coordinator to mirror.
+    """
+    not_owned = next(
+        shard
+        for shard in (_BTC_SHARD, _ETH_SHARD)
+        if not ShardOwnership(instance_id=0, instance_count=2).owns(shard)
+    )
+    trade_service = TradeService()
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=not_owned,
+        command_public_id=None,
+        filled_signed_qty=2.0,
+    )
+    await _scanner(_repo, instance_count=2, trade_service=trade_service)._scan_cycle(_T0)
+    halt = await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY)
+    assert halt is not None
+    assert trade_service.is_halted(not_owned) is False
+
+
+async def test_sweep_halts_skips_compensating_group_with_no_legs(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A compensating group with no legs is skipped and logged, never guessed.
+
+    Given: a compensating group (exposure by status) that has no leg rows, so
+        the halt row's mode cannot be derived,
+    When: a scan cycle runs,
+    Then: no durable halt is projected (the corruption is skipped + logged
+        rather than inserting a halt with a guessed mode).
+    """
+    trade_service = TradeService()
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.COMPENSATING.value
+    )
+    await _scanner(_repo, trade_service=trade_service)._scan_cycle(_T0)
+    halt = await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY)
+    assert halt is None
+
+
+async def test_sweep_halts_mirrors_only_owned_shard_in_mixed_two_leg_group(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A 2-leg exposed group halts only the owned leg's shard, not its sibling.
+
+    Given: a broken, filled group with one leg on an owned shard and one on a
+        non-owned shard for this 2-instance coordinator,
+    When: a scan cycle runs,
+    Then: the durable halt is inserted (global) and only the owned shard is
+        halted in memory, so each coordinator mirrors exactly its own legs.
+    """
+    ownership = ShardOwnership(instance_id=0, instance_count=2)
+    owned = next(shard for shard in (_BTC_SHARD, _ETH_SHARD) if ownership.owns(shard))
+    not_owned = next(shard for shard in (_BTC_SHARD, _ETH_SHARD) if not ownership.owns(shard))
+    trade_service = TradeService()
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=owned,
+        command_public_id=None,
+        filled_signed_qty=1.0,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-1",
+        group_public_id="grp-1",
+        leg_index=1,
+        instrument="ETH-USD",
+        shard_key=not_owned,
+        command_public_id=None,
+        filled_signed_qty=0.0,
+    )
+    await _scanner(_repo, instance_count=2, trade_service=trade_service)._scan_cycle(_T0)
+    halt = await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY)
+    assert halt is not None
+    assert trade_service.is_halted(owned) is True
+    assert trade_service.is_halted(not_owned) is False
+
+
+async def test_sweep_halts_is_idempotent_across_cycles(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Re-scanning the same exposed group leaves exactly one active halt.
+
+    Given: a broken, filled group already halted by a prior scan,
+    When: a second scan cycle runs,
+    Then: the active-unique scope admits no duplicate (exactly one active halt)
+        and the owned shard stays halted, so racing/repeated scans converge.
+    """
+    trade_service = TradeService()
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id=None,
+        filled_signed_qty=1.0,
+    )
+    scanner = _scanner(_repo, trade_service=trade_service)
+    await scanner._scan_cycle(_T0)
+    await scanner._scan_cycle(_T1)
+    async with _repo.session() as session:
+        active = (
+            (
+                await session.execute(
+                    select(PairedExecutionHalt).where(*where_active(PairedExecutionHalt, _T1))
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(list(active)) == 1
+    assert trade_service.is_halted(_BTC_SHARD) is True

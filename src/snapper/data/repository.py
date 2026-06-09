@@ -7862,6 +7862,42 @@ class SQLAlchemyRepository(Repository):
             await s.refresh(halt)
             return halt.public_id
 
+    async def ensure_paired_execution_halt(self, row: PairedExecutionHaltInsertRow) -> bool:
+        """Insert a paired-execution halt unless an active one already exists.
+
+        Idempotent across racing coordinators that each observe the same
+        broken / compensating group on a later scan: the active-unique
+        ``uq_peh_scope`` index admits exactly one active halt per
+        ``(wallet_public_id, strategy_id, group_key)`` scope. On an
+        ``IntegrityError`` the method re-checks for an active halt with that
+        scope; if one exists the error was the expected active-unique
+        collision and ``False`` is returned, but ANY other integrity failure
+        (a malformed row violating a different constraint) is RE-RAISED
+        rather than silently swallowed. Mirrors
+        :meth:`ensure_paired_execution_group`. Returns ``True`` iff this call
+        created the halt.
+        """
+        async with self.session() as s:
+            s.add(PairedExecutionHalt(**row))
+            try:
+                await s.commit()
+            except IntegrityError:
+                await s.rollback()
+                active = (
+                    await s.execute(
+                        select(PairedExecutionHalt.id).where(
+                            PairedExecutionHalt.wallet_public_id == row.get("wallet_public_id"),
+                            PairedExecutionHalt.strategy_id == row.get("strategy_id"),
+                            PairedExecutionHalt.group_key == row.get("group_key"),
+                            PairedExecutionHalt.known_to == KNOWN_TO_MAX,
+                        )
+                    )
+                ).first()
+                if active is None:
+                    raise
+                return False
+            return True
+
     async def cas_paired_execution_group_status(
         self,
         public_id: str,
@@ -8249,16 +8285,24 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str,
         strategy_id: str,
         group_key: str,
-        as_of: datetime,
     ) -> PairedExecutionHaltRow | None:
-        """Return the active paired-execution halt for a wallet-strategy-group scope."""
+        """Return the CURRENT active halt for a wallet-strategy-group scope.
+
+        Guards on the current active row (``known_to == KNOWN_TO_MAX``), not a
+        temporal ``as_of`` view: the live ``_on_signal`` fast-reject must see a
+        halt the instant it is projected, even if a sibling coordinator stamped
+        it with a slightly future ``timestamp`` under clock skew — a temporal
+        ``where_active(now)`` read would exclude such a halt and fail OPEN.
+        Mirrors the current-active guard the trade-command CAS uses. Returns
+        ``None`` when no active halt covers the scope.
+        """
         async with self.session() as s:
             result = await s.execute(
                 select(PairedExecutionHalt).where(
                     PairedExecutionHalt.wallet_public_id == wallet_public_id,
                     PairedExecutionHalt.strategy_id == strategy_id,
                     PairedExecutionHalt.group_key == group_key,
-                    *where_active(PairedExecutionHalt, as_of),
+                    PairedExecutionHalt.known_to == KNOWN_TO_MAX,
                 )
             )
             halt = result.scalars().first()

@@ -2780,6 +2780,7 @@ class TraderCoordinator(RegisterableProcess):
         self.guard_scanner = PairedExecutionGuardScanner(
             repository=self.repository,
             ownership=self._ownership,
+            trade_service=self.trade_service,
             interval_seconds=max(1.0, _bootstrap_settings.paired_execution_assembly_timeout_s / 2),
         )
         return asyncio.create_task(self.guard_scanner.run())
@@ -3126,6 +3127,8 @@ class TraderCoordinator(RegisterableProcess):
         if self.trade_service.is_halted(halt_key):
             logger.warning(f"ZMQTrader: shard {halt_key} is halted, dropping signal")
             return
+        if await self._grouped_signal_blocked_by_halt(signal):
+            return
         assert (
             self.execution_publisher is not None
         ), "execution_publisher not initialized - _setup_external_execution must be called first"
@@ -3162,6 +3165,49 @@ class TraderCoordinator(RegisterableProcess):
                     command_public_id=command_public_id,
                     client_order_id=new_oid,
                 )
+
+    async def _grouped_signal_blocked_by_halt(self, signal: SignalData) -> bool:
+        """Fast-reject a NEW grouped signal whose pair scope is durably halted.
+
+        Only grouped signals (``paired_group_id`` set) on a SQL repository are
+        checked: a durable ``paired_execution_halts`` row on the
+        ``(wallet, strategy, group_key)`` scope means a prior group on this pair
+        broke with exposure (compensation pending), so opening a new group would
+        stack a second one-sided position. Identity is normalized exactly as
+        :meth:`_ensure_paired_execution_group` stores it (wallet ``or ""``,
+        strategy ``or "unknown"``) so the query matches the projected halt.
+        Fails CLOSED: any DB error drops the grouped signal rather than risk a
+        naked group. Non-grouped signals keep the cheap in-memory shard-halt gate
+        and never reach the DB here; the no-SQL-repository test path is unguarded
+        because the guard tables do not exist there.
+        """
+        group_id = signal.paired_group_id
+        if group_id is None:
+            return False
+        group_key = signal.paired_group_key
+        if group_key is None:
+            return False
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return False
+        wallet_public_id = signal.wallet_public_id or ""
+        strategy_id = signal.strategy_name or "unknown"
+        try:
+            halt = await self.repository.get_active_paired_execution_halt(
+                wallet_public_id, strategy_id, group_key
+            )
+        except Exception as exc:
+            logger.warning(
+                f"ZMQTrader: paired-execution halt check failed for group {group_id}, "
+                f"dropping grouped signal (fail-closed): {exc}"
+            )
+            return True
+        if halt is None:
+            return False
+        logger.warning(
+            f"ZMQTrader: pair scope halted ({strategy_id}/{group_key}), "
+            f"dropping grouped signal {group_id}"
+        )
+        return True
 
     async def _ensure_paired_execution_group(self, signal: SignalData) -> str | None:
         """Ensure a paired-execution group row exists for a grouped signal.

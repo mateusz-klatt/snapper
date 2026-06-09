@@ -265,6 +265,18 @@ async def _active_leg_versions(
         return list(result.scalars().all())
 
 
+async def _active_halts(
+    repo: SQLAlchemyRepository,
+    as_of: datetime,
+) -> list[PairedExecutionHalt]:
+    """Return all active SCD2 halt versions at a point in time."""
+    async with repo.session() as session:
+        result = await session.execute(
+            select(PairedExecutionHalt).where(*where_active(PairedExecutionHalt, as_of))
+        )
+        return list(result.scalars().all())
+
+
 @pytest.mark.asyncio
 async def test_insert_and_read_methods_round_trip_filter_and_order(
     _repo: SQLAlchemyRepository,
@@ -357,13 +369,11 @@ async def test_insert_and_read_methods_round_trip_filter_and_order(
         _WALLET_ID,
         _STRATEGY_ID,
         _GROUP_KEY,
-        _T2,
     )
     absent_halt = await _repo.get_active_paired_execution_halt(
         _WALLET_ID,
         _STRATEGY_ID,
         _OTHER_GROUP_KEY,
-        _T2,
     )
 
     assert returned_group == group_b
@@ -657,7 +667,6 @@ async def test_clear_halt_closes_present_row_and_absent_is_false(
         _WALLET_ID,
         _STRATEGY_ID,
         _GROUP_KEY,
-        _T1,
     )
     versions = await _halt_versions(_repo, public_id)
 
@@ -1143,6 +1152,65 @@ async def test_ensure_reraises_non_collision_integrity_error(
     with pytest.raises(IntegrityError):
         await _repo.ensure_paired_execution_group(
             _group_insert_row(public_id=_pid(100), policy="bogus-policy")
+        )
+
+
+@pytest.mark.asyncio
+async def test_ensure_halt_creates_then_skips_active_duplicate(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """ensure_paired_execution_halt is idempotent on the active scope.
+
+    Given: no active halt for a (wallet, strategy, group_key) scope,
+    When: ensure is called twice for that scope with distinct public ids,
+    Then: the first call creates the halt (True) and the second loses the
+        active-unique scope race (False), leaving exactly one active halt — the
+        first — so racing scanners project a single durable halt per pair.
+    """
+    assert await _repo.ensure_paired_execution_halt(_halt_insert_row(public_id=_pid(100))) is True
+    assert await _repo.ensure_paired_execution_halt(_halt_insert_row(public_id=_pid(101))) is False
+    active = await _active_halts(_repo, _T0)
+    assert len(active) == 1
+    assert active[0].public_id == _pid(100)
+
+
+@pytest.mark.asyncio
+async def test_ensure_halt_creates_distinct_scopes_independently(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Halts on different pair scopes do not collide.
+
+    Given: an active halt for one group_key,
+    When: ensure is called for a DIFFERENT group_key under the same wallet,
+    Then: it creates a second active halt, because the active-unique scope is
+        per (wallet, strategy, group_key), not one global halt.
+    """
+    assert await _repo.ensure_paired_execution_halt(_halt_insert_row(public_id=_pid(100))) is True
+    assert (
+        await _repo.ensure_paired_execution_halt(
+            _halt_insert_row(public_id=_pid(101), group_key=_OTHER_GROUP_KEY)
+        )
+        is True
+    )
+    active = await _active_halts(_repo, _T0)
+    assert len(active) == 2
+
+
+@pytest.mark.asyncio
+async def test_ensure_halt_reraises_non_collision_integrity_error(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A non-uniqueness integrity failure is surfaced, not masked as duplicate.
+
+    Given: a halt insert row that violates the immutable mode CHECK constraint
+        (not the active-unique scope index), with no active halt present,
+    When: ensure_paired_execution_halt runs,
+    Then: the IntegrityError propagates rather than being swallowed as 'already
+        exists', so a malformed halt can never be silently dropped.
+    """
+    with pytest.raises(IntegrityError):
+        await _repo.ensure_paired_execution_halt(
+            _halt_insert_row(public_id=_pid(100), mode="bogus-mode")
         )
 
 

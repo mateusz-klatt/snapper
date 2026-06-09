@@ -361,3 +361,169 @@ async def test_on_signal_grouped_ensures_group_and_registers_leg(
     assert legs[0]["client_order_id"] == "oid-btc"
     assert legs[0]["leg_index"] == 0
     assert legs[0]["shard_key"] == "kraken.BTC-USD.live"
+
+
+async def _insert_scope_halt(
+    repo: SQLAlchemyRepository,
+    *,
+    wallet_public_id: str = "",
+    strategy_id: str = "pairs-alpha",
+    group_key: str = _GROUP_KEY,
+) -> None:
+    """Insert an active durable halt for a (wallet, strategy, group_key) scope."""
+    halt_time = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
+    await repo.insert_paired_execution_halt(
+        {
+            "wallet_public_id": wallet_public_id,
+            "operator_public_id": None,
+            "strategy_id": strategy_id,
+            "mode": "live",
+            "group_key": group_key,
+            "group_public_id": "grp-prior",
+            "reason": "paired-execution group broken",
+            "created_at": halt_time,
+            "session_id": "00000000-0000-0000-0000-000000000003",
+            "sequence_id": 1,
+            "timestamp": halt_time,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_halt_block_returns_false_for_standalone_signal(
+    _coord: TraderCoordinator,
+) -> None:
+    """A non-grouped signal is never halt-checked.
+
+    Given: a standalone signal (no paired_group_id),
+    When: the grouped halt fast-reject runs,
+    Then: it returns False so the cheap in-memory shard gate alone governs
+        non-grouped signals.
+    """
+    assert await _coord._grouped_signal_blocked_by_halt(_standalone_signal()) is False
+
+
+@pytest.mark.asyncio
+async def test_halt_block_returns_false_when_group_key_missing(
+    _coord: TraderCoordinator,
+) -> None:
+    """A grouped descriptor with no group key cannot be scoped, so it is allowed.
+
+    Given: a grouped signal whose paired_group_key bypassed the validator as
+        None,
+    When: the grouped halt fast-reject runs,
+    Then: it returns False (no scope to query) rather than guessing a halt.
+    """
+    signal = SignalData.model_construct(
+        type="signal",
+        public_id="sig-bad",
+        timestamp=datetime(2026, 6, 8, 12, 0, tzinfo=UTC),
+        session_id="",
+        sequence_id=0,
+        instrument="BTC-USD",
+        exchange="kraken",
+        side="buy",
+        strength=0.5,
+        reason="test",
+        price=50000.0,
+        strategy_name="pairs-alpha",
+        fired_at=datetime(2026, 6, 8, 12, 0, tzinfo=UTC),
+        paired_group_id="grp-1",
+        paired_group_size=2,
+        paired_group_index=0,
+        paired_group_policy="simultaneous",
+        paired_group_key=None,
+    )
+    assert await _coord._grouped_signal_blocked_by_halt(signal) is False
+
+
+@pytest.mark.asyncio
+async def test_halt_block_returns_false_for_non_sql_repository(
+    _coord: TraderCoordinator,
+) -> None:
+    """The grouped halt check is skipped without a SQL repository.
+
+    Given: a grouped signal but a non-SQL repository (tests),
+    When: the grouped halt fast-reject runs,
+    Then: it returns False — the guard tables do not exist, so there is no
+        fail-closed obligation on the no-repository test path.
+    """
+    _coord.repository = AsyncMock()
+    assert (
+        await _coord._grouped_signal_blocked_by_halt(_grouped_signal(instrument="BTC-USD", index=0))
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_halt_block_returns_false_when_no_active_halt(
+    _coord: TraderCoordinator,
+) -> None:
+    """A grouped signal with no halt on its scope is allowed through.
+
+    Given: a SQL repository with no active halt for the signal's pair scope,
+    When: the grouped halt fast-reject runs,
+    Then: it returns False so the group can assemble normally.
+    """
+    assert (
+        await _coord._grouped_signal_blocked_by_halt(_grouped_signal(instrument="BTC-USD", index=0))
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_halt_block_returns_true_when_pair_scope_halted(
+    _coord: TraderCoordinator,
+) -> None:
+    """A grouped signal whose pair scope carries an active halt is rejected.
+
+    Given: an active durable halt on the (wallet, strategy, group_key) scope,
+    When: the grouped halt fast-reject runs for a signal on that scope,
+    Then: it returns True so no new group is opened on a halted pair.
+    """
+    await _insert_scope_halt(_sql_repo(_coord))
+    assert (
+        await _coord._grouped_signal_blocked_by_halt(_grouped_signal(instrument="BTC-USD", index=0))
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_halt_block_fails_closed_on_db_error(
+    _coord: TraderCoordinator,
+) -> None:
+    """A DB error during the halt check drops the grouped signal (fail closed).
+
+    Given: a SQL repository whose halt query raises,
+    When: the grouped halt fast-reject runs,
+    Then: it returns True so a DB outage can never let a new grouped group open
+        unchecked on a possibly-halted pair.
+    """
+    _sql_repo(_coord).get_active_paired_execution_halt = AsyncMock(
+        side_effect=RuntimeError("db down")
+    )
+    assert (
+        await _coord._grouped_signal_blocked_by_halt(_grouped_signal(instrument="BTC-USD", index=0))
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_signal_drops_grouped_signal_when_pair_scope_halted(
+    _coord: TraderCoordinator,
+) -> None:
+    """_on_signal drops a grouped signal before opening a group on a halted pair.
+
+    Given: a coordinator with an engine and an active halt on the signal's pair
+        scope (but no in-memory shard halt),
+    When: _on_signal processes a grouped signal for that scope,
+    Then: the signal is dropped before _ensure_paired_execution_group, so no new
+        group is created on a pair whose prior group broke with exposure.
+    """
+    _coord._current_topic = "signals.kraken.BTC-USD.live"
+    await _coord._on_signal(_standalone_signal())
+    await _insert_scope_halt(_sql_repo(_coord))
+    _coord._current_topic = "signals.kraken.BTC-USD.live"
+    await _coord._on_signal(_grouped_signal(instrument="BTC-USD", index=0))
+    group = await _sql_repo(_coord).get_paired_execution_group("grp-1", datetime.now(UTC))
+    assert group is None
