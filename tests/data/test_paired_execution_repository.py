@@ -1215,6 +1215,65 @@ async def test_ensure_halt_reraises_non_collision_integrity_error(
 
 
 @pytest.mark.asyncio
+async def test_list_active_halts_returns_active_ordered_excludes_cleared(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """list_active_paired_execution_halts returns current-active halts, cleared excluded.
+
+    Given: two active halts on distinct scopes (same created_at, so ordered by
+        id), the first later cleared,
+    When: list_active_paired_execution_halts runs before and after the clear,
+    Then: before it returns both in id order; after it returns only the still-
+        active halt, because the cleared row's known_to is no longer MAX — so
+        startup recovery never re-halts a deliberately-freed pair.
+    """
+    halt_a = _pid(100)
+    halt_b = _pid(101)
+    await _repo.insert_paired_execution_halt(_halt_insert_row(public_id=halt_a))
+    await _repo.insert_paired_execution_halt(
+        _halt_insert_row(public_id=halt_b, group_key=_OTHER_GROUP_KEY)
+    )
+    before = await _repo.list_active_paired_execution_halts()
+    assert [h["public_id"] for h in before] == [halt_a, halt_b]
+    await _repo.clear_paired_execution_halt(halt_a, _T1)
+    after = await _repo.list_active_paired_execution_halts()
+    assert [h["public_id"] for h in after] == [halt_b]
+
+
+@pytest.mark.asyncio
+async def test_get_current_legs_includes_future_stamped_leg_excluded_by_temporal_read(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """get_current_paired_execution_legs returns current-active legs regardless of timestamp.
+
+    Given: a group with leg 0 stamped at _T0 and leg 1 stamped in the FUTURE
+        (_T2, a clock-skewed sibling write),
+    When: the current-active reader and the temporal as-of reader both run,
+    Then: the current reader returns both legs ordered by index, while the
+        temporal read at _T0 excludes the future-stamped leg — pinning why
+        startup recovery uses the current-active reader so a clock-skewed leg's
+        shard is still mirrored.
+    """
+    group_id = _pid(100)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(public_id=_pid(200), group_public_id=group_id, leg_index=0, shard_key="s0")
+    )
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=_pid(201),
+            group_public_id=group_id,
+            leg_index=1,
+            shard_key="s1",
+            timestamp=_T2,
+        )
+    )
+    current = await _repo.get_current_paired_execution_legs(group_id)
+    assert [leg["leg_index"] for leg in current] == [0, 1]
+    temporal = await _repo.get_paired_execution_legs(group_id, _T0)
+    assert [leg["leg_index"] for leg in temporal] == [0]
+
+
+@pytest.mark.asyncio
 async def test_outbox_ignores_historical_leg_command_binding(
     _repo: SQLAlchemyRepository,
 ) -> None:

@@ -20,11 +20,14 @@ import pytest
 
 import snapper.application.engine.trader as trader_module
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.core.partitioning import ShardOwnership
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import SignalData
 
 _GROUP_KEY = "kraken:BTC-USD:live|kraken:ETH-USD:live"
+_BTC_SHARD = "kraken.BTC-USD.live"
+_ETH_SHARD = "kraken.ETH-USD.live"
 
 
 @pytest.fixture
@@ -369,6 +372,8 @@ async def _insert_scope_halt(
     wallet_public_id: str = "",
     strategy_id: str = "pairs-alpha",
     group_key: str = _GROUP_KEY,
+    group_public_id: str = "grp-prior",
+    reason: str = "paired-execution group broken",
 ) -> None:
     """Insert an active durable halt for a (wallet, strategy, group_key) scope."""
     halt_time = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
@@ -379,12 +384,77 @@ async def _insert_scope_halt(
             "strategy_id": strategy_id,
             "mode": "live",
             "group_key": group_key,
-            "group_public_id": "grp-prior",
-            "reason": "paired-execution group broken",
+            "group_public_id": group_public_id,
+            "reason": reason,
             "created_at": halt_time,
             "session_id": "00000000-0000-0000-0000-000000000003",
             "sequence_id": 1,
             "timestamp": halt_time,
+        }
+    )
+
+
+async def _insert_guard_group(
+    repo: SQLAlchemyRepository,
+    *,
+    public_id: str,
+    status: str,
+) -> None:
+    """Insert a paired-execution group for recovery tests."""
+    now = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
+    await repo.insert_paired_execution_group(
+        {
+            "public_id": public_id,
+            "wallet_public_id": "",
+            "operator_public_id": None,
+            "strategy_id": "pairs-alpha",
+            "policy": "simultaneous",
+            "expected_leg_count": 2,
+            "group_key": _GROUP_KEY,
+            "status": status,
+            "assembly_deadline": now,
+            "fill_deadline": now,
+            "created_at": now,
+            "session_id": "00000000-0000-0000-0000-000000000003",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
+    )
+
+
+async def _insert_guard_leg(
+    repo: SQLAlchemyRepository,
+    *,
+    public_id: str,
+    group_public_id: str,
+    leg_index: int,
+    shard_key: str,
+    instrument: str = "BTC-USD",
+    timestamp: datetime | None = None,
+) -> None:
+    """Insert a pending paired-execution leg for recovery tests."""
+    stamp = timestamp if timestamp is not None else datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
+    await repo.insert_paired_execution_leg(
+        {
+            "public_id": public_id,
+            "group_public_id": group_public_id,
+            "leg_index": leg_index,
+            "exchange": "kraken",
+            "mode": "live",
+            "instrument": instrument,
+            "shard_key": shard_key,
+            "side": "buy",
+            "target_qty": 1.0,
+            "signal_public_id": f"sig-{public_id}",
+            "command_public_id": None,
+            "client_order_id": None,
+            "status": "pending",
+            "wallet_public_id": "",
+            "operator_public_id": None,
+            "created_at": stamp,
+            "session_id": "00000000-0000-0000-0000-000000000003",
+            "sequence_id": 1,
+            "timestamp": stamp,
         }
     )
 
@@ -527,3 +597,306 @@ async def test_on_signal_drops_grouped_signal_when_pair_scope_halted(
     await _coord._on_signal(_grouped_signal(instrument="BTC-USD", index=0))
     group = await _sql_repo(_coord).get_paired_execution_group("grp-1", datetime.now(UTC))
     assert group is None
+
+
+@pytest.mark.asyncio
+async def test_guard_recovery_skips_non_sql_repository(_coord: TraderCoordinator) -> None:
+    """Guard-state recovery is a no-op without a SQL repository.
+
+    Given: a non-SQL repository (tests),
+    When: paired-execution guard recovery runs,
+    Then: nothing is halted and the outbox is not woken — the guard tables do
+        not exist on a non-SQL repo.
+    """
+    _coord.repository = AsyncMock()
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _coord._recover_paired_execution_guard_state()
+    assert _coord.trade_service.is_halted(_BTC_SHARD) is False
+    _outbox_mock(_coord).notify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_guard_recovery_skips_without_ownership(_coord: TraderCoordinator) -> None:
+    """Guard-state recovery is a no-op without shard ownership.
+
+    Given: a SQL repository with an active halt but no shard ownership wired,
+    When: paired-execution guard recovery runs,
+    Then: nothing is halted — ownership is required to scope owned legs.
+    """
+    _coord._ownership = None
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-b", status="broken")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-0",
+        group_public_id="grp-b",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+    )
+    await _insert_scope_halt(_sql_repo(_coord), group_public_id="grp-b")
+    await _coord._recover_paired_execution_guard_state()
+    assert _coord.trade_service.is_halted(_BTC_SHARD) is False
+
+
+@pytest.mark.asyncio
+async def test_guard_recovery_mirrors_owned_halt_and_wakes_outbox(
+    _coord: TraderCoordinator,
+) -> None:
+    """Recovery re-halts owned shards from durable halts and wakes the outbox.
+
+    Given: an active durable halt over a broken group with an owned leg, plus an
+        armed group with an owned leg,
+    When: paired-execution guard recovery runs,
+    Then: the owned leg's shard is halted in memory (mirror restored from the
+        authoritative durable halt) and the outbox is woken once so the armed
+        group's held commands re-dispatch without waiting for the first poll.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-b", status="broken")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-b",
+        group_public_id="grp-b",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+    )
+    await _insert_scope_halt(_sql_repo(_coord), group_public_id="grp-b")
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-a", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-a",
+        group_public_id="grp-a",
+        leg_index=0,
+        shard_key=_ETH_SHARD,
+        instrument="ETH-USD",
+    )
+    await _coord._recover_paired_execution_guard_state()
+    assert _coord.trade_service.is_halted(_BTC_SHARD) is True
+    _outbox_mock(_coord).notify.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_guard_recovery_skips_non_owned_shard(_coord: TraderCoordinator) -> None:
+    """Recovery does not halt a shard whose leg this coordinator does not own.
+
+    Given: a 2-instance coordinator and an active halt whose only leg sits on a
+        non-owned shard,
+    When: paired-execution guard recovery runs,
+    Then: the non-owned shard is left un-halted for its owning coordinator.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=2)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-b", status="broken")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-b",
+        group_public_id="grp-b",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+    )
+    await _insert_scope_halt(_sql_repo(_coord), group_public_id="grp-b")
+    await _coord._recover_paired_execution_guard_state()
+    assert _coord.trade_service.is_halted(_BTC_SHARD) is False
+
+
+@pytest.mark.asyncio
+async def test_guard_recovery_does_not_restore_cleared_halt(_coord: TraderCoordinator) -> None:
+    """A cleared durable halt is never re-halted on restart.
+
+    Given: a durable halt over a broken group with an owned leg, then cleared,
+    When: paired-execution guard recovery runs,
+    Then: the owned shard is NOT halted — recovery restores from active durable
+        halts only, so an operator/Phase-5 clear is honoured across a restart
+        (a group-driven restore would wrongly re-wedge the still-broken group).
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-b", status="broken")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-b",
+        group_public_id="grp-b",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+    )
+    await _insert_scope_halt(_sql_repo(_coord), group_public_id="grp-b")
+    halt = await _sql_repo(_coord).get_active_paired_execution_halt("", "pairs-alpha", _GROUP_KEY)
+    assert halt is not None
+    await _sql_repo(_coord).clear_paired_execution_halt(halt["public_id"], datetime.now(UTC))
+    await _coord._recover_paired_execution_guard_state()
+    assert _coord.trade_service.is_halted(_BTC_SHARD) is False
+
+
+@pytest.mark.asyncio
+async def test_guard_recovery_does_not_wake_outbox_without_owned_armed_leg(
+    _coord: TraderCoordinator,
+) -> None:
+    """The outbox is not woken when no armed group has an owned leg.
+
+    Given: a 2-instance coordinator and an armed group whose only leg is on a
+        non-owned shard, with no halts,
+    When: paired-execution guard recovery runs,
+    Then: the outbox is not woken — there is nothing of this coordinator's to
+        re-dispatch.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=2)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-a", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-a",
+        group_public_id="grp-a",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+    )
+    await _coord._recover_paired_execution_guard_state()
+    _outbox_mock(_coord).notify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_guard_recovery_mirrors_halt_even_without_outbox(_coord: TraderCoordinator) -> None:
+    """Recovery still restores the halt mirror when the outbox is disabled.
+
+    Given: a SQL repository with an active halt over an owned leg but no outbox,
+    When: paired-execution guard recovery runs,
+    Then: the owned shard is halted and no error is raised (the outbox wake is
+        skipped when the outbox is None).
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    _coord.outbox = None
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-b", status="broken")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-b",
+        group_public_id="grp-b",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+    )
+    await _insert_scope_halt(_sql_repo(_coord), group_public_id="grp-b")
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-a", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-a",
+        group_public_id="grp-a",
+        leg_index=0,
+        shard_key=_ETH_SHARD,
+        instrument="ETH-USD",
+    )
+    await _coord._recover_paired_execution_guard_state()
+    assert _coord.trade_service.is_halted(_BTC_SHARD) is True
+
+
+@pytest.mark.asyncio
+async def test_guard_recovery_halt_mirror_failure_still_wakes_outbox(
+    _coord: TraderCoordinator,
+) -> None:
+    """A halt-mirror DB error is isolated and the independent outbox wake still fires.
+
+    Given: a real SQL repository with an armed owned group, whose active-halt
+        query is forced to raise,
+    When: paired-execution guard recovery runs,
+    Then: the mirror error is swallowed (logged) and the outbox is still woken
+        for the owned armed group, so a transient mirror error never suppresses
+        the independent re-dispatch kick nor blocks startup.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-a", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-a",
+        group_public_id="grp-a",
+        leg_index=0,
+        shard_key=_ETH_SHARD,
+        instrument="ETH-USD",
+    )
+    _sql_repo(_coord).list_active_paired_execution_halts = AsyncMock(
+        side_effect=RuntimeError("db down")
+    )
+    await _coord._recover_paired_execution_guard_state()
+    _outbox_mock(_coord).notify.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_guard_recovery_outbox_wake_failure_keeps_halt_mirror(
+    _coord: TraderCoordinator,
+) -> None:
+    """An outbox-wake DB error is swallowed after the halt mirror already ran.
+
+    Given: a real SQL repository with an active owned halt, whose armed-group
+        query is forced to raise,
+    When: paired-execution guard recovery runs,
+    Then: the mirror restored the owned shard halt FIRST, and the wake error is
+        swallowed (logged), so a wake failure neither undoes the safety-critical
+        mirror nor blocks startup.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-b", status="broken")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-b",
+        group_public_id="grp-b",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+    )
+    await _insert_scope_halt(_sql_repo(_coord), group_public_id="grp-b")
+    _sql_repo(_coord).list_active_paired_execution_groups = AsyncMock(
+        side_effect=RuntimeError("db down")
+    )
+    await _coord._recover_paired_execution_guard_state()
+    assert _coord.trade_service.is_halted(_BTC_SHARD) is True
+
+
+@pytest.mark.asyncio
+async def test_guard_recovery_mirrors_owned_halt_for_clock_skewed_future_leg(
+    _coord: TraderCoordinator,
+) -> None:
+    """Recovery halts an owned shard whose leg has a future (clock-skewed) timestamp.
+
+    Given: an active durable halt over a broken group whose only owned leg was
+        stamped with a timestamp far in the FUTURE relative to recovery's wall
+        clock (a sibling coordinator's clock skew),
+    When: paired-execution guard recovery runs,
+    Then: the owned shard is still halted, because the mirror reads CURRENT active
+        legs (known_to==MAX) rather than a temporal as-of view that would exclude
+        a future-stamped leg and leave the shard un-halted until the next scan.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-b", status="broken")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-b",
+        group_public_id="grp-b",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        timestamp=datetime(2099, 1, 1, tzinfo=UTC),
+    )
+    await _insert_scope_halt(_sql_repo(_coord), group_public_id="grp-b")
+    await _coord._recover_paired_execution_guard_state()
+    assert _coord.trade_service.is_halted(_BTC_SHARD) is True
+
+
+@pytest.mark.asyncio
+async def test_guard_recovery_per_halt_leg_error_does_not_skip_other_halts(
+    _coord: TraderCoordinator,
+) -> None:
+    """A per-halt leg-read error skips only that halt; other halted pairs still mirror.
+
+    Given: two active halts on distinct pair scopes whose leg reads are ordered so
+        the first raises and the second returns an owned leg,
+    When: paired-execution guard recovery runs,
+    Then: the first halt is logged and skipped while the SECOND halt's owned shard
+        is still halted, so one transient per-halt error never drops the mirror for
+        the other halted pairs.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_scope_halt(_sql_repo(_coord), group_key=_GROUP_KEY, group_public_id="grp-bad")
+    await _insert_scope_halt(
+        _sql_repo(_coord),
+        group_key="kraken:ADA-USD:live|kraken:SOL-USD:live",
+        group_public_id="grp-good",
+    )
+
+    async def _legs(group_public_id: str) -> list[dict[str, str]]:
+        if group_public_id == "grp-bad":
+            raise RuntimeError("db down")
+        return [{"shard_key": _BTC_SHARD}]
+
+    _sql_repo(_coord).get_current_paired_execution_legs = AsyncMock(side_effect=_legs)
+    await _coord._recover_paired_execution_guard_state()
+    assert _coord.trade_service.is_halted(_BTC_SHARD) is True

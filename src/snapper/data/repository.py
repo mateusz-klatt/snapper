@@ -8226,6 +8226,31 @@ class SQLAlchemyRepository(Repository):
             )
             return [self._paired_execution_leg_row_to_dict(leg) for leg in result.scalars().all()]
 
+    async def get_current_paired_execution_legs(
+        self,
+        group_public_id: str,
+    ) -> list[PairedExecutionLegRow]:
+        """Return the CURRENT active legs for a group ordered by leg index.
+
+        Guards on the current active row (``known_to == KNOWN_TO_MAX``), not a
+        temporal ``as_of`` view, so startup recovery rebuilding the in-memory
+        shard-halt mirror sees an owned leg even if a sibling coordinator stamped
+        it with a slightly future ``timestamp`` under clock skew — a temporal
+        ``get_paired_execution_legs(now)`` read would exclude such a leg and leave
+        its shard un-halted until the scanner catches up. Mirrors the
+        current-active guard :meth:`get_active_paired_execution_halt` uses.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(PairedExecutionLeg)
+                .where(
+                    PairedExecutionLeg.group_public_id == group_public_id,
+                    PairedExecutionLeg.known_to == KNOWN_TO_MAX,
+                )
+                .order_by(PairedExecutionLeg.leg_index)
+            )
+            return [self._paired_execution_leg_row_to_dict(leg) for leg in result.scalars().all()]
+
     async def list_active_paired_execution_legs_for_shards(
         self,
         shard_keys: list[str],
@@ -8309,6 +8334,27 @@ class SQLAlchemyRepository(Repository):
             if halt is None:
                 return None
             return self._paired_execution_halt_row_to_dict(halt)
+
+    async def list_active_paired_execution_halts(self) -> list[PairedExecutionHaltRow]:
+        """Return every CURRENT active paired-execution halt.
+
+        Lists current-active rows (``known_to == KNOWN_TO_MAX``), matching
+        :meth:`get_active_paired_execution_halt`, so startup recovery can rebuild
+        the in-memory shard-halt mirror from the authoritative durable halts: a
+        halt closed by ``clear_paired_execution_halt`` is excluded, so a
+        deliberately-cleared pair is never re-halted on restart. Bounded by the
+        number of pairs currently in failure / compensation. Ordered by
+        ``created_at`` then ``id`` for a deterministic page.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(PairedExecutionHalt)
+                .where(PairedExecutionHalt.known_to == KNOWN_TO_MAX)
+                .order_by(PairedExecutionHalt.created_at, PairedExecutionHalt.id)
+            )
+            return [
+                self._paired_execution_halt_row_to_dict(halt) for halt in result.scalars().all()
+            ]
 
     async def clear_paired_execution_halt(self, public_id: str, bus_time: datetime) -> bool:
         """Close an active paired-execution halt without inserting a successor row."""

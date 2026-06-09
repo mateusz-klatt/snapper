@@ -394,6 +394,7 @@ class TraderCoordinator(RegisterableProcess):
         self._setup_signal_subscriber()
         self._setup_trade_services()
         await self._recover_engine_state()
+        await self._recover_paired_execution_guard_state()
         await self._run_trading_loop()
 
     def _build_ownership(self) -> ShardOwnership:
@@ -590,6 +591,99 @@ class TraderCoordinator(RegisterableProcess):
             f"{sum(1 for e in self.engines.values() if e.order_in_flight)} in-flight, "
             f"{sum(1 for e in self.engines.values() if e.read_only)} degraded"
         )
+
+    async def _recover_paired_execution_guard_state(self) -> None:
+        """Rebuild paired-execution guard in-memory state from the DB on startup.
+
+        Runs AFTER :meth:`_recover_engine_state` and BEFORE the signal listener
+        starts (in :meth:`_run_trading_loop`), so a NEW grouped signal is never
+        accepted before the in-memory shard-halt mirror is restored. Both effects
+        are read-only on the DB (the guard scanner re-projects any missing durable
+        halt within one cycle):
+
+        - Halt mirror (halt-driven): for every CURRENT active durable halt,
+          re-halt this coordinator's owned leg shards in ``trade_service``. The
+          durable halt is the authoritative record, so a halt closed by
+          ``clear_paired_execution_halt`` is excluded — a deliberately-cleared
+          pair is never re-halted on restart (a group-driven restore from
+          still-``broken`` groups would wrongly re-wedge it).
+        - Outbox wake: if any active ``armed`` group has an owned leg, wake the
+          outbox once so its held commands re-dispatch immediately rather than
+          waiting for the first poll.
+
+        Gated on a SQL repository + shard ownership (skipped in tests). The halt
+        mirror and the outbox wake are INDEPENDENT best-effort steps (each wrapped
+        in its own fail-closed handler, mirroring ``_recover_engine_state``), so a
+        DB error restoring the safety-critical halt mirror never suppresses the
+        outbox wake, and neither ever blocks startup.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return
+        if self._ownership is None:
+            return
+        now = datetime.now(UTC)
+        try:
+            await self._restore_paired_execution_halt_mirror(self.repository, self._ownership)
+        except Exception as exc:
+            logger.warning(
+                f"ZMQTrader: paired-execution halt mirror recovery failed, continuing: {exc}"
+            )
+        try:
+            await self._wake_outbox_for_owned_armed_groups(self.repository, self._ownership, now)
+        except Exception as exc:
+            logger.warning(
+                f"ZMQTrader: paired-execution outbox wake recovery failed, continuing: {exc}"
+            )
+
+    async def _restore_paired_execution_halt_mirror(
+        self,
+        repository: SQLAlchemyRepository,
+        ownership: ShardOwnership,
+    ) -> None:
+        """Re-halt this coordinator's owned leg shards from every active halt.
+
+        Reads CURRENT active legs (``get_current_paired_execution_legs``), not a
+        temporal ``as_of`` view, so a leg stamped with a slightly future
+        ``timestamp`` under clock skew is still mirrored — a temporal read would
+        skip it and leave the owned shard un-halted until the scanner's next
+        cycle, reopening the very startup window this recovery closes.
+
+        Each halt is mirrored INDEPENDENTLY: a per-halt leg-read error logs and
+        skips only that halt, so one transient failure never drops the mirror for
+        the OTHER halted pairs. The scanner re-projects any skipped halt within a
+        cycle.
+        """
+        halts = await repository.list_active_paired_execution_halts()
+        for halt in halts:
+            try:
+                legs = await repository.get_current_paired_execution_legs(halt["group_public_id"])
+            except Exception as exc:
+                logger.warning(
+                    f"ZMQTrader: paired-execution halt {halt['public_id']} leg restore failed, "
+                    f"skipping: {exc}"
+                )
+                continue
+            for leg in legs:
+                if ownership.owns(leg["shard_key"]):
+                    self.trade_service.halt_shard(leg["shard_key"], halt["reason"])
+
+    async def _wake_outbox_for_owned_armed_groups(
+        self,
+        repository: SQLAlchemyRepository,
+        ownership: ShardOwnership,
+        now: datetime,
+    ) -> None:
+        """Wake the outbox once if this coordinator owns a leg of an armed group."""
+        if self.outbox is None:
+            return
+        armed = await repository.list_active_paired_execution_groups(
+            [PairedExecutionGroupStatusEnum.ARMED.value], now
+        )
+        for group in armed:
+            legs = await repository.get_paired_execution_legs(group["public_id"], now)
+            if any(ownership.owns(leg["shard_key"]) for leg in legs):
+                self.outbox.notify()
+                return
 
     async def _recover_from_checkpoints(self, now: datetime) -> set[str]:
         """Restore shards from persisted checkpoints + delta replay.

@@ -867,6 +867,43 @@ async def test_trader_coordinator_start_calls_setup_sequence(
     assert calls == ["external", "components", "subscriber", "loop"]
 
 
+@pytest.mark.asyncio
+async def test_trader_coordinator_start_runs_guard_recovery_after_engine_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """start() runs paired-execution guard recovery after engine recovery, before the loop.
+
+    Given a TraderCoordinator with the recovery and loop steps recorded,
+    When start() is called,
+    Then guard recovery runs AFTER engine recovery and BEFORE the trading loop,
+        so the in-memory halt mirror is restored before the signal listener (in
+        _run_trading_loop) can accept a NEW grouped signal.
+    """
+    _configure_settings(monkeypatch)
+    monkeypatch.setattr(
+        trader_module,
+        "_bootstrap_settings",
+        SimpleNamespace(zmq_broker_xpub="tcp://broker.xpub"),
+    )
+    coordinator = TraderCoordinator(signal_topics=["signals.paper."])
+    calls: list[str] = []
+
+    def _record(name: str) -> None:
+        calls.append(name)
+
+    coordinator_any = cast(Any, coordinator)
+    coordinator_any._setup_external_execution = MagicMock(side_effect=lambda: None)
+    coordinator_any._setup_trading_components = MagicMock(side_effect=lambda: None)
+    coordinator_any._setup_signal_subscriber = MagicMock(side_effect=lambda: None)
+    coordinator_any._recover_engine_state = AsyncMock(side_effect=lambda: _record("engine_recover"))
+    coordinator_any._recover_paired_execution_guard_state = AsyncMock(
+        side_effect=lambda: _record("guard_recover")
+    )
+    coordinator_any._run_trading_loop = AsyncMock(side_effect=lambda: _record("loop"))
+    await coordinator.start()
+    assert calls == ["engine_recover", "guard_recover", "loop"]
+
+
 def test_trader_coordinator_repr() -> None:
     """Verify repr includes signal topics.
 
