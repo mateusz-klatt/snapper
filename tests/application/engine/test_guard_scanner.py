@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 
 from snapper.application.engine.guard_scanner import PairedExecutionGuardScanner
 from snapper.application.trade.trade_service import TradeService
+from snapper.core.paired_execution import paired_halt_reason
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import PairedExecutionGroupStatusEnum
 from snapper.core.types import PairedExecutionLegStatusEnum
@@ -420,14 +421,17 @@ async def test_scanner_breaks_armed_group_on_terminal_leg(
     assert group["failure_reason"] == "leg terminal before fill"
 
 
-async def test_scanner_leaves_armed_group_with_all_legs_filled(
+async def test_scanner_completes_armed_group_with_all_legs_filled(
     _repo: SQLAlchemyRepository,
 ) -> None:
-    """An armed group whose legs all fully filled stays armed (the success path).
+    """An armed group whose legs all fully filled COMPLETES (the success path).
 
     Given: an armed group past its fill_deadline whose two legs are both filled,
     When: a scan cycle runs,
-    Then: it stays armed — the deadline is irrelevant once every leg completed.
+    Then: it is NOT broken (the deadline is irrelevant once every leg completed)
+        and instead transitions to COMPLETED, so a succeeded pair leaves every
+        scanner listing instead of staying armed forever. The exposure is the
+        strategy's intent, so no halt is projected.
     """
     await _insert_group(
         _repo,
@@ -460,7 +464,8 @@ async def test_scanner_leaves_armed_group_with_all_legs_filled(
     await _scanner(_repo)._scan_cycle(_T0)
     group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
     assert group is not None
-    assert group["status"] == PairedExecutionGroupStatusEnum.ARMED.value
+    assert group["status"] == PairedExecutionGroupStatusEnum.COMPLETED.value
+    assert await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY) is None
 
 
 async def test_scanner_leaves_armed_group_working_before_deadline(
@@ -962,8 +967,9 @@ async def test_sweep_halts_projects_for_compensating_group_without_fills(
 ) -> None:
     """A compensating group is halted even with zero fills; reason falls back.
 
-    Given: a compensating group (status exposure) whose leg has zero fills and
-        whose failure_reason is None,
+    Given: a compensating group (status exposure) whose COMPENSATING leg has
+        zero fills (a flatten still in flight blocks completion) and whose
+        failure_reason is None,
     When: a scan cycle runs,
     Then: a durable halt is still projected with the generic broken reason and
         the owned shard is halted, because compensating means flatten-in-flight.
@@ -980,6 +986,7 @@ async def test_sweep_halts_projects_for_compensating_group_without_fills(
         instrument="BTC-USD",
         shard_key=_BTC_SHARD,
         command_public_id=None,
+        status=PairedExecutionLegStatusEnum.COMPENSATING.value,
         filled_signed_qty=0.0,
     )
     await _scanner(_repo, trade_service=trade_service)._scan_cycle(_T0)
@@ -1235,7 +1242,9 @@ async def test_sweep_compensating_skips_non_live_original(_repo: SQLAlchemyRepos
     When: a scan cycle runs,
     Then: no cancel command is emitted by the compensation sweep — the held
         command is cancelled-as-a-row by the broken sweep, never sent to the
-        venue. (The group is not moved to compensating by this sweep.)
+        venue — and with the leg then cancelled at zero exposure the fully
+        resolved group COMPLETES the same cycle (Phase 5d.3) rather than
+        lingering broken forever.
     """
     await _insert_group(
         _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
@@ -1256,7 +1265,7 @@ async def test_sweep_compensating_skips_non_live_original(_repo: SQLAlchemyRepos
     assert len(await _cancel_commands(_repo, "grp-1")) == 0
     group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
     assert group is not None
-    assert group["status"] == PairedExecutionGroupStatusEnum.BROKEN.value
+    assert group["status"] == PairedExecutionGroupStatusEnum.COMPLETED.value
 
 
 async def test_sweep_compensating_is_idempotent_across_cycles(
@@ -1955,12 +1964,13 @@ async def test_sweep_compensating_escalates_when_spec_missing(
 async def test_sweep_compensating_skips_terminal_leg_without_exposure(
     _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A cancelled leg that never filled is a no-op (no flatten, no escalation).
+    """A cancelled leg that never filled emits no flatten and the group completes.
 
     Given: a broken group with an owned cancelled leg that carries zero fill,
     When: a scan cycle runs,
-    Then: no flatten is emitted and the group stays broken — there is no exposure
-        to compensate (completion is Phase 5d).
+    Then: no flatten is emitted (there is no exposure to compensate) and the
+        fully settled group COMPLETES the same cycle (Phase 5d.3) instead of
+        lingering broken.
     """
     _stub_instrument_lookups(monkeypatch, _repo)
     await _seed_flatten_leg(_repo, status="cancelled", filled_signed_qty=0.0)
@@ -1968,7 +1978,7 @@ async def test_sweep_compensating_skips_terminal_leg_without_exposure(
     assert len(await _flatten_commands(_repo, "grp-1")) == 0
     group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
     assert group is not None
-    assert group["status"] == PairedExecutionGroupStatusEnum.BROKEN.value
+    assert group["status"] == PairedExecutionGroupStatusEnum.COMPLETED.value
 
 
 async def test_sweep_compensating_flatten_is_idempotent_across_cycles(
@@ -2356,3 +2366,233 @@ async def test_sweep_compensating_leaves_a_settled_flattened_leg_untouched(
     await _scanner(_repo)._sweep_compensating(_T0)
     legs = await _repo.get_current_paired_execution_legs("grp-fl")
     assert legs[0]["status"] == PairedExecutionLegStatusEnum.FLATTENED.value
+
+
+async def _insert_halt_row(
+    repo: SQLAlchemyRepository,
+    *,
+    group_public_id: str,
+    group_key: str = _GROUP_KEY,
+) -> None:
+    """Insert an active durable halt for the default wallet/strategy scope."""
+    await repo.insert_paired_execution_halt(
+        {
+            "wallet_public_id": _WALLET,
+            "operator_public_id": _OPERATOR,
+            "strategy_id": "pairs-alpha",
+            "mode": "live",
+            "group_key": group_key,
+            "group_public_id": group_public_id,
+            "reason": "paired-execution group broken",
+            "created_at": _T0,
+            "session_id": _SESSION,
+            "sequence_id": 1,
+            "timestamp": _T0,
+        }
+    )
+
+
+_SCOPE_KEY = paired_halt_reason(_WALLET, "pairs-alpha", _GROUP_KEY)
+
+
+async def test_scan_cycle_completes_settled_group_clears_halt_and_releases_mirror(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A settled compensating group completes, its halt clears and its mirror frees.
+
+    Given: a compensating group whose only leg is cancelled at zero exposure,
+        an active durable halt on its scope, and the owned shard mirrored
+        halted under the scope reason key,
+    When: one scan cycle runs,
+    Then: the group is COMPLETED, the durable halt is cleared, and the
+        in-memory mirror is released — the pair can trade again within a
+        single cycle of settling.
+    """
+    trade_service = TradeService()
+    trade_service.halt_shard(_BTC_SHARD, _SCOPE_KEY)
+    await _insert_group(
+        _repo, public_id="grp-done", status=PairedExecutionGroupStatusEnum.COMPENSATING.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-done",
+        group_public_id="grp-done",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id=None,
+        status=PairedExecutionLegStatusEnum.CANCELLED.value,
+        filled_signed_qty=0.0,
+    )
+    await _insert_halt_row(_repo, group_public_id="grp-done")
+    await _scanner(_repo, trade_service=trade_service)._scan_cycle(_T0)
+    group = await _repo.get_paired_execution_group("grp-done", _FUTURE)
+    assert group is not None
+    assert group["status"] == PairedExecutionGroupStatusEnum.COMPLETED.value
+    assert await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY) is None
+    assert trade_service.is_halted(_BTC_SHARD) is False
+
+
+async def test_halt_survives_when_sibling_scope_group_still_exposed(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Completing one group never clears a halt still covering a scope sibling.
+
+    Given: two groups on the SAME scope — one settled (completes this cycle)
+        and one broken with a flatten still in flight — plus the scope's
+        durable halt and a mirrored owned shard,
+    When: one scan cycle runs,
+    Then: the settled group completes but the halt row and the in-memory
+        mirror BOTH survive, because the sibling group still needs them.
+    """
+    trade_service = TradeService()
+    trade_service.halt_shard(_BTC_SHARD, _SCOPE_KEY)
+    await _insert_group(
+        _repo, public_id="grp-a", status=PairedExecutionGroupStatusEnum.COMPENSATING.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-a",
+        group_public_id="grp-a",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id=None,
+        status=PairedExecutionLegStatusEnum.CANCELLED.value,
+        filled_signed_qty=0.0,
+    )
+    await _insert_group(
+        _repo, public_id="grp-b", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-b",
+        group_public_id="grp-b",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id=None,
+        status=PairedExecutionLegStatusEnum.COMPENSATING.value,
+        filled_signed_qty=0.0,
+    )
+    await _insert_halt_row(_repo, group_public_id="grp-a")
+    await _scanner(_repo, trade_service=trade_service)._scan_cycle(_T0)
+    group_a = await _repo.get_paired_execution_group("grp-a", _FUTURE)
+    assert group_a is not None
+    assert group_a["status"] == PairedExecutionGroupStatusEnum.COMPLETED.value
+    assert (
+        await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY) is not None
+    )
+    assert trade_service.is_halted(_BTC_SHARD) is True
+
+
+async def test_sweep_halt_clears_releases_stale_halt_after_crash(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A halt orphaned by a crash between completion and clear self-heals.
+
+    Given: a group already COMPLETED (a prior coordinator completed it and died
+        before clearing) whose scope still carries the durable halt and a
+        mirrored owned shard,
+    When: one scan cycle runs (no sweep lists the completed group),
+    Then: the quiet-halt sweep clears the stale halt and releases the mirror —
+        the wedge Codex's E3 review flagged for the one-shot design.
+    """
+    trade_service = TradeService()
+    trade_service.halt_shard(_BTC_SHARD, _SCOPE_KEY)
+    await _insert_group(
+        _repo, public_id="grp-crash", status=PairedExecutionGroupStatusEnum.COMPLETED.value
+    )
+    await _insert_halt_row(_repo, group_public_id="grp-crash")
+    await _scanner(_repo, trade_service=trade_service)._scan_cycle(_T0)
+    assert await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY) is None
+    assert trade_service.is_halted(_BTC_SHARD) is False
+
+
+async def test_sweep_halt_clears_releases_orphan_mirror_and_spares_other_reasons(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A mirror whose durable halt vanished is released; other reasons survive.
+
+    Given: an owned shard halted BOTH under a paired scope key whose durable
+        halt no longer exists (an operator cleared it, or another coordinator's
+        sweep won) AND under a reconciliation reason,
+    When: one scan cycle runs,
+    Then: the paired mirror reason is released (no active halt backs it) while
+        the reconciliation halt keeps the shard halted — the release is
+        reason-scoped, never blunt.
+    """
+    trade_service = TradeService()
+    trade_service.halt_shard(_BTC_SHARD, _SCOPE_KEY)
+    trade_service.halt_shard(_BTC_SHARD, "3 consecutive reconciliation failures")
+    await _scanner(_repo, trade_service=trade_service)._scan_cycle(_T0)
+    assert trade_service.shard_halt_reasons_with_prefix("paired-execution:") == []
+    assert trade_service.is_halted(_BTC_SHARD) is True
+
+
+async def test_sweep_halt_clears_keeps_mirror_when_halt_recreated_mid_sweep(
+    _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A halt re-created between the clear pass and the release keeps its mirror.
+
+    Given: an owned shard mirrored under a scope key whose halt is absent on
+        the sweep's FIRST listing but present again on the post-clear re-list
+        (a sibling coordinator re-created it mid-sweep),
+    When: the quiet-halt sweep runs,
+    Then: the mirror is NOT released — the surviving set is built from the
+        fresh post-clear read, so a release can only lag a real clear, never
+        lead a re-creation.
+    """
+    trade_service = TradeService()
+    trade_service.halt_shard(_BTC_SHARD, _SCOPE_KEY)
+    recreated_halt = {
+        "wallet_public_id": _WALLET,
+        "strategy_id": "pairs-alpha",
+        "group_key": _GROUP_KEY,
+        "group_public_id": "grp-re",
+        "reason": "paired-execution group broken",
+    }
+    monkeypatch.setattr(
+        _repo,
+        "list_active_paired_execution_halts",
+        AsyncMock(side_effect=[[], [recreated_halt]]),
+    )
+    await _scanner(_repo, trade_service=trade_service)._sweep_halt_clears(_T0)
+    assert trade_service.is_halted(_BTC_SHARD) is True
+    assert trade_service.shard_halt_reasons_with_prefix("paired-execution:") == [
+        (_BTC_SHARD, _SCOPE_KEY)
+    ]
+
+
+async def test_sweep_halts_mirror_uses_scope_reason_key(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """The halt sweep mirrors owned shards under the canonical scope reason key.
+
+    Given: a compensating group with an owned flatten-in-flight leg (blocks
+        completion, status exposure),
+    When: one scan cycle runs,
+    Then: the owned shard's in-memory halt reason is exactly the scope key the
+        quiet-halt sweep and the recovery mirror use — byte-identical keys are
+        what make the reason-scoped release line up across all three writers.
+    """
+    trade_service = TradeService()
+    await _insert_group(
+        _repo, public_id="grp-key", status=PairedExecutionGroupStatusEnum.COMPENSATING.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-key",
+        group_public_id="grp-key",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id=None,
+        status=PairedExecutionLegStatusEnum.COMPENSATING.value,
+        filled_signed_qty=0.0,
+    )
+    await _scanner(_repo, trade_service=trade_service)._scan_cycle(_T0)
+    assert trade_service.is_halted(_BTC_SHARD) is True
+    assert trade_service.shard_halt_reasons_with_prefix("paired-execution:") == [
+        (_BTC_SHARD, _SCOPE_KEY)
+    ]

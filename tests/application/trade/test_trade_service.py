@@ -317,6 +317,97 @@ def test_recon_success_resets_counter() -> None:
     assert halted is False
 
 
+def test_reason_scoped_unhalt_releases_only_its_reason() -> None:
+    """A reason-scoped un-halt releases exactly its halt source.
+
+    Given: a shard halted for two distinct reasons,
+    When: unhalt_shard runs with the first reason, then with the second,
+    Then: the shard stays halted while any reason remains and un-halts only
+        when the last one is released.
+    """
+    svc = TradeService()
+    svc.halt_shard("kraken.BTC-USD.live", "paired-execution:w:s:k")
+    svc.halt_shard("kraken.BTC-USD.live", "manual operator hold")
+    svc.unhalt_shard("kraken.BTC-USD.live", "paired-execution:w:s:k")
+    assert svc.is_halted("kraken.BTC-USD.live") is True
+    svc.unhalt_shard("kraken.BTC-USD.live", "manual operator hold")
+    assert svc.is_halted("kraken.BTC-USD.live") is False
+
+
+def test_reason_scoped_unhalt_is_failsafe_for_unregistered_reason() -> None:
+    """An un-halt for a reason that was never registered is a strict no-op.
+
+    Given: a shard halted by the reconciliation circuit breaker (a dynamic
+        reason string the paired guard never knows),
+    When: unhalt_shard runs with a paired-execution reason key,
+    Then: the shard stays halted — an automated paired un-halt can never clear
+        someone else's halt.
+    """
+    svc = TradeService()
+    for _ in range(3):
+        svc.record_recon_failure("kraken.BTC-USD.live", max_failures=3)
+    assert svc.is_halted("kraken.BTC-USD.live") is True
+    svc.unhalt_shard("kraken.BTC-USD.live", "paired-execution:w:s:k")
+    assert svc.is_halted("kraken.BTC-USD.live") is True
+
+
+def test_reason_scoped_unhalt_keeps_recon_counter() -> None:
+    """Releasing the last reason un-halts but never resets the recon counter.
+
+    Given: a shard with 2 accumulated recon failures (not yet halted) that the
+        paired guard then halts and releases,
+    When: one more recon failure arrives after the reason-scoped release,
+    Then: the shard halts at the 3-failure threshold — the scoped un-halt did
+        not erase the failure history the way the blunt operator clear does.
+    """
+    svc = TradeService()
+    svc.record_recon_failure("kraken.BTC-USD.live", max_failures=3)
+    svc.record_recon_failure("kraken.BTC-USD.live", max_failures=3)
+    svc.halt_shard("kraken.BTC-USD.live", "paired-execution:w:s:k")
+    svc.unhalt_shard("kraken.BTC-USD.live", "paired-execution:w:s:k")
+    assert svc.is_halted("kraken.BTC-USD.live") is False
+    halted = svc.record_recon_failure("kraken.BTC-USD.live", max_failures=3)
+    assert halted is True
+
+
+def test_blunt_unhalt_clears_all_reasons_and_recon_counter() -> None:
+    """The operator's blunt un-halt clears every reason and the recon counter.
+
+    Given: a shard halted for both a paired reason and 3 recon failures,
+    When: unhalt_shard runs without a reason,
+    Then: the shard un-halts wholesale and the next recon failure starts the
+        count from zero (no immediate re-halt).
+    """
+    svc = TradeService()
+    svc.halt_shard("kraken.BTC-USD.live", "paired-execution:w:s:k")
+    for _ in range(3):
+        svc.record_recon_failure("kraken.BTC-USD.live", max_failures=3)
+    svc.unhalt_shard("kraken.BTC-USD.live")
+    assert svc.is_halted("kraken.BTC-USD.live") is False
+    halted = svc.record_recon_failure("kraken.BTC-USD.live", max_failures=3)
+    assert halted is False
+
+
+def test_shard_halt_reasons_with_prefix_filters_and_sorts() -> None:
+    """The prefix read model returns only matching reasons, deterministically.
+
+    Given: two shards carrying a mix of paired-execution and other halt reasons,
+    When: shard_halt_reasons_with_prefix runs with the paired prefix,
+    Then: only the paired pairs come back, sorted per shard.
+    """
+    svc = TradeService()
+    svc.halt_shard("kraken.BTC-USD.live", "paired-execution:w:s:b")
+    svc.halt_shard("kraken.BTC-USD.live", "paired-execution:w:s:a")
+    svc.halt_shard("kraken.BTC-USD.live", "3 consecutive reconciliation failures")
+    svc.halt_shard("kraken.ETH-USD.live", "paired-execution:w:s:c")
+    pairs = svc.shard_halt_reasons_with_prefix("paired-execution:")
+    assert ("kraken.BTC-USD.live", "paired-execution:w:s:a") in pairs
+    assert ("kraken.BTC-USD.live", "paired-execution:w:s:b") in pairs
+    assert ("kraken.ETH-USD.live", "paired-execution:w:s:c") in pairs
+    assert all(reason.startswith("paired-execution:") for _, reason in pairs)
+    assert len(pairs) == 3
+
+
 def test_mark_to_market() -> None:
     """Mark-to-market updates equity and tracks peak correctly.
 

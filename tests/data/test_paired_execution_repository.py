@@ -7,12 +7,17 @@ aiosqlite database.
 """
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
 
 from snapper.core.types import PairedExecutionGroupStatusEnum
@@ -2984,3 +2989,782 @@ async def test_compensation_stale_terminal_does_not_reopen_while_current_seq_in_
     active = await _active_leg_versions(_repo, leg_id, _T2)
     assert active[0].compensated_signed_qty == 14.0
     assert active[0].status == PairedExecutionLegStatusEnum.COMPENSATING.value
+
+
+async def _seed_completion_group(
+    repo: SQLAlchemyRepository,
+    *,
+    group_id: str,
+    status: str,
+    leg_statuses: list[tuple[str, float, float]],
+    timestamp: datetime = _T0,
+) -> None:
+    """Seed a 2-leg group for completion-DAL tests.
+
+    ``leg_statuses`` is one ``(status, filled_signed_qty,
+    compensated_signed_qty)`` tuple per leg; legs are indexed 0..n-1 on
+    BTC-USD / ETH-USD so a 2-leg set matches the default ``group_key``
+    (the armed completion predicate validates the full leg set).
+    """
+    await repo.insert_paired_execution_group(
+        _group_insert_row(public_id=group_id, status=status, timestamp=timestamp)
+    )
+    instruments = ["BTC-USD", "ETH-USD"]
+    for index, (leg_status, filled, compensated) in enumerate(leg_statuses):
+        await repo.insert_paired_execution_leg(
+            _leg_insert_row(
+                public_id=f"00000000-0000-0000-0001-{index:012d}",
+                group_public_id=group_id,
+                leg_index=index,
+                instrument=instruments[index],
+                shard_key=f"kraken:{instruments[index]}:live",
+                command_public_id=f"00000000-0000-0000-0002-{index:012d}",
+                client_order_id=f"cid-comp-{index}",
+                status=leg_status,
+                filled_signed_qty=filled,
+                compensated_signed_qty=compensated,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_complete_group_armed_all_filled_completes(_repo: SQLAlchemyRepository) -> None:
+    """An armed group whose complete leg set fully filled completes (happy path).
+
+    Given: an armed 2-leg group whose legs are both FILLED,
+    When: complete_paired_execution_group_if_settled runs with expected 'armed',
+    Then: the group's active successor is COMPLETED — the succeeded pair leaves
+        the in-flight set without any halt logic.
+    """
+    gid = _pid(400)
+    await _seed_completion_group(
+        _repo,
+        group_id=gid,
+        status=PairedExecutionGroupStatusEnum.ARMED.value,
+        leg_statuses=[
+            (PairedExecutionLegStatusEnum.FILLED.value, 1.0, 0.0),
+            (PairedExecutionLegStatusEnum.FILLED.value, -1.0, 0.0),
+        ],
+    )
+    completed = await _repo.complete_paired_execution_group_if_settled(
+        gid, PairedExecutionGroupStatusEnum.ARMED.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert completed is True
+    group = (await _active_group_versions(_repo, gid, _T2))[0]
+    assert group.status == PairedExecutionGroupStatusEnum.COMPLETED.value
+
+
+@pytest.mark.asyncio
+async def test_complete_group_armed_rejects_partial_fill_and_incomplete_set(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """An armed group with a partial leg or a partial leg SET never completes.
+
+    Given: an armed group whose second leg is only partially filled, and another
+        armed group with a single leg (incomplete set for expected_leg_count=2),
+    When: the completion DAL runs for each,
+    Then: both return False and stay armed — completion can never bless a
+        wrong or unfinished leg set (the validated-set check also rejects a
+        vacuous set).
+    """
+    gid = _pid(401)
+    await _seed_completion_group(
+        _repo,
+        group_id=gid,
+        status=PairedExecutionGroupStatusEnum.ARMED.value,
+        leg_statuses=[
+            (PairedExecutionLegStatusEnum.FILLED.value, 1.0, 0.0),
+            (PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value, -0.4, 0.0),
+        ],
+    )
+    partial = await _repo.complete_paired_execution_group_if_settled(
+        gid, PairedExecutionGroupStatusEnum.ARMED.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    gid_short = _pid(402)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(public_id=gid_short, status=PairedExecutionGroupStatusEnum.ARMED.value)
+    )
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=_pid(403),
+            group_public_id=gid_short,
+            leg_index=0,
+            command_public_id=_pid(404),
+            client_order_id="cid-short-set",
+            status=PairedExecutionLegStatusEnum.FILLED.value,
+            filled_signed_qty=1.0,
+        )
+    )
+    incomplete = await _repo.complete_paired_execution_group_if_settled(
+        gid_short, PairedExecutionGroupStatusEnum.ARMED.value, _T1, _NEXT_SESSION_ID, 3
+    )
+    assert partial is False
+    assert incomplete is False
+    assert (await _active_group_versions(_repo, gid, _T2))[
+        0
+    ].status == PairedExecutionGroupStatusEnum.ARMED.value
+    assert (await _active_group_versions(_repo, gid_short, _T2))[
+        0
+    ].status == PairedExecutionGroupStatusEnum.ARMED.value
+
+
+@pytest.mark.asyncio
+async def test_complete_group_compensating_settled_mix_completes(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A compensating group whose legs all settled at zero open completes.
+
+    Given: a compensating group with one FLATTENED leg (filled=+10,
+        compensated=+10) and one FILLED leg whose residual was zeroed by a late
+        flatten fill report (filled=-5, compensated=-5 — reachable because only
+        COMPENSATING legs transition in the compensation recompute),
+    When: the completion DAL runs with expected 'compensating',
+    Then: the group completes — both legs are terminal with zero open exposure.
+    """
+    gid = _pid(405)
+    await _seed_completion_group(
+        _repo,
+        group_id=gid,
+        status=PairedExecutionGroupStatusEnum.COMPENSATING.value,
+        leg_statuses=[
+            (PairedExecutionLegStatusEnum.FLATTENED.value, 10.0, 10.0),
+            (PairedExecutionLegStatusEnum.FILLED.value, -5.0, -5.0),
+        ],
+    )
+    completed = await _repo.complete_paired_execution_group_if_settled(
+        gid, PairedExecutionGroupStatusEnum.COMPENSATING.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert completed is True
+    group = (await _active_group_versions(_repo, gid, _T2))[0]
+    assert group.status == PairedExecutionGroupStatusEnum.COMPLETED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("blocking_status", "filled", "compensated"),
+    [
+        (PairedExecutionLegStatusEnum.COMPENSATING.value, 10.0, 4.0),
+        (PairedExecutionLegStatusEnum.PENDING.value, 0.0, 0.0),
+        (PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value, 10.0, 10.0),
+        (PairedExecutionLegStatusEnum.FILLED.value, 10.0, 4.0),
+    ],
+)
+async def test_complete_group_compensating_blocked_by_unsettled_leg(
+    _repo: SQLAlchemyRepository, blocking_status: str, filled: float, compensated: float
+) -> None:
+    """Any unsettled leg blocks completion of a compensating group.
+
+    Given: a compensating group with one fully settled flattened leg and one
+        blocking leg — a flatten in flight, a pending leg, a manual_intervention
+        leg (even at zero open — the operator owns it), or residual open
+        exposure on a filled leg,
+    When: the completion DAL runs,
+    Then: it returns False and the group stays compensating.
+    """
+    gid = _pid(406)
+    await _seed_completion_group(
+        _repo,
+        group_id=gid,
+        status=PairedExecutionGroupStatusEnum.COMPENSATING.value,
+        leg_statuses=[
+            (PairedExecutionLegStatusEnum.FLATTENED.value, 10.0, 10.0),
+            (blocking_status, filled, compensated),
+        ],
+    )
+    completed = await _repo.complete_paired_execution_group_if_settled(
+        gid, PairedExecutionGroupStatusEnum.COMPENSATING.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert completed is False
+    group = (await _active_group_versions(_repo, gid, _T2))[0]
+    assert group.status == PairedExecutionGroupStatusEnum.COMPENSATING.value
+
+
+@pytest.mark.asyncio
+async def test_complete_group_broken_zero_exposure_completes(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A broken group whose legs were all cancelled at zero fill completes.
+
+    Given: a broken group (e.g. an assembly-timeout break) whose two legs are
+        both CANCELLED with zero fills,
+    When: the completion DAL runs with expected 'broken',
+    Then: the group completes, so a fully resolved zero-exposure break stops
+        bloating every scanner listing and its pair scope quiets.
+    """
+    gid = _pid(407)
+    await _seed_completion_group(
+        _repo,
+        group_id=gid,
+        status=PairedExecutionGroupStatusEnum.BROKEN.value,
+        leg_statuses=[
+            (PairedExecutionLegStatusEnum.CANCELLED.value, 0.0, 0.0),
+            (PairedExecutionLegStatusEnum.CANCELLED.value, 0.0, 0.0),
+        ],
+    )
+    completed = await _repo.complete_paired_execution_group_if_settled(
+        gid, PairedExecutionGroupStatusEnum.BROKEN.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert completed is True
+    group = (await _active_group_versions(_repo, gid, _T2))[0]
+    assert group.status == PairedExecutionGroupStatusEnum.COMPLETED.value
+
+
+@pytest.mark.asyncio
+async def test_complete_group_guards_vacuous_held_and_status_mismatch(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """No-leg groups, held created commands and status mismatches block completion.
+
+    Given: a broken group with NO legs (corruption — never vacuously completed),
+        a settled broken group with a HELD created command carrying its
+        correlation_id (completing would strand the command in the outbox
+        backlog forever), and a settled group whose status changed since it was
+        observed,
+    When: the completion DAL runs for each,
+    Then: every call returns False, and an expected_status outside
+        armed/broken/compensating raises ValueError.
+    """
+    gid_empty = _pid(408)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(public_id=gid_empty, status=PairedExecutionGroupStatusEnum.BROKEN.value)
+    )
+    vacuous = await _repo.complete_paired_execution_group_if_settled(
+        gid_empty, PairedExecutionGroupStatusEnum.BROKEN.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    gid_held = _pid(409)
+    await _seed_completion_group(
+        _repo,
+        group_id=gid_held,
+        status=PairedExecutionGroupStatusEnum.BROKEN.value,
+        leg_statuses=[
+            (PairedExecutionLegStatusEnum.CANCELLED.value, 0.0, 0.0),
+            (PairedExecutionLegStatusEnum.CANCELLED.value, 0.0, 0.0),
+        ],
+    )
+    await _insert_created_command(_repo, public_id=_pid(410), correlation_id=gid_held)
+    held = await _repo.complete_paired_execution_group_if_settled(
+        gid_held, PairedExecutionGroupStatusEnum.BROKEN.value, _T1, _NEXT_SESSION_ID, 3
+    )
+    mismatch = await _repo.complete_paired_execution_group_if_settled(
+        gid_held, PairedExecutionGroupStatusEnum.COMPENSATING.value, _T1, _NEXT_SESSION_ID, 4
+    )
+    assert vacuous is False
+    assert held is False
+    assert mismatch is False
+    with pytest.raises(ValueError, match="not allowed"):
+        await _repo.complete_paired_execution_group_if_settled(
+            gid_held,
+            PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value,
+            _T1,
+            _NEXT_SESSION_ID,
+            5,
+        )
+
+
+@pytest.mark.asyncio
+async def test_complete_group_clamps_bus_time_for_future_stamped_group(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A future-stamped group keeps a non-inverted SCD2 interval on completion.
+
+    Given: a settled compensating group whose timestamp is ahead of the scan
+        clock (sibling clock skew),
+    When: the completion DAL runs with an earlier bus_time,
+    Then: the close / successor time is clamped to the group's own timestamp so
+        the predecessor known_to never precedes its timestamp.
+    """
+    future = _T0 + timedelta(seconds=30)
+    gid = _pid(411)
+    await _seed_completion_group(
+        _repo,
+        group_id=gid,
+        status=PairedExecutionGroupStatusEnum.COMPENSATING.value,
+        leg_statuses=[
+            (PairedExecutionLegStatusEnum.FLATTENED.value, 1.0, 1.0),
+            (PairedExecutionLegStatusEnum.CANCELLED.value, 0.0, 0.0),
+        ],
+        timestamp=future,
+    )
+    completed = await _repo.complete_paired_execution_group_if_settled(
+        gid, PairedExecutionGroupStatusEnum.COMPENSATING.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert completed is True
+    async with _repo.session() as session:
+        versions = list(
+            (
+                await session.execute(
+                    select(PairedExecutionGroup)
+                    .where(PairedExecutionGroup.public_id == gid)
+                    .order_by(PairedExecutionGroup.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    predecessor, successor = versions
+    assert predecessor.known_to == future
+    assert predecessor.known_to >= predecessor.timestamp
+    assert successor.timestamp == future
+    assert successor.known_to == KNOWN_TO_MAX
+
+
+@pytest.mark.asyncio
+async def test_clear_halt_if_scope_quiet_clears_only_quiet_scope(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """The scope-quiet clear closes a quiet scope's halt and spares an exposed one.
+
+    Given: an active halt on a scope whose only group is COMPLETED, and another
+        halt on a scope that still carries a BROKEN group,
+    When: clear_paired_execution_halt_if_scope_quiet runs for each scope,
+    Then: the quiet scope's halt is closed (True) while the exposed scope's halt
+        survives (False) — a sibling group still failing keeps its protection.
+    """
+    quiet_gid = _pid(420)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(
+            public_id=quiet_gid, status=PairedExecutionGroupStatusEnum.COMPLETED.value
+        )
+    )
+    await _repo.ensure_paired_execution_halt(_halt_insert_row(group_public_id=quiet_gid))
+    exposed_gid = _pid(421)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(
+            public_id=exposed_gid,
+            status=PairedExecutionGroupStatusEnum.BROKEN.value,
+            group_key=_OTHER_GROUP_KEY,
+        )
+    )
+    await _repo.ensure_paired_execution_halt(
+        _halt_insert_row(group_public_id=exposed_gid, group_key=_OTHER_GROUP_KEY)
+    )
+    quiet = await _repo.clear_paired_execution_halt_if_scope_quiet(
+        _WALLET_ID, _STRATEGY_ID, _GROUP_KEY, _T1
+    )
+    exposed = await _repo.clear_paired_execution_halt_if_scope_quiet(
+        _WALLET_ID, _STRATEGY_ID, _OTHER_GROUP_KEY, _T1
+    )
+    assert quiet is True
+    assert exposed is False
+    assert (
+        await _repo.get_active_paired_execution_halt(_WALLET_ID, _STRATEGY_ID, _GROUP_KEY) is None
+    )
+    assert (
+        await _repo.get_active_paired_execution_halt(_WALLET_ID, _STRATEGY_ID, _OTHER_GROUP_KEY)
+        is not None
+    )
+
+
+@pytest.mark.asyncio
+async def test_clear_halt_if_scope_quiet_without_halt_is_false_and_clamps(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A quiet scope without a halt is False; a future-stamped halt clamps its close.
+
+    Given: a quiet scope with no halt row, then a quiet scope whose halt is
+        stamped ahead of the clock,
+    When: the scope-quiet clear runs,
+    Then: the missing halt returns False, and the future-stamped halt closes at
+        its own timestamp (clamped, never inverting the SCD2 interval).
+    """
+    missing = await _repo.clear_paired_execution_halt_if_scope_quiet(
+        _WALLET_ID, _STRATEGY_ID, _GROUP_KEY, _T1
+    )
+    assert missing is False
+    future = _T0 + timedelta(seconds=30)
+    await _repo.ensure_paired_execution_halt(
+        _halt_insert_row(public_id=_pid(422), timestamp=future)
+    )
+    cleared = await _repo.clear_paired_execution_halt_if_scope_quiet(
+        _WALLET_ID, _STRATEGY_ID, _GROUP_KEY, _T1
+    )
+    assert cleared is True
+    async with _repo.session() as session:
+        halt = (
+            (
+                await session.execute(
+                    select(PairedExecutionHalt).where(PairedExecutionHalt.public_id == _pid(422))
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert halt.known_to == future
+
+
+@pytest.mark.asyncio
+async def test_late_fill_reopens_completed_group_to_compensating(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A late original fill with residual reopens a COMPLETED group in one tx.
+
+    Given: a COMPLETED group whose flattened leg (filled=+10, compensated=+10)
+        receives a late ORIGINAL fill growing the cumulative to +15,
+    When: project_paired_execution_leg_fill runs,
+    Then: the leg reopens to FILLED with the residual (+5) and the group's
+        active successor is COMPENSATING with a stamped failure_reason — so the
+        scanner (which never lists completed groups) sees and re-flattens it.
+    """
+    gid = _pid(430)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(public_id=gid, status=PairedExecutionGroupStatusEnum.COMPLETED.value)
+    )
+    leg_id = _pid(431)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            group_public_id=gid,
+            side="buy",
+            command_public_id=_pid(432),
+            client_order_id="cid-reopen",
+            status=PairedExecutionLegStatusEnum.FLATTENED.value,
+            filled_signed_qty=10.0,
+            compensated_signed_qty=10.0,
+        )
+    )
+    applied = await _repo.project_paired_execution_leg_fill(
+        "cid-reopen", 15.0, PairedExecutionLegStatusEnum.FILLED.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert applied == PairedFillProjection.ORIGINAL_APPLIED
+    leg = (await _active_leg_versions(_repo, leg_id, _T2))[0]
+    assert leg.filled_signed_qty == 15.0
+    assert leg.status == PairedExecutionLegStatusEnum.FILLED.value
+    group = (await _active_group_versions(_repo, gid, _T2))[0]
+    assert group.status == PairedExecutionGroupStatusEnum.COMPENSATING.value
+    assert group.failure_reason == "late fill after completion"
+
+
+@pytest.mark.asyncio
+async def test_late_fill_with_zero_residual_keeps_group_completed(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A late fill that lands at zero open never reopens a completed group.
+
+    Given: a COMPLETED group whose flattened leg was over-compensated
+        (filled=+3, compensated=+5) and a late fill grows filled to exactly +5,
+    When: the fill projects,
+    Then: the leg accounting updates but open is zero, so the group's active
+        row stays COMPLETED with a single version (no successor written).
+    """
+    gid = _pid(433)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(public_id=gid, status=PairedExecutionGroupStatusEnum.COMPLETED.value)
+    )
+    leg_id = _pid(434)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            group_public_id=gid,
+            side="buy",
+            command_public_id=_pid(435),
+            client_order_id="cid-zero-reopen",
+            status=PairedExecutionLegStatusEnum.FLATTENED.value,
+            filled_signed_qty=3.0,
+            compensated_signed_qty=5.0,
+        )
+    )
+    applied = await _repo.project_paired_execution_leg_fill(
+        "cid-zero-reopen", 5.0, PairedExecutionLegStatusEnum.FILLED.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert applied == PairedFillProjection.ORIGINAL_APPLIED
+    leg = (await _active_leg_versions(_repo, leg_id, _T2))[0]
+    assert leg.filled_signed_qty == 5.0
+    assert leg.status == PairedExecutionLegStatusEnum.FLATTENED.value
+    async with _repo.session() as session:
+        versions = list(
+            (
+                await session.execute(
+                    select(PairedExecutionGroup).where(PairedExecutionGroup.public_id == gid)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(versions) == 1
+    assert versions[0].status == PairedExecutionGroupStatusEnum.COMPLETED.value
+
+
+@pytest.mark.asyncio
+async def test_late_fill_on_filled_leg_of_completed_group_reopens(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A growing fill on a FILLED (non-terminal-status) leg still reopens the group.
+
+    Given: a COMPLETED group whose FILLED leg sits at zero open (filled=+10,
+        compensated=+10) and the original order reports MORE cumulative (+12),
+    When: the fill projects,
+    Then: the group reopens to COMPENSATING — the reopen triggers on residual
+        exposure, not on the leg's status family.
+    """
+    gid = _pid(436)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(public_id=gid, status=PairedExecutionGroupStatusEnum.COMPLETED.value)
+    )
+    leg_id = _pid(437)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            group_public_id=gid,
+            side="buy",
+            command_public_id=_pid(438),
+            client_order_id="cid-filled-reopen",
+            status=PairedExecutionLegStatusEnum.FILLED.value,
+            filled_signed_qty=10.0,
+            compensated_signed_qty=10.0,
+        )
+    )
+    applied = await _repo.project_paired_execution_leg_fill(
+        "cid-filled-reopen",
+        12.0,
+        PairedExecutionLegStatusEnum.FILLED.value,
+        _T1,
+        _NEXT_SESSION_ID,
+        2,
+    )
+    assert applied == PairedFillProjection.ORIGINAL_APPLIED
+    group = (await _active_group_versions(_repo, gid, _T2))[0]
+    assert group.status == PairedExecutionGroupStatusEnum.COMPENSATING.value
+
+
+@pytest.mark.asyncio
+async def test_grouped_fill_path_handles_no_longer_completed_and_absent_groups(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """The group-first path writes the leg even when the group moved on or is gone.
+
+    Given: a leg whose group is COMPENSATING (no longer completed — the fast
+        path's detection raced a reopen) and another leg whose group row does
+        not exist at all,
+    When: the group-first projection path runs directly for each,
+    Then: both legs' fills apply without a group successor — the scanner
+        already sees a compensating group, and a missing group is corruption
+        that must not block fill accounting.
+    """
+    gid = _pid(440)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(public_id=gid, status=PairedExecutionGroupStatusEnum.COMPENSATING.value)
+    )
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=_pid(441),
+            group_public_id=gid,
+            side="buy",
+            command_public_id=_pid(442),
+            client_order_id="cid-grp-moved",
+            status=PairedExecutionLegStatusEnum.FLATTENED.value,
+            filled_signed_qty=10.0,
+            compensated_signed_qty=10.0,
+        )
+    )
+    moved = await _repo._project_original_fill_grouped(
+        "cid-grp-moved",
+        15.0,
+        PairedExecutionLegStatusEnum.FILLED.value,
+        _T1,
+        _NEXT_SESSION_ID,
+        2,
+        None,
+        None,
+    )
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=_pid(443),
+            group_public_id=_pid(449),
+            leg_index=1,
+            side="buy",
+            command_public_id=_pid(444),
+            client_order_id="cid-grp-gone",
+            status=PairedExecutionLegStatusEnum.FLATTENED.value,
+            filled_signed_qty=10.0,
+            compensated_signed_qty=10.0,
+        )
+    )
+    gone = await _repo._project_original_fill_grouped(
+        "cid-grp-gone",
+        15.0,
+        PairedExecutionLegStatusEnum.FILLED.value,
+        _T1,
+        _NEXT_SESSION_ID,
+        3,
+        None,
+        None,
+    )
+    assert moved == PairedFillProjection.ORIGINAL_APPLIED
+    assert gone == PairedFillProjection.ORIGINAL_APPLIED
+    group_versions = await _active_group_versions(_repo, gid, _T2)
+    assert group_versions[0].status == PairedExecutionGroupStatusEnum.COMPENSATING.value
+
+
+@pytest.mark.asyncio
+async def test_grouped_fill_path_no_match_and_noop_guards(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """The group-first path repeats the NO_MATCH and monotonic guards under lock.
+
+    Given: no leg for the order id, then a completed group's leg replayed with a
+        non-growing cumulative,
+    When: the group-first projection path runs directly,
+    Then: NO_MATCH and ORIGINAL_NOOP are returned exactly like the fast path.
+    """
+    absent = await _repo._project_original_fill_grouped(
+        "cid-none",
+        5.0,
+        PairedExecutionLegStatusEnum.FILLED.value,
+        _T1,
+        _NEXT_SESSION_ID,
+        2,
+        None,
+        None,
+    )
+    gid = _pid(445)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(public_id=gid, status=PairedExecutionGroupStatusEnum.COMPLETED.value)
+    )
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=_pid(446),
+            group_public_id=gid,
+            side="buy",
+            command_public_id=_pid(447),
+            client_order_id="cid-grp-noop",
+            status=PairedExecutionLegStatusEnum.FLATTENED.value,
+            filled_signed_qty=10.0,
+            compensated_signed_qty=10.0,
+        )
+    )
+    stale = await _repo._project_original_fill_grouped(
+        "cid-grp-noop",
+        10.0,
+        PairedExecutionLegStatusEnum.FILLED.value,
+        _T1,
+        _NEXT_SESSION_ID,
+        3,
+        None,
+        None,
+    )
+    assert absent == PairedFillProjection.NO_MATCH
+    assert stale == PairedFillProjection.ORIGINAL_NOOP
+
+
+@pytest.mark.asyncio
+async def test_list_recent_completed_groups_windows_by_completion_time(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """The completed-group listing returns only groups completed inside the window.
+
+    Given: one group completed at T0 and another whose completion successor is
+        stamped 10 days earlier,
+    When: list_recent_completed_paired_execution_groups runs with a cutoff
+        between the two,
+    Then: only the recent completion is returned — the bounded recovery window.
+    """
+    recent = _pid(450)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(public_id=recent, status=PairedExecutionGroupStatusEnum.COMPLETED.value)
+    )
+    old = _pid(451)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(
+            public_id=old,
+            status=PairedExecutionGroupStatusEnum.COMPLETED.value,
+            timestamp=_T0 - timedelta(days=10),
+            created_at=_T0 - timedelta(days=10),
+        )
+    )
+    rows = await _repo.list_recent_completed_paired_execution_groups(_T0 - timedelta(days=7))
+    assert [row["public_id"] for row in rows] == [recent]
+
+
+@pytest.mark.asyncio
+async def test_complete_group_ignores_created_compensation_command(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A momentarily-created COMPENSATION command never blocks completion.
+
+    Given: a settled broken group whose correlation_id is carried by a created
+        command that SUPERSEDES an original (a compensation cancel / flatten the
+        outbox dispatches regardless of group status),
+    When: the completion DAL runs,
+    Then: the group completes — only a held created ORIGINAL (which the outbox
+        gate would strand forever) blocks completion.
+    """
+    gid = _pid(460)
+    await _seed_completion_group(
+        _repo,
+        group_id=gid,
+        status=PairedExecutionGroupStatusEnum.BROKEN.value,
+        leg_statuses=[
+            (PairedExecutionLegStatusEnum.CANCELLED.value, 0.0, 0.0),
+            (PairedExecutionLegStatusEnum.CANCELLED.value, 0.0, 0.0),
+        ],
+    )
+    await _insert_created_command(
+        _repo,
+        public_id=_pid(461),
+        correlation_id=gid,
+        supersedes_command_id=_pid(462),
+    )
+    completed = await _repo.complete_paired_execution_group_if_settled(
+        gid, PairedExecutionGroupStatusEnum.BROKEN.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert completed is True
+    group = (await _active_group_versions(_repo, gid, _T2))[0]
+    assert group.status == PairedExecutionGroupStatusEnum.COMPLETED.value
+
+
+@pytest.mark.asyncio
+async def test_grouped_fill_path_no_match_when_leg_vanishes_under_lock(
+    _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leg that vanishes between the unlocked peek and the lock is NO_MATCH.
+
+    Given: the group-first projection path whose unlocked peek resolves a leg
+        but whose subsequent locked re-read finds it gone (a defensive
+        re-validation against concurrent mutation),
+    When: the path runs with the lock helper stubbed to that sequence,
+    Then: it returns NO_MATCH without writing anything.
+    """
+    fake_peek = SimpleNamespace(group_public_id=_pid(999))
+    monkeypatch.setattr(
+        _repo,
+        "_lock_leg_by_client_order_id",
+        AsyncMock(side_effect=[fake_peek, None]),
+    )
+    result = await _repo._project_original_fill_grouped(
+        "cid-vanish",
+        5.0,
+        PairedExecutionLegStatusEnum.FILLED.value,
+        _T1,
+        _NEXT_SESSION_ID,
+        2,
+        None,
+        None,
+    )
+    assert result == PairedFillProjection.NO_MATCH
+
+
+@pytest.mark.asyncio
+async def test_clear_halt_if_scope_quiet_fails_safe_on_lock_conflict(
+    _repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lock conflict on the scope's group rows aborts the clear fail-safe.
+
+    Given: the scope-group FOR UPDATE NOWAIT read raising a database lock
+        error (a concurrent reopen / completion holds a scope group row),
+    When: clear_paired_execution_halt_if_scope_quiet runs,
+    Then: it returns False without touching the halt — the quiet decision is
+        never made on a snapshot a concurrent SCD2 transition is invalidating,
+        and the next sweep cycle simply retries.
+    """
+
+    @asynccontextmanager
+    async def _conflicted_session() -> AsyncIterator[Any]:
+        yield SimpleNamespace(
+            execute=AsyncMock(side_effect=DBAPIError("stmt", None, Exception("lock not available")))
+        )
+
+    monkeypatch.setattr(_repo, "session", _conflicted_session)
+    cleared = await _repo.clear_paired_execution_halt_if_scope_quiet(
+        _WALLET_ID, _STRATEGY_ID, _GROUP_KEY, _T1
+    )
+    assert cleared is False

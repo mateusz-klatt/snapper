@@ -99,6 +99,7 @@ class ShardState:
     last_venue_event_id: int = 0
     seen_exec_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     halted: bool = False
+    halt_reasons: set[str] = field(default_factory=set)
     recon_failure_count: int = 0
     active_cycle_public_id: str | None = None
     active_cycle_max_qty: float = 0.0
@@ -562,24 +563,77 @@ class TradeService:
     def halt_shard(self, shard_key: str, reason: str) -> None:
         """Halt a shard due to circuit breaker activation.
 
+        The ``reason`` is recorded in the shard's ``halt_reasons`` set so a
+        reason-scoped :meth:`unhalt_shard` can later release exactly this halt
+        source without disturbing the others (e.g. the paired-execution guard
+        releasing its halt while a reconciliation halt stays in force).
+
         Args:
             shard_key: Unique identifier for the trading shard.
-            reason: Human-readable description of why the shard was halted.
+            reason: Human-readable description of why the shard was halted;
+                doubles as the selective un-halt key.
         """
         shard = self._get_or_create_shard(shard_key)
         shard.halted = True
+        shard.halt_reasons.add(reason)
         logger.warning(f"TradeService: shard {shard_key} HALTED: {reason}")
 
-    def unhalt_shard(self, shard_key: str) -> None:
-        """Un-halt a shard (operator-initiated recovery).
+    def unhalt_shard(self, shard_key: str, reason: str | None = None) -> None:
+        """Un-halt a shard, either bluntly (operator) or for one reason only.
+
+        Without a ``reason`` this is the operator-initiated full recovery:
+        every halt reason is cleared, the shard un-halts, and the
+        reconciliation failure counter resets — the operator has resolved the
+        shard wholesale. With a ``reason`` (Phase 5d.3, the paired-execution
+        completion path) the release is FAIL-SAFE and scoped: only a reason
+        that was actually registered is discarded, the shard un-halts only
+        when NO reasons remain, and ``recon_failure_count`` is untouched — so
+        an automated paired un-halt can never clear a reconciliation halt, an
+        operator halt, or any halt set without a matching registered reason.
 
         Args:
             shard_key: Unique identifier for the trading shard.
+            reason: The exact halt reason to release, or None for the blunt
+                operator full clear.
         """
         shard = self._get_or_create_shard(shard_key)
-        shard.halted = False
-        shard.recon_failure_count = 0
-        logger.info(f"TradeService: shard {shard_key} un-halted")
+        if reason is None:
+            shard.halt_reasons.clear()
+            shard.halted = False
+            shard.recon_failure_count = 0
+            logger.info(f"TradeService: shard {shard_key} un-halted")
+            return
+        if reason not in shard.halt_reasons:
+            return
+        shard.halt_reasons.discard(reason)
+        if not shard.halt_reasons:
+            shard.halted = False
+            logger.info(f"TradeService: shard {shard_key} un-halted ({reason})")
+
+    def shard_halt_reasons_with_prefix(self, prefix: str) -> list[tuple[str, str]]:
+        """Return every (shard_key, halt_reason) pair whose reason has the prefix.
+
+        Read model for the paired-execution quiet-halt sweep: it enumerates
+        this coordinator's in-memory PAIRED halt reasons (by the canonical
+        prefix) and releases exactly those whose scope no longer has an active
+        durable halt — including halts cleared by ANOTHER coordinator or an
+        operator, which this coordinator would otherwise never observe (the
+        cleared row stops being listed). Reasons are sorted per shard for a
+        deterministic result.
+
+        Args:
+            prefix: The reason-key prefix to match (e.g. the canonical
+                paired-execution prefix).
+
+        Returns:
+            All matching (shard_key, reason) pairs across known shards.
+        """
+        return [
+            (shard_key, reason)
+            for shard_key, shard in self._shards.items()
+            for reason in sorted(shard.halt_reasons)
+            if reason.startswith(prefix)
+        ]
 
     def record_recon_success(self, shard_key: str) -> None:
         """Record successful reconciliation, clearing failure counter.

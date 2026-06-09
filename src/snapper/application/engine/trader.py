@@ -55,6 +55,7 @@ from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
+from snapper.core.paired_execution import paired_halt_reason
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
@@ -112,6 +113,18 @@ from snapper.messaging.topics.builders import parse_order_event_topic
 from snapper.messaging.topics.builders import parse_signal_topic
 
 _bootstrap_settings = get_bootstrap_settings()
+
+_COMPLETED_GROUP_REPLAY_WINDOW = timedelta(days=7)
+"""How far back startup recovery replays fills into COMPLETED paired groups.
+
+A late original fill that landed while the coordinator was DOWN must reopen
+its completed group (the live reopen trigger never fires for events already
+persisted), but listing ALL completed groups is unbounded over a deployment's
+lifetime, so the replay is bounded to groups completed within this window.
+Venue late fills realistically trail by minutes; a week is a generous margin
+for an extended outage. A fill older than the window is reconciliation /
+operator territory.
+"""
 
 
 def _compute_pending_boundaries(
@@ -612,7 +625,12 @@ class TraderCoordinator(RegisterableProcess):
         flatten orders (Phase 5d.1 compensation parity), so a flatten that filled
         during downtime is restored too. Covers ``armed`` / ``broken`` /
         ``compensating`` / ``manual_intervention`` groups — a leg can be in any of
-        these while a sibling's flatten is mid-flight. Runs AFTER ``_recover_engine_state``
+        these while a sibling's flatten is mid-flight — plus groups COMPLETED
+        within :data:`_COMPLETED_GROUP_REPLAY_WINDOW` (Phase 5d.3): a late
+        original fill that landed during the downtime re-projects through the
+        fill DAL, whose completed-group path reopens the group to
+        ``compensating`` so the scanner re-halts and re-flattens the residual.
+        Runs AFTER ``_recover_engine_state``
         and BEFORE the trading loop, so the post-recovery guard scanner sees the
         restored exposure. Gated on a SQL repository + shard ownership; per-leg
         fail-soft so one bad leg (e.g. the data-integrity duplicate-client_order_id
@@ -631,6 +649,11 @@ class TraderCoordinator(RegisterableProcess):
                     PairedExecutionGroupStatusEnum.COMPENSATING.value,
                     PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value,
                 ]
+            )
+            groups = list(
+                groups
+            ) + await self.repository.list_recent_completed_paired_execution_groups(
+                now - _COMPLETED_GROUP_REPLAY_WINDOW
             )
         except Exception as exc:
             logger.error(
@@ -781,6 +804,12 @@ class TraderCoordinator(RegisterableProcess):
         skips only that halt, so one transient failure never drops the mirror for
         the OTHER halted pairs. The scanner re-projects any skipped halt within a
         cycle.
+
+        The mirror reason is the canonical per-scope :func:`paired_halt_reason`
+        key (NOT the durable row's human-readable reason): the scanner's halt
+        mirror and the quiet-halt sweep's reason-scoped release use the same
+        key, so a halt restored here is released the moment its scope quiets —
+        a mismatched string would strand the mirror until the next restart.
         """
         halts = await repository.list_active_paired_execution_halts()
         for halt in halts:
@@ -792,9 +821,12 @@ class TraderCoordinator(RegisterableProcess):
                     f"skipping: {exc}"
                 )
                 continue
+            mirror_reason = paired_halt_reason(
+                halt["wallet_public_id"], halt["strategy_id"], halt["group_key"]
+            )
             for leg in legs:
                 if ownership.owns(leg["shard_key"]):
-                    self.trade_service.halt_shard(leg["shard_key"], halt["reason"])
+                    self.trade_service.halt_shard(leg["shard_key"], mirror_reason)
 
     async def _wake_outbox_for_owned_armed_groups(
         self,

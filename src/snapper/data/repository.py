@@ -7968,6 +7968,29 @@ class SQLAlchemyRepository(Repository):
             PairedExecutionLegStatusEnum.BROKEN.value,
         }
     )
+    _PEL_SETTLED_STATUSES: frozenset[str] = frozenset(
+        {
+            PairedExecutionLegStatusEnum.FLATTENED.value,
+            PairedExecutionLegStatusEnum.CANCELLED.value,
+            PairedExecutionLegStatusEnum.EXPIRED.value,
+            PairedExecutionLegStatusEnum.REJECTED.value,
+            PairedExecutionLegStatusEnum.FILLED.value,
+        }
+    )
+    _PEG_COMPLETABLE_STATUSES: frozenset[str] = frozenset(
+        {
+            PairedExecutionGroupStatusEnum.ARMED.value,
+            PairedExecutionGroupStatusEnum.BROKEN.value,
+            PairedExecutionGroupStatusEnum.COMPENSATING.value,
+        }
+    )
+    _PEG_EXPOSED_STATUSES: frozenset[str] = frozenset(
+        {
+            PairedExecutionGroupStatusEnum.BROKEN.value,
+            PairedExecutionGroupStatusEnum.COMPENSATING.value,
+            PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value,
+        }
+    )
     _PEC_QTY_EPSILON: float = 1e-12
 
     @staticmethod
@@ -8307,6 +8330,21 @@ class SQLAlchemyRepository(Repository):
         ``manual_intervention`` keeps its status (the operator owns it). A normal
         in-flight leg uses the venue ``new_status`` as before.
 
+        A late growing fill that lands while the leg's GROUP is already
+        ``completed`` (Phase 5d.3) additionally reopens the group to
+        ``compensating`` in the SAME transaction whenever the leg's resulting
+        ``open_qty`` is non-zero — the guard scanner never lists completed
+        groups (terminal-status listing is unbounded), so without the reopen
+        the re-exposed leg would be invisible forever. LOCK ORDER: the
+        completion DAL locks group THEN legs, so the reopen path here also
+        locks the GROUP FIRST and only then the leg
+        (:meth:`_project_original_fill_grouped`); the common path keeps
+        today's leg-only lock (:meth:`_project_original_fill_fast`) and never
+        waits on a group lock, so no lock cycle exists. The fast path detects
+        a completed group with a NON-LOCKING read just before writing and
+        retries once through the group-first path, closing the race where the
+        group completes between the read and the leg lock.
+
         Unlike the generic :func:`close_and_insert` helper (which matches the
         predecessor with a temporal ``timestamp <= bus_time`` filter and so
         silently skips a future-stamped row), this method matches the CURRENT
@@ -8319,66 +8357,262 @@ class SQLAlchemyRepository(Repository):
         backdated before its predecessor. In the normal case
         (``bus_time >= existing.timestamp``) the clamp is a no-op.
         """
+        result = await self._project_original_fill_fast(
+            client_order_id,
+            filled_signed_qty,
+            new_status,
+            bus_time,
+            session_id,
+            sequence_id,
+            exchange_order_id,
+            last_venue_event_id,
+        )
+        if result is not None:
+            return result
+        return await self._project_original_fill_grouped(
+            client_order_id,
+            filled_signed_qty,
+            new_status,
+            bus_time,
+            session_id,
+            sequence_id,
+            exchange_order_id,
+            last_venue_event_id,
+        )
+
+    async def _project_original_fill_fast(
+        self,
+        client_order_id: str,
+        filled_signed_qty: float,
+        new_status: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+        exchange_order_id: str | None,
+        last_venue_event_id: int | None,
+    ) -> PairedFillProjection | None:
+        """Apply an original fill under the leg-only lock, or defer to the group path.
+
+        This is the common path and keeps the pre-5d.3 locking exactly: the
+        CURRENT active leg is locked ``FOR UPDATE`` by ``client_order_id`` and
+        no group lock is ever taken, so it can never participate in a lock
+        cycle with the completion DAL (which locks group then legs). Just
+        before writing, when the resulting ``open_qty`` is non-zero, the
+        group's status is read WITHOUT a lock; a ``completed`` group means the
+        write must also reopen the group, which requires the group-first lock
+        order — so this path returns ``None`` (nothing written, the session
+        discards the close) and the caller retries through
+        :meth:`_project_original_fill_grouped`. Every other outcome is final.
+        """
         async with self.session() as s:
-            matches = (
-                (
-                    await s.execute(
-                        select(PairedExecutionLeg)
-                        .where(
-                            PairedExecutionLeg.client_order_id == client_order_id,
-                            PairedExecutionLeg.known_to == KNOWN_TO_MAX,
-                        )
-                        .with_for_update()
-                        .limit(2)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            if len(matches) > 1:
-                raise ValueError(
-                    "paired-execution data integrity: "
-                    f"{len(matches)} active legs share client_order_id {client_order_id}"
-                )
-            existing = matches[0] if matches else None
+            existing = await self._lock_leg_by_client_order_id(s, client_order_id)
             if existing is None:
                 return PairedFillProjection.NO_MATCH
             if abs(filled_signed_qty) <= abs(existing.filled_signed_qty):
                 return PairedFillProjection.ORIGINAL_NOOP
-            successor_status = self._late_original_fill_status(
-                existing.status,
+            open_qty = filled_signed_qty - existing.compensated_signed_qty
+            if abs(open_qty) >= self._PEC_QTY_EPSILON:
+                group_status = (
+                    await s.execute(
+                        select(PairedExecutionGroup.status).where(
+                            PairedExecutionGroup.public_id == existing.group_public_id,
+                            PairedExecutionGroup.known_to == KNOWN_TO_MAX,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if group_status == PairedExecutionGroupStatusEnum.COMPLETED.value:
+                    return None
+            await self._write_original_fill_successor(
+                s,
+                existing,
                 filled_signed_qty,
-                existing.compensated_signed_qty,
                 new_status,
-            )
-            effective_bus_time = max(bus_time, existing.timestamp)
-            await s.execute(
-                update(PairedExecutionLeg)
-                .where(PairedExecutionLeg.id == existing.id)
-                .values(known_to=effective_bus_time)
-            )
-            s.add(
-                self._leg_successor(
-                    existing,
-                    status=successor_status,
-                    filled_signed_qty=filled_signed_qty,
-                    exchange_order_id=(
-                        exchange_order_id
-                        if exchange_order_id is not None
-                        else existing.exchange_order_id
-                    ),
-                    last_venue_event_id=(
-                        last_venue_event_id
-                        if last_venue_event_id is not None
-                        else existing.last_venue_event_id
-                    ),
-                    session_id=session_id,
-                    sequence_id=sequence_id,
-                    timestamp=effective_bus_time,
-                )
+                bus_time,
+                session_id,
+                sequence_id,
+                exchange_order_id,
+                last_venue_event_id,
             )
             await s.commit()
             return PairedFillProjection.ORIGINAL_APPLIED
+
+    async def _project_original_fill_grouped(
+        self,
+        client_order_id: str,
+        filled_signed_qty: float,
+        new_status: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+        exchange_order_id: str | None,
+        last_venue_event_id: int | None,
+    ) -> PairedFillProjection:
+        """Apply an original fill under the group-first lock, reopening if completed.
+
+        The completed-group reopen path: an UNLOCKED peek resolves the leg (and
+        its immutable ``group_public_id``), the GROUP is locked ``FOR UPDATE``
+        FIRST (matching the completion DAL's lock order, so the two can never
+        deadlock), then the leg is locked and every guard re-validated against
+        the locked rows. When the locked group is (still) ``completed`` and the
+        leg's resulting ``open_qty`` is non-zero, the group is SCD2-reopened to
+        ``compensating`` in the same transaction — stamping ``failure_reason``
+        / ``halted_at`` if unset — so the next scanner cycle re-halts the scope
+        and re-flattens the residual. A group that is no longer ``completed``
+        under the lock needs no successor (the scanner already sees it); the
+        leg write proceeds either way.
+        """
+        async with self.session() as s:
+            peek = await self._lock_leg_by_client_order_id(s, client_order_id, lock=False)
+            if peek is None:
+                return PairedFillProjection.NO_MATCH
+            group = (
+                (
+                    await s.execute(
+                        select(PairedExecutionGroup)
+                        .where(
+                            PairedExecutionGroup.public_id == peek.group_public_id,
+                            PairedExecutionGroup.known_to == KNOWN_TO_MAX,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            existing = await self._lock_leg_by_client_order_id(s, client_order_id)
+            if existing is None:
+                return PairedFillProjection.NO_MATCH
+            if abs(filled_signed_qty) <= abs(existing.filled_signed_qty):
+                return PairedFillProjection.ORIGINAL_NOOP
+            await self._write_original_fill_successor(
+                s,
+                existing,
+                filled_signed_qty,
+                new_status,
+                bus_time,
+                session_id,
+                sequence_id,
+                exchange_order_id,
+                last_venue_event_id,
+            )
+            open_qty = filled_signed_qty - existing.compensated_signed_qty
+            if (
+                group is not None
+                and group.status == PairedExecutionGroupStatusEnum.COMPLETED.value
+                and abs(open_qty) >= self._PEC_QTY_EPSILON
+            ):
+                group_bus_time = max(bus_time, group.timestamp)
+                await s.execute(
+                    update(PairedExecutionGroup)
+                    .where(PairedExecutionGroup.id == group.id)
+                    .values(known_to=group_bus_time)
+                )
+                s.add(
+                    PairedExecutionGroup(
+                        public_id=group.public_id,
+                        wallet_public_id=group.wallet_public_id,
+                        operator_public_id=group.operator_public_id,
+                        strategy_id=group.strategy_id,
+                        policy=group.policy,
+                        expected_leg_count=group.expected_leg_count,
+                        group_key=group.group_key,
+                        status=PairedExecutionGroupStatusEnum.COMPENSATING.value,
+                        assembly_deadline=group.assembly_deadline,
+                        fill_deadline=group.fill_deadline,
+                        failure_reason=group.failure_reason or "late fill after completion",
+                        halted_at=group.halted_at or group_bus_time,
+                        created_at=group.created_at,
+                        session_id=session_id,
+                        sequence_id=sequence_id,
+                        timestamp=group_bus_time,
+                    )
+                )
+            await s.commit()
+            return PairedFillProjection.ORIGINAL_APPLIED
+
+    @staticmethod
+    async def _lock_leg_by_client_order_id(
+        s: AsyncSession, client_order_id: str, lock: bool = True
+    ) -> PairedExecutionLeg | None:
+        """Resolve the CURRENT active leg for an original order id, optionally locked.
+
+        Shared by the fast and group-first fill paths. Raises the
+        data-integrity ``ValueError`` when two active legs share the
+        ``client_order_id`` (the active-unique invariant the fill projection
+        has guarded since 5a); returns ``None`` when no leg owns the order.
+        ``lock=False`` is the group-first path's unlocked peek (it only needs
+        the immutable ``group_public_id`` before taking the group lock).
+        """
+        stmt = (
+            select(PairedExecutionLeg)
+            .where(
+                PairedExecutionLeg.client_order_id == client_order_id,
+                PairedExecutionLeg.known_to == KNOWN_TO_MAX,
+            )
+            .limit(2)
+        )
+        if lock:
+            stmt = stmt.with_for_update()
+        matches = (await s.execute(stmt)).scalars().all()
+        if len(matches) > 1:
+            raise ValueError(
+                "paired-execution data integrity: "
+                f"{len(matches)} active legs share client_order_id {client_order_id}"
+            )
+        return matches[0] if matches else None
+
+    async def _write_original_fill_successor(
+        self,
+        s: AsyncSession,
+        existing: PairedExecutionLeg,
+        filled_signed_qty: float,
+        new_status: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+        exchange_order_id: str | None,
+        last_venue_event_id: int | None,
+    ) -> None:
+        """Close the locked leg and stage its original-fill SCD2 successor.
+
+        Shared write half of the fast and group-first fill paths: picks the
+        successor status via :meth:`_late_original_fill_status`, clamps the
+        close / successor bus time to ``max(bus_time, existing.timestamp)``
+        and carries the venue ids forward when the caller omitted them. The
+        caller commits (its transaction may also carry a group reopen).
+        """
+        successor_status = self._late_original_fill_status(
+            existing.status,
+            filled_signed_qty,
+            existing.compensated_signed_qty,
+            new_status,
+        )
+        effective_bus_time = max(bus_time, existing.timestamp)
+        await s.execute(
+            update(PairedExecutionLeg)
+            .where(PairedExecutionLeg.id == existing.id)
+            .values(known_to=effective_bus_time)
+        )
+        s.add(
+            self._leg_successor(
+                existing,
+                status=successor_status,
+                filled_signed_qty=filled_signed_qty,
+                exchange_order_id=(
+                    exchange_order_id
+                    if exchange_order_id is not None
+                    else existing.exchange_order_id
+                ),
+                last_venue_event_id=(
+                    last_venue_event_id
+                    if last_venue_event_id is not None
+                    else existing.last_venue_event_id
+                ),
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=effective_bus_time,
+            )
+        )
 
     @classmethod
     def _late_original_fill_status(
@@ -9270,6 +9504,270 @@ class SQLAlchemyRepository(Repository):
             )
             await s.commit()
             return True
+
+    async def clear_paired_execution_halt_if_scope_quiet(
+        self,
+        wallet_public_id: str,
+        strategy_id: str,
+        group_key: str,
+        bus_time: datetime,
+    ) -> bool:
+        """Close a scope's active halt iff NO group in the scope is still exposed.
+
+        The quiet-halt sweep's clear (Phase 5d.3): in ONE transaction, checks
+        for any CURRENT active group on the ``(wallet, strategy, group_key)``
+        scope whose status is still exposed (``broken`` / ``compensating`` /
+        ``manual_intervention``) and, only when none exists, closes the scope's
+        CURRENT active halt row. A completed group no longer matches the
+        exposed set, so the halt clears on the first sweep after the scope's
+        LAST group completes; a sibling group still failing keeps the halt in
+        force (it covers that group too — the scope is active-unique). Both
+        reads guard on ``known_to == KNOWN_TO_MAX`` (not a temporal view) so a
+        future-stamped row under clock skew cannot make the scope look quiet,
+        and the close time is clamped to ``max(bus_time, halt.timestamp)`` so
+        the SCD2 interval never inverts. Running it from a periodic sweep
+        (rather than once at completion) makes the clear idempotent and
+        crash-retryable: a coordinator dying between completing the group and
+        clearing the halt just leaves the clear for the next cycle. Returns
+        ``True`` iff this call closed the halt.
+
+        The scope's group rows are read ``FOR UPDATE NOWAIT`` (ordered by id so
+        two sweeping coordinators cannot deadlock each other): the quiet
+        decision must be made against rows a concurrent late-fill REOPEN
+        (which flips a completed group back to ``compensating`` under the same
+        group lock) cannot change mid-transaction. Plain ``FOR UPDATE`` would
+        be unsound under the SCD2 close-and-insert pattern — a clear WAITING on
+        the reopen's lock would, after the wait, re-check and SKIP the closed
+        predecessor row while the reopen's freshly INSERTED ``compensating``
+        successor stays invisible to its snapshot, so the scope would look
+        quiet exactly when it is not. ``NOWAIT`` makes the race fail-safe
+        instead: ANY lock conflict (or other database error) aborts this clear
+        with ``False`` — the halt stays and the next cycle retries. The lock
+        order (groups, then the halt row; never legs) cannot cycle with the
+        completion DAL (group → legs) or the reopen path (group → leg). A
+        reopen that lands strictly AFTER this clear commits remains exposed
+        without a halt for at most one scan cycle — the halts sweep re-halts a
+        ``compensating`` group on the next pass; that residual ordering is
+        inherent to clearing at all and self-heals.
+        """
+        async with self.session() as s:
+            try:
+                scope_groups = (
+                    (
+                        await s.execute(
+                            select(PairedExecutionGroup)
+                            .where(
+                                PairedExecutionGroup.wallet_public_id == wallet_public_id,
+                                PairedExecutionGroup.strategy_id == strategy_id,
+                                PairedExecutionGroup.group_key == group_key,
+                                PairedExecutionGroup.known_to == KNOWN_TO_MAX,
+                            )
+                            .order_by(PairedExecutionGroup.id)
+                            .with_for_update(nowait=True)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            except DBAPIError:
+                return False
+            if any(group.status in self._PEG_EXPOSED_STATUSES for group in scope_groups):
+                return False
+            halt = (
+                (
+                    await s.execute(
+                        select(PairedExecutionHalt)
+                        .where(
+                            PairedExecutionHalt.wallet_public_id == wallet_public_id,
+                            PairedExecutionHalt.strategy_id == strategy_id,
+                            PairedExecutionHalt.group_key == group_key,
+                            PairedExecutionHalt.known_to == KNOWN_TO_MAX,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if halt is None:
+                return False
+            await s.execute(
+                update(PairedExecutionHalt)
+                .where(PairedExecutionHalt.id == halt.id)
+                .values(known_to=max(bus_time, halt.timestamp))
+            )
+            await s.commit()
+            return True
+
+    async def complete_paired_execution_group_if_settled(
+        self,
+        group_public_id: str,
+        expected_status: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> bool:
+        """CAS a fully-settled group to ``completed`` under a group-then-legs lock.
+
+        The Phase 5d.3 completion check, in ONE transaction: locks the CURRENT
+        active group ``FOR UPDATE`` (group THEN legs — the lock order every
+        group-touching paired DAL shares), verifies ``status ==
+        expected_status``, locks the CURRENT active legs, and verifies the
+        status-specific settled predicate:
+
+        - ``armed`` (the happy path): the legs form the COMPLETE validated leg
+          set (:meth:`_paired_execution_leg_set_is_complete` — never a vacuous
+          or partial set) and every leg is fully ``filled``. The exposure is
+          INTENDED (the strategy holds the pair), so completion involves no
+          halt or flatten logic.
+        - ``broken`` / ``compensating``: at least one leg exists and EVERY leg
+          is settled — a terminal status (``flattened`` / ``cancelled`` /
+          ``expired`` / ``rejected`` / ``filled``) with zero open exposure
+          (``|filled_signed_qty − compensated_signed_qty| <`` epsilon).
+          ``filled``-with-zero-open is reachable (a reopened leg whose old
+          flatten's late fill report zeroes the residual) and counts. A
+          ``pending`` / ``working`` / ``compensating`` / ``manual_intervention``
+          leg blocks completion; ``manual_intervention`` GROUPS are never
+          completed automatically (`expected_status` rejects them).
+
+        Additionally requires NO current-active HELD ``created`` ORIGINAL trade
+        command (``supersedes_command_id IS NULL``) carrying this group as its
+        ``correlation_id``: completing the group would leave such a command held
+        by the outbox gate forever (the gate releases grouped commands only for
+        ARMED groups), polluting every outbox poll page — and a held original
+        means the group was not truly settled. COMPENSATION commands (cancel /
+        flatten, which supersede an original) are deliberately excluded: the
+        outbox dispatches them regardless of group status, so one that is
+        momentarily ``created`` must only delay completion by its dispatch, not
+        block it on a stale row. The group close / successor time is clamped to ``max(bus_time,
+        group.timestamp)``. Completing settled BROKEN groups (e.g. a
+        zero-exposure assembly-timeout break whose legs were all cancelled)
+        deliberately terminalizes them so they stop bloating every scanner
+        listing and the pair scope quiets. Returns ``True`` iff this call
+        completed the group. Raises ``ValueError`` for an ``expected_status``
+        outside the completable set (armed / broken / compensating).
+        """
+        if expected_status not in self._PEG_COMPLETABLE_STATUSES:
+            raise ValueError(
+                f"paired-execution group completion from {expected_status!r} is not allowed"
+            )
+        async with self.session() as s:
+            group = (
+                (
+                    await s.execute(
+                        select(PairedExecutionGroup)
+                        .where(
+                            PairedExecutionGroup.public_id == group_public_id,
+                            PairedExecutionGroup.known_to == KNOWN_TO_MAX,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if group is None or group.status != expected_status:
+                return False
+            legs = (
+                (
+                    await s.execute(
+                        select(PairedExecutionLeg)
+                        .where(
+                            PairedExecutionLeg.group_public_id == group_public_id,
+                            PairedExecutionLeg.known_to == KNOWN_TO_MAX,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not legs:
+                return False
+            if expected_status == PairedExecutionGroupStatusEnum.ARMED.value:
+                if not self._paired_execution_leg_set_is_complete(list(legs), group):
+                    return False
+                if any(leg.status != PairedExecutionLegStatusEnum.FILLED.value for leg in legs):
+                    return False
+            else:
+                for leg in legs:
+                    if leg.status not in self._PEL_SETTLED_STATUSES:
+                        return False
+                    open_qty = leg.filled_signed_qty - leg.compensated_signed_qty
+                    if abs(open_qty) >= self._PEC_QTY_EPSILON:
+                        return False
+            held = (
+                await s.execute(
+                    select(TradeCommand.id)
+                    .where(
+                        TradeCommand.correlation_id == group_public_id,
+                        TradeCommand.status == TradeCommandStatusEnum.CREATED.value,
+                        TradeCommand.supersedes_command_id.is_(None),
+                        TradeCommand.known_to == KNOWN_TO_MAX,
+                    )
+                    .limit(1)
+                )
+            ).first()
+            if held is not None:
+                return False
+            effective_bus_time = max(bus_time, group.timestamp)
+            await s.execute(
+                update(PairedExecutionGroup)
+                .where(PairedExecutionGroup.id == group.id)
+                .values(known_to=effective_bus_time)
+            )
+            s.add(
+                PairedExecutionGroup(
+                    public_id=group.public_id,
+                    wallet_public_id=group.wallet_public_id,
+                    operator_public_id=group.operator_public_id,
+                    strategy_id=group.strategy_id,
+                    policy=group.policy,
+                    expected_leg_count=group.expected_leg_count,
+                    group_key=group.group_key,
+                    status=PairedExecutionGroupStatusEnum.COMPLETED.value,
+                    assembly_deadline=group.assembly_deadline,
+                    fill_deadline=group.fill_deadline,
+                    failure_reason=group.failure_reason,
+                    halted_at=group.halted_at,
+                    created_at=group.created_at,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                    timestamp=effective_bus_time,
+                )
+            )
+            await s.commit()
+            return True
+
+    async def list_recent_completed_paired_execution_groups(
+        self, completed_after: datetime
+    ) -> list[PairedExecutionGroupRow]:
+        """Return CURRENT active ``completed`` groups whose completion is recent.
+
+        Startup recovery's bounded window over completed groups (Phase 5d.3): a
+        late original fill that landed while the coordinator was DOWN must
+        reopen its completed group, but the live reopen trigger never fires for
+        events already persisted and listing ALL completed groups is unbounded
+        over a deployment's lifetime. The completion successor's ``timestamp``
+        IS the completion time, so filtering ``timestamp > completed_after``
+        (backed by the ``ix_peg_status_timestamp`` index) bounds the replay to
+        groups completed within the recovery window; an older late fill is
+        reconciliation / operator territory. Ordered by ``created_at`` then
+        ``id`` for a deterministic page.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(PairedExecutionGroup)
+                .where(
+                    PairedExecutionGroup.status == PairedExecutionGroupStatusEnum.COMPLETED.value,
+                    PairedExecutionGroup.known_to == KNOWN_TO_MAX,
+                    PairedExecutionGroup.timestamp > completed_after,
+                )
+                .order_by(PairedExecutionGroup.created_at, PairedExecutionGroup.id)
+            )
+            return [
+                self._paired_execution_group_row_to_dict(group) for group in result.scalars().all()
+            ]
 
     @staticmethod
     def _venue_event_to_row(ve: VenueEvent) -> VenueEventRow:

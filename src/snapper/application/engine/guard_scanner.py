@@ -45,6 +45,8 @@ from loguru import logger
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.application.trade.trade_service import TradeService
+from snapper.core.paired_execution import PAIRED_HALT_REASON_PREFIX
+from snapper.core.paired_execution import paired_halt_reason
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import PairedExecutionGroupStatusEnum
 from snapper.core.types import PairedExecutionLegStatusEnum
@@ -165,13 +167,17 @@ class PairedExecutionGuardScanner:
         self._running = False
 
     async def _scan_cycle(self, now: datetime | None = None) -> None:
-        """Run one scan: assembling, armed, broken, compensating, halt projection.
+        """Run one scan: assembling, armed, broken, compensating, halts, halt clears.
 
         The ``armed`` sweep runs AFTER ``assembling`` and BEFORE ``broken`` so a
         group broken this tick for a fill timeout or a terminal leg is cleaned up
         within the SAME cycle. ``compensating`` runs AFTER ``broken`` (so the held
         original commands are already cancelled) and BEFORE ``halts`` (so a group
-        moved to ``compensating`` is halted the same cycle).
+        moved to ``compensating`` is halted the same cycle). ``halt clears`` runs
+        LAST: a group completed this cycle by the armed / compensating sweeps is
+        no longer listed by the halts sweep, so its scope's durable halt (if any)
+        is cleared and the in-memory mirror released within the SAME cycle —
+        while a scope still carrying an exposed group keeps its halt.
 
         Args:
             now: Scan wall-clock; defaults to ``datetime.now(UTC)`` in the
@@ -183,6 +189,7 @@ class PairedExecutionGuardScanner:
         await self._sweep_broken(scan_at)
         await self._sweep_compensating(scan_at)
         await self._sweep_halts(scan_at)
+        await self._sweep_halt_clears(scan_at)
 
     async def _sweep_assembling(self, now: datetime) -> None:
         """Break expired assembling groups and retry arming complete ones."""
@@ -228,6 +235,14 @@ class PairedExecutionGuardScanner:
         orders and flattening filled legs is Phase 5c — here the same cycle's
         later ``broken`` / ``halt`` sweeps cancel owned held commands and (for an
         exposed break) project the durable halt.
+
+        A HEALTHY armed group whose every leg is fully ``filled`` is the happy
+        path: it is COMPLETED (Phase 5d.3) via the locked settled check, so a
+        succeeded pair leaves every scanner listing instead of staying armed
+        forever. The temporal leg read here is only a cheap hint — the
+        completion DAL re-reads the CURRENT active leg set under the group
+        lock and re-validates, so a stale read can only delay completion by a
+        cycle, never complete a wrong set.
         """
         armed = await self._repo.list_active_paired_execution_groups(
             [PairedExecutionGroupStatusEnum.ARMED.value], now
@@ -239,6 +254,10 @@ class PairedExecutionGuardScanner:
             reason = self._armed_break_reason(group, legs, now)
             if reason is not None:
                 await self._break_armed_group(group, now, reason)
+            elif legs and all(
+                leg["status"] == PairedExecutionLegStatusEnum.FILLED.value for leg in legs
+            ):
+                await self._try_complete_group(group, now)
 
     def _armed_break_reason(
         self,
@@ -384,6 +403,33 @@ class PairedExecutionGuardScanner:
                     await self._flatten_leg(group, leg, now)
                 elif status == PairedExecutionLegStatusEnum.COMPENSATING.value:
                     await self._settle_compensating_leg(leg, now)
+            await self._try_complete_group(group, now)
+
+    async def _try_complete_group(self, group: PairedExecutionGroupRow, now: datetime) -> None:
+        """Attempt the locked settled-completion of one group (Phase 5d.3).
+
+        Called for healthy all-filled ``armed`` groups and for every
+        ``broken`` / ``compensating`` group after its compensation routing. The
+        DAL re-reads the group and its legs under a group-then-legs lock and
+        validates the status-specific settled predicate, so calling it
+        unconditionally per cycle is safe — it returns ``False`` fast on the
+        first unsettled leg. On success the group leaves every scanner listing;
+        the same cycle's trailing quiet-halt sweep then clears the scope's
+        durable halt and releases the in-memory mirror if no sibling group
+        still needs it.
+        """
+        completed = await self._repo.complete_paired_execution_group_if_settled(
+            group["public_id"],
+            group["status"],
+            now,
+            self._tracker.session_id,
+            self._tracker.next_sequence("guard.complete"),
+        )
+        if completed:
+            logger.info(
+                f"PairedExecutionGuardScanner: group {group['public_id']} COMPLETED "
+                f"from {group['status']}"
+            )
 
     async def _settle_compensating_leg(self, leg: PairedExecutionLegRow, now: datetime) -> None:
         """Backstop: re-derive an owned compensating leg's settlement from venue_events.
@@ -709,9 +755,64 @@ class PairedExecutionGuardScanner:
                 )
                 continue
             await self._repo.ensure_paired_execution_halt(self._halt_row(group, legs, now))
+            mirror_reason = paired_halt_reason(
+                group["wallet_public_id"], group["strategy_id"], group["group_key"]
+            )
             for leg in legs:
                 if self._ownership.owns(leg["shard_key"]):
-                    self._trade_service.halt_shard(leg["shard_key"], _GROUP_BROKEN_REASON)
+                    self._trade_service.halt_shard(leg["shard_key"], mirror_reason)
+
+    async def _sweep_halt_clears(self, now: datetime) -> None:
+        """Clear durable halts whose scope is quiet and release stale mirrors.
+
+        Two halves, both idempotent and crash-retryable because they run every
+        cycle rather than once at completion:
+
+        DURABLE: for every CURRENT active halt, attempt the one-transaction
+        scope-quiet clear — the halt closes only when NO group on its
+        ``(wallet, strategy, group_key)`` scope is still ``broken`` /
+        ``compensating`` / ``manual_intervention``. A coordinator dying after
+        completing a group just leaves the clear for the next cycle on ANY
+        coordinator.
+
+        IN-MEMORY: release every LOCAL paired halt reason whose scope key no
+        longer matches an active durable halt. Diffing the in-memory reasons
+        against a FRESH post-clear halt listing (exact key match, no parsing)
+        is what makes the mirror release correct across coordinators: a halt
+        cleared by ANOTHER coordinator — or by an operator via
+        ``clear_paired_execution_halt`` — stops being listed, so an
+        "unhalt-what-I-cleared" design would strand every other coordinator's
+        mirror until restart; the diff releases them on the very next cycle.
+        The surviving set MUST come from a re-list taken AFTER the clear
+        attempts, not from the first listing: a halt re-created by a sibling
+        coordinator between this coordinator's first read and its release
+        would otherwise be missing from the set and its mirror released while
+        the scope still needs it. Reason-scoped: a reconciliation / operator
+        halt on the same shard, or a paired halt for a scope that still has
+        its durable row, stays in force.
+        """
+        halts = await self._repo.list_active_paired_execution_halts()
+        for halt in halts:
+            cleared = await self._repo.clear_paired_execution_halt_if_scope_quiet(
+                halt["wallet_public_id"],
+                halt["strategy_id"],
+                halt["group_key"],
+                now,
+            )
+            if cleared:
+                logger.info(
+                    "PairedExecutionGuardScanner: cleared quiet halt for scope "
+                    f"{halt['group_key']} (group {halt['group_public_id']})"
+                )
+        surviving_scope_keys = {
+            paired_halt_reason(halt["wallet_public_id"], halt["strategy_id"], halt["group_key"])
+            for halt in await self._repo.list_active_paired_execution_halts()
+        }
+        for shard_key, reason in self._trade_service.shard_halt_reasons_with_prefix(
+            PAIRED_HALT_REASON_PREFIX
+        ):
+            if reason not in surviving_scope_keys:
+                self._trade_service.unhalt_shard(shard_key, reason)
 
     def _group_has_exposure(
         self, group: PairedExecutionGroupRow, legs: list[PairedExecutionLegRow]

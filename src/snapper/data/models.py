@@ -1176,6 +1176,7 @@ class PairedExecutionGroup(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index("ix_peg_status", "status"),
+        Index("ix_peg_status_timestamp", "status", "timestamp"),
         Index("ix_peg_group_key", "group_key"),
         CheckConstraint(
             "policy IN ('simultaneous', 'sequential_handoff')",

@@ -9,6 +9,7 @@ arms the group once its full leg set is durably registered.
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
@@ -20,6 +21,7 @@ import pytest
 
 import snapper.application.engine.trader as trader_module
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.core.paired_execution import paired_halt_reason
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import PairedExecutionLegStatusEnum
 from snapper.core.types import TradeCommandStatusEnum
@@ -1948,3 +1950,117 @@ async def test_recover_leg_fills_per_group_leg_read_failure_is_isolated(
     assert await real("grp-good") is not None
     legs = await real("grp-good")
     assert next(leg["filled_signed_qty"] for leg in legs if leg["leg_index"] == 0) == 6.0
+
+
+@pytest.mark.asyncio
+async def test_guard_recovery_mirror_uses_scope_reason_key(_coord: TraderCoordinator) -> None:
+    """The restart halt mirror registers the canonical per-scope reason key.
+
+    Given: an active durable halt whose group has an owned leg,
+    When: paired-execution guard recovery runs,
+    Then: the owned shard is halted under the scope key (not the durable row's
+        human-readable reason), so the scanner's quiet-halt sweep can later
+        release exactly this mirror.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_scope_halt(_sql_repo(_coord), group_public_id="grp-mirror")
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-mirror", status="broken")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-mirror",
+        group_public_id="grp-mirror",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        client_order_id="cid-mirror",
+    )
+    await _coord._recover_paired_execution_guard_state()
+    assert _coord.trade_service.is_halted(_BTC_SHARD) is True
+    expected_key = paired_halt_reason("", "pairs-alpha", _GROUP_KEY)
+    assert _coord.trade_service.shard_halt_reasons_with_prefix("paired-execution:") == [
+        (_BTC_SHARD, expected_key)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_reopens_recently_completed_group(
+    _coord: TraderCoordinator,
+) -> None:
+    """A downtime late fill on a recently completed group reopens it on restart.
+
+    Given: a COMPLETED group (completed within the replay window) whose owned
+        flattened leg (filled=+5, compensated=+5) has a durable venue fill with
+        a LARGER cumulative (+8) that landed while the coordinator was down,
+    When: the recovery leg-fill pass runs,
+    Then: the leg re-projects to FILLED with the grown cumulative and the group
+        reopens to COMPENSATING — the residual is visible to the scanner again.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-cw", status="completed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-cw",
+        group_public_id="grp-cw",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        side="buy",
+        client_order_id="cid-cw",
+        command_public_id="cmd-cw",
+        filled_signed_qty=5.0,
+        compensated_signed_qty=5.0,
+        status=PairedExecutionLegStatusEnum.FLATTENED.value,
+    )
+    await _insert_fill_event(_sql_repo(_coord), client_order_id="cid-cw", cum_fill_size=8.0)
+    await _coord._recover_paired_execution_leg_fills()
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-cw")
+    assert legs[0]["filled_signed_qty"] == 8.0
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.FILLED.value
+    group = await _sql_repo(_coord).get_paired_execution_group(
+        "grp-cw", datetime.now(UTC) + timedelta(seconds=60)
+    )
+    assert group is not None
+    assert group["status"] == "compensating"
+
+
+@pytest.mark.asyncio
+async def test_recover_leg_fills_skips_group_completed_outside_window(
+    _coord: TraderCoordinator,
+) -> None:
+    """A group completed before the replay window is not replayed on restart.
+
+    Given: a group whose completion successor is stamped 10 days ago, with an
+        owned flattened leg and a larger durable venue fill,
+    When: the recovery leg-fill pass runs,
+    Then: the leg keeps its stored cumulative and the group stays COMPLETED —
+        fills older than the window are reconciliation territory, and the
+        bounded window keeps the replay from scanning every completion ever.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    await _insert_guard_group(
+        _sql_repo(_coord),
+        public_id="grp-old",
+        status="completed",
+        timestamp=datetime.now(UTC) - timedelta(days=10),
+    )
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-old",
+        group_public_id="grp-old",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        side="buy",
+        client_order_id="cid-old",
+        command_public_id="cmd-old",
+        filled_signed_qty=5.0,
+        compensated_signed_qty=5.0,
+        status=PairedExecutionLegStatusEnum.FLATTENED.value,
+    )
+    await _insert_fill_event(_sql_repo(_coord), client_order_id="cid-old", cum_fill_size=8.0)
+    await _coord._recover_paired_execution_leg_fills()
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-old")
+    assert legs[0]["filled_signed_qty"] == 5.0
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.FLATTENED.value
+    group = await _sql_repo(_coord).get_paired_execution_group(
+        "grp-old", datetime.now(UTC) + timedelta(seconds=60)
+    )
+    assert group is not None
+    assert group["status"] == "completed"

@@ -48,3 +48,38 @@ def compute_paired_group_key(legs: list[tuple[str, str, str]]) -> str:
         paired_group_leg_token(exchange, instrument, mode) for exchange, instrument, mode in legs
     )
     return "|".join(tokens)
+
+
+PAIRED_HALT_REASON_PREFIX = "paired-execution:"
+"""Prefix shared by every :func:`paired_halt_reason` key.
+
+The guard scanner's quiet-halt sweep enumerates a shard's in-memory halt
+reasons by this prefix to find the PAIRED ones, then releases exactly those
+whose scope no longer has an active durable halt — so the prefix and the key
+builder must stay in lockstep (the builder interpolates this constant).
+"""
+
+
+def paired_halt_reason(wallet_public_id: str, strategy_id: str, group_key: str) -> str:
+    """Return the canonical in-memory shard-halt reason for a paired halt scope.
+
+    The reason doubles as the SELECTIVE un-halt key for the reason-scoped
+    ``TradeService`` shard halts (Phase 5d.3): the guard scanner's halt mirror,
+    the startup recovery mirror, and the completion un-halt MUST all derive the
+    byte-identical string or a completed pair would never release its shards.
+    Keyed per HALT SCOPE — ``(wallet, strategy, group_key)`` — matching the
+    durable ``paired_execution_halts`` active-unique constraint, NOT per group:
+    two groups sharing a scope share one durable halt, so their mirrors must
+    share one key, and the scope-quiet clear releases it exactly once. A shard
+    hosting legs of two DIFFERENT scopes carries two distinct reasons, so
+    completing one scope leaves the other halted.
+
+    Args:
+        wallet_public_id: Wallet scope component of the durable halt.
+        strategy_id: Strategy scope component of the durable halt.
+        group_key: Canonical pair key scope component of the durable halt.
+
+    Returns:
+        The canonical reason string / selective un-halt key for the scope.
+    """
+    return f"{PAIRED_HALT_REASON_PREFIX}{wallet_public_id}:{strategy_id}:{group_key}"
