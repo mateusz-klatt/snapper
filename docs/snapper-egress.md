@@ -44,8 +44,16 @@ Per tunnel:
    kernel routes them via the tunnel.
 
 The snapper-api's `EgressPool` (`socks5h://snapper-egress:<port>`)
-reserves a route per Kraken WS handshake. On HTTP 429 the active
-route is quarantined and the next handshake uses an alternate.
+reserves a route per Kraken WS handshake. A route is quarantined — and
+the next handshake fails over to an alternate (or the direct fallback) —
+on any of the `QuarantineReason` values: `http-429` (handshake 429),
+`close-1015` (Cloudflare close frame), `http-connect-error` (REST
+connect failure via the pooled transport), and `ws-connect-error` (a WS
+connect-level failure — TCP/SOCKS timeout, connection refused, or a
+silent blackhole — through a proxy route, quarantined ~30 s via
+`_WS_CONNECT_ERROR_QUARANTINE_S`). Connect-level failover matters
+because a dead tunnel often blackholes rather than returning 429: without
+it the reconnect loop would re-dial the same dead route indefinitely.
 
 ## Adding a tunnel
 
@@ -286,6 +294,10 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
   dominant cost).
 - HTTP 429 failover: ~1-2 s (route quarantined → next handshake picks
   alternate).
+- WS connect-error failover (`ws-connect-error`): the dead proxy route is
+  quarantined ~30 s on a connect timeout/refused/blackhole, so the next
+  reconnect rides an alternate route (or the direct fallback) instead of
+  re-dialing the dead tunnel.
 - Tunnel handshake age: WireGuard re-keys every 2 minutes; if `wg
   show <iface> latest-handshakes` returns > 180 s ago, the peer is
   unreachable.

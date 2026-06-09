@@ -713,11 +713,19 @@ async def run_feed():
 
 On startup the publisher loads the latest candle `public_id` per
 (instrument, timeframe) pair from the database into an in-memory cache.
+The startup load is bounded to a recent `open_at` window
+(`_CANDLE_ID_CACHE_LOOKBACK`, 2 days) so the warm-up rides the
+`(instrument, open_at)` index instead of scanning the full (multi-hundred-
+million-row) candles table — an unbounded scan otherwise blocked the
+publisher's startup for minutes before its WebSocket connected. Bounding
+it is safe: only the *current* open interval needs identity continuity,
+and intervals older than the window are closed (no further updates).
 When a new tick arrives for an existing candle interval (`open_at` matches),
 the cached `public_id` is reused so the same logical candle keeps a stable
 identity across ZMQ, WebSocket, and the database.  When `open_at` advances
-to a new interval, a fresh UUID7 is minted and the cache entry is replaced.
-This avoids any DB reads on the hot path.
+to a new interval (or falls outside the warm-up window), a fresh UUID7 is
+minted and the cache entry is replaced. This avoids any DB reads on the
+hot path.
 
 ### Micro-Batch DB Persistence
 

@@ -288,6 +288,16 @@ action:
   with an explicit `ping_timeout`/`close_timeout` so a silently dead
   socket (a yanked link with no close frame) surfaces in tens of seconds
   rather than waiting out the app-level silence threshold.
+- **Bounded connect.** The WebSocket connect itself (`SpotWSClient`/
+  `FuturesWSClient` `start()`) is wrapped in a 20 s timeout
+  (`_WS_CONNECT_TIMEOUT_S`). The vendored SDK's `start()` polls for the
+  socket with a connect timeout that never fires, so on a prolonged
+  blackout — where the connector exhausts its reconnect ceiling and never
+  establishes a socket — an unbounded `start()` would hang forever and
+  wedge in-process recovery (only a process restart would clear it).
+  Bounding it makes a stalled handshake fail fast so the recovery loop
+  tears the partial client down and retries with a fresh one, reconnecting
+  as soon as the network returns.
 - **Dark-feed watchdog.** If a feed stays dark for ~25 min despite
   recovery (a wedged SDK or recovery bug), the publisher exits non-zero
   and `ProcessLauncherService` respawns it. The exit ceiling is kept
