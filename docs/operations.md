@@ -301,25 +301,40 @@ Watch recovery via `GET /api/market/feed-health` /
 (`liveness recovery triggered`, `feed recovered after N attempt(s)`,
 `feed dark for …s … exiting for launcher restart`).
 
-### Fault-injection testing (staging only)
+### Fault-injection testing
 
-`scripts/resilience_fault_injection.py` simulates an outage and asserts
-recovery. It blocks outbound HTTPS in a container via
-`docker exec <container> iptables` (always restored in a `finally`
-block) and measures candle-freshness recovery against the SLA.
+`scripts/resilience_fault_injection.py` simulates a real exchange outage and
+asserts recovery. It drops outbound HTTPS (:443) **inside the feed container's
+network namespace** with a throwaway privileged helper
+(`docker run --net=container:<feed> --cap-add=NET_ADMIN`), holds the outage,
+restores it, and measures candle-freshness recovery against the SLA. Only :443
+is dropped, so the ZMQ bus and DB writes keep working — the outage is
+market-data only (order execution, a separate container, is unaffected).
+
+It targets the feed's own netns because the runtime image has no `iptables`
+(`docker exec <feed> iptables` fails) and the feed connects **directly** to the
+exchanges rather than through egress (so pausing/firewalling egress is a no-op).
+Restore is safety-critical and proven, not best-effort: every step is
+exit-code-checked, the helper runs a prebuilt `snapper-fault-helper` image (no
+package install while the link is down), removal is proven with `iptables -C`,
+and if removal cannot be proven the feed container is recreated (fresh netns)
+and re-verified — the harness raises loudly rather than reporting an uncertain
+restore. It builds the helper image on first run.
 
 ```bash
-# Public path (egress): drop for 5 min, expect recovery within 120 s.
-DB_URL=... python scripts/resilience_fault_injection.py --path public --hold-s 300
+# Default: drop the feed's :443 for 180 s, expect spot+futures back within 180 s.
+DB_URL=... python scripts/resilience_fault_injection.py --hold-s 180
 
-# Private/direct path: target a NET_ADMIN-capable container; use a
-# longer SLA for the entitlement-delayed Equities feed.
+# Longer outage + a wider recovery SLA (e.g. validating the dark-feed watchdog).
+DB_URL=... python scripts/resilience_fault_injection.py --hold-s 900 --sla-s 600
+
+# Override the target container, port, or verified exchanges.
 DB_URL=... python scripts/resilience_fault_injection.py \
-    --path private --private-container snapper-feed --hold-s 900 --sla-s 900
+    --container snapper-feed --port 443 --exchanges kraken,kraken_futures
 ```
 
-Never run it against production; the private-path container must be
-started with `NET_ADMIN` for the in-container `iptables` rule to apply.
+Run it in a low-impact window — it darkens live market data for the hold
+duration.
 
 ## Per-wallet executors
 
