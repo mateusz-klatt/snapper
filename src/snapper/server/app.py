@@ -229,6 +229,7 @@ from snapper.server.market_feed_health_routes import router as market_feed_healt
 from snapper.server.metrics_routes import router as metrics_router
 from snapper.server.operator_routes import router as operator_router
 from snapper.server.order_routes import router as order_router
+from snapper.server.paired_execution_routes import router as paired_execution_router
 from snapper.server.position_cycle_routes import router as position_cycle_router
 from snapper.server.process_routes import router as process_router
 from snapper.server.provenance_middleware import ClientProvenanceMiddleware
@@ -927,6 +928,7 @@ def create_app() -> FastAPI:
     app.include_router(strategy_router, prefix=API_PREFIX)
     app.include_router(wallet_router, prefix=API_PREFIX)
     app.include_router(operator_router, prefix=API_PREFIX)
+    app.include_router(paired_execution_router, prefix=API_PREFIX)
     app.include_router(scope_grant_router, prefix=API_PREFIX)
     app.include_router(market_cache_router, prefix=API_PREFIX)
     app.include_router(market_coverage_router, prefix=API_PREFIX)

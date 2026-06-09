@@ -24,6 +24,7 @@ from snapper.core.types import PairedExecutionGroupStatusEnum
 from snapper.core.types import PairedExecutionLegStatusEnum
 from snapper.core.types import PairedExecutionPolicyEnum
 from snapper.core.types import PairedFillProjection
+from snapper.core.types import PairedGroupTerminalizeOutcome
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import PairedExecutionGroup
@@ -3768,3 +3769,320 @@ async def test_clear_halt_if_scope_quiet_fails_safe_on_lock_conflict(
         _WALLET_ID, _STRATEGY_ID, _GROUP_KEY, _T1
     )
     assert cleared is False
+
+
+@pytest.mark.asyncio
+async def test_terminalize_manual_group_records_attestation(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Terminalizing a manual group completes it with the attestation stamp.
+
+    Given: a manual_intervention group with one manual leg carrying real open
+        exposure and one cancelled zero-exposure sibling,
+    When: terminalize_paired_execution_group runs with an attesting user id,
+    Then: the group's active successor is COMPLETED with
+        'terminalized_by=<uid>' stamped into failure_reason, while BOTH legs
+        keep their true statuses and signed accounting (no book falsification).
+    """
+    gid = _pid(470)
+    await _seed_completion_group(
+        _repo,
+        group_id=gid,
+        status=PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value,
+        leg_statuses=[
+            (PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value, 10.0, 4.0),
+            (PairedExecutionLegStatusEnum.CANCELLED.value, 0.0, 0.0),
+        ],
+    )
+    outcome = await _repo.terminalize_paired_execution_group(
+        gid, "user-7", _T1, _NEXT_SESSION_ID, 2
+    )
+    assert outcome == PairedGroupTerminalizeOutcome.TERMINALIZED
+    group = (await _active_group_versions(_repo, gid, _T2))[0]
+    assert group.status == PairedExecutionGroupStatusEnum.COMPLETED.value
+    assert group.failure_reason is not None
+    assert group.failure_reason.endswith("; terminalized_by=user-7")
+    legs = await _repo.get_current_paired_execution_legs(gid)
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value
+    assert legs[0]["filled_signed_qty"] == 10.0
+    assert legs[0]["compensated_signed_qty"] == 4.0
+
+
+@pytest.mark.asyncio
+async def test_terminalize_reopened_compensating_group_with_manual_leg(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """The re-attestation path: a compensating group with a manual leg terminalizes.
+
+    Given: a compensating group (a late fill reopened a previously terminalized
+        group) whose legs are one manual_intervention leg with residual and one
+        flattened zero-open sibling,
+    When: terminalize runs,
+    Then: it returns TERMINALIZED — the operator can attest again without the
+        FSM wedging on the manual leg automation can never touch.
+    """
+    gid = _pid(471)
+    await _seed_completion_group(
+        _repo,
+        group_id=gid,
+        status=PairedExecutionGroupStatusEnum.COMPENSATING.value,
+        leg_statuses=[
+            (PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value, 15.0, 10.0),
+            (PairedExecutionLegStatusEnum.FLATTENED.value, -5.0, -5.0),
+        ],
+    )
+    outcome = await _repo.terminalize_paired_execution_group(
+        gid, "user-7", _T1, _NEXT_SESSION_ID, 2
+    )
+    assert outcome == PairedGroupTerminalizeOutcome.TERMINALIZED
+    group = (await _active_group_versions(_repo, gid, _T2))[0]
+    assert group.status == PairedExecutionGroupStatusEnum.COMPLETED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("group_status", "leg_statuses"),
+    [
+        (
+            PairedExecutionGroupStatusEnum.ARMED.value,
+            [
+                (PairedExecutionLegStatusEnum.FILLED.value, 1.0, 0.0),
+                (PairedExecutionLegStatusEnum.FILLED.value, -1.0, 0.0),
+            ],
+        ),
+        (
+            PairedExecutionGroupStatusEnum.BROKEN.value,
+            [
+                (PairedExecutionLegStatusEnum.CANCELLED.value, 0.0, 0.0),
+                (PairedExecutionLegStatusEnum.CANCELLED.value, 0.0, 0.0),
+            ],
+        ),
+        (
+            PairedExecutionGroupStatusEnum.COMPENSATING.value,
+            [
+                (PairedExecutionLegStatusEnum.COMPENSATING.value, 10.0, 4.0),
+                (PairedExecutionLegStatusEnum.FLATTENED.value, -5.0, -5.0),
+            ],
+        ),
+    ],
+)
+async def test_terminalize_refuses_non_attestable_group_states(
+    _repo: SQLAlchemyRepository,
+    group_status: str,
+    leg_statuses: list[tuple[str, float, float]],
+) -> None:
+    """Armed, broken and manual-less compensating groups are not attestable.
+
+    Given: a group that is healthy (armed), automation-owned (broken), or
+        compensating WITHOUT any manual leg,
+    When: terminalize runs,
+    Then: NOT_TERMINALIZABLE — the operator surface can never bless a group
+        the automation still owns end-to-end.
+    """
+    gid = _pid(472)
+    await _seed_completion_group(
+        _repo, group_id=gid, status=group_status, leg_statuses=leg_statuses
+    )
+    outcome = await _repo.terminalize_paired_execution_group(
+        gid, "user-7", _T1, _NEXT_SESSION_ID, 2
+    )
+    assert outcome == PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
+    group = (await _active_group_versions(_repo, gid, _T2))[0]
+    assert group.status == group_status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sibling_status", "sibling_filled", "sibling_compensated"),
+    [
+        (PairedExecutionLegStatusEnum.COMPENSATING.value, -5.0, -2.0),
+        (PairedExecutionLegStatusEnum.FILLED.value, -5.0, 0.0),
+        (PairedExecutionLegStatusEnum.PENDING.value, 0.0, 0.0),
+    ],
+)
+async def test_terminalize_refuses_inflight_sibling_leg(
+    _repo: SQLAlchemyRepository,
+    sibling_status: str,
+    sibling_filled: float,
+    sibling_compensated: float,
+) -> None:
+    """A sibling leg with automation in flight blocks the attestation.
+
+    Given: a manual_intervention group whose second leg is still in
+        automation's hands — a flatten in flight, a filled leg with residual
+        the sweep will flatten, or a pending leg,
+    When: terminalize runs,
+    Then: NOT_TERMINALIZABLE — the operator must wait for the sibling to
+        settle rather than attest over a live order.
+    """
+    gid = _pid(473)
+    await _seed_completion_group(
+        _repo,
+        group_id=gid,
+        status=PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value,
+        leg_statuses=[
+            (PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value, 10.0, 4.0),
+            (sibling_status, sibling_filled, sibling_compensated),
+        ],
+    )
+    outcome = await _repo.terminalize_paired_execution_group(
+        gid, "user-7", _T1, _NEXT_SESSION_ID, 2
+    )
+    assert outcome == PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
+
+
+@pytest.mark.asyncio
+async def test_terminalize_refuses_group_without_legs(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A manual group with NO current legs is never attestable.
+
+    Given: a manual_intervention group carrying zero legs (corruption),
+    When: terminalize runs,
+    Then: NOT_TERMINALIZABLE — a vacuous attestation would clear the scope's
+        halt while erasing the operator-visible incident.
+    """
+    gid = _pid(478)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(
+            public_id=gid,
+            status=PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value,
+        )
+    )
+    outcome = await _repo.terminalize_paired_execution_group(
+        gid, "user-7", _T1, _NEXT_SESSION_ID, 2
+    )
+    assert outcome == PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
+
+
+@pytest.mark.asyncio
+async def test_terminalize_refuses_held_original_command(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A held created ORIGINAL command blocks the attestation, mirroring auto-complete.
+
+    Given: an otherwise attestable manual group whose correlation_id is carried
+        by a current-active created command with no supersedes (a gate-held
+        original the outbox would strand forever once the group completes),
+    When: terminalize runs,
+    Then: NOT_TERMINALIZABLE — the operator path must never create the stuck
+        outbox backlog the automatic completion path guards against.
+    """
+    gid = _pid(479)
+    await _seed_completion_group(
+        _repo,
+        group_id=gid,
+        status=PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value,
+        leg_statuses=[
+            (PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value, 10.0, 4.0),
+            (PairedExecutionLegStatusEnum.CANCELLED.value, 0.0, 0.0),
+        ],
+    )
+    await _insert_created_command(_repo, public_id=_pid(480), correlation_id=gid)
+    outcome = await _repo.terminalize_paired_execution_group(
+        gid, "user-7", _T1, _NEXT_SESSION_ID, 2
+    )
+    assert outcome == PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
+
+
+@pytest.mark.asyncio
+async def test_terminalize_clamps_long_attestation_subject(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A pathologically long attesting subject is clamped to 64 chars in the stamp.
+
+    Given: an attestable manual group and a 200-char attesting subject,
+    When: terminalize runs,
+    Then: the stamp suffix carries only the subject's first 64 chars, so the
+        suffix can never consume the whole 512-char reason column.
+    """
+    gid = _pid(481)
+    await _seed_completion_group(
+        _repo,
+        group_id=gid,
+        status=PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value,
+        leg_statuses=[
+            (PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value, 1.0, 0.0),
+            (PairedExecutionLegStatusEnum.CANCELLED.value, 0.0, 0.0),
+        ],
+    )
+    outcome = await _repo.terminalize_paired_execution_group(
+        gid, "u" * 200, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert outcome == PairedGroupTerminalizeOutcome.TERMINALIZED
+    group = (await _active_group_versions(_repo, gid, _T2))[0]
+    assert group.failure_reason is not None
+    assert group.failure_reason.endswith("terminalized_by=" + "u" * 64)
+    assert len(group.failure_reason) <= 512
+
+
+@pytest.mark.asyncio
+async def test_terminalize_not_found_and_reason_truncation(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """An absent group is NOT_FOUND; a long prior reason truncates to 512 chars.
+
+    Given: no group for one id, and a manual group whose failure_reason is
+        already at the 512-char column limit,
+    When: terminalize runs for each,
+    Then: the absent id returns NOT_FOUND, and the stamped successor's
+        failure_reason still fits 512 chars while ending with the attestation
+        suffix.
+    """
+    absent = await _repo.terminalize_paired_execution_group(
+        _pid(998), "user-7", _T1, _NEXT_SESSION_ID, 2
+    )
+    assert absent == PairedGroupTerminalizeOutcome.NOT_FOUND
+    gid = _pid(474)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(
+            public_id=gid,
+            status=PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value,
+            failure_reason="x" * 512,
+        )
+    )
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=_pid(475),
+            group_public_id=gid,
+            side="buy",
+            command_public_id=_pid(476),
+            client_order_id="cid-trunc",
+            status=PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value,
+            filled_signed_qty=1.0,
+        )
+    )
+    outcome = await _repo.terminalize_paired_execution_group(
+        gid, "user-7", _T1, _NEXT_SESSION_ID, 3
+    )
+    assert outcome == PairedGroupTerminalizeOutcome.TERMINALIZED
+    group = (await _active_group_versions(_repo, gid, _T2))[0]
+    assert group.failure_reason is not None
+    assert len(group.failure_reason) == 512
+    assert group.failure_reason.endswith("; terminalized_by=user-7")
+
+
+@pytest.mark.asyncio
+async def test_get_current_paired_execution_group_reads_current_active(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """The current-active group read sees a future-stamped row; absent is None.
+
+    Given: a group stamped with a future timestamp (sibling clock skew) and a
+        non-existent id,
+    When: get_current_paired_execution_group runs for each,
+    Then: the future-stamped group is returned (a temporal as_of read would
+        skip it and 404 the operator) and the absent id yields None.
+    """
+    gid = _pid(477)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(
+            public_id=gid,
+            status=PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value,
+            timestamp=_T0 + timedelta(seconds=600),
+        )
+    )
+    found = await _repo.get_current_paired_execution_group(gid)
+    assert found is not None
+    assert found["public_id"] == gid
+    assert await _repo.get_current_paired_execution_group(_pid(997)) is None

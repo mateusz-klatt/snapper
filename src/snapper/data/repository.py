@@ -107,6 +107,7 @@ from snapper.core.types import AllExchange
 from snapper.core.types import PairedExecutionGroupStatusEnum
 from snapper.core.types import PairedExecutionLegStatusEnum
 from snapper.core.types import PairedFillProjection
+from snapper.core.types import PairedGroupTerminalizeOutcome
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.core.types import TradeSideEnum
 from snapper.data.archive_symbols import resolve_archive_symbols
@@ -9768,6 +9769,169 @@ class SQLAlchemyRepository(Repository):
             return [
                 self._paired_execution_group_row_to_dict(group) for group in result.scalars().all()
             ]
+
+    async def get_current_paired_execution_group(
+        self, public_id: str
+    ) -> PairedExecutionGroupRow | None:
+        """Return the CURRENT active group by public_id, or None.
+
+        Guards on the current active row (``known_to == KNOWN_TO_MAX``), not a
+        temporal ``as_of`` view, so the operator surface never 404s a group a
+        sibling coordinator stamped with a slightly future ``timestamp`` under
+        clock skew — pairing with :meth:`get_current_paired_execution_legs`.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(PairedExecutionGroup).where(
+                    PairedExecutionGroup.public_id == public_id,
+                    PairedExecutionGroup.known_to == KNOWN_TO_MAX,
+                )
+            )
+            group = result.scalars().first()
+            if group is None:
+                return None
+            return self._paired_execution_group_row_to_dict(group)
+
+    async def terminalize_paired_execution_group(
+        self,
+        public_id: str,
+        attested_by: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> PairedGroupTerminalizeOutcome:
+        """Record an operator attestation that a manual group is resolved at the venue.
+
+        The OPERATOR counterpart of the automatic
+        :meth:`complete_paired_execution_group_if_settled` (which deliberately
+        refuses ``manual_intervention``): in ONE transaction it locks the
+        CURRENT active group ``FOR UPDATE`` (group THEN legs — the shared lock
+        order), validates the attestable predicate, and SCD2-closes the group
+        into ``completed`` with the attestation stamped into ``failure_reason``
+        as a bounded, parseable ``terminalized_by=<user_public_id>`` suffix
+        (truncating the prior reason to fit the 512-char column). The next
+        scanner cycle's quiet-halt sweep then clears the scope's durable halt
+        and every coordinator's in-memory mirror — no cross-process call.
+
+        Attestable means: the group is ``manual_intervention`` (the operator
+        owns it outright), OR it is ``compensating`` with at least one current
+        ``manual_intervention`` leg — the re-attestation path after a late
+        original fill reopened an already-terminalized group whose manual leg
+        cannot re-enter automation. In BOTH cases every leg must be either
+        settled (a terminal status at zero open exposure) or
+        ``manual_intervention``: an operator must never attest over a sibling
+        leg's in-flight automation (a live original or an unfinished flatten),
+        so such a group returns ``NOT_TERMINALIZABLE`` until the live hooks
+        settle the sibling. Legs are NEVER mutated — their statuses and signed
+        accounting remain the true books; the completed group is purely the
+        attestation record. A group with NO current legs is never attestable:
+        a vacuous attestation would clear the scope's halt while erasing the
+        operator-visible incident, so corruption stays surfaced instead. The
+        held-created-ORIGINAL guard mirrors
+        :meth:`complete_paired_execution_group_if_settled` (an attested group
+        must never strand a gate-held command in the outbox backlog), and the
+        attesting subject is clamped to 64 chars so the stamp suffix can never
+        consume the whole 512-char column.
+        """
+        async with self.session() as s:
+            group = (
+                (
+                    await s.execute(
+                        select(PairedExecutionGroup)
+                        .where(
+                            PairedExecutionGroup.public_id == public_id,
+                            PairedExecutionGroup.known_to == KNOWN_TO_MAX,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if group is None:
+                return PairedGroupTerminalizeOutcome.NOT_FOUND
+            legs = (
+                (
+                    await s.execute(
+                        select(PairedExecutionLeg)
+                        .where(
+                            PairedExecutionLeg.group_public_id == public_id,
+                            PairedExecutionLeg.known_to == KNOWN_TO_MAX,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not legs:
+                return PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
+            manual_legs = [
+                leg
+                for leg in legs
+                if leg.status == PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value
+            ]
+            group_is_manual = (
+                group.status == PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value
+            )
+            group_is_reopened_manual = (
+                group.status == PairedExecutionGroupStatusEnum.COMPENSATING.value
+                and bool(manual_legs)
+            )
+            if not (group_is_manual or group_is_reopened_manual):
+                return PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
+            for leg in legs:
+                if leg.status == PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value:
+                    continue
+                if leg.status not in self._PEL_SETTLED_STATUSES:
+                    return PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
+                if abs(leg.filled_signed_qty - leg.compensated_signed_qty) >= self._PEC_QTY_EPSILON:
+                    return PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
+            held = (
+                await s.execute(
+                    select(TradeCommand.id)
+                    .where(
+                        TradeCommand.correlation_id == public_id,
+                        TradeCommand.status == TradeCommandStatusEnum.CREATED.value,
+                        TradeCommand.supersedes_command_id.is_(None),
+                        TradeCommand.known_to == KNOWN_TO_MAX,
+                    )
+                    .limit(1)
+                )
+            ).first()
+            if held is not None:
+                return PairedGroupTerminalizeOutcome.NOT_TERMINALIZABLE
+            suffix = f"; terminalized_by={attested_by[:64]}"
+            base = group.failure_reason or "manual intervention"
+            stamped = base[: max(0, 512 - len(suffix))] + suffix
+            effective_bus_time = max(bus_time, group.timestamp)
+            await s.execute(
+                update(PairedExecutionGroup)
+                .where(PairedExecutionGroup.id == group.id)
+                .values(known_to=effective_bus_time)
+            )
+            s.add(
+                PairedExecutionGroup(
+                    public_id=group.public_id,
+                    wallet_public_id=group.wallet_public_id,
+                    operator_public_id=group.operator_public_id,
+                    strategy_id=group.strategy_id,
+                    policy=group.policy,
+                    expected_leg_count=group.expected_leg_count,
+                    group_key=group.group_key,
+                    status=PairedExecutionGroupStatusEnum.COMPLETED.value,
+                    assembly_deadline=group.assembly_deadline,
+                    fill_deadline=group.fill_deadline,
+                    failure_reason=stamped,
+                    halted_at=group.halted_at,
+                    created_at=group.created_at,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                    timestamp=effective_bus_time,
+                )
+            )
+            await s.commit()
+            return PairedGroupTerminalizeOutcome.TERMINALIZED
 
     @staticmethod
     def _venue_event_to_row(ve: VenueEvent) -> VenueEventRow:

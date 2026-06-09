@@ -47,6 +47,7 @@ class Permission(StrEnum):
     MANAGE_BACKTESTS = "manage:backtests"
     READ_NOTIFICATIONS = "read:notifications"
     MANAGE_NOTIFICATION_DEVICES = "manage:notification_devices"
+    MANAGE_PAIRED_EXECUTION = "manage:paired_execution"
 
 
 RESOURCE_PERMISSIONS: dict[str, Permission | None] = {
@@ -103,6 +104,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.READ_SIGNALS,
         Permission.READ_SYSTEM_STATUS,
         Permission.MANAGE_PROCESSES,
+        Permission.MANAGE_PAIRED_EXECUTION,
         Permission.READ_BACKTESTS,
         Permission.MANAGE_BACKTESTS,
         Permission.READ_NOTIFICATIONS,

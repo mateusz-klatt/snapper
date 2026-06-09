@@ -333,6 +333,25 @@ class PairedExecutionPolicyEnum(StrEnum):
     SEQUENTIAL_HANDOFF = "sequential_handoff"
 
 
+class PairedGroupTerminalizeOutcome(StrEnum):
+    """Outcome of an operator terminalize attempt on a paired-execution group.
+
+    ``TERMINALIZED`` — the attestation was recorded and the group is now
+    ``completed`` (the guard scanner's quiet-halt sweep then clears the
+    scope's durable halt and every coordinator's in-memory mirror within one
+    cycle). ``NOT_FOUND`` — no current active group carries the public id
+    (maps to HTTP 404). ``NOT_TERMINALIZABLE`` — the group exists but is not
+    operator-attestable right now: it is neither ``manual_intervention`` nor a
+    ``compensating`` group re-opened onto a manual leg, or some leg is still
+    in flight (neither settled at zero open exposure nor manual), so attesting
+    would paper over live automation (maps to HTTP 409).
+    """
+
+    TERMINALIZED = "terminalized"
+    NOT_FOUND = "not_found"
+    NOT_TERMINALIZABLE = "not_terminalizable"
+
+
 class PairedFillProjection(StrEnum):
     """Outcome of projecting a venue fill onto the paired-execution tables.
 
@@ -801,6 +820,7 @@ __all__ = [
     "PairedExecutionPolicy",
     "PairedExecutionPolicyEnum",
     "PairedFillProjection",
+    "PairedGroupTerminalizeOutcome",
     "ProcessLifecycleEnum",
     "ProcessLifecycleType",
     "ProcessMode",
