@@ -4742,3 +4742,397 @@ class TestGetCurrentFundingRate:
         )
         result = await client.get_current_funding_rate("PF_XBTUSD")
         assert result is None
+
+
+class TestSubscribeWedgeHardening:
+    """Tests for the #144 deadlock-class hardening.
+
+    Bounded SDK sends, serialized connects, compare-and-clear ownership,
+    replay abort on client swap, and trade dark-recovery — the fix set for
+    the 2026-06-09 connected-but-dark incident.
+    """
+
+    @pytest.mark.asyncio
+    async def test_send_public_subscribe_times_out_and_releases_lock(
+        self, client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A hung SDK send raises TimeoutError and frees the throttle lock.
+
+        Given: A client whose SDK subscribe never returns (the SDK's
+            while-not-socket spin on a socketless client),
+        When: _send_public_subscribe runs,
+        Then: It raises TimeoutError within the bound and a SUBSEQUENT send
+            acquires the lock and succeeds — the wedge that starved every
+            subscribe path in the incident is impossible.
+        """
+        monkeypatch.setattr(kf, "_SDK_SEND_TIMEOUT_S", 0.05)
+
+        async def _hang(**_kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        hung = AsyncMock()
+        hung.subscribe = AsyncMock(side_effect=_hang)
+        client._ws_client = hung
+        with pytest.raises(TimeoutError):
+            await client._send_public_subscribe(feed="ticker", product="PF_XBTUSD")
+        assert not client._public_subscribe_lock.locked()
+        good = AsyncMock()
+        client._ws_client = good
+        await client._send_public_subscribe(feed="ticker", product="PF_XBTUSD")
+        good.subscribe.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_send_public_subscribe_raises_when_client_cleared_under_lock(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """The in-lock client snapshot rejects a slot cleared while queueing.
+
+        Given: A send that passed the outer client check but waited on the
+            throttle lock while a concurrent path cleared the slot,
+        When: The lock is finally acquired,
+        Then: RuntimeError is raised instead of dereferencing a stale
+            narrowed reference.
+        """
+        client._ws_client = AsyncMock()
+        await client._public_subscribe_lock.acquire()
+        send_task = asyncio.create_task(
+            client._send_public_subscribe(feed="ticker", product="PF_XBTUSD")
+        )
+        await asyncio.sleep(0)
+        client._ws_client = None
+        client._public_subscribe_lock.release()
+        with pytest.raises(RuntimeError):
+            await send_task
+
+    @pytest.mark.asyncio
+    async def test_ensure_ws_connected_coalesces_concurrent_callers(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Concurrent connect callers build exactly one client.
+
+        Given: Two concurrent _ensure_ws_connected callers and a slow start,
+        When: Both run,
+        Then: Only one FuturesWSClient is constructed — the second caller
+            parks on the connect lock and adopts the first one's client
+            (no duplicate live connections).
+        """
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow_start() -> None:
+            started.set()
+            await release.wait()
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
+        ) as ws_cls:
+            ws_cls.return_value.start = _slow_start
+            first = asyncio.create_task(client._ensure_ws_connected())
+            await started.wait()
+            second = asyncio.create_task(client._ensure_ws_connected())
+            await asyncio.sleep(0.01)
+            release.set()
+            await asyncio.gather(first, second)
+        assert ws_cls.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_ensure_teardown_leaves_foreign_client_untouched(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A failing connect cannot null a client another path installed.
+
+        Given: A start() that swaps the slot to a foreign client then raises
+            (modeling a concurrent disconnect/install racing the connect),
+        When: _ensure_ws_connected tears down,
+        Then: The foreign client stays in the slot (compare-and-clear).
+        """
+        foreign = AsyncMock()
+
+        async def _steal_and_fail() -> None:
+            client._ws_client = foreign
+            raise RuntimeError("boom")
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
+        ) as ws_cls:
+            ws_cls.return_value.start = _steal_and_fail
+            ws_cls.return_value.close = AsyncMock()
+            with pytest.raises(RuntimeError, match="boom"):
+                await client._ensure_ws_connected()
+        assert client._ws_client is foreign
+
+    @pytest.mark.asyncio
+    async def test_replay_aborts_when_client_swapped_mid_replay(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Replay raises when the client slot is swapped between sends.
+
+        Given: Two cached subscriptions and a send that swaps the slot,
+        When: _replay_subscriptions runs,
+        Then: It raises after the first send instead of marching the rest of
+            the replay against the wrong connection.
+        """
+        client._ws_client = AsyncMock()
+        first = SubscriptionRequest(channel="ticker", symbols=("PF_XBTUSD",), parameters_json="{}")
+        second = SubscriptionRequest(channel="trade", symbols=("PF_ETHUSD",), parameters_json="{}")
+        client._subscription_cache[first.key()] = first
+        client._subscription_cache[second.key()] = second
+        calls = {"n": 0}
+
+        async def _swap(**_kwargs: Any) -> None:
+            calls["n"] += 1
+            client._ws_client = AsyncMock()
+
+        with (
+            patch.object(client, "_send_public_subscribe", AsyncMock(side_effect=_swap)),
+            pytest.raises(RuntimeError, match="replaced during subscription replay"),
+        ):
+            await client._replay_subscriptions()
+        assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_disconnect_does_not_clobber_newer_client(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Disconnect leaves a newer concurrently-installed client alone.
+
+        Given: A close() during which a concurrent path installs a NEW client,
+        When: disconnect finishes,
+        Then: The new client remains in the slot (compare-and-clear) instead
+            of being detached into an unowned orphan.
+        """
+        newer = AsyncMock()
+        old = AsyncMock()
+
+        async def _close_and_install() -> None:
+            client._ws_client = newer
+
+        old.close = AsyncMock(side_effect=_close_and_install)
+        client._ws_client = old
+        await client.disconnect()
+        assert client._ws_client is newer
+
+    @pytest.mark.asyncio
+    async def test_tick_cleanup_skips_unsubscribe_after_client_swap(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A dying tick generator never bulk-unsubscribes a swapped client.
+
+        Given: A started tick generator whose client was swapped by recovery,
+        When: The generator closes,
+        Then: NO unsubscribe is sent — the latent kill-switch that could
+            strip the whole universe from a freshly-replayed client is gone.
+        """
+        original = AsyncMock()
+        original.exception_occur = False
+        with (
+            patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock),
+            patch.object(client, "_subscribe_in_chunks", new_callable=AsyncMock),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures."
+                "native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+        ):
+            client._ws_client = original
+            gen = client._subscribe_ticks_impl(["BTC-USD-PERP"])
+            client._tick_queue.put_nowait(MagicMock())
+            await gen.__anext__()
+            client._ws_client = AsyncMock()
+            await gen.aclose()
+        original.unsubscribe.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_trade_cleanup_skips_unsubscribe_after_client_swap(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A dying trade generator never bulk-unsubscribes a swapped client.
+
+        Given: A started trade generator whose client was swapped by recovery,
+        When: The generator closes,
+        Then: NO unsubscribe is sent on the new client.
+        """
+        original = AsyncMock()
+        original.exception_occur = False
+        with (
+            patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock),
+            patch.object(client, "_subscribe_in_chunks", new_callable=AsyncMock),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures."
+                "native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+        ):
+            client._ws_client = original
+            gen = client._subscribe_trades_impl(["BTC-USD-PERP"])
+            client._trade_queue.put_nowait(MagicMock())
+            await gen.__anext__()
+            client._ws_client = AsyncMock()
+            await gen.aclose()
+        original.unsubscribe.assert_not_awaited()
+
+    def test_health_tracker_dark_recovers_trades_too(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Futures dark recovery covers the trade channel.
+
+        Given: A freshly constructed Futures client,
+        When: Its health tracker is inspected,
+        Then: dark_recovery_channels includes trade — Futures candles are
+            synthesized from trades, so the candle pipeline now has the slow
+            dark backstop too.
+        """
+        assert client._health_tracker.dark_recovery_channels == frozenset({"ticker", "trade"})
+
+    @pytest.mark.asyncio
+    async def test_disconnect_does_not_clobber_newer_private_client(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Disconnect leaves a newer concurrently-installed PRIVATE client alone.
+
+        Given: A private close() during which a concurrent path installs a
+            NEW private client,
+        When: disconnect finishes,
+        Then: The new private client remains in the slot (compare-and-clear).
+        """
+        newer = AsyncMock()
+        old = AsyncMock()
+
+        async def _close_and_install() -> None:
+            auth_client._private_ws_client = newer
+
+        old.close = AsyncMock(side_effect=_close_and_install)
+        auth_client._private_ws_client = old
+        await auth_client.disconnect()
+        assert auth_client._private_ws_client is newer
+
+
+class TestPrivatePathHardening:
+    """Round-2 #144 hardening: the PRIVATE WS path gets the same guarantees."""
+
+    @pytest.mark.asyncio
+    async def test_private_ensure_coalesces_concurrent_callers(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Concurrent private connects build exactly one client.
+
+        Given: Two concurrent _ensure_private_ws_connected callers,
+        When: Both run against a slow start,
+        Then: Only one private FuturesWSClient is constructed.
+        """
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow_start() -> None:
+            started.set()
+            await release.wait()
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
+        ) as ws_cls:
+            ws_cls.return_value.start = _slow_start
+            first = asyncio.create_task(auth_client._ensure_private_ws_connected())
+            await started.wait()
+            second = asyncio.create_task(auth_client._ensure_private_ws_connected())
+            await asyncio.sleep(0.01)
+            release.set()
+            await asyncio.gather(first, second)
+        assert ws_cls.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_private_ensure_detects_ownership_loss(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A private connect raced by disconnect closes its own client.
+
+        Given: A private start() during which a concurrent disconnect nulls
+            the private slot,
+        When: _ensure_private_ws_connected finishes starting,
+        Then: It raises the ownership-lost error and closes the client it
+            built — a started-but-unowned private client (callback attached,
+            no owner) can no longer leak.
+        """
+
+        async def _start_while_disconnected() -> None:
+            auth_client._private_ws_client = None
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
+        ) as ws_cls:
+            ws_cls.return_value.start = _start_while_disconnected
+            ws_cls.return_value.close = AsyncMock()
+            with pytest.raises(RuntimeError, match="replaced during connect"):
+                await auth_client._ensure_private_ws_connected()
+            ws_cls.return_value.close.assert_awaited_once()
+        assert auth_client._private_ws_client is None
+
+    @pytest.mark.asyncio
+    async def test_public_ensure_detects_ownership_loss(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A public connect raced by disconnect closes its own client.
+
+        Given: An empty replay cache and a start() during which a concurrent
+            disconnect nulls the public slot,
+        When: _ensure_ws_connected finishes starting,
+        Then: It raises the ownership-lost error and closes the client it
+            built instead of returning success with an unowned live client.
+        """
+
+        async def _start_while_disconnected() -> None:
+            client._ws_client = None
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
+        ) as ws_cls:
+            ws_cls.return_value.start = _start_while_disconnected
+            ws_cls.return_value.close = AsyncMock()
+            with pytest.raises(RuntimeError, match="replaced during connect"):
+                await client._ensure_ws_connected()
+            ws_cls.return_value.close.assert_awaited_once()
+        assert client._ws_client is None
+
+    @pytest.mark.asyncio
+    async def test_private_subscribe_send_is_bounded(
+        self, auth_client: KrakenFuturesExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A hung private subscribe raises instead of wedging the executor.
+
+        Given: A private client whose subscribe never returns,
+        When: The executions generator starts,
+        Then: TimeoutError is raised within the per-send bound.
+        """
+        monkeypatch.setattr(kf, "_SDK_SEND_TIMEOUT_S", 0.05)
+
+        async def _hang(**_kwargs: Any) -> None:
+            await asyncio.Event().wait()
+
+        hung = AsyncMock()
+        hung.subscribe = AsyncMock(side_effect=_hang)
+        auth_client._private_ws_client = hung
+        with patch.object(auth_client, "_ensure_private_ws_connected", new_callable=AsyncMock):
+            gen = auth_client._subscribe_executions_impl()
+            with pytest.raises(TimeoutError):
+                await gen.__anext__()
+
+    @pytest.mark.asyncio
+    async def test_executions_cleanup_skips_unsubscribe_after_client_swap(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A dying executions generator never unsubscribes a swapped client.
+
+        Given: A started executions generator whose private client was
+            swapped by a concurrent reconnect,
+        When: The generator closes,
+        Then: NO unsubscribe is sent on the new private client.
+        """
+        original = AsyncMock()
+        original.exception_occur = False
+        auth_client._private_ws_client = original
+        with patch.object(auth_client, "_ensure_private_ws_connected", new_callable=AsyncMock):
+            gen = auth_client._subscribe_executions_impl()
+            auth_client._execution_queue.put_nowait(MagicMock())
+            await gen.__anext__()
+            auth_client._private_ws_client = AsyncMock()
+            await gen.aclose()
+        original.unsubscribe.assert_not_awaited()

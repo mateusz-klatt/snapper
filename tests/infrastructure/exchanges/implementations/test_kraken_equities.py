@@ -2048,3 +2048,143 @@ class TestWsEnvelopeDelayedPropagation:
             }
             await client._on_ws_message(msg)
         assert parse_mock.call_args.kwargs == {"envelope_delayed": False}
+
+
+class TestConnectRaceHardening:
+    """Equities parity tests for the #144 connect-race hardening."""
+
+    @pytest.mark.asyncio
+    async def test_ensure_ws_connected_coalesces_concurrent_callers(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Concurrent connect callers build exactly one SpotWSClient.
+
+        Given: Two concurrent _ensure_ws_connected callers and a slow start,
+        When: Both run,
+        Then: Only one client is constructed — the second caller parks on
+            the connect lock and adopts the first one's client.
+        """
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow_start() -> None:
+            started.set()
+            await release.wait()
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient"
+        ) as ws_cls:
+            ws_cls.return_value.start = _slow_start
+            first = asyncio.create_task(client._ensure_ws_connected())
+            await started.wait()
+            second = asyncio.create_task(client._ensure_ws_connected())
+            await asyncio.sleep(0.01)
+            release.set()
+            await asyncio.gather(first, second)
+        assert ws_cls.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_disconnect_does_not_clobber_newer_client(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Disconnect leaves a newer concurrently-installed client alone.
+
+        Given: A close() during which a concurrent path installs a NEW client,
+        When: disconnect finishes,
+        Then: The new client remains in the slot (compare-and-clear).
+        """
+        newer = AsyncMock()
+        old = AsyncMock()
+
+        async def _close_and_install() -> None:
+            client._ws_client = newer
+
+        old.close = AsyncMock(side_effect=_close_and_install)
+        client._ws_client = old
+        await client.disconnect()
+        assert client._ws_client is newer
+
+    @pytest.mark.asyncio
+    async def test_replay_aborts_when_client_swapped_mid_replay(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Equities replay raises when the client slot is swapped mid-replay.
+
+        Given: Two cached bulk requests and a subscribe that swaps the slot,
+        When: _replay_subscriptions runs,
+        Then: It raises after the first send instead of continuing against
+            the wrong connection.
+        """
+        ws = AsyncMock()
+
+        async def _swap(**_kwargs: object) -> None:
+            client._ws_client = AsyncMock()
+
+        ws.subscribe = AsyncMock(side_effect=_swap)
+        client._ws_client = ws
+        first = SubscriptionRequest(channel="ticker", symbols=("AAPL.US",), parameters_json="{}")
+        second = SubscriptionRequest(channel="trade", symbols=("AAPL.US",), parameters_json="{}")
+        client._subscription_cache[first.key()] = first
+        client._subscription_cache[second.key()] = second
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(RuntimeError, match="replaced during subscription replay"),
+        ):
+            await client._replay_subscriptions()
+        ws.subscribe.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_ensure_ws_connected_detects_ownership_loss(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """An equities connect raced by a disconnect closes its own client.
+
+        Given: An empty replay cache and a start() during which a concurrent
+            path nulls the slot,
+        When: _ensure_ws_connected finishes starting,
+        Then: It raises the ownership-lost error and closes the DISOWNED
+            client directly (slot-scoped disconnect would no-op and leak).
+        """
+
+        async def _start_while_disconnected() -> None:
+            client._ws_client = None
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient"
+            ) as ws_cls,
+            patch.object(client, "disconnect", new_callable=AsyncMock) as slot_disconnect,
+        ):
+            ws_cls.return_value.start = _start_while_disconnected
+            ws_cls.return_value.close = AsyncMock()
+            with pytest.raises(RuntimeError, match="replaced during connect"):
+                await client._ensure_ws_connected()
+            ws_cls.return_value.close.assert_awaited_once()
+            slot_disconnect.assert_not_awaited()
+        assert client._ws_client is None
+
+    @pytest.mark.asyncio
+    async def test_disowned_close_error_is_swallowed(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """A failing disowned close never masks the ownership error.
+
+        Given: An ownership-lost connect whose direct close also raises,
+        When: _ensure_ws_connected tears down,
+        Then: The close error is swallowed and the ownership RuntimeError
+            propagates.
+        """
+
+        async def _start_while_disconnected() -> None:
+            client._ws_client = None
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient"
+        ) as ws_cls:
+            ws_cls.return_value.start = _start_while_disconnected
+            ws_cls.return_value.close = AsyncMock(side_effect=RuntimeError("close fail"))
+            with pytest.raises(RuntimeError, match="replaced during connect"):
+                await client._ensure_ws_connected()

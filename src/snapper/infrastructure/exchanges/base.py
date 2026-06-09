@@ -185,6 +185,14 @@ class ExchangeClientBase(ABC):
     async def _subscription_health_loop(self) -> None:
         """Retry overdue pending subscribes and log stale data.
 
+        Stale-subscription logging runs FIRST in each cycle: it is read-only
+        and must never be hostage to send behavior. In the 2026-06-09
+        blackout incident a retry pass blocked forever inside a venue send,
+        and because logging ran after the retries the publisher emitted zero
+        stale warnings for its entire connected-but-dark lifetime — the one
+        signal an operator could have alerted on was muted by the very
+        failure it should have exposed.
+
         Args:
             None.
 
@@ -200,9 +208,9 @@ class ExchangeClientBase(ABC):
             return
         while self._health_loop_running:
             await asyncio.sleep(tracker.retry_interval_s)
+            self._log_stale_subscriptions(tracker)
             await self._retry_overdue_pending_subscriptions(tracker)
             await self._retry_due_failed_subscriptions(tracker)
-            self._log_stale_subscriptions(tracker)
             await self._recover_dark_subscriptions(tracker)
 
     async def _retry_overdue_pending_subscriptions(

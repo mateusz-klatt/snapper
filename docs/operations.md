@@ -298,6 +298,20 @@ action:
   Bounding it makes a stalled handshake fail fast so the recovery loop
   tears the partial client down and retries with a fresh one, reconnecting
   as soon as the network returns.
+- **Bounded subscribe sends + serialized reconnects.** Every Kraken SDK
+  subscribe/unsubscribe send is wrapped in a 5 s timeout
+  (`_SDK_SEND_TIMEOUT_S`): the Futures SDK's `send_message` spins forever
+  on a client whose socket never came up, and one such send once wedged
+  the shared subscribe throttle lock — starving the post-reconnect
+  subscription replay and leaving the feed connected-but-dark until a
+  process restart. Client (re)connects are serialized per venue
+  (`_ws_connect_lock`), slot writes are compare-and-clear, and a connect
+  raced by a disconnect closes its own client instead of leaking it.
+  Each recovery attempt is additionally bounded to 180 s
+  (`_RECOVERY_ATTEMPT_TIMEOUT_S`) so even an unforeseen hang becomes a
+  logged, retried failure rather than a silent permanent wedge. Futures
+  dark auto-recovery covers the `trade` channel too (its candles are
+  synthesized from trades).
 - **Dark-feed watchdog.** If a feed stays dark for ~25 min despite
   recovery (a wedged SDK or recovery bug), the publisher exits non-zero
   and `ProcessLauncherService` respawns it. The exit ceiling is kept
@@ -337,6 +351,10 @@ DB_URL=... python scripts/resilience_fault_injection.py --hold-s 180
 
 # Longer outage + a wider recovery SLA (e.g. validating the dark-feed watchdog).
 DB_URL=... python scripts/resilience_fault_injection.py --hold-s 900 --sla-s 600
+
+# Freshness bar vs SLA: --fresh-s is HOW FRESH the newest candle must be to
+# count as recovered; --sla-s is the wall-clock budget for getting there.
+DB_URL=... python scripts/resilience_fault_injection.py --hold-s 240 --sla-s 360 --fresh-s 120
 
 # Override the target container, port, or verified exchanges.
 DB_URL=... python scripts/resilience_fault_injection.py \

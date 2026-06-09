@@ -514,3 +514,57 @@ class TestMain:
         restore_mock.assert_called_once()
         cycle_mock.assert_not_called()
         assert "restore-only" in capsys.readouterr().out
+
+
+class TestFreshnessDecoupling:
+    """Tests for the fresh-vs-SLA decoupling and deadline-honest reporting."""
+
+    def test_age_under_sla_but_over_fresh_is_not_recovery(self) -> None:
+        """A candle age under the SLA but over fresh_s is NOT a recovery.
+
+        Given: A query reporting a constant 200s age, SLA 240s, fresh 120s,
+        When: await_recovery polls until the deadline,
+        Then: The exchange reports None — the previous conflated predicate
+            (age <= sla) declared instant recovery while the venue was dark.
+        """
+        clock: Iterator[float] = iter([0.0, 0.0, 5.0, 300.0])
+        result = await_recovery(
+            ["kraken_futures"],
+            sla_s=240.0,
+            poll_s=1.0,
+            fresh_s=120.0,
+            query=lambda _e: 200.0,
+            sleep=MagicMock(),
+            now=lambda: next(clock),
+        )
+        assert result == {"kraken_futures": None}
+
+    def test_pass_not_recorded_after_deadline(self) -> None:
+        """Freshness observed only after the deadline is not a pass.
+
+        Given: A slow poll whose fresh reading lands past the SLA deadline,
+        When: await_recovery evaluates it,
+        Then: The exchange reports None — elapsed times can no longer exceed
+            the SLA in a PASS line (the 423s-on-a-240s-SLA report).
+        """
+        clock: Iterator[float] = iter([0.0, 5.0, 250.0, 251.0])
+        result = await_recovery(
+            ["kraken"],
+            sla_s=240.0,
+            poll_s=1.0,
+            fresh_s=120.0,
+            query=lambda _e: 60.0,
+            sleep=MagicMock(),
+            now=lambda: next(clock),
+        )
+        assert result == {"kraken": None}
+
+    def test_parse_args_accepts_fresh_s(self) -> None:
+        """--fresh-s parses into args.fresh_s.
+
+        Given: A command line with --fresh-s 60,
+        When: _parse_args runs,
+        Then: The parsed namespace carries fresh_s=60.0.
+        """
+        args = _parse_args(["--fresh-s", "60"])
+        assert args.fresh_s == 60.0

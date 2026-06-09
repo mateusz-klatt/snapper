@@ -48,13 +48,32 @@ _DEFAULT_HOLD_S = 180.0
 _DEFAULT_SLA_S = 180.0
 _DEFAULT_POLL_S = 10.0
 _DEFAULT_EXCHANGES = "kraken,kraken_futures"
+_DEFAULT_FRESH_S = 120.0
+"""Default freshness threshold: a venue counts as recovered once its newest
+1m candle is at most this old. Decoupled from ``sla_s`` — the SLA is the
+WALL-CLOCK budget for reaching freshness, not the freshness bar itself.
+Conflating the two let a run with a generous SLA "pass" while a venue was
+still dark (candle age happened to sit under the SLA at restore time)."""
+_FRESHNESS_WINDOW_MIN = 30
+"""Recent ``open_at`` window (minutes) the freshness probe scans."""
 _FRESHNESS_SQL = (
     "SELECT EXTRACT(EPOCH FROM now() - max(c.open_at)) FROM candles c "
     "JOIN instruments i ON i.public_id = c.instrument_public_id "
     "AND i.known_to >= TIMESTAMP '9999-12-31' "
     "WHERE c.timeframe = '1m' AND c.known_to >= TIMESTAMP '9999-12-31' "
+    f"AND c.open_at > now() - INTERVAL '{_FRESHNESS_WINDOW_MIN} minutes' "
     "AND i.exchange = '{exchange}'"
 )
+"""Freshness probe bounded to a recent ``open_at`` window.
+
+Without the bound this was an unbounded ``max(open_at)`` over the
+multi-hundred-million-row candles table — the same scan class as the feed
+startup-cache incident — and under post-blackout write load a single poll
+took long enough to blow past the SLA deadline check, producing reports
+like ``PASS ... recovered in 423s`` on a 240 s-SLA run. Bounded, the probe
+rides the ``(instrument, open_at)`` index; when no candle exists inside the
+window the query returns NULL, which the caller treats as not-yet-fresh and
+keeps polling — exactly the wanted semantics."""
 
 _Runner = Callable[[Sequence[str]], tuple[int, str]]
 
@@ -388,16 +407,25 @@ def await_recovery(
     *,
     sla_s: float,
     poll_s: float,
+    fresh_s: float = _DEFAULT_FRESH_S,
     query: Callable[[str], float | None] = query_seconds_since_fresh,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.monotonic,
 ) -> dict[str, float | None]:
     """Poll each exchange until fresh data returns or the SLA elapses.
 
+    Freshness (``fresh_s``: how recent the newest candle must be) is a
+    separate axis from the SLA (``sla_s``: the wall-clock budget for
+    reaching that freshness). The pass condition is recorded only while the
+    deadline holds, so a slow poll can never report a "recovery" that
+    happened after the SLA already expired.
+
     Args:
         exchanges: Exchanges to verify recovery for.
         sla_s: Maximum seconds to wait for fresh data after restoration.
         poll_s: Seconds between freshness polls.
+        fresh_s: Maximum age (seconds) of the newest candle that counts as
+            fresh data.
         query: Callable returning seconds-since-fresh for an exchange.
         sleep: Callable used to pace polling.
         now: Monotonic clock callable.
@@ -406,15 +434,15 @@ def await_recovery(
         Mapping of exchange to the seconds-to-recovery measured, or ``None``
         if the SLA elapsed before fresh data returned.
     """
-    deadline = now() + sla_s
+    start = now()
+    deadline = start + sla_s
     pending = list(exchanges)
     recovered: dict[str, float | None] = {}
-    start = now()
     while pending and now() < deadline:
         still_pending: list[str] = []
         for exchange in pending:
             seconds_since = query(exchange)
-            if seconds_since is not None and seconds_since <= sla_s:
+            if seconds_since is not None and seconds_since <= fresh_s and now() < deadline:
                 recovered[exchange] = now() - start
             else:
                 still_pending.append(exchange)
@@ -434,6 +462,7 @@ def run_outage_cycle(
     hold_s: float,
     sla_s: float,
     poll_s: float,
+    fresh_s: float = _DEFAULT_FRESH_S,
     service: str | None = None,
     run: _Runner = run_helper,
     sleep: Callable[[float], None] = time.sleep,
@@ -451,6 +480,7 @@ def run_outage_cycle(
         exchanges: Exchanges expected to recover after restoration.
         hold_s: Seconds to hold the outage.
         sla_s: Recovery SLA passed to :func:`await_recovery`.
+        fresh_s: Freshness threshold passed to :func:`await_recovery`.
         poll_s: Poll cadence passed to :func:`await_recovery`.
         service: Compose service to recreate as the restore backstop;
             defaults to ``container``.
@@ -466,7 +496,7 @@ def run_outage_cycle(
         sleep(hold_s)
     finally:
         restore(container, port, run=run, service=service)
-    return await_recovery(exchanges, sla_s=sla_s, poll_s=poll_s)
+    return await_recovery(exchanges, sla_s=sla_s, poll_s=poll_s, fresh_s=fresh_s)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -498,6 +528,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--hold-s", type=float, default=_DEFAULT_HOLD_S)
     parser.add_argument("--sla-s", type=float, default=_DEFAULT_SLA_S)
     parser.add_argument("--poll-s", type=float, default=_DEFAULT_POLL_S)
+    parser.add_argument(
+        "--fresh-s",
+        type=float,
+        default=_DEFAULT_FRESH_S,
+        help="Max age (s) of the newest 1m candle that counts as fresh data.",
+    )
     parser.add_argument(
         "--restore-only",
         action="store_true",
@@ -531,15 +567,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         hold_s=args.hold_s,
         sla_s=args.sla_s,
         poll_s=args.poll_s,
+        fresh_s=args.fresh_s,
         service=service,
     )
     ok = True
     for exchange, seconds in recovered.items():
         if seconds is None:
-            print(f"FAIL {exchange}: no fresh data within {args.sla_s:.0f}s SLA")
+            print(
+                f"FAIL {exchange}: no candle fresher than {args.fresh_s:.0f}s "
+                f"within {args.sla_s:.0f}s SLA"
+            )
             ok = False
         else:
-            print(f"PASS {exchange}: recovered in {seconds:.0f}s")
+            print(
+                f"PASS {exchange}: candle age <= {args.fresh_s:.0f}s "
+                f"after {seconds:.0f}s (SLA {args.sla_s:.0f}s)"
+            )
     return 0 if ok else 1
 
 

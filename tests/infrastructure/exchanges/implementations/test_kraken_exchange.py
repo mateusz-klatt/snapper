@@ -6478,3 +6478,138 @@ class TestRawTickerCapture:
             client._ws_client = mock_ws_client
             await client.collect_raw_ticker_symbols(window_seconds=0.0)
         assert client._raw_ticker_capture is outer_capture
+
+
+class TestConnectRaceHardening:
+    """Spot parity tests for the #144 connect-race hardening."""
+
+    @pytest.mark.asyncio
+    async def test_ensure_ws_connected_coalesces_concurrent_callers(self) -> None:
+        """Concurrent connect callers build exactly one SpotWSClient.
+
+        Given: Two concurrent _ensure_ws_connected callers and a slow start,
+        When: Both run,
+        Then: Only one client is constructed — the second caller parks on
+            the connect lock and adopts the first one's client.
+        """
+        client = KrakenExchangeClient(api_key="key", api_secret="secret")
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow_start() -> None:
+            started.set()
+            await release.wait()
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient"
+        ) as ws_cls:
+            ws_cls.return_value.start = _slow_start
+            first = asyncio.create_task(client._ensure_ws_connected())
+            await started.wait()
+            second = asyncio.create_task(client._ensure_ws_connected())
+            await asyncio.sleep(0.01)
+            release.set()
+            await asyncio.gather(first, second)
+        assert ws_cls.call_count == 1
+        assert client._ws_connected is True
+
+    @pytest.mark.asyncio
+    async def test_close_ws_client_does_not_clobber_newer_client(self) -> None:
+        """_close_ws_client leaves a newer concurrently-installed client alone.
+
+        Given: A close() during which a concurrent path installs a NEW client,
+        When: _close_ws_client finishes,
+        Then: The new client remains in the slot (compare-and-clear).
+        """
+        client = KrakenExchangeClient(api_key="key", api_secret="secret")
+        newer = AsyncMock()
+        old = AsyncMock()
+
+        async def _close_and_install() -> None:
+            client._ws_client = newer
+
+        old.close = AsyncMock(side_effect=_close_and_install)
+        client._ws_client = old
+        await client._close_ws_client()
+        assert client._ws_client is newer
+
+    @pytest.mark.asyncio
+    async def test_replay_aborts_when_client_swapped_mid_replay(self) -> None:
+        """Spot replay raises when the client slot is swapped between chunks.
+
+        Given: Two cached chunk requests and a subscribe that swaps the slot,
+        When: _replay_subscriptions runs,
+        Then: It raises after the first chunk instead of aiming the rest of
+            the replay at the wrong connection.
+        """
+        client = KrakenExchangeClient(api_key="key", api_secret="secret")
+        ws = AsyncMock()
+
+        async def _swap(**_kwargs: Any) -> None:
+            client._ws_client = AsyncMock()
+
+        ws.subscribe = AsyncMock(side_effect=_swap)
+        client._ws_client = ws
+        first = SubscriptionRequest(channel="trade", symbols=("BTC/USD",), parameters_json="{}")
+        second = SubscriptionRequest(channel="trade", symbols=("ETH/USD",), parameters_json="{}")
+        client._subscription_cache[first.key()] = first
+        client._subscription_cache[second.key()] = second
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(RuntimeError, match="replaced during subscription replay"),
+        ):
+            await client._replay_subscriptions()
+        ws.subscribe.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_ensure_ws_connected_detects_ownership_loss(self) -> None:
+        """A spot connect raced by a disconnect closes its own client.
+
+        Given: An empty replay cache and a start() during which a concurrent
+            path nulls the slot,
+        When: _ensure_ws_connected finishes starting,
+        Then: It raises the ownership-lost error and closes the DISOWNED
+            client directly (the slot-scoped _close_ws_client would be a
+            no-op on the emptied slot, leaking the started client).
+        """
+        client = KrakenExchangeClient(api_key="key", api_secret="secret")
+
+        async def _start_while_disconnected() -> None:
+            client._ws_client = None
+
+        with (
+            patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient") as ws_cls,
+            patch.object(client, "_close_ws_client", new_callable=AsyncMock) as slot_close,
+        ):
+            ws_cls.return_value.start = _start_while_disconnected
+            ws_cls.return_value.close = AsyncMock()
+            with pytest.raises(RuntimeError, match="replaced during connect"):
+                await client._ensure_ws_connected()
+            ws_cls.return_value.close.assert_awaited_once()
+            slot_close.assert_not_awaited()
+        assert client._ws_client is None
+
+    @pytest.mark.asyncio
+    async def test_disowned_close_error_is_swallowed(self) -> None:
+        """A failing disowned close never masks the ownership error.
+
+        Given: An ownership-lost connect whose direct close also raises,
+        When: _ensure_ws_connected tears down,
+        Then: The close error is swallowed and the ownership RuntimeError
+            propagates.
+        """
+        client = KrakenExchangeClient(api_key="key", api_secret="secret")
+
+        async def _start_while_disconnected() -> None:
+            client._ws_client = None
+
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient"
+        ) as ws_cls:
+            ws_cls.return_value.start = _start_while_disconnected
+            ws_cls.return_value.close = AsyncMock(side_effect=RuntimeError("close fail"))
+            with pytest.raises(RuntimeError, match="replaced during connect"):
+                await client._ensure_ws_connected()

@@ -178,6 +178,8 @@ _TIMEFRAME_TO_INTERVAL: dict[str, int] = {
 _RESUBSCRIBE_CHUNK_DELAY_S = 5.0
 _ALREADY_SUBSCRIBED_ERROR = "Already subscribed"
 _WS_CLIENT_NOT_CONNECTED_MSG = "WebSocket client not connected"
+_REPLAY_CLIENT_REPLACED_MSG = "WebSocket client replaced during subscription replay"
+_CONNECT_OWNERSHIP_LOST_MSG = "WebSocket client replaced during connect"
 
 
 def _subscription_ack_confirms(success: bool, error: str | None) -> bool:
@@ -279,6 +281,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         super().__init__(repository=repository, exchange_name=ExchangeEnum.KRAKEN_EQUITIES)
         self._health_tracker: SubscriptionHealthTracker = SubscriptionHealthTracker()
         self._ws_client: SpotWSClient | None = None
+        self._ws_connect_lock: asyncio.Lock = asyncio.Lock()
         self._tick_queue: asyncio.Queue[TickerUpdate] = asyncio.Queue(maxsize=_TICK_QUEUE_MAX_SIZE)
         self._trade_queue: asyncio.Queue[TradeUpdate] = asyncio.Queue(maxsize=_TRADE_QUEUE_MAX_SIZE)
         self._candle_queue: asyncio.Queue[CandleUpdate] = asyncio.Queue(
@@ -301,17 +304,22 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         The close is bounded by ``_WS_CLOSE_TIMEOUT_S`` so a blackholed
         socket cannot hang liveness recovery or shutdown; on timeout or
         close error the client reference is dropped and a fresh one is
-        rebuilt on the next connect.
+        rebuilt on the next connect. The slot clear is compare-and-clear: a
+        concurrent ``_ensure_ws_connected`` may have installed a NEWER client
+        while this close was in flight, and unconditionally nulling the slot
+        would detach that live client (callback still attached, no owner).
         """
-        if self._ws_client:
+        client = self._ws_client
+        if client:
             try:
                 async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
-                    await self._ws_client.close()
+                    await client.close()
             except TimeoutError:
                 logger.warning("Kraken Equities WS close timed out - forcing cleanup")
             except Exception as e:
                 logger.warning(f"Error closing Kraken Equities WS: {e}")
-            self._ws_client = None
+            if self._ws_client is client:
+                self._ws_client = None
         logger.info("Kraken Equities connections closed")
 
     async def _on_ws_message(self, message: dict[str, Any] | list[Any]) -> None:
@@ -480,34 +488,65 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
     async def _ensure_ws_connected(self) -> None:
         """Connect the SpotWSClient if not already connected.
 
+        Serialized on ``_ws_connect_lock``: the recovery loop and supervised
+        consumer restarts call this concurrently, and unserialized callers
+        can build DUPLICATE clients whose teardown writes clobber each
+        other's ``_ws_client`` slot (the duplicate-client churn observed on
+        Futures in the 2026-06-09 blackout fault test). Under the lock,
+        concurrent callers coalesce onto a single client.
+
         On a build/replay failure or cancellation the partial client is
         torn down via :meth:`disconnect` before the error propagates, so a
         cancelled or failed recovery cannot leak the SDK client, its
         background run task, or its aiohttp session.
         """
-        if self._ws_client is not None:
-            return
-        self._ws_client = SpotWSClient(
-            ws_url=_WS_URL,
-            callback=self._on_ws_message,
-            no_public=False,
-        )
-        try:
-            async with asyncio.timeout(_WS_CONNECT_TIMEOUT_S):
-                await self._ws_client.start()
-            logger.info("Kraken Equities WebSocket connected")
-            if self._subscription_cache:
-                await self._replay_subscriptions()
-        except BaseException:
-            await self.disconnect()
-            raise
+        async with self._ws_connect_lock:
+            if self._ws_client is not None:
+                return
+            client = SpotWSClient(
+                ws_url=_WS_URL,
+                callback=self._on_ws_message,
+                no_public=False,
+            )
+            self._ws_client = client
+            try:
+                async with asyncio.timeout(_WS_CONNECT_TIMEOUT_S):
+                    await client.start()
+                logger.info("Kraken Equities WebSocket connected")
+                if self._subscription_cache:
+                    await self._replay_subscriptions()
+                if self._ws_client is not client:
+                    raise RuntimeError(_CONNECT_OWNERSHIP_LOST_MSG)
+            except BaseException:
+                if self._ws_client is client:
+                    await self.disconnect()
+                else:
+                    try:
+                        async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
+                            await client.close()
+                    except Exception as exc:
+                        logger.warning(f"Error closing disowned Kraken Equities WS: {exc!r}")
+                raise
 
     async def _replay_subscriptions(self) -> None:
-        """Replay cached public subscriptions after reconnect."""
-        if self._ws_client is None:
+        """Replay cached public subscriptions after reconnect.
+
+        Captures the client at entry and aborts (raises) if the
+        ``_ws_client`` slot is swapped between chunk sends, so a replay
+        aimed at a client that a concurrent path already replaced cannot
+        keep sending against the wrong connection.
+
+        Raises:
+            RuntimeError: If no client is connected at entry, or the slot
+                stops pointing at the entry client between sends.
+        """
+        client = self._ws_client
+        if client is None:
             raise RuntimeError(_WS_CLIENT_NOT_CONNECTED_MSG)
         requests = list(self._subscription_cache.values())
         for index, req in enumerate(requests):
+            if self._ws_client is not client:
+                raise RuntimeError(_REPLAY_CLIENT_REPLACED_MSG)
             params = {
                 "channel": req.channel,
                 "symbol": list(req.symbols),
@@ -519,7 +558,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                     symbol,
                     preserve_retry_count=True,
                 )
-            await self._ws_client.subscribe(params=params)
+            await client.subscribe(params=params)
             if index < len(requests) - 1:
                 await asyncio.sleep(_RESUBSCRIBE_CHUNK_DELAY_S)
 

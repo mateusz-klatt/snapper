@@ -823,3 +823,44 @@ def test_subscription_health_snapshot_returns_tracker_state() -> None:
     snapshot = client.subscription_health_snapshot()
     assert set(snapshot.keys()) == {("ticker", "BTC/USD")}
     assert snapshot[("ticker", "BTC/USD")].status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_health_loop_logs_stale_before_retry_passes() -> None:
+    """Stale-subscription logging precedes the retry passes each cycle.
+
+    Given: A client with a tracker and a health loop allowed one cycle,
+    When: The loop runs one iteration,
+    Then: _log_stale_subscriptions runs BEFORE the retry passes, so a
+        blocking retry can never mute stale telemetry again (in the
+        2026-06-09 incident a wedged retry silenced every stale warning for
+        the publisher's whole connected-but-dark lifetime).
+    """
+    client = DummyExchangeClient()
+    client._health_tracker = MagicMock(retry_interval_s=0.0)
+    order: list[str] = []
+
+    def _log(_tracker: object) -> None:
+        order.append("log")
+
+    async def _overdue(_tracker: object) -> None:
+        order.append("overdue")
+        client._health_loop_running = False
+
+    async def _failed(_tracker: object) -> None:
+        order.append("failed")
+
+    async def _dark(_tracker: object) -> None:
+        order.append("dark")
+
+    with (
+        patch.object(client, "_log_stale_subscriptions", side_effect=_log),
+        patch.object(
+            client, "_retry_overdue_pending_subscriptions", AsyncMock(side_effect=_overdue)
+        ),
+        patch.object(client, "_retry_due_failed_subscriptions", AsyncMock(side_effect=_failed)),
+        patch.object(client, "_recover_dark_subscriptions", AsyncMock(side_effect=_dark)),
+    ):
+        client._health_loop_running = True
+        await client._subscription_health_loop()
+    assert order == ["log", "overdue", "failed", "dark"]

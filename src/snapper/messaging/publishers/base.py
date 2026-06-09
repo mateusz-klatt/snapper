@@ -114,6 +114,21 @@ publisher stops. This replaces the previous single ``asyncio.wait_for``
 attempt bounded at 90 seconds, which cancelled a Spot reconnect mid
 subscription-replay (~195 s of work) on every cycle and left the public
 feeds dark for hours after a multi-minute network outage."""
+_RECOVERY_ATTEMPT_TIMEOUT_S: Final = 180.0
+"""Upper bound on a SINGLE liveness-recovery attempt.
+
+The 2026-06-09 blackout fault test proved an attempt can hang forever
+OUTSIDE the venue-level connect timeout (a subscription replay queued
+behind a wedged subscribe lock), and a hung attempt holds the recovery
+lock — silencing every future liveness trigger while the feed stays
+connected-but-dark until a process restart. Bounding the whole attempt
+turns any unforeseen hang into ``recovery attempt N raised TimeoutError``
+plus a retry. Attempts are idempotent (subscription caches survive and
+replay re-marks tracker entries with preserved budgets), and 180 s gives
+~3.6x headroom over the worst venue's healthy attempt (~50 s of paced
+Futures replay plus rate-limit cooldowns) — the bound MUST exceed a
+healthy attempt or recovery would churn half-replayed connections
+forever."""
 _RECOVERY_JITTER_FRACTION: Final = 0.2
 """Plus/minus fractional jitter applied to each recovery backoff so
 independent publishers do not synchronise their reconnect attempts."""
@@ -964,7 +979,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         exponential jitter and tries again. The loop never abandons a
         dark feed on a timeout — it runs until messages resume or the
         publisher stops — so a multi-minute network outage no longer
-        leaves the feed dark waiting for an operator.
+        leaves the feed dark waiting for an operator. Each individual
+        attempt is additionally bounded by ``_RECOVERY_ATTEMPT_TIMEOUT_S``
+        so a wedged attempt (e.g. a replay stuck behind a blocked
+        subscribe path) becomes a logged, retried failure instead of
+        silently holding the recovery lock forever.
 
         Args:
             reason: Human-readable trigger reason for log context.
@@ -984,7 +1003,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 attempt += 1
                 attempt_ok = True
                 try:
-                    await self._attempt_liveness_recovery(reason)
+                    async with asyncio.timeout(_RECOVERY_ATTEMPT_TIMEOUT_S):
+                        await self._attempt_liveness_recovery(reason)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:

@@ -6973,3 +6973,36 @@ class TestFeedHealthFlush:
     def test_flush_interval_is_thirty_seconds(self) -> None:
         """The module flush interval constant defaults to 30 seconds."""
         assert _FEED_HEALTH_FLUSH_INTERVAL_S == 30.0
+
+
+@pytest.mark.asyncio
+async def test_recovery_attempt_is_bounded_and_retried_on_hang(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hung recovery attempt times out, is logged, and recovery retries.
+
+    Given: A running publisher whose first attempt hangs forever (the
+        wedged-replay class from the 2026-06-09 incident),
+    When: Recovery runs under the lock with a small per-attempt bound,
+    Then: The hang becomes a swallowed TimeoutError, attempt 2 runs and
+        restores data, and the recovery lock is released — a single wedged
+        attempt can no longer silence liveness recovery permanently.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._last_message_at = 0.0
+    calls = {"n": 0}
+
+    async def _attempt(_reason: str) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await asyncio.Event().wait()
+        pub._last_message_at = 100.0
+
+    pub._attempt_liveness_recovery = AsyncMock(side_effect=_attempt)
+    pub._sleep_with_jitter = AsyncMock()
+    monkeypatch.setattr("snapper.messaging.publishers.base._RECOVERY_ATTEMPT_TIMEOUT_S", 0.05)
+    monkeypatch.setattr("snapper.messaging.publishers.base._RECOVERY_PROGRESS_GRACE_S", 0.0)
+    await pub._run_recovery_under_lock("stale")
+    assert pub._attempt_liveness_recovery.await_count == 2
+    assert not pub._recovery_lock.locked()
