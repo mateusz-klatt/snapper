@@ -2468,6 +2468,14 @@ class TraderCoordinator(RegisterableProcess):
         Skipped without a SQL repository (the paired-execution tables do not
         exist there). The dispatcher already drops foreign-shard venue events,
         so this is not ownership-gated here (matching the live fill projection).
+
+        When the guard is enabled the terminal is ALSO routed to the compensation
+        projection (Phase 5d.2): a FLATTEN order's own cancel / expire / reject
+        carries the flatten's fresh ``client_order_id`` (matching no leg as an
+        original), so it lands via ``supersedes_command_id`` on the leg it was
+        flattening — settling that leg to ``flattened`` (residual gone) or back to
+        ``filled`` (residual remains because a late original fill grew exposure) so
+        the sweep re-flattens. A non-flatten terminal is a harmless ``NO_MATCH``.
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
             return
@@ -2479,6 +2487,14 @@ class TraderCoordinator(RegisterableProcess):
             self._tracker.next_sequence(f"paired.terminal.{client_order_id}"),
             exchange_order_id=exchange_order_id,
         )
+        if _bootstrap_settings.paired_execution_guard_enabled:
+            await self.repository.project_paired_execution_compensation_fill(
+                client_order_id,
+                datetime.now(UTC),
+                self._tracker.session_id,
+                self._tracker.next_sequence(f"paired.comp.terminal.{client_order_id}"),
+                flatten_terminal=True,
+            )
 
     async def _sync_position_cycle_on_fill(
         self,

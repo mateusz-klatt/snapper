@@ -1417,28 +1417,51 @@ async def test_project_leg_fill_clamps_bus_time_for_future_stamped_leg(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "terminal_status",
+    ("terminal_status", "expected_status"),
     [
-        PairedExecutionLegStatusEnum.REJECTED.value,
-        PairedExecutionLegStatusEnum.CANCELLED.value,
-        PairedExecutionLegStatusEnum.EXPIRED.value,
-        PairedExecutionLegStatusEnum.BROKEN.value,
-        PairedExecutionLegStatusEnum.COMPENSATING.value,
-        PairedExecutionLegStatusEnum.FLATTENED.value,
-        PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value,
+        (
+            PairedExecutionLegStatusEnum.REJECTED.value,
+            PairedExecutionLegStatusEnum.REJECTED.value,
+        ),
+        (
+            PairedExecutionLegStatusEnum.CANCELLED.value,
+            PairedExecutionLegStatusEnum.CANCELLED.value,
+        ),
+        (
+            PairedExecutionLegStatusEnum.EXPIRED.value,
+            PairedExecutionLegStatusEnum.EXPIRED.value,
+        ),
+        (
+            PairedExecutionLegStatusEnum.BROKEN.value,
+            PairedExecutionLegStatusEnum.FILLED.value,
+        ),
+        (
+            PairedExecutionLegStatusEnum.COMPENSATING.value,
+            PairedExecutionLegStatusEnum.COMPENSATING.value,
+        ),
+        (
+            PairedExecutionLegStatusEnum.FLATTENED.value,
+            PairedExecutionLegStatusEnum.FILLED.value,
+        ),
+        (
+            PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value,
+            PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value,
+        ),
     ],
 )
-async def test_project_leg_fill_skips_every_fill_terminal_status(
-    _repo: SQLAlchemyRepository, terminal_status: str
+async def test_project_leg_fill_late_reentry_per_terminal_status(
+    _repo: SQLAlchemyRepository, terminal_status: str, expected_status: str
 ) -> None:
-    """A fill on ANY fill-terminal leg is ignored (late post-terminal fills are 5d).
+    """A LATE original fill re-enters each post-break leg status per the 5d.2 FSM.
 
-    Given: an active leg already in each fill-terminal status,
-    When: a fill projection arrives for its client_order_id,
-    Then: it returns ORIGINAL_NOOP and the leg is unchanged, so fill projection
-        never resurrects a leg the guard already terminalized (re-compensation of
-        a late post-terminal fill is Phase 5d.2, not 5a). Covers the whole terminal
-        set so a new terminal status added without updating it is caught.
+    Given: an active leg already in each fill-terminal status with zero fill,
+    When: a LATE growing original fill arrives for its client_order_id,
+    Then: filled_signed_qty is updated (real venue exposure only grows) and the
+        successor status follows the re-entry FSM — flattened/broken reopen to
+        ``filled`` (so the sweep re-flattens the residual), while
+        compensating/cancelled/expired/rejected/manual_intervention keep their
+        status. Covers the whole terminal set so a new terminal status added
+        without a re-entry policy is caught.
     """
     leg_id = _pid(200)
     await _repo.insert_paired_execution_leg(
@@ -1453,10 +1476,76 @@ async def test_project_leg_fill_skips_every_fill_terminal_status(
     applied = await _repo.project_paired_execution_leg_fill(
         "cid-1", 5.0, PairedExecutionLegStatusEnum.FILLED.value, _T1, _NEXT_SESSION_ID, 2
     )
-    assert applied == PairedFillProjection.ORIGINAL_NOOP
+    assert applied == PairedFillProjection.ORIGINAL_APPLIED
     active = await _active_leg_versions(_repo, leg_id, _T2)
-    assert active[0].filled_signed_qty == 0.0
-    assert active[0].status == terminal_status
+    assert active[0].filled_signed_qty == 5.0
+    assert active[0].status == expected_status
+
+
+@pytest.mark.asyncio
+async def test_project_leg_fill_late_reentry_keeps_flattened_when_no_residual(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A late fill that does not re-open exposure leaves a flattened leg flattened.
+
+    Given: a flattened leg already over-compensated (filled=3, compensated=5),
+    When: a late original fill grows filled to exactly the compensated magnitude
+        (5), so open_qty collapses to zero,
+    Then: the leg stays FLATTENED (no spurious reopen) — the reopen only fires when
+        real residual exposure reappears.
+    """
+    leg_id = _pid(201)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            leg_index=0,
+            side="buy",
+            client_order_id="cid-nores",
+            status=PairedExecutionLegStatusEnum.FLATTENED.value,
+            filled_signed_qty=3.0,
+            compensated_signed_qty=5.0,
+        )
+    )
+    applied = await _repo.project_paired_execution_leg_fill(
+        "cid-nores", 5.0, PairedExecutionLegStatusEnum.FILLED.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert applied == PairedFillProjection.ORIGINAL_APPLIED
+    active = await _active_leg_versions(_repo, leg_id, _T2)
+    assert active[0].filled_signed_qty == 5.0
+    assert active[0].status == PairedExecutionLegStatusEnum.FLATTENED.value
+
+
+@pytest.mark.asyncio
+async def test_project_leg_fill_late_reentry_reopens_short_flattened_leg(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A late SELL fill on a flattened SHORT leg reopens it (sign-independent reopen).
+
+    Given: a flattened short leg (filled=−10, compensated=−10, open 0),
+    When: a late original SELL fill grows the signed cumulative to −15,
+    Then: filled becomes −15, the residual reappears (open=−5) and the leg reopens
+        to FILLED — the reopen uses abs(open_qty) so it is symmetric to the long
+        case.
+    """
+    leg_id = _pid(202)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            leg_index=0,
+            side="sell",
+            client_order_id="cid-short",
+            status=PairedExecutionLegStatusEnum.FLATTENED.value,
+            filled_signed_qty=-10.0,
+            compensated_signed_qty=-10.0,
+        )
+    )
+    applied = await _repo.project_paired_execution_leg_fill(
+        "cid-short", -15.0, PairedExecutionLegStatusEnum.FILLED.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert applied == PairedFillProjection.ORIGINAL_APPLIED
+    active = await _active_leg_versions(_repo, leg_id, _T2)
+    assert active[0].filled_signed_qty == -15.0
+    assert active[0].status == PairedExecutionLegStatusEnum.FILLED.value
 
 
 @pytest.mark.asyncio
@@ -2000,6 +2089,8 @@ async def _insert_flatten_command(
     supersedes_command_id: str,
     client_order_id: str,
     side: str,
+    quantity: float = 1.0,
+    idempotency_key: str | None = None,
     correlation_id: str = "00000000-0000-0000-0000-000000000100",
     now: datetime = _T0,
 ) -> None:
@@ -2009,7 +2100,10 @@ async def _insert_flatten_command(
     emits in Phase 5c.2: a ``reduce_only`` ``submit`` whose
     ``supersedes_command_id`` is the leg's ORIGINAL command and whose
     ``client_order_id`` is a fresh venue order id, so its fill routes back to the
-    leg's ``compensated_signed_qty`` by command identity.
+    leg's ``compensated_signed_qty`` by command identity. ``idempotency_key``
+    defaults to a unique per-order key; pass the real
+    ``paired:{group}:{leg}:flatten:{seq}`` form to make the flatten the leg's
+    CURRENT-``compensation_seq`` order (Phase 5d.2 terminality routing).
     """
     async with repo.session() as session:
         session.add(
@@ -2025,14 +2119,16 @@ async def _insert_flatten_command(
                 venue_client_id=client_order_id,
                 side=side,
                 order_type="market",
-                quantity=1.0,
+                quantity=quantity,
                 price=None,
                 reduce_only=True,
                 status=TradeCommandStatusEnum.CREATED.value,
                 created_at=now,
                 correlation_id=correlation_id,
                 supersedes_command_id=supersedes_command_id,
-                idempotency_key=f"flatten:{client_order_id}",
+                idempotency_key=(
+                    f"flatten:{client_order_id}" if idempotency_key is None else idempotency_key
+                ),
                 wallet_public_id="",
                 session_id=_SESSION_ID,
                 sequence_id=1,
@@ -2677,3 +2773,214 @@ async def test_compensation_recompute_raises_on_unexpected_flatten_side(
     )
     with pytest.raises(ValueError, match="unexpected side"):
         await _repo.reproject_paired_execution_leg_compensation(leg_id, _T1, _NEXT_SESSION_ID, 2)
+
+
+_DEFAULT_GROUP_PID = "00000000-0000-0000-0000-000000000100"
+
+
+def _current_seq_key(leg_public_id: str, seq: int) -> str:
+    """Build the flatten idempotency key the leg's CURRENT compensation_seq expects."""
+    return f"paired:{_DEFAULT_GROUP_PID}:{leg_public_id}:flatten:{seq}"
+
+
+@pytest.mark.asyncio
+async def test_compensation_reopens_leg_when_current_flatten_fully_fills_with_residual(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A fully-filled current flatten with residual reopens the leg for the next round.
+
+    Given: a compensating long leg whose exposure grew to +15 (a late original
+        fill) while its CURRENT-seq sell-flatten (quantity 10) fully filled 10,
+    When: the compensation projection settles the leg,
+    Then: compensated is +10, open residual is +5, and because the current flatten
+        is terminal (filled to its quantity) the leg reopens to FILLED so the sweep
+        re-flattens the residual on the next compensation_seq.
+    """
+    leg_id = _pid(330)
+    await _insert_created_command(_repo, public_id=_pid(730), correlation_id=_pid(100))
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            side="buy",
+            command_public_id=_pid(730),
+            client_order_id="orig-reopen",
+            status=PairedExecutionLegStatusEnum.COMPENSATING.value,
+            filled_signed_qty=15.0,
+            compensation_seq=1,
+        )
+    )
+    await _insert_flatten_command(
+        _repo,
+        public_id=_pid(830),
+        supersedes_command_id=_pid(730),
+        client_order_id="flat-r1",
+        side="sell",
+        quantity=10.0,
+        idempotency_key=_current_seq_key(leg_id, 1),
+    )
+    await _insert_fill_event(_repo, client_order_id="flat-r1", cum_fill_size=10.0, side="sell")
+    result = await _repo.reproject_paired_execution_leg_compensation(
+        leg_id, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert result == PairedFillProjection.COMPENSATION_APPLIED
+    active = await _active_leg_versions(_repo, leg_id, _T2)
+    assert active[0].compensated_signed_qty == 10.0
+    assert active[0].status == PairedExecutionLegStatusEnum.FILLED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "status"),
+    [("order_terminal", "cancelled"), ("order_rejected", "rejected")],
+)
+async def test_compensation_reopens_leg_when_current_flatten_aborts_with_residual(
+    _repo: SQLAlchemyRepository, event_type: str, status: str
+) -> None:
+    """A cancelled / rejected current flatten leaving residual reopens the leg.
+
+    Given: a compensating long leg (filled +10) whose CURRENT-seq sell-flatten
+        (quantity 10) only partially filled 4 before the venue cancelled / rejected
+        it (a durable order_terminal / order_rejected event),
+    When: the compensation projection settles the leg,
+    Then: compensated is +4, residual +6 remains, and because the current flatten
+        terminalized the leg reopens to FILLED for the next round.
+    """
+    leg_id = _pid(331)
+    await _insert_created_command(_repo, public_id=_pid(731), correlation_id=_pid(100))
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            side="buy",
+            command_public_id=_pid(731),
+            client_order_id="orig-abort",
+            status=PairedExecutionLegStatusEnum.COMPENSATING.value,
+            filled_signed_qty=10.0,
+            compensation_seq=1,
+        )
+    )
+    await _insert_flatten_command(
+        _repo,
+        public_id=_pid(831),
+        supersedes_command_id=_pid(731),
+        client_order_id="flat-abort",
+        side="sell",
+        quantity=10.0,
+        idempotency_key=_current_seq_key(leg_id, 1),
+    )
+    await _insert_fill_event(_repo, client_order_id="flat-abort", cum_fill_size=4.0, side="sell")
+    await _insert_fill_event(
+        _repo,
+        client_order_id="flat-abort",
+        cum_fill_size=None,
+        event_type=event_type,
+        status=status,
+        side="sell",
+    )
+    result = await _repo.reproject_paired_execution_leg_compensation(
+        leg_id, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert result == PairedFillProjection.COMPENSATION_APPLIED
+    active = await _active_leg_versions(_repo, leg_id, _T2)
+    assert active[0].compensated_signed_qty == 4.0
+    assert active[0].status == PairedExecutionLegStatusEnum.FILLED.value
+
+
+@pytest.mark.asyncio
+async def test_compensation_partial_current_flatten_in_flight_stays_compensating(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A partially-filled, still-live current flatten keeps the leg compensating.
+
+    Given: a compensating long leg (filled +10) whose CURRENT-seq sell-flatten
+        (quantity 10) has only partially filled 4 and is NOT terminal (no
+        cancel/expire/reject event),
+    When: the compensation projection settles the leg,
+    Then: compensated is +4 (open residual +6) but the leg stays COMPENSATING —
+        re-flattening now would double-flatten the in-flight order.
+    """
+    leg_id = _pid(332)
+    await _insert_created_command(_repo, public_id=_pid(732), correlation_id=_pid(100))
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            side="buy",
+            command_public_id=_pid(732),
+            client_order_id="orig-inflight",
+            status=PairedExecutionLegStatusEnum.COMPENSATING.value,
+            filled_signed_qty=10.0,
+            compensation_seq=1,
+        )
+    )
+    await _insert_flatten_command(
+        _repo,
+        public_id=_pid(832),
+        supersedes_command_id=_pid(732),
+        client_order_id="flat-inflight",
+        side="sell",
+        quantity=10.0,
+        idempotency_key=_current_seq_key(leg_id, 1),
+    )
+    await _insert_fill_event(_repo, client_order_id="flat-inflight", cum_fill_size=4.0, side="sell")
+    result = await _repo.reproject_paired_execution_leg_compensation(
+        leg_id, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert result == PairedFillProjection.COMPENSATION_APPLIED
+    active = await _active_leg_versions(_repo, leg_id, _T2)
+    assert active[0].compensated_signed_qty == 4.0
+    assert active[0].status == PairedExecutionLegStatusEnum.COMPENSATING.value
+
+
+@pytest.mark.asyncio
+async def test_compensation_stale_terminal_does_not_reopen_while_current_seq_in_flight(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A terminal for an OLD round never reopens while the current round is in flight.
+
+    Given: a compensating long leg at compensation_seq=2 (filled +20) whose seq-1
+        flatten fully filled 10 (terminal) but whose CURRENT seq-2 flatten (quantity
+        10) has only partially filled 4 and is still live,
+    When: the compensation projection settles the leg,
+    Then: compensated is +14 (10+4), residual +6, but because terminality is judged
+        on the CURRENT seq-2 flatten (still in flight) the leg stays COMPENSATING —
+        the stale seq-1 terminal cannot trigger a double-flatten.
+    """
+    leg_id = _pid(333)
+    await _insert_created_command(_repo, public_id=_pid(733), correlation_id=_pid(100))
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            side="buy",
+            command_public_id=_pid(733),
+            client_order_id="orig-stale",
+            status=PairedExecutionLegStatusEnum.COMPENSATING.value,
+            filled_signed_qty=20.0,
+            compensation_seq=2,
+        )
+    )
+    await _insert_flatten_command(
+        _repo,
+        public_id=_pid(834),
+        supersedes_command_id=_pid(733),
+        client_order_id="flat-seq1",
+        side="sell",
+        quantity=10.0,
+        idempotency_key=_current_seq_key(leg_id, 1),
+    )
+    await _insert_flatten_command(
+        _repo,
+        public_id=_pid(835),
+        supersedes_command_id=_pid(733),
+        client_order_id="flat-seq2",
+        side="sell",
+        quantity=10.0,
+        idempotency_key=_current_seq_key(leg_id, 2),
+    )
+    await _insert_fill_event(_repo, client_order_id="flat-seq1", cum_fill_size=10.0, side="sell")
+    await _insert_fill_event(_repo, client_order_id="flat-seq2", cum_fill_size=4.0, side="sell")
+    result = await _repo.reproject_paired_execution_leg_compensation(
+        leg_id, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert result == PairedFillProjection.COMPENSATION_APPLIED
+    active = await _active_leg_versions(_repo, leg_id, _T2)
+    assert active[0].compensated_signed_qty == 14.0
+    assert active[0].status == PairedExecutionLegStatusEnum.COMPENSATING.value

@@ -382,6 +382,30 @@ class PairedExecutionGuardScanner:
                     await self._cancel_live_original(group, leg, now)
                 elif status in _LEG_FLATTEN_ELIGIBLE_STATUSES:
                     await self._flatten_leg(group, leg, now)
+                elif status == PairedExecutionLegStatusEnum.COMPENSATING.value:
+                    await self._settle_compensating_leg(leg, now)
+
+    async def _settle_compensating_leg(self, leg: PairedExecutionLegRow, now: datetime) -> None:
+        """Backstop: re-derive an owned compensating leg's settlement from venue_events.
+
+        Phase 5d.2's live terminal hook settles a flatten order's cancel / expire /
+        reject the instant the message arrives, but two cases never reach it: a
+        venue cancel / expire recorded durably with NO trader terminal message, and
+        a not-tradeable reject that publishes without recording a row (so the live
+        recompute could miss terminality). Each scan this reprojects the leg's
+        compensation from the AUTHORITATIVE ``venue_events`` — idempotent (a
+        ``COMPENSATION_NOOP`` while the flatten is still in flight), and on a
+        durable terminal it FLATTENS the leg (residual gone) or reopens it to
+        ``filled`` (residual remains) so the next sweep re-flattens. A reopened leg
+        is dispatched by the next cycle's flatten claim, so no outbox notify is
+        needed here.
+        """
+        await self._repo.reproject_paired_execution_leg_compensation(
+            leg["public_id"],
+            now,
+            self._tracker.session_id,
+            self._tracker.next_sequence("guard.comp.settle"),
+        )
 
     async def _cancel_live_original(
         self,

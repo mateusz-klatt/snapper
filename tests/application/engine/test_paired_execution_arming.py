@@ -445,6 +445,7 @@ async def _insert_guard_leg(
     command_public_id: str | None = None,
     filled_signed_qty: float = 0.0,
     compensated_signed_qty: float = 0.0,
+    compensation_seq: int = 0,
     status: str = "pending",
 ) -> None:
     """Insert a paired-execution leg for recovery / fill-projection tests."""
@@ -465,6 +466,7 @@ async def _insert_guard_leg(
             "client_order_id": client_order_id,
             "filled_signed_qty": filled_signed_qty,
             "compensated_signed_qty": compensated_signed_qty,
+            "compensation_seq": compensation_seq,
             "status": status,
             "wallet_public_id": "",
             "operator_public_id": None,
@@ -483,6 +485,8 @@ async def _insert_flatten_cmd(
     supersedes_command_id: str,
     client_order_id: str,
     side: str,
+    quantity: float = 1.0,
+    idempotency_key: str | None = None,
 ) -> None:
     """Insert an active reduce-only flatten command superseding a leg's original."""
     stamp = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
@@ -500,14 +504,16 @@ async def _insert_flatten_cmd(
                 venue_client_id=client_order_id,
                 side=side,
                 order_type="market",
-                quantity=1.0,
+                quantity=quantity,
                 price=None,
                 reduce_only=True,
                 status=TradeCommandStatusEnum.CREATED.value,
                 created_at=stamp,
                 correlation_id="00000000-0000-0000-0000-000000000111",
                 supersedes_command_id=supersedes_command_id,
-                idempotency_key=f"flatten:{client_order_id}",
+                idempotency_key=(
+                    f"flatten:{client_order_id}" if idempotency_key is None else idempotency_key
+                ),
                 wallet_public_id="",
                 session_id="00000000-0000-0000-0000-000000000003",
                 sequence_id=1,
@@ -1144,6 +1150,90 @@ async def test_project_leg_fill_skips_compensation_when_guard_disabled(
 
 
 @pytest.mark.asyncio
+async def test_project_leg_fill_late_original_fill_reopens_flattened_leg(
+    _coord: TraderCoordinator,
+) -> None:
+    """A late ORIGINAL fill on a flattened leg reopens it to filled (5d.2 re-entry).
+
+    Given: a flattened long leg (filled=+10, compensated=+10, open 0) whose original
+        order fills 5 MORE at the venue after compensation closed,
+    When: _project_paired_execution_leg_fill runs for the late original fill,
+    Then: filled grows to +15, the open residual reappears (+5) and the leg reopens
+        to FILLED so the guard sweep re-flattens the residual.
+    """
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-la", status="compensating")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-la",
+        group_public_id="grp-la",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        side="buy",
+        client_order_id="orig-la",
+        command_public_id="cmd-la",
+        filled_signed_qty=10.0,
+        compensated_signed_qty=10.0,
+        status=PairedExecutionLegStatusEnum.FLATTENED.value,
+    )
+    await _coord._project_paired_execution_leg_fill(
+        _fill(client_order_id="orig-la", side="buy", size=15.0, status="filled"),
+        cast(VenueEventRow, {"id": 2}),
+    )
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-la")
+    assert legs[0]["filled_signed_qty"] == 15.0
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.FILLED.value
+
+
+@pytest.mark.asyncio
+async def test_project_leg_terminal_routes_flatten_cancel_to_compensation(
+    _coord: TraderCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A FLATTEN order's cancel reopens its leg from the live message, even with no row yet.
+
+    Given: the guard enabled, a compensating long leg (filled=+10, seq 1) whose
+        current-seq sell-flatten (quantity 10) partially filled 4, and a cancel
+        MESSAGE arriving BEFORE any durable order_terminal row exists (the executor
+        publishes before recording),
+    When: _project_paired_execution_leg_terminal handles the flatten order's cancel
+        (its fresh client_order_id matches no leg as an original),
+    Then: it routes by supersedes to the leg and — trusting the terminal MESSAGE via
+        the flatten_terminal hint — records compensated=+4 and reopens the leg to
+        FILLED (residual +6) for the next round without waiting for the durable row.
+    """
+    monkeypatch.setattr(
+        trader_module._bootstrap_settings, "paired_execution_guard_enabled", True, raising=True
+    )
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-tb", status="compensating")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-tb",
+        group_public_id="grp-tb",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        side="buy",
+        client_order_id="orig-tb",
+        command_public_id="cmd-tb",
+        filled_signed_qty=10.0,
+        compensation_seq=1,
+        status=PairedExecutionLegStatusEnum.COMPENSATING.value,
+    )
+    await _insert_flatten_cmd(
+        _sql_repo(_coord),
+        public_id="flatcmd-tb",
+        supersedes_command_id="cmd-tb",
+        client_order_id="flat-tb",
+        side="sell",
+        quantity=10.0,
+        idempotency_key="paired:grp-tb:leg-tb:flatten:1",
+    )
+    await _insert_fill_event(_sql_repo(_coord), client_order_id="flat-tb", cum_fill_size=4.0)
+    await _coord._project_paired_execution_leg_terminal("flat-tb", "cancelled", "exch-flat-tb")
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-tb")
+    assert legs[0]["compensated_signed_qty"] == 4.0
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.FILLED.value
+
+
+@pytest.mark.asyncio
 async def test_recover_leg_fills_reprojects_compensation_when_enabled(
     _coord: TraderCoordinator, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1441,11 +1531,12 @@ async def _insert_fill_event(
     side: str = "buy",
     status: str = "filled",
     instrument: str = "BTC-USD",
+    event_type: str = "fill_observed",
 ) -> None:
-    """Insert a fill_observed venue event for recovery fill-parity tests."""
+    """Insert a venue event for recovery fill-parity / compensation terminality tests."""
     await repo.insert_venue_event(
         {
-            "event_type": "fill_observed",
+            "event_type": event_type,
             "shard_key": shard_key,
             "wallet_public_id": "",
             "exchange": "kraken",

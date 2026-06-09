@@ -2223,3 +2223,136 @@ async def test_claim_leg_and_insert_flatten_command_reraises_other_integrity_err
             session_id=_SESSION,
             sequence_id=3,
         )
+
+
+async def test_sweep_compensating_backstop_settles_durably_terminal_flatten(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """The compensating sweep settles a leg whose flatten cancelled durably with no message.
+
+    Given: an owned compensating leg (filled=+1, seq 1) whose current-seq flatten
+        was cancelled at the venue — a durable order_terminal row exists but NO live
+        trader terminal message ever fired (a WS cancel records but does not
+        publish), so the live hook never settled it,
+    When: the guard scanner runs a cycle,
+    Then: the backstop reprojects the leg from venue_events, finds the current
+        flatten terminal with residual exposure, and reopens the leg to FILLED so
+        the next sweep re-flattens it — closing the durable-without-message gap.
+    """
+    await _insert_group(
+        _repo,
+        public_id="grp-bs",
+        status=PairedExecutionGroupStatusEnum.COMPENSATING.value,
+    )
+    await _insert_command(
+        _repo,
+        public_id="cmd-bs",
+        correlation_id="grp-bs",
+        shard_key=_BTC_SHARD,
+        status="dispatched",
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-bs",
+        group_public_id="grp-bs",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-bs",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    command_row: dict[str, object] = {
+        "command_type": "submit",
+        "shard_key": _BTC_SHARD,
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "pairs-alpha",
+        "client_order_id": "flatten-bs",
+        "venue_client_id": "flatten-bs",
+        "side": "sell",
+        "order_type": "market",
+        "quantity": 1.0,
+        "price": None,
+        "reduce_only": True,
+        "status": "created",
+        "created_at": _T0,
+        "correlation_id": "grp-bs",
+        "session_id": _SESSION,
+        "sequence_id": 2,
+        "timestamp": _T0,
+        "idempotency_key": "paired:grp-bs:leg-bs:flatten:1",
+        "supersedes_command_id": "cmd-bs",
+        "wallet_public_id": _WALLET,
+        "operator_public_id": _OPERATOR,
+        "source_surface": "strategy",
+    }
+    await _repo.claim_leg_and_insert_flatten_command(
+        leg_public_id="leg-bs",
+        expected_status=PairedExecutionLegStatusEnum.FILLED.value,
+        new_compensation_seq=1,
+        command_row=cast(Any, command_row),
+        bus_time=_T1,
+        session_id=_SESSION,
+        sequence_id=3,
+    )
+    await _repo.insert_venue_event(
+        cast(
+            Any,
+            {
+                "event_type": "order_terminal",
+                "shard_key": _BTC_SHARD,
+                "wallet_public_id": _WALLET,
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "mode": "live",
+                "client_order_id": "flatten-bs",
+                "exchange_order_id": "exch-flatten-bs",
+                "side": "sell",
+                "status": "cancelled",
+                "fill_size": None,
+                "cum_fill_size": None,
+                "received_at": _T0,
+                "session_id": _SESSION,
+                "sequence_id": 1,
+                "timestamp": _T0,
+            },
+        )
+    )
+    await _scanner(_repo)._scan_cycle(_FUTURE)
+    legs = await _repo.get_current_paired_execution_legs("grp-bs")
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.FILLED.value
+    assert legs[0]["compensated_signed_qty"] == 0.0
+
+
+async def test_sweep_compensating_leaves_a_settled_flattened_leg_untouched(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A settled flattened leg in a compensating group is not re-routed by the sweep.
+
+    Given: a compensating group whose owned leg is already FLATTENED (compensation
+        finished — neither cancel-eligible, flatten-eligible, nor compensating),
+    When: the compensating sweep runs,
+    Then: the leg falls through every routing branch untouched (no cancel, no
+        flatten, no backstop reproject) and stays FLATTENED.
+    """
+    await _insert_group(
+        _repo,
+        public_id="grp-fl",
+        status=PairedExecutionGroupStatusEnum.COMPENSATING.value,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-fl",
+        group_public_id="grp-fl",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-fl",
+        status=PairedExecutionLegStatusEnum.FLATTENED.value,
+        filled_signed_qty=1.0,
+    )
+    await _scanner(_repo)._sweep_compensating(_T0)
+    legs = await _repo.get_current_paired_execution_legs("grp-fl")
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.FLATTENED.value
