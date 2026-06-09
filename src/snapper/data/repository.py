@@ -105,6 +105,7 @@ from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
 from snapper.core.types import AllExchange
 from snapper.core.types import PairedExecutionGroupStatusEnum
+from snapper.core.types import PairedExecutionLegStatusEnum
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.archive_symbols import resolve_archive_symbols
 from snapper.data.db_stats_types import TableCounters
@@ -7752,6 +7753,17 @@ class SQLAlchemyRepository(Repository):
             "last_venue_event_id",
         }
     )
+    _PEL_FILL_TERMINAL_STATUSES: frozenset[str] = frozenset(
+        {
+            PairedExecutionLegStatusEnum.REJECTED.value,
+            PairedExecutionLegStatusEnum.CANCELLED.value,
+            PairedExecutionLegStatusEnum.EXPIRED.value,
+            PairedExecutionLegStatusEnum.BROKEN.value,
+            PairedExecutionLegStatusEnum.COMPENSATING.value,
+            PairedExecutionLegStatusEnum.FLATTENED.value,
+            PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value,
+        }
+    )
 
     @staticmethod
     def _paired_execution_group_row_to_dict(
@@ -8046,6 +8058,97 @@ class SQLAlchemyRepository(Repository):
                 for key, value in updates.items():
                     setattr(new_row, key, value)
             s.add(new_row)
+            await s.commit()
+            return True
+
+    async def project_paired_execution_leg_fill(
+        self,
+        client_order_id: str,
+        filled_signed_qty: float,
+        new_status: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+        exchange_order_id: str | None = None,
+        last_venue_event_id: int | None = None,
+    ) -> bool:
+        """Project a venue fill onto the CURRENT active paired-execution leg.
+
+        Resolves the leg by its ``client_order_id`` (the leg's original order
+        id; a non-grouped fill matches no leg and is a no-op). Guards the
+        CURRENT active row (``known_to == KNOWN_TO_MAX``) under ``FOR UPDATE``,
+        skips a leg already in a fill-terminal state (a late post-terminal fill
+        is Phase-5d's re-compensation concern, not fill projection), and applies
+        MONOTONIC cumulative accounting: ``filled_signed_qty`` is replaced only
+        when the incoming signed cumulative MAGNITUDE strictly exceeds the
+        stored one, so a duplicate / out-of-order replay never regresses the
+        leg. On apply it SCD2 close-and-inserts the successor carrying the new
+        ``filled_signed_qty`` / ``status`` / ``exchange_order_id`` /
+        ``last_venue_event_id`` (and all other columns forward). Returns
+        ``True`` iff a successor was written.
+        """
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(PairedExecutionLeg)
+                        .where(
+                            PairedExecutionLeg.client_order_id == client_order_id,
+                            PairedExecutionLeg.known_to == KNOWN_TO_MAX,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                return False
+            if existing.status in self._PEL_FILL_TERMINAL_STATUSES:
+                return False
+            if abs(filled_signed_qty) <= abs(existing.filled_signed_qty):
+                return False
+            await s.execute(
+                update(PairedExecutionLeg)
+                .where(PairedExecutionLeg.id == existing.id)
+                .values(known_to=bus_time)
+            )
+            s.add(
+                PairedExecutionLeg(
+                    public_id=existing.public_id,
+                    group_public_id=existing.group_public_id,
+                    leg_index=existing.leg_index,
+                    exchange=existing.exchange,
+                    mode=existing.mode,
+                    instrument=existing.instrument,
+                    shard_key=existing.shard_key,
+                    side=existing.side,
+                    target_qty=existing.target_qty,
+                    signal_public_id=existing.signal_public_id,
+                    command_public_id=existing.command_public_id,
+                    client_order_id=existing.client_order_id,
+                    exchange_order_id=(
+                        exchange_order_id
+                        if exchange_order_id is not None
+                        else existing.exchange_order_id
+                    ),
+                    status=new_status,
+                    filled_signed_qty=filled_signed_qty,
+                    compensated_signed_qty=existing.compensated_signed_qty,
+                    compensation_seq=existing.compensation_seq,
+                    last_venue_event_id=(
+                        last_venue_event_id
+                        if last_venue_event_id is not None
+                        else existing.last_venue_event_id
+                    ),
+                    wallet_public_id=existing.wallet_public_id,
+                    operator_public_id=existing.operator_public_id,
+                    created_at=existing.created_at,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                    timestamp=bus_time,
+                )
+            )
             await s.commit()
             return True
 

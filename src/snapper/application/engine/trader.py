@@ -58,6 +58,7 @@ from snapper.config.settings import get_settings_with_service
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
+from snapper.core.types import FillStatusEnum
 from snapper.core.types import OrderCommandEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import OrderType
@@ -2237,6 +2238,7 @@ class TraderCoordinator(RegisterableProcess):
             "received_at": datetime.now(UTC),
         }
         self.trade_service.apply_venue_event(venue_event)
+        await self._project_paired_execution_leg_fill(fill, venue_event)
         pos = self.trade_service.get_position(shard_key)
         new_qty = pos.position_qty
         self.balance_service.on_position_changed(
@@ -2249,6 +2251,40 @@ class TraderCoordinator(RegisterableProcess):
         )
         await self._sync_position_cycle_on_fill(engine, old_qty, new_qty, fill)
         await self._persist_checkpoint(shard_key)
+
+    async def _project_paired_execution_leg_fill(
+        self, fill: ExecutionData, venue_event: VenueEventRow
+    ) -> None:
+        """Project a live venue fill onto its paired-execution leg, if grouped.
+
+        A fill on the original order of a paired-execution leg sets the leg's
+        signed cumulative ``filled_signed_qty`` so the guard scanner sees real
+        exposure (activating the durable halt projection + recovery mirror). The
+        leg is resolved by ``client_order_id``; a non-grouped fill matches no
+        leg and is a no-op. Sign follows the fill side (buy +, sell −), matching
+        the leg's own side for an original order. Skipped without a SQL
+        repository (the paired-execution tables do not exist there). This is the
+        LIVE path only; recovery-replay parity (projecting fills observed while
+        the coordinator was down) is Phase 5a.2.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return
+        signed_qty = fill.size if fill.side == TradeSideEnum.BUY else -fill.size
+        new_status = (
+            PairedExecutionLegStatusEnum.FILLED.value
+            if fill.status == FillStatusEnum.FILLED
+            else PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value
+        )
+        await self.repository.project_paired_execution_leg_fill(
+            fill.client_order_id,
+            signed_qty,
+            new_status,
+            datetime.now(UTC),
+            self._tracker.session_id,
+            self._tracker.next_sequence(f"paired.fill.{fill.client_order_id}"),
+            exchange_order_id=fill.exchange_order_id,
+            last_venue_event_id=venue_event["id"],
+        )
 
     async def _sync_position_cycle_on_fill(
         self,

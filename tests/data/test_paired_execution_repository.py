@@ -1274,6 +1274,275 @@ async def test_get_current_legs_includes_future_stamped_leg_excluded_by_temporal
 
 
 @pytest.mark.asyncio
+async def test_project_leg_fill_sets_signed_cumulative_status_and_venue_ids(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A grouped fill sets the leg's signed cumulative qty, status and venue ids.
+
+    Given: an active armed buy leg with zero fill,
+    When: project_paired_execution_leg_fill runs for its client_order_id with a
+        positive signed cumulative and a 'filled' status,
+    Then: it returns True and the active successor carries the new
+        filled_signed_qty, status, exchange_order_id and last_venue_event_id, so
+        the guard scanner sees real exposure.
+    """
+    leg_id = _pid(200)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            leg_index=0,
+            side="buy",
+            client_order_id="cid-1",
+            status=PairedExecutionLegStatusEnum.ARMED.value,
+        )
+    )
+    applied = await _repo.project_paired_execution_leg_fill(
+        "cid-1",
+        5.0,
+        PairedExecutionLegStatusEnum.FILLED.value,
+        _T1,
+        _NEXT_SESSION_ID,
+        2,
+        exchange_order_id="exch-1",
+        last_venue_event_id=42,
+    )
+    assert applied is True
+    active = await _active_leg_versions(_repo, leg_id, _T2)
+    assert len(active) == 1
+    assert active[0].filled_signed_qty == 5.0
+    assert active[0].status == PairedExecutionLegStatusEnum.FILLED.value
+    assert active[0].exchange_order_id == "exch-1"
+    assert active[0].last_venue_event_id == 42
+
+
+@pytest.mark.asyncio
+async def test_project_leg_fill_is_monotonic_skipping_stale_and_duplicate(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Projection only grows the cumulative; a stale or duplicate replay is a no-op.
+
+    Given: an active leg already at filled_signed_qty=5,
+    When: projections arrive for the same (5) and a smaller (3) cumulative, then a
+        larger (8) one,
+    Then: the equal and smaller replays return False without regressing the leg,
+        and only the larger cumulative is applied — so out-of-order / duplicate
+        fills never shrink the recorded exposure.
+    """
+    leg_id = _pid(200)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            leg_index=0,
+            side="buy",
+            client_order_id="cid-1",
+            status=PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value,
+            filled_signed_qty=5.0,
+        )
+    )
+    dup = await _repo.project_paired_execution_leg_fill(
+        "cid-1", 5.0, PairedExecutionLegStatusEnum.FILLED.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    stale = await _repo.project_paired_execution_leg_fill(
+        "cid-1", 3.0, PairedExecutionLegStatusEnum.FILLED.value, _T1, _NEXT_SESSION_ID, 3
+    )
+    grow = await _repo.project_paired_execution_leg_fill(
+        "cid-1", 8.0, PairedExecutionLegStatusEnum.FILLED.value, _T1, _NEXT_SESSION_ID, 4
+    )
+    assert dup is False
+    assert stale is False
+    assert grow is True
+    active = await _active_leg_versions(_repo, leg_id, _T2)
+    assert active[0].filled_signed_qty == 8.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_status",
+    [
+        PairedExecutionLegStatusEnum.REJECTED.value,
+        PairedExecutionLegStatusEnum.CANCELLED.value,
+        PairedExecutionLegStatusEnum.EXPIRED.value,
+        PairedExecutionLegStatusEnum.BROKEN.value,
+        PairedExecutionLegStatusEnum.COMPENSATING.value,
+        PairedExecutionLegStatusEnum.FLATTENED.value,
+        PairedExecutionLegStatusEnum.MANUAL_INTERVENTION.value,
+    ],
+)
+async def test_project_leg_fill_skips_every_fill_terminal_status(
+    _repo: SQLAlchemyRepository, terminal_status: str
+) -> None:
+    """A fill on ANY fill-terminal leg is ignored (late post-terminal fills are 5d).
+
+    Given: an active leg already in each fill-terminal status,
+    When: a fill projection arrives for its client_order_id,
+    Then: it returns False and the leg is unchanged, so fill projection never
+        resurrects a leg the guard already terminalized (re-compensation of a late
+        post-terminal fill is Phase 5d, not 5a). Covers the whole terminal set so
+        a new terminal status added without updating it is caught.
+    """
+    leg_id = _pid(200)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            leg_index=0,
+            side="buy",
+            client_order_id="cid-1",
+            status=terminal_status,
+        )
+    )
+    applied = await _repo.project_paired_execution_leg_fill(
+        "cid-1", 5.0, PairedExecutionLegStatusEnum.FILLED.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert applied is False
+    active = await _active_leg_versions(_repo, leg_id, _T2)
+    assert active[0].filled_signed_qty == 0.0
+    assert active[0].status == terminal_status
+
+
+@pytest.mark.asyncio
+async def test_project_leg_fill_carries_every_other_column(_repo: SQLAlchemyRepository) -> None:
+    """Given a fully-populated leg, projection changes only fill fields; the rest carry.
+
+    Introspects the ORM columns so a future leg column added without a matching
+    carry-forward assignment in project_paired_execution_leg_fill is caught here
+    rather than silently reset on every fill projection.
+    """
+    leg_id = _pid(208)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            side="buy",
+            command_public_id=_pid(702),
+            client_order_id="cid-cf",
+            exchange_order_id="exchange-existing",
+            filled_signed_qty=0.0,
+            compensated_signed_qty=1.5,
+            compensation_seq=4,
+            last_venue_event_id=11,
+            status=PairedExecutionLegStatusEnum.WORKING.value,
+        )
+    )
+    before = (await _active_leg_versions(_repo, leg_id, _T0))[0]
+    carried = {
+        column.name: getattr(before, column.name) for column in PairedExecutionLeg.__table__.columns
+    }
+    applied = await _repo.project_paired_execution_leg_fill(
+        "cid-cf",
+        6.0,
+        PairedExecutionLegStatusEnum.FILLED.value,
+        _T1,
+        _NEXT_SESSION_ID,
+        2,
+        exchange_order_id="exchange-new",
+        last_venue_event_id=42,
+    )
+    after = (await _active_leg_versions(_repo, leg_id, _T2))[0]
+    assert applied is True
+    advanced = {
+        "id",
+        "known_to",
+        "session_id",
+        "sequence_id",
+        "timestamp",
+        "status",
+        "filled_signed_qty",
+        "exchange_order_id",
+        "last_venue_event_id",
+    }
+    for column in PairedExecutionLeg.__table__.columns:
+        if column.name in advanced:
+            continue
+        assert getattr(after, column.name) == carried[column.name], column.name
+    assert after.status == PairedExecutionLegStatusEnum.FILLED.value
+    assert after.filled_signed_qty == 6.0
+    assert after.exchange_order_id == "exchange-new"
+    assert after.last_venue_event_id == 42
+
+
+@pytest.mark.asyncio
+async def test_project_leg_fill_no_matching_leg_is_noop(_repo: SQLAlchemyRepository) -> None:
+    """A fill whose client_order_id matches no leg is a no-op (non-grouped order).
+
+    Given: no leg bound to the fill's client_order_id,
+    When: project_paired_execution_leg_fill runs,
+    Then: it returns False without error, so a non-grouped fill is harmlessly
+        ignored.
+    """
+    applied = await _repo.project_paired_execution_leg_fill(
+        "cid-absent", 5.0, PairedExecutionLegStatusEnum.FILLED.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert applied is False
+
+
+@pytest.mark.asyncio
+async def test_project_leg_fill_sell_leg_records_negative_signed_qty(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A sell leg's fill is stored as a negative signed cumulative.
+
+    Given: an active sell leg,
+    When: a projection arrives with a negative signed cumulative,
+    Then: filled_signed_qty is the negative value, so the signed-qty model
+        (buy +, sell −) is preserved for the open-qty accounting.
+    """
+    leg_id = _pid(200)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            leg_index=0,
+            side="sell",
+            client_order_id="cid-1",
+            status=PairedExecutionLegStatusEnum.WORKING.value,
+        )
+    )
+    applied = await _repo.project_paired_execution_leg_fill(
+        "cid-1",
+        -5.0,
+        PairedExecutionLegStatusEnum.FILLED.value,
+        _T1,
+        _NEXT_SESSION_ID,
+        2,
+    )
+    assert applied is True
+    active = await _active_leg_versions(_repo, leg_id, _T2)
+    assert active[0].filled_signed_qty == -5.0
+
+
+@pytest.mark.asyncio
+async def test_project_leg_fill_carries_forward_venue_ids_when_none(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Omitted venue ids carry forward the leg's existing values.
+
+    Given: an active leg already carrying an exchange_order_id and
+        last_venue_event_id,
+    When: a growing projection arrives with both venue ids omitted (None),
+    Then: the successor keeps the existing venue ids while applying the new
+        filled_signed_qty.
+    """
+    leg_id = _pid(200)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=leg_id,
+            leg_index=0,
+            side="buy",
+            client_order_id="cid-1",
+            status=PairedExecutionLegStatusEnum.WORKING.value,
+            exchange_order_id="exch-existing",
+            last_venue_event_id=7,
+        )
+    )
+    applied = await _repo.project_paired_execution_leg_fill(
+        "cid-1", 5.0, PairedExecutionLegStatusEnum.FILLED.value, _T1, _NEXT_SESSION_ID, 2
+    )
+    assert applied is True
+    active = await _active_leg_versions(_repo, leg_id, _T2)
+    assert active[0].exchange_order_id == "exch-existing"
+    assert active[0].last_venue_event_id == 7
+    assert active[0].filled_signed_qty == 5.0
+
+
+@pytest.mark.asyncio
 async def test_outbox_ignores_historical_leg_command_binding(
     _repo: SQLAlchemyRepository,
 ) -> None:

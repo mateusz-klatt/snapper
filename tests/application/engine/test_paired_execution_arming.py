@@ -22,7 +22,9 @@ import snapper.application.engine.trader as trader_module
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.core.partitioning import ShardOwnership
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import VenueEventRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import SignalData
 
 _GROUP_KEY = "kraken:BTC-USD:live|kraken:ETH-USD:live"
@@ -431,8 +433,11 @@ async def _insert_guard_leg(
     shard_key: str,
     instrument: str = "BTC-USD",
     timestamp: datetime | None = None,
+    side: str = "buy",
+    client_order_id: str | None = None,
+    status: str = "pending",
 ) -> None:
-    """Insert a pending paired-execution leg for recovery tests."""
+    """Insert a paired-execution leg for recovery / fill-projection tests."""
     stamp = timestamp if timestamp is not None else datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
     await repo.insert_paired_execution_leg(
         {
@@ -443,12 +448,12 @@ async def _insert_guard_leg(
             "mode": "live",
             "instrument": instrument,
             "shard_key": shard_key,
-            "side": "buy",
+            "side": side,
             "target_qty": 1.0,
             "signal_public_id": f"sig-{public_id}",
             "command_public_id": None,
-            "client_order_id": None,
-            "status": "pending",
+            "client_order_id": client_order_id,
+            "status": status,
             "wallet_public_id": "",
             "operator_public_id": None,
             "created_at": stamp,
@@ -456,6 +461,37 @@ async def _insert_guard_leg(
             "sequence_id": 1,
             "timestamp": stamp,
         }
+    )
+
+
+def _fill(
+    *,
+    client_order_id: str,
+    side: str = "buy",
+    size: float = 5.0,
+    status: str = "filled",
+    instrument: str = "BTC-USD",
+) -> ExecutionData:
+    """Build an ExecutionData venue fill for a paired-execution leg."""
+    return ExecutionData(
+        public_id=f"exec-{client_order_id}",
+        timestamp=datetime(2026, 6, 8, 12, 0, tzinfo=UTC),
+        session_id="",
+        sequence_id=0,
+        trade_id=f"trade-{client_order_id}",
+        exchange_order_id=f"exch-{client_order_id}",
+        client_order_id=client_order_id,
+        instrument=instrument,
+        exchange="kraken",
+        side=side,
+        size=size,
+        price=50000.0,
+        last_size=size,
+        last_price=50000.0,
+        fee=0.0,
+        fee_asset="USD",
+        status=status,
+        executed_at=datetime(2026, 6, 8, 12, 0, tzinfo=UTC),
     )
 
 
@@ -900,3 +936,88 @@ async def test_guard_recovery_per_halt_leg_error_does_not_skip_other_halts(
     _sql_repo(_coord).get_current_paired_execution_legs = AsyncMock(side_effect=_legs)
     await _coord._recover_paired_execution_guard_state()
     assert _coord.trade_service.is_halted(_BTC_SHARD) is True
+
+
+@pytest.mark.asyncio
+async def test_project_leg_fill_sets_signed_cumulative_on_owned_buy_leg(
+    _coord: TraderCoordinator,
+) -> None:
+    """A buy-leg fill sets the leg's positive signed cumulative and FILLED status.
+
+    Given: an armed buy leg bound to a client_order_id,
+    When: _project_paired_execution_leg_fill runs for a 'filled' fill on that
+        client_order_id,
+    Then: the leg records filled_signed_qty=+size and status FILLED, so the guard
+        scanner sees real exposure on the pair.
+    """
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-f", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-f",
+        group_public_id="grp-f",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        side="buy",
+        client_order_id="cid-1",
+        status="armed",
+    )
+    await _coord._project_paired_execution_leg_fill(
+        _fill(client_order_id="cid-1", side="buy", size=5.0, status="filled"),
+        cast(VenueEventRow, {"id": 99}),
+    )
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-f")
+    assert legs[0]["filled_signed_qty"] == 5.0
+    assert legs[0]["status"] == "filled"
+    assert legs[0]["last_venue_event_id"] == 99
+
+
+@pytest.mark.asyncio
+async def test_project_leg_fill_sell_leg_negative_qty_and_partial_status(
+    _coord: TraderCoordinator,
+) -> None:
+    """A sell-leg partial fill records a negative signed cumulative and PARTIALLY_FILLED.
+
+    Given: a working sell leg bound to a client_order_id,
+    When: _project_paired_execution_leg_fill runs for a 'partial' fill,
+    Then: filled_signed_qty=-size and status PARTIALLY_FILLED, preserving the
+        signed-qty model and the partial-vs-filled distinction.
+    """
+    await _insert_guard_group(_sql_repo(_coord), public_id="grp-f", status="armed")
+    await _insert_guard_leg(
+        _sql_repo(_coord),
+        public_id="leg-f",
+        group_public_id="grp-f",
+        leg_index=0,
+        shard_key=_ETH_SHARD,
+        instrument="ETH-USD",
+        side="sell",
+        client_order_id="cid-2",
+        status="working",
+    )
+    await _coord._project_paired_execution_leg_fill(
+        _fill(
+            client_order_id="cid-2", side="sell", size=4.0, status="partial", instrument="ETH-USD"
+        ),
+        cast(VenueEventRow, {"id": 7}),
+    )
+    legs = await _sql_repo(_coord).get_current_paired_execution_legs("grp-f")
+    assert legs[0]["filled_signed_qty"] == -4.0
+    assert legs[0]["status"] == "partially_filled"
+
+
+@pytest.mark.asyncio
+async def test_project_leg_fill_noop_without_sql_repository(_coord: TraderCoordinator) -> None:
+    """Fill projection is skipped without a SQL repository.
+
+    Given: a non-SQL repository (tests),
+    When: _project_paired_execution_leg_fill runs,
+    Then: the DAL projection is never called — the paired-execution tables do not
+        exist on a non-SQL repo.
+    """
+    repo = AsyncMock()
+    _coord.repository = repo
+    await _coord._project_paired_execution_leg_fill(
+        _fill(client_order_id="cid-1"),
+        cast(VenueEventRow, {"id": 1}),
+    )
+    repo.project_paired_execution_leg_fill.assert_not_called()
