@@ -68,8 +68,17 @@ Executes the complete quality gate:
 | `make typecheck` | Mypy type checking |
 | `make test` | Tests (parallel) |
 | `make test-serial` | Tests (sequential, debug) |
+| `make test-integration` | Paper-mode E2E tests (`tests/integration/`) |
 | `make cov` | Tests with coverage |
+| `make cov-xml` | Export coverage XML for SonarCloud (after `make cov`) |
 | `make check-egress-compose` | Reject unsafe snapper-egress compose wiring |
+
+`make check-egress-compose` scans Compose files and override files for
+the snapper-egress sidecar contract. The sidecar must share the unified
+Snapper image, run through `command: ["egress"]`, run as root with
+`NET_ADMIN`, avoid host `ports:` / `network_mode: host`, and share the
+SQLite data mount when the monolith uses `/app/data`. The monolith stays
+unprivileged: no `cap_add` and no `user:` override.
 
 ### Automatic Fixes
 
@@ -181,6 +190,7 @@ tests/
 ├── cli/                 # CLI tests
 ├── data/                # Data layer tests
 ├── indicators/          # Indicator tests
+├── integration/         # Paper-mode E2E tests
 ├── messaging/           # ZMQ tests
 ├── strategies/          # Strategy tests
 └── ...
@@ -258,6 +268,20 @@ def sample_candles() -> list[Candle]:
     ]
 ```
 
+### Integration Tests
+
+```bash
+make test-integration
+```
+
+Runs the paper-mode end-to-end tests in `tests/integration/` with a
+120-second per-test timeout. The fixtures spin up a real
+`ZmqBrokerThread`, a `PaperOrderExecutor`, and a `TraderCoordinator`
+against the SQLite test fixture, so the full order path is exercised
+without touching a live venue. These tests carry the `integration`
+pytest marker and are excluded from `make test` / `make cov` (the
+default `addopts` select `-m 'not integration'`).
+
 ### 100% Coverage
 
 The project requires 100% code coverage (TDD). Check:
@@ -307,8 +331,26 @@ make ui-fix   # lint-fix + format-fix + dead-code-fix
 ### Type Generation
 
 ```bash
-make ui-gen-types   # OpenAPI types, WebSocket types, Zod schemas, entity aliases, permissions
+make ui-gen-types   # Frontend OpenAPI/WS types, Zod schemas, entity aliases, permissions
+make ios-gen-types  # Swift models from OpenAPI + WebSocket schemas
+make ts-bridge      # snapper-mcp bridge wire contract only
+make bridge-regen   # Regenerate bridge contract and run bridge checks
+make bridge-check   # Verify committed bridge contract without regenerating
+make ui-check-types # Non-destructive drift check for generated types and backend i18n catalogs
 ```
+
+The shared generator is `scripts/generate_types.py`. With no explicit
+target it runs `--all`, which covers the main-repo frontend/iOS export
+path but intentionally excludes the snapper-mcp bridge because that
+target writes across the integration boundary. Use `--bridge` (or the
+Makefile targets above) when the bridge wire contract must be updated.
+`make bridge-check` verifies the committed wire-contract file against
+the current backend schemas (`scripts/bridge_check/check_drift.py` and
+`check_oss_prose.py`) and runs the bridge npm stack (typecheck, lint,
+tests, stdout gate) without rewriting any files.
+`scripts/check_type_drift.py` backs up generated files, runs
+`make ui-gen-types ios-gen-types gen-backend-i18n-catalog`, compares
+the result, then restores the working tree.
 
 ## Internationalization
 
@@ -316,14 +358,28 @@ The frontend i18n catalogs in `frontend/src/locales/<lang>/*.json` are
 the source of truth for translated UI strings across 45 locales. iOS
 mirrors the subset of strings used on the native client by porting
 them into `ios/Snapper/Resources/Localization/Localizable.xcstrings`.
+Backend `user.default_language` validation accepts the union of the
+iOS and frontend catalog code forms: 45 iOS cases plus 45 frontend
+cases, with five naming divergences (`pt-BR`/`pt`, `nb`/`no`,
+`zh-Hans`/`zh`, `sr-Latn`/`sr`, `my`/`my-MM`) for 50 accepted codes.
 
-### Market catalog (description / asset class / sector)
+### Backend alert catalog
 
-The `market.description.*`, `market.assetClass.*`, and `market.sector.*`
-namespaces are ported from the frontend JSON into the iOS xcstrings
-by `scripts/port_market_catalog.py`. Run after editing any
-`frontend/src/locales/<lang>/market.json` file under one of those
-namespaces:
+`scripts/gen_backend_i18n_catalog.py` reads the iOS xcstrings file and
+writes committed backend JSON catalogs to
+`src/snapper/i18n/catalogs/<lang>.json`. The backend catalog is limited
+to alert title/body templates: 12 keys across 45 languages, one JSON
+file per language. It is generated with `make gen-backend-i18n-catalog`
+and checked by `scripts/check_type_drift.py`.
+
+### Market catalog
+
+The `market.description.*`, `market.assetClass.*`,
+`market.sector.*`, `market.related.*`, `market.pairStats.*`, and
+`market.cacheBanner.*` namespaces are ported from the frontend JSON
+into the iOS xcstrings by `scripts/port_market_catalog.py`. Run after
+editing any `frontend/src/locales/<lang>/market.json` file under one of
+those namespaces:
 
 ```bash
 python scripts/port_market_catalog.py        # write
@@ -341,12 +397,47 @@ iOS-side coverage of the resulting catalog is enforced by
 `SnapperTests/I18n/ExpectedKeys.swift`); adding a new key to the
 catalog requires adding it to `ExpectedKeys.swift` in the same iOS PR.
 
+`make ios-i18n-check` (run from the main repo) delegates into the ios
+submodule Makefile and lints Swift call sites: bare
+`String(localized:)` usage under `ios/Snapper` is rejected in favor of
+the `LocaleStrings` helper, so catalog lookups follow the selected app
+locale rather than `Locale.current`. An allowlist file
+(`ios/scripts/check_i18n_allowlist.txt`) exempts specific paths.
+
 ### Alerts catalog (historical direction: xcstrings → JSON)
 
 Historically the iOS alerts catalog was the source of truth and
 frontend caught up via `scripts/port_ios_alert_catalog.py`. That
 direction is preserved for back-compatibility; new namespaces should
-flow frontend → iOS via the market-catalog pattern above.
+flow frontend → iOS via the market-catalog pattern above. The alert
+port currently processes 32 `alerts.*` keys across 45 locales, writes
+one `frontend/src/locales/<lang>/alerts.json` file per locale, and
+updates `common.nav.alerts` from the `alerts.navTitle` xcstrings key.
+The five divergent locale directory names are remapped between iOS and
+frontend in the same way as `SUPPORTED_LANGUAGES`.
+
+## Scanner Behavior
+
+The backend quality scanners are intentionally source-tree scanners,
+not import-time checks. `check_docstrings.py` scans `src`, `tests`,
+`proprietary` when present, and `scripts`; with the Makefile flags it
+enforces module/public docstrings, BDD-style test docstrings, and
+Google-style `Args:` / `Returns:` sections. `check_no_comments.py`
+tokenizes Python under `src`, `tests`, `scripts`, `proprietary/src`,
+and `proprietary/tests`; hashes inside strings and docstrings are
+allowed, but real comment tokens fail strict mode. `check_pydantic_routes.py`
+walks `src/snapper/server`, `src/snapper/auth`, `src/snapper/config`,
+and `src/snapper/api`, then filters for FastAPI route functions whose
+I/O must use concrete Pydantic schemas rather than `dict`, `Any`, or
+raw response types.
+
+The remaining scanners are similarly path-scoped: coverage/lint
+exclusions scan Python in `src`, `tests`, `scripts`, optional
+`proprietary` code, and frontend TypeScript; temporal-mutation and
+vendor-neutrality scans walk `src/snapper`; `check_init_files.py`
+checks configured `__init__.py` roots for docstring-only files; and
+`check_main_guard.py` requires every discovered entry point to end with
+`raise SystemExit(main())`.
 
 ## Database Migrations
 
@@ -358,6 +449,23 @@ Test and coverage Make targets use an isolated SQLite fixture at
 inside the Makefile. This keeps `make test`, `make cov`, and
 `make check-all` from mutating the database used by a running local
 server, even when `.env` points at `./data/snapper.db` or PostgreSQL.
+
+The fixture is built automatically on the first test run and reused
+afterwards. `make migrate-dev-sqlite` builds it explicitly (Alembic
+migrations via `snapper db-init`, then `snapper db-seed --profile dev`);
+delete `./data/dev.db` first to rebuild it from scratch.
+
+The fixture URL is the `TEST_DB_URL` Make variable (default
+`sqlite+aiosqlite:///./data/dev.db`). Override it to run the suite
+against a PostgreSQL staging database:
+
+```bash
+make test TEST_DB_URL=postgresql+asyncpg://USER:PASS@HOST/DB
+```
+
+Never point `TEST_DB_URL` at a live server's database: tests mutate
+state, and the `isolated_sqlite_db` conftest fixture only protects
+SQLite paths.
 
 ### Migration Strategy (Development)
 
@@ -413,11 +521,18 @@ docker compose up -d
 
 ## CI/CD
 
-Pipeline executes the same consolidated gate used locally:
+The pipeline (`.github/workflows/ci.yml`) wraps the consolidated gate
+used locally in additional build and smoke stages:
 
-1.  `make check-all` — Backend checks, frontend checks, exclusion scan, and tests with coverage
+1.  Setup — `make system-deps`, `make setup`, `make ui-setup`
+2.  `make ui-build` — Production frontend bundle
+3.  `make migrate-dev` — Initialize and seed the database
+4.  `make ui-check-types` — Drift check for generated types and backend i18n catalogs
+5.  `make check-all` — Backend checks, frontend checks, exclusion scan, and tests with coverage
+6.  `make cov-xml` — Export coverage XML, consumed by the SonarCloud scan step
+7.  Docker smoke stage — `make docker-build-dev`, `make docker-migrate-dev`, `docker compose up` for the `snapper` and `snapper-web` services, then a `make server-check` health check
 
-For debugging a failing pipeline locally, the equivalent steps are:
+For debugging a failing `make check-all` locally, the equivalent steps are:
 
 1.  `make check` — Backend quality checks
 2.  `make ui-check` — Frontend lint, format, dead-code, type, and i18n catalog checks (`ui-lint ui-format ui-dead-code ui-typecheck ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market`)

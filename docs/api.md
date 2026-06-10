@@ -200,9 +200,8 @@ leaves them `null` and writes the rotated JWTs as `Set-Cookie` headers.
 The `RefreshTokenRequest` body (optional) carries
 `active_wallet_public_id` / `clear_active_wallet` to atomically swap
 the caller's active wallet during the rotation; an
-`Authorization: Bearer <refresh-jwt>` header is accepted as a
-fallback for headless callers that don't have access to the
-`refresh_token` cookie.
+`Authorization: Bearer <refresh-jwt>` header is read first, with the
+`refresh_token` cookie used as fallback for browser callers.
 
 ### POST /api/auth/ws_token
 
@@ -741,8 +740,13 @@ X-CSRF-Token: <csrf_token>
         "order_type": "limit",
         "quantity": 0.5,
         "price": 50000.0,
+        "time_in_force": "GTC",
+        "post_only": false,
+        "leverage": null,
+        "reduce_only": false,
         "wallet_public_id": "<uuid>",
-        "idempotency_key": "<uuid7>"
+        "idempotency_key": "<uuid7>",
+        "ai_review_public_id": null
     }
 }
 ```
@@ -760,9 +764,14 @@ X-CSRF-Token: <csrf_token>
 | `quantity` | float | yes | Order size (must be > 0) |
 | `price` | float | cond | Required for `limit` and `stop_limit` |
 | `stop_price` | float | cond | Required for `stop` and `stop_limit` |
+| `time_in_force` | string | no | Time-in-force policy (`GTC` default) |
+| `post_only` | boolean | no | Maker-only order flag (`false` default) |
+| `leverage` | int | no | Optional leverage multiplier |
+| `reduce_only` | boolean | no | Reduce-only flag for closing exposure (`false` default) |
 | `wallet_public_id` | string | yes | Target wallet UUID |
 | `operator_public_id` | string | no | Operator identity |
 | `idempotency_key` | string | no | Dedup key (409 on duplicate) |
+| `ai_review_public_id` | string | no | Approved `ai_reviews` row cited for AI-mediated manual orders |
 
 **Response (200):** `ExecutionPlanResponse` envelope with plan details.
 
@@ -805,7 +814,8 @@ X-CSRF-Token: <csrf_token>
 **Response (200):** `ExecutionPlanResponse` with status `cancel_requested`.
 
 **Errors:** 403 (wallet not accessible), 404 (not found), 409 (already
-terminal or concurrent change), 500 (cancel command insert failed).
+terminal or concurrent change), 422 (caps violation), 500 (cancel command
+insert failed).
 
 ### POST /api/orders/by-client-order-id/{client_order_id}/cancel
 
@@ -840,7 +850,8 @@ X-CSRF-Token: <csrf_token>
 **Response (200):** `ExecutionPlanResponse` with status `cancel_requested`.
 
 **Errors:** 403 (wallet not accessible), 404 (no linked plan),
-409 (already terminal), 500 (cancel command insert failed).
+409 (already terminal), 422 (caps violation), 500 (cancel command insert
+failed).
 
 ### GET /api/instrument-capabilities
 
@@ -1827,6 +1838,7 @@ List all settings, optionally filtered by category.
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
 | `category` | string | no | Filter by setting category |
+| `as_of` | datetime | no | Point-in-time timestamp for temporal setting reads |
 
 **Response (200):**
 
@@ -1880,6 +1892,12 @@ and `/api/ai-delegates/*` return the shared `feature_disabled` envelope.
 
 List distinct setting category names.
 
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `as_of` | datetime | no | Point-in-time timestamp for temporal category reads |
+
 **Response (200):**
 
 ```json
@@ -1910,6 +1928,49 @@ Replace the push-beta gate configuration in one call. Requires
 allowlist after the write, so callers should read, edit locally, then
 submit the full desired set.
 
+**Request:**
+
+```http
+POST /api/settings/push-beta/users
+Content-Type: application/json
+X-CSRF-Token: <csrf_token>
+
+{
+    "type": "update_push_beta_users_command",
+    "public_id": "<uuid7>",
+    "session_id": "<client-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "payload": {
+        "enabled": true,
+        "user_public_ids": ["019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b"]
+    }
+}
+```
+
+**Response (200):**
+
+```json
+{
+    "type": "push_beta_config_response",
+    "public_id": "<uuid7>",
+    "session_id": "<server-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
+    "payload": {
+        "type": "push_beta_config_read",
+        "public_id": "<uuid7>",
+        "session_id": "<server-session>",
+        "sequence_id": 1,
+        "timestamp": "2026-01-18T12:00:00Z",
+        "topic": null,
+        "enabled": true,
+        "user_public_ids": ["019e1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b"]
+    }
+}
+```
+
 ### POST /api/settings/{key}/set
 
 Set (create or update) a setting value.
@@ -1922,6 +1983,7 @@ Content-Type: application/json
 X-CSRF-Token: <csrf_token>
 
 {
+    "type": "setting_update",
     "public_id": "<uuid7>",
     "session_id": "<client-session>",
     "sequence_id": 1,
@@ -1951,8 +2013,14 @@ X-CSRF-Token: <csrf_token>
     "session_id": "<server-session>",
     "sequence_id": 1,
     "timestamp": "2026-01-18T12:00:00Z",
+    "topic": null,
     "payload": {
         "type": "setting_read",
+        "public_id": "<uuid7>",
+        "session_id": "<server-session>",
+        "sequence_id": 1,
+        "timestamp": "2026-01-18T12:00:00Z",
+        "topic": null,
         "key": "polygon_api_key",
         "value": "new-api-key-value",
         "category": "api",
@@ -1975,6 +2043,7 @@ Content-Type: application/json
 X-CSRF-Token: <csrf_token>
 
 {
+    "type": "remove_setting_request",
     "public_id": "<uuid7>",
     "session_id": "<client-session>",
     "sequence_id": 2,
@@ -1992,6 +2061,7 @@ X-CSRF-Token: <csrf_token>
     "session_id": "<server-session>",
     "sequence_id": 2,
     "timestamp": "2026-01-18T12:00:01Z",
+    "topic": null,
     "payload": "Setting 'polygon_api_key' deleted successfully"
 }
 ```
@@ -2081,9 +2151,9 @@ underlying cannot be resolved.
 
 ## Multi-Tenant (Wallets, Operators, Scope Grants, Credentials)
 
-ADMIN principals see the full catalogue; VIEWER and OPERATOR
-principals see only the subset covered by their operator memberships
-and active scope grants.
+ADMIN principals see the full catalogue; AI_DELEGATE, VIEWER, and
+OPERATOR principals see only the subset covered by their operator
+memberships and active scope grants.
 
 ### GET /api/wallets
 
@@ -2157,15 +2227,17 @@ before encrypting.
 ### Connection and Authentication
 
 The WebSocket endpoint is at `/api/ws`. Authentication is message-based,
-not query-parameter-based, but the connection must already carry the
-active auth session cookie. Missing or invalid cookies are rejected with
-close code `4401` before the `auth_required` challenge.
+not query-parameter-based, but the upgrade must already carry an access
+JWT via `Authorization: Bearer <access_token>` or, for browser clients,
+the `access_token` cookie. Bearer auth is checked first; the cookie is
+the fallback. Missing or invalid upgrade auth is rejected with close code
+`4401` before the `auth_required` challenge.
 
 **Connection flow:**
 
 1. Client connects to `ws://host:port/api/ws` (or `wss://` over TLS)
-   with the active auth session cookie
-2. Server validates the origin header and session cookie
+   with an access bearer token or active auth session cookie
+2. Server validates the origin header and bearer/cookie auth
 3. Server sends `auth_required` message
 4. Client sends `authenticate` message with a WebSocket token
 5. Server validates the token and sends `auth_ok`
@@ -2639,6 +2711,7 @@ the scoped prefixes documented in the WebSocket auth section above.
 - `orders.events.{exchange}.{instrument}.cancelled` -- Order cancelled
 - `orders.events.{exchange}.{instrument}.expired` -- Order expired
 - `orders.events.{exchange}.{instrument}.replaced` -- Order replaced
+- `orders.events.{exchange}.{instrument}.unknown` -- Ambiguous venue submit outcome (non-terminal; resolved to accepted or rejected via venue verification)
 
 #### Order Commands
 
@@ -3185,7 +3258,13 @@ The routes are documented end-to-end in
 [ai-integration.md](ai-integration.md) alongside the Claude Code /
 Claude Desktop / Cursor / Windsurf wire-up instructions. They follow
 the same `PayloadResponse` envelope convention used by the auth routes
-above.
+above. All delegate-management routes require `OPERATOR` or higher;
+mutating routes also require CSRF for cookie-authenticated requests.
+On create, omitted `operator_public_id` binds to the caller's
+`primary_operator_public_id` and returns 422 when no primary exists.
+Non-admin callers that supply `operator_public_id` must choose one of
+their authenticated operators; ADMIN callers may bind explicitly using
+the admin operator bypass.
 
 ## Paired Execution (operator surface)
 

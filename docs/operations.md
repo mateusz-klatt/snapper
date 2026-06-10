@@ -56,6 +56,14 @@ MASTER_PASSWORD=...
 SNAPPER_COORDINATOR_INSTANCE_COUNT=2
 ```
 
+`SNAPPER_COORDINATOR_INSTANCE_COUNT >= 2` requires a PostgreSQL
+`DB_URL`. On a SQLite backend the coordinator refuses to start with a
+count above 1, raising `ValueError` before any signal is dispatched:
+SQLite compiles `SELECT ... FOR UPDATE` to a plain SELECT, so
+cross-instance row claims cannot serialize — use PostgreSQL for
+multi-instance deployments. A single-instance SQLite coordinator
+starts but logs a writer-concurrency warning.
+
 ## Scale up N=1 → N=2 (systemd)
 
 ```bash
@@ -287,15 +295,19 @@ action:
   Bounding it makes a stalled handshake fail fast so the recovery loop
   tears the partial client down and retries with a fresh one, reconnecting
   as soon as the network returns.
-- **Bounded subscribe sends + serialized reconnects.** Every Kraken SDK
-  subscribe/unsubscribe send is wrapped in a 5 s timeout
+- **Bounded subscribe sends + serialized reconnects.** Every Kraken
+  Futures SDK subscribe/unsubscribe send is wrapped in a 5 s timeout
   (`_SDK_SEND_TIMEOUT_S`): the Futures SDK's `send_message` spins forever
   on a client whose socket never came up, and one such send once wedged
   the shared subscribe throttle lock — starving the post-reconnect
   subscription replay and leaving the feed connected-but-dark until a
-  process restart. Client (re)connects are serialized per venue
-  (`_ws_connect_lock`), slot writes are compare-and-clear, and a connect
-  raced by a disconnect closes its own client instead of leaking it.
+  process restart. Spot and Equities subscribe sends are not wrapped —
+  the spinning `send_message` is a Futures-SDK behavior, so those venues
+  rely on the bounded connect, the ping/close timeouts, and the 180 s
+  per-attempt recovery bound instead. Client (re)connects are serialized
+  per venue (`_ws_connect_lock`), slot writes are compare-and-clear, and
+  a connect raced by a disconnect closes its own client instead of
+  leaking it.
   Each recovery attempt is additionally bounded to 180 s
   (`_RECOVERY_ATTEMPT_TIMEOUT_S`) so even an unforeseen hang becomes a
   logged, retried failure rather than a silent permanent wedge. Futures
@@ -354,9 +366,15 @@ symbols) — does the executor park the order, record a non-terminal
 - a safety-critical `order_unknown` operator alert fires ("do not
   assume flat", 5-minute dedup window);
 - failures that provably happened *before* any send (circuit breaker
-  open, credentials, symbol/order-type validation, connection refused)
-  and authoritative venue answers (4xx, `success=false`, exhausted
-  429) still reject immediately — only genuine ambiguity parks.
+  open, credentials, symbol/order-type validation) and authoritative
+  venue answers (4xx, `success=false`, exhausted 429) still reject
+  immediately on every venue — only genuine ambiguity parks. Connection
+  refused rejects immediately only on Walutomat, where httpx surfaces
+  connection-setup errors distinctly; on Kraken Spot and Futures
+  connection-setup failures park as UNKNOWN by design, because the ccxt
+  and `requests` transports cannot reliably distinguish sent from
+  not-sent (a connection error can fire mid-body), and a false park
+  merely alerts while a false rejection could double a position.
 
 Resolution: a late `accepted` event clears the UNKNOWN flag (the order
 resumes its normal lifecycle with the guard still held until fills); a
@@ -367,6 +385,14 @@ A PARKED UNKNOWN order is retried by the 60s reconciliation loop
 (fresh venue-verification round each cycle); if it stays unresolved
 across cycles, check the venue's open and closed orders for the client
 id from the alert before taking any manual action.
+The same 60s loop also heals fill gaps: when the venue reports more
+filled quantity than the executor has recorded, it emits a corrective
+fill, pricing market orders that lack a snapshot price from the
+venue's own per-order fills VWAP (`get_order_fill_vwap`). Only when no
+venue price resolves at all does it log
+`Recon: fill gap ... no price on market order, skipping corrective fill`
+— a fill mismatch needs manual reconciliation against the venue's fill
+history only if that ERROR persists across cycles.
 
 ### Duplicate-dispatch guard and dispatch TTL
 
@@ -381,20 +407,21 @@ Two executor/outbox gates close the remaining order-flow loss windows:
   retries still flow) all block the re-submit before any venue call.
   A failed evidence check drops FAIL-CLOSED.
 - **Dispatch max-age TTL** (`TRADE_COMMAND_DISPATCH_TTL_S`, default
-  30s, `<= 0` disables). Stale CREATED submits expire at the outbox to
-  the terminal EXPIRED status (never published; engine intent released
-  through the regular expired pipeline), and stale frames buffered
-  through an outage (the order-flow socket has no high-water mark) are
-  resolved at the executor against venue truth: a frame whose order
-  EXISTS under the client id is adopted as accepted (a crash-window
-  replay that actually placed), an unverifiable frame drops silently
-  (the reconciler WARN and engine valve cover it), and only a
-  venue-verified-absent frame rejects. A stale row that DOES
+  30s, `<= 0` disables). Stale CREATED create/submit commands expire
+  at the outbox to the terminal EXPIRED status (never published; engine
+  intent released through the regular expired pipeline), and stale
+  frames buffered through an outage (the order-flow socket has no
+  high-water mark) are resolved at the executor against venue truth: a
+  frame whose order EXISTS under the client id is adopted as accepted
+  (a crash-window replay that actually placed), an unverifiable frame
+  drops silently (the reconciler WARN and engine valve cover it), and
+  only a venue-verified-absent frame rejects. A stale row that DOES
   carry submit evidence publishes anyway and is absorbed by the
   duplicate guard — expiring it would fabricate a terminal state for a
-  possibly-live order. Cancels are exempt: expiring a stale cancel
-  would strand a live order. Keep the TTL below the engine's 60s
-  in-flight valve.
+  possibly-live order. Cancels and replaces are exempt: expiring a
+  stale cancel would strand a live order, and replace outcomes are
+  reported on the lightweight cancel/replace event path. Keep the TTL
+  below the engine's 60s in-flight valve.
 
 ### Fault-injection testing
 
@@ -407,8 +434,10 @@ is dropped, so the ZMQ bus and DB writes keep working — the outage is
 market-data only (order execution, a separate container, is unaffected).
 
 It targets the feed's own netns because the runtime image has no `iptables`
-(`docker exec <feed> iptables` fails) and the feed connects **directly** to the
-exchanges rather than through egress (so pausing/firewalling egress is a no-op).
+(`docker exec <feed> iptables` fails). This matches the default direct-feed
+path (`feed_egress_enabled=false`). If feed egress is enabled, publishers
+connect to `snapper-egress` SOCKS ports instead, so drop the SOCKS/egress path
+rather than feed-container `:443`.
 Restore is safety-critical and proven, not best-effort: every step is
 exit-code-checked, the helper runs a prebuilt `snapper-fault-helper` image (no
 package install while the link is down), removal is proven with `iptables -C`,
@@ -437,13 +466,13 @@ duration.
 
 ### Egress routing for feeds (`feed_egress_enabled`)
 
-By default the feed publishers connect **directly** to the exchanges — they do
-NOT route through the egress WireGuard/SOCKS multiplexer (the pool is only
-initialized in the API/coordinator process). Set the `feed_egress_enabled`
-setting to enable per-publisher egress routing: each feed subprocess then
-initializes the egress pool at startup so the Kraken connect shim and
-Walutomat's pooled HTTP transport route through the configured tunnels
-(per-exchange pins apply; direct stays the fallback).
+By default the feed publishers connect **directly** to the exchanges and do
+not initialize an egress pool in their own processes. Set the
+`feed_egress_enabled` setting to enable per-publisher egress routing: each
+feed subprocess then initializes its own process-local egress pool at
+startup, so the Kraken connect shim and Walutomat's pooled HTTP transport
+route through the configured tunnels (per-exchange pins apply; direct stays
+the fallback).
 
 This is gated off by default because routing live market data through shared
 VPN IPs changes latency and can make Kraken/Cloudflare throttle the feed
@@ -457,6 +486,14 @@ differently than the host IP. Roll it out cautiously:
     direct baseline; watch the reconnect logs for throttling/close codes.
 4. Revert instantly by setting `feed_egress_enabled=false` and restarting the
     feed.
+
+With routing enabled, a TCP/SOCKS connect-level failure through a proxy
+route — timeout, connection refused, or a tunnel that went dark —
+quarantines that route for 30 s (`_WS_CONNECT_ERROR_QUARANTINE_S`), so
+the next reconnect fails over to another tunnel or the direct fallback
+instead of re-dialing the dead route. Direct routes are never
+quarantined: a connect error with no proxy means the exchange or the
+local uplink is down, not the route.
 
 ## Per-wallet executors
 
@@ -579,7 +616,8 @@ contracts (`MNQM6-CME` = Jun 26, etc.) and must be rotated before the
    property default literal in `src/snapper/config/app.py` (code
    path — requires a deploy; roll back via git revert), OR overriding
    the `instruments` DB Setting row via the Settings page or
-   `POST /api/settings` (immediate, no deploy). `instruments` is a
+   `POST /api/settings/instruments/set` (immediate, no deploy;
+   requires `CONFIGURE_SYSTEM` + CSRF). `instruments` is a
    read-only `@property`, so the DB Setting row is the only runtime
    override.
 

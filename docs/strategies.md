@@ -141,8 +141,8 @@ class RSIReversion(BaseStrategy):
 | `outputs` | list[str] | List of instruments for signals |
 | `exchange` | string | Target exchange (`paper`, `kraken`, `kraken_futures`, `walutomat`) |
 | `params` | dict | Strategy-specific parameters |
-| `wallet_public_id` | string | Wallet that will execute orders for this strategy. Still defaults to empty and is NOT validated by `StrategyConfig` itself (the dataclass keeps an empty default pending the NOT NULL tightening migration). The non-empty requirement applies only at runtime via the caps guard for any strategy that uses `create_ai_review_and_await()` — see "AI delegate consultation" below. |
-| `operator_public_id` | string | Trading-identity operator that owns this strategy instance. Empty default; validated against the launching principal's `operator_public_ids` when populated. |
+| `wallet_public_id` | string | Wallet that will execute orders for this strategy. Still defaults to empty and is NOT validated by `StrategyConfig` itself (the dataclass keeps an empty default pending the NOT NULL tightening migration). Process routes validate active operator/wallet grant coverage when both this field and `operator_public_id` are populated; a wallet without an operator is rejected. The non-empty requirement applies at runtime via the caps guard for any strategy that uses `create_ai_review_and_await()` — see "AI delegate consultation" below. |
+| `operator_public_id` | string | Trading-identity operator that owns this strategy instance. Empty default; validated against the launching principal's `operator_public_ids` when populated, and used with `wallet_public_id` for active grant and live-output coverage checks. |
 
 ### AI delegate consultation
 
@@ -295,6 +295,81 @@ See the next section for the generalized N-leg API.
 | `exit_threshold` | 0.5 | Z-score threshold for mean-reversion exit |
 | `lookback_window` | 50 | Window length for rolling spread statistics |
 | `min_data_points` | 30 | Minimum buffered candles before any signal is emitted |
+
+Two processes register this class out of the box:
+`strategy_cointegration_btc_eth` trades hourly BTC-USD/ETH-USD paper
+candles with the defaults above, and
+`strategy_cointegration_fet_render` is a forward-test preset that
+trades daily FET-USD/RENDER-USD paper candles with a screened hedge
+ratio (`beta=0.257463`, `lookback_window=60`).
+
+## Proprietary strategies
+
+When the proprietary submodule is present, additional strategy classes
+live under `proprietary/src/strategies`. They are registered by their
+modules and use the same `BaseStrategy` and process-wrapper contracts as
+open-source strategies. Ignore `proprietary/plans` and
+`proprietary/memory` historical notes unless a current README explicitly
+points to them as live docs.
+
+### SPYBTCMomentum
+
+`SPYBTCMomentum` is a cross-asset momentum strategy: completed/current
+SPY hourly movement drives same-direction BTC signals. It does **not**
+trade a correlation spread and does **not** emit SPY orders.
+
+The default paper process subscribes to 1-minute SPY and BTC candles,
+aggregates both into hourly bars, and emits at most one BTC signal per
+UTC hour during the configured US session window. A positive SPY return
+above `spy_threshold` emits `BUY` on BTC; a negative SPY return below
+`-spy_threshold` emits `SELL` on BTC. Signal price comes from the
+current BTC hourly aggregate.
+
+**Parameters:**
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `spy_threshold` | `0.002` | Absolute SPY hourly return threshold before a BTC signal can fire. |
+| `us_session_start_utc` | `14` | Inclusive UTC hour at which signals may start. |
+| `us_session_end_utc` | `21` | Exclusive UTC hour at which signals stop. |
+| `spy_instrument` | `SPY` | Instrument identifier used to route incoming SPY candles. |
+| `btc_instrument` | `BTC-USD` | Target BTC instrument emitted in `StrategySignal.instrument`. |
+
+### ParlayCascade
+
+`ParlayCascade` is a sequential N-leg compounding strategy. It uses
+`MultiLegSpreadMixin` for the ordered leg roster, but it does not open
+all legs at once. It starts on leg 0 only after the trailing-window drift
+gate clears, then advances through the configured legs one at a time.
+
+Each active leg exits by one of three paths:
+
+1.  Favourable move reaches `tp_pct`: exit the current leg. If another
+    leg remains, the callback returns `[exit_current, enter_next]` so the
+    handoff uses the multi-leg list return contract.
+2.  Adverse move reaches `sl_pct`: exit the current leg, mark the
+    cascade busted, and start the cooldown.
+3.  `max_bars_per_leg` candles elapse: exit the current leg as a
+    timeout bust and start the cooldown.
+
+The `min_edge_bps` gate is measured over `lookback_window` candles on
+leg 0. For long entries, positive drift is favourable; for short
+entries, the sign is flipped so positive still means "edge in our
+favor". After a bust, `cooldown_bars` candles must drain before the next
+attempt can start. A successful full cascade moves to complete state
+without cooldown and then returns to idle on the next eligible cycle.
+
+**Parameters:**
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `tp_pct` | `0.01` | Per-leg take-profit threshold as a fraction. Must be positive. |
+| `sl_pct` | `0.01` | Per-leg stop-loss threshold as a fraction. Must be positive. |
+| `max_bars_per_leg` | `24` | Per-leg timeout in candles. Must be positive. |
+| `entry_side` | `buy` | Direction used for every leg entry; `sell` inverts favourable/adverse tests. |
+| `lookback_window` | `20` | Number of trailing candles used by the drift edge gate. |
+| `min_edge_bps` | `5.0` | Minimum favourable drift, in basis points, required before leg 0 can enter. |
+| `cooldown_bars` | `4` | Number of candles to wait after a bust before another attempt. |
 
 ## Multi-leg / N-leg basket strategies
 
@@ -682,9 +757,12 @@ async def test_buy_signal_on_low_rsi(rsi_strategy: RSIReversion) -> None:
 
 ### Backtesting
 
-Use replay data from the dedicated `paper.{source_exchange}` market
-sub-prefix — the strategy listens to the same `market.*` shape as
-in live mode, only the source exchange is swapped for `paper`:
+For `BacktestConfig` runs, `direct_db` instantiates strategies with a
+synthetic input prefix (`candles.{exchange}.synthetic.{timeframe}`),
+while `zmq_replay` publishes
+`market.{exchange}.{instrument}.candles.{timeframe}` on a private
+broker. The separate `paper_feed_publisher` replay process is the path
+that uses the dedicated `market.paper.{source_exchange}...` topic shape:
 
 ```python
 default_config={

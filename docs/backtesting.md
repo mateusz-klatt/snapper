@@ -70,6 +70,44 @@ Both engines honour the gate identically; the parity test
 `tests/integration/test_backtest_hardening.py::test_warmup_gating_parity_between_engines`
 asserts field-for-field equality.
 
+## Signal and fill artifacts
+
+`process_time_batch` is the single execution/fill path for both engines.
+For every timestamp batch it updates `latest_closes` for all candles
+first, feeds each candle through the strategy, drops pre-`start_date`
+signals, then records kept signals/trades and one equity point for the
+timestamp.
+
+Each kept signal receives a fresh UUID7 `public_id` before any fill is
+simulated. When a trade is produced, `backtest_trades.signal_public_id`
+carries that same value so Direct-DB and ZMQ replay artifacts are
+FK-linkable in parity tests. The signal row records:
+
+- `signal_time` from the candle batch timestamp (`open_at`);
+- `signal_type` from `StrategySignal.side`;
+- `instrument` from `StrategySignal.instrument`;
+- `price` from the resolved target close when fill attribution succeeds,
+  or from `StrategySignal.price` on the missing-target-close fallback;
+- `timestamp` from the run's `snapshot_as_of` bus-time anchor.
+
+The only current fill model is `market`. `simulate_market_fill` executes
+at the relevant close price adjusted by `slippage_bps`; commission is
+charged in basis points. Buy size is
+`signal_strength * cash / cost_per_unit` (default strength `1.0`), and a
+sell flattens the current position quantity. Invalid close prices,
+zero/negative buy strength, no cash, or a sell with no position return
+`None`; the signal is still recorded, but no trade row is written.
+
+When a fill exists, the trade row records:
+
+- `executed_at = fill.fill_at`, which is the candle `open_at` timestamp
+  passed into the fill model;
+- `instrument`, `side`, `quantity`, `price`, `fee`, and `pnl` from the
+  simulated fill (`pnl` is populated on sells from realized PnL delta);
+- `position_after` from the portfolio after the fill;
+- `signal_public_id` linking back to the triggering signal;
+- `timestamp` from the same `snapshot_as_of` bus-time anchor.
+
 ## ZMQ replay implementation notes
 
 The replay path adds a few primitives the live system does not need:
@@ -224,7 +262,11 @@ it is **not** auto-registered, so `BacktestConfig.validate_strategy_class`
 rejects the config below as written. To run it, first copy the example
 module to the strategies package root and decorate it with
 `@register_strategy`, or substitute a registered strategy class
-(`RSIReversion`, `MACDCrossover`, or `CointegrationPairs`):
+(`RSIReversion`, `MACDCrossover`, or `CointegrationPairs`). The
+current registry is queryable at
+`GET /api/backtests/strategy-classes`, which returns the sorted
+`StrategyFactory` keys accepted as `strategy_class` values (see
+[api.md](api.md#get-apibacktestsstrategy-classes)):
 
 ```python
 BacktestConfig(
@@ -258,13 +300,46 @@ substitutes at simulated-fill time:
   no longer used on cross-asset runs.
 
 When `target_execution_exchange is None` (default), the fill is
-attributed to `event.exchange` + `signal.instrument`. In older
-single-feed strategies `signal.instrument == event.instrument` by
-convention (verified across every in-tree emitter at `rsi.py`,
-`macd.py`, `cointegration.py`), so the recorded exchange /
-instrument / price are byte-identical with the pre-v1.2 path —
-every existing single-feed backtest keeps its exact fingerprint
-and result rows.
+attributed to `event.exchange` + `signal.instrument`. The
+single-leg emitters (`rsi.py`, `macd.py`) always set
+`signal.instrument == event.instrument`, so for those strategies
+the recorded exchange / instrument / price are byte-identical with
+the pre-v1.2 path — every existing single-feed backtest keeps its
+exact fingerprint and result rows. `CointegrationPairs` does not
+follow that convention: its `on_candle` returns a
+`[primary, hedge]` pair whose hedge leg targets the *partner*
+instrument, so that leg is attributed to `event.exchange` plus the
+partner symbol and fills at `latest_closes[partner]` (see
+"Multi-leg signal groups" below).
+
+### Multi-leg signal groups
+
+A strategy callback may return a `list[StrategySignal]` (a leg
+group) instead of a single signal. The backtest path handles
+groups as follows:
+
+- **Fail-closed group preflight** — `_handle_candle_data` runs the
+  whole group through `BaseStrategy._normalize_signal_group` before
+  returning anything: every element must be a `StrategySignal`, no
+  two legs may share an instrument, and every leg must map to a
+  configured output topic. A malformed group raises instead of
+  emitting, so a backtest can never record half a spread.
+- **Per-leg fan-out** — `process_time_batch` pairs each leg with
+  the candle event that produced the group and processes the legs
+  independently: each leg gets its own `signal_public_id`, fill
+  simulation, and signal/trade rows.
+- **Hedge-leg pricing** — the hedge leg fills at
+  `latest_closes[partner]`, the partner instrument's latest close
+  from its own feed, not the observing candle's close. Because
+  `process_time_batch` updates `latest_closes` for every candle in
+  the timestamp batch before feeding the strategy, both legs price
+  off same-timestamp data when both feeds emit. A partner symbol
+  absent from `latest_closes` falls into the missing-target-close
+  policy below.
+
+`CointegrationPairs` additionally refuses to enter a one-sided
+position at the source: `_build_paired_entry` returns `None` (no
+signals at all) when the partner leg has no buffered price yet.
 
 ### Missing-target-close policy
 

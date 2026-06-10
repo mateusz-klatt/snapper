@@ -14,7 +14,7 @@ mirrors.
 
 ## Endpoints
 
-All four routes are gated by `Permission.READ_SYSTEM_STATUS` (held by
+All five routes are gated by `Permission.READ_SYSTEM_STATUS` (held by
 `AI_DELEGATE`, `VIEWER`, `OPERATOR`, `ADMIN`). The two `POST` routes
 also require CSRF (cookie-auth path); `Authorization: Bearer` requests
 bypass CSRF per the project-wide auth contract.
@@ -25,12 +25,13 @@ bypass CSRF per the project-wide auth contract.
 | GET    | `/api/metrics/system/history?since&until&limit`     | Windowed slice of the ring buffer |
 | POST   | `/api/metrics/system/tracemalloc/start?duration_s`  | Arm Python tracemalloc with auto-stop deadline |
 | POST   | `/api/metrics/system/tracemalloc/stop`              | Disarm tracemalloc + cancel pending deadline |
+| GET    | `/api/metrics/notifications`                        | Notify-sidecar outbox delivery counters |
 
 ### Failure contract
 
 If the snapshotter singleton failed to start at lifespan time, the
 `app.state.system_metrics_snapshotter` attribute stays `None` and every
-metrics route returns HTTP `503` with body
+`/api/metrics/system*` route returns HTTP `503` with body
 `{"detail": "system metrics snapshotter not available"}`. The rest of
 the application continues to serve other endpoints.
 
@@ -39,6 +40,17 @@ the application continues to serve other endpoints.
 `SystemMetricsSnapshotter.start()` takes one eager synchronous sample
 BEFORE returning, so the first request after lifespan startup completes
 hits a populated buffer.
+
+### Notification delivery metrics
+
+`GET /api/metrics/notifications` does not touch the snapshotter or
+the ring buffer (the failure contract above does not apply to it).
+Each request aggregates active `alert_deliveries` rows (SCD2
+predecessor versions excluded) into per-status delivery totals —
+`sent`, `failed`, APNs-410 `unregistered`, `cancelled_scope` — plus
+the `queued` backlog depth of the notify sidecar's retry loop.
+Statuses absent from the database report `0`. See [api.md](api.md)
+for the `NotificationMetricsResponse` wire schema.
 
 ## Snapshot fields
 

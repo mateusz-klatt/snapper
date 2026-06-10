@@ -106,6 +106,10 @@ TELEMETRY_RECORDING_ENABLED=false
 # ZeroMQ broker
 ZMQ_BROKER_XSUB=tcp://127.0.0.1:7500
 ZMQ_BROKER_XPUB=tcp://127.0.0.1:7501
+
+# Max command age before the outbox expires stale create/submit
+# commands instead of publishing them (<= 0 disables)
+TRADE_COMMAND_DISPATCH_TTL_S=30.0
 ```
 
 ### Running
@@ -137,7 +141,34 @@ The trade runtime always uses durable, outbox-driven dispatch: commands
 are persisted as `TradeCommand` rows and published by the outbox
 dispatcher. On the accepted/fill paths, executor `VenueEvent`
 persistence is fail-closed — a failed write raises before the
-corresponding `orders.events.*` publish.
+corresponding `orders.events.*` publish. An ambiguous submit failure
+never fabricates a rejection: the executor verifies venue truth via
+`find_order_by_client_id` and, when the venue cannot answer, parks the
+order in the non-terminal UNKNOWN state — the engine holds its
+in-flight guard, the recon loop re-verifies the order each cycle until
+resolved, and the `order_unknown` notification rule alerts the
+operator.
+
+Replayed submits of an already-evidenced `client_order_id` (outbox
+re-publishes after a crash between publish and the dispatched commit)
+are dropped by a duplicate-submit guard; its durable venue-evidence
+probe is fail-closed — a failed check drops the command rather than
+risk double-placing a market order. Dispatch is also bounded by a
+max-age TTL (`TRADE_COMMAND_DISPATCH_TTL_S`, default 30 s): the outbox
+CAS-expires stale CREATED create/submit commands to EXPIRED instead of
+publishing them, so an outage backlog cannot fire orders priced off
+old signals. Cancels are exempt — expiring a stale cancel would strand
+a live order.
+
+### Process-Managed Executors
+
+Process-managed deployments run one executor per `(exchange, wallet)`
+credential row. Bare `executor_<exchange>` process configs are templates
+only; the launcher expands active `wallet_credentials` rows into
+`executor_<exchange>_w<wallet_short>` instances, where `wallet_short` is
+the last 12 lowercase hex characters of the wallet UUID7. Each instance
+loads only its wallet credentials and filters incoming command frames by
+`wallet_public_id`.
 
 ## System Overview
 
@@ -183,8 +214,8 @@ flowchart TB
 snapper server              # Start FastAPI server
 snapper broker              # Start ZMQ broker
 snapper trade-zmq           # Trade runtime / coordinator (pass --instance-id + --instance-count for N>=2, see docs/operations.md)
-snapper executor            # Order executor
-snapper feed                # Market data publisher
+snapper executor            # Standalone order executor helper
+snapper feed                # Direct Kraken market data publisher helper
 snapper feed-engine         # Dedicated feed container entrypoint
 snapper egress              # WireGuard + SOCKS5 egress sidecar entrypoint
 ```
@@ -337,6 +368,12 @@ make test        # Unit tests
 make cov         # Tests with coverage (100% required)
 ```
 
+Generated contracts are split by target: `make ui-gen-types` refreshes
+frontend OpenAPI/WebSocket/Zod/entity/permission types,
+`make ios-gen-types` refreshes Swift models, and `make ts-bridge` (or
+`make bridge-regen`) refreshes the opt-in snapper-mcp bridge wire
+contract.
+
 ### Frontend
 
 ```bash
@@ -433,10 +470,15 @@ Detailed documentation in [docs/](docs/) directory:
 - [Configuration](docs/configuration.md) — Environment variables and settings
 - [CLI](docs/cli.md) — Full command documentation
 - [Strategies](docs/strategies.md) — Creating trading strategies
+- [Backtesting](docs/backtesting.md) — Backtest engines and artifacts
 - [API](docs/api.md) — REST API and WebSocket
 - [Messaging](docs/messaging.md) — ZeroMQ architecture
+- [Operations](docs/operations.md) — Multi-instance coordinator runbook
+- [Observability](docs/observability.md) — Process health metrics surface
+- [AI integration](docs/ai-integration.md) — MCP endpoint and AI delegate tokens
 - [Development](docs/development.md) — Developer guidelines (incl. [Internationalization](docs/development.md#internationalization))
 - [Paired execution](docs/paired-execution.md) — Multi-leg guard operator runbook
+- [Egress](docs/snapper-egress.md) — WireGuard + SOCKS5 egress sidecar runbook
 
 ## License
 

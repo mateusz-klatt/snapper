@@ -88,14 +88,17 @@ curl -X POST http://localhost:8000/api/ai-delegates \
 ```
 
 `payload.operator_public_id` is optional. When omitted, Snapper binds the
-delegate to the caller's `primary_operator_public_id`; when supplied, it
-must be one of the caller's authenticated operator claims. The minted
+delegate to the caller's `primary_operator_public_id`; if the caller has
+no primary operator, create returns 422 until an explicit operator is
+supplied. When supplied by a non-admin caller, the operator must be in
+the caller's authenticated operator claims. Admin callers have the admin
+operator bypass and may bind explicitly to any operator. The minted
 delegate token inherits scope from that bound operator, so later scope
 grant changes for that operator control which wallets/instruments the
 delegate can act on.
 
-The response is **one-shot**. Copy the tokens out of the HTTP session
-immediately — Snapper never re-serves them:
+The response is **one-shot**. Copy the token out of the HTTP session
+immediately — Snapper never re-serves it:
 
 ```json
 {
@@ -139,12 +142,14 @@ Other endpoints on `/api/ai-delegates`:
 
 Each AI delegate mints a single long-lived (~3-month) access JWT.
 The same token authenticates both the proxy MCP server and the
-optional push-wakeup watch monitor. Revocation works instantly:
+optional push-wakeup watch monitor. Revocation is server-side:
 `POST /api/ai-delegates/{id}/deactivate` flips
-`users.is_active=False`, publishes `admin.user_deactivated` on the
-bus, and every Snapper instance evicts the delegate's
-`user_active_tokens` row from the verify-cache within one bus
-round-trip. The 90-day `exp` is a ceiling, not a commitment;
+`users.is_active=False`, revokes the delegate's `user_active_tokens`
+row, publishes `admin.user_deactivated` on the bus, and each
+Snapper instance evicts matching verify-cache entries on receipt
+(or lets them expire at the 30-second LRU ceiling). The local JTI
+blacklist uses a 10-second grace window for requests that raced the
+kill switch. The 90-day `exp` is a ceiling, not a commitment;
 operators are expected to rotate delegate tokens on the cadence
 that fits their key-management hygiene.
 
@@ -274,13 +279,14 @@ curl -X POST http://localhost:8000/api/mcp/ \
 ## Available tools
 
 Read-only tools surface the delegate's order book, position state,
-and venue market data. Write tools (`submit_manual_order`,
-`cancel_order`) are gated by per-tool permissions; only
-`submit_manual_order` is unconditionally guarded by
-`TradingCapsEnforcer.guard` — `cancel_order` invokes the guard
-only on the cancel paths that affect open exposure, and
-`submit_ai_review_decision` is not wired to
-`caps_enforcer_getter` at registration.
+signals, and venue market data. Write and decision tools
+(`submit_manual_order`, `cancel_order`,
+`submit_ai_review_decision`) are gated by per-tool permissions.
+Only `submit_manual_order` is unconditionally guarded by
+`TradingCapsEnforcer.guard`; `cancel_order` invokes the guard only
+on the cancel paths that affect open exposure, and
+`submit_ai_review_decision` is not wired to `caps_enforcer_getter`
+at registration.
 
 - **`list_instruments(exchange: str)`** — returns sorted native symbols
     for the exchange inventory. It is not wallet/operator scoped;
@@ -295,14 +301,19 @@ only on the cancel paths that affect open exposure, and
 
 - **`get_order_status(command_public_id: str)`** — single-order
     lookup keyed by the trade-command public id returned from
-    `submit_manual_order`. Requires `READ_ORDERS`.
+    `submit_manual_order`. Requires `READ_ORDERS`; unknown or
+    out-of-scope command ids return `order_not_found`
+    (anti-enumeration).
 
 - **`list_positions(wallet_public_id?, exchange?, instrument?)`** —
     active positions across the caller's accessible wallets. Requires
-    `READ_POSITIONS`.
+    `READ_POSITIONS`; wallet scope violations return
+    `position_not_found` (anti-enumeration).
 
 - **`get_position_cycle(cycle_public_id: str)`** — full open→close
-    audit trail for a position cycle. Requires `READ_POSITIONS`.
+    audit trail for a position cycle. Requires `READ_POSITIONS`;
+    unknown or out-of-scope cycles return `position_cycle_not_found`
+    (anti-enumeration).
 
 - **`get_ohlcv(exchange, instrument, timeframe, since?, until?,
     limit=200)`** — OHLCV candles for a venue + instrument. Range
@@ -324,22 +335,33 @@ only on the cancel paths that affect open exposure, and
     price?, operator_public_id?, ai_review_public_id?)`** —
     enqueues a trade command under the delegate's user_public_id
     with `source_surface='mcp'` + the caps check from
-    `TradingCapsEnforcer.guard`. Fails closed on any cap violation.
+    `TradingCapsEnforcer.guard`. Requires `CREATE_ORDERS`, rejects
+    non-admin `operator_public_id` values outside the caller's
+    authenticated operator set, rechecks wallet scope against active
+    grants on every call, and fails closed on any cap violation.
     Wraps the REST `create_order` route.
 
 - **`cancel_order(plan_public_id, idempotency_key)`** — cancels an
     active execution plan via the same `PlansCancelService` REST
     goes through. Idempotent: same `idempotency_key` on retry
-    returns the current plan state without re-executing.
+    returns the current plan state without re-executing. Requires
+    `CANCEL_ORDERS`; unknown and out-of-scope plans collapse to
+    `order_not_found` (anti-enumeration).
 
 - **`submit_ai_review_decision(review_id, decision, rationale?)`** —
     REST mirror of the
     `POST /api/ai-reviews/{review_public_id}/decision` route for
     the in-process MCP surface; lets the delegate approve or
     reject a pending CONSULT review. `review_id` is the UUID7 of
-    the `ai_reviews` row. Not gated by the caps enforcer (the
-    underlying review-decision path does its own SCD2
-    close-and-insert + bus fanout).
+    the `ai_reviews` row. Requires `CREATE_ORDERS`; the review
+    service additionally verifies the caller is a registered AI
+    delegate that still holds an active scope grant for the
+    review wallet and instrument. Any such delegate may decide —
+    the selected delegate is who was consulted, not an exclusive
+    decision authority — and a delegate racing an already-resolved
+    review receives `review_already_resolved_by_peer`. Not gated
+    by the caps enforcer (the underlying review-decision path does
+    its own SCD2 close-and-insert + bus fanout).
 
 The tool catalog is discoverable via the MCP `tools/list` JSON-RPC
 method:
@@ -400,16 +422,17 @@ operator deactivation:
     and evicts matching verify-cache entries via
     `invalidate_user_cache`.
 
-Latency: same-instance kill is immediate (JTI blacklist consulted
-before LRU in `verify_token_with_db`); cross-instance kill is bounded
-by one bus-message round-trip (sub-second on local ZMQ) instead of
-the 30-second LRU TTL.
+Latency: the token inventory is revoked before the deactivated-user
+bus event is published. Existing positive verify-cache entries are
+evicted when each instance receives `admin.user_deactivated`; if the
+bus listener is unavailable, the cache TTL is the 30-second ceiling.
+The local JTI blacklist is consulted before the LRU but has a
+10-second grace window, so requests that race deactivation can still
+complete.
 
 In-flight MCP tool handlers are **not** force-cancelled. The
-guarantee is narrowly "subsequent MCP requests are rejected once
-the JTI blacklist propagates" — the in-memory blacklist carries
-a small grace period (so requests that raced the propagation
-window can still complete) before subsequent verifies fail.
+guarantee is narrowly "later MCP requests are rejected once the
+inventory/cache revocation path has observed the kill switch."
 
 ---
 
@@ -451,7 +474,7 @@ migrated.
 | 401    | Refresh token redeemed     | Replay of a spent refresh JWT                    | Re-login                                              |
 | 401    | Account deactivated        | Session cookie flow                              | Re-login                                              |
 | 403    | MCP write helpers: `wallet_out_of_scope:` *(prefixed message)* / REST: `"Wallet not in accessible set"` *(detail string)* | Mutating tool targets a wallet outside the caller's scope. The helper path raises `PermissionError(f"wallet_out_of_scope: ...")` lifted by FastMCP into a `ToolError`; REST raises `HTTPException(403, detail="Wallet not in accessible set")` from `server/scoping.py`. Tool-level read/cancel paths may instead return structured anti-enumeration envelopes such as `order_not_found`, `position_not_found`, or `signal_not_found`. | Pick a wallet the caller still has a live grant on    |
-| 403    | MCP write helpers: `operator_out_of_scope:` *(prefixed message)* / REST: `"Operator not in accessible set"` *(detail string)* | Same write-helper shape as the wallet variant. Read/cancel tools can intentionally collapse out-of-scope and not-found cases into structured not-found envelopes to avoid leaking resource existence. | Pick an operator from the caller's authenticated set  |
+| 403    | MCP write helpers: `operator_out_of_scope:` *(prefixed message)* / REST: `"Operator not in accessible set"` *(detail string)* | Same write-helper shape as the wallet variant. Non-admin callers must pick an operator from their authenticated set; ADMIN bypasses the operator-set check. Read/cancel tools can intentionally collapse out-of-scope and not-found cases into structured not-found envelopes to avoid leaking resource existence. | Pick an operator from the caller's authenticated set unless the caller is ADMIN |
 
 Delegate CRUD:
 
@@ -461,7 +484,7 @@ Delegate CRUD:
 | 403    | `require_role(OPERATOR)`               | AI_DELEGATE or VIEWER trying to manage delegates            |
 | 404    | `Delegate not found`                   | Unknown ID OR cross-tenant (no existence leak)              |
 | 409    | `Could not derive a unique username …` | Label slug collides 8+ times (pathological)                 |
-| 422    | `Operator '<id>' is not in …`          | Caller picked `operator_public_id` outside their claim set  |
+| 422    | `Operator '<id>' is not in …`          | Non-admin caller picked `operator_public_id` outside their claim set |
 | 422    | `Caller has no primary operator …`     | No explicit operator and no primary → binding is ambiguous  |
 
 ---
@@ -476,7 +499,10 @@ Delegate CRUD:
     (~3 months / 90 days); operators rotate them on the cadence that
     fits their key-management hygiene, and revocation is immediate via
     deactivating the delegate rather than waiting for expiry.
-- Refresh tokens live **7 days** (30 days with `remember_me=true`).
+- Refresh tokens on the login/refresh route path currently live
+    `auth_refresh_token_expire_days` (default **7 days**). The
+    `remember_me` request field is accepted by the schema but is not
+    currently threaded into token creation.
 - Refresh rotation is **atomic**: one DB transaction revokes the old
     refresh JTI AND persists the new access+refresh pair. Replay of
     a spent refresh JWT fails with 401 `Refresh token already

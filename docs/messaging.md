@@ -93,6 +93,8 @@ Topic format varies by category (see per-category tables below).
 | Topic | Description |
 | ----- | ----------- |
 | `orders.commands.kraken.BTC-USD.submit` | Order requests for Kraken |
+| `orders.commands.kraken.BTC-USD.cancel` | Cancel requests for an existing Kraken order |
+| `orders.commands.kraken.BTC-USD.replace` | Replace/modify requests; executors currently reject with a lightweight `rejected` replace event because atomic replace is not implemented |
 | `orders.events.kraken.BTC-USD.executed` | Order executions from Kraken |
 | `orders.events.kraken.BTC-USD.submitted` | Order submitted events |
 | `orders.events.kraken.BTC-USD.accepted` | Order accepted events |
@@ -100,6 +102,7 @@ Topic format varies by category (see per-category tables below).
 | `orders.events.kraken.BTC-USD.cancelled` | Order cancelled events |
 | `orders.events.kraken.BTC-USD.expired` | Order expired events |
 | `orders.events.kraken.BTC-USD.replaced` | Order replaced events |
+| `orders.events.kraken.BTC-USD.unknown` | Ambiguous submit outcome; non-terminal until venue verification resolves it |
 
 `TradeCommand`, `VenueEvent`, and `TradeProjectionCheckpoint` are durable
 database artifacts used by the trade runtime. They are not additional ZMQ topics.
@@ -161,6 +164,7 @@ APNs sidecar.
 | ----- | ----------- |
 | `alerts.<user_public_id>.order_fill_full` | Order filled in full |
 | `alerts.<user_public_id>.order_rejected` | Venue rejected the order |
+| `alerts.<user_public_id>.order_unknown` | Order submit outcome ambiguous — parked as non-terminal UNKNOWN pending venue verification (safety-critical; user-scoped with admin fan-out for strategy orders) |
 | `alerts.<user_public_id>.position_stop_loss_fired` | Stop-loss fired on an open position |
 | `alerts.<user_public_id>.margin_warning` | Margin warning |
 | `alerts.<user_public_id>.critical_system_error` | Critical system error |
@@ -284,7 +288,9 @@ Every Data class inherits from `StrictDataSchema` and carries:
 serializes and forwards the already-complete payload without modifying provenance.
 Consumers can use these fields to detect message loss and producer restarts.
 
-The old `messaging.schemas.messages` module still exists but only contains `parse_message()` and `MessageParseError`.
+`messaging.schemas.messages` remains the parser/registry module: it
+exposes `parse_message()`, `MessageParseError`, `GapEnvelope`,
+`MarketDataMessage`, and `MESSAGE_TYPE_MAP`.
 
 ### TickData
 
@@ -406,9 +412,23 @@ signal = SignalData(
 | `price` | float | Price |
 | `fired_at` | datetime | Domain time when signal was generated |
 | `timestamp` | datetime | System timestamp |
+| `paired_group_id` | string \| None | Paired-execution group identifier; unset for standalone signals |
+| `paired_group_size` | int \| None | Number of legs in the group (must be >= 2) |
+| `paired_group_index` | int \| None | This leg's position in the group (`0 <= index < size`) |
+| `paired_group_policy` | string \| None | Coordination policy: `simultaneous` or `sequential_handoff` |
+| `paired_group_key` | string \| None | Canonical sorted `{exchange}:{instrument}:{mode}` leg-set key |
 
 Paper signals (`exchange == "paper"`) require `strategy_name` to be set. The schema
 enforces this invariant at construction time so invalid paper signals cannot be created.
+
+The paired-group descriptor is fail-closed and all-or-nothing: a model
+validator requires either every `paired_group_*` field unset (a standalone
+signal) or all five set together, with `paired_group_size >= 2`,
+`0 <= paired_group_index < paired_group_size`, and a non-empty
+`paired_group_key`. The descriptor (without `paired_group_key`) is also
+carried transport-only on the downstream order schemas —
+`OrderRequestData`, `OrderData`, `ExecutionData`, and `OrderEventData` —
+so subscribers can attribute order flow to its paired group.
 
 ### OrderRequestData
 
@@ -729,9 +749,13 @@ hot path.
 
 ### Micro-Batch DB Persistence
 
-DB writes are decoupled from the ZMQ publish path via per-loop micro-batching.
-Each producer loop (candles, ticks, trades) accumulates rows in a local batch
-and flushes to the database on a size or age threshold:
+DB writes are decoupled from the ZMQ publish path via dedicated per-stream
+writer tasks. The producer loops (candles, ticks, trades) are ingest-only:
+each drains its exchange subscription iterator, publishes to ZMQ, and
+enqueues the resulting row onto a bounded per-stream write queue. A
+dedicated writer task per stream consumes its queue with a long-lived
+database session, accumulating rows and flushing on a size or age
+threshold — DB commit latency never blocks the producer loop:
 
 - **Size trigger**: candles flush at 100 rows, ticks/trades at 500 rows
 - **Age trigger**: all streams flush after 50 ms since the first batch item
@@ -743,10 +767,26 @@ Thresholds are configurable via `write_buffer_flush_ms`,
 and `write_buffer_trade_max_rows` settings (cached at publisher start,
 require process restart to change).
 
-On shutdown (launcher cancellation or direct stop), each loop flushes its
-remaining batch in a `finally` block.  The `asyncio.wait` age trigger uses
-a persistent future that is never cancelled on timeout, preserving the
-underlying exchange subscription iterator.
+The write queues are bounded (20 000 rows for ticks and candles, 5 000 for
+trades) with drop-oldest overflow: when a queue is full, the enqueue helper
+evicts the oldest queued row to make room for the new one and emits a
+rate-limited `WARNING` with the drop count. This is a persistence backlog,
+not data loss on the wire — subscribers already received the evicted rows
+over ZMQ; only their DB persistence is skipped.
+
+If a writer task's database session is lost mid-flush, the task holds its
+unflushed rows, reopens the session with capped exponential backoff (1 s
+doubling up to 30 s), and resumes draining — queued and in-flight rows
+survive session loss.
+
+On shutdown (launcher cancellation or direct stop), remaining rows are
+flushed by the writer drain loops, which keep draining the queue and the
+in-flight batch after the running flag goes false until both are empty;
+`stop()` joins each queue before awaiting its writer task. The producer
+loop's `asyncio.wait` poll still uses a persistent future that is never
+cancelled on timeout, preserving the underlying exchange subscription
+iterator — the age-based flush itself is driven by the writer task's
+batch timer.
 
 Candle flushes that hit an `IntegrityError` (e.g. out-of-order timestamps)
 fall back to row-by-row retry, isolating the bad row without losing the
@@ -766,15 +806,53 @@ snapper executor -e kraken
 
 Executor:
 
-1.  Subscribes to `orders.commands.{exchange}.*` topics
-2.  Receives `OrderRequestData` from the trade runtime via the durable
-    outbox dispatcher
+1.  Subscribes to `orders.commands.{exchange}.{instrument}.submit`,
+    `.cancel`, and `.replace` topics, plus `system.symbol_aliases` and
+    `system.settings`
+2.  Receives `OrderRequestData` and `OrderCancelData` from the durable
+    trade outbox, and accepts direct `OrderReplaceData` command frames
+    from compatible publishers
 3.  Executes order via exchange API
 4.  Persists `VenueEvent` rows for accepted, fill, and terminal observations
-5.  Publishes `ExecutionData` or `OrderData`
+5.  Publishes `ExecutionData`, `OrderData`, or lightweight `OrderEventData`
 
-Failed `VenueEvent` persistence is treated as fail-closed on the
-accepted/fill paths and aborts downstream publish from the executor.
+Before any venue call, each submit passes two gates. The duplicate-submit
+guard drops outbox replays of an already-evidenced `client_order_id`,
+checking the live pending entry, the unhealed-accept queue, and the durable
+`has_order_submit_evidence` probe (which excludes `order_rejected` rows so
+a legitimate retry after a definitive reject still flows). A failed durable
+probe is fail-closed — the command is dropped as if duplicate — and dropped
+duplicates publish nothing. The staleness gate then handles commands older
+than the dispatch TTL (`TRADE_COMMAND_DISPATCH_TTL_S`, default 30 s,
+measured from the command's `signaled_at`) with venue-truth-backed
+outcomes: a single client-id lookup runs first; an order found on the venue
+is adopted as accepted, an unverifiable venue (lookup unsupported or
+unreachable) makes the frame drop silently, and only a verified absence
+publishes `rejected` and records an `order_rejected` venue event.
+
+When a submit fails ambiguously (the order may exist on the venue), the
+executor never fabricates a rejection. It parks the pending entry and
+verifies venue truth by client id via `find_order_by_client_id`: a found
+order is adopted as accepted, while a definitive rejection requires two
+consecutive authoritative not-found answers — a lookup that could not be
+checked never counts as the venue saying no. If verification cannot
+resolve, the executor publishes `OrderData` on
+`orders.events.{exchange}.{instrument}.unknown` (non-terminal; the engine
+holds its in-flight guard) and the reconciliation loop re-verifies parked
+entries each cycle until the order resolves to accepted or rejected.
+
+Failed `VenueEvent` persistence is fail-closed on the fill path: the
+`fill_observed` write precedes the execution publish, and a write failure
+aborts the publish. The accepted path differs because the order is already
+live on the venue: the `accepted` status is published anyway, the failed
+`order_accepted` write is parked in `_unhealed_accept_events`, and the
+reconciliation loop retries the durable write each cycle until it heals.
+
+Replace commands are parsed and wallet-scoped like submit/cancel commands, but
+no exchange client implements atomic replace today; the executor logs the
+request and publishes a lightweight `OrderEventData(event="rejected")` on
+`orders.events.{exchange}.{instrument}.rejected` so callers can use an
+explicit cancel + new-order workflow.
 
 The trade runtime subscribes to `orders.events.*` to keep `TradeService` and
 `BalanceService` in sync during normal operation. `VenueEvent` rows are used as
@@ -804,6 +882,8 @@ Bridge automatically:
 - Subscribes to ZMQ topics when WebSocket client subscribes
 - Validates each inbound ZMQ message as JSON and runs `GapDetector.check()` before forwarding
 - Drops messages with malformed JSON (logged as `WARNING`; counted in `invalid_messages` per topic)
+- Applies per-frame scope filters for `ai_reviews.*`, `orders.events.*`, and
+  `alerts.*`; malformed scoped frames fail closed before fan-out
 - Forwards messages via `_forward_to_clients` with per-subscription backpressure
 - Throttles market data per subscriber (configurable `throttle_ms`)
 - Drops market data when a client exceeds `MAX_PENDING_MESSAGES_MARKET` (100)
@@ -815,15 +895,14 @@ Bridge automatically:
 
 `GapDetector` tracks `session_id` and `sequence_id` partitioned by the
 tuple `(received_topic, wallet_public_id)` — wallet scoping avoids
-false gaps when interleaved per-wallet streams share a topic — and
-emits log
-messages when it finds sequence gaps or producer session resets.
+false gaps when interleaved per-wallet streams share a topic — and emits
+log messages when it finds sequence gaps or producer session resets.
 
 ```python
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 
 detector = GapDetector()
-detector.check(received_topic, session_id, sequence_id)
+detector.check(received_topic, session_id, sequence_id, wallet_public_id=wallet_public_id)
 ```
 
 Rules:
@@ -831,9 +910,10 @@ Rules:
 - Messages without provenance (`session_id == ""` or `sequence_id == 0`) are **rejected**
   with a `WARNING` log and a `rejected_unstamped` counter increment. This makes unstamped
   traffic observable rather than silently passing through.
-- First message on a topic: sets baseline. If `sequence_id > 1` the subscriber joined
-  mid-stream (logged `INFO`).
-- Same topic, new `session_id`: producer restarted (logged `INFO`, counter resets).
+- First message on a `(topic, wallet_public_id)` stream: sets baseline. If
+  `sequence_id > 1` the subscriber joined mid-stream (logged `INFO`).
+- Same `(topic, wallet_public_id)` stream, new `session_id`: producer restarted
+  (logged `INFO`, counter resets).
 - In-order message (`sequence_id == expected`): accepted silently.
 - Gap (`sequence_id > expected`): logs `WARNING` with the missing range, then advances.
 - Duplicate / reorder (`sequence_id < expected`): logs `DEBUG`, state unchanged.

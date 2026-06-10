@@ -284,6 +284,8 @@ FastAPI application:
 - **App Factory** (`app.py`) — `create_app()` with lifespan management
 - **REST API** — HTTP endpoints
 - **WebSocket** — Real-time streaming via ZMQ bridge
+  with per-frame scope filters for `ai_reviews.*`, `orders.events.*`,
+  and `alerts.*`
 - **Static Files** — Frontend dashboard
 - **ClientProvenanceMiddleware** (`provenance_middleware.py`) — Extracts client
   provenance from mutation requests, runs per-session gap detection, records
@@ -504,9 +506,9 @@ Three order-safety layers sit on the dispatch path:
 
 - **Dispatch max-age TTL** (`TRADE_COMMAND_DISPATCH_TTL_S`, default
   30 s): the outbox CAS-expires a stale `CREATED` create/submit
-  command to terminal `EXPIRED` instead of publishing it (cancels are
-  exempt), and the engine releases its in-flight intent via a
-  synthetic expired event — an outage backlog cannot fire MARKET
+  command to terminal `EXPIRED` instead of publishing it (cancels and
+  replaces are exempt), and the engine releases its in-flight intent
+  via a synthetic expired event — an outage backlog cannot fire MARKET
   orders priced off old signals. The executor-side stale check is
   venue-truth-backed: a found order is adopted, an unverifiable venue
   drops the frame silently (recon resolves it), and only venue-verified
@@ -755,8 +757,10 @@ Deploy notes (see `docker-compose.yml` `snapper-feed` service):
   deployment whose broker config already carries `tcp://127.0.0.1:7500`
   must have that row re-synced (or the `parameters` cleared) so the broker
   picks up `tcp://0.0.0.0:*`; otherwise the feed container cannot reach it.
-- Verify outbound Kraken WS from the feed container routes through
-  `snapper-egress` (same `egress_pool` setting + network as the backend).
+- By default feed publishers dial exchanges directly. To verify egress
+  routing, set `feed_egress_enabled=true`, restart `snapper-feed`, then
+  confirm publisher connections use the configured `snapper-egress` SOCKS
+  routes.
 
 **Multi-instance deployment (AI-review fanout dedup):**
 multi-worker uvicorn is a supported production topology. The

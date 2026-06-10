@@ -145,8 +145,9 @@ than the `default` route's priority. Bootstrap configurations
 that ship `default: priority=0` and a new tunnel at
 `priority=10` would silently keep using direct egress because
 `0 < 10`. Set the direct route to a high number (e.g. `100`)
-when you want it to act as fallback only, or set
-`"enabled": false` on it to disable direct egress entirely.
+when you want it to act as fallback only. Keep at least one enabled
+direct route whenever `egress_pool.enabled=true`; current schema does
+not support disabling direct fallback for an enabled pool.
 
 ### Per-exchange routing — pinning a tunnel to one exchange
 
@@ -175,10 +176,11 @@ back-compatible path for existing pool entries.
 **The direct fallback path IGNORES `allowed_exchanges` by design.**
 When every preferred route is quarantined, `EgressPool` returns the
 direct route as a last resort regardless of any exchange pin. If you
-want to deny direct egress for a specific exchange, set
-`"enabled": false` on the direct route instead. Unknown exchange
-names (typos) are rejected by `EgressPoolConfig` at config-load
-time, so a `"krakeen"` typo never silently makes a route
+want SOCKS routes preferred for a specific exchange, pin those routes
+with `allowed_exchanges` and give the direct route a worse priority;
+current schema does not support per-exchange denial of direct fallback.
+Unknown exchange names (typos) are rejected by `EgressPoolConfig` at
+config-load time, so a `"krakeen"` typo never silently makes a route
 unreachable.
 
 Then enable the feed gate (DB setting `feed_egress_enabled=true`) if
@@ -242,13 +244,13 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
    in a fresh `docker compose exec` interpreter returns `None`, and
    quarantining inside the API process would not touch the publisher
    pools, so a REPL-based quarantine cannot exercise the failover.
-   Instead, steer by configuration: set the direct route
-   `"enabled": false` (or give it the worst priority) in the
-   `egress_pool` setting, make sure `feed_egress_enabled=true`, then
+   Instead, steer by configuration: give the direct route the worst
+   priority in the `egress_pool` setting, make sure
+   `feed_egress_enabled=true`, then
    restart snapper-feed and observe the next handshake. The publisher
    log line should show the tunnel route id; Cloudflare's view of the
-   source IP should match the VPN exit. Re-enable the direct route
-   when done.
+   source IP should match the VPN exit. Restore the normal direct-route
+   priority when done.
 
 5. **Stable tick flow?**
    ```sql

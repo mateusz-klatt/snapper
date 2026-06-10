@@ -126,12 +126,26 @@ Each instance owns `~1/N` of the shard_keys via deterministic
 SHA-256 hashing. Default `--instance-count 1` is byte-identical to
 single-coordinator behavior (every shard owned by the single
 coordinator).
+
+Multi-instance deployment requires PostgreSQL. With
+`--instance-count` greater than 1 on a SQLite backend the coordinator
+fails fast at startup with a `ValueError`: SQLite compiles
+`SELECT ... FOR UPDATE` to a plain SELECT, so cross-instance row
+claims cannot serialize. A single-instance SQLite coordinator is
+allowed but logs a startup warning about the same locking caveat.
+
 See [docs/operations.md](operations.md) for systemd template unit +
 scale-up/down/crash-recovery runbooks.
 
 ### `executor`
 
-Starts the order execution service for a selected exchange.
+Starts the standalone order execution service for a selected exchange.
+Process-managed deployments use per-wallet executor instances instead:
+bare `executor_<exchange>` process configs are templates, and the
+launcher expands active `wallet_credentials` rows into runnable
+`executor_<exchange>_w<wallet_short>` instances. Start/stop the generated
+per-wallet instance names in the process UI/API; starting a bare executor
+template is rejected.
 
 ```bash
 snapper executor [OPTIONS]
@@ -142,6 +156,11 @@ snapper executor [OPTIONS]
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
 | `-e, --exchange` | string | `kraken` | Exchange (`kraken`, `walutomat`) |
+
+`wallet_short` is the last 12 lowercase hex characters of the wallet
+UUID7. Each per-wallet instance subscribes to the same exchange command
+prefix as the template, then filters by `wallet_public_id` before loading
+credentials or placing orders.
 
 **Examples:**
 
@@ -155,7 +174,10 @@ snapper executor --exchange walutomat
 
 ### `feed`
 
-Starts the market data publisher via WebSocket.
+Starts the direct Kraken market data publisher helper via WebSocket.
+For the dedicated feed-container topology, use `snapper feed-engine`
+instead; it starts every enabled market-data publisher from the process
+registry as a supervised subprocess.
 
 ```bash
 snapper feed [OPTIONS]
@@ -178,7 +200,11 @@ snapper feed --symbols "BTC-USD,ETH-USD"
 Runs the dedicated feed-container entrypoint. It syncs the process
 registry, starts enabled market-data publishers as OS subprocesses,
 and exits non-zero if any supervised publisher crashes so the
-orchestrator restarts the feed container.
+orchestrator restarts the feed container. It does not start a broker;
+publisher subprocesses connect to the backend's configured
+`ZMQ_BROKER_*` endpoints. Per-process RSS/CPU summary events are emitted
+best-effort when the backend broker is reachable, but metrics-publisher
+setup failure does not abort feed startup.
 
 ```bash
 snapper feed-engine
@@ -210,7 +236,12 @@ snapper zmq-logger --payload --audit-file logs/zmq.jsonl
 ### `egress`
 
 Runs the snapper-egress sidecar from the unified Snapper image.
-Additional arguments are forwarded to the egress entrypoint.
+Additional arguments after `snapper egress` are forwarded verbatim to
+the egress entrypoint's argparse parser. This is the compose dispatch
+path for `ENTRYPOINT ["snapper"]` plus `command: ["egress"]`; the module
+entrypoint `python -m snapper.egress` remains supported for bare-shell
+invocations. The Typer wrapper propagates the egress entrypoint's
+integer return code as the process exit code.
 
 ```bash
 snapper egress [--instance-id snapper-egress-prod]
@@ -369,8 +400,7 @@ snapper update-kraken-symbols [OPTIONS]
 
 ### `update-kraken-futures-symbols`
 
-Syncs Kraken Futures (crypto perpetuals) symbol mappings from the
-exchange API.
+Syncs Kraken Futures crypto symbol mappings from the exchange API.
 
 ```bash
 snapper update-kraken-futures-symbols [OPTIONS]
@@ -384,8 +414,8 @@ snapper update-kraken-futures-symbols [OPTIONS]
 
 ### `update-kraken-equities-symbols`
 
-Syncs Kraken Equities (FCM Futures) symbol mappings from the
-exchange API.
+Syncs Kraken Equities (FCM Futures) symbol mappings from the exchange
+API.
 
 ```bash
 snapper update-kraken-equities-symbols [OPTIONS]
@@ -413,7 +443,9 @@ snapper update-walutomat-symbols [OPTIONS]
 
 ### `update-polygon-symbols`
 
-Synchronizes symbol mappings from the Polygon.io API.
+Synchronizes symbol mappings from the Polygon.io API. By default it
+updates existing rows only; pass `--insert-new` to insert symbols that
+are not yet in the database.
 
 ```bash
 snapper update-polygon-symbols [OPTIONS]
@@ -430,10 +462,10 @@ snapper update-polygon-symbols [OPTIONS]
 
 ### `update-underlyings`
 
-Syncs underlying asset definitions from YAML to the database. Matches
+Syncs underlying asset definitions from YAML to the database. It matches
 active instruments to underlyings via pattern rules, upserts mappings,
-and applies YAML-fallback instrument_type/expiry_override to InstrumentSpec
-when API-sourced values are NULL.
+and applies YAML-fallback `instrument_type` / `expiry_override` values to
+`InstrumentSpec` rows when API-sourced values are NULL.
 
 ```bash
 snapper update-underlyings [OPTIONS]
@@ -996,7 +1028,10 @@ snapper backtest-cancel <run-public-id>
 
 ### `backtest-rerun`
 
-Re-run a backtest with the same configuration (including strategy params).
+Re-run a CLI-compatible backtest with the fields exposed by
+`backtest-run`, including strategy params. The CLI rerun path does not
+preserve `target_execution_exchange`; use the API/process runner for
+cross-asset reruns.
 
 ```bash
 snapper backtest-rerun <run-public-id>

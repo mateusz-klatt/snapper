@@ -166,6 +166,27 @@ below. Shared market-data provider keys stay in `settings`.
 | --- | ----------- |
 | `polygon_api_key` | Polygon.io API key (shared market data — not wallet-scoped) |
 
+### Push Notifications (APNs)
+
+The notification sidecar reads its APNs credentials and the push-beta
+rollout gate from the `settings` table:
+
+| Key | Description |
+| --- | ----------- |
+| `apns_team_id` | Apple Developer team ID |
+| `apns_key_id` | APNs auth key ID |
+| `apns_bundle_id` | iOS app bundle identifier (reverse-DNS form) |
+| `apns_topic` | APNs topic — normally identical to `apns_bundle_id` for alert pushes |
+| `apns_environment` | `sandbox`, `production`, or `sandbox_and_production`; the latter runs both APNs clients and routes by each device's registered environment |
+| `apns_private_key_p8_base64` | APNs auth key (`.p8` PKCS#8 PEM) encoded as base64 so it round-trips through the TOML seed |
+| `push_beta_config` | JSON `{"enabled": bool, "user_public_ids": [...]}` rollout gate (category `notifications`). Disabled by default — every user receives pushes; when enabled, only allowlisted users do. An absent or malformed value falls back to the disabled default so a misedit can never silence pushes. Managed via [Manage Push-Beta Gate](#manage-push-beta-gate) |
+
+All six `apns_*` keys are required when the notification sidecar
+starts: `load_apns_config` fails loud at startup with the full list
+of missing keys rather than producing cryptic APNs errors at
+first-send time. They are seeded under category `apns` via the
+proprietary seed profile (`proprietary/data/seed/{dev,prod}.toml`).
+
 ### Wallet Credentials
 
 Per-exchange trading credentials live in the `wallet_credentials` table
@@ -187,18 +208,29 @@ Envelope shapes by `credential_type`:
 - `oauth` — `{"client_id": "...", "client_secret": "...", "refresh_token": "..."}`
 - `paper` — `{"initial_balance": "10000.0"}` (paper wallets)
 
-The shipped seed profile (`dev.toml`) bootstraps `wallet_credentials`
-on a fresh database; operators can add their own
-`data/seed/{profile}.toml` override for other environments. Note: the
-seed loader supports the
-`api_key_secret`, `rsa_pem`, and `paper` envelope shapes — the
-`oauth` shape is accepted at the credential-resolver layer but
-**not** by the current seed loader, so OAuth credentials must be
-inserted through the REST `wallet_credentials` create/rotate routes
+Seed profiles are resolved in three tiers:
+`data/seed/{profile}.toml`, then `proprietary/data/seed/{profile}.toml`,
+then the package-bundled `src/snapper/data/seed/{profile}.toml`. The
+bundled `dev.toml` seeds an open-source paper wallet with a paper
+credential; maintainers may have a proprietary override with live
+wallet credentials. On a fresh database, `db-seed` creates the default
+operator, every `[[wallets]]` entry, nested
+`[[wallets.credentials]]` rows, and the first admin user's primary
+operator membership. If the profile has no wallets, the loader falls
+back to a single `default` paper wallet with a `10000.0` initial
+balance. Re-running seed on an established database does not merge
+wallets: users are skipped when any user exists, settings are
+inserted only when the key is absent, and the whole operator/wallet
+bootstrap is skipped when either operators or wallets already exist.
+
+The seed loader supports the `api_key_secret`, `rsa_pem`, and `paper`
+envelope shapes. The `oauth` shape is accepted at the
+credential-resolver layer but **not** by the current seed loader, so
+OAuth credentials must be inserted through the REST `wallet_credentials`
+create/rotate routes
 (`POST /api/wallets/{wallet_public_id}/credentials`,
 `POST /api/wallets/{wallet_public_id}/credentials/{credential_public_id}/rotate`)
-rather than via
-seed.
+rather than via seed.
 
 The credential management REST surface AND the matching frontend UI
 (`frontend/src/features/admin/CredentialManagement/`) are both
@@ -206,9 +238,8 @@ shipped. Day-to-day operators use the dashboard's Credential
 Management view; headless callers can hit the REST routes directly
 (curl / Postman — the snapper-mcp bridge does NOT expose
 credential CRUD as MCP tools). Other recovery options
-are re-running the seed against a clean DB (seed is idempotent — it
-skips wallets that already exist) or direct SQL surgery on the
-encrypted payload as a last resort.
+are re-running the seed against a clean DB or direct SQL surgery on
+the encrypted payload as a last resort.
 
 Seed file structure:
 
@@ -244,11 +275,39 @@ key before insert.
 | `risk_max_leverage` | `1.0` | Maximum leverage |
 | `risk_r_per_trade` | `0.005` | Risk per trade (0.5%) |
 
+Additional runtime settings are also DB-backed and can be managed
+through the Settings API/UI:
+
+| Key | Default | Description |
+| --- | ------- | ----------- |
+| `feed_egress_enabled` | `false` | Route feed publishers through their own process-local egress pools at startup |
+| `egress_pool` | unset | JSON tunnel-pool definition, validated as `EgressPoolConfig` at startup. An absent, malformed, or validation-failing value disables egress routing with a log line. See [snapper-egress.md](snapper-egress.md) |
+| `paper_instruments` | `{"kraken": ["BTC-USD", "EUR-USD"], "kraken_futures": [], "walutomat": ["EUR-PLN", "USD-PLN"]}` | Source exchanges and symbols replayed by paper feeds |
+| `backfill_days` | `30` | Default historical backfill window |
+| `risk_max_drawdown` | `0.15` | Maximum portfolio drawdown threshold |
+| `log_level` | `INFO` | Application log level |
+| `log_json` | `false` | Emit structured JSON logs |
+| `ws_reconnect_max_delay` | `10` | Maximum WebSocket reconnect delay in seconds |
+| `rest_retry_max_attempts` | `5` | REST retry attempt cap |
+| `rest_retry_backoff_base` | `0.2` | REST exponential-backoff base delay in seconds |
+| `rest_retry_max_delay` | `2.0` | REST retry maximum delay in seconds |
+| `rest_circuit_failure_threshold` | `5` | Failures before the REST circuit opens |
+| `rest_circuit_reset_timeout` | `30` | Seconds before the REST circuit attempts reset |
+| `zmq_heartbeat_interval_ms` | `1000` | ZMQ heartbeat interval |
+| `recon_balance_threshold` | `1.0` | Absolute balance mismatch threshold for reconciliation warnings |
+
 The trade runtime always uses the durable (outbox-driven) dispatch
 path. The engine writes `TradeCommand` rows to the database; the
-`OutboxDispatcher` picks them up and publishes to ZMQ. Executor-side
-`VenueEvent` writes are fail-closed — a failed persist raises before
-the executor acknowledges the venue event.
+`OutboxDispatcher` picks them up and publishes to ZMQ. Stale `CREATED`
+create/submit commands older than `TRADE_COMMAND_DISPATCH_TTL_S` (see
+[Trade Runtime Safety](#trade-runtime-safety)) are CAS-expired to
+terminal `EXPIRED` instead of published — cancels and replaces are
+exempt — and the engine releases its in-flight intent via a synthetic
+expired event. Executor-side `VenueEvent` writes are fail-closed for
+pre-acceptance events — a failed persist raises before the executor
+acknowledges the venue event; once the venue has accepted an order, a
+failed `order_accepted` persist no longer aborts the flow and the
+executor's recon loop retries the durable write each cycle.
 
 ### Market Persist Policy
 
@@ -405,14 +464,49 @@ envelope = await resolver.get_credentials(
 
 ```http
 GET /api/settings
-GET /api/settings?category=exchange
+GET /api/settings?category=api
+GET /api/settings?category=api&as_of=2026-01-18T12:00:00Z
 ```
+
+### Public Feature Flags
+
+```http
+GET /api/settings/features
+```
+
+This route does not require authentication. It returns the public
+feature-flag projection used by the frontend, currently
+`ai_integration_enabled`.
 
 ### List Categories
 
 ```http
 GET /api/settings/categories
+GET /api/settings/categories?as_of=2026-01-18T12:00:00Z
 ```
+
+### Manage Push-Beta Gate
+
+```http
+GET /api/settings/push-beta/users
+POST /api/settings/push-beta/users
+X-CSRF-Token: <csrf_token>
+Content-Type: application/json
+
+{
+    "type": "update_push_beta_users_command",
+    "public_id": "<uuid7>",
+    "session_id": "<client-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "payload": {
+        "enabled": true,
+        "user_public_ids": ["<user-public-id>"]
+    }
+}
+```
+
+The POST body replaces the full allowlist; it is not a merge.
 
 ### Set Setting
 
@@ -422,6 +516,7 @@ X-CSRF-Token: <csrf_token>
 Content-Type: application/json
 
 {
+    "type": "setting_update",
     "public_id": "<uuid7>",
     "session_id": "<client-session>",
     "sequence_id": 1,
@@ -442,6 +537,7 @@ X-CSRF-Token: <csrf_token>
 Content-Type: application/json
 
 {
+    "type": "remove_setting_request",
     "public_id": "<uuid7>",
     "session_id": "<client-session>",
     "sequence_id": 2,
@@ -498,7 +594,11 @@ Sensitive settings are encrypted with Fernet (AES-128-CBC + HMAC-SHA256):
 3.  Values are encrypted with Fernet and stored in database
 
 If `MASTER_PASSWORD` changes, encrypted settings become inaccessible.
-Use `snapper settings-rotate-encryption` to rotate passwords safely.
+Use `snapper settings-rotate-encryption` to re-encrypt encrypted
+settings rows before changing it. Wallet credential payloads use the
+same master-password Fernet key but are not rewritten by that command;
+rotate or recreate wallet credentials separately before changing
+`MASTER_PASSWORD`.
 
 ## Configuration Validation
 
