@@ -5,6 +5,8 @@ import contextlib
 import json
 import time as time_module
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -22,6 +24,7 @@ from unittest.mock import patch as mock_patch
 import pytest
 import zmq
 
+import snapper.application.process_manager.launcher as launcher_module
 import snapper.messaging.executors.base as base_module
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
@@ -41,6 +44,7 @@ from snapper.messaging.schemas.data import OrderReplaceData
 from snapper.messaging.schemas.data import OrderRequestData
 from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.messages import MessageParseError
+from snapper.messaging.topics.builders import order_commands_prefix
 
 TEST_DB_URL = "sqlite:///:memory:"
 
@@ -635,11 +639,13 @@ async def test_order_handler_logs_error_and_continues(monkeypatch: pytest.Monkey
 async def test_order_handler_error_when_not_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test order handler suppresses errors when not running.
+    """Test order handler treats a poison recv as consumed, then stops.
 
-    Given: An executor that becomes not running after error,
-    When: Error occurs during recv_multipart,
-    Then: Error is not logged when executor is stopping.
+    Given: An executor whose first recv raises ValueError (a poison
+        frame, already consumed by ZMQ) and flips running off,
+    When: The handler hits the poison branch and re-checks running,
+    Then: It exits without re-recv — poison frames never escape to the
+        supervisor (transport errors do).
     """
     ex: Any = MergedDummyExecutor()
     ex.running = True
@@ -664,7 +670,9 @@ async def test_order_handler_error_when_not_running(
 
     monkeypatch.setattr("snapper.messaging.executors.base.logger", DummyLogger())
     await ex._order_handler()
-    assert logged_errors == []
+    assert len(logged_errors) == 1
+    assert "Poison order frame dropped" in logged_errors[0]
+    assert call_count == 1
 
 
 @pytest.mark.asyncio
@@ -990,12 +998,18 @@ async def test_publish_heartbeat_skips_when_not_running() -> None:
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_loop_handles_publish_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test heartbeat loop handles publish errors.
+async def test_heartbeat_loop_fault_escapes_to_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A heartbeat-loop fault propagates instead of hot-spinning.
 
-    Given: A running executor with failing _publish_heartbeat,
-    When: Heartbeat loop runs,
-    Then: Error is handled and loop continues until stopped.
+    Given: A running executor whose _publish_heartbeat raises (the real
+        method self-swallows send errors; a raise here models a genuine
+        loop fault such as broken settings access),
+    When: The heartbeat loop hits it,
+    Then: The error escapes — the supervisor respawns with backoff; the
+        old per-iteration catch hot-spun forever while heartbeating
+        HEALTHY.
     """
     ex: Any = MergedDummyExecutor()
     ex.running = True
@@ -1005,10 +1019,8 @@ async def test_heartbeat_loop_handles_publish_error(monkeypatch: pytest.MonkeyPa
         zmq_broker_xpub="xpub",
     )
     ex._publish_heartbeat = AsyncMock(side_effect=RuntimeError("send fail"))
-    task = asyncio.create_task(ex._heartbeat_loop())
-    await asyncio.sleep(0.02)
-    ex.running = False
-    await task
+    with pytest.raises(RuntimeError, match="send fail"):
+        await asyncio.wait_for(ex._heartbeat_loop(), timeout=1.0)
 
 
 def test_stop_closes_resources() -> None:
@@ -2099,6 +2111,7 @@ class TestStartWithAsyncContextManager:
             patch.object(service, "_order_handler", side_effect=mock_order_handler),
             patch.object(service, "_heartbeat_loop", new=AsyncMock()),
             patch.object(service, "_supervise_execution_stream", new=AsyncMock()),
+            patch.object(service, "_supervise_loop", new=_passthrough_supervise_loop()),
             patch(
                 "snapper.messaging.executors.base.get_repository",
                 return_value=MagicMock(),
@@ -2437,12 +2450,16 @@ async def test_order_handler_processes_order_and_stops(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_order_handler_logs_error_and_exits(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test order handler logs errors and exits.
+async def test_order_handler_transport_error_escapes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transport-level recv failure propagates to the supervisor.
 
-    Given: A running executor with failing subscriber,
-    When: recv_multipart raises error,
-    Then: Error is logged.
+    Given: A running executor whose subscriber raises a non-poison error,
+    When: recv_multipart raises,
+    Then: The error escapes _order_handler — the supervisor owns the
+        respawn (and rebuilds the SUB socket first); swallowing it here
+        used to hot-spin on a dead socket forever.
     """
     executor = DummyExecutorSimple()
     executor.running = True
@@ -2452,15 +2469,8 @@ async def test_order_handler_logs_error_and_exits(monkeypatch: pytest.MonkeyPatc
             raise RuntimeError("boom")
 
     executor.subscriber = cast(Any, FailingSubscriber())
-    errors: list[str] = []
-
-    def fake_error(message: str) -> None:
-        errors.append(message)
-        executor.running = False
-
-    monkeypatch.setattr("snapper.messaging.executors.base.logger.error", fake_error)
-    await asyncio.wait_for(executor._order_handler(), timeout=0.1)
-    assert errors
+    with pytest.raises(RuntimeError, match="boom"):
+        await asyncio.wait_for(executor._order_handler(), timeout=0.1)
 
 
 @pytest.mark.asyncio
@@ -2766,6 +2776,7 @@ class TestExecutorCoverage:
         with (
             patch.object(service, "_order_handler", new=AsyncMock(return_value=None)),
             patch.object(service, "_supervise_execution_stream", new=AsyncMock(return_value=None)),
+            patch.object(service, "_supervise_loop", new=AsyncMock(return_value=None)),
             patch.object(service, "_heartbeat_loop", new=AsyncMock(return_value=None)),
             patch.object(service, "_reconciliation_handler", new=AsyncMock(return_value=None)),
             patch.object(service, "_create_exchange_client", return_value=mock_exchange_client),
@@ -3140,7 +3151,10 @@ class TestExecutorCoverage:
             patch.object(
                 service, "_supervise_execution_stream", new=AsyncMock(return_value=None)
             ) as execution_mock,
-            patch.object(service, "_reconciliation_handler", new=AsyncMock(return_value=None)),
+            patch.object(service, "_supervise_loop", new=_passthrough_supervise_loop()),
+            patch.object(
+                service, "_reconciliation_handler", new=AsyncMock(return_value=None)
+            ) as recon_mock,
             patch(
                 "snapper.application.services.settings.get_settings_service",
                 new=AsyncMock(return_value=mock_settings_service),
@@ -3162,6 +3176,7 @@ class TestExecutorCoverage:
         order_mock.assert_awaited_once()
         heartbeat_mock.assert_awaited_once()
         execution_mock.assert_not_awaited()
+        recon_mock.assert_awaited_once()
         await service.stop()
         assert service.running is False
 
@@ -3602,6 +3617,7 @@ class TestExecutorWebSocketExecutions:
             patch("snapper.messaging.executors.base.zmq.asyncio.Context") as mock_context_class,
             patch.object(service, "_order_handler", new_callable=AsyncMock),
             patch.object(service, "_supervise_execution_stream", new_callable=AsyncMock),
+            patch.object(service, "_supervise_loop", new_callable=AsyncMock),
             patch.object(service, "_heartbeat_loop", new_callable=AsyncMock),
             patch.object(service, "_create_exchange_client", return_value=mock_exchange_client),
             patch(
@@ -3657,6 +3673,7 @@ class TestExecutorWebSocketExecutions:
             patch("snapper.messaging.executors.base.zmq.asyncio.Context") as mock_context_class,
             patch.object(service, "_order_handler", new_callable=AsyncMock),
             patch.object(service, "_supervise_execution_stream", new_callable=AsyncMock),
+            patch.object(service, "_supervise_loop", new_callable=AsyncMock),
             patch.object(service, "_heartbeat_loop", new_callable=AsyncMock),
             patch.object(service, "_create_exchange_client", return_value=mock_exchange_client),
             patch(
@@ -5465,6 +5482,24 @@ class TestExecutorBasePersistence:
         assert order.client_order_id not in ex.pending_orders
 
 
+def _passthrough_supervise_loop() -> Any:
+    """Build a supervisor stand-in that runs the wrapped loop exactly once.
+
+    Start() tests patch the supervisor so a mocked loop's immediate clean
+    return is not treated as a death (the real supervisor would respawn
+    it with live backoff and the gather would never finish).
+    """
+
+    async def _run_once(
+        task_label: str,
+        attempt: Callable[[], Awaitable[None]],
+        pre_respawn: Callable[[], None] | None = None,
+    ) -> None:
+        await attempt()
+
+    return _run_once
+
+
 def _make_db_order(
     client_order_id: str = "c1",
     exchange_order_id: str = "ex-1",
@@ -5842,19 +5877,6 @@ async def test_record_venue_event_fail_closed() -> None:
                 "instrument": "BTC-USD",
             }
         )
-
-
-def test_create_reconciliation_task_always_none() -> None:
-    """Executor reconciliation always returns None (runs in coordinator).
-
-    Given: an executor with any settings,
-    When: _create_reconciliation_task is called,
-    Then: None is returned because reconciliation runs in coordinator.
-    """
-    ex: Any = MergedDummyExecutor()
-    ex.settings = SimpleNamespace()
-    task = ex._create_reconciliation_task("kraken")
-    assert task is None
 
 
 def test_resolve_fee_prefers_usd_equiv() -> None:
@@ -8482,3 +8504,508 @@ class TestStatusOnlyTerminalDelta:
         sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
         assert len(sent) == 2
         assert sent[0].trade_id != sent[1].trade_id
+
+
+class TestSupervisedLoop:
+    """Generic loop supervisor: respawn, backoff, escalation, hooks."""
+
+    def _executor(self) -> Any:
+        """Build a running executor with a recording jitter sleep."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex._sleep_with_jitter = AsyncMock()
+        return ex
+
+    @pytest.mark.asyncio
+    async def test_respawns_on_exception_and_clean_return(self) -> None:
+        """Both death shapes respawn; cancellation propagates.
+
+        Given: An attempt that raises, then returns cleanly, then is
+            cancelled,
+        When: The supervisor runs,
+        Then: Two respawns with doubled backoff are recorded and the
+            cancellation re-raises.
+        """
+        ex = self._executor()
+        attempt = AsyncMock(side_effect=[RuntimeError("died"), None, asyncio.CancelledError()])
+        with pytest.raises(asyncio.CancelledError):
+            await ex._supervise_loop("order_handler", attempt)
+        assert attempt.await_count == 3
+        sleeps = [c.args[0] for c in ex._sleep_with_jitter.await_args_list]
+        assert sleeps == [1.0, 2.0]
+        assert ex._task_restarts["order_handler"] == 2
+
+    @pytest.mark.asyncio
+    async def test_exit_silently_when_stopped(self) -> None:
+        """A death observed after running cleared is shutdown, not a death."""
+        ex = self._executor()
+
+        async def stop_and_raise() -> None:
+            ex.running = False
+            raise RuntimeError("socket closed by stop")
+
+        attempt = AsyncMock(side_effect=stop_and_raise)
+        await ex._supervise_loop("order_handler", attempt)
+        ex._sleep_with_jitter.assert_not_awaited()
+        assert ex._task_restarts == {}
+
+    @pytest.mark.asyncio
+    async def test_clean_return_after_stop_exits(self) -> None:
+        """A clean return after running cleared exits without respawn."""
+        ex = self._executor()
+
+        async def stop_and_return() -> None:
+            ex.running = False
+
+        attempt = AsyncMock(side_effect=stop_and_return)
+        await ex._supervise_loop("heartbeat", attempt)
+        ex._sleep_with_jitter.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pre_respawn_runs_only_after_a_death(self) -> None:
+        """The pre-respawn hook never runs before the first attempt.
+
+        Given: An attempt that dies once then is cancelled,
+        When: The supervisor re-enters,
+        Then: pre_respawn ran exactly once — before attempt 2, not 1.
+        """
+        ex = self._executor()
+        order: list[str] = []
+
+        async def dying() -> None:
+            order.append("attempt")
+            if len([o for o in order if o == "attempt"]) >= 2:
+                raise asyncio.CancelledError()
+            raise RuntimeError("died")
+
+        def hook() -> None:
+            order.append("hook")
+
+        with pytest.raises(asyncio.CancelledError):
+            await ex._supervise_loop("order_handler", dying, pre_respawn=hook)
+        assert order == ["attempt", "hook", "attempt"]
+
+    @pytest.mark.asyncio
+    async def test_healthy_runtime_resets_backoff_and_streak(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A long-lived run resets both backoff and the death streak."""
+        ex = self._executor()
+        clock = iter([0.0, 1.0, 10.0, 11.0, 20.0, 321.0])
+        monkeypatch.setattr(base_module, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+        sleeps: list[float] = []
+
+        async def record(delay: float) -> None:
+            sleeps.append(delay)
+            if len(sleeps) >= 3:
+                ex.running = False
+
+        ex._sleep_with_jitter = AsyncMock(side_effect=record)
+        attempt = AsyncMock(side_effect=RuntimeError("down"))
+        await ex._supervise_loop("reconciliation", attempt)
+        assert sleeps == [1.0, 2.0, 1.0]
+
+    @pytest.mark.asyncio
+    async def test_death_streak_past_ceiling_escalates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A streak older than the ceiling raises ExecutorTaskDeadError.
+
+        Given: Deaths whose streak start sits more than the escalation
+            ceiling in the past,
+        When: The next death is handled,
+        Then: ExecutorTaskDeadError carries the task label — in-process
+            respawn has proven insufficient, the launcher must rebuild.
+        """
+        ex = self._executor()
+        clock = iter([0.0, 1.0, 1490.0, 1502.0])
+        monkeypatch.setattr(base_module, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+        attempt = AsyncMock(side_effect=RuntimeError("down"))
+        with pytest.raises(base_module.ExecutorTaskDeadError, match="order_handler"):
+            await ex._supervise_loop("order_handler", attempt)
+        assert attempt.await_count == 2
+
+    def test_ceiling_exceeds_launcher_total_reset(self) -> None:
+        """INVARIANT: escalation always presents as long-healthy uptime.
+
+        Given: the executor escalation ceiling and the launcher's
+            total-reset uptime threshold,
+        When: compared,
+        Then: ceiling > threshold — a ceiling-driven service death always
+            resets the launcher's restart budget, so escalation yields an
+            unbounded slow retry cadence, never a permanent park.
+        """
+        assert base_module._TASK_DEATH_ESCALATION_CEILING_S > launcher_module._TOTAL_RESET_UPTIME_S
+
+
+class TestOrderSubscriberRebuild:
+    """Pre-respawn SUB rebuild for the order handler."""
+
+    def test_rebuild_closes_old_and_resubscribes(self) -> None:
+        """The poisoned subscriber is closed and a fresh one connected.
+
+        Given: An executor with a live context and a poisoned subscriber,
+        When: _rebuild_order_subscriber runs,
+        Then: The old socket gets LINGER 0 + close, and the new SUB is
+            connected to the broker with all three subscriptions.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.settings = SimpleNamespace(zmq_broker_xpub="tcp://x:1")
+        old = MagicMock()
+        ex.subscriber = old
+        raw = MagicMock()
+        ex.context = MagicMock()
+        ex.context.socket = MagicMock(return_value=raw)
+        ex._rebuild_order_subscriber()
+        old.setsockopt.assert_called_once_with(zmq.LINGER, 0)
+        old.close.assert_called_once()
+        raw.connect.assert_called_once_with("tcp://x:1")
+        assert ex.subscriber is not old
+        subscribed = [c.args[1] for c in raw.setsockopt_string.call_args_list]
+        assert subscribed == [
+            order_commands_prefix("kraken"),
+            "system.symbol_aliases",
+            "system.settings",
+        ]
+
+    def test_rebuild_survives_close_failure(self) -> None:
+        """A failing close never blocks the fresh subscriber."""
+        ex: Any = MergedDummyExecutor()
+        ex.settings = SimpleNamespace(zmq_broker_xpub="tcp://x:1")
+        old = MagicMock()
+        old.setsockopt = MagicMock(side_effect=RuntimeError("already dead"))
+        ex.subscriber = old
+        ex.context = MagicMock()
+        ex._rebuild_order_subscriber()
+        assert ex.subscriber is not old
+
+    def test_rebuild_without_existing_subscriber(self) -> None:
+        """A missing subscriber just builds a fresh one."""
+        ex: Any = MergedDummyExecutor()
+        ex.settings = SimpleNamespace(zmq_broker_xpub="tcp://x:1")
+        ex.subscriber = None
+        ex.context = MagicMock()
+        ex._rebuild_order_subscriber()
+        assert ex.subscriber is not None
+
+
+class TestReconCycleTimeout:
+    """Bounded reconciliation cycles release the lock on wedge."""
+
+    @pytest.mark.asyncio
+    async def test_wedged_cycle_times_out_and_releases_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A hung venue call no longer holds _recon_lock forever.
+
+        Given: A cycle body that never returns,
+        When: _reconcile_with_exchange runs with a tiny timeout,
+        Then: TimeoutError propagates and the lock is free afterwards —
+            unblocking both the periodic loop and the stream supervisor's
+            post-reconnect heal.
+        """
+        ex: Any = MergedDummyExecutor()
+        monkeypatch.setattr(base_module, "_RECON_CYCLE_TIMEOUT_S", 0.01)
+
+        async def wedge() -> None:
+            await asyncio.Event().wait()
+
+        ex._reconcile_with_exchange_unlocked = AsyncMock(side_effect=wedge)
+        with pytest.raises(TimeoutError):
+            await ex._reconcile_with_exchange()
+        assert ex._recon_lock.locked() is False
+
+    @pytest.mark.asyncio
+    async def test_handler_logs_wedge_and_continues(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The periodic handler logs the wedge and keeps cycling."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        calls = 0
+
+        async def recon() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError()
+            ex.running = False
+
+        ex._reconcile_with_exchange = AsyncMock(side_effect=recon)
+
+        async def fake_sleep(_delay: float) -> None:
+            return None
+
+        monkeypatch.setattr(
+            base_module, "asyncio", SimpleNamespace(sleep=fake_sleep, timeout=asyncio.timeout)
+        )
+        await ex._reconciliation_handler()
+        assert calls == 2
+
+
+class TestStartSiblingContainment:
+    """start() never orphans sibling tasks on a crash."""
+
+    @pytest.mark.asyncio
+    async def test_crashing_supervisor_cancels_siblings_and_stops(self) -> None:
+        """One supervisor's death tears the whole service down cleanly.
+
+        Given: A start() whose execution-stream supervisor raises while
+            the other supervisors run forever,
+        When: The gather propagates the error,
+        Then: Siblings observe cancellation (no orphans outliving the
+            exchange client), the crash-path stop() runs (running False),
+            and the original error propagates out of start().
+        """
+        ex: Any = MergedDummyExecutor()
+        cancelled: list[str] = []
+
+        async def forever(label: str) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.append(label)
+                raise
+
+        async def fake_supervise(
+            task_label: str,
+            attempt: Callable[[], Awaitable[None]],
+            pre_respawn: Callable[[], None] | None = None,
+        ) -> None:
+            await forever(task_label)
+
+        async def boom() -> None:
+            await asyncio.sleep(0)
+            raise RuntimeError("stream supervisor died for good")
+
+        ex._initialize_settings = AsyncMock()
+        ex._resolve_credentials = AsyncMock()
+        ex._setup_zmq_sockets = MagicMock()
+        ex._recover_pending_orders = AsyncMock()
+        ex._supervise_loop = fake_supervise
+        ex._supervise_execution_stream = boom
+        ex.stop = AsyncMock(side_effect=lambda: setattr(ex, "running", False))
+        client = AsyncMock()
+        client.set_tracker = MagicMock()
+        client.supports_websocket_executions = True
+        ex._create_exchange_client = MagicMock(return_value=client)
+        with pytest.raises(RuntimeError, match="died for good"):
+            await ex.start()
+        assert sorted(cancelled) == ["heartbeat", "order_handler", "reconciliation"]
+        ex.stop.assert_awaited_once()
+
+
+class TestLoopResidualBranches:
+    """Containment branches that stay inside the supervised loops."""
+
+    @pytest.mark.asyncio
+    async def test_routing_failure_is_contained_per_frame(self) -> None:
+        """A frame whose ROUTING raises is logged, not a loop death.
+
+        Given: A consumed, decodable frame whose _route_message raises,
+        When: The order handler processes it,
+        Then: The error is logged and the loop continues to the next
+            frame — post-recv processing failures are poison containment
+            on an already-consumed frame, unlike transport errors.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        frames = iter([("orders.commands.kraken.BTC-USD.submit", b"{}")])
+
+        async def recv() -> tuple[str, bytes]:
+            try:
+                return next(frames)
+            except StopIteration:
+                ex.running = False
+                raise RuntimeError("drained") from None
+
+        ex.subscriber = SimpleNamespace(recv_multipart=AsyncMock(side_effect=recv))
+        ex._route_message = AsyncMock(side_effect=RuntimeError("router broke"))
+        with pytest.raises(RuntimeError, match="drained"):
+            await ex._order_handler()
+        ex._route_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_breaks_when_stopped_during_sleep(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stop during the heartbeat sleep exits before publishing."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.settings = SimpleNamespace(
+            zmq_heartbeat_interval_ms=1,
+            zmq_broker_xsub="xsub",
+            zmq_broker_xpub="xpub",
+        )
+        ex._publish_heartbeat = AsyncMock()
+
+        async def stopping_sleep(_delay: float) -> None:
+            ex.running = False
+
+        monkeypatch.setattr(
+            base_module,
+            "asyncio",
+            SimpleNamespace(sleep=stopping_sleep, timeout=asyncio.timeout),
+        )
+        await ex._heartbeat_loop()
+        ex._publish_heartbeat.assert_not_awaited()
+
+
+class TestAmbiguousVerificationFairness:
+    """Per-cycle cap + rotation over parked ambiguous orders."""
+
+    @pytest.mark.asyncio
+    async def test_tail_orders_are_reached_across_cycles(self) -> None:
+        """Every parked entry is attempted within ceil(N/cap) cycles.
+
+        Given: Five parked ambiguous orders (cap is 3) whose verification
+            consumes the whole per-cycle budget,
+        When: Two recon cycles run,
+        Then: All five entries were attempted exactly once — a fixed
+            iteration order would burn the budget on the same prefix
+            every cycle and starve the tail forever.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.exchange_client = AsyncMock()
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        for i in range(5):
+            order = make_order(client_order_id=f"amb-{i}")
+            ex.pending_orders[f"amb-{i}"] = base_module.PendingOrderState(
+                request=order, submit_ambiguous=True
+            )
+        attempted: list[str] = []
+
+        async def verify(entry: Any) -> None:
+            attempted.append(entry.request.client_order_id)
+
+        ex._resolve_ambiguous_pending = AsyncMock(side_effect=verify)
+        await ex._reconcile_with_exchange()
+        assert attempted == ["amb-0", "amb-1", "amb-2"]
+        await ex._reconcile_with_exchange()
+        assert attempted == ["amb-0", "amb-1", "amb-2", "amb-3", "amb-4", "amb-0"]
+
+    @pytest.mark.asyncio
+    async def test_resolved_entries_drop_out_of_rotation(self) -> None:
+        """Entries that gained an exchange id or vanished are skipped."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.exchange_client = AsyncMock()
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        for i in range(2):
+            order = make_order(client_order_id=f"amb-{i}")
+            ex.pending_orders[f"amb-{i}"] = base_module.PendingOrderState(
+                request=order, submit_ambiguous=True
+            )
+        attempted: list[str] = []
+
+        async def verify_and_resolve(entry: Any) -> None:
+            attempted.append(entry.request.client_order_id)
+            entry.exchange_order_id = "ex-found"
+            ex.pending_orders.pop("amb-1", None)
+
+        ex._resolve_ambiguous_pending = AsyncMock(side_effect=verify_and_resolve)
+        await ex._reconcile_with_exchange()
+        assert attempted == ["amb-0"]
+
+
+class TestTerminalSectionsCancelSafety:
+    """Terminal emissions pop tracking LAST — cancel/crash safe."""
+
+    @pytest.mark.asyncio
+    async def test_verified_absent_keeps_entry_until_terminal_persisted(self) -> None:
+        """A cut-short absent-rejection leaves the entry parked for retry.
+
+        Given: A parked ambiguous order whose second authoritative
+            absence triggers the REJECTED terminal, with the durable
+            write raising (modelling a recon-cycle timeout or DB fault
+            cutting the section),
+        When: The verification round runs,
+        Then: The entry is STILL parked — the pop happens only after the
+            terminal publish and durable write both completed, so the
+            next cycle retries instead of losing the rejection forever.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.exchange_client = AsyncMock()
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
+        order = make_order(client_order_id="amb-cut")
+        pending = base_module.PendingOrderState(request=order, submit_ambiguous=True)
+        ex.pending_orders["amb-cut"] = pending
+        ex._publish_order_status = AsyncMock(return_value=True)
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("cut mid-write"))
+        with (
+            patch.object(base_module.asyncio, "sleep", new=AsyncMock()),
+            pytest.raises(RuntimeError, match="cut mid-write"),
+        ):
+            await ex._verify_ambiguous_submit(order, pending)
+        assert "amb-cut" in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_verified_absent_failed_publish_keeps_entry_parked(self) -> None:
+        """A swallowed REJECTED publish failure never pops the entry.
+
+        Given: Two authoritative absences but _publish_order_status
+            reports False (ZMQ send failed — the engine did NOT receive
+            the rejection and its UNKNOWN guard stays held),
+        When: The verification round runs,
+        Then: No durable rejection is written and the entry stays parked
+            — popping here would strand the engine guard forever, since
+            UNKNOWN disables the in-flight timeout release.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.exchange_client = AsyncMock()
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
+        order = make_order(client_order_id="amb-pubfail")
+        pending = base_module.PendingOrderState(request=order, submit_ambiguous=True)
+        ex.pending_orders["amb-pubfail"] = pending
+        ex._publish_order_status = AsyncMock(return_value=False)
+        ex._record_venue_event = AsyncMock()
+        with patch.object(base_module.asyncio, "sleep", new=AsyncMock()):
+            resolved = await ex._verify_ambiguous_submit(order, pending)
+        assert resolved is False
+        assert "amb-pubfail" in ex.pending_orders
+        ex._record_venue_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancellation_keeps_entry_until_terminal_persisted(self) -> None:
+        """A cut-short cancel terminal leaves tracking intact for re-heal.
+
+        Given: A cancel execution whose durable order_terminal write
+            raises mid-section,
+        When: _handle_cancellation runs,
+        Then: pending_orders and client_by_exchange still track the order
+            — recon's disappeared-path re-detects and re-emits the
+            terminal instead of the order vanishing untracked with no
+            durable terminal row.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(quantity=2.0)
+        ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
+        ex.client_by_exchange["ex-1"] = order.client_order_id
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("cut mid-write"))
+        cancel = SimpleNamespace(
+            order_id="ex-1",
+            exec_type="canceled",
+            exec_id=None,
+            order_status=None,
+            cum_qty=None,
+            average_price=None,
+            fee_usd_equiv=None,
+            fees=None,
+            last_qty=None,
+            last_price=None,
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            side=SimpleNamespace(value="buy"),
+            trade_id=None,
+            liquidity_ind=None,
+        )
+        await ex._process_execution(cancel)
+        assert order.client_order_id in ex.pending_orders
+        assert "ex-1" in ex.client_by_exchange
+        ex._record_venue_event = AsyncMock()
+        await ex._process_execution(cancel)
+        assert order.client_order_id not in ex.pending_orders
+        assert "ex-1" not in ex.client_by_exchange

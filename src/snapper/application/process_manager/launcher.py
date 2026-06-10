@@ -2263,14 +2263,20 @@ class ProcessLauncherService:
         self.expected_terminations.discard(name)
 
     async def _handle_task_completion(self, name: str, task: asyncio.Task[Any]) -> None:
-        """Finalize an asyncio-task process and clear its watchdog state.
+        """Finalize an asyncio-task process and drive the restart watchdog.
 
-        Thread/async-task processes are never watchdog-respawned (only the
-        native-subprocess completion handler drives
-        :meth:`_maybe_schedule_restart`), so this terminal handler clears
-        the watchdog markers :meth:`start_process` armed before launch,
-        closing the non-native state leak. Native subprocesses never reach
-        here; they are handled by :meth:`_handle_process_completion`.
+        Mirrors the native-subprocess completion handler
+        (:meth:`_handle_process_completion`): the resolved run status feeds
+        :meth:`_maybe_schedule_restart`, so a died THREAD/async-task
+        process (executors foremost) is respawned by the same backoff,
+        budget, and stop-race machinery as a native feed — previously a
+        died executor task was finalized FAILED and silently never
+        restarted, a permanent invisible order-execution outage. The
+        restart decision runs BEFORE :meth:`_cleanup_task_tracking`
+        because the deliberate-stop guard reads ``expected_terminations``,
+        which cleanup discards. Watchdog markers are cleared by the
+        restart machinery itself (terminal lifecycles, clean exits, stop
+        paths), never unconditionally here.
 
         Args:
             name: Process name whose task completed.
@@ -2288,13 +2294,15 @@ class ProcessLauncherService:
                 run_status, error_message = self._resolve_task_exception_status(name, task)
             else:
                 run_status = self._resolve_task_success_status(name, lifecycle, expected)
-            self._cleanup_task_tracking(name, task)
-            self._clear_watchdog_state(name)
             should_finalize = task.cancelled() or not isinstance(
                 task.exception(), (GeneratorExit, StopAsyncIteration)
             )
-            if should_finalize:
-                await self._finalize_process_run(name, run_status, error=error_message)
+            try:
+                if should_finalize:
+                    await self._finalize_process_run(name, run_status, error=error_message)
+            finally:
+                await self._maybe_schedule_restart(name, run_status)
+                self._cleanup_task_tracking(name, task)
             await self._emit_summary_snapshot()
             if was_strategy:
                 await self._emit_strategy_list_snapshot()

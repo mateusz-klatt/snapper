@@ -11,6 +11,8 @@ from abc import ABC
 from abc import abstractmethod
 from collections import OrderedDict
 from collections.abc import AsyncGenerator
+from collections.abc import Awaitable
+from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
@@ -124,11 +126,59 @@ Without the reset, a stream that lived for hours would inherit the
 on its next blip.
 """
 
+_AMBIGUOUS_VERIFY_PER_CYCLE_MAX = 3
+"""Fairness cap on parked-ambiguous verifications per recon cycle.
+
+One verification can legitimately spend ~62s (retry sleeps plus three
+bounded venue lookups), so an uncapped pass over many parked entries
+would exceed the cycle timeout at the SAME prefix every cycle and starve
+the tail forever. Three worst-case verifications (~186s) leave the 300s
+cycle budget room for the rest of the pass; the index-based rotation
+(``_ambiguous_rotation_offset``) guarantees forward progress through the
+parked set regardless of entries getting popped mid-rotation — a
+popped-identity resume pointer would silently fall back to prefix order
+and re-starve the tail."""
+
+_RECON_CYCLE_TIMEOUT_S = 300.0
+"""Bound on one full reconciliation cycle INCLUDING lock acquisition.
+
+A hung venue call inside the cycle used to hold ``_recon_lock`` forever,
+wedging both the 60s periodic loop and the stream supervisor's
+post-reconnect heal. Five times the cycle period: a legitimate cycle is
+bounded far lower by the venue clients' own timeouts, and a cancelled
+cycle is safely recomputed next period (correctives carry stable
+synthetic ids)."""
+
+_TASK_DEATH_ESCALATION_CEILING_S = 1500.0
+"""Death-streak ceiling after which a supervised loop escalates.
+
+When a task keeps dying for this long without a healthy run, in-process
+respawn has proven insufficient and the supervisor raises
+``ExecutorTaskDeadError`` out of ``start()`` so the launcher rebuilds a
+FRESH service instance (safe since recovery-time corrective fills).
+INVARIANT: strictly greater than the launcher's ``_TOTAL_RESET_UPTIME_S``
+(1200s) — a ceiling-driven death therefore always presents as a
+long-healthy run to the launcher, resetting its restart budget, so this
+path yields an unbounded slow restart-and-retry cadence that self-heals
+when the cause clears, never a permanent park (publisher dark-feed
+precedent)."""
+
 _SEEN_EXEC_IDS_MAX = 10_000
 """Bound of the executor-level seen-exec-id LRU (mirrors the engine's
 apply_fill LRU). At one fill per second this covers ~3 hours of
 lookback — far beyond any venue replay window — while capping memory.
 """
+
+
+class ExecutorTaskDeadError(RuntimeError):
+    """A supervised executor loop kept dying past the escalation ceiling.
+
+    Raised out of the loop supervisor so it propagates through
+    ``start()``'s gather: siblings get cancelled, the exchange client
+    disconnects, the crash-path ``stop()`` closes ZMQ, and the launcher's
+    task-completion handler resolves FAILED and schedules a fresh-instance
+    restart through the watchdog.
+    """
 
 
 @dataclass
@@ -233,6 +283,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._unhealed_accept_events: dict[str, RecordVenueEventParams] = {}
         self._seen_exec_ids: OrderedDict[str, None] = OrderedDict()
         self._exec_stream_restarts: int = 0
+        self._task_restarts: dict[str, int] = {}
+        self._ambiguous_rotation_offset: int = 0
         self._recon_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[None]] = set()
 
@@ -329,13 +381,19 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         msg_wallet = getattr(msg, "wallet_public_id", "") or ""
         return msg_wallet == self.wallet_public_id
 
-    def _setup_zmq_sockets(self, exchange_name: OrderExchange) -> None:
-        """Create and connect ZMQ subscriber and publisher sockets.
+    def _connect_order_subscriber(self, exchange_name: OrderExchange) -> None:
+        """Build, connect, and subscribe the order-commands SUB socket.
+
+        Extracted from :meth:`_setup_zmq_sockets` so the order-handler
+        supervisor can rebuild ONLY its own subscriber before a respawn —
+        the dominant order-handler fault is a poisoned or closed SUB
+        socket, and re-entering the loop on the same dead socket would
+        just die again.
 
         Args:
             exchange_name: Exchange name for topic prefix construction.
         """
-        self.context = zmq.asyncio.Context()
+        assert self.context is not None, "ZMQ context must exist before subscriber setup"
         raw_sub_socket = self.context.socket(zmq.SUB)
         apply_hwm(raw_sub_socket, rcvhwm=HWM_ORDER_FLOW)
         raw_sub_socket.connect(self.settings.zmq_broker_xpub)
@@ -348,6 +406,32 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             f"ExchangeExecutorService[{exchange_name}]: Subscribed to {cmd_prefix}, "
             f"system.symbol_aliases, system.settings from {self.settings.zmq_broker_xpub}"
         )
+
+    def _rebuild_order_subscriber(self) -> None:
+        """Replace the order-commands subscriber with a fresh socket.
+
+        Runs as the order-handler supervisor's pre-respawn hook: closes
+        the old SUB (LINGER 0 — never block a respawn on unsent acks) and
+        connects a new one with identical subscriptions. Local-safe: the
+        subscriber is consumed only by the order handler.
+        """
+        old = self.subscriber
+        if old is not None:
+            try:
+                old.setsockopt(zmq.LINGER, 0)
+                old.close()
+            except Exception as exc:
+                logger.warning(f"Closing poisoned order subscriber failed: {exc!r}")
+        self._connect_order_subscriber(self._get_exchange_name())
+
+    def _setup_zmq_sockets(self, exchange_name: OrderExchange) -> None:
+        """Create and connect ZMQ subscriber and publisher sockets.
+
+        Args:
+            exchange_name: Exchange name for topic prefix construction.
+        """
+        self.context = zmq.asyncio.Context()
+        self._connect_order_subscriber(exchange_name)
         raw_pub_socket = self.context.socket(zmq.PUB)
         apply_hwm(raw_pub_socket, sndhwm=HWM_ORDER_FLOW)
         raw_pub_socket.connect(self.settings.zmq_broker_xsub)
@@ -764,35 +848,38 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
             self.running = True
             await self._recover_pending_orders(exchange_name)
-            tasks = [
-                asyncio.create_task(self._order_handler()),
-                asyncio.create_task(self._heartbeat_loop()),
-            ]
-            if supports_ws:
-                tasks.append(asyncio.create_task(self._supervise_execution_stream()))
-            tasks.append(asyncio.create_task(self._reconciliation_handler()))
             try:
-                await asyncio.gather(*tasks)
+                tasks = [
+                    asyncio.create_task(
+                        self._supervise_loop(
+                            "order_handler",
+                            self._order_handler,
+                            pre_respawn=self._rebuild_order_subscriber,
+                        )
+                    ),
+                    asyncio.create_task(self._supervise_loop("heartbeat", self._heartbeat_loop)),
+                ]
+                if supports_ws:
+                    tasks.append(asyncio.create_task(self._supervise_execution_stream()))
+                tasks.append(
+                    asyncio.create_task(
+                        self._supervise_loop("reconciliation", self._reconciliation_handler)
+                    )
+                )
+                try:
+                    await asyncio.gather(*tasks)
+                except asyncio.CancelledError:
+                    logger.info(f"ExchangeExecutorService[{exchange_name}] tasks cancelled")
+                    raise
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
             except asyncio.CancelledError:
-                logger.info(f"ExchangeExecutorService[{exchange_name}] tasks cancelled")
                 raise
-
-    def _create_reconciliation_task(
-        self, exchange_name: OrderExchange
-    ) -> asyncio.Task[None] | None:
-        """Reconciliation placeholder — runs from coordinator, not executor.
-
-        Reconciliation needs the shared TradeService (for circuit breaker)
-        which lives in the coordinator process. Returns None so executor
-        does not run its own isolated reconciliation.
-
-        Args:
-            exchange_name: Exchange identifier (unused).
-
-        Returns:
-            Always None.
-        """
-        return None
+            except Exception:
+                await self.stop()
+                raise
 
     async def stop(self) -> None:
         """Stop the execution service and close ZMQ connections."""
@@ -871,12 +958,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name = self._get_exchange_name()
         commands_prefix = order_commands_prefix(exchange_name)
         while self.running:
+            if not self.subscriber:
+                await asyncio.sleep(0.1)
+                continue
             try:
-                if not self.subscriber:
-                    await asyncio.sleep(0.1)
-                    continue
                 topic_str, payload_bytes = await self.subscriber.recv_multipart()
                 payload_str = payload_bytes.decode("utf-8")
+            except (ValueError, UnicodeDecodeError) as e:
+                logger.error(f"Poison order frame dropped (already consumed): {e}")
+                continue
+            try:
                 try:
                     parsed_msg = parse_message(payload_str)
                     parsed_wallet = getattr(parsed_msg, "wallet_public_id", "") or ""
@@ -1391,8 +1482,15 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     f"[{exchange_name}] Order {order.client_order_id} verified ABSENT "
                     f"on venue (2 consecutive authoritative answers) — safe to reject"
                 )
-                self.pending_orders.pop(order.client_order_id, None)
-                await self._publish_order_status(order, OrderEventEnum.REJECTED)
+                if not await self._publish_order_status(order, OrderEventEnum.REJECTED):
+                    logger.warning(
+                        f"[{exchange_name}] REJECTED publish for "
+                        f"{order.client_order_id} failed - entry stays parked for "
+                        f"the next cycle (the engine holds its UNKNOWN guard until "
+                        f"it actually receives the rejection; popping now would "
+                        f"strand that guard forever)"
+                    )
+                    return False
                 await self._record_venue_event(
                     {
                         "event_type": "order_rejected",
@@ -1404,6 +1502,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                         "strategy_tag": order.strategy_tag,
                     }
                 )
+                self.pending_orders.pop(order.client_order_id, None)
                 return True
         return False
 
@@ -1825,6 +1924,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             await asyncio.sleep(interval)
             try:
                 await self._reconcile_with_exchange()
+            except TimeoutError:
+                logger.error(
+                    f"[{exchange_name}] Reconciliation cycle exceeded "
+                    f"{_RECON_CYCLE_TIMEOUT_S:.0f}s and was cancelled (wedged venue "
+                    f"call?) - lock released, retrying next cycle"
+                )
             except httpx.HTTPError as exc:
                 logger.warning(
                     "[{}] Reconciliation cycle transient HTTP error — will retry "
@@ -1843,9 +1948,21 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         cycles could both observe the same fill gap and double-emit the
         corrective execution — the lock became necessary exactly when the
         second caller appeared.
+
+        The whole cycle INCLUDING lock acquisition is bounded by
+        ``_RECON_CYCLE_TIMEOUT_S``: a hung venue call used to hold the
+        lock forever, wedging both callers permanently. Cancellation via
+        the timeout releases the lock (async-with), and the next periodic
+        cycle recomputes any cancelled corrective idempotently (stable
+        synthetic exec ids).
+
+        Raises:
+            TimeoutError: When the cycle exceeded the bound; callers log
+                and retry on their own schedule.
         """
-        async with self._recon_lock:
-            await self._reconcile_with_exchange_unlocked()
+        async with asyncio.timeout(_RECON_CYCLE_TIMEOUT_S):
+            async with self._recon_lock:
+                await self._reconcile_with_exchange_unlocked()
 
     async def _post_reconnect_reconcile(self) -> None:
         """Best-effort recon pass before re-entering a respawned stream.
@@ -1889,11 +2006,31 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_orders = await self.exchange_client.get_orders(status=ExchangeOrderStatusEnum.OPEN)
         exchange_by_id = {o.id: o for o in exchange_orders}
 
+        ambiguous_budget = _AMBIGUOUS_VERIFY_PER_CYCLE_MAX
+        ambiguous_cids = [
+            cid
+            for cid, entry in self.pending_orders.items()
+            if not entry.exchange_order_id and entry.submit_ambiguous
+        ]
+        if ambiguous_cids:
+            start = self._ambiguous_rotation_offset % len(ambiguous_cids)
+            ambiguous_cids = ambiguous_cids[start:] + ambiguous_cids[:start]
+            self._ambiguous_rotation_offset = start + min(ambiguous_budget, len(ambiguous_cids))
+        for cid in ambiguous_cids[:ambiguous_budget]:
+            entry = self.pending_orders.get(cid)
+            if entry is None or entry.exchange_order_id:
+                continue
+            await self._resolve_ambiguous_pending(entry)
+        if len(ambiguous_cids) > ambiguous_budget:
+            logger.info(
+                f"[{exchange_name}] Recon: {len(ambiguous_cids) - ambiguous_budget} "
+                f"parked ambiguous orders deferred to later cycles (fairness cap "
+                f"{ambiguous_budget}/cycle)"
+            )
+
         for _eid, pending in tuple(self.pending_orders.items()):
             exchange_oid = pending.exchange_order_id
             if not exchange_oid:
-                if pending.submit_ambiguous:
-                    await self._resolve_ambiguous_pending(pending)
                 continue
 
             if exchange_oid not in exchange_by_id:
@@ -2187,6 +2324,81 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         jitter = 1.0 + _EXEC_STREAM_JITTER_FRACTION * (2.0 * random.random() - 1.0)
         await asyncio.sleep(delay_s * jitter)
 
+    async def _supervise_loop(
+        self,
+        task_label: str,
+        attempt: Callable[[], Awaitable[None]],
+        pre_respawn: Callable[[], None] | None = None,
+    ) -> None:
+        """Respawn a core executor loop until shutdown or escalation.
+
+        Direct generalization of :meth:`_supervise_execution_stream` for
+        the order, reconciliation, and heartbeat loops, which previously
+        either swallowed every fault (hot-spinning on a poisoned socket)
+        or — if they did die — orphaned their siblings via the bare
+        gather. Death is termination itself: a clean return while
+        ``running`` and any ``Exception`` both respawn after the shared
+        capped jittered backoff; ``CancelledError`` re-raises (shutdown);
+        a return after ``running`` cleared exits silently (a stop closing
+        the sockets makes the loops raise — that is not a death).
+
+        A death streak older than ``_TASK_DEATH_ESCALATION_CEILING_S``
+        (without a healthy run of ``_EXEC_STREAM_HEALTHY_RUNTIME_S`` to
+        clear it) raises :class:`ExecutorTaskDeadError`: in-process
+        respawn has proven insufficient, so the whole service crashes out
+        of ``start()`` and the launcher watchdog rebuilds a fresh
+        instance.
+
+        Args:
+            task_label: Stable label for logs and the restart counter.
+            attempt: One full pass of the supervised loop.
+            pre_respawn: Optional hook run before every re-entry after a
+                death (e.g. rebuilding the order SUB socket).
+        """
+        exchange_name = self._get_exchange_name()
+        backoff = _EXEC_STREAM_BACKOFF_INITIAL_S
+        streak_started: float | None = None
+        while self.running:
+            if self._task_restarts.get(task_label, 0) > 0 and pre_respawn is not None:
+                pre_respawn()
+            started = time.monotonic()
+            try:
+                await attempt()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if not self.running:
+                    return
+                logger.warning(
+                    f"[{exchange_name}] {task_label} died ({exc!r}) - "
+                    f"respawn #{self._task_restarts.get(task_label, 0) + 1} "
+                    f"after {backoff:.0f}s backoff"
+                )
+            else:
+                if not self.running:
+                    return
+                logger.warning(
+                    f"[{exchange_name}] {task_label} returned unexpectedly - "
+                    f"respawn #{self._task_restarts.get(task_label, 0) + 1} "
+                    f"after {backoff:.0f}s backoff"
+                )
+            now = time.monotonic()
+            if now - started >= _EXEC_STREAM_HEALTHY_RUNTIME_S:
+                backoff = _EXEC_STREAM_BACKOFF_INITIAL_S
+                streak_started = None
+            if streak_started is None:
+                streak_started = now
+            elif now - streak_started >= _TASK_DEATH_ESCALATION_CEILING_S:
+                logger.critical(
+                    f"[{exchange_name}] {task_label} death streak exceeded "
+                    f"{_TASK_DEATH_ESCALATION_CEILING_S:.0f}s - escalating to "
+                    f"a full service restart"
+                )
+                raise ExecutorTaskDeadError(task_label)
+            self._task_restarts[task_label] = self._task_restarts.get(task_label, 0) + 1
+            await self._sleep_with_jitter(backoff)
+            backoff = min(backoff * 2.0, _EXEC_STREAM_BACKOFF_CAP_S)
+
     async def _supervise_execution_stream(self) -> None:
         """Respawn the private execution stream until shutdown.
 
@@ -2432,8 +2644,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         if execution.exec_type not in ("canceled", "expired"):
             return False
-        pending = self.pending_orders.pop(client_order_id, None)
-        self.client_by_exchange.pop(exchange_order_id, None)
+        pending = self.pending_orders.get(client_order_id)
         if pending and pending.db_order_id is not None and self.exchange_client is not None:
             status = (
                 ExchangeOrderStatusEnum.CANCELED
@@ -2459,6 +2670,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 "strategy_tag": tag,
             }
         )
+        self.pending_orders.pop(client_order_id, None)
+        self.client_by_exchange.pop(exchange_order_id, None)
         logger.info(
             f"[{exchange_name}] Order {client_order_id} {execution.exec_type}, "
             f"cleaned up maps (no execution published)"
@@ -2972,34 +3185,31 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             else f"executor.{exchange_name}"
         )
         while self.running:
-            try:
-                await asyncio.sleep(self.settings.zmq_heartbeat_interval_ms / 1000.0)
-                if not self.running:
-                    break
-                self._cleanup_expired_orphans()
-                self.heartbeat_seq += 1
-                lag_ms = 0
-                hb_topic = heartbeat_topic("executor", exchange_name, wallet_short=wallet_short)
-                hb_msg = HeartbeatData(
-                    public_id=str(uuid7()),
-                    timestamp=datetime.now(UTC),
-                    session_id=self._tracker.session_id,
-                    sequence_id=self._tracker.next_sequence(hb_topic),
-                    component=component,
-                    sequence=self.heartbeat_seq,
-                    status=HealthStatusEnum.HEALTHY,
-                    lag_ms=lag_ms,
-                    meta={
-                        "running": self.running,
-                        "exchange": exchange_name,
-                        "wallet_public_id": self.wallet_public_id,
-                        "broker_xsub": self.settings.zmq_broker_xsub,
-                        "broker_xpub": self.settings.zmq_broker_xpub,
-                    },
-                )
-                await self._publish_heartbeat(hb_topic, hb_msg)
-            except Exception as e:
-                logger.error(f"[{exchange_name}] Execution service heartbeat error: {e}")
+            await asyncio.sleep(self.settings.zmq_heartbeat_interval_ms / 1000.0)
+            if not self.running:
+                break
+            self._cleanup_expired_orphans()
+            self.heartbeat_seq += 1
+            lag_ms = 0
+            hb_topic = heartbeat_topic("executor", exchange_name, wallet_short=wallet_short)
+            hb_msg = HeartbeatData(
+                public_id=str(uuid7()),
+                timestamp=datetime.now(UTC),
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(hb_topic),
+                component=component,
+                sequence=self.heartbeat_seq,
+                status=HealthStatusEnum.HEALTHY,
+                lag_ms=lag_ms,
+                meta={
+                    "running": self.running,
+                    "exchange": exchange_name,
+                    "wallet_public_id": self.wallet_public_id,
+                    "broker_xsub": self.settings.zmq_broker_xsub,
+                    "broker_xpub": self.settings.zmq_broker_xpub,
+                },
+            )
+            await self._publish_heartbeat(hb_topic, hb_msg)
 
     async def _publish_heartbeat(self, topic: str, message: HeartbeatData) -> None:
         """Send a complete heartbeat message to ZMQ.

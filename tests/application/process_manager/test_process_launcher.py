@@ -8986,18 +8986,23 @@ class TestWatchdogConcurrencyRegressions:
         assert "updater" not in factory._restart_uptime_start
 
     @pytest.mark.asyncio()
-    async def test_fix6_task_completion_clears_watchdog_state(self) -> None:
-        """A completed asyncio-task process clears its watchdog state.
+    async def test_fix6_task_completion_drives_watchdog_restart(self) -> None:
+        """A died asyncio-task process is respawned by the watchdog.
 
-        Given: a thread/async-task process with watchdog markers armed,
+        Given: a thread/async-task process with watchdog markers armed
+            whose LONG_RUNNING task completed unexpectedly,
         When: _handle_task_completion runs on its finished task,
-        Then: the watchdog state is cleared (task processes are never
-            watchdog-respawned), closing the non-native state leak.
+        Then: a restart is scheduled through the same machinery as native
+            subprocesses — previously task processes were finalized and
+            silently never respawned (a died executor meant a permanent
+            invisible order-execution outage).
         """
         factory = ProcessLauncherService(MagicMock())
         config = _watchdog_config(name="job", role=ProcessRoleEnum.CORE)
         _arm_watchdog(factory, config)
         _stub_run_tracking(factory)
+        schedule_spy = MagicMock()
+        cast(Any, factory)._schedule_delayed_restart = schedule_spy
 
         async def _done() -> None:
             return None
@@ -9007,8 +9012,105 @@ class TestWatchdogConcurrencyRegressions:
         factory.process_tasks["job"] = task
         factory.process_lifecycles["job"] = ProcessLifecycleEnum.LONG_RUNNING
         await factory._handle_task_completion("job", task)
-        assert "job" not in factory._desired_state
-        assert "job" not in factory._restart_configs
+        schedule_spy.assert_called_once()
+        assert factory._desired_state.get("job") is _DesiredState.RUNNING
+
+    @pytest.mark.asyncio()
+    async def test_fix6_task_restart_runs_before_tracking_cleanup(self) -> None:
+        """The restart decision consumes expected_terminations pre-cleanup.
+
+        Given: a watchdog-armed task process whose name sits in
+            expected_terminations (a deliberate stop in flight) while its
+            task FAILED,
+        When: _handle_task_completion runs,
+        Then: no restart is scheduled — which can only hold when
+            _maybe_schedule_restart reads expected_terminations BEFORE
+            _cleanup_task_tracking discards it.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="job", role=ProcessRoleEnum.CORE)
+        _arm_watchdog(factory, config)
+        _stub_run_tracking(factory)
+        schedule_spy = MagicMock()
+        cast(Any, factory)._schedule_delayed_restart = schedule_spy
+
+        async def _boom() -> None:
+            raise RuntimeError("died during stop")
+
+        task = asyncio.create_task(_boom())
+        with contextlib.suppress(RuntimeError):
+            await task
+        factory.process_tasks["job"] = task
+        factory.process_lifecycles["job"] = ProcessLifecycleEnum.LONG_RUNNING
+        factory.expected_terminations.add("job")
+        await factory._handle_task_completion("job", task)
+        schedule_spy.assert_not_called()
+        assert "job" not in factory.expected_terminations
+
+    @pytest.mark.asyncio()
+    async def test_fix6_failed_task_restarts_via_start_process(self) -> None:
+        """A FAILED task death flows through to a fresh start_process.
+
+        Given: an armed watchdog, zero backoff, and a task that raised,
+        When: completion handling schedules and the delayed restart runs,
+        Then: start_process is awaited once with the stored config.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="job", role=ProcessRoleEnum.CORE)
+        _arm_watchdog(factory, config)
+        _stub_run_tracking(factory)
+        cast(Any, factory)._compute_backoff_delay = MagicMock(return_value=0.0)
+        start_spy = mock.AsyncMock(return_value=True)
+        cast(Any, factory).start_process = start_spy
+
+        async def _boom() -> None:
+            raise RuntimeError("task died")
+
+        task = asyncio.create_task(_boom())
+        with contextlib.suppress(RuntimeError):
+            await task
+        factory.process_tasks["job"] = task
+        factory.process_lifecycles["job"] = ProcessLifecycleEnum.LONG_RUNNING
+        await factory._handle_task_completion("job", task)
+        restart_task = factory._restart_tasks.get("job")
+        assert restart_task is not None
+        await restart_task
+        start_spy.assert_awaited_once()
+        assert start_spy.await_args is not None
+        assert start_spy.await_args.args[0] is config
+
+    @pytest.mark.asyncio()
+    async def test_fix6_cancelled_deliberate_stop_never_restarts(self) -> None:
+        """A deliberate stop's cancellation schedules no restart.
+
+        Given: desired=STOPPED with the name in expected_terminations and
+            a cancelled task (the deliberate-stop shape),
+        When: _handle_task_completion runs,
+        Then: nothing is scheduled and desired stays STOPPED — ownership
+            clearing belongs to the stop call itself, exactly like the
+            native-subprocess path.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="job", role=ProcessRoleEnum.CORE)
+        _arm_watchdog(factory, config)
+        _stub_run_tracking(factory)
+        factory._desired_state["job"] = _DesiredState.STOPPED
+        factory.expected_terminations.add("job")
+        schedule_spy = MagicMock()
+        cast(Any, factory)._schedule_delayed_restart = schedule_spy
+
+        async def _forever() -> None:
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(_forever())
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        factory.process_tasks["job"] = task
+        factory.process_lifecycles["job"] = ProcessLifecycleEnum.LONG_RUNNING
+        await factory._handle_task_completion("job", task)
+        schedule_spy.assert_not_called()
+        assert factory._desired_state.get("job") is _DesiredState.STOPPED
 
     @pytest.mark.asyncio()
     async def test_r2_1_failed_respawn_does_not_resurrect_a_stopped_process(

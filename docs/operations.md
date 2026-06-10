@@ -491,6 +491,29 @@ plane is unreadable for an order, recovery degrades to the legacy
 venue-truth seeding for that order only and logs an ERROR (the downtime
 gap for it stays unhealed — fix the DB and restart).
 
+### Executor task supervision and service restarts
+
+Every executor core loop (order handler, reconciliation, heartbeat —
+plus the fill stream, supervised since P1-1) runs under an in-process
+supervisor: a loop that dies (exception or unexpected clean return)
+respawns with capped jittered backoff (1s doubling to 60s; a 5-minute
+healthy run resets it), preserving all in-memory order state. The order
+handler's supervisor rebuilds its SUB socket before re-entry; poison
+frames (already consumed by ZMQ) are logged and skipped, never
+respawn-looped. Reconciliation cycles are bounded (300s) so a hung
+venue call cannot hold the recon lock forever, and parked-UNKNOWN
+verification is fairness-capped (3 per cycle, index-rotated) so a large
+parked set cannot starve its tail. A death streak older than 25 minutes
+escalates: the whole service crashes out of `start()` (siblings
+cancelled, sockets closed) and the process launcher — whose
+task-completion handler now drives the same restart watchdog as native
+subprocesses — rebuilds a FRESH instance, made safe by recovery-time
+corrective fills. The escalation ceiling deliberately exceeds the
+launcher's healthy-uptime reset, so escalations retry forever at a slow
+cadence instead of exhausting the restart budget; only fast startup
+crash-loops (bad credentials, DB down at boot) park the executor after
+the budget, with ERROR logs as the operator signal.
+
 ### Fault-injection testing
 
 `scripts/resilience_fault_injection.py` simulates a real exchange outage and
