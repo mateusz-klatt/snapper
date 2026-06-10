@@ -4737,9 +4737,9 @@ class _UnparseableResponse:
 
 
 class TestWalutomatAmbiguousSubmitClassification:
-    """Exception taxonomy pins for Walutomat create_order (#145 P0-1).
+    """Exception taxonomy pins for Walutomat create_order.
 
-    Connect-phase failures provably happened before the request left
+    Connection-setup failures provably happened before the request left
     the process and stay plain; post-send transport failures, gateway
     5xx, and unusable success bodies wrap as ambiguous because the
     venue may have accepted the order under the submitId.

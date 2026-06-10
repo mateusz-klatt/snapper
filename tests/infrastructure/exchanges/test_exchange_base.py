@@ -259,7 +259,7 @@ async def test_log_order_to_db_never_raises(mock_resolve: AsyncMock) -> None:
     When: _log_order_to_db is called,
     Then: It returns None — an escaping exception would ride the venue
         client back into the executor's definitive-reject branch and
-        misreport a LIVE order as rejected (#145 P0-1).
+        misreport a LIVE order as rejected.
     """
     mock_repo = MagicMock(spec=Repository)
     client = DummyExchangeClient(repository=mock_repo)
@@ -918,8 +918,8 @@ async def test_find_order_by_client_id_default_raises() -> None:
     Given: A venue client without a client-id lookup implementation,
     When: find_order_by_client_id is called,
     Then: NotImplementedError names the venue — the caller must treat
-        this as could-not-verify, never as authoritative absence
-        (#145 P0-1 contract).
+        this as could-not-verify, never as authoritative absence (only
+        an explicit None return means the venue confirmed absence).
     """
     client = DummyExchangeClient(repository=None)
     with pytest.raises(NotImplementedError, match="dummy"):

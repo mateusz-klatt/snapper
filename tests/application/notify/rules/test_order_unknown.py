@@ -1,4 +1,4 @@
-"""Tests for ``OrderUnknownRule`` (#145 P0-1 ambiguous-submit alert)."""
+"""Tests for ``OrderUnknownRule`` (the ambiguous-submit alert)."""
 
 from datetime import UTC
 from datetime import datetime

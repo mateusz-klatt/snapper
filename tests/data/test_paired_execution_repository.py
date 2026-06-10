@@ -2103,13 +2103,14 @@ async def _insert_flatten_command(
     """Insert an active reduce-only MARKET flatten command superseding a leg's order.
 
     Mirrors what the guard scanner's ``claim_leg_and_insert_flatten_command``
-    emits in Phase 5c.2: a ``reduce_only`` ``submit`` whose
+    emits: a ``reduce_only`` ``submit`` whose
     ``supersedes_command_id`` is the leg's ORIGINAL command and whose
     ``client_order_id`` is a fresh venue order id, so its fill routes back to the
     leg's ``compensated_signed_qty`` by command identity. ``idempotency_key``
     defaults to a unique per-order key; pass the real
     ``paired:{group}:{leg}:flatten:{seq}`` form to make the flatten the leg's
-    CURRENT-``compensation_seq`` order (Phase 5d.2 terminality routing).
+    CURRENT-``compensation_seq`` order, the one terminal-event routing
+    (``_current_flatten_is_terminal``) treats as live.
     """
     async with repo.session() as session:
         session.add(
@@ -2238,7 +2239,7 @@ async def test_compensation_fill_partial_stays_compensating(_repo: SQLAlchemyRep
     Given: a compensating long leg (filled=+10) whose sell-flatten filled only 4,
     When: the compensation fill is routed,
     Then: compensated_signed_qty is +4 (open residual +6) so the leg stays
-        COMPENSATING — completion is deferred until the residual collapses to zero.
+        COMPENSATING — completion waits until the residual collapses to zero.
     """
     leg_id = _pid(302)
     await _insert_created_command(_repo, public_id=_pid(702), correlation_id=_pid(100))
@@ -4089,7 +4090,7 @@ async def test_get_current_paired_execution_group_reads_current_active(
 
 
 class TestHasOrderSubmitEvidence:
-    """Durable evidence probe for the duplicate-submit guard (#145 P0-5)."""
+    """Durable evidence probe for the duplicate-submit guard."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

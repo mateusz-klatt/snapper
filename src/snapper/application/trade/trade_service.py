@@ -284,7 +284,7 @@ class TradeService:
         """Hold command state on an ambiguous submit outcome.
 
         The submit failed in a way where the order MAY exist on the
-        venue (#145 P0-1). Deliberately changes nothing: the command
+        venue. Deliberately changes nothing: the command
         stays non-terminal (in_flight remains True), no rejection is
         recorded, and only the watermark advances — so a checkpoint
         replay reproduces the held state instead of warning about an
@@ -604,7 +604,7 @@ class TradeService:
         Without a ``reason`` this is the operator-initiated full recovery:
         every halt reason is cleared, the shard un-halts, and the
         reconciliation failure counter resets — the operator has resolved the
-        shard wholesale. With a ``reason`` (Phase 5d.3, the paired-execution
+        shard wholesale. With a ``reason`` (the paired-execution
         completion path) the release is FAIL-SAFE and scoped: only a reason
         that was actually registered is discarded, the shard un-halts only
         when NO reasons remain, and ``recon_failure_count`` is untouched — so

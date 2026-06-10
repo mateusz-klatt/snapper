@@ -856,7 +856,7 @@ def generate_swift_types(
     """Generate Swift types from JSON Schema.
 
     Args:
-        _project_root: Root directory of the project (reserved for future use).
+        _project_root: Root directory argument accepted by the public helper.
         schema_path: Path to the JSON Schema file.
         output_path: Path for the generated Swift file.
         include_any_codable: Whether to include the AnyCodable helper.

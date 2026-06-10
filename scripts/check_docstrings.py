@@ -442,7 +442,7 @@ def check_function(
         filepath: Path to the file being checked.
         node: The FunctionDef AST node.
         result: ScanResult to accumulate findings.
-        _is_method: Whether this is a class method (reserved for future use).
+        _is_method: Whether this is a class method; retained for caller compatibility.
         enforce_bdd: Whether to enforce Given/When/Then docstrings for tests.
         enforce_google_sections: Whether to enforce Args/Returns sections.
     """

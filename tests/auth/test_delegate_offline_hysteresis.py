@@ -12,7 +12,7 @@ delegate-connection lifecycle:
 - :meth:`WebSocketAuthManager._delayed_offline_publish` sleeps the
   configured grace window then publishes the bus event.
 
-All tests run with sub-second grace windows so the deferred path is
+All tests run with sub-second grace windows so the delayed path is
 deterministic; the ZMQ socket is mocked.
 """
 
@@ -35,18 +35,18 @@ from snapper.messaging.schemas.data import DelegateOfflineData
 TEST_TIMEOUT = 5
 _GRACE_SECONDS = 1
 """Sub-second window not allowed; grace must be a positive int. 1s keeps tests
-fast while still exercising the deferred-publish path deterministically."""
+fast while still exercising the delayed-publish path deterministically."""
 
 
 async def _instant_sleep(_seconds: float) -> None:
-    """Patched stand-in for ``asyncio.sleep`` inside the deferred-publish path.
+    """Patched stand-in for ``asyncio.sleep`` inside the delayed-publish path.
 
     The monkeypatch in each test rebinds the ``sleep`` attribute on the
     global ``asyncio`` module object — the same object every importer
     references — so calling ``asyncio.sleep(0)`` here would recurse
     indefinitely. Awaiting a pre-resolved :class:`asyncio.Future` yields
     control to the event loop once and immediately resumes, which is
-    the semantic the deferred-publish path actually needs.
+    the semantic the delayed-publish path actually needs.
     """
     fut: asyncio.Future[None] = asyncio.Future()
     fut.set_result(None)
@@ -212,7 +212,7 @@ async def test_delayed_offline_publish_fires_after_grace(
 ) -> None:
     """Pending task publishes ``bus.delegate_offline`` once the grace elapses.
 
-    Patches ``asyncio.sleep`` to a fast no-op so the deferred-publish
+    Patches ``asyncio.sleep`` to a fast no-op so the delayed-publish
     branch runs without wall-clock waits, then awaits the scheduled
     task and asserts the publisher saw exactly one ``DelegateOfflineData``
     message on the right topic.
@@ -275,7 +275,7 @@ async def test_delayed_offline_publish_logs_when_publisher_missing(
     must still tolerate the call without crashing the asyncio task.
 
     Given a manager without a wired publisher and a patched zero-sleep,
-    When the deferred publish path runs to completion,
+    When the delayed publish path runs to completion,
     Then the task ends cleanly (done) without raising.
     """
     manager = _make_manager()
@@ -301,7 +301,7 @@ async def test_delayed_offline_publish_swallows_publisher_failure(
     correctness backstop.
 
     Given a publisher whose send() raises RuntimeError,
-    When the deferred publish path runs to completion,
+    When the delayed publish path runs to completion,
     Then the task finishes with no exception observable on .exception().
     """
     publisher = _mock_publisher()
@@ -514,7 +514,7 @@ async def test_cancel_pending_offline_tasks_drains_registry() -> None:
     """Shutdown helper cancels every in-flight delayed task and clears the dict.
 
     FastAPI lifespan calls this on shutdown so a closing process does
-    not leave deferred-publish tasks sleeping against torn-down wiring.
+    not leave delayed-publish tasks sleeping against torn-down wiring.
 
     Given a manager with multiple pending tasks for distinct delegates,
     When cancel_pending_offline_tasks runs,

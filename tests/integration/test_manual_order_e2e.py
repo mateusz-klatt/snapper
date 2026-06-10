@@ -60,7 +60,7 @@ async def plan_broker_stack(
     """Spin up a standalone ZMQ broker + shared repo for plan executor tests.
 
     Does NOT start the PlanExecutorService — tests own startup so the
-    plan row can be inserted before the service's recovery phase runs.
+    plan row can be inserted before the service's recovery step runs.
 
     Yields:
         Dict with the ``broker``, a ``repo`` handle (shared with the

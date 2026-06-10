@@ -133,7 +133,7 @@ class TestZmqBrokerBindEndpoints:
 
 
 class TestTradeCommandDispatchTtl:
-    """``TRADE_COMMAND_DISPATCH_TTL_S`` env round-trip (#145 P0-4)."""
+    """``TRADE_COMMAND_DISPATCH_TTL_S`` env round-trip."""
 
     def test_default_is_thirty_seconds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Default TTL is 30s — below the engine's 60s in-flight valve."""

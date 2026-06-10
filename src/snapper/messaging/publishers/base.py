@@ -2303,11 +2303,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         still-live session, etc.) are logged + rolled back per row
         and the failed row is dropped silently — this matches the
         legacy pre-2026-05-28 behavior here and is a known limitation
-        (not introduced by the writer-recovery work). A retry policy
-        that distinguishes "transient drop" from "permanent drop"
-        without livelocking on shutdown is tracked separately; until
-        that exists, persistent generic failures will produce
-        repeated ERROR log lines per row but not block ``queue.join``.
+        (not introduced by the writer-recovery work). No retry policy
+        distinguishes "transient drop" from "permanent drop" — naive
+        per-row retries risk livelocking shutdown — so persistent
+        generic failures produce repeated ERROR log lines per row but
+        do not block ``queue.join``.
 
         Args:
             batch: List of candle rows where batch upsert failed.

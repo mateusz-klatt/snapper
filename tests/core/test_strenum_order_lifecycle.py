@@ -85,8 +85,8 @@ def test_order_status_values(member: OrderStatusEnum, value: str) -> None:
 def test_order_event_values(member: OrderEventEnum, value: str) -> None:
     """Each OrderEventEnum member carries its documented wire value.
 
-    Given: the 8-event OrderEventEnum domain enum (UNKNOWN added by
-        #145 P0-1 for ambiguous submit outcomes),
+    Given: the 8-event OrderEventEnum domain enum (UNKNOWN represents
+        ambiguous submit outcomes),
     When: reading .value on every member,
     Then: every value matches the pre-rename Literal alias strings
         used as the ``orders.events.{exchange}.{instrument}.{event}``

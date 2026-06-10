@@ -126,8 +126,9 @@ class BootstrapSettingsLoader(BaseSettings):
             group waits for ALL sibling legs to register a durable command
             before it is considered stalled. Each new group's
             ``assembly_deadline = created_at + this``; a group cannot arm
-            after its assembly_deadline, and the (Phase-4) guard scanner
-            breaks groups still assembling past it — no venue order was sent.
+            after its assembly_deadline, and the guard scanner
+            (``PairedExecutionGuardScanner``) breaks groups still
+            assembling past it — no venue order was sent.
         paired_execution_fill_timeout_s: Seconds an armed paired-execution
             group waits for its legs to fill before the guard treats a
             laggard as a breakage. Sets ``fill_deadline = created_at + this``.
@@ -169,7 +170,7 @@ class BootstrapSettingsLoader(BaseSettings):
         default=30.0, alias="PAIRED_EXECUTION_FILL_TIMEOUT_S"
     )
     trade_command_dispatch_ttl_s: float = Field(default=30.0, alias="TRADE_COMMAND_DISPATCH_TTL_S")
-    """Max age of a trade command before dispatch refuses it (#145 P0-4).
+    """Max age of a trade command before dispatch refuses it.
 
     Gates BOTH the outbox fetch (stale CREATED submits expire to the
     terminal EXPIRED status, never published) and the executor's

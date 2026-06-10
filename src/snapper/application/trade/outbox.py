@@ -26,7 +26,7 @@ PublishFn = Callable[[TradeCommandRow], Awaitable[None]]
 ExpireFn = Callable[[TradeCommandRow], Awaitable[None]]
 
 _EXPIRABLE_COMMAND_TYPES: tuple[str, ...] = ("create", "submit")
-"""Command types subject to the dispatch TTL (#145 P0-4).
+"""Command types subject to the dispatch TTL.
 
 Cancels (and replaces) are exempt: expiring a stale cancel strands a
 live order, a late cancel carries no double-exposure risk, and its
@@ -87,7 +87,7 @@ class OutboxDispatcher:
                 scans. ``None`` = scan until DB exhaustion.
             dispatch_ttl_s: Max age (seconds, from ``created_at``) a
                 create/submit command may reach before dispatch expires
-                it instead of publishing (#145 P0-4). ``None`` (and any
+                it instead of publishing. ``None`` (and any
                 value ``<= 0``) disables the gate.
             expire_fn: Async callback invoked after a command is
                 CAS-transitioned to EXPIRED, so the coordinator can
@@ -203,18 +203,19 @@ class OutboxDispatcher:
         """Expire a stale create/submit command instead of dispatching it.
 
         Returns True when the command was handled here (expired, lost
-        the expiry race, or deferred on an error) and must NOT be
+        the expiry race, or left for retry on an error) and must NOT be
         published this cycle; False when it should dispatch normally.
 
-        Decision table (#145 P0-4):
+        Decision table:
 
         - TTL disabled, non-expirable command type, or fresh → publish.
         - Stale WITH durable submit evidence → publish anyway with a
           WARN: the coordinator crashed after publishing but before the
           CREATED→DISPATCHED commit, so the order may be live — expiring
-          would fabricate a terminal state for it (the P0-1 sin). The
-          executor's duplicate-submit guard absorbs the re-publish and
-          the normal bulk path performs the missing transition.
+          would fabricate a terminal state for it (exactly the
+          false-reject failure the UNKNOWN state exists to prevent).
+          The executor's duplicate-submit guard absorbs the re-publish
+          and the normal bulk path performs the missing transition.
         - Stale without evidence → CAS CREATED→EXPIRED (race-safe
           against concurrent dispatchers and the guard scanner's
           CREATED→CANCELLED); only the CAS winner invokes ``expire_fn``

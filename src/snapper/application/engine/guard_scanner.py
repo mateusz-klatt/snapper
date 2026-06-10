@@ -1,7 +1,7 @@
 """Periodic guard scanner for the paired-execution arming barrier.
 
-DB-only liveness loop (Phase 4a) that self-heals paired-execution groups the
-live ``_on_signal`` arming path could not finish:
+DB-only liveness loop that self-heals paired-execution groups the live
+``_on_signal`` arming path could not finish:
 
 - breaks ``assembling`` groups whose ``assembly_deadline`` has passed (a sibling
   leg never registered) — such a group never armed, so its leg commands were
@@ -12,11 +12,11 @@ live ``_on_signal`` arming path could not finish:
   filling, or that have a leg in a terminal-without-fill state (a venue reject /
   cancel / expire projected onto the leg by the live terminal hook) — so a group
   whose sibling can never complete stops holding the filled sibling exposed
-  (Phase 5b breaks + halts; Phase 5c flattens the exposure);
+  (the guard breaks and halts the group, then flattens the exposure);
 - cancels this coordinator's owned held ``created`` commands and terminalizes its
   owned legs for any ``broken`` group, so a sibling-broken group's held commands
   never linger and never dispatch;
-- projects a durable halt (Phase 4b) for every active ``broken`` / ``compensating``
+- projects a durable halt for every active ``broken`` / ``compensating``
   group that carries REAL EXPOSURE (a leg with a non-zero ``filled_signed_qty`` or
   ``compensating`` status), and mirrors it into this coordinator's owned in-memory
   shard halts so ``_on_signal`` fast-rejects a NEW group on the same pair scope.
@@ -30,9 +30,9 @@ and dedup-safe (any coordinator may win — the halt's active-unique
 coordinator owns, and run for EVERY active ``broken`` group (not only groups this
 scanner just broke), so a CAS-loser still cleans up its own legs on a later scan.
 Scoped to ``simultaneous`` policy; ``sequential_handoff`` (ParlayCascade) is out of
-scope here. Compensation of FILLED legs in a broken ARMED group is Phase 5; in
-Phase 4b no shipped path sets ``filled_signed_qty`` on a leg, so the exposure halt
-is dormant in production (unit-tested with synthetic exposed rows) until Phase 5.
+scope here. FILLED legs in a broken ARMED group are compensated by the live
+fill and flatten paths, and the exposure halt is active when a leg carries
+``filled_signed_qty``.
 """
 
 import asyncio
@@ -231,14 +231,15 @@ class PairedExecutionGuardScanner:
         one leg not fully ``filled``. A terminal leg is broken immediately (before
         the deadline) because one sibling can never complete, so holding the
         already-filled sibling exposed until the deadline is avoidable risk. The
-        break only flips the group status + records the reason; cancelling live
-        orders and flattening filled legs is Phase 5c — here the same cycle's
-        later ``broken`` / ``halt`` sweeps cancel owned held commands and (for an
+        break only flips the group status + records the reason; cancelling
+        live orders and flattening filled legs is handled by the compensation
+        sweep (:meth:`_sweep_compensating`) — the same cycle's later
+        ``broken`` / ``halt`` sweeps cancel owned held commands and (for an
         exposed break) project the durable halt.
 
         A HEALTHY armed group whose every leg is fully ``filled`` is the happy
-        path: it is COMPLETED (Phase 5d.3) via the locked settled check, so a
-        succeeded pair leaves every scanner listing instead of staying armed
+        path: it is COMPLETED via the locked settled check, so a succeeded
+        pair leaves every scanner listing instead of staying armed
         forever. The temporal leg read here is only a cheap hint — the
         completion DAL re-reads the CURRENT active leg set under the group
         lock and re-validates, so a stale read can only delay completion by a
@@ -354,33 +355,33 @@ class PairedExecutionGuardScanner:
                     )
 
     async def _sweep_compensating(self, now: datetime) -> None:
-        """Cancel live originals (5c.1) and flatten terminal exposure (5c.2).
+        """Cancel live originals and flatten terminal exposure.
 
         Each OWNED leg is routed by status: a non-terminal leg
         (:data:`_LEG_CANCEL_ELIGIBLE_STATUSES`) with a live original is cancelled
-        at the venue (5c.1, :meth:`_cancel_live_original`); a venue-terminal leg
+        at the venue (:meth:`_cancel_live_original`); a venue-terminal leg
         (:data:`_LEG_FLATTEN_ELIGIBLE_STATUSES` — filled / cancelled / expired /
         rejected, where the original can no longer fill) with residual
-        ``open_group_qty`` is flattened with a reduce-only MARKET order (5c.2,
-        :meth:`_flatten_leg`). Already-handled legs (compensating / flattened /
+        ``open_group_qty`` is flattened with a reduce-only MARKET order
+        (:meth:`_flatten_leg`). Already-handled legs (compensating / flattened /
         manual_intervention) fall through untouched.
 
-        Phase 5c.1 (cancel): for each active ``broken`` / ``compensating``
-        ``simultaneous`` group, for each OWNED leg still in a non-terminal status
+        For each active ``broken`` / ``compensating`` ``simultaneous`` group,
+        for each OWNED leg still in a non-terminal status
         (:data:`_LEG_CANCEL_ELIGIBLE_STATUSES`) whose ORIGINAL command is still
-        LIVE at the venue (command status in :data:`_LIVE_COMMAND_STATUSES`), the
-        group is moved ``broken`` → ``compensating`` (dedup-safe CAS) and an
-        idempotent venue cancel command is emitted for the original order. BOTH
-        guards are required: leg status alone is not a venue-liveness signal (a
-        dispatched leg stays ``pending`` until a fill / venue terminal is
-        projected), and command status alone is not either (venue terminals are
-        projected onto the LEG, not back onto the command, so a FILLED / CANCELLED
-        leg can still read command status ``dispatched``). The leg is NOT claimed
-        or flattened here — it stays fill-projectable until the venue cancel /
-        expire / reject (or a fill) terminalizes it; Phase 5c.2 then flattens any
-        residual exposure. Lists ``broken`` AND ``compensating`` so a CAS loser, a
-        re-scan, or a leg that turns live after the group flipped is still
-        handled. Scoped to ``simultaneous`` policy.
+        LIVE at the venue (command status in :data:`_LIVE_COMMAND_STATUSES`),
+        the group is moved ``broken`` → ``compensating`` (dedup-safe CAS) and
+        an idempotent venue cancel command is emitted for the original order.
+        BOTH guards are required: leg status alone is not a venue-liveness
+        signal (a dispatched leg stays ``pending`` until a fill / venue terminal
+        is projected), and command status alone is not either (venue terminals
+        are projected onto the LEG, not back onto the command, so a FILLED /
+        CANCELLED leg can still read command status ``dispatched``). The leg is
+        NOT claimed or flattened here — it stays fill-projectable until the
+        venue cancel / expire / reject (or a fill) terminalizes it; residual
+        exposure is then flattened. Lists ``broken`` AND ``compensating`` so a
+        CAS loser, a re-scan, or a leg that turns live after the group flipped
+        is still handled. Scoped to ``simultaneous`` policy.
         """
         groups = await self._repo.list_active_paired_execution_groups(
             [
@@ -406,7 +407,7 @@ class PairedExecutionGuardScanner:
             await self._try_complete_group(group, now)
 
     async def _try_complete_group(self, group: PairedExecutionGroupRow, now: datetime) -> None:
-        """Attempt the locked settled-completion of one group (Phase 5d.3).
+        """Attempt the locked settled-completion of one group.
 
         Called for healthy all-filled ``armed`` groups and for every
         ``broken`` / ``compensating`` group after its compensation routing. The
@@ -434,7 +435,7 @@ class PairedExecutionGuardScanner:
     async def _settle_compensating_leg(self, leg: PairedExecutionLegRow, now: datetime) -> None:
         """Backstop: re-derive an owned compensating leg's settlement from venue_events.
 
-        Phase 5d.2's live terminal hook settles a flatten order's cancel / expire /
+        The live terminal hook settles a flatten order's cancel / expire /
         reject the instant the message arrives, but two cases never reach it: a
         venue cancel / expire recorded durably with NO trader terminal message, and
         a not-tradeable reject that publishes without recording a row (so the live
@@ -551,11 +552,12 @@ class PairedExecutionGuardScanner:
         leg: PairedExecutionLegRow,
         now: datetime,
     ) -> None:
-        """Flatten one owned venue-terminal leg's residual exposure (Phase 5c.2).
+        """Flatten one owned venue-terminal leg's residual exposure.
 
         ``open_group_qty = filled_signed_qty − compensated_signed_qty``. A zero
-        residual is a no-op (nothing filled, or already compensated — completion
-        is Phase 5d). Otherwise the flatten quantity is resolved (capability +
+        residual is a no-op (nothing filled, or already compensated —
+        :meth:`_try_complete_group` then completes the settled group).
+        Otherwise the flatten quantity is resolved (capability +
         spec + lot rounding); an unresolvable leg (no instrument id, no
         reduce-only support, missing spec, sub-lot dust, or below the venue lot
         minimum) escalates the leg AND group to ``manual_intervention`` rather
@@ -684,7 +686,7 @@ class PairedExecutionGuardScanner:
         A FRESH ``client_order_id`` / ``venue_client_id`` (this is a NEW venue
         order, not the original); ``reduce_only=True`` so it can only reduce
         exposure; ``supersedes_command_id`` is the leg's ORIGINAL command (its
-        flatten fills route back to the leg by supersedes in Phase 5d, and the
+        flatten fills route back to the leg by supersedes, and the
         broken-group outbox gate releases it); the ``idempotency_key`` carries
         the ``compensation_seq`` so each compensation round is a distinct,
         re-run-safe command.
@@ -728,13 +730,13 @@ class PairedExecutionGuardScanner:
         ``compensating`` / ``manual_intervention`` status. An assembly-timeout
         break has no fills and is skipped, so the pair stays free to re-assemble
         next tick. ``manual_intervention`` is included because a leg that cannot
-        be auto-flattened (Phase 5c.2) leaves real exposure that MUST stay halted
+        be auto-flattened leaves real exposure that MUST stay halted
         until an operator resolves it. For a haltable group the durable halt row
         is inserted GLOBALLY (any coordinator may win the idempotent active-unique
         scope) and ``halt_shard`` is mirrored in memory ONLY for owned leg shards,
-        matching the 4a global-CAS / owned-side-effect split. A group with no legs
-        is corruption (``mode`` is derived from a leg) — it is skipped and logged
-        loudly rather than guessed.
+        matching the scanner's global-CAS / owned-side-effect split. A group
+        with no legs is corruption (``mode`` is derived from a leg) — it is
+        skipped and logged loudly rather than guessed.
         """
         groups = await self._repo.list_active_paired_execution_groups(
             [

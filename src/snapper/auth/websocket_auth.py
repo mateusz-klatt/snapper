@@ -426,7 +426,7 @@ class WebSocketAuthManager:
         """Override the delayed-publish grace window (testing seam).
 
         Default is 5s; tests override to a sub-second value so
-        the deferred-publish path can be exercised deterministically.
+        the delayed-publish path can be exercised deterministically.
 
         Args:
             grace_seconds: New grace window in seconds. Must be positive.
@@ -511,7 +511,7 @@ class WebSocketAuthManager:
 
         Called from the WS dispatcher's disconnect path BEFORE (or
         alongside) the synchronous :meth:`disconnect` cleanup. The
-        hysteresis publish is deferred by
+        hysteresis publish is delayed by
         :data:`DEFAULT_DELEGATE_OFFLINE_GRACE_SECONDS` so a flapping
         reconnect cancels it before any subscriber observes the
         phantom-offline transition. If a prior pending task already
@@ -561,7 +561,7 @@ class WebSocketAuthManager:
         """Cancel + drain every in-flight delayed-offline task.
 
         Called from the FastAPI lifespan shutdown path so a closing
-        process does not leave deferred-publish tasks
+        process does not leave delayed-publish tasks
         sleeping against a torn-down ZMQ publisher / repository
         connection. Idempotent: clears the registry after draining so
         a second call is a no-op.

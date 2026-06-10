@@ -165,8 +165,8 @@ class TestTopicContractValidation:
         """Test the ambiguous-submit unknown event suffix is valid.
 
         Given: An orders events topic with the unknown suffix
-            (#145 P0-1 — published when a submit outcome is ambiguous
-            and venue verification is pending),
+            (published when a submit outcome is ambiguous and venue
+            verification is pending),
         When: Validated,
         Then: The topic is accepted.
         """
@@ -1463,7 +1463,8 @@ class TestOrdersCommandsAndEventsTopics:
         """Verify orders events topic with invalid event is rejected.
 
         Given: An orders events topic with an unrecognized event type
-            (note: 'unknown' itself is a VALID suffix since #145 P0-1),
+            (note: 'unknown' itself is a VALID suffix, published when
+            a submit outcome is ambiguous),
         When: Validated,
         Then: Validation fails.
         """
@@ -1782,7 +1783,8 @@ class TestOrdersEventsTopicValidationV2:
         """Verify orders.events topic with invalid event type is rejected.
 
         Given: An orders.events topic with an unrecognized event type
-            (note: 'unknown' itself is a VALID suffix since #145 P0-1),
+            (note: 'unknown' itself is a VALID suffix, published when
+            a submit outcome is ambiguous),
         When: Validated,
         Then: Validation fails with event type error.
         """

@@ -18,8 +18,8 @@ class OrderUnknownRule(AlertRule):
     """Safety-critical ambiguous-submit alert — order state is UNRESOLVED.
 
     An ``unknown`` event means the venue call failed in a way where the
-    order MAY exist on the exchange (#145 P0-1): the executor parked the
-    command and venue verification is pending. The operator must NOT
+    order MAY exist on the exchange: the executor parked the command
+    and venue verification is pending. The operator must NOT
     assume a flat position — the alert exists precisely because neither
     accepted nor rejected can be claimed yet, and automated layers are
     deliberately holding the in-flight guard instead of re-emitting.

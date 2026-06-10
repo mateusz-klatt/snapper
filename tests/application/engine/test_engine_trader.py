@@ -3402,7 +3402,7 @@ class TestRecovery:
     async def test_recover_active_order_backfills_operator_on_existing_engine(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Backfill operator on engines reused from earlier recovery phases.
+        """Backfill operator on engines reused from earlier recovery steps.
 
         When ``_recover_from_executions`` (or ``_recover_from_checkpoints``)
         creates an engine first, it has no source for ``operator_public_id``
@@ -5227,7 +5227,7 @@ class TestResolveInstrumentSpecs:
 
 
 class TestUnknownSubmitGuard:
-    """Engine-side guard semantics for the #145 P0-1 UNKNOWN submit state."""
+    """Engine-side guard semantics for the UNKNOWN submit state."""
 
     def _make_engine_inflight(self) -> Any:
         """Create a real engine with an in-flight order past its timeout."""
@@ -5334,7 +5334,7 @@ class TestUnknownSubmitGuard:
 
 @pytest.mark.asyncio
 class TestUnknownEventRouting:
-    """Coordinator routing of .unknown order events (#145 P0-1)."""
+    """Coordinator routing of .unknown order events."""
 
     async def _dispatch(self, coord: TraderCoordinator, status: str) -> None:
         """Send an OrderData with the given status through the handler."""

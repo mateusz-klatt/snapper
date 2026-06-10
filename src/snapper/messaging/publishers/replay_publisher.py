@@ -27,7 +27,7 @@ Streaming + drain
     in the message so an operator can tell publisher-stall from
     strategy-death.
 The publisher always closes the socket and terminates the context in a
-``finally`` block, regardless of which phase raised.
+``finally`` block, regardless of which step raised.
 """
 
 import asyncio
@@ -216,7 +216,7 @@ class ReplayPublisher:
         """Run the publisher: handshake, stream, drain. Always cleans up.
 
         ZMQ context and PUB socket are created here and torn down in a
-        ``finally`` block regardless of which phase raised, so the engine
+        ``finally`` block regardless of which step raised, so the engine
         does not leak ports if a backtest fails partway through.
         """
         ctx = zmq.asyncio.Context()

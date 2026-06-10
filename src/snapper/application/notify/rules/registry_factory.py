@@ -15,15 +15,15 @@ from snapper.application.notify.rules.position_stop_loss_fired import PositionSt
 
 
 def load_default_registry() -> RuleRegistry:
-    """Build the default registry with the five P0 rules plus order_unknown.
+    """Build the default registry with all six default alert rules.
 
     ``MarginWarningRule`` is registered before ``OrderRejectedRule``
     so the longest-prefix tiebreak (when both share the
     ``orders.events.`` prefix) is irrelevant — the two rules
     partition the rejected-events space via the shared
     ``is_margin_related_rejection`` predicate, so registration order
-    is documentation, not behaviour. ``OrderUnknownRule`` (#145 P0-1)
-    likewise shares the prefix but fires only on the ``.unknown``
+    is documentation, not behaviour. ``OrderUnknownRule`` likewise
+    shares the prefix but fires only on the ``.unknown``
     suffix, disjoint from every other rule.
 
     Returns:

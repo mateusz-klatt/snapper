@@ -64,7 +64,7 @@ def paired_halt_reason(wallet_public_id: str, strategy_id: str, group_key: str) 
     """Return the canonical in-memory shard-halt reason for a paired halt scope.
 
     The reason doubles as the SELECTIVE un-halt key for the reason-scoped
-    ``TradeService`` shard halts (Phase 5d.3): the guard scanner's halt mirror,
+    ``TradeService`` shard halts: the guard scanner's halt mirror,
     the startup recovery mirror, and the completion un-halt MUST all derive the
     byte-identical string or a completed pair would never release its shards.
     Keyed per HALT SCOPE — ``(wallet, strategy, group_key)`` — matching the

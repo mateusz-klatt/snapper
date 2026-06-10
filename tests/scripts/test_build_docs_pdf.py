@@ -1744,7 +1744,7 @@ class TestAdditionalCoverage:
         mock_mermaid_renderer: MagicMock,
         config: RenderConfig,
     ) -> None:
-        """Test that code in paragraph tags gets converted to pre tags."""
+        """Test that code in HTML p tags gets converted to pre tags."""
         doc_path = tmp_path / "code.md"
         doc_path.write_text("# Test\n\n`single line code block`\n", encoding="utf-8")
         source = DocumentSource(path=doc_path, title="Test", slug="test")

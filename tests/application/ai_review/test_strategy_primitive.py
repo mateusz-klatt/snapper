@@ -496,11 +496,10 @@ async def test_future_resolved_externally_skips_remaining_poll(
 ) -> None:
     """Pre-resolved future short-circuits the await loop.
 
-    Fast path — when the (future-deferred) bus listener fires
-    bus.ai_review_decision and resolves the registered Future,
-    the primitive exits the wait_for early. Because the bus listener
-    isn't wired yet, we simulate the path by resolving the future
-    directly.
+    Fast path — when a bus listener fires bus.ai_review_decision
+    and resolves the registered Future, the primitive exits the
+    wait_for early. No bus listener is wired, so the test simulates
+    the path by resolving the future directly.
 
     Given a registered future that is set as soon as the loop schedules,
     When the primitive's wait_for fires,

@@ -620,9 +620,9 @@ class ExchangeClientBase(ABC):
     ) -> ExchangeOrderSnapshot | None:
         """Verify whether an order with the given client id exists on the venue.
 
-        The resolver behind the ambiguous-submit UNKNOWN state (#145
-        P0-1): after a submit whose outcome is unknown, the executor
-        asks the venue for the truth before deciding the order's fate.
+        The resolver behind the ambiguous-submit UNKNOWN state: after
+        a submit whose outcome is unknown, the executor asks the venue
+        for the truth before deciding the order's fate.
 
         CONTRACT — ``None`` is an AUTHORITATIVE answer: it may be
         returned only when the venue was queried successfully across
@@ -816,9 +816,10 @@ class ExchangeClientBase(ABC):
         this point the venue already accepted the order, and an escaping
         exception would ride the venue client's create_order back into
         the executor's definitive-reject branch — misreporting a LIVE
-        order as rejected (#145 P0-1). Hence the blanket exception
-        catch; the caller treats None as "not persisted" and downstream
-        reconciliation heals the row.
+        order as rejected (exactly the false-reject failure the
+        ambiguous-submit UNKNOWN state exists to prevent). Hence the
+        blanket exception catch; the caller treats None as "not
+        persisted" and downstream reconciliation heals the row.
 
         Args:
             request: Original order request with parameters.

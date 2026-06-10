@@ -61,8 +61,8 @@ class TZDateTime(TypeDecorator[datetime]):
     production — earlier revisions did the strip everywhere, which
     landed a ``TIMESTAMP WITHOUT TIME ZONE`` schema in PG and lost
     the timezone information the production backend was designed to
-    preserve (operator decision 2026-05-16: "Postgres = production,
-    natywne typy gdzie się da, SQLite konwertuje").
+    preserve (operator decision 2026-05-16: Postgres is production,
+    native types where possible, SQLite converts).
     """
 
     impl = DateTime(timezone=True)
@@ -1162,8 +1162,8 @@ class PairedExecutionGroup(TemporalMixin, Base):
     terminal state. ``group_key`` is the canonical sorted set of
     per-leg ``exchange:instrument:mode`` tokens joined by ``|`` so a
     halt can recognise the same strategy pair. ``status`` is not
-    constrained by a DB CHECK (the FSM is extended across later guard
-    phases); only the immutable ``policy`` is pinned.
+    constrained by a DB CHECK (the FSM can gain states without a
+    schema migration); only the immutable ``policy`` is pinned.
     """
 
     __tablename__ = "paired_execution_groups"
@@ -1206,8 +1206,8 @@ class PairedExecutionLeg(TemporalMixin, Base):
     ``shard_key``) plus the venue identifiers and signed quantities the
     compensator needs: ``open_group_qty = filled_signed_qty -
     compensated_signed_qty``. ``status`` is not constrained by a DB
-    CHECK (the FSM is extended across later guard phases); only the
-    immutable ``side`` and ``mode`` are pinned.
+    CHECK (the FSM can gain states without a schema migration); only
+    the immutable ``side`` and ``mode`` are pinned.
     """
 
     __tablename__ = "paired_execution_legs"
@@ -1273,8 +1273,10 @@ class PairedExecutionHalt(TemporalMixin, Base):
     Prevents a strategy pair from opening a NEW group while a prior
     group is broken / compensating. Active-unique on
     ``(wallet_public_id, strategy_id, group_key)`` so the ``_on_signal``
-    fast-reject can match a pending halt cheaply. The schema lands in
-    Phase 2; the halt projection / clear behaviour is wired in Phase 4.
+    fast-reject can match a pending halt cheaply. The guard scanner
+    writes halts when a haltable group breaks
+    (``ensure_paired_execution_halt``) and clears them via its
+    quiet-halt sweep (``_sweep_halt_clears``).
     """
 
     __tablename__ = "paired_execution_halts"
@@ -1438,8 +1440,9 @@ class ContinuousContractConfig(TemporalMixin, Base):
 
     Stores parameters for on-demand continuous contract computation.
     The series data itself is NOT persisted — it is computed per request
-    by ContinuousContractBuilder. CRUD endpoints deferred to a future
-    phase; ships schema/migration only.
+    by ContinuousContractBuilder. No CRUD endpoints exist for these
+    presets; the continuous-series endpoint takes its parameters
+    directly as query arguments.
     """
 
     __tablename__ = "continuous_contract_configs"
@@ -1647,7 +1650,8 @@ class WalletCredential(TemporalMixin, Base):
     restart. There is no per-row ``encryption_key_id``: the master
     password is the single source of truth. A multi-key overlap
     window (envelope encryption with KMS-style data-encryption keys)
-    is intentionally deferred until a real use case appears.
+    is intentionally not implemented; rotation is always the
+    all-rows lockstep described above.
 
     Encryption reuses the existing Setting encryption infrastructure (master
     key from env var, encrypted at rest). Credentials are pull-on-startup only
@@ -1767,8 +1771,7 @@ class WalletOperatorScopeGrant(TemporalMixin, Base):
     All grants are instrument-exclusive: at most ONE operator
     may hold an active grant on any (wallet, instrument) tuple at any time.
     There is no lock_mode column. Cooperative grants (multiple operators
-    sharing the same instrument on the same wallet) are deferred to a
-    future plan.
+    sharing the same instrument on the same wallet) are not supported.
 
     The CHECK constraint enforces scope_kind XOR: exactly one of
     underlying_public_id / instrument_public_id is non-NULL. The two partial

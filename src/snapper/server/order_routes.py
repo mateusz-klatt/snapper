@@ -199,7 +199,7 @@ async def create_order(
 
     Creates the plan with status=pending, inserts the TradeCommand
     then transitions to active. On command insert failure the plan
-    is marked failed. This two-phase approach prevents orphaned
+    is marked failed. This two-step approach prevents orphaned
     active plans without commands.
 
     Args:

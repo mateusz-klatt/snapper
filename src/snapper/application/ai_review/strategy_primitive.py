@@ -20,13 +20,14 @@ issue + await an AI-delegate CONSULT round:
 The primitive composes :meth:`AiReviewService.create_review` with the
 await loop:
 
-- **Fast path (deferred wiring)** — :meth:`AiReviewService.register_future`
+- **Fast path** — :meth:`AiReviewService.register_future`
   registers an :class:`asyncio.Future` keyed on ``review_public_id``.
   When the ``bus.ai_review_decision`` listener fires for the row it
   resolves the future via the singleton's ``_futures`` registry and
-  the await wakes immediately. The ZMQ subscriber loop that drives
-  this is a separate chunk; until it lands the future stays unset
-  and the slow path is the primary completion signal.
+  the await wakes immediately. The listener is started via
+  :meth:`AiReviewService.start_bus_listener`; in processes that
+  never start it the future stays unset and the slow path is the
+  sole completion signal.
 - **Slow path** — DB poll every ``poll_min_seconds`` to
   ``poll_max_seconds`` (jittered 3-7s default).
   ``Repository.get_ai_review`` returns the row; once status reaches

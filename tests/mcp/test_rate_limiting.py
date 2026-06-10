@@ -76,7 +76,7 @@ class _StubClaimsMiddleware(BaseHTTPMiddleware):
         self._claims = claims
 
     async def dispatch(self, request: Request, call_next: Any) -> Any:
-        """Attach claims and defer to downstream."""
+        """Attach claims and pass control downstream."""
         request.state.token_claims = self._claims
         return await call_next(request)
 

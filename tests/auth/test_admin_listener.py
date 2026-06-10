@@ -163,7 +163,7 @@ class TestCloseUserConnections:
 
     @pytest.mark.asyncio
     async def test_ascii_reason_truncated_to_123_bytes(self) -> None:
-        """Close-frame `reason` field is limited per RFC 6455 §5.5.1 (123 bytes)."""
+        """Close-frame `reason` field is limited per RFC 6455 section 5.5.1."""
         manager = _make_manager()
         ws = MagicMock()
         ws.close = AsyncMock()

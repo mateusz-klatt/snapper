@@ -614,9 +614,10 @@ class UserDeactivatedData(StrictDataSchema[Literal["user_deactivated"]]):
 class CapsViolationAfterAiApproveData(StrictDataSchema[Literal["caps_violation_after_ai_approve"]]):
     """Caps-violation event for an already-AI-approved CONSULT.
 
-    Published by ``TradingCapsEnforcer`` (deferred wiring chunk —
-    publisher side ships when the enforcer learns to thread the
-    ``ai_review_public_id`` through ``TradeCommandSubmission``) on the
+    Published by ``TradingCapsEnforcer`` (only when the rejected
+    submission carries an ``ai_review_public_id`` citation threaded
+    through ``TradeCommandSubmission``; uncited rejections skip the
+    broadcast) on the
     internal ``bus.caps_violation_after_ai_approve`` topic when a
     trade that previously passed the AI delegate's review later
     fails the caps gate. ``AiReviewService.handle_caps_violation_bus_message``

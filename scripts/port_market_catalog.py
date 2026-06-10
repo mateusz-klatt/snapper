@@ -1,7 +1,7 @@
 """Port frontend market.* translations into the iOS xcstrings catalog.
 
 Reads each frontend ``frontend/src/locales/<dir>/market.json`` file,
-extracts the namespaces declared in :data:`PHASE_PREFIXES`, and
+extracts the configured market namespaces, and
 merges the per-locale strings into
 ``ios/Snapper/Resources/Localization/Localizable.xcstrings``.
 
@@ -57,14 +57,11 @@ PHASE_PREFIXES: Final[tuple[str, ...]] = (
 )
 """Frontend ``market.*`` sub-namespaces this script ports.
 
-An earlier increment landed the banner + locale-persist infrastructure
-(``description.`` / ``assetClass.`` / ``sector.``). A follow-up added
-``related.`` (cluster headers + chip exchange separator + empty
-state). The most recent increment adds ``pairStats.`` (cointegration
-row label + metric + accessibility) and ``cacheBanner.`` (cache-warming
-notice + data-source caption). Each increment extends this tuple in the
-same commit as the iOS view that consumes the keys, so the catalog
-parity gate fails loudly if either side drifts.
+The tuple covers descriptive labels (``description.``, ``assetClass.``,
+``sector.``), related-instrument UI strings (``related.``),
+cointegration summary strings (``pairStats.``), and cache status copy
+(``cacheBanner.``). The catalog parity gate fails loudly when the
+frontend JSON and iOS view-consumed keys drift apart.
 """
 
 CATALOG_NAMESPACE: Final[str] = "market"
@@ -131,17 +128,17 @@ def _is_phase_key(key: str) -> bool:
 
 
 def _flatten_market_payload(payload: dict[str, object]) -> dict[str, str]:
-    """Return the dotted-key flat map filtered to the ported prefixes.
+    """Return the dotted-key flat map filtered to the ported namespaces.
 
     Skips keys whose value is not a string (i.e. nested namespaces are
-    descended into, leaves outside the ported prefixes are discarded).
+    descended into, leaves outside the ported namespaces are discarded).
 
     Args:
         payload: Parsed ``market.json`` for one locale.
 
     Returns:
         Flat ``{"description.label": "Instrument description", ...}``
-        map containing only keys under :data:`PHASE_PREFIXES`.
+        map containing only keys under the configured market namespaces.
     """
     flat: dict[str, str] = {}
     _walk_market_payload("", payload, flat)
@@ -245,8 +242,8 @@ def _read_locale_payload(locale_dir_name: str) -> dict[str, str]:
             directory.
 
     Returns:
-        Flat ``{short_key: value}`` map filtered to the namespaces in
-        :data:`PHASE_PREFIXES`.
+        Flat ``{short_key: value}`` map filtered to the configured
+        market namespaces.
     """
     path = FRONTEND_LOCALES_DIR / locale_dir_name / "market.json"
     if not path.exists():

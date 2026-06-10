@@ -543,10 +543,10 @@ class KrakenExchangeClient(ExchangeClientBase):
         the one non-idempotent venue mutation on this client, and a blind
         re-send after an ambiguous network failure (request possibly
         executed, response lost) can double-place a market order because
-        Kraken's ``cl_ord_id`` dedupe covers only open orders (#145
-        audit, gap P0-2). The ambiguous failure is re-raised as
-        ``AmbiguousOrderSubmitError`` so the executor routes it to the
-        UNKNOWN/verify path instead of fabricating a rejection (P0-1).
+        Kraken's ``cl_ord_id`` dedupe covers only open orders. The
+        ambiguous failure is re-raised as ``AmbiguousOrderSubmitError``
+        so the executor routes it to the UNKNOWN/verify path instead of
+        fabricating a rejection.
         ``RateLimitExceeded`` is re-raised plain FIRST because it
         subclasses ``NetworkError`` while being a definitive venue-side
         rejection (the exhausted 429 cannot have placed the order).
@@ -770,8 +770,8 @@ class KrakenExchangeClient(ExchangeClientBase):
 
         Returns:
             The order snapshot when found; None only after BOTH queries
-            succeeded and neither contains the client id (#145 P0-1
-            authoritative-absence contract).
+            succeeded and neither contains the client id, so None is an
+            authoritative statement of absence.
 
         Raises:
             RuntimeError: If API credentials are missing.
@@ -2179,10 +2179,10 @@ class KrakenExchangeClient(ExchangeClientBase):
         Kraken deduplicates ``cl_ord_id`` only among OPEN orders and all
         strategy orders are MARKET (filled instantly, never open), so a
         blind re-send after a send-then-timeout can double-place a real
-        position (#145 audit, gap P0-2). With the flag off, network
-        failures still feed the circuit breaker but raise immediately;
-        rate-limit retries remain enabled because a 429 is a definitive
-        venue-side rejection and re-sending cannot duplicate.
+        position. With the flag off, network failures still feed the
+        circuit breaker but raise immediately; rate-limit retries remain
+        enabled because a 429 is a definitive venue-side rejection and
+        re-sending cannot duplicate.
 
         Args:
             func: Function to call (sync or async).

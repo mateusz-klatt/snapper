@@ -263,7 +263,7 @@ class AppSettings:
 
     @property
     def trade_command_dispatch_ttl_s(self) -> float:
-        """Return the dispatch max-age TTL for trade commands (#145 P0-4).
+        """Return the dispatch max-age TTL for trade commands.
 
         Gates both the outbox dispatch (stale CREATED submits expire to
         EXPIRED) and the executor submit path (stale frames reject

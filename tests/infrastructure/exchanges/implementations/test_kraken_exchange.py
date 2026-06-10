@@ -2858,7 +2858,7 @@ class TestRetryMaxRetriesExceeded:
 
 
 class TestCreateOrderNetworkRetryExclusion:
-    """Tests for the P0-2 double-place guard (#145 audit).
+    """Tests for the create_order double-place guard.
 
     Order creation is the one non-idempotent venue mutation on the spot
     client: a network-class failure after send is ambiguous (the order
@@ -2891,7 +2891,7 @@ class TestCreateOrderNetworkRetryExclusion:
             consumed by _with_retry rather than forwarded to the venue
             call, and the ambiguous failure surfaces as
             AmbiguousOrderSubmitError carrying the original timeout as
-            __cause__ plus the submit identity (#145 P0-1).
+            __cause__ plus the submit identity.
         """
         mock_client = AsyncMock()
         mock_client.create_order.side_effect = ccxt.RequestTimeout("request timed out")
@@ -3006,7 +3006,7 @@ class TestCreateOrderNetworkRetryExclusion:
 
 
 class TestAmbiguousSubmitClassification:
-    """Exception taxonomy pins for spot create_order (#145 P0-1).
+    """Exception taxonomy pins for spot create_order.
 
     Only genuinely ambiguous failures (request possibly executed) may
     wrap into AmbiguousOrderSubmitError; definitive venue answers and
@@ -6742,7 +6742,7 @@ class TestRawTickerCapture:
 
 
 class TestConnectRaceHardening:
-    """Spot parity tests for the #144 connect-race hardening."""
+    """Spot parity tests for the futures client's connect-race hardening."""
 
     @pytest.mark.asyncio
     async def test_ensure_ws_connected_coalesces_concurrent_callers(self) -> None:
@@ -6877,7 +6877,7 @@ class TestConnectRaceHardening:
 
 
 class TestFindOrderByClientId:
-    """Spot client-id verification lookups (#145 P0-1 slice 3)."""
+    """Spot client-id verification lookups for ambiguous submits."""
 
     @pytest.fixture
     def kraken_client(self) -> KrakenExchangeClient:

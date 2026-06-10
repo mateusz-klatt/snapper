@@ -1596,9 +1596,9 @@ class TestPhaseBPrimeShim:
         Then the reservation uses the legacy ``"kraken"`` tag,
         preserving back-compat for the Spot publisher path where
         ``KrakenMarketDataPublisher.start`` sets the ContextVar
-        explicitly. (Other Kraken publishers that have not yet been
-        migrated to set ``_CURRENT_PUBLISHER`` still get pool routing
-        under the legacy tag.)
+        explicitly. (Other Kraken publishers that do not set
+        ``_CURRENT_PUBLISHER`` still get pool routing under the
+        legacy tag.)
         """
         self._enable_pool(with_socks5=True)
         seen_kwargs: dict[str, Any] = {}
@@ -1636,7 +1636,7 @@ class TestPhaseBPrimeGetReconnectWait:
 
     @staticmethod
     def _enable_pool(*, with_socks5: bool = False) -> Any:
-        """Helper — same as TestPhaseBPrimeShim._enable_pool."""
+        """Helper matching the pool-enabled shim setup."""
         routes = [RouteConfig(id="default", kind="direct", priority=0)]
         if with_socks5:
             routes.append(

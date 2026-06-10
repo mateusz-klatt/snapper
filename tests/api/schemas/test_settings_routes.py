@@ -671,7 +671,7 @@ class TestPushBetaUsersRoutes:
         """``enabled=True`` with an empty allowlist silences every push.
 
         The admin contract: explicit empty list = "nobody is in the
-        beta yet" — used during a phased rollout where the gate is
+        beta yet" — used during an incremental rollout where the gate is
         flipped on before users are added.
         """
         mock_settings = MagicMock()

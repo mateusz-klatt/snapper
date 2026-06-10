@@ -276,8 +276,8 @@ class PairedExecutionGroupStatusEnum(StrEnum):
     (all legs reached a consistent terminal state); and
     ``manual_intervention`` (compensation could not complete
     automatically, operator action required). Persisted as the column
-    string value; not enforced by a DB CHECK so later phases may extend
-    the FSM without a constraint-widening migration.
+    string value; not enforced by a DB CHECK, so the FSM can gain new
+    states without a constraint-widening migration.
     """
 
     ASSEMBLING = "assembling"
@@ -562,7 +562,7 @@ class OrderEventEnum(StrEnum):
     failed in a way where the order MAY exist on the venue (request
     possibly executed, response lost). It is non-terminal — the engine
     must keep the in-flight guard held until the executor resolves the
-    order to accepted or rejected via venue verification (#145 P0-1).
+    order to accepted or rejected via venue verification.
     """
 
     SUBMITTED = "submitted"

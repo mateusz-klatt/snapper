@@ -24,8 +24,8 @@ the packet through the correct WG interface.
 
 RFC notes (RFC 1928):
 
-* The handshake + CONNECT-request phases are bounded by short timeouts.
-* The relay phase is UNBOUNDED — Kraken WebSocket sessions live for
+* The handshake and CONNECT request steps are bounded by short timeouts.
+* The relay loop is UNBOUNDED — Kraken WebSocket sessions live for
   hours, so wrapping the relay in a global ``wait_for`` would kill them
   silently.
 * Failure replies always carry the IPv4 placeholder ``0.0.0.0:0`` as
@@ -80,13 +80,13 @@ REP_CONNECTION_REFUSED: Final[int] = 0x05
 """Reply code: connection refused by destination."""
 
 REP_COMMAND_NOT_SUPPORTED: Final[int] = 0x07
-"""Reply code: command not supported (RFC 1928 §6)."""
+"""Reply code: command not supported (RFC 1928 section 6)."""
 
 REP_ADDRTYPE_NOT_SUPPORTED: Final[int] = 0x08
 """Reply code: address type not supported."""
 
 RSV_REQUIRED: Final[int] = 0x00
-"""RFC 1928 §6: the reserved byte MUST be ``0x00`` in every request/reply."""
+"""RFC 1928 section 6: the reserved byte MUST be ``0x00`` in every request/reply."""
 
 _NEGOTIATION_TIMEOUT_S: Final[float] = 5.0
 """Maximum time to wait for the SOCKS5 greeting + CONNECT request."""
@@ -201,7 +201,7 @@ class Socks5Server:
 
         Negotiation + CONNECT establishment is bounded by
         ``_NEGOTIATION_TIMEOUT_S + _CONNECT_TIMEOUT_S``; the relay
-        phase is UNBOUNDED (long-lived WebSocket sessions). Catches
+        loop is UNBOUNDED (long-lived WebSocket sessions). Catches
         protocol-level and IO errors so a misbehaving peer cannot crash
         the listener; unexpected exceptions still bubble to asyncio's
         default handler so they are not silently lost.
@@ -279,7 +279,7 @@ class Socks5Server:
         """Parse the CONNECT request and return ``(host, port)``.
 
         Replies with the matching error code and raises ``_Socks5Error``
-        on any unsupported field. Per RFC 1928 §6 the reserved byte
+        on any unsupported field. Per RFC 1928 section 6 the reserved byte
         MUST be ``0x00``; non-zero is treated as a malformed request.
         """
         header = await self._readexactly_or_raise(client_reader, 4, "request header")
@@ -358,7 +358,7 @@ class Socks5Server:
     async def _reply_success(self, client_writer: asyncio.StreamWriter) -> None:
         """Send the SOCKS5 success reply with IPv4 ``0.0.0.0:0`` BIND placeholder.
 
-        Per RFC 1928 §6 the success reply MUST be well-formed; we use the
+        Per RFC 1928 section 6 the success reply MUST be well-formed; we use the
         canonical IPv4 zero placeholder for BND.ADDR/PORT since we never
         advertise a useful bind address back to the client.
         """
@@ -387,7 +387,7 @@ class Socks5Server:
     ) -> None:
         """Send a SOCKS5 failure reply with the IPv4 ``0.0.0.0:0`` placeholder.
 
-        Per RFC 1928 §6 every reply (success or failure) must be a
+        Per RFC 1928 section 6 every reply (success or failure) must be a
         well-formed BND.ADDR + BND.PORT tuple. Failure replies always
         use ATYP=IPv4 with zero address regardless of the request's
         ATYP — emitting the request ATYP would produce malformed

@@ -6655,9 +6655,9 @@ async def test_flush_candle_row_by_row_drops_generic_failed_row_before_disconnec
         logged + rolled back and is silently dropped, matching the
         legacy pre-2026-05-28 behavior for non-disconnect failures.
         Retaining the generic-failed row in the retry batch would risk
-        a shutdown livelock if the failure is persistent. (A retry
-        policy that distinguishes transient from permanent generic
-        failures with a shutdown-safe escape is tracked separately.)
+        a shutdown livelock if the failure is persistent. (No retry
+        policy distinguishes transient from permanent generic
+        failures; a generic-failed row is dropped, never retried.)
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     call_count = {"n": 0}

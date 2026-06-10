@@ -428,7 +428,7 @@ _ORDER_SUBMIT_EVIDENCE_EVENT_TYPES: tuple[str, ...] = (
 )
 """Venue event types proving an order submit may have reached the venue.
 
-The duplicate-submit guard (#145 P0-5) drops a replayed command whose
+The duplicate-submit guard drops a replayed command whose
 client_order_id carries any of these — the order is or was live (or its
 state is UNKNOWN pending verification), so re-submitting could double a
 MARKET position. ``order_rejected`` is deliberately EXCLUDED: a cid
@@ -6890,9 +6890,9 @@ class SQLAlchemyRepository(Repository):
         """Insert a paired-execution compensation command, idempotent on idempotency_key.
 
         Used by the guard scanner to emit a venue cancel of a still-live original
-        order (Phase 5c.1) or a reduce-only flatten (Phase 5c.2) for a broken /
-        compensating group. The row MUST carry an ``idempotency_key``; the
-        active-unique ``(idempotency_key)`` index dedups re-emission across scan
+        order or a reduce-only flatten for a broken / compensating group. The
+        row MUST carry an ``idempotency_key``; the active-unique
+        ``(idempotency_key)`` index dedups re-emission across scan
         cycles and coordinator instances. On an ``IntegrityError`` the method
         RE-CHECKS that an active row already holds this ``idempotency_key``; if so
         the collision was the expected idempotent dedup and ``None`` is returned,
@@ -6945,7 +6945,7 @@ class SQLAlchemyRepository(Repository):
     ) -> str | None:
         """Atomically claim a leg for compensation and insert its flatten command.
 
-        In ONE transaction (Phase 5c.2): re-reads the CURRENT active leg
+        In ONE transaction: re-reads the CURRENT active leg
         (``known_to == KNOWN_TO_MAX``) ``FOR UPDATE``; if the leg is gone or its
         status no longer equals ``expected_status`` (another instance / cycle
         already claimed it — optimistic CAS) it returns ``None`` WITHOUT inserting;
@@ -7637,7 +7637,7 @@ class SQLAlchemyRepository(Repository):
         transitioned. Per-row ``last_error`` is cleared on the new
         version (success path never carries a previous error forward).
 
-        CAS semantics on the CURRENT row (#145 P0-4 hardening): only an
+        CAS semantics on the CURRENT row: only an
         ACTIVE row still at ``status='created'`` transitions. A command
         that a concurrent writer already moved (outbox TTL
         CREATED→EXPIRED, guard-scanner CREATED→CANCELLED) between this
@@ -8344,8 +8344,8 @@ class SQLAlchemyRepository(Repository):
         but the monotonic guard left it unchanged, and
         :attr:`~PairedFillProjection.NO_MATCH` when no leg owns the order.
 
-        A late ORIGINAL fill that arrives AFTER the leg went post-break (Phase
-        5d.2 re-entry) is no longer dropped — the monotonic update still applies
+        A late ORIGINAL fill that arrives AFTER the leg went post-break is
+        NOT dropped — the monotonic update still applies
         (real venue exposure only grows), and the successor status follows
         :meth:`_late_original_fill_status`: a ``flattened`` / ``broken`` leg whose
         ``open_qty`` reappears goes back to ``filled`` so the compensation sweep
@@ -8357,7 +8357,7 @@ class SQLAlchemyRepository(Repository):
         in-flight leg uses the venue ``new_status`` as before.
 
         A late growing fill that lands while the leg's GROUP is already
-        ``completed`` (Phase 5d.3) additionally reopens the group to
+        ``completed`` additionally reopens the group to
         ``compensating`` in the SAME transaction whenever the leg's resulting
         ``open_qty`` is non-zero — the guard scanner never lists completed
         groups (terminal-status listing is unbounded), so without the reopen
@@ -8653,8 +8653,8 @@ class SQLAlchemyRepository(Repository):
         A fill on a leg still in a normal in-flight state (``pending`` / ``armed``
         / ``working`` / ``partially_filled``) uses the venue ``normal_status``
         (``filled`` / ``partially_filled``) as before. A LATE fill that grows
-        exposure on a leg already in a fill-terminal state (Phase 5d.2 re-entry)
-        instead transitions per the safe re-entry FSM:
+        exposure on a leg already in a fill-terminal state instead
+        transitions per the safe re-entry FSM:
 
         - ``flattened`` / ``broken`` → ``filled`` when ``open_qty`` reappears (so
           the compensation sweep re-flattens the residual on the next
@@ -8686,7 +8686,7 @@ class SQLAlchemyRepository(Repository):
         """Project a reduce-only FLATTEN order's venue event onto its leg's compensation.
 
         Routes BOTH a flatten order's fill (live fill hook) and its venue terminal
-        — cancel / expire / reject (live terminal hook, Phase 5d.2) — since each
+        — cancel / expire / reject (live terminal hook) — since each
         carries the flatten's FRESH ``client_order_id`` and a command whose
         ``supersedes_command_id`` is the leg's ORIGINAL command, so it matches NO
         leg by ``client_order_id`` (the original projection returns ``NO_MATCH``
@@ -8832,7 +8832,7 @@ class SQLAlchemyRepository(Repository):
         filled or venue cancel / expire / reject) while exposure remains —
         because a late ORIGINAL fill grew ``filled`` past what that round
         flattened — back to ``filled`` so the sweep re-flattens the residual on
-        the NEXT ``compensation_seq`` (Phase 5d.2 re-entry); else ``compensating``
+        the NEXT ``compensation_seq``; else ``compensating``
         is kept (a flatten is still in flight — re-flattening now would
         double-flatten). ``manual_intervention`` and every non-``compensating``
         status are carried forward UNCHANGED (auto-flatten must never override an
@@ -9130,10 +9130,10 @@ class SQLAlchemyRepository(Repository):
         side, target, signal/command ids) is copied from ``existing`` and only
         the explicitly-overridden ``status`` / ``filled_signed_qty`` / venue ids
         / provenance / ``timestamp`` differ. ``compensated_signed_qty`` is
-        carried forward unless an override is given (the Phase 5d.1
+        carried forward unless an override is given (the
         compensation-fill projection writes the recomputed value);
         ``compensation_seq`` is carried forward unless an override is given (the
-        flatten claim in Phase 5c.2 bumps it). The caller closes ``existing``
+        flatten claim bumps it). The caller closes ``existing``
         and adds this row.
         """
         return PairedExecutionLeg(
@@ -9540,7 +9540,7 @@ class SQLAlchemyRepository(Repository):
     ) -> bool:
         """Close a scope's active halt iff NO group in the scope is still exposed.
 
-        The quiet-halt sweep's clear (Phase 5d.3): in ONE transaction, checks
+        The quiet-halt sweep's clear: in ONE transaction, checks
         for any CURRENT active group on the ``(wallet, strategy, group_key)``
         scope whose status is still exposed (``broken`` / ``compensating`` /
         ``manual_intervention``) and, only when none exists, closes the scope's
@@ -9635,7 +9635,7 @@ class SQLAlchemyRepository(Repository):
     ) -> bool:
         """CAS a fully-settled group to ``completed`` under a group-then-legs lock.
 
-        The Phase 5d.3 completion check, in ONE transaction: locks the CURRENT
+        The completion check, in ONE transaction: locks the CURRENT
         active group ``FOR UPDATE`` (group THEN legs — the lock order every
         group-touching paired DAL shares), verifies ``status ==
         expected_status``, locks the CURRENT active legs, and verifies the
@@ -9770,7 +9770,7 @@ class SQLAlchemyRepository(Repository):
     ) -> list[PairedExecutionGroupRow]:
         """Return CURRENT active ``completed`` groups whose completion is recent.
 
-        Startup recovery's bounded window over completed groups (Phase 5d.3): a
+        Startup recovery's bounded window over completed groups: a
         late original fill that landed while the coordinator was DOWN must
         reopen its completed group, but the live reopen trigger never fires for
         events already persisted and listing ALL completed groups is unbounded
@@ -10038,7 +10038,7 @@ class SQLAlchemyRepository(Repository):
 
         Probes the append-only ``venue_events`` for any
         ``_ORDER_SUBMIT_EVIDENCE_EVENT_TYPES`` row of the client order
-        id — the duplicate-submit guard's durable check (#145 P0-5),
+        id — the duplicate-submit guard's durable check,
         covering crash-replay where a fresh executor process has no
         in-memory pending state. Served by
         ``ix_venue_events_cid_event_type``; no ``known_to`` filter is

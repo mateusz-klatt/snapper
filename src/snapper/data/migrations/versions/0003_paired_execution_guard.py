@@ -4,8 +4,7 @@ Creates the three Slowly-Changing-Dimension Type 2 tables that back the
 multi-leg paired-execution guard: ``paired_execution_groups`` (the
 bounded-compensation group FSM), ``paired_execution_legs`` (the
 authoritative per-leg map with signed fill / compensation accounting),
-and ``paired_execution_halts`` (the strategy-pair halt projection whose
-behaviour is wired in a later guard phase). Also adds a single
+and ``paired_execution_halts`` (the strategy-pair halt projection). Also adds a single
 denormalised, nullable ``paired_group_id`` column to ``signals`` and
 ``venue_events`` for guard provenance / handler fast-paths.
 
@@ -15,7 +14,7 @@ columns (native ``UUID`` on Postgres, ``VARCHAR(36)`` on SQLite),
 decorator, named ``CheckConstraint``s, and partial unique indexes
 restricted to the SCD2-active rows (``known_to = KNOWN_TO_MAX``) with
 dialect-specific literals. The status columns are deliberately NOT
-constrained by a CHECK so later guard phases can extend the FSM without
+constrained by a CHECK so the guard FSM can extend without
 a constraint-widening migration; only the immutable ``policy`` / ``side``
 / ``mode`` enums are pinned.
 """

@@ -564,9 +564,9 @@ async def test_rate_limited_log_is_throttled_within_cooldown(
         subsequent alerts within the same cooldown window flow through
         the cooldown-update path silently. This protects the boot log
         from buffer-flush amplification of an otherwise correct
-        rate-limit handler. Mirrors the P2 aggregate pattern (commit
-        ``05142cbf``): preserve behavioural correctness, suppress
-        per-event log spam.
+        rate-limit handler. Mirrors the aggregated-warning pattern
+        (commit ``05142cbf``): preserve behavioural correctness,
+        suppress per-event log spam.
     """
     clock = _DeterministicClock()
     _install_public_subscribe_clock(monkeypatch, clock)
@@ -1497,7 +1497,7 @@ class TestOrderMethods:
 
         Given: The Trade SDK create_order raising a requests transport
             error (the request may have reached the venue with this
-            cliOrdId, #145 P0-1),
+            cliOrdId),
         When: create_order is called,
         Then: AmbiguousOrderSubmitError surfaces with the original
             error chained and the submit identity attached.
@@ -4809,7 +4809,7 @@ class TestGetCurrentFundingRate:
 
 
 class TestSubscribeWedgeHardening:
-    """Tests for the #144 deadlock-class hardening.
+    """Tests for the subscribe-wedge deadlock-class hardening.
 
     Bounded SDK sends, serialized connects, compare-and-clear ownership,
     replay abort on client swap, and trade dark-recovery — the fix set for
@@ -5072,7 +5072,7 @@ class TestSubscribeWedgeHardening:
 
 
 class TestPrivatePathHardening:
-    """Round-2 #144 hardening: the PRIVATE WS path gets the same guarantees."""
+    """The PRIVATE WS path gets the same deadlock-hardening guarantees."""
 
     @pytest.mark.asyncio
     async def test_private_ensure_coalesces_concurrent_callers(
@@ -5203,7 +5203,7 @@ class TestPrivatePathHardening:
 
 
 class TestFindOrderByClientIdFutures:
-    """Futures cliOrdId verification lookups (#145 P0-1 slice 3)."""
+    """Futures cliOrdId verification lookups for ambiguous-submit recovery."""
 
     @pytest.mark.asyncio
     async def test_found_returns_snapshot(self, auth_client: KrakenFuturesExchangeClient) -> None:

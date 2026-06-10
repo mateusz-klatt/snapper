@@ -125,11 +125,11 @@ def _is_whitelisted_line(line: str, filepath: Path | None = None) -> bool:
     """Return True when the line matches a whitelisted pattern.
 
     Checks global whitelist patterns only. The ``filepath`` parameter
-    is reserved for future path-specific whitelist extensions.
+    is accepted for API symmetry with path-aware callers.
 
     Args:
         line: Source code line to check.
-        filepath: Optional file path (reserved for future use).
+        filepath: Optional file path supplied by path-aware callers.
 
     Returns:
         True when the line is safe to ignore.

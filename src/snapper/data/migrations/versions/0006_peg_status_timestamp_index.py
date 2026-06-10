@@ -1,6 +1,6 @@
 """Add a paired_execution_groups (status, timestamp) index for completed-window recovery.
 
-Phase 5d.3's startup recovery replays venue fills into RECENTLY COMPLETED
+The startup recovery replays venue fills into RECENTLY COMPLETED
 paired-execution groups (a late original fill that landed while the
 coordinator was down must reopen the completed group, and the live reopen
 trigger never fires for events already persisted). The replay is bounded by a

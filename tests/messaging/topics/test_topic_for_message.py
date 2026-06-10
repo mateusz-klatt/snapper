@@ -181,8 +181,8 @@ class TestTopicForMessage:
     def test_order_data_unknown_status(self) -> None:
         """OrderData with the ambiguous-submit status derives the unknown topic.
 
-        Given: An OrderData with status 'unknown' (#145 P0-1 — submit
-            outcome ambiguous, venue verification pending),
+        Given: An OrderData with status 'unknown' (submit outcome
+            ambiguous, venue verification pending),
         When: Deriving topic,
         Then: Returns orders.events.kraken.BTC-USD.unknown.
         """

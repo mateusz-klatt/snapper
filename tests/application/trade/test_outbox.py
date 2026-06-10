@@ -322,7 +322,7 @@ async def test_dispatch_revert_db_failure_logged() -> None:
 
 
 class TestDispatchTtl:
-    """Stale CREATED commands expire instead of dispatching (#145 P0-4)."""
+    """Stale CREATED commands expire instead of dispatching."""
 
     def _stale_cmd(self, age_s: float = 120.0, command_type: str = "submit") -> TradeCommandRow:
         """Build a command row created age_s seconds in the past."""

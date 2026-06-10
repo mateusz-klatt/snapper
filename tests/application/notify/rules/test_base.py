@@ -101,7 +101,7 @@ class TestLoadDefaultRegistry:
     """Verifies the default v1.11 registry contract."""
 
     def test_default_registry_has_six_rules(self) -> None:
-        """load_default_registry wires the 5 P0 rules plus order_unknown (#145 P0-1)."""
+        """load_default_registry wires the five baseline rules plus order_unknown."""
         reg = load_default_registry()
 
         alert_types = {rule.alert_type for rule in reg._rules}

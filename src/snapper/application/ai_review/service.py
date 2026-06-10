@@ -1468,7 +1468,7 @@ class AiReviewService:
                 bus subscriber pass ``msg.last_seen_at`` so the
                 ``fanout_after`` gate matches the instant the delegate
                 actually went offline; reviews whose ``fanout_after``
-                is still in the future are deferred to the Layer 2
+                is still in the future are handled by the Layer 2
                 scanner per the :class:`DelegateOfflineData` schema
                 contract.
 

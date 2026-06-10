@@ -2051,7 +2051,7 @@ class TestWsEnvelopeDelayedPropagation:
 
 
 class TestConnectRaceHardening:
-    """Equities parity tests for the #144 connect-race hardening."""
+    """Equities parity tests for the shared Kraken connect-race hardening."""
 
     @pytest.mark.asyncio
     async def test_ensure_ws_connected_coalesces_concurrent_callers(

@@ -59,7 +59,7 @@ async def test_ownership_filters_foreign_shards_out_of_cycle() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_ownership_preserves_pre_phase4_behavior() -> None:
+async def test_no_ownership_preserves_unsharded_behavior() -> None:
     """With ``ownership=None`` every shard is reconciled (legacy path).
 
     Given: a ReconciliationLoop constructed without an ``ownership``

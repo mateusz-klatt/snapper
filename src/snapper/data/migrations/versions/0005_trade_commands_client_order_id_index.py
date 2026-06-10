@@ -1,6 +1,6 @@
 """Add a trade_commands (client_order_id) index for compensation-fill routing.
 
-The paired-execution guard's Phase-5d compensation-fill projection routes a
+The paired-execution guard's compensation-fill projection routes a
 reduce-only FLATTEN order's venue fill back to its leg by resolving the active
 ``trade_commands`` row whose ``client_order_id`` is the flatten order's fresh
 id, then following ``supersedes_command_id`` to the leg's original command. The

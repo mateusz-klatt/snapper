@@ -361,8 +361,9 @@ class BacktestResultData(StrictDataSchema[Literal["backtest_result"]]):
     """Backtest result metrics payload.
 
     See ``BacktestResultInline`` for the 8
-    advanced metrics; this schema mirrors them so future standalone
-    result endpoints surface the same shape.
+    advanced metrics; this schema mirrors them so a standalone
+    result endpoint surfaces the same shape. No route consumes
+    this schema; results reach clients via the inline form only.
 
     Attributes:
         type: Payload discriminator.

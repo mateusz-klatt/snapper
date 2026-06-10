@@ -1,6 +1,6 @@
 """Tests for the kill-switch primitive.
 
-Covers :meth:`TokenManager.revoke_user_sessions` — the two-phase
+Coverage for :meth:`TokenManager.revoke_user_sessions` — the two-step
 revocation that flips ``user_active_tokens.revoked_at`` in DB AND
 pushes every active JTI into the in-memory fast-path blacklist so
 :meth:`verify_token` rejects them on the next request.

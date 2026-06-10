@@ -78,7 +78,7 @@ class NotificationDeviceInfo(StrictDataSchema[Literal["notification_device_info"
         device_token: 64-hex APNs token (current active).
         device_id: Stable device identifier (see
             ``RegisterDeviceBody.device_id``).
-        platform: Always ``ios`` in this phase.
+        platform: Always ``ios`` for the current mobile API.
         env: APNs environment this token was issued for.
         app_version: Optional app version string.
         previews_mode: iOS lock-screen visibility

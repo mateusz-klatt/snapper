@@ -193,7 +193,7 @@ class TestReconciliation:
 
     @pytest.mark.asyncio
     async def test_recon_disappeared_non_terminal_status_deferred(self) -> None:
-        """Disappeared order with non-terminal status (e.g., OPEN) is deferred.
+        """Disappeared order with non-terminal status stays pending for retry.
 
         Given: pending order, get_order returns OPEN (API race),
         When: _reconcile_with_exchange runs,
@@ -565,7 +565,7 @@ class TestReconciliation:
 
 
 class TestAmbiguousReconResolution:
-    """Recon-loop resolution of parked ambiguous entries (#145 P0-1 slice 4)."""
+    """Recon-loop resolution of parked ambiguous entries."""
 
     @pytest.mark.asyncio
     async def test_parked_ambiguous_entry_gets_verification_round(self) -> None:

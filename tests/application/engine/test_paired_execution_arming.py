@@ -1,4 +1,4 @@
-"""Tests for the coordinator's paired-execution arming wiring (Phase 3b-wire).
+"""Tests for the coordinator's paired-execution arming wiring.
 
 Exercises ``TraderCoordinator._ensure_paired_execution_group`` and
 ``_register_and_arm_paired_leg`` against a real in-memory repository, plus the
@@ -801,8 +801,9 @@ async def test_guard_recovery_does_not_restore_cleared_halt(_coord: TraderCoordi
     Given: a durable halt over a broken group with an owned leg, then cleared,
     When: paired-execution guard recovery runs,
     Then: the owned shard is NOT halted — recovery restores from active durable
-        halts only, so an operator/Phase-5 clear is honoured across a restart
-        (a group-driven restore would wrongly re-wedge the still-broken group).
+        halts only, so an operator or quiet-halt-sweep clear is honoured across
+        a restart (a group-driven restore would wrongly re-wedge the
+        still-broken group).
     """
     _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
     await _insert_guard_group(_sql_repo(_coord), public_id="grp-b", status="broken")
@@ -1155,7 +1156,7 @@ async def test_project_leg_fill_skips_compensation_when_guard_disabled(
 async def test_project_leg_fill_late_original_fill_reopens_flattened_leg(
     _coord: TraderCoordinator,
 ) -> None:
-    """A late ORIGINAL fill on a flattened leg reopens it to filled (5d.2 re-entry).
+    """A late ORIGINAL fill on a flattened leg reopens it to filled for re-flattening.
 
     Given: a flattened long leg (filled=+10, compensated=+10, open 0) whose original
         order fills 5 MORE at the venue after compensation closed,

@@ -4369,7 +4369,7 @@ class TestEgressCommand:
 
         Given importing ``snapper.egress.__main__`` raises ``ImportError``,
         When ``snapper.cli.app`` is imported fresh,
-        Then the module still imports and stores the error for deferred
+        Then the module still imports and stores the error for later
             reporting by the ``egress`` command path.
         """
         real_import = builtins.__import__
@@ -4404,7 +4404,7 @@ class TestEgressCommand:
     def test_egress_command_reports_unavailable_dependency(
         self, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Spec — egress command reports deferred import failure cleanly.
+        """Spec — egress command reports stored import failure cleanly.
 
         Given the optional egress import failed during module import,
         When the operator invokes ``snapper egress``,

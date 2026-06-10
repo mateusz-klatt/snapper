@@ -25,7 +25,7 @@ The three tests below pin the same contract at the integration layer:
    the SCD2 chain invariant in the final DB state regardless of
    dialect. Accepted outcomes: both tasks succeed (Postgres MVCC) OR
    one task succeeds and the other raises ``IntegrityError`` on the
-   ``candles.public_id`` UNIQUE constraint (SQLite DEFERRED isolation).
+   ``candles.public_id`` UNIQUE constraint under SQLite's default transaction mode.
    Invariant asserted: exactly one active row, every row shares the
    single carried-forward ``public_id``, ``#closed_rows == #successful
    upserts``, no orphan inserts.
@@ -360,7 +360,7 @@ async def test_concurrent_upsert_candles_serializes() -> None:
       MVCC row locks acquired by ``SELECT ... FOR UPDATE``. Final DB
       state carries one active row + two closed versions, all rows
       sharing the single carried-forward ``public_id``.
-    - **SQLite** (aiosqlite): default ``BEGIN DEFERRED`` isolation
+    - **SQLite** (aiosqlite): default transaction startup mode
       makes ``SELECT ... FOR UPDATE`` a no-op. Both tasks can read the
       same seeded active row before either writes, so the second task
       to INSERT raises ``IntegrityError`` on ``candles.public_id``

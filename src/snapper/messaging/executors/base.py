@@ -89,8 +89,7 @@ _AMBIGUOUS_VERIFY_TIMEOUT_S = 15.0
 
 The lookup runs while the engine's in-flight guard is held; an
 unbounded venue call here would silently extend the UNKNOWN window. A
-timed-out attempt counts as could-not-verify, never as absence (#145
-P0-1).
+timed-out attempt counts as could-not-verify, never as absence.
 """
 
 
@@ -109,8 +108,8 @@ class PendingOrderState:
         exchange_order_id: Exchange-assigned order ID (set after ACK).
         last_seen_cum_qty: Running cumulative fill quantity for delta fallback.
         submit_ambiguous: True when the submit failed ambiguously (the
-            venue MAY have the order, #145 P0-1); the entry is parked
-            pending venue verification instead of being rejected.
+            venue MAY have the order); the entry is parked pending
+            venue verification instead of being rejected.
         unknown_published: True once the single UNKNOWN order event has
             been published for this entry (guards duplicate publishes
             across recon touches).
@@ -719,7 +718,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         failed bulk write leaves it re-fetchable on the very next 50ms
         tick. Venue-side cl_ord_id dedupe covers only OPEN orders while
         strategy orders are MARKET, so an unguarded replay double-places
-        a real position (#145 P0-5).
+        a real position.
 
         Checks, cheapest first:
 
@@ -785,15 +784,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def _reject_if_stale(self, order: OrderRequestData) -> bool:
         """Reject a command older than the dispatch TTL before any venue call.
 
-        The executor's half of the staleness control (#145 P0-4): the
-        order-flow socket buffers an outage backlog unbounded (HWM=0),
+        The executor's half of the staleness control: the order-flow
+        socket buffers an outage backlog unbounded (HWM=0),
         so frames can arrive long after the outbox published them. The
         age anchor is ``signaled_at`` — the command row's creation time
         forwarded by the outbox publish — because the frame
         ``timestamp`` is re-stamped at every publish. Runs AFTER the
         duplicate guard on purpose: a stale REPLAY of an accepted order
         must drop silently as a duplicate, never reject — a synthetic
-        REJECTED for a live order is the P0-1 fabrication. Frames
+        REJECTED for a live order is exactly the false-reject
+        fabrication the UNKNOWN state exists to prevent. Frames
         without ``signaled_at`` (legacy/direct paths) and a disabled
         TTL skip the gate.
 
@@ -913,7 +913,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Actual fills come asynchronously via WebSocket execution updates.
         Acceptance finalization runs outside the submit try/except in
         ``_finalize_accepted_submit`` so a DB blip on a live order can
-        never publish REJECTED (#145 P0-1).
+        never publish REJECTED.
 
         Args:
             order: Order request data containing order details.
@@ -981,8 +981,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     ) -> None:
         """Record and publish acceptance of a venue-confirmed live order.
 
-        Runs OUTSIDE the submit try/except on purpose (#145 P0-1): once
-        the venue returned an order id the order IS live, so nothing in
+        Runs OUTSIDE the submit try/except on purpose: once the venue
+        returned an order id the order IS live, so nothing in
         here may publish REJECTED or pop the pending entry. A failed
         durable ``order_accepted`` write is logged CRITICAL and marked
         on the pending entry (``accept_event_pending``) for the recon
@@ -1044,7 +1044,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
         Up to three lookups (after 2s/5s/10s — the venue needs a moment
         to materialize an order whose response was lost), each bounded
-        to 15s. Outcomes (#145 P0-1):
+        to 15s. Outcomes:
 
         - FOUND: the order is live or was — finalize as accepted; an
           already-terminal snapshot is additionally routed through
@@ -1167,7 +1167,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """Park an ambiguously-failed submit in the UNKNOWN state.
 
         The venue call failed in a way where the order MAY exist on the
-        venue (#145 P0-1). Publishing REJECTED here would fabricate
+        venue. Publishing REJECTED here would fabricate
         state: the engine would clear its in-flight intent and could
         re-emit a replacement order while the original is live, doubling
         exposure. Instead the pending entry is kept and marked
@@ -1188,9 +1188,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         ``unknown_published`` is set ONLY on a confirmed send — a
         swallowed publish failure would leave the engine's in-flight
         timeout free to clear the guard and re-emit while the original
-        order may be live. A total publish failure is CRITICAL (the
-        recon-loop retouch that re-attempts the publish lands in a
-        follow-up slice; until then the loud log is the backstop).
+        order may be live. A total publish failure is CRITICAL; the
+        recon loop (``_resolve_ambiguous_pending``) re-attempts the
+        publish each cycle until a send confirms.
 
         Args:
             order: The original order request.
@@ -1280,10 +1280,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             await self._publish_cancel_event(cancel, OrderEventEnum.REJECTED)
 
     async def _process_replace(self, replace: OrderReplaceData) -> None:
-        """Replace/modify an existing order on the exchange.
+        """Reject an order-replace request (replace is not implemented).
 
-        Note: Many exchanges don't support atomic replace, so this may
-        cancel and re-submit the order.
+        No exchange client implements atomic replace here; the request
+        is logged and answered with a REJECTED replace event so the
+        caller can fall back to an explicit cancel + new order flow.
 
         Args:
             replace: Replace request data containing new order parameters.
@@ -1368,7 +1369,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def _execute_live_order(self, order: OrderRequestData) -> str | None:
         """Execute an order on the exchange and return the exchange order ID.
 
-        Exceptions PROPAGATE to the caller (#145 P0-1): the previous
+        Exceptions PROPAGATE to the caller: the previous
         blanket except-return-None coerced every failure — including
         ambiguous network failures where the order may have executed —
         into the definitive-reject path. ``_process_order`` now
@@ -1444,7 +1445,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         logged and RE-RAISED — durable mode requires every venue event
         persisted before the corresponding ZMQ publish, so callers must
         decide per call site whether a failed write may abort the flow
-        (it must NOT for an already-accepted live order, #145 P0-1).
+        (it must NOT for an already-accepted live order).
 
         Args:
             params: Event data including event_type, exchange_name, instrument,
@@ -1542,8 +1543,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         ``submit_ambiguous`` set) get a fresh venue-verification round
         each cycle, and entries whose durable ``order_accepted`` write
         failed (``accept_event_pending``) get the write retried until
-        it sticks (#145 P0-1 slice 4) — the 60s loop is the steady-state
-        resolver for everything the inline paths could not settle.
+        it sticks — the 60s loop is the steady-state resolver for
+        everything the inline paths could not settle.
         """
         if self.exchange_client is None:
             return
@@ -1581,13 +1582,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def _resolve_ambiguous_pending(self, pending: PendingOrderState) -> None:
         """Run one recon-cycle verification round for a parked entry.
 
-        Reuses the full bounded verification routine (#145 P0-1 slice
-        3) — the two-consecutive-absence rule needs multiple lookups
-        anyway, and parked entries are rare enough that the extra
-        seconds inside the 60s loop are acceptable. When the entry
-        stays unresolved AND its UNKNOWN publish never confirmed (the
-        slice-2 failure case), one publish retry per cycle keeps
-        working toward holding the engine guard.
+        Reuses the full bounded verification routine
+        (``_verify_ambiguous_submit``) — the two-consecutive-absence
+        rule needs multiple lookups anyway, and parked entries are rare
+        enough that the extra seconds inside the 60s loop are
+        acceptable. When the entry stays unresolved AND its UNKNOWN
+        publish never confirmed (the park-time publish retries all
+        failed), one publish retry per cycle keeps working toward
+        holding the engine guard.
 
         Args:
             pending: The parked ambiguous pending entry.
@@ -1617,8 +1619,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         repair. The retry state lives in ``_unhealed_accept_events`` on
         the executor — NOT on the pending entry — so a terminal fill or
         cancel popping the entry before the write sticks cannot lose
-        the retry (#145 P0-1 slice 4). Failure keeps the event queued
-        for the next cycle.
+        the retry. Failure keeps the event queued for the next cycle.
 
         Args:
             client_order_id: Key into ``_unhealed_accept_events``.
@@ -1878,7 +1879,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def _flush_orphaned_inline(self, exchange_order_id: str) -> None:
         """Process a buffered orphan execution synchronously, in caller order.
 
-        The terminal-verified ambiguous path (#145 P0-1) awaits the
+        The terminal-verified ambiguous path awaits the
         buffered WS fill BEFORE REST reconciliation: the fill keeps its
         full fidelity (exec id, fees, exact prices) and advances
         ``last_seen_cum_qty``, so the reconciler then emits only the
@@ -2256,8 +2257,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             True when the event was handed to the publisher without
             error; False when the publisher is unavailable or the send
-            raised. Callers of safety-critical statuses (UNKNOWN, #145
-            P0-1) must check this — a swallowed publish failure would
+            raised. Callers of safety-critical statuses (UNKNOWN) must
+            check this — a swallowed publish failure would
             leave the engine unaware that its in-flight guard must hold.
         """
         if not self.msg_publisher or not self.running:

@@ -115,7 +115,7 @@ class TestSetRepositoryFactory:
 class TestBusDispatchFrame:
     """`_bus_dispatch_frame` routes topics → typed handlers + swallows errors.
 
-    The dispatch helper is the surface a deferred publisher (e.g.
+    The dispatch helper is the surface a bus publisher (e.g.
     TradingCapsEnforcer for caps_violation, WebSocketAuthManager for
     delegate_offline) hits at production time.
     """

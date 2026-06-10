@@ -919,7 +919,7 @@ class TestTraderSignalHandling:
             strength=0.5,
             price=50000.0,
             exchange="kraken",
-            reason="phase-0c-wallet-routing",
+            reason="wallet-routing",
             wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         )
         trader._current_topic = "signals.kraken.BTC-USD.live"
@@ -3211,7 +3211,7 @@ async def test_reconcile_mixed_engines_processes_each_independently() -> None:
 
 @pytest.mark.asyncio
 async def test_outbox_publish_forwards_true_age_via_signaled_at() -> None:
-    """The outbox publish forwards the command's creation time (#145 P0-4).
+    """The outbox publish forwards the command's creation time.
 
     Given: a TradeCommandRow created at a known past instant,
     When: _outbox_publish builds the OrderRequestData,
@@ -3309,8 +3309,8 @@ def test_setup_trade_services_wires_dispatch_ttl_and_expiry() -> None:
 
     Then:
         The dispatcher is armed with that TTL and the coordinator's
-        ``_on_command_expired`` release callback (#145 P0-4); a
-        non-positive TTL disables the gate (``None``).
+        ``_on_command_expired`` release callback; a non-positive TTL
+        disables the gate (``None``).
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.trade_service = TradeService()

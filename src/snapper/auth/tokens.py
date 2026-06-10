@@ -1038,7 +1038,7 @@ class TokenManager:
     async def revoke_user_sessions(self, user_public_id: str, repository: Repository) -> int:
         """Revoke every active session for a user.
 
-        Two-phase revocation pushes state into BOTH the DB inventory
+        Two-step revocation pushes state into BOTH the DB inventory
         AND the in-memory fast-path blacklist so ``verify_token``
         rejects the next request regardless of which layer it
         consults first

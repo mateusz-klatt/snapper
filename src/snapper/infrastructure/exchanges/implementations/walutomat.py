@@ -1060,8 +1060,8 @@ class WalutomatExchangeClient(ExchangeClientBase):
     async def create_order(self, request: ExchangeOrderRequest) -> ExchangeOrderSnapshot:
         """Create a new FX order on Walutomat.
 
-        Transport failures are split by safety class (#145 P0-1):
-        connect-phase errors (connection refused, connect timeout, no
+        Transport failures are split by safety class:
+        connection-setup errors (connection refused, connect timeout, no
         pool slot, SOCKS handshake) provably happened BEFORE the request
         left the process and re-raise plain — safe to reject. Anything
         after send (read/write timeout, reset, protocol error, gateway

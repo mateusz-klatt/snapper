@@ -381,7 +381,7 @@ class TestStatusEventRouting:
 
 
 class TestStatusShadowWriteMapping:
-    """Suffix-to-venue-event mapping is exhaustive with no silent default (#145 P0-1)."""
+    """Suffix-to-venue-event mapping is exhaustive with no silent default."""
 
     @pytest.mark.asyncio
     async def test_unknown_suffix_maps_to_order_submit_unknown(

@@ -555,7 +555,7 @@ async def test_run_walutomat_scenario_places_expected_order(
 
     Given: A mocked Walutomat client and one selected scenario.
     When: run_walutomat executes the scenario.
-    Then: The request, follow-up calls, and emitted fixtures match the scenario.
+    Then: The request, subsequent calls, and emitted fixtures match the scenario.
     """
     symbol = "EUR-PLN"
     amount = 1.0
@@ -784,7 +784,7 @@ async def test_run_kraken_spot_scenario_places_expected_order(
 
     Given: A mocked Kraken Spot client and one selected scenario.
     When: run_kraken_spot executes the scenario.
-    Then: The request, follow-up calls, and emitted fixtures match the scenario.
+    Then: The request, subsequent calls, and emitted fixtures match the scenario.
     """
     symbol = "BTC-EUR"
     amount = 0.0001
@@ -1009,7 +1009,7 @@ async def test_run_kraken_futures_scenario_places_expected_order(
 
     Given: A mocked Kraken Futures client and one selected scenario.
     When: run_kraken_futures executes the scenario.
-    Then: The request, follow-up calls, and emitted fixtures match the scenario.
+    Then: The request, subsequent calls, and emitted fixtures match the scenario.
     """
     symbol = "BTC-USD-PERP"
     amount = 0.0001

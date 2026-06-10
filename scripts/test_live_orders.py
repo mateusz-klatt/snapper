@@ -300,8 +300,8 @@ async def run_kraken_spot(settings: Any, scenarios: list[str] | None = None) -> 
     """Test order lifecycle on Kraken Spot BTC-EUR via CCXT path.
 
     Kraken specifics:
-    - CCXT create_order may return status=None → follow-up fetch_order
-    - CCXT cancel returns empty → follow-up fetch_order
+    - CCXT create_order may return status=None → subsequent fetch_order
+    - CCXT cancel returns empty → subsequent fetch_order
     - Minimum: 0.0001 BTC
     - Leverage via params["leverage"] (integer, 2-5x)
     - post_only via params["postOnly"]

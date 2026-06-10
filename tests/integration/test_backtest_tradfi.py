@@ -15,9 +15,8 @@ run against a market-data-only instrument produces:
 - no crash when the source instrument is ``can_trade=False``.
 
 Cross-asset execution (observing TradFi, executing on a crypto
-instrument) was deferred initially and is now
-implemented in this project (shipped
-2026-04-23) — ``batch_processor.process_time_batch`` routes fills
+instrument) is implemented in this project (shipped 2026-04-23) —
+``batch_processor.process_time_batch`` routes fills
 through ``signal.instrument`` + ``config.target_execution_exchange``
 via the extracted ``_resolve_target_fill_price`` helper. The end-to-end
 acceptance for cross-asset behaviour lives in
@@ -186,9 +185,8 @@ class TestBacktestTradfiObservationOnly:
         only so the engine's internal ``StrategyConfig`` validation
         passes. The real code path that ensures cross-asset execution
         on a ``can_trade=False`` instrument would be rejected is the
-        REST capability guard + the historical cross-asset deferral
-        that documents why a true cross-asset execution test requires
-        engine changes.
+        REST capability guard; end-to-end cross-asset coverage lives in
+        ``tests/application/backtest/test_cross_asset_reference_strategy.py``.
         """
         with (
             patch.dict(

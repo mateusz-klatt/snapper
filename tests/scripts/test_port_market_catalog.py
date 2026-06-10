@@ -10,10 +10,10 @@ import scripts.port_market_catalog as port
 
 
 class TestIsPhaseKey:
-    """``_is_phase_key`` accepts keys under :data:`PHASE_PREFIXES`."""
+    """Prefix predicate accepts keys under the ported market namespaces."""
 
     def test_namespace_root_match(self) -> None:
-        """A bare namespace key (no leaf) IS considered a phase key.
+        """A bare namespace key (no leaf) is considered ported.
 
         The walker descends into nested dicts, so this branch is only
         exercised on leaf strings; still need coverage for the
@@ -27,7 +27,7 @@ class TestIsPhaseKey:
         assert port._is_phase_key("cacheBanner") is True
 
     def test_leaf_under_phase_prefix(self) -> None:
-        """Standard leaf paths under each phase prefix match."""
+        """Standard leaf paths under each ported prefix match."""
         assert port._is_phase_key("description.label") is True
         assert port._is_phase_key("description.fallback") is True
         assert port._is_phase_key("assetClass.crypto") is True
@@ -40,7 +40,7 @@ class TestIsPhaseKey:
         assert port._is_phase_key("cacheBanner.sources.cache") is True
 
     def test_outside_phase_prefix_rejected(self) -> None:
-        """Keys outside the phase namespaces are filtered out."""
+        """Keys outside the ported market namespaces are filtered out."""
         assert port._is_phase_key("page.title") is False
         assert port._is_phase_key("controls.exchange") is False
         assert port._is_phase_key("chart.title") is False
@@ -49,10 +49,10 @@ class TestIsPhaseKey:
 
 
 class TestWalkAndFlatten:
-    """Recursive descent + leaf collection under phase prefixes."""
+    """Recursive descent + leaf collection under ported prefixes."""
 
     def test_flatten_typical_market_payload(self) -> None:
-        """A realistic ``market.json`` shape flattens to dotted leaves filtered to phase prefixes."""
+        """A realistic ``market.json`` shape flattens to filtered dotted leaves."""
         payload = {
             "page": {"title": "Market Data"},
             "description": {"label": "L", "fallback": "F"},
@@ -73,7 +73,7 @@ class TestWalkAndFlatten:
         assert port._flatten_market_payload({}) == {}
 
     def test_flatten_skips_non_string_leaves(self) -> None:
-        """Non-string leaves under phase prefixes are silently dropped (defensive; real catalogs only carry strings)."""
+        """Non-string leaves under ported prefixes are silently dropped."""
         payload = {
             "description": {"label": 42, "fallback": "F"},
             "assetClass": {"crypto": None},
@@ -82,7 +82,7 @@ class TestWalkAndFlatten:
         assert flat == {"description.fallback": "F"}
 
     def test_walk_handles_deeply_nested(self) -> None:
-        """A nested namespace inside a phase prefix is descended into."""
+        """A nested namespace inside a ported prefix is descended into."""
         payload = {
             "sector": {
                 "extra": {"deeply-nested": "X"},
@@ -260,7 +260,7 @@ class TestFullCatalogKey:
 
 
 class TestIterPhaseKeys:
-    """``_iter_phase_keys`` yields sorted phase-key short paths."""
+    """Market key iterator yields sorted short paths."""
 
     def test_yields_sorted(self) -> None:
         """Even when input is shuffled, output is alphabetic."""
@@ -326,7 +326,7 @@ class TestReadLocalePayload:
     """``_read_locale_payload`` reads + flattens one locale's market.json."""
 
     def test_reads_and_flattens(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Happy path: present file, valid JSON, phase keys flow through."""
+        """Happy path: present file, valid JSON, ported keys flow through."""
         en_dir = tmp_path / "en"
         en_dir.mkdir()
         (en_dir / "market.json").write_text(
@@ -441,7 +441,7 @@ class TestGenerateE2E:
     def test_writes_phase_keys_with_positional_placeholders(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """All 3 phase namespaces land in the catalog; placeholders port from ``{{name}}`` to ``%1$@`` based on EN order."""
+        """All ported namespaces land in the catalog with ordered placeholders."""
         self._setup_frontend(
             tmp_path,
             monkeypatch,
@@ -535,7 +535,7 @@ class TestGenerateE2E:
     def test_missing_translation_for_locale_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """If a locale's market.json is missing a phase key present in EN, the script fails loudly so translators are forced to fix it."""
+        """Missing locale translations for EN market keys fail loudly."""
         self._setup_frontend(
             tmp_path,
             monkeypatch,
@@ -578,7 +578,7 @@ class TestGenerateE2E:
     def test_empty_en_phase_keys_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """EN file without any phase keys fails fast — would skip the whole port silently otherwise."""
+        """EN file without any ported keys fails fast instead of skipping the port."""
         self._setup_frontend(
             tmp_path,
             monkeypatch,

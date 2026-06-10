@@ -285,7 +285,7 @@ class TestOnSignalOwnershipFilter:
         assert coord.engines == {}
 
     @pytest.mark.asyncio
-    async def test_n_equals_one_preserves_pre_phase4_behavior(
+    async def test_n_equals_one_preserves_unsharded_behavior(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """At N=1 ALL signals are owned → never-drop invariant."""

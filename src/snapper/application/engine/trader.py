@@ -637,20 +637,21 @@ class TraderCoordinator(RegisterableProcess):
     async def _recover_paired_execution_leg_fills(self) -> None:
         """Re-project paired-execution leg fills from authoritative venue_events on startup.
 
-        5a's live fill projection runs only on the live fill path, so a grouped
+        The live fill projection runs only on the live fill path, so a grouped
         leg whose order filled while the coordinator was DOWN would recover with
-        ``filled_signed_qty == 0`` and stay invisible to the 4b halt scanner + 4c
-        recovery. This pass re-reads the AUTHORITATIVE durable ``venue_events``
+        ``filled_signed_qty == 0`` and stay invisible to the guard scanner's halt
+        projection and the startup halt-mirror recovery. This pass re-reads the
+        AUTHORITATIVE durable ``venue_events``
         (the executor writes them fail-closed with the cumulative ``cum_fill_size``
         BEFORE publishing) and re-projects each owned active leg's MAX cumulative
         ORIGINAL fill via the monotonic projection DAL — a leg already projected
         live is a no-op; a downtime fill is restored. When the guard is enabled it
         ALSO re-derives each leg's ``compensated_signed_qty`` from its reduce-only
-        flatten orders (Phase 5d.1 compensation parity), so a flatten that filled
-        during downtime is restored too. Covers ``armed`` / ``broken`` /
+        flatten orders (mirroring the live compensation projection), so a flatten
+        that filled during downtime is restored too. Covers ``armed`` / ``broken`` /
         ``compensating`` / ``manual_intervention`` groups — a leg can be in any of
         these while a sibling's flatten is mid-flight — plus groups COMPLETED
-        within :data:`_COMPLETED_GROUP_REPLAY_WINDOW` (Phase 5d.3): a late
+        within :data:`_COMPLETED_GROUP_REPLAY_WINDOW`: a late
         original fill that landed during the downtime re-projects through the
         fill DAL, whose completed-group path reopens the group to
         ``compensating`` so the scanner re-halts and re-flattens the residual.
@@ -736,8 +737,9 @@ class TraderCoordinator(RegisterableProcess):
         Re-derives the ORIGINAL fill (``filled_signed_qty``) from the leg's
         ``client_order_id`` and then, when the guard is enabled, re-derives the
         COMPENSATION fill (``compensated_signed_qty``) from the leg's reduce-only
-        flatten orders (Phase 5d.1 recovery parity) so a flatten that filled while
-        the coordinator was down is restored. Both projections read the
+        flatten orders (recovery parity with the live compensation projection)
+        so a flatten that filled while the coordinator was down is restored.
+        Both projections read the
         authoritative ``venue_events`` and are idempotent no-ops when the live
         path already applied them.
         """
@@ -1683,8 +1685,9 @@ class TraderCoordinator(RegisterableProcess):
 
         Engines with degraded wallet attribution (``wallet_public_id``
         falsy, e.g. a checkpoint whose ``wallet_short`` no longer
-        resolves on this node) are skipped fail-closed; the follow-up
-        runbook handles orphan cycles in that case. Engines whose
+        resolves on this node) are skipped fail-closed; any orphan
+        cycles left behind are closed by an operator via the
+        position-cycle orphan admin endpoints. Engines whose
         ``native_symbol`` cannot be resolved to an
         ``instrument_public_id`` at bootstrap time are logged and
         skipped; a later live fill via
@@ -2280,7 +2283,7 @@ class TraderCoordinator(RegisterableProcess):
         For 'rejected' status, the log includes message type to disambiguate
         submit rejection (OrderData) vs cancel/replace rejection
         (OrderEventData). A submit rejection also projects the terminal state
-        onto its paired-execution leg (Phase 5b) so the guard scanner can break
+        onto its paired-execution leg so the guard scanner can break
         an armed group whose sibling rejected before filling.
 
         Args:
@@ -2361,7 +2364,7 @@ class TraderCoordinator(RegisterableProcess):
         For 'rejected' event, the log includes message type to disambiguate
         cancel/replace rejection (OrderEventData) vs submit rejection
         (OrderData). A 'cancelled' / 'expired' event projects the terminal
-        state onto its paired-execution leg (Phase 5b); a 'rejected' event does
+        state onto its paired-execution leg; a 'rejected' event does
         NOT — a rejected cancel/replace leaves the original order live, so the
         leg is not terminal.
 
@@ -2491,11 +2494,11 @@ class TraderCoordinator(RegisterableProcess):
         leg and is a no-op. Sign follows the fill side (buy +, sell −), matching
         the leg's own side for an original order. Skipped without a SQL
         repository (the paired-execution tables do not exist there). This is the
-        LIVE path only; recovery-replay parity (projecting fills observed while
-        the coordinator was down) is Phase 5a.2.
+        LIVE path only; startup recovery handles fills observed while the
+        coordinator was down.
 
         When the fill matched no leg directly (``NO_MATCH``) AND the guard is
-        enabled, the fill is re-routed to the Phase-5d.1 compensation projection:
+        enabled, the fill is re-routed to the compensation projection:
         a reduce-only FLATTEN order carries a fresh ``client_order_id`` whose
         command supersedes a leg's original, so its fill lands on that leg's
         ``compensated_signed_qty`` instead. The compensation lookup is gated on
@@ -2541,13 +2544,13 @@ class TraderCoordinator(RegisterableProcess):
         terminal before fully filling. The leg is resolved by
         ``client_order_id``; a non-grouped or already-terminal / already-FILLED
         leg is a no-op. ``filled_signed_qty`` is preserved, so a partially-filled
-        leg that then cancels keeps its exposure for Phase-5c compensation.
+        leg that then cancels keeps its exposure for compensation.
         Skipped without a SQL repository (the paired-execution tables do not
         exist there). The dispatcher already drops foreign-shard venue events,
         so this is not ownership-gated here (matching the live fill projection).
 
         When the guard is enabled the terminal is ALSO routed to the compensation
-        projection (Phase 5d.2): a FLATTEN order's own cancel / expire / reject
+        projection: a FLATTEN order's own cancel / expire / reject
         carries the flatten's fresh ``client_order_id`` (matching no leg as an
         original), so it lands via ``supersedes_command_id`` on the leg it was
         flattening — settling that leg to ``flattened`` (residual gone) or back to
@@ -2594,7 +2597,8 @@ class TraderCoordinator(RegisterableProcess):
         (recovery path where ``wallet_short`` could not be resolved in
         ``_recover_from_checkpoints``), all cycle writes are skipped
         fail-closed and a warning is logged. Pre-existing orphan open
-        cycles may be left unclosed; see the follow-up memory runbook.
+        cycles may be left unclosed until an operator closes them via
+        the position-cycle orphan admin endpoints.
 
         **Symmetric DB fallback (close/flip/scale_up)**: if the shard
         cache is empty on a non-open transition, the trader re-queries
@@ -2898,7 +2902,7 @@ class TraderCoordinator(RegisterableProcess):
         The map is exhaustive on purpose: an unmapped suffix is skipped
         with a warning rather than defaulted — the previous default of
         ``order_accepted`` would have silently marked a command ACCEPTED
-        for any new event type (#145 P0-1 latent-bug fix).
+        for any new event type.
 
         Args:
             order_status: Order status data from ZMQ.
@@ -3249,7 +3253,7 @@ class TraderCoordinator(RegisterableProcess):
         return tasks
 
     async def _on_command_expired(self, cmd: TradeCommandRow) -> None:
-        """Release engine intent for a command the outbox expired (#145 P0-4).
+        """Release engine intent for a command the outbox expired.
 
         The command was never published, so no executor event will ever
         arrive for it — without this release the engine's in-flight
@@ -3744,7 +3748,7 @@ class TraderCoordinator(RegisterableProcess):
         notified so the now-armed group's held commands dispatch together.
         Cross-coordinator, the last leg to register sees the full set and wins
         the arm; the others' CAS no-ops. If a sibling never registers, the group
-        never arms and no command dispatches — safe (the Phase-4 scanner breaks
+        never arms and no command dispatches — safe (the guard scanner breaks
         the stalled group).
         """
         if not isinstance(self.repository, SQLAlchemyRepository):

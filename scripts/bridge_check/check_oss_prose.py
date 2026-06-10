@@ -1,11 +1,11 @@
 """Public-OSS prose audit for the bridge wire-contract working-tree file.
 
 The bridge OSS repo cannot reference internal Snapper jargon — plan
-letters, paragraph anchors, internal repo paths, internal handle
+letters, section anchors, internal repo paths, internal handle
 names. The autogenerator already emits header-only docs in v1, so
 this scan is a defensive net that catches:
 
-    1. Future regressions where someone reintroduces per-interface
+    1. Regressions where someone reintroduces per-interface
        JSDoc that copies a backend Pydantic docstring containing
        internal jargon.
     2. Manual edits to the generated file that smuggle internal

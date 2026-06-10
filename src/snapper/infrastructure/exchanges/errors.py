@@ -9,7 +9,7 @@ be treated as a definitive rejection. A failure AFTER the send may mean
 the venue accepted and even filled the order although the response was
 lost — treating that as rejected fabricates wrong state: the engine
 clears its in-flight intent, can re-emit a replacement order, and the
-live "ghost" doubles real exposure (#145 audit, gap P0-1).
+live "ghost" doubles real exposure.
 
 Venue clients wrap only the genuinely ambiguous failures of their
 ``create_order`` call in :class:`AmbiguousOrderSubmitError`; everything

@@ -877,7 +877,8 @@ class PlanExecutorService(RegisterableProcess):
         DB insert is the source of truth — publish failure logs
         ``logger.warning`` and returns without raising so the caller
         (bracket / trailing-stop firing paths) completes normally.
-        Durable replay of missed publishes is a deferred follow-up.
+        Missed publishes are not replayed; a dropped event is only
+        recoverable by reading the decision row from the DB.
 
         Short-circuits when ``self._publisher is None`` (unit-test
         harness that never called ``_setup_publisher`` or environments
@@ -974,7 +975,7 @@ class PlanExecutorService(RegisterableProcess):
         """Check armed plans for closed cycles.
 
         Targets all armed plans with a position_cycle_public_id (brackets,
-        trailing stops, future plan types). Active plans with in-flight
+        trailing stops, additional plan types). Active plans with in-flight
         child orders must go through the cancel_requested + cancel
         TradeCommand flow, handled by the cancel route, not this sweep.
         """

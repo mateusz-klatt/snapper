@@ -45,7 +45,7 @@ class SyncReturnsAwaitableProcess:
         self.identifier = identifier
 
     def start(self) -> Awaitable[None]:
-        """Return awaitable coroutine for deferred execution."""
+        """Return awaitable coroutine for awaited execution."""
 
         async def _inner() -> None:
             CALL_LOG.append(f"awaitable:{self.identifier}")

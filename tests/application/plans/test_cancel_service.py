@@ -1,10 +1,10 @@
 """Tests for :class:`PlansCancelService`.
 
 The service is the domain-level cancel-by-plan-public-id facade that
-the MCP ``cancel_order`` tool calls. REST keeps the legacy helper
-in :mod:`snapper.server.order_routes` untouched (deferred REST
-refactor); these tests exercise the service in isolation against an
-in-memory mock repository.
+the MCP ``cancel_order`` tool calls. REST does not call this service;
+it still uses its own legacy helper in
+:mod:`snapper.server.order_routes`. These tests exercise the service
+in isolation against an in-memory mock repository.
 """
 
 import asyncio

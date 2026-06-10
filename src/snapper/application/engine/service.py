@@ -212,8 +212,9 @@ class TradingEngineService:
                 Paper engines with different tags get isolated shard_keys.
                 Ignored for live mode (one consolidated position per instrument).
             wallet_public_id: Wallet that owns positions and credentials for
-                this engine instance. Transitional default ``""``
-                NOT NULL migration tightens the columns.
+                this engine instance. The ``""`` default exists for test
+                fixtures; the trade-command wallet columns are NOT NULL,
+                and production call sites always pass a real wallet id.
             operator_public_id: Trading-identity operator that initiated the
                 strategy this engine serves. Stored on the engine for audit
                 propagation onto every TradeCommand and OrderRequestData
@@ -366,7 +367,7 @@ class TradingEngineService:
         has passed since the order was sent, logs a warning and clears
         the guard so new signals can be processed.
 
-        EXCEPTION (#145 P0-1): when the pending order's submit outcome
+        EXCEPTION: when the pending order's submit outcome
         is UNKNOWN (``_pending_unknown``), the guard is NEVER cleared on
         timeout — the order may be live on the venue, and clearing
         would let a replacement order through, doubling exposure. The

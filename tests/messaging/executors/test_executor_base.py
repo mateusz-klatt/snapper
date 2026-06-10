@@ -1333,10 +1333,9 @@ class TestExecuteLiveOrderErrors:
 
         Given: Exchange client that raises an exception,
         When: _execute_live_order is called,
-        Then: The exception propagates (#145 P0-1 — the previous
-            blanket swallow coerced ambiguous failures into the
-            definitive-reject path; classification now happens in
-            _process_order).
+        Then: The exception propagates (a blanket swallow here would
+            coerce ambiguous failures into the definitive-reject
+            path; classification happens in _process_order).
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
@@ -2873,7 +2872,8 @@ class TestExecutorCoverage:
 
         Given: Exchange client that raises exception,
         When: Order is executed,
-        Then: The exception propagates to the caller (#145 P0-1).
+        Then: The exception propagates to the caller (classification
+            happens in _process_order).
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
@@ -3775,7 +3775,7 @@ class TestExecutorWebSocketExecutions:
         Given: Exchange client that raises exception,
         When: Order is executed,
         Then: The exception propagates and no pending entry appears
-            (#145 P0-1 — classification happens in _process_order).
+            (classification happens in _process_order).
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
@@ -6235,7 +6235,7 @@ class TestWalletScopedExecutor:
 
 
 class TestAmbiguousSubmitHandling:
-    """Money-safety pins for the #145 P0-1 UNKNOWN submit path.
+    """Money-safety pins for the UNKNOWN ambiguous-submit path.
 
     An ambiguous venue failure (the order MAY exist) must never reach
     the REJECTED path: a fabricated rejection clears the engine's
@@ -6461,7 +6461,7 @@ class TestAmbiguousSubmitHandling:
 
 
 class TestAmbiguousVerification:
-    """Venue-truth verification of ambiguous submits (#145 P0-1 slice 3)."""
+    """Venue-truth verification of ambiguous submits."""
 
     def _executor(self, monkeypatch: pytest.MonkeyPatch) -> Any:
         """Build a running executor with a verifying exchange client."""
@@ -6672,7 +6672,7 @@ class TestAmbiguousVerification:
 
 
 class TestDuplicateSubmitGuard:
-    """Replayed dispatches never reach the venue twice (#145 P0-5)."""
+    """Replayed dispatches never reach the venue twice."""
 
     def _executor(self, monkeypatch: pytest.MonkeyPatch) -> Any:
         """Build a running executor with tracked submit-path mocks."""
@@ -6811,7 +6811,7 @@ class TestDuplicateSubmitGuard:
 
 
 class TestStaleCommandGate:
-    """Outage-backlog frames reject before any venue call (#145 P0-4)."""
+    """Outage-backlog frames reject before any venue call."""
 
     def _executor(self, monkeypatch: pytest.MonkeyPatch, ttl: float = 30.0) -> Any:
         """Build a running executor with the TTL configured.
@@ -6910,8 +6910,9 @@ class TestStaleCommandGate:
             replayed dispatch of a live order),
         When: _process_order runs,
         Then: It drops SILENTLY as a duplicate — TTL-rejecting it would
-            publish REJECTED for a possibly-live order (the P0-1
-            fabrication).
+            publish REJECTED for a possibly-live order (exactly the
+            fabricated-terminal-state failure the UNKNOWN state exists
+            to prevent).
         """
         ex = self._executor(monkeypatch)
         order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300))

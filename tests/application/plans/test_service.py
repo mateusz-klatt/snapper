@@ -949,7 +949,7 @@ class TestPlanExecutorService:
     ) -> None:
         """Given an UNKNOWN submit outcome, Then the plan is NOT failed.
 
-        The ambiguous state (#145 P0-1) is non-terminal: the order may
+        The ambiguous UNKNOWN state is non-terminal: the order may
         be live on the venue, so failing the plan would misreport an
         unresolved submit as a terminal outcome.
         """

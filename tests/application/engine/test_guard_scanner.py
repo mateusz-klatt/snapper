@@ -1,4 +1,4 @@
-"""Tests for the paired-execution guard scanner (Phase 4a) + cas_trade_command_status.
+"""Tests for the paired-execution guard scanner + cas_trade_command_status.
 
 Exercises the DB-only liveness loop against a real in-memory repository: breaking
 expired assembling groups, retrying arming complete groups, and cancelling owned
@@ -306,11 +306,11 @@ async def test_scanner_arms_complete_group_within_deadline(_repo: SQLAlchemyRepo
 
 
 async def test_scanner_skips_sequential_handoff_policy(_repo: SQLAlchemyRepository) -> None:
-    """A sequential_handoff group is left untouched by the 4a scanner.
+    """A sequential_handoff group is left untouched by the guard scanner.
 
     Given: an expired assembling group with sequential_handoff policy,
     When: a scan cycle runs,
-    Then: it stays assembling (4a scopes to simultaneous only).
+    Then: it stays assembling (the scanner scopes to simultaneous only).
     """
     await _insert_group(
         _repo,
@@ -1243,8 +1243,8 @@ async def test_sweep_compensating_skips_non_live_original(_repo: SQLAlchemyRepos
     Then: no cancel command is emitted by the compensation sweep — the held
         command is cancelled-as-a-row by the broken sweep, never sent to the
         venue — and with the leg then cancelled at zero exposure the fully
-        resolved group COMPLETES the same cycle (Phase 5d.3) rather than
-        lingering broken forever.
+        resolved group COMPLETES the same cycle (the settled-completion
+        check) rather than lingering broken forever.
     """
     await _insert_group(
         _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
@@ -1969,8 +1969,8 @@ async def test_sweep_compensating_skips_terminal_leg_without_exposure(
     Given: a broken group with an owned cancelled leg that carries zero fill,
     When: a scan cycle runs,
     Then: no flatten is emitted (there is no exposure to compensate) and the
-        fully settled group COMPLETES the same cycle (Phase 5d.3) instead of
-        lingering broken.
+        fully settled group COMPLETES the same cycle (the settled-completion
+        check) instead of lingering broken.
     """
     _stub_instrument_lookups(monkeypatch, _repo)
     await _seed_flatten_leg(_repo, status="cancelled", filled_signed_qty=0.0)
@@ -2496,7 +2496,8 @@ async def test_sweep_halt_clears_releases_stale_halt_after_crash(
         mirrored owned shard,
     When: one scan cycle runs (no sweep lists the completed group),
     Then: the quiet-halt sweep clears the stale halt and releases the mirror —
-        the wedge Codex's E3 review flagged for the one-shot design.
+        a one-shot clear tied to the completing transition would leave this
+        wedge permanent.
     """
     trade_service = TradeService()
     trade_service.halt_shard(_BTC_SHARD, _SCOPE_KEY)

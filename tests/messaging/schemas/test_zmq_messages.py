@@ -633,9 +633,9 @@ class TestMessages:
     def test_order_event_unknown_round_trip(self) -> None:
         """OrderEventData accepts and round-trips the unknown event type.
 
-        Given: An OrderEventData with event 'unknown' (#145 P0-1 — the
-            OrderEventType Literal gained the non-terminal ambiguous
-            member),
+        Given: An OrderEventData with event 'unknown' (the
+            OrderEventType Literal includes this non-terminal member
+            marking an ambiguous submit outcome),
         When: Serialized and parsed,
         Then: The event survives the round trip unchanged.
         """

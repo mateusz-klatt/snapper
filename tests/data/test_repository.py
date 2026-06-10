@@ -9161,7 +9161,7 @@ async def test_insert_trade_command_passes_with_owned_shard(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_insert_trade_command_ownership_none_preserves_pre_phase4(
+async def test_insert_trade_command_ownership_none_skips_ownership_guard(
     tmp_path: Path,
 ) -> None:
     """Passing ``ownership=None`` (or omitting it) skips the guard entirely."""
@@ -9773,8 +9773,7 @@ async def test_bulk_dispatch_skips_concurrently_expired_command(tmp_path: Path) 
     """A command another writer moved past CREATED is never resurrected.
 
     Given: A created command CAS-transitioned to EXPIRED (the outbox
-        dispatch TTL racing a dispatcher that already published it,
-        #145 P0-4),
+        dispatch TTL racing a dispatcher that already published it),
     When: bulk_dispatch_trade_commands later runs for that public_id,
     Then: The row is SKIPPED — the command stays terminally EXPIRED and
         no DISPATCHED successor forks the SCD2 history.

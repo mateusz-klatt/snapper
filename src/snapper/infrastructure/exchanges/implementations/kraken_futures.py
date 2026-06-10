@@ -796,8 +796,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 way where the request may have reached the venue
                 (timeout, reset, gateway error) — the order MAY exist
                 with this cliOrdId; the executor must verify, not
-                reject (#145 P0-1). The whole ``RequestException``
-                umbrella is wrapped DELIBERATELY, connect-phase
+                reject. The whole ``RequestException`` umbrella is
+                wrapped DELIBERATELY, connection-setup
                 failures included: ``requests`` does not reliably
                 distinguish sent-vs-not-sent (a ConnectionError can
                 fire mid-body), and a false-ambiguous merely parks the

@@ -6,7 +6,7 @@ purge older rows in batches of at most ``backlog_lookback_days`` days."*
 
 Policies are validated at module import: every ``policy.table`` MUST be
 a key in :data:`snapper.data.archiver.EVENT_TABLES`. v1 supports event
-tables only; ``StateArchiver`` is a future-iteration extension.
+tables only; ``StateArchiver`` tables fail this validation.
 
 Three operator-controlled env vars (read directly via
 ``os.environ.get``):
@@ -69,7 +69,7 @@ def validate_policies(policies: tuple[RetentionPolicy, ...]) -> None:
 
     v1 supports the keys of
     :data:`snapper.data.archiver.EVENT_TABLES` only; ``StateArchiver``
-    tables are deferred to a future iteration.
+    tables are not supported and are rejected here.
 
     Args:
         policies: Tuple of :class:`RetentionPolicy` to validate.

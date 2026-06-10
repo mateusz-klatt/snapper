@@ -863,7 +863,7 @@ def test_trade_command_dispatch_ttl_passthrough() -> None:
 
     Given AppSettings over a bootstrap with an explicit TTL,
     When reading trade_command_dispatch_ttl_s,
-    Then the bootstrap float is returned as-is (#145 P0-4).
+    Then the bootstrap float is returned as-is.
     """
     bootstrap = BootstrapSettingsLoader(
         DB_URL="sqlite:///:memory:", TRADE_COMMAND_DISPATCH_TTL_S=17.0

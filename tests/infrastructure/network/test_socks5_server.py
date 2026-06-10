@@ -336,7 +336,7 @@ class TestRequestParsing:
 
         Given a request with cmd=0x02,
         When _read_connect_request runs,
-        Then the server writes a reply with REP=0x07 (RFC 1928 §6) and
+        Then the server writes a reply with REP=0x07 and
         raises _Socks5Error.
         """
         reader, writer = self._stream_pair()
