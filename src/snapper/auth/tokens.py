@@ -811,9 +811,17 @@ class TokenManager:
         The safe resolution is to skip caching blank-claim tokens
         completely — fail-closed. These legacy tokens pay a perf
         penalty (always DB-backed) but cannot slip a stale positive
-        into cache during a race. Current token issuance never emits
-        blank-claim tokens, so the penalty is bounded by legacy
-        session lifetimes (≤ 15 min access-token TTL).
+        into cache during a race. Login and delegate issuance always
+        populate the claim from the DB-backed principal, but
+        ``TokenClaims.user_public_id`` still defaults to ``""`` for
+        decode tolerance and ``TokenManager.refresh_tokens`` re-mints
+        new pairs from old claims, so blank-claim tokens remain
+        representable. The exposure window is not the 15-minute
+        access TTL alone: refresh tokens and long-lived delegate
+        tokens live for days, bounded by
+        :data:`LONG_LIVED_TOKEN_EXPIRE_DAYS`. This skip MUST remain
+        as long as a blank claim can decode — removing it
+        reintroduces the stale-positive-during-deactivation race.
 
         Args:
             token_hash: SHA-256 hex digest of the token (cache key).

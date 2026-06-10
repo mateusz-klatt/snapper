@@ -252,9 +252,12 @@ def _envelope_for_permission_check(
     Returns the structured ``permission_denied`` envelope when the
     caller's role does not include ``permission``; ``None`` when the
     check passes (caller proceeds with the tool body). The legacy
-    :func:`_require_permission` raises a :class:`PermissionError` —
-    every MCP tool returns the canonical envelope, so the
-    new tools wrap the check at their entry point.
+    :func:`_require_permission` raises a :class:`PermissionError`
+    that FastMCP surfaces as a generic tool error — the original
+    tools (``list_instruments``, ``submit_manual_order``,
+    ``submit_ai_review_decision``) still use that raising path,
+    while the envelope-first tools wrap the check here at their
+    entry point so clients receive the canonical envelope.
     """
     role_permissions = ROLE_PERMISSIONS.get(claims.role, set())
     if permission not in role_permissions:

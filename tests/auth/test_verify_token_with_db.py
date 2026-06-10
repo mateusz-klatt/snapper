@@ -457,9 +457,11 @@ class TestVerifyCacheGenerationRace:
             admin-bus listener bumps, but a blank claim has no such
             identifier before the await. This closes the gap where
             sampling the row id post-await cannot detect an
-            invalidate-during-DB-read race. Current issuance never
-            mints blank-claim tokens; legacy tokens pay a perf
-            penalty (always DB-backed) until they expire.
+            invalidate-during-DB-read race. ``refresh_tokens``
+            re-mints pairs from old claims, so blank-claim tokens
+            remain representable; they pay a perf penalty (always
+            DB-backed) for refresh/long-lived token lifetimes, not
+            merely the 15-minute access TTL.
         """
         manager = _fresh_manager()
         now = int(datetime.now(UTC).timestamp())

@@ -136,13 +136,16 @@ def test_create_exchange_client_uses_credential_dict_when_wallet_set(
     mocked_settings: SimpleNamespace,
     wallet_credential_envelope: SimpleNamespace,
 ) -> None:
-    """Per-wallet credentials override AppSettings fallback.
+    """Per-wallet credential envelope is the sole credential source.
 
     Given a KrakenOrderExecutor with a non-empty wallet_public_id and
-        a populated ``self._credentials`` dict,
+        a populated ``self._credentials`` dict (as resolved from the
+        ``wallet_credentials`` table by ``_resolve_credentials``),
     When ``_create_exchange_client`` is called,
     Then KrakenExchangeClient receives the per-wallet api_key/secret
-        from the credential dict, NOT the legacy AppSettings values.
+        from the credential dict — the legacy ``AppSettings``
+        credential fallback was removed, so there is nothing else to
+        fall back to; unresolved credentials raise ``RuntimeError``.
     """
     created_kwargs: dict[str, Any] = {}
 

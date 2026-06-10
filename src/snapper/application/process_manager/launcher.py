@@ -1417,10 +1417,15 @@ class ProcessLauncherService:
         all wallets sharing an exchange; ``class_path``, ``method``,
         ``role``, ``lifecycle``, ``tags`` are fixed by the registry.
 
-        The spawn loop is intentionally **additive**: executor templates
-        registered with ``enabled=True`` continue to run as the legacy
-        single-wallet path. Each per-wallet instance joins the same
-        exchange-prefix topic subscription and the wallet filter on
+        Templates themselves are config-only and never run directly:
+        :meth:`get_process_configs` forces ``enabled=False`` on every
+        executor template at read time, and both
+        :meth:`start_process_by_name` and the REST start endpoint
+        reject bare template names. Executors therefore only ever run
+        as per-wallet instances — spawned here at boot or manually via
+        :meth:`start_per_wallet_instance_by_name`. Each per-wallet
+        instance joins the same exchange-prefix topic subscription and
+        the wallet filter on
         :meth:`ExchangeExecutorService._is_for_my_wallet` keeps
         cross-wallet messages from spilling into the wrong instance.
 

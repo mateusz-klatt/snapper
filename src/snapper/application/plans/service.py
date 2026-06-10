@@ -110,9 +110,11 @@ class PlanExecutorService(RegisterableProcess):
         Args:
             caps_enforcer: Optional :class:`TradingCapsEnforcer` for
                 pre-insert cap enforcement on emitted commands.
-                ``None`` bypasses enforcement — preserved so legacy
-                test fixtures that instantiate the service without
-                DI keep working.
+                ``None`` defers construction to :meth:`start`, which
+                lazy-builds the enforcer for
+                :class:`SQLAlchemyRepository` repositories; with
+                non-SQLAlchemy repositories (test fixtures) commands
+                insert without cap enforcement.
         """
         self.settings: AppSettings = get_settings()
         self.repository = get_repository(self.settings.db_url)
@@ -418,12 +420,14 @@ class PlanExecutorService(RegisterableProcess):
         present, routes through :meth:`TradingCapsEnforcer.guard`
         (per-user caps apply). When absent (system / strategy-created
         plan), routes through
-        meth:`TradingCapsEnforcer.guard_service_principal` so the
+        :meth:`TradingCapsEnforcer.guard_service_principal` so the
         bypass is audit-visible at the call site.
-        When the service was constructed without a caps enforcer
-        (legacy test fixtures), the insert is issued directly
-        matches the legacy behavior so existing tests continue to
-        pass unchanged.
+        When the service runs without a caps enforcer — test fixtures
+        and non-SQLAlchemy repositories, since :meth:`start` only
+        lazy-constructs the enforcer for :class:`SQLAlchemyRepository`
+        — the insert is issued directly, mirroring the trader
+        coordinator's ``_build_caps_enforcer`` returning ``None`` for
+        the same case.
         """
         if self._caps_enforcer is None:
             await self.repository.insert_trade_command(row, ownership=None)
