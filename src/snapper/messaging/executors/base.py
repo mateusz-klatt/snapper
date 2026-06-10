@@ -5,9 +5,12 @@ that handle order placement and fill reporting.
 """
 
 import asyncio
+import random
 import time
 from abc import ABC
 from abc import abstractmethod
+from collections import OrderedDict
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
@@ -92,6 +95,39 @@ unbounded venue call here would silently extend the UNKNOWN window. A
 timed-out attempt counts as could-not-verify, never as absence.
 """
 
+_EXEC_STREAM_BACKOFF_INITIAL_S = 1.0
+"""Supervisor backoff after the first execution-stream death."""
+
+_EXEC_STREAM_BACKOFF_CAP_S = 60.0
+"""Backoff ceiling between execution-stream reconnect attempts.
+
+Kept at the recon-loop period: even while the stream is down, every
+fill is at most one recon cycle behind, so retrying the (cheap)
+resubscribe more than once a minute buys nothing during a long outage.
+"""
+
+_EXEC_STREAM_JITTER_FRACTION = 0.2
+"""Relative jitter applied to each supervisor backoff sleep.
+
+Decorrelates reconnect attempts across executor instances after a
+shared outage so the venue does not see synchronized resubscribe
+bursts on recovery.
+"""
+
+_EXEC_STREAM_HEALTHY_RUNTIME_S = 300.0
+"""Stream runtime above which the next death restarts backoff from initial.
+
+Without the reset, a stream that lived for hours would inherit the
+60s ceiling from an incident long resolved and sit dark a full minute
+on its next blip.
+"""
+
+_SEEN_EXEC_IDS_MAX = 10_000
+"""Bound of the executor-level seen-exec-id LRU (mirrors the engine's
+apply_fill LRU). At one fill per second this covers ~3 hours of
+lookback — far beyond any venue replay window — while capping memory.
+"""
+
 
 @dataclass
 class PendingOrderState:
@@ -106,7 +142,14 @@ class PendingOrderState:
         db_order_id: Database row ID from _log_order_to_db (for status updates).
         order_public_id: Logical order identity (for execution inserts).
         exchange_order_id: Exchange-assigned order ID (set after ACK).
-        last_seen_cum_qty: Running cumulative fill quantity for delta fallback.
+        last_seen_cum_qty: COMMITTED cumulative — what has actually been
+            published to the engine; advanced only on publish success.
+        last_recorded_cum_qty: DURABLE cumulative — the highest
+            cum_fill_size successfully written to venue_events for this
+            order; advanced on record success (even when the subsequent
+            publish fails). The durable fill_size of each new row is the
+            gap from THIS watermark, so additive checkpoint replay always
+            sums to venue truth regardless of which prior step failed.
         submit_ambiguous: True when the submit failed ambiguously (the
             venue MAY have the order); the entry is parked pending
             venue verification instead of being rejected.
@@ -116,6 +159,12 @@ class PendingOrderState:
         accept_event_pending: True when the order was accepted by the
             venue but the durable order_accepted venue event failed to
             persist; the recon loop retries the write until it sticks.
+        fill_lock: Serializes fill booking for this order across the live
+            stream task and the recon task — dedupe gate, delta build,
+            durable write, publish, and committed-cumulative advance form
+            one atomic section (see ``_book_correlated_fill``). Lifecycle
+            is tied to the entry itself, so the lock vanishes with the
+            order and cannot leak.
     """
 
     request: OrderRequestData
@@ -123,9 +172,11 @@ class PendingOrderState:
     order_public_id: str | None = field(default=None)
     exchange_order_id: str | None = field(default=None)
     last_seen_cum_qty: float = field(default=0.0)
+    last_recorded_cum_qty: float = field(default=0.0)
     submit_ambiguous: bool = field(default=False)
     unknown_published: bool = field(default=False)
     accept_event_pending: bool = field(default=False)
+    fill_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
@@ -178,6 +229,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.orphan_ttl_seconds: float = 5.0
         self.orphan_drop_count: int = 0
         self._unhealed_accept_events: dict[str, RecordVenueEventParams] = {}
+        self._seen_exec_ids: OrderedDict[str, None] = OrderedDict()
+        self._exec_stream_restarts: int = 0
+        self._recon_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[None]] = set()
 
     @abstractmethod
@@ -404,6 +458,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             order_public_id=db_order["public_id"],
             exchange_order_id=exchange_order_id,
             last_seen_cum_qty=filled,
+            last_recorded_cum_qty=filled,
         )
         self.pending_orders[client_order_id] = pending
         self.client_by_exchange[exchange_order_id] = client_order_id
@@ -488,7 +543,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 asyncio.create_task(self._heartbeat_loop()),
             ]
             if supports_ws:
-                tasks.append(asyncio.create_task(self._execution_handler()))
+                tasks.append(asyncio.create_task(self._supervise_execution_stream()))
             tasks.append(asyncio.create_task(self._reconciliation_handler()))
             try:
                 await asyncio.gather(*tasks)
@@ -1243,7 +1298,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def _process_cancel(self, cancel: OrderCancelData) -> None:
         """Cancel an existing order on the exchange.
 
-        Cleans up pending_orders and client_by_exchange on success.
+        Cleans up pending_orders and client_by_exchange on success. The
+        lifecycle pop runs under the order's ``fill_lock``: an
+        unserialized pop could yank the entry out from under an in-flight
+        fill booking, stranding that fill (uncorrelatable, orphan-TTL
+        dropped, invisible to recon once untracked) — the same interleave
+        class the stream-side cancellation path serializes against. A
+        trailing fill arriving AFTER a completed cancel pop remains
+        recon/P0-3 territory: the order is legitimately gone.
 
         Args:
             cancel: Cancel request data containing order ID to cancel.
@@ -1255,15 +1317,20 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 cancel.exchange_order_id, cancel.instrument
             )
             if result and result.status == ExchangeOrderStatusEnum.CANCELED:
-                client_id = self.client_by_exchange.pop(cancel.exchange_order_id, None)
-                if client_id:
-                    pending = self.pending_orders.pop(client_id, None)
-                    if pending and pending.db_order_id is not None:
-                        assert self.exchange_client is not None
-                        await self.exchange_client._log_order_update_to_db(
-                            db_order_id=pending.db_order_id,
-                            status=ExchangeOrderStatusEnum.CANCELED,
-                        )
+                client_id = self.client_by_exchange.get(cancel.exchange_order_id)
+                holder = self.pending_orders.get(client_id) if client_id else None
+                if holder is not None:
+                    async with holder.fill_lock:
+                        self.client_by_exchange.pop(cancel.exchange_order_id, None)
+                        pending = self.pending_orders.pop(client_id, None) if client_id else None
+                        if pending and pending.db_order_id is not None:
+                            assert self.exchange_client is not None
+                            await self.exchange_client._log_order_update_to_db(
+                                db_order_id=pending.db_order_id,
+                                status=ExchangeOrderStatusEnum.CANCELED,
+                            )
+                else:
+                    self.client_by_exchange.pop(cancel.exchange_order_id, None)
                 await self._publish_cancel_event(cancel, OrderEventEnum.CANCELLED)
                 logger.info(
                     f"[{exchange_name}] Order {cancel.exchange_order_id} cancelled successfully"
@@ -1418,15 +1485,23 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
         return exchange_order_id
 
-    async def _publish_execution(self, topic: str, fill: ExecutionData) -> None:
+    async def _publish_execution(self, topic: str, fill: ExecutionData) -> bool:
         """Send a complete fill notification to ZMQ.
 
         Args:
             topic: ZMQ topic for routing.
             fill: Complete ExecutionData with provenance set.
+
+        Returns:
+            True when the fill was handed to the publisher without error;
+            False when the publisher is unavailable or the send raised.
+            The caller's dedupe registration MUST check this — a swallowed
+            send failure that still registered the exec id / advanced the
+            seen cumulative would make the venue's redelivery look like a
+            replay and drop the fill for good.
         """
         if not self.msg_publisher or not self.running:
-            return
+            return False
         exchange_name = self._get_exchange_name()
         try:
             await self.msg_publisher.send(topic, fill)
@@ -1436,6 +1511,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
         except Exception as e:
             logger.error(f"[{exchange_name}] Error publishing fill: {e}")
+            return False
+        return True
 
     async def _record_venue_event(self, params: RecordVenueEventParams) -> None:
         """Write a VenueEvent row to DB if repository supports it.
@@ -1533,6 +1610,36 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 logger.exception(f"[{exchange_name}] Reconciliation cycle failed")
 
     async def _reconcile_with_exchange(self) -> None:
+        """Run one reconciliation cycle, serialized on ``_recon_lock``.
+
+        Two callers exist: the periodic 60s handler and the stream
+        supervisor's post-reconnect heal. Unserialized, two concurrent
+        cycles could both observe the same fill gap and double-emit the
+        corrective execution — the lock became necessary exactly when the
+        second caller appeared.
+        """
+        async with self._recon_lock:
+            await self._reconcile_with_exchange_unlocked()
+
+    async def _post_reconnect_reconcile(self) -> None:
+        """Best-effort recon pass before re-entering a respawned stream.
+
+        Heals the dark-window fill/terminal gap promptly (instead of
+        waiting up to a full periodic cycle) and orders "recon heals
+        first, then resubscribe with no snapshot" — closing the window
+        where a corrective fill and a venue replay could interleave.
+        Failures are logged and never block the resubscribe: the periodic
+        cycle remains the steady-state backstop.
+        """
+        try:
+            await self._reconcile_with_exchange()
+        except Exception:
+            logger.exception(
+                f"[{self._get_exchange_name()}] Post-reconnect reconciliation "
+                f"failed - resubscribing anyway"
+            )
+
+    async def _reconcile_with_exchange_unlocked(self) -> None:
         """Run one reconciliation cycle against the exchange API.
 
         Queries exchange for current order state and balances,
@@ -1822,9 +1929,109 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
         await self._process_execution(corrective)
 
-    async def _execution_handler(self) -> None:
-        """Handle execution updates from the exchange WebSocket."""
+    async def _sleep_with_jitter(self, delay_s: float) -> None:
+        """Sleep ``delay_s`` scaled by ±``_EXEC_STREAM_JITTER_FRACTION``.
+
+        Args:
+            delay_s: Base backoff delay in seconds.
+        """
+        jitter = 1.0 + _EXEC_STREAM_JITTER_FRACTION * (2.0 * random.random() - 1.0)
+        await asyncio.sleep(delay_s * jitter)
+
+    async def _supervise_execution_stream(self) -> None:
+        """Respawn the private execution stream until shutdown.
+
+        Replaces the previous spawn-once model in which ANY termination of
+        :meth:`_execution_handler` — SDK reconnect-budget exhaustion after
+        ~2 min (futures) / ~5 min (spot) of outage, a raised error, even a
+        clean generator return — left fills permanently dark while the
+        process kept reporting RUNNING, until an operator restarted it.
+
+        Death signal is termination itself: a clean return is treated
+        exactly like an exception (the spot generator can still end
+        cleanly via its inner receive-error break), mirroring the #144
+        publisher supervisor. Backoff doubles from
+        ``_EXEC_STREAM_BACKOFF_INITIAL_S`` to ``_EXEC_STREAM_BACKOFF_CAP_S``
+        with ±``_EXEC_STREAM_JITTER_FRACTION`` jitter and never abandons —
+        each attempt is internally bounded by the venue clients' connect
+        and send timeouts, so a wedged attempt cannot stall the loop. A
+        stream that survived ``_EXEC_STREAM_HEALTHY_RUNTIME_S`` resets the
+        backoff so an old incident's ceiling is not inherited by the next
+        blip. Every attempt after a death first runs a best-effort
+        :meth:`_post_reconnect_reconcile` so the dark-window gap is healed
+        BEFORE the snapshot-free resubscribe. Client rebuild and
+        resubscribe happen inside the venue generator on re-entry (locked
+        ensure-connected, poisoned-slot rebuild); this loop deliberately
+        touches no executor maps —
+        ``pending_orders``/``client_by_exchange`` survive respawns, which
+        is what keeps fill correlation working across the gap.
+
+        Terminal exits: ``running`` cleared (shutdown), ``CancelledError``
+        (propagates to ``start()``'s gather), ``NotImplementedError`` (the
+        venue cannot stream executions — permanent, the recon loop is the
+        only fill source), or a venue client that does not exist /
+        advertises no WebSocket executions support.
+
+        ``_exec_stream_restarts`` counts respawns as an observability seam
+        for the future honest-heartbeat work (P2-1).
+        """
         exchange_name = self._get_exchange_name()
+        backoff = _EXEC_STREAM_BACKOFF_INITIAL_S
+        while self.running:
+            client = self.exchange_client
+            if client is None or not client.supports_websocket_executions:
+                logger.warning(
+                    f"[{exchange_name}] Execution stream unavailable on this venue - "
+                    f"supervisor exiting"
+                )
+                return
+            if self._exec_stream_restarts:
+                await self._post_reconnect_reconcile()
+            started = time.monotonic()
+            try:
+                await self._execution_handler()
+            except asyncio.CancelledError:
+                raise
+            except NotImplementedError:
+                logger.info(
+                    f"[{exchange_name}] Exchange client does not support execution "
+                    f"streaming - supervisor exiting"
+                )
+                return
+            except Exception as exc:
+                logger.warning(
+                    f"[{exchange_name}] Execution stream died ({exc!r}) - "
+                    f"respawn #{self._exec_stream_restarts + 1} after {backoff:.0f}s backoff"
+                )
+            else:
+                if not self.running:
+                    return
+                logger.warning(
+                    f"[{exchange_name}] Execution stream returned cleanly - "
+                    f"respawn #{self._exec_stream_restarts + 1} after {backoff:.0f}s backoff"
+                )
+            self._exec_stream_restarts += 1
+            if time.monotonic() - started >= _EXEC_STREAM_HEALTHY_RUNTIME_S:
+                backoff = _EXEC_STREAM_BACKOFF_INITIAL_S
+            await self._sleep_with_jitter(backoff)
+            backoff = min(backoff * 2.0, _EXEC_STREAM_BACKOFF_CAP_S)
+
+    async def _execution_handler(self) -> None:
+        """Consume one execution-stream pass from the exchange WebSocket.
+
+        Single pass by design: any termination — clean generator end or a
+        raised error — returns or propagates to
+        :meth:`_supervise_execution_stream`, which owns logging, backoff,
+        and respawn (the broad swallow that used to live here hid death
+        from any caller). The ``finally`` aclose runs the generator's
+        finalizers (venue-side unsubscribe, poisoned-slot
+        compare-and-clear) deterministically BEFORE the supervisor's next
+        attempt, so a stale generator's deferred cleanup can never
+        unsubscribe the fills feed out from under a freshly subscribed
+        stream. The contract type is ``AsyncIterator`` (not every test
+        double is a generator), hence the runtime ``AsyncGenerator``
+        check instead of ``contextlib.aclosing``.
+        """
         if self.exchange_client is None:
             logger.warning(f"ExchangeExecutorService: {_EXCHANGE_NOT_INIT_MSG}")
             return
@@ -1833,18 +2040,15 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 "ExchangeExecutorService: WebSocket executions unsupported; skipping handler"
             )
             return
+        stream = self.exchange_client.subscribe_executions()
         try:
-            async for message in self.exchange_client.subscribe_executions():
+            async for message in stream:
                 if not self.running:
                     break
                 await self._process_execution(message)
-        except NotImplementedError:
-            logger.info(
-                f"[{exchange_name}] Exchange client does not support execution streaming, skipping"
-            )
-        except Exception as e:
-            if self.running:
-                logger.error(f"[{exchange_name}] Error in execution handler: {e}")
+        finally:
+            if isinstance(stream, AsyncGenerator):
+                await stream.aclose()
 
     def _cleanup_expired_orphans(self) -> None:
         """Remove orphaned executions that exceeded TTL.
@@ -2016,12 +2220,30 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     def _resolve_fill_quantities(
         execution: ExecutionUpdate,
         prev_cum: float,
+        *,
+        tracked: bool = False,
     ) -> tuple[float, float, float, float]:
         """Derive cumulative and delta quantities from an execution update.
+
+        For a TRACKED order whose frame carries both the absolute
+        cumulative and a venue delta, the published delta is anchored to
+        the COMMITTED cumulative (``cum_qty - prev_cum``) rather than the
+        venue's ``last_qty``: the engine applies deltas, so every
+        published delta must close the distance from what was actually
+        published before. When a prior fill's publish failed, the next
+        cum-carrying frame thereby absorbs the unpublished gap instead of
+        leaving the engine permanently behind venue truth (a divergence
+        the recon loop cannot see, because the executor-side cumulative
+        matches the venue). The two values coincide in normal operation;
+        a divergence is logged. Untracked orders keep the venue delta —
+        with no committed cumulative to anchor to, cum-diff deltas would
+        repeat-count across frames.
 
         Args:
             execution: Execution update from exchange.
             prev_cum: Previously seen cumulative quantity for this order.
+            tracked: True when the order has a pending entry whose
+                committed cumulative advances on successful publish.
 
         Returns:
             Tuple of (cum_qty, delta_size, delta_price, avg_price).
@@ -2032,7 +2254,21 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             cum_qty = prev_cum + execution.last_qty
         else:
             cum_qty = 0.0
-        if execution.last_qty is not None and execution.last_price is not None:
+        if (
+            tracked
+            and execution.cum_qty is not None
+            and execution.last_qty is not None
+            and execution.last_price is not None
+        ):
+            delta_size = cum_qty - prev_cum
+            delta_price = execution.last_price
+            if abs(delta_size - execution.last_qty) > max(1e-12, abs(execution.last_qty) * 1e-6):
+                logger.warning(
+                    f"Cum-anchored delta {delta_size} diverges from venue last_qty "
+                    f"{execution.last_qty} (cum {cum_qty}, committed {prev_cum}) - "
+                    f"absorbing unpublished gap"
+                )
+        elif execution.last_qty is not None and execution.last_price is not None:
             delta_size = execution.last_qty
             delta_price = execution.last_price
         else:
@@ -2112,6 +2348,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             original_order: Original order request data.
             exchange_name: Exchange name.
 
+        ``last_seen_cum_qty`` is deliberately NOT advanced here: it is
+        COMMITTED state, advanced by :meth:`_book_correlated_fill` only
+        after the publish succeeded, under the order's ``fill_lock``. A
+        builder-side advance would leak tentative state to concurrent
+        readers and, after a failed publish, make the venue's redelivery
+        look non-advancing and drop the fill for good.
+
         Returns:
             Tuple of (stream_key, ExecutionData) ready for publishing.
         """
@@ -2122,13 +2365,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         pending = self.pending_orders.get(client_id)
         prev_cum = pending.last_seen_cum_qty if pending else 0.0
         cum_qty, delta_size, delta_price, avg_price = self._resolve_fill_quantities(
-            execution, prev_cum
+            execution, prev_cum, tracked=pending is not None
         )
         status = self._determine_fill_status(
             execution, cum_qty, abs(float(original_order.quantity))
         )
-        if pending:
-            pending.last_seen_cum_qty = cum_qty
         return topic, ExecutionData(
             public_id=str(uuid7()),
             timestamp=now,
@@ -2155,6 +2396,74 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             ),
         )
 
+    def _is_duplicate_fill(self, execution: ExecutionUpdate, client_order_id: str) -> bool:
+        """Decide whether a fill frame was already booked and must be dropped.
+
+        Two complementary keys, checked BEFORE :meth:`_build_execution_data`
+        mutates ``last_seen_cum_qty``:
+
+        - ``exec_id`` LRU: catches venue redelivery of the same execution
+          (at-least-once delivery, replays across resubscribes). Futures
+          fills carry ``fill_id`` as exec id, spot carries ``exec_id``;
+          recon correctives use unique synthetic ids and never collide.
+        - Cumulative-monotonic guard: a fill carrying absolute ``cum_qty``
+          that does not ADVANCE the order's seen cumulative is a replay or
+          a stale corrective. This closes the cross-key hole exec ids
+          cannot: a recon corrective healed the gap under a synthetic id,
+          then the real fill (a NEVER-seen exec id) arrives — and equally
+          the reverse race, a stale corrective (recon always stamps
+          ``cum_qty = exchange.filled``) landing after a live fill already
+          advanced the cumulative. Futures live fills carry no ``cum_qty``
+          so this guard never misfires there; their replay exposure is
+          closed by snapshot suppression at the source plus the exec-id LRU.
+
+        Status-only frames (``last_qty`` is None) always pass — they carry
+        no quantity to double-book.
+
+        Args:
+            execution: Execution update from the exchange WebSocket.
+            client_order_id: Correlated client order id.
+
+        Returns:
+            True when the frame must be dropped without publishing.
+        """
+        if execution.last_qty is None:
+            return False
+        exec_id = getattr(execution, "exec_id", None)
+        if exec_id and exec_id in self._seen_exec_ids:
+            logger.debug(f"Skipping duplicate fill {exec_id} for {client_order_id}")
+            return True
+        pending = self.pending_orders.get(client_order_id)
+        if (
+            pending is not None
+            and execution.cum_qty is not None
+            and execution.cum_qty <= pending.last_seen_cum_qty + 1e-12
+        ):
+            logger.debug(
+                f"Skipping non-advancing fill for {client_order_id}: "
+                f"cum {execution.cum_qty} <= seen {pending.last_seen_cum_qty}"
+            )
+            return True
+        return False
+
+    def _register_seen_exec_id(self, exec_id: str | None) -> None:
+        """Record a PUBLISHED fill's exec id in the bounded LRU.
+
+        Registration happens only after :meth:`_publish_execution`
+        succeeded: a fill whose durable venue-event write or publish
+        failed must NOT be marked seen, or its redelivery would be dropped
+        and the fill lost for good.
+
+        Args:
+            exec_id: Venue execution id; falsy values are ignored.
+        """
+        if not exec_id:
+            return
+        self._seen_exec_ids[exec_id] = None
+        self._seen_exec_ids.move_to_end(exec_id)
+        while len(self._seen_exec_ids) > _SEEN_EXEC_IDS_MAX:
+            self._seen_exec_ids.popitem(last=False)
+
     async def _process_execution(self, execution: ExecutionUpdate) -> None:
         """Process an execution update and publish fill notification.
 
@@ -2164,6 +2473,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
         Cancelled/expired executions clean up maps but do not publish execution data.
         Unknown executions are buffered for TTL in case ACK arrives later (race).
+
+        Fill booking AND cancellation handling for a tracked order run
+        under the order's ``fill_lock``: the live stream task, the recon
+        task, and the orphan-flush task can all deliver executions for
+        the same order. An unserialized interleave lets a later fill read
+        tentative (not yet published) cumulative state, and an
+        unserialized cancellation can pop the pending entry out from
+        under an in-flight booking — the gate, the delta computation, the
+        durable write, the publish, the committed-cumulative advance, and
+        any lifecycle pop must be one atomic section per order.
 
         Args:
             execution: Execution update from the exchange WebSocket.
@@ -2175,68 +2494,144 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             if resolved is None:
                 return
             exchange_order_id, client_order_id, original_order = resolved
-            if await self._handle_cancellation(
-                execution, exchange_order_id, client_order_id, exchange_name
-            ):
+            holder = self.pending_orders.get(client_order_id)
+            if holder is None:
                 return
-            topic, fill = self._build_execution_data(
-                execution, exchange_order_id, original_order, exchange_name
-            )
-            raw_tid = getattr(execution, "trade_id", None)
-            await self._record_venue_event(
-                {
-                    "event_type": "fill_observed",
-                    "exchange_name": exchange_name,
-                    "instrument": fill.instrument,
-                    "exchange_order_id": exchange_order_id,
-                    "client_order_id": client_order_id,
-                    "side": fill.side,
-                    "status": fill.status,
-                    "fill_price": fill.last_price,
-                    "fill_size": fill.last_size,
-                    "cum_fill_size": fill.size,
-                    "fee": fill.fee,
-                    "fee_asset": fill.fee_asset,
-                    "exec_id": getattr(execution, "exec_id", None),
-                    "trade_id": str(raw_tid) if raw_tid else None,
-                    "venue_timestamp": getattr(execution, "timestamp", None),
-                    "strategy_tag": original_order.strategy_tag,
-                    "liquidity_role": fill.liquidity_role,
-                }
-            )
-            await self._publish_execution(topic, fill)
-            pending = self.pending_orders.get(client_order_id)
-            if pending and self.exchange_client is not None:
-                if pending.order_public_id is not None:
-                    await self.exchange_client._log_execution_to_db(
-                        order_public_id=pending.order_public_id,
-                        execution=execution,
-                        wallet_public_id=self.wallet_public_id,
-                        operator_public_id=pending.request.operator_public_id,
-                        delta_size=fill.last_size,
-                        delta_price=fill.last_price,
-                        fee=fill.fee,
-                        fee_asset=fill.fee_asset,
-                        status=fill.status,
-                    )
-                if pending.db_order_id is not None:
-                    db_status = (
-                        ExchangeOrderStatusEnum.CLOSED
-                        if fill.status == FillStatusEnum.FILLED
-                        else ExchangeOrderStatusEnum.OPEN
-                    )
-                    await self.exchange_client._log_order_update_to_db(
-                        db_order_id=pending.db_order_id,
-                        status=db_status,
-                    )
-            if fill.status == FillStatusEnum.FILLED:
-                self.pending_orders.pop(client_order_id, None)
-                self.client_by_exchange.pop(exchange_order_id, None)
-                logger.info(
-                    f"[{exchange_name}] Order {client_order_id} filled, removed from pending"
+            async with holder.fill_lock:
+                if await self._handle_cancellation(
+                    execution, exchange_order_id, client_order_id, exchange_name
+                ):
+                    return
+                await self._book_correlated_fill(
+                    execution, exchange_order_id, client_order_id, original_order, exchange_name
                 )
         except Exception as e:
             logger.error(f"[{exchange_name}] Error processing execution: {e}")
+
+    async def _book_correlated_fill(
+        self,
+        execution: ExecutionUpdate,
+        exchange_order_id: str,
+        client_order_id: str,
+        original_order: OrderRequestData,
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Book one correlated execution: dedupe, persist, publish, commit.
+
+        Runs under the order's ``fill_lock`` when the order is tracked.
+        ``last_seen_cum_qty`` is COMMITTED state — advanced only after the
+        publish succeeded, so it always equals the cumulative the engine
+        has actually been told about. A fill whose publish failed commits
+        nothing: its redelivery passes the gate, and if a LATER fill for
+        the same order arrives first, that fill's cum-anchored delta (see
+        :meth:`_resolve_fill_quantities`) absorbs the unpublished gap —
+        either way the published deltas sum to the committed cumulative.
+
+        The durable venue-event row's ``fill_size`` anchoring depends on
+        what the frame carries. Replay (``TradeService.apply_venue_event``)
+        dedupes rows by exec id and sums ``fill_size`` additively across
+        DISTINCT fills, so:
+
+        - CUM-CARRYING frames anchor to the DURABLE watermark
+          (``last_recorded_cum_qty``): the gap since the last persisted
+          row. The venue's raw ``last_qty`` would underbook when the
+          predecessor's durable write failed (its quantity exists in no
+          row), and the publish-anchored absorbed delta would overbook
+          when the predecessor's row DID persist and only its publish
+          failed. The watermark advances right after the record succeeds
+          — before the publish — because it tracks DB truth, not engine
+          truth.
+        - DELTA-ONLY frames (futures: no ``cum_qty``) write the venue's
+          own ``last_qty``: their ``fill.size`` is fabricated from the
+          COMMITTED cumulative, which lags venue truth after a publish
+          failure, and a watermark gap computed from a fabricated
+          cumulative would write a zero row for a real, distinct fill —
+          underbooking replay. Redelivered duplicates of the SAME fill
+          re-write rows under the same exec id, which replay dedupes.
+
+        Args:
+            execution: Execution update from the exchange WebSocket.
+            exchange_order_id: Venue-assigned order id.
+            client_order_id: Correlated client order id.
+            original_order: Original order request data.
+            exchange_name: Exchange identifier.
+        """
+        if self._is_duplicate_fill(execution, client_order_id):
+            return
+        topic, fill = self._build_execution_data(
+            execution, exchange_order_id, original_order, exchange_name
+        )
+        raw_tid = getattr(execution, "trade_id", None)
+        durable_holder = self.pending_orders.get(client_order_id)
+        is_fill_frame = execution.last_qty is not None or execution.cum_qty is not None
+        if durable_holder is not None and execution.cum_qty is not None:
+            durable_size = max(0.0, fill.size - durable_holder.last_recorded_cum_qty)
+        elif execution.last_qty is not None:
+            durable_size = execution.last_qty
+        else:
+            durable_size = fill.last_size
+        await self._record_venue_event(
+            {
+                "event_type": "fill_observed",
+                "exchange_name": exchange_name,
+                "instrument": fill.instrument,
+                "exchange_order_id": exchange_order_id,
+                "client_order_id": client_order_id,
+                "side": fill.side,
+                "status": fill.status,
+                "fill_price": fill.last_price,
+                "fill_size": durable_size,
+                "cum_fill_size": fill.size,
+                "fee": fill.fee,
+                "fee_asset": fill.fee_asset,
+                "exec_id": getattr(execution, "exec_id", None),
+                "trade_id": str(raw_tid) if raw_tid else None,
+                "venue_timestamp": getattr(execution, "timestamp", None),
+                "strategy_tag": original_order.strategy_tag,
+                "liquidity_role": fill.liquidity_role,
+            }
+        )
+        if durable_holder is not None and is_fill_frame:
+            durable_holder.last_recorded_cum_qty = max(
+                durable_holder.last_recorded_cum_qty, fill.size
+            )
+        if not await self._publish_execution(topic, fill):
+            return
+        committed = self.pending_orders.get(client_order_id)
+        if committed is not None and (
+            execution.last_qty is not None or execution.cum_qty is not None
+        ):
+            committed.last_seen_cum_qty = max(committed.last_seen_cum_qty, fill.size)
+        if execution.last_qty is not None:
+            self._register_seen_exec_id(getattr(execution, "exec_id", None))
+        pending = self.pending_orders.get(client_order_id)
+        if pending and self.exchange_client is not None:
+            if pending.order_public_id is not None:
+                await self.exchange_client._log_execution_to_db(
+                    order_public_id=pending.order_public_id,
+                    execution=execution,
+                    wallet_public_id=self.wallet_public_id,
+                    operator_public_id=pending.request.operator_public_id,
+                    delta_size=fill.last_size,
+                    delta_price=fill.last_price,
+                    fee=fill.fee,
+                    fee_asset=fill.fee_asset,
+                    status=fill.status,
+                )
+            if pending.db_order_id is not None:
+                db_status = (
+                    ExchangeOrderStatusEnum.CLOSED
+                    if fill.status == FillStatusEnum.FILLED
+                    else ExchangeOrderStatusEnum.OPEN
+                )
+                await self.exchange_client._log_order_update_to_db(
+                    db_order_id=pending.db_order_id,
+                    status=db_status,
+                )
+        if fill.status == FillStatusEnum.FILLED:
+            self.pending_orders.pop(client_order_id, None)
+            self.client_by_exchange.pop(exchange_order_id, None)
+            logger.info(f"[{exchange_name}] Order {client_order_id} filled, removed from pending")
 
     async def _publish_order_status(
         self,
