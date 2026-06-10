@@ -1514,15 +1514,27 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
         Known limitation — market orders without price:
             If the exchange reports a market order whose snapshot has
-            ``price=None``, this method logs an ERROR
-            (``"no price on market order, skipping corrective fill"``) and
-            returns without emitting a corrective fill.
+            ``price=None``, this method first asks the venue for the
+            order's OWN fills via
+            :meth:`ExchangeClientBase.get_order_fill_vwap` (venue-true
+            quantity-weighted average; implemented for Kraken Futures,
+            whose snapshots carry only ``limitPrice``). The VWAP is
+            trusted ONLY when the returned covered quantity spans the
+            order's whole filled quantity within a RELATIVE 1e-6
+            tolerance (venue-side decimal rounding and float summation
+            can legitimately leave a fully-covered page a few ulps
+            short) — a partial fills page (older fills aged out) must
+            never price the entire gap. Only when
+            that also yields nothing — no usable fills lookup, partial
+            coverage, or a failed lookup — does it log an ERROR
+            (``"no price on market order, skipping corrective fill"``)
+            and return without emitting a corrective fill.
 
             The CCXT snapshot builder backfills ``price`` from the
             order's executed ``average`` (the venue's VWAP) when the limit
             price is absent and the order has filled, so this skip now
-            only fires when the venue reports neither a price nor an
-            executed average for the order.
+            only fires when the venue reports neither a price, nor an
+            executed average, nor per-order fills.
 
             Rationale: the executor does not subscribe to ticks and thus
             cannot approximate the fill price locally. Cross-process RPC
@@ -1553,6 +1565,25 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
         gap = exchange_order.filled - pending.last_seen_cum_qty
         fill_price = exchange_order.price
+        if fill_price is None and self.exchange_client is not None:
+            try:
+                vwap_result = await self.exchange_client.get_order_fill_vwap(exchange_oid)
+            except Exception as exc:
+                logger.warning(
+                    f"[{exchange_name}] Recon: fill-VWAP lookup failed for "
+                    f"{exchange_oid}, treating as unresolved: {exc}"
+                )
+                vwap_result = None
+            if vwap_result is not None:
+                vwap, covered_qty = vwap_result
+                if covered_qty >= exchange_order.filled * (1.0 - 1e-6):
+                    fill_price = vwap
+                else:
+                    logger.warning(
+                        f"[{exchange_name}] Recon: fills page for {exchange_oid} "
+                        f"covers only {covered_qty} of {exchange_order.filled}, "
+                        f"refusing a partial-page VWAP"
+                    )
         if fill_price is None:
             logger.error(
                 f"[{exchange_name}] Recon: fill gap for {exchange_oid} "

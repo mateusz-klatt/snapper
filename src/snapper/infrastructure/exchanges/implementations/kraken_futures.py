@@ -938,6 +938,74 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             raise ValueError(f"Order {order_id} not found")
         return self._convert_status_entry(orders[0])
 
+    async def get_order_fill_vwap(self, order_id: str) -> tuple[float, float] | None:
+        """Return (VWAP, covered quantity) of an order's recent venue fills.
+
+        Kraken Futures order snapshots carry only ``limitPrice``, so a filled
+        MARKET order's snapshot has no price and fill-gap reconciliation
+        would skip its corrective fill. This queries the venue's own fills
+        endpoint (the most recent fills page), filters to this ``order_id``
+        and computes ``sum(price * qty) / sum(qty)`` together with the summed
+        quantity — venue truth, never a local approximation. The caller
+        compares the covered quantity against the order's total filled
+        quantity, so a VWAP over a PARTIAL fills page (older fills aged out)
+        is never applied to the whole gap. Per-fill parsing is defensive:
+        the quantity key is ``size`` or ``qty`` (the venue uses both shapes
+        across surfaces), duplicate ``fill_id`` entries are counted once (a
+        retried fetch must not inflate coverage or bias the average), fills
+        are summed with ``math.fsum`` for float robustness, and an
+        unparseable or non-positive fill is skipped rather than aborting the
+        lookup (the venue does not report busts as negative fills here).
+        Returns ``None`` when no usable fills exist for the order, keeping
+        reconciliation's documented fail-safe skip.
+
+        Args:
+            order_id: Exchange order ID whose fills should be averaged.
+
+        Returns:
+            A ``(vwap, covered_quantity)`` tuple over the order's recent
+            fills, or ``None``.
+
+        Raises:
+            RuntimeError: If API credentials are missing.
+            Exception: If the venue query fails — the reconciliation caller
+                treats this as could-not-resolve and skips.
+        """
+        self._require_authenticated()
+        self._record_rest_call()
+        result = await asyncio.to_thread(cast(Trade, self._trade_client).get_fills)
+        fills = result.get("fills")
+        if not isinstance(fills, list):
+            return None
+        notionals: list[float] = []
+        quantities: list[float] = []
+        seen_fill_ids: set[str] = set()
+        for fill in fills:
+            if not isinstance(fill, dict) or fill.get("order_id") != order_id:
+                continue
+            fill_id = fill.get("fill_id")
+            if fill_id is not None and fill_id in seen_fill_ids:
+                continue
+            price_raw = fill.get("price")
+            size_raw = fill.get("size", fill.get("qty"))
+            if price_raw is None or size_raw is None:
+                continue
+            try:
+                price = float(price_raw)
+                size = float(size_raw)
+            except (TypeError, ValueError):
+                continue
+            if not (math.isfinite(price) and math.isfinite(size)) or size <= 0.0:
+                continue
+            if fill_id is not None:
+                seen_fill_ids.add(fill_id)
+            notionals.append(price * size)
+            quantities.append(size)
+        quantity = math.fsum(quantities)
+        if quantity <= 0.0:
+            return None
+        return math.fsum(notionals) / quantity, quantity
+
     def _convert_status_entry(self, entry: dict[str, Any]) -> ExchangeOrderSnapshot:
         """Convert one get_orders_status entry to an order snapshot.
 

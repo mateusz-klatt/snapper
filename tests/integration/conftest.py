@@ -90,11 +90,22 @@ def _patch_settings_for_e2e(
     get_settings_with_service so _initialize_settings does not replace
     the mock at start time.
 
+    Also reports the repository dialect as ``postgresql`` for the e2e
+    scope: these tests exercise multi-coordinator PARTITIONING and
+    dispatch over an isolated SQLite copy, while the coordinator's
+    fail-fast ownership validation (correctly) rejects a real
+    multi-instance SQLite deployment because FOR UPDATE is a no-op
+    there — row-locking semantics are not what these tests verify.
+
     Args:
         monkeypatch: pytest monkeypatch fixture for module-level patches.
         xsub_endpoint: Broker XSUB endpoint to inject into settings.
         xpub_endpoint: Broker XPUB endpoint to inject into settings.
     """
+    monkeypatch.setattr(
+        "snapper.data.repository.SQLAlchemyRepository.dialect_name",
+        property(lambda _self: "postgresql"),
+    )
     mock_settings = snapper_settings.get_settings()
     mock_settings.zmq_broker_xsub = xsub_endpoint
     mock_settings.zmq_broker_xpub = xpub_endpoint

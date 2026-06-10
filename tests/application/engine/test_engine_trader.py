@@ -629,6 +629,8 @@ class TestTraderCoverage:
 class _RepositoryStub:
     """Test stub for database repository."""
 
+    dialect_name = "postgresql"
+
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 

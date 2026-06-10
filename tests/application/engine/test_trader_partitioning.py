@@ -130,12 +130,36 @@ class TestBuildOwnership:
         assert ownership.instance_count == 1
 
     def test_multi_instance_values_threaded(self) -> None:
-        """Injected (2, 4) is threaded verbatim into :class:`ShardOwnership`."""
+        """Injected (2, 4) is threaded verbatim into :class:`ShardOwnership`.
+
+        The repository is stubbed to a PostgreSQL dialect because a real
+        multi-instance deployment requires it (SQLite is rejected below).
+        """
         coord = TraderCoordinator(settings=cast(AppSettings, _build_injected_settings(2, 4)))
         coord.settings = cast(AppSettings, coord._injected_settings)
+        coord.repository = cast(Any, SimpleNamespace(dialect_name="postgresql"))
         ownership = coord._build_ownership()
         assert ownership.instance_id == 2
         assert ownership.instance_count == 4
+
+    def test_multi_instance_on_sqlite_raises(self) -> None:
+        """``instance_count > 1`` on a SQLite backend fails fast.
+
+        SQLite compiles SELECT ... FOR UPDATE to a plain SELECT, so two
+        coordinators could not serialize row claims — the configuration is
+        rejected before any signal is dispatched.
+        """
+        coord = TraderCoordinator(settings=cast(AppSettings, _build_injected_settings(0, 2)))
+        coord.settings = cast(AppSettings, coord._injected_settings)
+        with pytest.raises(ValueError, match="unsupported on a SQLite backend"):
+            coord._build_ownership()
+
+    def test_single_instance_on_sqlite_warns_but_builds(self) -> None:
+        """A single-instance SQLite coordinator builds ownership (with a warning)."""
+        coord = TraderCoordinator(settings=cast(AppSettings, _build_injected_settings(0, 1)))
+        coord.settings = cast(AppSettings, coord._injected_settings)
+        ownership = coord._build_ownership()
+        assert ownership.instance_count == 1
 
     def test_zero_instance_count_raises(self) -> None:
         """``instance_count < 1`` fails fast."""

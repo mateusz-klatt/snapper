@@ -23,6 +23,8 @@ ownership-only pass, no broker pipeline).
 import asyncio
 from datetime import UTC
 from datetime import datetime
+from types import SimpleNamespace
+from typing import Any
 from typing import cast
 
 import pytest
@@ -207,6 +209,7 @@ def test_coordinator_ownership_from_bootstrap_env(
         trader = TraderCoordinator(signal_topics=["signals."])
         assert trader.settings.coordinator_instance_id == inst_id
         assert trader.settings.coordinator_instance_count == inst_count
+        trader.repository = cast(Any, SimpleNamespace(dialect_name="postgresql"))
         return trader._build_ownership()
 
     ownership_0 = _make_coordinator(0, 2)

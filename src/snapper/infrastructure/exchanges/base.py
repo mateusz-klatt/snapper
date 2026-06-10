@@ -671,6 +671,38 @@ class ExchangeClientBase(ABC):
         """
         ...
 
+    async def get_order_fill_vwap(self, order_id: str) -> tuple[float, float] | None:
+        """Return (VWAP, covered quantity) across an order's own fills, or None.
+
+        Fill-gap reconciliation's last-resort price source: when an order
+        snapshot carries no price (a market order whose venue payload also
+        lacks an executed average), the executor asks the venue for the
+        order's OWN fills and uses their quantity-weighted average price —
+        venue truth, never a local approximation (the executor deliberately
+        has no tick feed; see the fill-gap rationale in the executor base).
+        The covered quantity is returned alongside the price because venues
+        typically page their fills: a VWAP computed over a PARTIAL page must
+        never be trusted as the order's average, so the caller compares the
+        coverage against the order's total filled quantity and falls back to
+        the skip when the page does not cover it.
+
+        The default returns ``None``: a venue without a usable per-order
+        fills lookup keeps reconciliation's documented fail-safe skip.
+
+        Args:
+            order_id: Exchange order ID whose fills should be averaged.
+
+        Returns:
+            A ``(vwap, covered_quantity)`` tuple over the fills the venue
+            returned for the order, or ``None`` when no usable fills exist.
+
+        Raises:
+            Exception: Implementations may raise on venue/transport errors —
+                the reconciliation caller treats any failure as
+                could-not-resolve and skips.
+        """
+        return None
+
     @abstractmethod
     async def get_balance(self, currency: str | None = None) -> dict[str, AccountBalance]:
         """Fetch account balances.

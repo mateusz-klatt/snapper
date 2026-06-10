@@ -5323,3 +5323,82 @@ class TestFindOrderByClientIdFutures:
         )
         with pytest.raises(RuntimeError, match="refusing a false match"):
             await auth_client.find_order_by_client_id("cid-fut-7")
+
+
+class TestGetOrderFillVwap:
+    """Venue-fills VWAP backfill for priceless futures market orders."""
+
+    @pytest.mark.asyncio
+    async def test_vwap_weights_only_this_orders_fills(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """The VWAP averages only the queried order's fills, quantity-weighted.
+
+        Given: a fills page mixing fills of the queried order keyed by both
+            ``size`` (100x2, plus a 100x2 fill repeated under one fill_id)
+            and ``qty`` (110x1) with a foreign order's fill, a price-less
+            fill, an unparseable price, a zero-size fill and a malformed
+            entry,
+        When: get_order_fill_vwap runs,
+        Then: duplicate fill_id entries count exactly once and the result is
+            ((100*4 + 110*1) / 5, 5.0) — foreign, duplicated, partial and
+            malformed fills never contaminate the average or the coverage.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.get_fills = MagicMock(
+            return_value={
+                "fills": [
+                    {"order_id": "fut-1", "price": 100.0, "size": 2.0},
+                    {"order_id": "fut-1", "price": 110.0, "qty": 1.0},
+                    {"order_id": "other", "price": 999.0, "size": 5.0},
+                    {"order_id": "fut-1", "price": None, "size": 1.0},
+                    {"order_id": "fut-1", "price": "not-a-number", "size": 1.0},
+                    {"order_id": "fut-1", "price": 105.0, "size": 0.0},
+                    {"order_id": "fut-1", "fill_id": "f-dup", "price": 100.0, "size": 2.0},
+                    {"order_id": "fut-1", "fill_id": "f-dup", "price": 100.0, "size": 2.0},
+                    "garbage",
+                ]
+            }
+        )
+        result = await auth_client.get_order_fill_vwap("fut-1")
+        assert result is not None
+        vwap, covered = result
+        assert vwap == pytest.approx((100.0 * 4.0 + 110.0 * 1.0) / 5.0)
+        assert covered == pytest.approx(5.0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"fills": []},
+            {"fills": [{"order_id": "other", "price": 1.0, "size": 1.0}]},
+            {"result": "success"},
+            {"fills": "not-a-list"},
+        ],
+    )
+    async def test_vwap_none_when_no_usable_fills(
+        self, auth_client: KrakenFuturesExchangeClient, payload: dict[str, object]
+    ) -> None:
+        """No usable fills for the order yields None (recon keeps its fail-safe).
+
+        Given: a fills response that is empty, foreign-only, missing the
+            fills key, or malformed,
+        When: get_order_fill_vwap runs,
+        Then: it returns None rather than guessing a price.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.get_fills = MagicMock(return_value=payload)
+        assert await auth_client.get_order_fill_vwap("fut-1") is None
+
+    @pytest.mark.asyncio
+    async def test_vwap_requires_authentication(self) -> None:
+        """An unauthenticated client refuses the fills lookup.
+
+        Given: a client constructed without API credentials,
+        When: get_order_fill_vwap runs,
+        Then: it raises instead of silently returning None — the recon caller
+            logs and skips.
+        """
+        client = KrakenFuturesExchangeClient(sandbox=True)
+        with pytest.raises(RuntimeError):
+            await client.get_order_fill_vwap("fut-1")

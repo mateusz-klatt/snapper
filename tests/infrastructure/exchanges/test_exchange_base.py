@@ -924,3 +924,16 @@ async def test_find_order_by_client_id_default_raises() -> None:
     client = DummyExchangeClient(repository=None)
     with pytest.raises(NotImplementedError, match="dummy"):
         await client.find_order_by_client_id("cid-x", "BTC-USD")
+
+
+@pytest.mark.asyncio
+async def test_get_order_fill_vwap_defaults_to_none() -> None:
+    """The base fill-VWAP hook returns None for venues without a fills lookup.
+
+    Given: a client that does not override get_order_fill_vwap,
+    When: the hook is called,
+    Then: it returns None, so fill-gap reconciliation keeps its documented
+        fail-safe skip on such venues.
+    """
+    client = DummyExchangeClient(repository=None)
+    assert await client.get_order_fill_vwap("ex-1") is None

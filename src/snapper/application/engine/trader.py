@@ -420,18 +420,27 @@ class TraderCoordinator(RegisterableProcess):
 
         Called from :meth:`start` after ``_initialize_settings`` has
         upgraded (or test-injected) ``self.settings``. Validation is
-        fail-fast: ``instance_count < 1`` or ``instance_id`` outside
-        ``[0, instance_count)`` raises :class:`ValueError` with a
-        message naming the invalid value, which surfaces the operator
-        misconfiguration before any signal is dispatched.
+        fail-fast: ``instance_count < 1``, ``instance_id`` outside
+        ``[0, instance_count)``, or ``instance_count > 1`` on a SQLite
+        backend raises :class:`ValueError` with a message naming the
+        invalid value, which surfaces the operator misconfiguration
+        before any signal is dispatched. SQLite compiles
+        ``SELECT ... FOR UPDATE`` (and ``NOWAIT``) to a plain SELECT, so
+        multiple coordinators cannot serialize their row claims — the
+        money-path CAS/claim DALs would race instead of queueing, which
+        only PostgreSQL prevents. A single-instance SQLite coordinator is
+        allowed but logged: concurrent WRITER processes against the same
+        file (e.g. a full local ZMQ stack) carry the same caveat, per the
+        repository module's documented locking contract.
 
         Returns:
             A validated :class:`ShardOwnership` for this coordinator.
 
         Raises:
-            ValueError: If ``coordinator_instance_count < 1`` or
+            ValueError: If ``coordinator_instance_count < 1``,
                 ``coordinator_instance_id`` is outside the half-open
-                range ``[0, instance_count)``.
+                range ``[0, instance_count)``, or ``instance_count > 1``
+                with a SQLite repository backend.
         """
         instance_id = self.settings.coordinator_instance_id
         instance_count = self.settings.coordinator_instance_count
@@ -440,6 +449,19 @@ class TraderCoordinator(RegisterableProcess):
         if not 0 <= instance_id < instance_count:
             raise ValueError(
                 f"coordinator_instance_id {instance_id} out of range [0, {instance_count})"
+            )
+        if self.repository.dialect_name == "sqlite":
+            if instance_count > 1:
+                raise ValueError(
+                    "coordinator_instance_count > 1 is unsupported on a SQLite "
+                    "backend: SELECT ... FOR UPDATE is a no-op on sqlite, so "
+                    "cross-instance row claims cannot serialize; use PostgreSQL "
+                    "for multi-instance deployments"
+                )
+            logger.warning(
+                "ZMQTrader: SQLite backend — SELECT ... FOR UPDATE is a no-op; "
+                "running additional writer processes against this database file "
+                "is unsupported (see the repository module locking contract)"
             )
         return ShardOwnership(
             instance_id=instance_id,

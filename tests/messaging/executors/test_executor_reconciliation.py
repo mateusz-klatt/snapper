@@ -158,6 +158,7 @@ class TestReconciliation:
         )
         ex.exchange_client.get_order = AsyncMock(return_value=closed_no_price)
         ex.exchange_client.get_balance = AsyncMock(return_value={})
+        ex.exchange_client.get_order_fill_vwap = AsyncMock(return_value=None)
         ex._process_execution = AsyncMock()
 
         await ex._reconcile_with_exchange()
@@ -435,17 +436,114 @@ class TestReconciliation:
 
     @pytest.mark.asyncio
     async def test_recon_fill_gap_skips_market_order_without_price(self) -> None:
-        """Fill gap with no price (market order) is skipped with error log.
+        """Fill gap with no price anywhere (snapshot + fills) is skipped with error log.
 
-        Given: exchange shows fill gap but order price is None,
+        Given: exchange shows fill gap, order price is None, and the venue
+            fills VWAP lookup also yields nothing,
         When: _reconcile_with_exchange runs,
-        Then: no corrective fill processed, error logged.
+        Then: no corrective fill processed, error logged — the documented
+            fail-safe skip.
         """
         ex = _make_executor()
         ex.pending_orders["cid-1"] = _make_pending(cum_qty=0.0)
         snap = _make_order_snapshot(filled=5.0, price=None)
         ex.exchange_client.get_orders = AsyncMock(return_value=[snap])
         ex.exchange_client.get_balance = AsyncMock(return_value={})
+        ex.exchange_client.get_order_fill_vwap = AsyncMock(return_value=None)
+        ex._process_execution = AsyncMock()
+
+        await ex._reconcile_with_exchange()
+
+        ex._process_execution.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recon_fill_gap_resolves_price_from_venue_fill_vwap(self) -> None:
+        """A priceless market-order gap heals via the venue fills VWAP.
+
+        Given: exchange shows a fill gap with price=None but the venue's
+            per-order fills lookup returns a VWAP,
+        When: _reconcile_with_exchange runs,
+        Then: the corrective fill is emitted at the venue VWAP instead of
+            being skipped.
+        """
+        ex = _make_executor()
+        ex.pending_orders["cid-1"] = _make_pending(cum_qty=0.0)
+        snap = _make_order_snapshot(filled=5.0, price=None)
+        ex.exchange_client.get_orders = AsyncMock(return_value=[snap])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        ex.exchange_client.get_order_fill_vwap = AsyncMock(return_value=(101.5, 5.0))
+        ex._process_execution = AsyncMock()
+
+        await ex._reconcile_with_exchange()
+
+        ex.exchange_client.get_order_fill_vwap.assert_awaited_once_with("ex-1")
+        ex._process_execution.assert_called_once()
+        corrective = ex._process_execution.call_args.args[0]
+        assert corrective.last_price == 101.5
+
+    @pytest.mark.asyncio
+    async def test_recon_fill_gap_refuses_partial_page_vwap(self) -> None:
+        """A VWAP covering only part of the order's fills is never applied.
+
+        Given: a priceless fill gap (order filled=5.0) whose venue fills page
+            covers only 3.0 of quantity,
+        When: _reconcile_with_exchange runs,
+        Then: the corrective fill is skipped — a partial-page average must
+            never price the whole gap (it feeds PnL and cash projections).
+        """
+        ex = _make_executor()
+        ex.pending_orders["cid-1"] = _make_pending(cum_qty=0.0)
+        snap = _make_order_snapshot(filled=5.0, price=None)
+        ex.exchange_client.get_orders = AsyncMock(return_value=[snap])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        ex.exchange_client.get_order_fill_vwap = AsyncMock(return_value=(101.5, 3.0))
+        ex._process_execution = AsyncMock()
+
+        await ex._reconcile_with_exchange()
+
+        ex._process_execution.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recon_fill_gap_vwap_coverage_tolerates_float_rounding(self) -> None:
+        """Coverage a few ulps short of the filled qty still heals the gap.
+
+        Given: a priceless fill gap (filled=5.0) whose fills-page coverage is
+            4.9999999 (venue decimal rounding + float summation shortfall,
+            within the relative 1e-6 tolerance),
+        When: _reconcile_with_exchange runs,
+        Then: the VWAP is trusted and the corrective fill is emitted — a
+            legitimately full page is never refused as partial over float
+            noise.
+        """
+        ex = _make_executor()
+        ex.pending_orders["cid-1"] = _make_pending(cum_qty=0.0)
+        snap = _make_order_snapshot(filled=5.0, price=None)
+        ex.exchange_client.get_orders = AsyncMock(return_value=[snap])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        ex.exchange_client.get_order_fill_vwap = AsyncMock(return_value=(101.5, 4.9999999))
+        ex._process_execution = AsyncMock()
+
+        await ex._reconcile_with_exchange()
+
+        ex._process_execution.assert_called_once()
+        corrective = ex._process_execution.call_args.args[0]
+        assert corrective.last_price == 101.5
+
+    @pytest.mark.asyncio
+    async def test_recon_fill_gap_vwap_lookup_failure_falls_back_to_skip(self) -> None:
+        """A failing venue fills lookup degrades to the fail-safe skip.
+
+        Given: a priceless fill gap whose VWAP lookup raises (venue hiccup),
+        When: _reconcile_with_exchange runs,
+        Then: the cycle survives and the corrective fill is skipped — a
+            transient fills-endpoint error never crashes reconciliation.
+        """
+        ex = _make_executor()
+        ex.pending_orders["cid-1"] = _make_pending(cum_qty=0.0)
+        snap = _make_order_snapshot(filled=5.0, price=None)
+        ex.exchange_client.get_orders = AsyncMock(return_value=[snap])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        ex.exchange_client.get_order_fill_vwap = AsyncMock(side_effect=RuntimeError("boom"))
         ex._process_execution = AsyncMock()
 
         await ex._reconcile_with_exchange()
