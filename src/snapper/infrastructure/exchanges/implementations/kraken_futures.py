@@ -582,11 +582,20 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
     async def _on_execution_message(self, message: dict[str, Any]) -> None:
         """Route private WS fill messages to the execution queue.
 
-        Only processes ``fills`` and ``fills_snapshot`` feeds. The
-        ``open_orders`` feed is intentionally excluded: it carries
-        cumulative order-state snapshots (not incremental fills) and
-        feeding it through the executor's fill pipeline would emit
-        bogus zero-size executions or double-count real fills.
+        Only processes the live ``fills`` feed. The ``open_orders`` feed is
+        intentionally excluded: it carries cumulative order-state snapshots
+        (not incremental fills) and feeding it through the executor's fill
+        pipeline would emit bogus zero-size executions or double-count real
+        fills. The ``fills_snapshot`` feed is dropped for the same
+        double-count reason: it replays historical fills the executor has
+        already accounted for — ``_recover_pending_orders`` seeds
+        ``last_seen_cum_qty`` from venue ``filled`` at boot and the recon
+        loop heals gaps steady-state — and the executor pipeline is
+        delta-based for Futures (fills carry no ``cum_qty``), so every
+        replayed fill would inflate the cumulative above venue truth. The
+        venue re-sends the snapshot on every subscribe, including each SDK
+        in-budget reconnect, so dropping it at the source also makes
+        supervised resubscribes idempotent by construction.
 
         Args:
             message: Raw WebSocket message dictionary.
@@ -595,7 +604,13 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         if "event" in message:
             return
         feed = message.get("feed", "")
-        if feed in ("fills", "fills_snapshot"):
+        if feed == "fills_snapshot":
+            logger.debug(
+                f"Dropping fills_snapshot replay of "
+                f"{len(message.get('fills', []))} fills - REST recovery owns startup state"
+            )
+            return
+        if feed == "fills":
             for fill in message.get("fills", []):
                 try:
                     update = parse_kraken_futures_fill(fill, kraken_futures_ws_to_native)
@@ -697,12 +712,28 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         client or leak a started-but-unowned one (callback attached, no
         owner).
 
+        A slot holding a client whose ``exception_occur`` flag is terminal
+        is closed (bounded, compare-and-clear) and rebuilt instead of being
+        returned as connected: the SDK never recovers such a client, and the
+        residual window where no generator finalizer ran would otherwise
+        hand every later caller a dead client.
+
         Raises:
             RuntimeError: If API credentials are missing, or the private
                 slot was replaced while the connect was in flight.
         """
         self._require_authenticated()
         async with self._private_ws_connect_lock:
+            poisoned = self._private_ws_client
+            if poisoned is not None and getattr(poisoned, "exception_occur", False):
+                logger.warning("Kraken Futures private WS slot holds a dead client - rebuilding")
+                try:
+                    async with asyncio.timeout(_WS_CLOSE_TIMEOUT_S):
+                        await poisoned.close()
+                except Exception as exc:
+                    logger.warning(f"Error closing poisoned Kraken Futures private WS: {exc!r}")
+                if self._private_ws_client is poisoned:
+                    self._private_ws_client = None
             if self._private_ws_client is not None:
                 return
             client = FuturesWSClient(

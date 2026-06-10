@@ -1328,23 +1328,27 @@ class TestOnExecutionMessage:
         assert not auth_client._execution_queue.empty()
 
     @pytest.mark.asyncio
-    async def test_fills_snapshot_message_routed(
+    async def test_fills_snapshot_message_dropped(
         self, auth_client: KrakenFuturesExchangeClient
     ) -> None:
-        """Route fills_snapshot WS message to execution_queue.
+        """Drop fills_snapshot WS messages instead of enqueuing replays.
 
-        Given: WS message with feed=fills_snapshot,
+        Given: WS message with feed=fills_snapshot carrying historical fills,
         When: _on_execution_message is called,
-        Then: Parsed ExecutionUpdate is placed in _execution_queue.
+        Then: Nothing reaches _execution_queue — the executor pipeline is
+            delta-based (Futures fills carry no cum_qty) and REST recovery
+            already seeded last_seen_cum_qty from venue truth, so replayed
+            fills would double-count on every subscribe and SDK reconnect.
         """
         mock_update = MagicMock(spec=ExecutionUpdate)
         with patch(
             "snapper.infrastructure.exchanges.implementations.kraken_futures.parse_kraken_futures_fill",
             return_value=mock_update,
-        ):
+        ) as parse_fn:
             msg = {"feed": "fills_snapshot", "fills": [{"fill_id": "f1", "order_id": "o1"}]}
             await auth_client._on_execution_message(msg)
-        assert not auth_client._execution_queue.empty()
+        assert auth_client._execution_queue.empty()
+        parse_fn.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_open_orders_delta_ignored(
@@ -2109,15 +2113,94 @@ class TestEnsurePrivateWsConnected:
     ) -> None:
         """Skip connection when private WS is already connected.
 
-        Given: Authenticated client with existing private WS,
+        Given: Authenticated client with existing healthy private WS,
         When: _ensure_private_ws_connected is called,
         Then: Existing client is preserved unchanged.
         """
         existing_ws = AsyncMock()
+        existing_ws.exception_occur = False
         auth_client._private_ws_client = existing_ws
         await auth_client._ensure_private_ws_connected()
         assert auth_client._private_ws_client is existing_ws
         existing_ws.start.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_poisoned_slot_closed_and_rebuilt(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Close a dead slot client and build a fresh one under the lock.
+
+        Given: The private slot holds a client whose exception_occur flag is
+            terminal (no generator finalizer ran for it),
+        When: _ensure_private_ws_connected is called,
+        Then: The dead client is closed, the slot is cleared, and a fresh
+            client is constructed and started — instead of returning the
+            dead client as connected.
+        """
+        poisoned = AsyncMock()
+        poisoned.exception_occur = True
+        auth_client._private_ws_client = poisoned
+        fresh = AsyncMock()
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+            return_value=fresh,
+        ):
+            await auth_client._ensure_private_ws_connected()
+        poisoned.close.assert_awaited_once()
+        fresh.start.assert_awaited_once()
+        assert auth_client._private_ws_client is fresh
+
+    @pytest.mark.asyncio
+    async def test_poisoned_slot_clear_respects_concurrent_replacement(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Compare-and-clear never nulls a client installed during close.
+
+        Given: A dead slot client whose close() coincides with another path
+            installing a replacement client into the slot,
+        When: _ensure_private_ws_connected finishes closing the dead client,
+        Then: The replacement is left in place (compare-and-clear) and is
+            returned as the connected client without building another one.
+        """
+        poisoned = AsyncMock()
+        poisoned.exception_occur = True
+        replacement = AsyncMock()
+        replacement.exception_occur = False
+
+        async def install_replacement() -> None:
+            auth_client._private_ws_client = replacement
+
+        poisoned.close = AsyncMock(side_effect=install_replacement)
+        auth_client._private_ws_client = poisoned
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
+        ) as ws_cls:
+            await auth_client._ensure_private_ws_connected()
+        ws_cls.assert_not_called()
+        assert auth_client._private_ws_client is replacement
+
+    @pytest.mark.asyncio
+    async def test_poisoned_slot_close_error_swallowed(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A close error on the poisoned client never blocks the rebuild.
+
+        Given: A dead slot client whose close() raises,
+        When: _ensure_private_ws_connected is called,
+        Then: The error is swallowed, the slot is cleared, and a fresh
+            client is built.
+        """
+        poisoned = AsyncMock()
+        poisoned.exception_occur = True
+        poisoned.close = AsyncMock(side_effect=RuntimeError("close fail"))
+        auth_client._private_ws_client = poisoned
+        fresh = AsyncMock()
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+            return_value=fresh,
+        ):
+            await auth_client._ensure_private_ws_connected()
+        assert auth_client._private_ws_client is fresh
 
     @pytest.mark.asyncio
     async def test_requires_auth(self, client: KrakenFuturesExchangeClient) -> None:
@@ -5095,6 +5178,7 @@ class TestPrivatePathHardening:
             "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
         ) as ws_cls:
             ws_cls.return_value.start = _slow_start
+            ws_cls.return_value.exception_occur = False
             first = asyncio.create_task(auth_client._ensure_private_ws_connected())
             await started.wait()
             second = asyncio.create_task(auth_client._ensure_private_ws_connected())

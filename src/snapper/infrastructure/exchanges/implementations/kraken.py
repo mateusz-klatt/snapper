@@ -104,6 +104,15 @@ ceiling and exits without ever setting the socket — ``start`` loops forever.
 Bounding it here turns that permanent hang into a timeout that tears the partial
 client down and lets the recovery loop retry with a fresh client, which
 reconnects once the network returns instead of requiring a process restart."""
+_SDK_SEND_TIMEOUT_S = 5.0
+"""Upper bound on a single private-channel SDK subscribe send.
+
+A hung executions subscribe would otherwise wedge the generator BEFORE its
+death-detection loop starts, making the death invisible to the executor-side
+stream supervisor (the exact #144 wedge class, on the fills money path). On
+timeout the subscribed client is closed (compare-and-clear) so the next
+attempt rebuilds fresh instead of re-sending into the same dead socket.
+Mirrors the Kraken Futures constant of the same name."""
 _QUEUE_MAX_SIZE = 10_000
 _TICK_QUEUE_MAX_SIZE = 50_000
 """Boot-time absorption budget for ticker and candle producer queues.
@@ -385,7 +394,10 @@ class KrakenExchangeClient(ExchangeClientBase):
         The slot clear is compare-and-clear: this close may race a concurrent
         ``_ensure_ws_connected`` that already installed a NEWER client, and
         unconditionally nulling the slot would detach that live client
-        (callback still attached, no owner).
+        (callback still attached, no owner). The ``_ws_connected`` flag write
+        is owner-gated for the same reason: an unconditional ``False`` from a
+        loser of that race would stamp the freshly built connection as
+        disconnected after the winner already set it ``True``.
 
         Ensures the process does not hang indefinitely when the Kraken
         SDK fails to close the connection or its underlying aiohttp
@@ -398,9 +410,6 @@ class KrakenExchangeClient(ExchangeClientBase):
         try:
             async with asyncio.timeout(self._WS_CLOSE_TIMEOUT_SECONDS):
                 await client.close()
-                self._ws_connected = False
-                if was_connected:
-                    logger.info("Kraken WebSocket disconnected")
                 if hasattr(client, "_SpotAsyncClient__session"):
                     session = getattr(client, "_SpotAsyncClient__session", None)
                     if session and not session.closed:
@@ -408,13 +417,14 @@ class KrakenExchangeClient(ExchangeClientBase):
                         logger.debug("Closed aiohttp session from kraken websocket client")
         except TimeoutError:
             logger.warning("WebSocket close timed out - forcing cleanup")
-            self._ws_connected = False
         except Exception as exc:
             logger.warning(f"WebSocket close failed - forcing cleanup: {exc!r}")
-            self._ws_connected = False
         finally:
             if self._ws_client is client:
                 self._ws_client = None
+                self._ws_connected = False
+                if was_connected:
+                    logger.info("Kraken WebSocket disconnected")
 
     async def disconnect_websocket(self) -> None:
         """Close WebSocket connection without disconnecting REST client."""
@@ -1451,14 +1461,23 @@ class KrakenExchangeClient(ExchangeClientBase):
     def subscribe_executions(
         self,
         *,
-        snap_orders: bool | None = True,
-        snap_trades: bool | None = True,
+        snap_orders: bool | None = False,
+        snap_trades: bool | None = False,
         order_status: bool | None = True,
         ratecounter: bool | None = None,
         users: Literal["all"] | None = None,
         req_id: int | None = None,
     ) -> AsyncIterator[ExecutionUpdate]:
         """Subscribe to user execution reports (private channel).
+
+        Snapshots default to ``False`` (sent as explicit ``false`` — the
+        params schema excludes only ``None``): startup state is owned by the
+        executor's REST recovery (``_recover_pending_orders`` seeds
+        ``last_seen_cum_qty`` from venue truth) and the steady-state recon
+        loop. A snapshot replayed on subscribe — or on every SDK in-budget
+        reconnect, which re-sends the cached subscription verbatim — would
+        re-deliver already-accounted executions into the executor's
+        delta-based fill pipeline and double-count them.
 
         Args:
             snap_orders: Include order snapshot on subscribe.
@@ -1509,13 +1528,20 @@ class KrakenExchangeClient(ExchangeClientBase):
 
         Raises:
             RuntimeError: If API credentials are missing.
+            ConnectionError: If the private WebSocket connection is lost
+                (the SDK's in-client reconnect budget is exhausted and
+                ``exception_occur`` is terminal). The poisoned client is
+                closed and its slot compare-and-cleared before the raise
+                propagates, so the next ``_ensure_ws_connected`` builds a
+                fresh client instead of trusting a dead one.
             Exception: If subscription fails.
         """
         if not self.api_key or not self.api_secret:
             raise RuntimeError("API credentials required for executions subscription")
         try:
             await self._ensure_ws_connected()
-            assert self._ws_client is not None, "WebSocket client should be started"
+            subscribed_client = self._ws_client
+            assert subscribed_client is not None, "WebSocket client should be started"
             logger.info("Subscribing to executions (private channel)")
             subscribe_params = KrakenExecutionSubscribeParamsSchema(
                 snap_orders=snap_orders,
@@ -1525,16 +1551,30 @@ class KrakenExchangeClient(ExchangeClientBase):
                 users=users,
                 reqid=req_id,
             ).as_params()
-            await self._ws_client.subscribe(params=subscribe_params, req_id=req_id)
-            while not self._ws_client.exception_occur:
-                try:
-                    message = await asyncio.wait_for(self._execution_queue.get(), timeout=0.1)
-                    yield message
-                except TimeoutError:
-                    await asyncio.sleep(0.01)
-                except Exception as e:
-                    logger.error(f"Error receiving WebSocket execution message: {e}")
-                    break
+            try:
+                async with asyncio.timeout(_SDK_SEND_TIMEOUT_S):
+                    await subscribed_client.subscribe(params=subscribe_params, req_id=req_id)
+            except TimeoutError:
+                if self._ws_client is subscribed_client:
+                    await self._close_ws_client()
+                raise
+            try:
+                while not self._ws_exception_occurred(subscribed_client):
+                    try:
+                        message = await asyncio.wait_for(self._execution_queue.get(), timeout=0.1)
+                        yield message
+                    except TimeoutError:
+                        await asyncio.sleep(0.01)
+                    except Exception as e:
+                        logger.error(f"Error receiving WebSocket execution message: {e}")
+                        break
+                if self._ws_exception_occurred(subscribed_client):
+                    raise ConnectionError("Kraken spot private WS connection lost")
+            finally:
+                if self._ws_client is subscribed_client and self._ws_exception_occurred(
+                    subscribed_client
+                ):
+                    await self._close_ws_client()
         except Exception as e:
             logger.error(f"WebSocket executions subscription error: {e}")
             raise
@@ -2044,8 +2084,20 @@ class KrakenExchangeClient(ExchangeClientBase):
         Futures in the 2026-06-09 blackout fault test). Under the lock,
         concurrent callers coalesce onto a single client and the slot
         re-check runs inside the lock.
+
+        A slot holding a client whose ``exception_occur`` flag is terminal is
+        closed (bounded, compare-and-clear) and rebuilt instead of being
+        trusted: the SDK never recovers such a client, and the residual
+        window where no generator finalizer ran (e.g. a consumer death path
+        that bypassed cleanup) would otherwise poison every later caller —
+        the existence guard treated the dead client as connected and even
+        re-asserted ``_ws_connected``.
         """
         async with self._ws_connect_lock:
+            poisoned = self._ws_client
+            if poisoned is not None and self._ws_exception_occurred(poisoned):
+                logger.warning("Kraken WebSocket client slot holds a dead client - rebuilding")
+                await self._close_ws_client()
             if not self._ws_client:
                 client = SpotWSClient(
                     key=self.api_key or "",

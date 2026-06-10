@@ -1620,8 +1620,218 @@ class TestKrakenExchangeClient:
             params = subscribe_kwargs["params"]
             assert params["channel"] == "executions"
             assert params["snap_orders"] is True
-            assert params["snap_trades"] is True
+            assert params["snap_trades"] is False
             mock_ensure_ws.assert_called_once()
+
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_subscribe_executions_snapshot_defaults_off(
+        self, mock_ws_class: MagicMock, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Argument-free subscribe sends explicit false snapshot flags.
+
+        Given: The executor call site invokes subscribe_executions() with no
+            arguments,
+        When: The subscription params are built,
+        Then: snap_orders and snap_trades are sent as explicit False (the
+            schema excludes only None) so the venue never replays
+            already-accounted executions into the delta-based fill pipeline
+            on subscribe or on SDK in-budget reconnects.
+        """
+        mock_ws_client = AsyncMock()
+        mock_ws_class.return_value = mock_ws_client
+        mock_ws_client.exception_occur = True
+        with patch.object(kraken_client, "_ensure_ws_connected", new_callable=AsyncMock):
+            kraken_client._ws_client = mock_ws_client
+            with (
+                patch.object(kraken_client, "_close_ws_client", new_callable=AsyncMock),
+                pytest.raises(ConnectionError),
+            ):
+                async for _ in kraken_client.subscribe_executions():
+                    pytest.fail("dead client must not yield")
+        params = mock_ws_client.subscribe.call_args.kwargs["params"]
+        assert params["snap_orders"] is False
+        assert params["snap_trades"] is False
+
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_subscribe_executions_raises_and_closes_on_connection_lost(
+        self, mock_ws_class: MagicMock, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A terminal exception_occur raises ConnectionError and resets the slot.
+
+        Given: The SDK's in-client reconnect budget is exhausted
+            (exception_occur terminal) while the executions generator runs,
+        When: The consume loop observes the flag,
+        Then: The generator closes the poisoned client (slot cleared via
+            compare-and-clear) and raises ConnectionError so a supervising
+            caller can detect death and rebuild — instead of exiting cleanly
+            and leaving the dead client poisoning _ensure_ws_connected.
+        """
+        mock_ws_client = AsyncMock()
+        mock_ws_class.return_value = mock_ws_client
+        mock_ws_client.exception_occur = False
+        with patch.object(kraken_client, "_ensure_ws_connected", new_callable=AsyncMock):
+            kraken_client._ws_client = mock_ws_client
+
+            async def flip_after_subscribe() -> None:
+                mock_ws_client.exception_occur = True
+
+            asyncio.create_task(flip_after_subscribe())
+            with pytest.raises(ConnectionError, match="private WS connection lost"):
+                async for _ in kraken_client.subscribe_executions():
+                    pytest.fail("no message was enqueued")
+        mock_ws_client.close.assert_awaited()
+        assert kraken_client._ws_client is None
+
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_subscribe_executions_hung_subscribe_times_out_and_rebuilds(
+        self, mock_ws_class: MagicMock, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A hung subscribe send is bounded and tears the client down.
+
+        Given: A SpotWSClient whose subscribe() never returns (dead socket
+            the SDK has not flagged yet),
+        When: The executions generator issues the subscribe,
+        Then: The send times out within _SDK_SEND_TIMEOUT_S, the subscribed
+            client is closed (slot cleared) so the next attempt rebuilds
+            fresh, and TimeoutError propagates so a supervising caller
+            observes the death instead of wedging forever.
+        """
+        mock_ws_client = AsyncMock()
+        mock_ws_client.exception_occur = False
+
+        async def hung_subscribe(**_: object) -> None:
+            await asyncio.Event().wait()
+
+        mock_ws_client.subscribe = AsyncMock(side_effect=hung_subscribe)
+        mock_ws_class.return_value = mock_ws_client
+        with (
+            patch.object(kraken_client, "_ensure_ws_connected", new_callable=AsyncMock),
+            patch.object(kr, "_SDK_SEND_TIMEOUT_S", 0.05),
+        ):
+            kraken_client._ws_client = mock_ws_client
+            with pytest.raises(TimeoutError):
+                async for _ in kraken_client.subscribe_executions():
+                    pytest.fail("hung subscribe must not yield")
+        mock_ws_client.close.assert_awaited_once()
+        assert kraken_client._ws_client is None
+
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_subscribe_executions_hung_subscribe_skips_close_when_replaced(
+        self, mock_ws_class: MagicMock, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A subscribe timeout never closes a slot another path replaced.
+
+        Given: A hung subscribe during which a concurrent path installs a
+            different client into the slot,
+        When: The send times out,
+        Then: TimeoutError still propagates but the replacement client is
+            left untouched (compare-and-clear discipline).
+        """
+        subscribed = AsyncMock()
+        subscribed.exception_occur = False
+        replacement = AsyncMock()
+        replacement.exception_occur = False
+
+        async def hung_subscribe(**_: object) -> None:
+            kraken_client._ws_client = replacement
+            await asyncio.Event().wait()
+
+        subscribed.subscribe = AsyncMock(side_effect=hung_subscribe)
+        mock_ws_class.return_value = subscribed
+        with (
+            patch.object(kraken_client, "_ensure_ws_connected", new_callable=AsyncMock),
+            patch.object(kr, "_SDK_SEND_TIMEOUT_S", 0.05),
+        ):
+            kraken_client._ws_client = subscribed
+            with pytest.raises(TimeoutError):
+                async for _ in kraken_client.subscribe_executions():
+                    pytest.fail("hung subscribe must not yield")
+        subscribed.close.assert_not_awaited()
+        replacement.close.assert_not_awaited()
+        assert kraken_client._ws_client is replacement
+
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_subscribe_executions_death_skips_close_when_slot_replaced(
+        self, mock_ws_class: MagicMock, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Death cleanup never touches a slot another path already replaced.
+
+        Given: The subscribed client dies (exception_occur terminal) while a
+            concurrent path has already installed a different client in the
+            slot,
+        When: The generator's death cleanup runs,
+        Then: ConnectionError still propagates but the replacement client is
+            left untouched (no close, slot preserved).
+        """
+        subscribed = AsyncMock()
+        subscribed.exception_occur = False
+        replacement = AsyncMock()
+        replacement.exception_occur = False
+        with patch.object(kraken_client, "_ensure_ws_connected", new_callable=AsyncMock):
+            kraken_client._ws_client = subscribed
+
+            async def swap_slot_then_kill() -> None:
+                kraken_client._ws_client = replacement
+                subscribed.exception_occur = True
+
+            asyncio.create_task(swap_slot_then_kill())
+            with pytest.raises(ConnectionError, match="private WS connection lost"):
+                async for _ in kraken_client.subscribe_executions():
+                    pytest.fail("no message was enqueued")
+        subscribed.close.assert_not_awaited()
+        replacement.close.assert_not_awaited()
+        assert kraken_client._ws_client is replacement
+
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_subscribe_executions_inner_break_exits_cleanly(
+        self, mock_ws_class: MagicMock, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A receive-error break ends the generator without ConnectionError.
+
+        Given: The execution queue raises a non-timeout error while the
+            client is still healthy (exception_occur False),
+        When: The consume loop breaks out,
+        Then: The generator finishes cleanly (supervision treats clean
+            return as death too) and the healthy client stays in the slot.
+        """
+        mock_ws_client = AsyncMock()
+        mock_ws_class.return_value = mock_ws_client
+        mock_ws_client.exception_occur = False
+        with patch.object(kraken_client, "_ensure_ws_connected", new_callable=AsyncMock):
+            kraken_client._ws_client = mock_ws_client
+            with patch.object(
+                kraken_client._execution_queue,
+                "get",
+                side_effect=RuntimeError("queue torn down"),
+            ):
+                collected = [m async for m in kraken_client.subscribe_executions()]
+        assert collected == []
+        mock_ws_client.close.assert_not_awaited()
+        assert kraken_client._ws_client is mock_ws_client
+
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
+    async def test_ensure_ws_connected_rebuilds_poisoned_slot(
+        self, mock_ws_class: MagicMock, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A dead client in the slot is closed and replaced under the lock.
+
+        Given: _ws_client holds a client whose exception_occur flag is
+            terminal and no generator finalizer ran for it,
+        When: _ensure_ws_connected is called,
+        Then: The dead client is closed and a fresh client is constructed
+            and started, instead of the existence guard treating the dead
+            client as connected.
+        """
+        poisoned = AsyncMock()
+        poisoned.exception_occur = True
+        kraken_client._ws_client = poisoned
+        fresh = AsyncMock()
+        fresh.exception_occur = False
+        mock_ws_class.return_value = fresh
+        await kraken_client._ensure_ws_connected()
+        poisoned.close.assert_awaited_once()
+        fresh.start.assert_awaited_once()
+        assert kraken_client._ws_client is fresh
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient")
     async def test_subscribe_ticks_error(
@@ -2508,12 +2718,21 @@ class TestWebsocketTimeoutPaths:
         ws.subscribe.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_subscribe_executions_timeout_breaks_loop(
+    async def test_subscribe_executions_timeout_then_dead_client_raises(
         self, kraken_client: KrakenExchangeClient
     ) -> None:
-        """Verify subscribe executions timeout breaks loop."""
+        """A queue timeout followed by a dead client raises ConnectionError.
+
+        Given: The drain wait times out while the SDK flips exception_occur
+            to terminal,
+        When: The consume loop re-checks the flag,
+        Then: The generator closes the poisoned client (slot cleared) and
+            raises ConnectionError instead of ending cleanly — death must be
+            observable to a supervising caller.
+        """
         ws = MagicMock()
         ws.subscribe = AsyncMock()
+        ws.close = AsyncMock()
         ws.exception_occur = False
         kraken_client._ws_client = ws
 
@@ -2539,9 +2758,11 @@ class TestWebsocketTimeoutPaths:
             ),
         ):
             agen = kraken_client.subscribe_executions()
-            with pytest.raises(StopAsyncIteration):
+            with pytest.raises(ConnectionError, match="private WS connection lost"):
                 await agen.__anext__()
         ws.subscribe.assert_awaited_once()
+        ws.close.assert_awaited_once()
+        assert kraken_client._ws_client is None
 
     @pytest.mark.asyncio
     async def test_subscribe_instruments_timeout_breaks_loop(
@@ -3435,9 +3656,10 @@ class TestEnsureWsConnectedAlreadyConnected:
     async def test_ensure_ws_connected_already_has_client(
         self, kraken_client: KrakenExchangeClient
     ) -> None:
-        """Verify ensure ws connected already has client."""
+        """Verify ensure ws connected already has healthy client."""
         mock_ws_client = MagicMock()
         mock_ws_client.start = AsyncMock()
+        mock_ws_client.exception_occur = False
         kraken_client._ws_client = mock_ws_client
         kraken_client._ws_connected = False
         await kraken_client._ensure_ws_connected()
@@ -3533,6 +3755,7 @@ class _StubWsClient:
 
     def __init__(self) -> None:
         self.subscribe = AsyncMock()
+        self.close = AsyncMock()
         self.exception_occur = False
 
     async def __aenter__(self) -> _StubWsClient:
@@ -3626,12 +3849,15 @@ async def test_subscribe_trades_consumes_queue() -> None:
 
 
 @pytest.mark.asyncio
-async def test_subscribe_executions_consumes_queue() -> None:
-    """Execution subscription consumes from execution queue.
+async def test_subscribe_executions_consumes_queue_then_raises_on_death() -> None:
+    """Execution subscription yields queued updates, then raises on death.
 
-    Given a KrakenExchangeClient with an execution queue,
-    When subscribe_executions is called,
-    Then it yields execution updates from the queue.
+    Given a KrakenExchangeClient whose execution queue delivers one update
+        and then flips the client's exception_occur flag to terminal,
+    When subscribe_executions is consumed,
+    Then the queued update is yielded first and the generator then raises
+        ConnectionError (closing the poisoned client) so a supervising
+        caller observes the death instead of a clean end.
     """
     client = KrakenExchangeClient("key", "secret")
     ws = _StubWsClient()
@@ -3639,10 +3865,13 @@ async def test_subscribe_executions_consumes_queue() -> None:
     client._execution_queue = _OneShotQueue({"execution": 1}, ws)
     with patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock):
         updates: list[Any] = []
-        async for item in client.subscribe_executions(req_id=5):
-            updates.append(item)
+        with pytest.raises(ConnectionError, match="private WS connection lost"):
+            async for item in client.subscribe_executions(req_id=5):
+                updates.append(item)
     assert updates == [{"execution": 1}]
     ws.subscribe.assert_called_once()
+    ws.close.assert_awaited_once()
+    assert client._ws_client is None
 
 
 @pytest.mark.asyncio
@@ -6765,6 +6994,7 @@ class TestConnectRaceHardening:
             "snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient"
         ) as ws_cls:
             ws_cls.return_value.start = _slow_start
+            ws_cls.return_value.exception_occur = False
             first = asyncio.create_task(client._ensure_ws_connected())
             await started.wait()
             second = asyncio.create_task(client._ensure_ws_connected())
@@ -6778,9 +7008,12 @@ class TestConnectRaceHardening:
     async def test_close_ws_client_does_not_clobber_newer_client(self) -> None:
         """_close_ws_client leaves a newer concurrently-installed client alone.
 
-        Given: A close() during which a concurrent path installs a NEW client,
+        Given: A close() during which a concurrent path installs a NEW client
+            and marks it connected,
         When: _close_ws_client finishes,
-        Then: The new client remains in the slot (compare-and-clear).
+        Then: The new client remains in the slot (compare-and-clear) and its
+            connected flag survives — the losing closer must not stamp the
+            freshly built connection as disconnected.
         """
         client = KrakenExchangeClient(api_key="key", api_secret="secret")
         newer = AsyncMock()
@@ -6788,11 +7021,13 @@ class TestConnectRaceHardening:
 
         async def _close_and_install() -> None:
             client._ws_client = newer
+            client._ws_connected = True
 
         old.close = AsyncMock(side_effect=_close_and_install)
         client._ws_client = old
         await client._close_ws_client()
         assert client._ws_client is newer
+        assert client._ws_connected is True
 
     @pytest.mark.asyncio
     async def test_replay_aborts_when_client_swapped_mid_replay(self) -> None:
