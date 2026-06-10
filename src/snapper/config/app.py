@@ -395,12 +395,12 @@ class AppSettings:
         ``get_available_*_symbols()`` at runtime so a fresh DB
         subscribes to the full venue universe without any operator
         configuration. Persistence is decoupled — the
-        ``market_persist_*`` settings (seeded as
-        ``{"mode":"explicit","exchanges":{}}`` in
-        ``proprietary/data/seed/{dev,prod}.toml``) keep every wildcard
-        tick out of the DB write path; data flows into the in-process
-        ``MarketCacheService`` + ZMQ broadcast and is dropped at the
-        publisher's persist gate.
+        ``market_persist_*`` settings default to ``auto`` when
+        missing; bundled dev seeds also use ``auto``. Deployment and
+        proprietary profiles may override those rows to narrow the DB
+        write path independently from the live publish path. Data still
+        flows into the in-process ``MarketCacheService`` + ZMQ
+        broadcast when a publisher's persist gate drops the row.
 
         For ``ExchangeEnum.POLYGON`` (REST-only backfill, no live WS)
         and the three Kraken historical backfill services, each

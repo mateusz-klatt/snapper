@@ -748,14 +748,14 @@ redis = ["redis (>=2.10.5)"]
 
 [[package]]
 name = "ccxt"
-version = "4.5.56"
+version = "4.5.57"
 description = "A cryptocurrency trading API with more than 100 exchanges in JavaScript / TypeScript / Python / C# / PHP / Go"
 optional = false
 python-versions = "*"
 groups = ["main"]
 files = [
-    {file = "ccxt-4.5.56-py2.py3-none-any.whl", hash = "sha256:1c6dc6a6f7a7f98d4db40c904f9c2f656e4a6c0dba287faf9469c98f17238b9d"},
-    {file = "ccxt-4.5.56.tar.gz", hash = "sha256:062f8ab649a2f639c36be5bc680d9ee6b8dac98396321fd9f2d9cc6a114fcf1b"},
+    {file = "ccxt-4.5.57-py2.py3-none-any.whl", hash = "sha256:90449e8f27e381ea3152d3f5b53d94b8180cdd7b9d76564987c5c8aa1a2031a3"},
+    {file = "ccxt-4.5.57.tar.gz", hash = "sha256:a32ecedac82a6b8fed5d1ce06f62dbbd54c51a772eb2e1115cf686803bfd2e11"},
 ]
 
 [package.dependencies]
@@ -1669,14 +1669,14 @@ devel = ["colorama", "json-spec", "jsonschema", "pylint", "pytest", "pytest-benc
 
 [[package]]
 name = "filelock"
-version = "3.29.1"
+version = "3.29.2"
 description = "A platform independent file lock."
 optional = false
 python-versions = ">=3.10"
 groups = ["dev"]
 files = [
-    {file = "filelock-3.29.1-py3-none-any.whl", hash = "sha256:85199dfd706869641b72b2e8955d5416a4b2b7dc4b0e8e6d97b4cc1299a6983b"},
-    {file = "filelock-3.29.1.tar.gz", hash = "sha256:d97e6b1b9757569626c58caa07dc4beb1613f4a2938b1e8cc81afca398906c9e"},
+    {file = "filelock-3.29.2-py3-none-any.whl", hash = "sha256:f5d3feb44b2b8824832587543af5226822fe86baf086678ede47aa177fe47ca5"},
+    {file = "filelock-3.29.2.tar.gz", hash = "sha256:779d2f5443b584750c6b90457abffd49235bfb0e66ce82ef5a680867e518ca1c"},
 ]
 
 [[package]]
@@ -7443,4 +7443,4 @@ test = ["pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "a615197fe2173fe3f6277687d128e7dc5750b963d363376236797ff4eb7789d5"
+content-hash = "8c1ff2e68f18bd5eed7df13e451737a26e71df4c738a7d74d50c0dbca264bd81"
