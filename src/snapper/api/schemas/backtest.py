@@ -357,61 +357,6 @@ class BacktestStrategyClassListResponse(
     type: Literal["backtest_strategy_class_list"] = "backtest_strategy_class_list"
 
 
-class BacktestResultData(StrictDataSchema[Literal["backtest_result"]]):
-    """Backtest result metrics payload.
-
-    See ``BacktestResultInline`` for the 8
-    advanced metrics; this schema mirrors them so a standalone
-    result endpoint surfaces the same shape. No route consumes
-    this schema; results reach clients via the inline form only.
-
-    Attributes:
-        type: Payload discriminator.
-        run_public_id: Associated run.
-        total_trades: Total exit trades.
-        winning_trades: Profitable trades.
-        losing_trades: Losing trades.
-        total_pnl: Net PnL.
-        max_drawdown: Maximum drawdown fraction.
-        sharpe_ratio: Annualized Sharpe.
-        win_rate: Win rate fraction.
-        profit_factor: Gross profit / gross loss.
-        final_equity: Final equity value.
-        max_equity: Peak equity value.
-        sortino_ratio: Annualized Sortino ratio.
-        cagr: Compound annual growth rate.
-        calmar_ratio: CAGR divided by max drawdown.
-        expectancy: Mean per-trade PnL.
-        avg_trade_pnl: Average PnL per exit trade.
-        max_drawdown_duration_seconds: Longest peak-to-recovery duration.
-        exposure_ratio: Fraction of run time holding a non-zero position.
-        turnover_ratio: Total notional traded divided by mean equity.
-        extra_metrics: Any non-promoted additional computed metrics.
-    """
-
-    type: Literal["backtest_result"] = "backtest_result"
-    run_public_id: str
-    total_trades: int
-    winning_trades: int
-    losing_trades: int
-    total_pnl: float
-    max_drawdown: float
-    sharpe_ratio: float | None = None
-    win_rate: float | None = None
-    profit_factor: float | None = None
-    final_equity: float
-    max_equity: float
-    sortino_ratio: float | None = None
-    cagr: float | None = None
-    calmar_ratio: float | None = None
-    expectancy: float | None = None
-    avg_trade_pnl: float | None = None
-    max_drawdown_duration_seconds: float | None = None
-    exposure_ratio: float | None = None
-    turnover_ratio: float | None = None
-    extra_metrics: dict[str, Any] = Field(default={})
-
-
 class BacktestCompareBody(StrictBody):
     """Compare-request body.
 

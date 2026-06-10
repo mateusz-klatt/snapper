@@ -70,10 +70,6 @@ class DummyRepo(SimpleNamespace):
         """Retrieve candle records."""
         return []
 
-    async def get_trades(self, *args: Any, **kwargs: Any) -> list[Any]:
-        """Retrieve trade records."""
-        return []
-
 
 @pytest.mark.asyncio
 async def test_connect_twice_warns(caplog: pytest.LogCaptureFixture) -> None:
@@ -724,9 +720,6 @@ class _ReplayRepo:
     async def get_candles(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         return self.candles
 
-    async def get_trades(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
-        return self.trades
-
     async def iter_trades(self, *args: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Async-generator companion mirroring the production streaming path."""
         for trade in self.trades:
@@ -1280,7 +1273,7 @@ async def test_subscribe_trades_with_empty_result_for_symbol() -> None:
     """
 
     class _EmptyTradesRepo(_ReplayRepo):
-        async def get_trades(self, symbol: str, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        async def _trades_for_symbol(self, symbol: str) -> list[dict[str, Any]]:
             if symbol == "BTC/USD":
                 return [
                     {
@@ -1296,7 +1289,7 @@ async def test_subscribe_trades_with_empty_result_for_symbol() -> None:
         async def iter_trades(
             self, symbol: str, *args: Any, **kwargs: Any
         ) -> AsyncIterator[dict[str, Any]]:
-            for trade in await self.get_trades(symbol, *args, **kwargs):
+            for trade in await self._trades_for_symbol(symbol):
                 yield trade
 
     client = PaperExchangeClient(

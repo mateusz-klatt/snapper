@@ -1395,14 +1395,6 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         as_of=datetime.now(UTC),
     )
     assert len(candle_results) == 2
-    trade_results = await repo.get_trades(
-        "BTC-USD",
-        base_ts - timedelta(minutes=1),
-        base_ts + timedelta(minutes=2),
-        exchange="kraken",
-        as_of=datetime.now(UTC),
-    )
-    assert len(trade_results) == 2
     order_id, order_public_id = await repo.insert_order(
         instrument_public_id=instrument_public_id,
         wallet_public_id="00000000-0000-7000-8000-000000000001",
@@ -1782,17 +1774,6 @@ class DummyRepository(Repository):
         order: str = "asc",
     ) -> list[dict[str, Any]]:
         """Get candles - returns empty list."""
-        return []
-
-    async def get_trades(
-        self,
-        instrument: str,
-        start: datetime,
-        end: datetime,
-        exchange: str,
-        as_of: datetime,
-    ) -> list[dict[str, Any]]:
-        """Get trades - returns empty list."""
         return []
 
     async def iter_trades(
@@ -2812,72 +2793,6 @@ async def test_dispose_repositories_awaits_coroutine(
     assert repo_module._repository_cache == {}
 
 
-@pytest.mark.asyncio()
-async def test_get_trades_returns_empty_when_instrument_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify get_trades returns empty list when instrument is not found."""
-    with patch("snapper.data.repository.create_async_engine"):
-        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
-    mock_inst_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
-
-    async def _execute(*_: object, **__: object) -> SimpleNamespace:
-        return mock_inst_result
-
-    mock_session = AsyncMock()
-    mock_session.execute.side_effect = _execute
-
-    class _Ctx:
-        async def __aenter__(self) -> Any:
-            return mock_session
-
-        async def __aexit__(self, *_: object) -> None:
-            return None
-
-    monkeypatch.setattr(repo, "session", lambda: _Ctx())
-    result = await repo.get_trades(
-        "MISSING",
-        datetime.now(UTC),
-        datetime.now(UTC),
-        exchange="kraken",
-        as_of=datetime.now(UTC),
-    )
-    assert result == []
-
-
-@pytest.mark.asyncio()
-async def test_get_trades_with_exchange_filter(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify get_trades filters by exchange when provided."""
-    with patch("snapper.data.repository.create_async_engine"):
-        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
-    mock_inst_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
-
-    async def _execute(*_: object, **__: object) -> SimpleNamespace:
-        return mock_inst_result
-
-    mock_session = AsyncMock()
-    mock_session.execute.side_effect = _execute
-
-    class _Ctx:
-        async def __aenter__(self) -> Any:
-            return mock_session
-
-        async def __aexit__(self, *_: object) -> None:
-            return None
-
-    monkeypatch.setattr(repo, "session", lambda: _Ctx())
-    result = await repo.get_trades(
-        "MISSING",
-        datetime.now(UTC),
-        datetime.now(UTC),
-        exchange="kraken",
-        as_of=datetime.now(UTC),
-    )
-    assert result == []
-
-
 class _MinimalRepository(Repository):
     def session(self) -> Any:
         raise NotImplementedError
@@ -2981,16 +2896,6 @@ class _MinimalRepository(Repository):
         as_of: datetime,
         limit: int | None = None,
         order: str = "asc",
-    ) -> list[dict[str, Any]]:
-        return []
-
-    async def get_trades(
-        self,
-        instrument: str,
-        start: datetime,
-        end: datetime,
-        exchange: str,
-        as_of: datetime,
     ) -> list[dict[str, Any]]:
         return []
 
@@ -4361,60 +4266,6 @@ async def test_get_ticks_returns_rows_when_instrument_found(
 
 
 @pytest.mark.asyncio
-async def test_get_trades_returns_executed_at(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify get_trades returns executed_at and maps it correctly."""
-    with patch("snapper.data.repository.create_async_engine"):
-        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
-    bus_time = datetime(2024, 6, 1, 0, 0, 1, tzinfo=UTC)
-    event_time = datetime(2024, 6, 1, 0, 0, 0, tzinfo=UTC)
-    mock_inst = SimpleNamespace(public_id="inst-pub-1")
-    mock_inst_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: mock_inst))
-    trade_row = SimpleNamespace(
-        timestamp=bus_time,
-        executed_at=event_time,
-        price=100.0,
-        size=1.5,
-        side="buy",
-        trade_id="exch-123",
-    )
-    mock_query_result = SimpleNamespace(all=lambda: [trade_row])
-    call_count = 0
-
-    async def _execute(*_: object, **__: object) -> SimpleNamespace:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return mock_inst_result
-        return mock_query_result
-
-    mock_session = AsyncMock()
-    mock_session.execute.side_effect = _execute
-
-    class _Ctx:
-        async def __aenter__(self) -> Any:
-            return mock_session
-
-        async def __aexit__(self, *_: object) -> None:
-            return None
-
-    monkeypatch.setattr(repo, "session", lambda: _Ctx())
-    result = await repo.get_trades(
-        "BTC-USD",
-        event_time - timedelta(seconds=1),
-        event_time + timedelta(seconds=1),
-        exchange="kraken",
-        as_of=bus_time + timedelta(hours=1),
-    )
-    assert len(result) == 1
-    assert result[0]["timestamp"] == bus_time
-    assert result[0]["executed_at"] == event_time
-    assert result[0]["trade_id"] == "exch-123"
-    assert result[0]["price"] == 100.0
-
-
-@pytest.mark.asyncio
 async def test_get_ticks_respects_limit_and_iter_ticks_streams_all(tmp_path: Path) -> None:
     """Verify ``limit`` caps ``get_ticks`` while ``iter_ticks`` streams the full range.
 
@@ -4861,10 +4712,10 @@ async def test_get_latest_checkpoints_for_plans_dedups_active_rows(
 
 
 @pytest.mark.asyncio
-async def test_get_trades_respects_limit_and_iter_trades_streams_all(
+async def test_iter_trades_streams_all(
     tmp_path: Path,
 ) -> None:
-    """Verify ``limit`` caps ``get_trades`` while ``iter_trades`` streams the full range."""
+    """Verify ``iter_trades`` streams the full range with executed_at mapping."""
     r, _sym_pid, inst_pid = await _seed_full_repo(tmp_path)
     base = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
     async with r.session() as s:
@@ -4883,15 +4734,6 @@ async def test_get_trades_respects_limit_and_iter_trades_streams_all(
                 )
             )
         await s.commit()
-    capped = await r.get_trades(
-        "BTC-USD",
-        base,
-        base + timedelta(seconds=30),
-        exchange="kraken",
-        as_of=base + timedelta(minutes=1),
-        limit=10,
-    )
-    assert len(capped) == 10
     streamed: list[TradeRow] = []
     async for row in r.iter_trades(
         "BTC-USD",

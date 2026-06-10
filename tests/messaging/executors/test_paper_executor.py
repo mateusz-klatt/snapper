@@ -108,25 +108,6 @@ async def fake_get_candles(
     ]
 
 
-async def fake_get_trades(
-    symbol: str,
-    start_dt: datetime,
-    end_dt: datetime,
-    exchange: str,
-    as_of: datetime | None = None,
-) -> list[dict]:
-    """Return fake trade data for testing."""
-    return [
-        {
-            "side": "buy",
-            "size": 0.5,
-            "price": 50000.0,
-            "trade_id": 12345,
-            "timestamp": datetime.now(tz=UTC),
-        }
-    ]
-
-
 async def fake_iter_trades(
     symbol: str,
     start_dt: datetime,
@@ -134,8 +115,16 @@ async def fake_iter_trades(
     exchange: str,
     as_of: datetime | None = None,
 ) -> AsyncIterator[dict]:
-    """Async-generator companion mirroring :meth:`fake_get_trades`."""
-    for trade in await fake_get_trades(symbol, start_dt, end_dt, exchange, as_of):
+    """Stream fake trade data for testing."""
+    for trade in [
+        {
+            "side": "buy",
+            "size": 0.5,
+            "price": 50000.0,
+            "trade_id": 12345,
+            "timestamp": datetime.now(tz=UTC),
+        }
+    ]:
         yield trade
 
 
@@ -676,7 +665,6 @@ class TestPaperMarketDataMethods:
         Then: Trade updates are yielded from repository.
         """
         mock_repo = SimpleNamespace(
-            get_trades=fake_get_trades,
             iter_trades=fake_iter_trades,
         )
         start_ts = time.time() - 3600
@@ -776,17 +764,7 @@ class TestPaperMarketDataMethods:
         """
 
         class MultiSymbolRepo:
-            async def get_trades(
-                self,
-                symbol: str,
-                start_dt: datetime,
-                end_dt: datetime,
-                exchange: str,
-                as_of: datetime | None = None,
-            ) -> list[dict]:
-                _ = start_dt
-                _ = end_dt
-                _ = exchange
+            async def _trades_for_symbol(self, symbol: str) -> list[dict]:
                 base = datetime(2024, 1, 1, tzinfo=UTC)
                 if symbol == "BTC-USD":
                     return [
@@ -832,7 +810,10 @@ class TestPaperMarketDataMethods:
                 exchange: str,
                 as_of: datetime | None = None,
             ) -> AsyncIterator[dict]:
-                for trade in await self.get_trades(symbol, start_dt, end_dt, exchange, as_of):
+                _ = start_dt
+                _ = end_dt
+                _ = exchange
+                for trade in await self._trades_for_symbol(symbol):
                     yield trade
 
         start_ts = datetime(2024, 1, 1, tzinfo=UTC).timestamp()

@@ -732,11 +732,12 @@ class PaperExchangeClient(ExchangeClientBase):
 
         Streams per-symbol via :meth:`Repository.iter_trades` and
         merges the resulting time-ordered streams with a k-way async
-        heap merge (bounded-memory paper backtest streaming). The legacy
-        materialising path (``get_trades`` + in-memory sort across
-        every symbol) was OOM-prone on multi-day, multi-symbol
-        replays; this version keeps RSS bounded by the number of
-        symbols (one ``TradeUpdate`` in flight per stream).
+        heap merge (bounded-memory paper backtest streaming). The
+        legacy materialising path (a bounded-list fetch with an
+        in-memory sort across every symbol) was OOM-prone on
+        multi-day, multi-symbol replays; this version keeps RSS
+        bounded by the number of symbols (one ``TradeUpdate`` in
+        flight per stream).
 
         Args:
             symbols: List of trading pairs.

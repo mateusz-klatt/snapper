@@ -124,7 +124,7 @@ class CandleRow(TypedDict):
 
 
 class TradeRow(TypedDict):
-    """Row dict returned by get_trades."""
+    """Row dict yielded by iter_trades."""
 
     timestamp: datetime
     executed_at: datetime | None

@@ -790,15 +790,6 @@ snapper restore --table candles --dir data/archive/candles/polygon/BTC-USD/
 - Rows already present in DB (matching `public_id + timestamp + known_to`) are skipped.
 - Audit restore inserts all temporal columns exactly as exported.
 
-### One-time cache directory migration
-
-Renames legacy Polygon cache directories from API ticker format
-(`X_BTCUSD`) to archive_symbol format (`BTC-USD`).
-
-```bash
-python -m scripts.migrate_polygon_cache_dirs [--dry-run] [--cache-root PATH]
-```
-
 ## Encryption Management
 
 ### `settings-rotate-encryption`
