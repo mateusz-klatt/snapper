@@ -6345,6 +6345,7 @@ class TestAmbiguousSubmitHandling:
         assert statuses == ["submitted", "accepted"]
         pending = ex.pending_orders[order.client_order_id]
         assert pending.accept_event_pending is True
+        assert order.client_order_id in ex._unhealed_accept_events
         assert ex.client_by_exchange["ex-live-9"] == order.client_order_id
 
     @pytest.mark.asyncio

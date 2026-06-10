@@ -178,6 +178,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.orphaned_executions: dict[str, tuple[ExecutionUpdate, float]] = {}
         self.orphan_ttl_seconds: float = 5.0
         self.orphan_drop_count: int = 0
+        self._unhealed_accept_events: dict[str, RecordVenueEventParams] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
 
     @abstractmethod
@@ -821,24 +822,24 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         exchange_name = self._get_exchange_name()
         self.client_by_exchange[exchange_order_id] = order.client_order_id
+        accept_event: RecordVenueEventParams = {
+            "event_type": "order_accepted",
+            "exchange_name": exchange_name,
+            "instrument": order.instrument,
+            "exchange_order_id": exchange_order_id,
+            "client_order_id": order.client_order_id,
+            "side": order.side,
+            "strategy_tag": order.strategy_tag,
+        }
         try:
-            await self._record_venue_event(
-                {
-                    "event_type": "order_accepted",
-                    "exchange_name": exchange_name,
-                    "instrument": order.instrument,
-                    "exchange_order_id": exchange_order_id,
-                    "client_order_id": order.client_order_id,
-                    "side": order.side,
-                    "strategy_tag": order.strategy_tag,
-                }
-            )
+            await self._record_venue_event(accept_event)
         except Exception:
             logger.critical(
                 f"[{exchange_name}] Order {order.client_order_id} accepted as "
                 f"{exchange_order_id} but the order_accepted venue event failed to "
                 f"persist — order is LIVE; recon will retry the durable write"
             )
+            self._unhealed_accept_events[order.client_order_id] = accept_event
             pending = self.pending_orders.get(order.client_order_id)
             if pending is not None:
                 pending.accept_event_pending = True
@@ -1328,17 +1329,28 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         compares with local pending orders, and processes corrective
         fills for detected gaps. Uses get_order() to verify the actual
         terminal status of disappeared orders (not just absent from
-        open set).
+        open set). Parked ambiguous-submit entries (no exchange id yet,
+        ``submit_ambiguous`` set) get a fresh venue-verification round
+        each cycle, and entries whose durable ``order_accepted`` write
+        failed (``accept_event_pending``) get the write retried until
+        it sticks (#145 P0-1 slice 4) — the 60s loop is the steady-state
+        resolver for everything the inline paths could not settle.
         """
         if self.exchange_client is None:
             return
         exchange_name = self._get_exchange_name()
+
+        for client_order_id in tuple(self._unhealed_accept_events):
+            await self._retry_accept_event(client_order_id)
+
         exchange_orders = await self.exchange_client.get_orders(status=ExchangeOrderStatusEnum.OPEN)
         exchange_by_id = {o.id: o for o in exchange_orders}
 
         for _eid, pending in tuple(self.pending_orders.items()):
             exchange_oid = pending.exchange_order_id
             if not exchange_oid:
+                if pending.submit_ambiguous:
+                    await self._resolve_ambiguous_pending(pending)
                 continue
 
             if exchange_oid not in exchange_by_id:
@@ -1356,6 +1368,72 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     f"free={bal.free} used={bal.used} total={bal.total} "
                     f"(threshold={threshold})"
                 )
+
+    async def _resolve_ambiguous_pending(self, pending: PendingOrderState) -> None:
+        """Run one recon-cycle verification round for a parked entry.
+
+        Reuses the full bounded verification routine (#145 P0-1 slice
+        3) — the two-consecutive-absence rule needs multiple lookups
+        anyway, and parked entries are rare enough that the extra
+        seconds inside the 60s loop are acceptable. When the entry
+        stays unresolved AND its UNKNOWN publish never confirmed (the
+        slice-2 failure case), one publish retry per cycle keeps
+        working toward holding the engine guard.
+
+        Args:
+            pending: The parked ambiguous pending entry.
+        """
+        order = pending.request
+        exchange_name = self._get_exchange_name()
+        if await self._verify_ambiguous_submit(order, pending):
+            logger.info(
+                f"[{exchange_name}] Recon resolved parked ambiguous order "
+                f"{order.client_order_id}"
+            )
+            return
+        if not pending.unknown_published:
+            if await self._publish_order_status(order, OrderEventEnum.UNKNOWN):
+                pending.unknown_published = True
+        logger.warning(
+            f"[{exchange_name}] Recon: order {order.client_order_id} still UNKNOWN "
+            f"(venue verification pending) — retrying next cycle"
+        )
+
+    async def _retry_accept_event(self, client_order_id: str) -> None:
+        """Retry the durable order_accepted write for an accepted order.
+
+        Heals the row whose write failed during acceptance
+        finalization; the order is live (or by now terminal) and was
+        already published ACCEPTED, so only the durable side needs
+        repair. The retry state lives in ``_unhealed_accept_events`` on
+        the executor — NOT on the pending entry — so a terminal fill or
+        cancel popping the entry before the write sticks cannot lose
+        the retry (#145 P0-1 slice 4). Failure keeps the event queued
+        for the next cycle.
+
+        Args:
+            client_order_id: Key into ``_unhealed_accept_events``.
+        """
+        exchange_name = self._get_exchange_name()
+        accept_event = self._unhealed_accept_events.get(client_order_id)
+        if accept_event is None:
+            return
+        try:
+            await self._record_venue_event(accept_event)
+        except Exception:
+            logger.warning(
+                f"[{exchange_name}] Recon: order_accepted venue event still failing "
+                f"for {client_order_id} — retrying next cycle"
+            )
+            return
+        self._unhealed_accept_events.pop(client_order_id, None)
+        pending = self.pending_orders.get(client_order_id)
+        if pending is not None:
+            pending.accept_event_pending = False
+        logger.info(
+            f"[{exchange_name}] Recon healed the durable order_accepted event for "
+            f"{client_order_id}"
+        )
 
     async def _reconcile_disappeared_order(
         self,

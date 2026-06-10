@@ -464,3 +464,249 @@ class TestReconciliation:
         ex.exchange_client = None
 
         await ex._reconcile_with_exchange()
+
+
+class TestAmbiguousReconResolution:
+    """Recon-loop resolution of parked ambiguous entries (#145 P0-1 slice 4)."""
+
+    @pytest.mark.asyncio
+    async def test_parked_ambiguous_entry_gets_verification_round(self) -> None:
+        """A parked ambiguous entry is no longer silently skipped.
+
+        Given: A pending entry without exchange id, flagged ambiguous,
+        When: One reconciliation cycle runs,
+        Then: The verification routine is invoked for it.
+        """
+        ex = _make_executor()
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        pending = _make_pending(exchange_order_id="")
+        pending.exchange_order_id = None
+        pending.submit_ambiguous = True
+        pending.unknown_published = True
+        ex.pending_orders["cid-1"] = pending
+        ex._verify_ambiguous_submit = AsyncMock(return_value=True)
+        await ex._reconcile_with_exchange()
+        ex._verify_ambiguous_submit.assert_awaited_once_with(pending.request, pending)
+
+    @pytest.mark.asyncio
+    async def test_plain_no_id_entry_is_still_skipped(self) -> None:
+        """A non-ambiguous entry without exchange id stays untouched.
+
+        Given: A pending entry without exchange id and no ambiguity,
+        When: One reconciliation cycle runs,
+        Then: No verification is attempted (pre-ACK orders are simply
+            not reconciled, as before).
+        """
+        ex = _make_executor()
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        pending = _make_pending(exchange_order_id="")
+        pending.exchange_order_id = None
+        ex.pending_orders["cid-1"] = pending
+        ex._verify_ambiguous_submit = AsyncMock()
+        await ex._reconcile_with_exchange()
+        ex._verify_ambiguous_submit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unresolved_entry_retries_unconfirmed_unknown_publish(self) -> None:
+        """An undelivered UNKNOWN publish is retried each cycle.
+
+        Given: A parked entry whose UNKNOWN publish never confirmed,
+        When: The recon resolver fails to verify again,
+        Then: One publish retry happens and a confirmed send sets the
+            flag so the engine guard holds.
+        """
+        ex = _make_executor()
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        pending = _make_pending(exchange_order_id="")
+        pending.exchange_order_id = None
+        pending.submit_ambiguous = True
+        ex.pending_orders["cid-1"] = pending
+        ex._verify_ambiguous_submit = AsyncMock(return_value=False)
+        ex._publish_order_status = AsyncMock(return_value=True)
+        await ex._reconcile_with_exchange()
+        ex._publish_order_status.assert_awaited_once_with(pending.request, "unknown")
+        assert pending.unknown_published is True
+
+    @pytest.mark.asyncio
+    async def test_resolved_entry_skips_unknown_retouch(self) -> None:
+        """A resolved entry never re-publishes UNKNOWN.
+
+        Given: A parked entry the resolver settles this cycle,
+        When: The cycle completes,
+        Then: No UNKNOWN publish retry happens.
+        """
+        ex = _make_executor()
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        pending = _make_pending(exchange_order_id="")
+        pending.exchange_order_id = None
+        pending.submit_ambiguous = True
+        ex.pending_orders["cid-1"] = pending
+        ex._verify_ambiguous_submit = AsyncMock(return_value=True)
+        ex._publish_order_status = AsyncMock()
+        await ex._reconcile_with_exchange()
+        ex._publish_order_status.assert_not_awaited()
+
+    def _accept_event(self, exchange_order_id: str = "ex-1") -> dict[str, object]:
+        """Build the queued order_accepted event params."""
+        return {
+            "event_type": "order_accepted",
+            "exchange_name": "kraken",
+            "instrument": "BTC-USD",
+            "exchange_order_id": exchange_order_id,
+            "client_order_id": "cid-1",
+            "side": "buy",
+            "strategy_tag": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_accept_event_pending_is_healed(self) -> None:
+        """A failed durable order_accepted write heals through recon.
+
+        Given: A queued unhealed accept event for a live pending entry,
+        When: One reconciliation cycle runs and the write succeeds,
+        Then: The order_accepted venue event is recorded, the queue
+            entry is removed, and the pending flag clears.
+        """
+        ex = _make_executor()
+        snapshot = _make_order_snapshot(order_id="ex-1")
+        ex.exchange_client.get_orders = AsyncMock(return_value=[snapshot])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        pending = _make_pending(exchange_order_id="ex-1")
+        pending.accept_event_pending = True
+        ex.pending_orders["cid-1"] = pending
+        ex._unhealed_accept_events["cid-1"] = self._accept_event()
+        ex._record_venue_event = AsyncMock()
+        ex._reconcile_fill_gap = AsyncMock()
+        await ex._reconcile_with_exchange()
+        event = ex._record_venue_event.await_args.args[0]
+        assert event["event_type"] == "order_accepted"
+        assert event["exchange_order_id"] == "ex-1"
+        assert "cid-1" not in ex._unhealed_accept_events
+        assert pending.accept_event_pending is False
+
+    @pytest.mark.asyncio
+    async def test_accept_event_retry_failure_keeps_queue(self) -> None:
+        """A still-failing durable write keeps the event queued.
+
+        Given: A queued accept event whose write raises again,
+        When: One reconciliation cycle runs,
+        Then: The queue entry and flag stay set and the cycle continues
+            normally.
+        """
+        ex = _make_executor()
+        snapshot = _make_order_snapshot(order_id="ex-1")
+        ex.exchange_client.get_orders = AsyncMock(return_value=[snapshot])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        pending = _make_pending(exchange_order_id="ex-1")
+        pending.accept_event_pending = True
+        ex.pending_orders["cid-1"] = pending
+        ex._unhealed_accept_events["cid-1"] = self._accept_event()
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
+        ex._reconcile_fill_gap = AsyncMock()
+        await ex._reconcile_with_exchange()
+        assert "cid-1" in ex._unhealed_accept_events
+        assert pending.accept_event_pending is True
+        ex._reconcile_fill_gap.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_accept_event_heals_after_terminal_pop(self) -> None:
+        """The retry survives the pending entry's terminal cleanup.
+
+        Given: A queued accept event whose order already filled and
+            whose pending entry is GONE (terminal pop before the write
+            ever stuck),
+        When: One reconciliation cycle runs,
+        Then: The durable order_accepted event is still written and the
+            queue entry removed — terminal cleanup cannot lose the
+            durable acceptance record.
+        """
+        ex = _make_executor()
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        ex._unhealed_accept_events["cid-1"] = self._accept_event()
+        ex._record_venue_event = AsyncMock()
+        await ex._reconcile_with_exchange()
+        event = ex._record_venue_event.await_args.args[0]
+        assert event["event_type"] == "order_accepted"
+        assert "cid-1" not in ex._unhealed_accept_events
+
+    @pytest.mark.asyncio
+    async def test_unresolved_with_confirmed_unknown_does_not_republish(self) -> None:
+        """An already-confirmed UNKNOWN publish is never repeated.
+
+        Given: A parked unresolved entry whose UNKNOWN already
+            confirmed,
+        When: One reconciliation cycle runs,
+        Then: No publish retry happens (the engine already holds).
+        """
+        ex = _make_executor()
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        pending = _make_pending(exchange_order_id="")
+        pending.exchange_order_id = None
+        pending.submit_ambiguous = True
+        pending.unknown_published = True
+        ex.pending_orders["cid-1"] = pending
+        ex._verify_ambiguous_submit = AsyncMock(return_value=False)
+        ex._publish_order_status = AsyncMock()
+        await ex._reconcile_with_exchange()
+        ex._publish_order_status.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_failed_unknown_retouch_keeps_flag_unset(self) -> None:
+        """A failed publish retry leaves the flag unset for next cycle.
+
+        Given: A parked unresolved entry with an unconfirmed UNKNOWN
+            and a publisher that fails again,
+        When: One reconciliation cycle runs,
+        Then: unknown_published stays False so the retry repeats.
+        """
+        ex = _make_executor()
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        pending = _make_pending(exchange_order_id="")
+        pending.exchange_order_id = None
+        pending.submit_ambiguous = True
+        ex.pending_orders["cid-1"] = pending
+        ex._verify_ambiguous_submit = AsyncMock(return_value=False)
+        ex._publish_order_status = AsyncMock(return_value=False)
+        await ex._reconcile_with_exchange()
+        assert pending.unknown_published is False
+
+    @pytest.mark.asyncio
+    async def test_retry_accept_event_with_unknown_key_is_noop(self) -> None:
+        """A retry for an already-healed key is a harmless no-op.
+
+        Given: No queued accept event for the client id (healed or
+            removed concurrently),
+        When: _retry_accept_event runs for that id,
+        Then: Nothing is written and nothing raises.
+        """
+        ex = _make_executor()
+        ex._record_venue_event = AsyncMock()
+        await ex._retry_accept_event("ghost-cid")
+        ex._record_venue_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_accept_event_heals_even_when_venue_is_down(self) -> None:
+        """The DB-only heal runs before (and despite) a dead venue.
+
+        Given: A queued accept event and get_orders raising (venue
+            unreachable — exactly the outage that produced the failed
+            write),
+        When: One reconciliation cycle runs,
+        Then: The durable order_accepted write still happens before the
+            venue call aborts the rest of the cycle.
+        """
+        ex = _make_executor()
+        ex.exchange_client.get_orders = AsyncMock(side_effect=RuntimeError("venue down"))
+        ex._unhealed_accept_events["cid-1"] = self._accept_event()
+        ex._record_venue_event = AsyncMock()
+        with pytest.raises(RuntimeError, match="venue down"):
+            await ex._reconcile_with_exchange()
+        assert "cid-1" not in ex._unhealed_accept_events
+        ex._record_venue_event.assert_awaited_once()
