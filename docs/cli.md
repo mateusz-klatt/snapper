@@ -964,6 +964,11 @@ snapper backtest-run \
 | `--slippage-bps` | float | `0.0` | Per-fill slippage in basis points |
 | `--commission-bps` | float | `0.0` | Per-fill commission in basis points |
 
+`--execution-mode` is persisted on the run, but the CLI computes the
+pairing config hash with execution mode excluded and currently
+instantiates `DirectDbEngine` directly. Use `POST /api/backtests` for
+a run that actually executes through `zmq_replay`.
+
 ### `backtest-list`
 
 List backtest runs with optional filters.

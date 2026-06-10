@@ -152,38 +152,27 @@ Under N>1 paper mode, state that never produced a checkpoint is
 not recovered by the restarted coordinator. Paper strategies that
 need to survive restart MUST persist checkpoints.
 
-## Known limitation — REST orders with `wallet_public_id` under N>1
+## REST orders with `wallet_public_id` under N>1
 
-The REST order endpoints at `src/snapper/server/order_routes.py`
-build the ``TradeCommand.shard_key`` without the wallet segment,
-while the signal-driven engine's shard_key appends
-``.w{wallet_short}`` via ``_compute_shard_key`` when
-``wallet_public_id`` is non-empty.
+REST manual orders are supported under N>1. `POST /api/orders`
+uses the same `compute_shard_key(...)` helper as the signal engine,
+executor, and MCP manual-order path. When `wallet_public_id` is
+non-empty, the shard key includes the `.w{wallet_short}` segment;
+REST manual orders pass `strategy_tag=None`, so they do not add the
+paper strategy segment.
 
-At N=1 this is dormant because every shard is owned by the single
-coordinator, the outbox ownership filter is a no-op at N=1 (the
-trader always passes ``ShardOwnership(0, 1)``, whose ``owns()``
-returns True for every shard when ``instance_count == 1``), and the
-CID guard is gated on ``instance_count > 1``.
+The route writes that shard key to both `execution_plans` and
+`trade_commands`, inserts the command with `ownership=None` so any
+API worker may accept the request, and lets the trade coordinator
+outbox ownership filter decide which instance dispatches it. During
+outbox publish, the coordinator registers
+`client_order_id -> shard_key`, so the N>1 CID guard accepts the
+venue ACK/fill/cancel events only on the owning coordinator.
 
-Under N>1, a REST order with a non-empty ``wallet_public_id``
-writes a TradeCommand whose shard_key hashes to a different
-instance than the engine for the same (exchange, instrument,
-wallet). The owning coordinator dispatches the command to the
-venue correctly, but the venue ACK is dropped by the CID guard
-on every coordinator because the CID was never registered
-in ``_order_shard_keys`` (the REST path does not populate it).
-
-Consequence at N>1: REST orders with ``wallet_public_id`` reach
-the venue, but the coordinator's ``TradeService`` projection does
-not reflect fills/cancellations. Monitoring via the ``orders``
-and ``executions`` tables still works — only the in-memory
-coordinator state drifts.
-
-Mitigation until a forward fix lands: for N>1 deployments that
-need REST orders, either (a) set ``wallet_public_id=""`` on the
-REST request, or (b) stay on N=1 for workflows that mix signal-
-driven + REST-driven orders. Signal-only workflows are unaffected.
+Use `wallet_public_id=""` only for backward-compatible or explicitly
+single-wallet workflows where the wallet segment should be omitted.
+Signal-driven paper orders may still add a `strategy_tag`; REST
+manual orders intentionally do not.
 
 ## Non-systemd deployments (contract)
 

@@ -120,7 +120,7 @@ promoted from the `extra_metrics` JSON blob
   equity. Zero-trade returns `0.0`; non-positive mean equity
   returns `None` + warning.
 
-Read-side fallback at `GET /api/backtests/{id}` collapses legacy
+Read-side fallback at `GET /api/backtests/{id}` collapses older
 `extra_metrics` JSON into the typed slots using explicit `is not
 None` coalescing (never Python truthiness — preserves legitimate
 `0.0` values). The response strips the five promoted names from the
@@ -164,7 +164,7 @@ Every new run persists a `config_hash` via
 `slippage_bps`, `commission_bps`), plus
 `target_execution_exchange` when it is set on the config
 (see "Cross-asset execution" → "Fingerprint + pairing" below —
-legacy default-`None` runs keep their exact prior hash). `execution_mode`,
+default-`None` runs keep their exact prior hash). `execution_mode`,
 `snapshot_as_of`, `warmup_bars`, and `buffer_size` are explicitly
 excluded so Direct-DB and ZMQ replay runs on the same config share
 a hash.
@@ -258,7 +258,7 @@ substitutes at simulated-fill time:
   no longer used on cross-asset runs.
 
 When `target_execution_exchange is None` (default), the fill is
-attributed to `event.exchange` + `signal.instrument`. In legacy
+attributed to `event.exchange` + `signal.instrument`. In older
 single-feed strategies `signal.instrument == event.instrument` by
 convention (verified across every in-tree emitter at `rsi.py`,
 `macd.py`, `cointegration.py`), so the recorded exchange /
@@ -302,7 +302,7 @@ Two explicit non-goals in the current implementation:
 field on `BacktestCreateBody`. When set, simulated fills are
 attributed to that order-capable venue while candles still feed from
 `exchange`. When unset, the run stays single-exchange and
-byte-identical to legacy behaviour. The same field round-trips
+byte-identical to pre-cross-asset behaviour. The same field round-trips
 through DB persistence + the rerun endpoint, and surfaces on
 `BacktestRunData` for frontend display. Allowed target values:
 `paper` / `kraken` / `kraken_futures` / `walutomat`.
@@ -310,8 +310,8 @@ through DB persistence + the rerun endpoint, and surfaces on
 ### Fingerprint + pairing
 
 `compute_fingerprint` includes `target_execution_exchange` in the
-payload **only when non-None**, so legacy (default-None) runs keep
-their exact pre-cross-asset hash in both the default and
+payload **only when non-None**, so default-None runs keep their exact
+pre-cross-asset hash in both the default and
 `for_pairing=True` paths. This preserves dedup cache validity and
 the auto-pair UI grouping logic in the `_resolve_auto_pair` resolver
 in `backtest_routes.py`.

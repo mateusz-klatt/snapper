@@ -29,8 +29,9 @@ A failing group's scope — `(wallet, strategy, group_key)` where `group_key`
 is the canonical sorted `exchange:instrument:mode` token set — carries one
 durable halt row in `paired_execution_halts`. The halt blocks NEW grouped
 signals on the same pair and is mirrored into each trade coordinator's
-in-memory shard halts. The guard scanner re-evaluates everything roughly
-every 2.5 seconds.
+in-memory shard halts. The guard scanner interval is
+`max(1.0, PAIRED_EXECUTION_ASSEMBLY_TIMEOUT_S / 2)`, which is 2.5
+seconds with the default 5-second assembly timeout.
 
 ## The automatic lifecycle (no operator action)
 
@@ -130,8 +131,18 @@ re-attestation path accepts a `compensating` group with a manual leg).
 - **Missed not-tradeable reject**: a flatten rejected locally as
     not-tradeable (a delisted instrument) writes no durable venue event; if
     its live message is also lost, the leg stays `compensating` + halted.
-    That IS the operator hand-off for a delisted instrument — resolve and
-    attest as above.
+    In this window the group is NOT attestable: terminalize requires every
+    non-manual leg settled, a `compensating` leg is not, and the scanner's
+    compensating sweep only reprojects from durable venue events (it finds
+    none here), so POST terminalize returns 409 indefinitely. Resolution is
+    reconciliation territory — the scope stays halted (fail-safe) until a
+    durable venue event for the flatten appears or the rows are reconciled
+    by hand.
+- **Dispatch max-age TTL applies to paired commands too**: a paired
+    `CREATED` command older than `TRADE_COMMAND_DISPATCH_TTL_S`
+    (default 30 s) is CAS-expired by the outbox instead of dispatched —
+    a group wedged pre-dispatch longer than the TTL breaks via the
+    assembly/fill deadlines rather than firing stale legs.
 - **Late fills older than 7 days**: startup recovery replays fills into
     groups completed within the last 7 days. Older late fills are
     reconciliation territory.

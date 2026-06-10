@@ -82,6 +82,8 @@ Persistence layer with SQLAlchemy:
     - `TradeCommand` — Durable trade intent written by the engine before execution
     - `VenueEvent` — Durable venue observations and acknowledgements persisted by executors
     - `TradeProjectionCheckpoint` — Materialized position/balance snapshot for fast recovery
+    - `PairedExecutionGroup`, `PairedExecutionLeg`, `PairedExecutionHalt` —
+      durable arming, compensation, and halt state for multi-leg paired execution
     - `Signal` — Signal events
     - `User` — System users
     - `Setting` — Settings (encrypted)
@@ -225,20 +227,25 @@ determine their actual terminal status (CLOSED / CANCELED / EXPIRED),
 emits any residual fill gap first, then publishes the terminal
 `ExecutionUpdate`.
 
-#### Known limitation — market orders without price
+#### Market orders without price — venue-fills VWAP heal
 
-If a market order's exchange snapshot reports `price=None`, the
-fill-gap path logs an ERROR (`"no price on market order, skipping
-corrective fill"`) and skips the corrective emission. The executor
-does not subscribe to ticks and cannot approximate the fill price
-without degrading VWAP accuracy silently. Recovery is
-lifecycle-dependent: if the order stays open and a later snapshot
-populates `price`, the next reconciliation iteration emits the
-corrective fill; if the order reaches a terminal state first, the
-skipped gap persists until reconciled manually against the exchange's
-fill history. Operators seeing this ERROR log should not patch Snapper
-to approximate; the skip is an intentional trade-off (predictable
-behaviour + observable gap) over silent approximation drift.
+If a market order's exchange snapshot reports `price=None` (Kraken
+Futures snapshots carry only `limitPrice`), the fill-gap path first
+asks the venue for the order's own fills via
+`ExchangeClientBase.get_order_fill_vwap` and uses the venue-true VWAP
+— but only when the fills page covers the **whole** filled quantity
+within a relative `1e-6` tolerance; a partial page is refused rather
+than silently skewing VWAP. The CCXT snapshot builder additionally
+backfills `price` from the executed `average` when the venue reports
+one. Only when the venue reports neither a price, nor an executed
+average, nor whole-coverage per-order fills does the path log an
+ERROR (`"no price on market order, skipping corrective fill"`) and
+skip the corrective emission — recovery then depends on a later
+snapshot populating `price`, or manual reconciliation against the
+exchange's fill history. Operators seeing this ERROR should not patch
+Snapper to approximate from ticks; the skip is an intentional
+trade-off (predictable behaviour + observable gap) over silent
+approximation drift.
 
 ### Application (`src/snapper/application/`)
 
@@ -410,6 +417,9 @@ execution_plan_decisions   -- Per-tick plan decisions (audit trail)
 trade_commands              -- Durable trade intent (engine writes before execution)
 venue_events                -- Durable venue observations and acknowledgements from executors
 trade_projection_checkpoints -- Materialized position/balance snapshots
+paired_execution_groups     -- Multi-leg group FSM for arming and compensation
+paired_execution_legs       -- Per-leg command binding and signed exposure accounting
+paired_execution_halts      -- Durable per-scope halt projection for broken/exposed groups
 
 -- Multi-tenant
 wallets                     -- Trading accounts (label, is_paper)
@@ -481,8 +491,48 @@ snapper db-downgrade  # Rollback
 The trade runtime always uses the durable (outbox-driven) dispatch
 path. `TradingEngineService` writes `TradeCommand` rows to the
 database; `OutboxDispatcher` polls the table and publishes undispatched
-commands to ZMQ. Executor `VenueEvent` writes are fail-closed — a
-failed persist raises before the executor acknowledges the venue event.
+commands to ZMQ. Executor `VenueEvent` writes are fail-closed for
+pre-acceptance events — a failed persist raises before the executor
+acknowledges the venue event. Once the venue has accepted an order
+(returned an order id), a failed `order_accepted` persist no longer
+aborts the flow: it is logged CRITICAL, the entry is flagged
+`accept_event_pending` and queued, ACCEPTED is still published (the
+venue state is the truth), and the executor's recon loop retries the
+durable write each cycle until it sticks.
+
+Three order-safety layers sit on the dispatch path:
+
+- **Dispatch max-age TTL** (`TRADE_COMMAND_DISPATCH_TTL_S`, default
+  30 s): the outbox CAS-expires a stale `CREATED` create/submit
+  command to terminal `EXPIRED` instead of publishing it (cancels are
+  exempt), and the engine releases its in-flight intent via a
+  synthetic expired event — an outage backlog cannot fire MARKET
+  orders priced off old signals. The executor-side stale check is
+  venue-truth-backed: a found order is adopted, an unverifiable venue
+  drops the frame silently (recon resolves it), and only venue-verified
+  absence rejects.
+- **Duplicate-submit guard**: before placing, the executor drops
+  outbox replays of an already-evidenced `client_order_id` (live
+  pending entry, unhealed-accept queue, or a durable venue-event
+  evidence probe) — fail-closed on probe failure, publishing nothing.
+- **UNKNOWN submit state**: when a venue submit outcome is ambiguous
+  (timeout, connection drop mid-send), the executor parks the order
+  as non-terminal `OrderEventEnum.UNKNOWN` instead of fabricating a
+  REJECTED — a false reject would let the engine re-emit and double
+  the position. It then verifies against venue truth by client id
+  (`find_order_by_client_id`: could-not-check never counts as
+  venue-says-no); a found order is adopted, two consecutive
+  authoritative absences reject safely, anything else stays parked.
+  The recon loop gives every parked entry a verification round each
+  cycle, and the engine holds the in-flight guard until resolution.
+  An `order_unknown` safety-critical alert (user-scoped, with admin
+  fan-out for strategy orders) fires while an order is parked.
+
+Spot (Kraken) `create_order` is additionally excluded from blind
+network retry — an ambiguous network failure may have placed the
+order, and Kraken's `cl_ord_id` dedupe covers only open orders, so a
+blind retry of a MARKET order could double-place. The 429 rate-limit
+retry is kept (an exhausted 429 is a definitive venue-side rejection).
 
 The `TraderCoordinator` class acts as the trade runtime coordinator
 and integrates `TradeService` (command lifecycle) and `BalanceService`
@@ -497,9 +547,27 @@ Multiple `TraderCoordinator` processes can run against the same DB
 `~1/N` of the `shard_key` set; signals, venue events, recovery,
 outbox dispatch, and reconciliation all filter by ownership so no
 two instances process the same shard. Default `--instance-count 1`
-is byte-identical to single-coordinator behavior. See
+is byte-identical to single-coordinator behavior. Scaling to N≥2
+requires PostgreSQL: the coordinator fails fast (`ValueError`) at
+startup when `instance_count > 1` on a SQLite backend, because
+`SELECT ... FOR UPDATE` row locking — which the money-path DALs
+depend on — is a no-op there. See
 [`docs/operations.md`](operations.md) for the systemd template
 recipe and scale-up / scale-down / crash-recovery procedures.
+
+The coordinator also spawns the **paired-execution guard scanner**
+(`PairedExecutionGuardScanner`) as a background task: a DB-only
+liveness loop that assembles and arms multi-leg signal groups behind
+an arming barrier (no grouped command reaches a venue until every
+sibling leg is durably registered), breaks groups that miss their
+assembly/fill deadlines, cancels and reduce-only-flattens exposed
+legs, projects durable per-scope halts, and completes settled groups.
+The guard is dark by default (`PAIRED_EXECUTION_GUARD_ENABLED`
+false): live multi-leg emission is refused fail-closed at the
+strategy layer, while the scanner's compensation backstop always
+runs. Operator surface: `GET /api/paired-execution/incidents` and
+`POST /api/paired-execution/groups/{id}/terminalize` — runbook in
+[`docs/paired-execution.md`](paired-execution.md).
 
 ## Bitemporal Model
 
@@ -580,8 +648,8 @@ the first session's close+insert only after the first commits; both
 batches complete without error and produce a clean SCD2 chain.
 
 On **SQLite** (aiosqlite), `SELECT ... FOR UPDATE` is a no-op and the
-default `BEGIN DEFERRED` isolation does not acquire a write lock at
-SELECT time — two concurrent tasks can both read the same active
+default transaction mode does not acquire a write lock at SELECT
+time — two concurrent tasks can both read the same active
 row before either writes. The first writer to COMMIT wins; the second
 writer's INSERT then collides on the `public_id` UNIQUE index and
 raises `sqlalchemy.exc.IntegrityError`. The final DB state is still a
@@ -826,7 +894,7 @@ audit-gap warning, and the cache is cleared so subsequent fail-soft
 paths handle themselves correctly.
 
 `_recover_engine_state` runs `_reconcile_position_cycles` as a fourth
-recovery phase, after engine state is rebuilt and before the trading
+recovery pass, after engine state is rebuilt and before the trading
 loop starts. It iterates `self.engines` (engines, not `TradeService`,
 because full replay rebuilds `engine.position_qty` but not the
 projection) and handles four cases: recovered flat with a stale open

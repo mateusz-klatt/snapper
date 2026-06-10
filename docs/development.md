@@ -341,7 +341,7 @@ iOS-side coverage of the resulting catalog is enforced by
 `SnapperTests/I18n/ExpectedKeys.swift`); adding a new key to the
 catalog requires adding it to `ExpectedKeys.swift` in the same iOS PR.
 
-### Alerts catalog (legacy direction: xcstrings → JSON)
+### Alerts catalog (historical direction: xcstrings → JSON)
 
 Historically the iOS alerts catalog was the source of truth and
 frontend caught up via `scripts/port_ios_alert_catalog.py`. That

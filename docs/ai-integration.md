@@ -457,7 +457,7 @@ Delegate CRUD:
 
 | Status | Detail                                 | When it fires                                               |
 | ------ | -------------------------------------- | ----------------------------------------------------------- |
-| 401    | Requires populated `user_public_id`    | Principal has blank `user_public_id` (legacy token rollout) |
+| 401    | Requires populated `user_public_id`    | Principal has blank `user_public_id` (older token rollout)  |
 | 403    | `require_role(OPERATOR)`               | AI_DELEGATE or VIEWER trying to manage delegates            |
 | 404    | `Delegate not found`                   | Unknown ID OR cross-tenant (no existence leak)              |
 | 409    | `Could not derive a unique username …` | Label slug collides 8+ times (pathological)                 |

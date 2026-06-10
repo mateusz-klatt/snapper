@@ -9,7 +9,7 @@ Modules:
         settings with password-derived keys.
 
 Security features:
-    - PBKDF2-HMAC-SHA256 key derivation with 480,000 iterations
+    - PBKDF2-HMAC-SHA256 key derivation with 100,000 iterations
     - Fernet (AES-128-CBC with HMAC) authenticated encryption
     - Automatic detection of encrypted vs cleartext values
     - Thread-safe global encryption service singleton

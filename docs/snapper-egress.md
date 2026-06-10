@@ -28,7 +28,7 @@ This sidecar is part of the egress-multiplexer subsystem.
 
 ```
 ┌───────────────┐       ┌─────────────────┐       ┌──────────┐
-│ snapper-api   │       │ snapper-egress  │  WG   │  Kraken  │
+│ snapper-feed  │       │ snapper-egress  │  WG   │  Kraken  │
 │ (publishers)  │ SOCKS │ (this sidecar)  │ ────▶ │  WS      │
 │               │ ────▶ │  wg-uk-1 :1081  │       │          │
 └───────────────┘       │  wg-us-1 :1082  │       └──────────┘
@@ -43,8 +43,14 @@ Per tunnel:
 3. SOCKS5 listener binds outbound sockets to the tunnel's IP →
    kernel routes them via the tunnel.
 
-The snapper-api's `EgressPool` (`socks5h://snapper-egress:<port>`)
-reserves a route per Kraken WS handshake. A route is quarantined — and
+Kraken WS handshakes go through the `EgressPool`
+(`socks5h://snapper-egress:<port>`) inside the feed-publisher
+subprocesses of the **snapper-feed** container (the API profile
+excludes market-data publishers; the FEED profile runs only them).
+Each publisher process builds its own process-local pool at start,
+gated on the `feed_egress_enabled` DB setting (default **off** —
+publishers dial direct until the gate is flipped). The pool reserves
+a route per Kraken WS handshake. A route is quarantined — and
 the next handshake fails over to an alternate (or the direct fallback) —
 on any of the `QuarantineReason` values: `http-429` (handshake 429),
 `close-1015` (Cloudflare close frame), `http-connect-error` (REST
@@ -79,8 +85,11 @@ poetry run python scripts/provision_egress_tunnel.py \
 Remove `--dry-run` after validation. The helper writes the descriptor,
 encrypted private/optional preshared key settings, and merges the SOCKS5
 route into `egress_pool`. It can also restart the sidecar with
-`--restart-sidecar`; snapper-api still needs a restart after `egress_pool`
-changes so the pool is rebuilt during lifespan startup.
+`--restart-sidecar`. After `egress_pool` changes, restart
+**snapper-feed** (each feed-publisher process builds its own
+process-local pool at start) in addition to snapper-api — restarting
+only the API rebuilds the API process's pool but not the pools the
+Kraken/Walutomat feeds actually dial through.
 
 Manual path:
 
@@ -144,7 +153,7 @@ when you want it to act as fallback only, or set
 To restrict a SOCKS5 route to specific exchanges, add an
 `allowed_exchanges` field listing the exchange names (matching
 `ExchangeEnum` *values* — `"walutomat"`, `"kraken"`,
-`"kraken_futures"`, `"kraken_equities"`, `"polygon"`):
+`"kraken_futures"`, `"kraken_equities"`, `"polygon"`, `"paper"`):
 
 ```json
 {
@@ -172,12 +181,20 @@ names (typos) are rejected by `EgressPoolConfig` at config-load
 time, so a `"krakeen"` typo never silently makes a route
 unreachable.
 
-Then restart snapper-api so the lifespan re-runs the egress-pool
-preflight:
+Then enable the feed gate (DB setting `feed_egress_enabled=true`) if
+not already on, and restart both the API and the feed tier — the feed
+publishers hold their own process-local pools:
 
 ```
-docker compose restart snapper
+docker compose restart snapper snapper-feed
 ```
+
+The process-local egress preflight validates each SOCKS5 route before
+installing the pool: it checks that `python-socks` is importable,
+resolves the proxy host, opens the proxy port, and sends a SOCKS5
+NO_AUTH greeting. A route that fails preflight is auto-disabled in that
+process's effective config, so restart every process that should use
+the updated route set.
 
 The lifespan logs:
 
@@ -220,22 +237,18 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
    The interface should be `UP` and the rule should pin `from
    <tunnel_addr>` → table N.
 
-4. **Kraken WS uses the tunnel?** Quarantine the direct route from
-   the snapper-api Python REPL:
-   ```python
-   from datetime import UTC, datetime, timedelta
-   from snapper.infrastructure.network.egress_pool import get_egress_pool
-   pool = get_egress_pool()
-   pool._quarantine_route(
-       "default",
-       datetime.now(UTC) + timedelta(seconds=600),
-       "http-429",
-   )
-   ```
-   Then force a Kraken Spot reconnect (restart the publisher process)
-   and observe the next handshake. The log line should show the
-   tunnel route id; Cloudflare's view of the source IP should match
-   the VPN exit.
+4. **Kraken WS uses the tunnel?** The pool is a process-local
+   singleton inside each feed-publisher process — `get_egress_pool()`
+   in a fresh `docker compose exec` interpreter returns `None`, and
+   quarantining inside the API process would not touch the publisher
+   pools, so a REPL-based quarantine cannot exercise the failover.
+   Instead, steer by configuration: set the direct route
+   `"enabled": false` (or give it the worst priority) in the
+   `egress_pool` setting, make sure `feed_egress_enabled=true`, then
+   restart snapper-feed and observe the next handshake. The publisher
+   log line should show the tunnel route id; Cloudflare's view of the
+   source IP should match the VPN exit. Re-enable the direct route
+   when done.
 
 5. **Stable tick flow?**
    ```sql
@@ -252,9 +265,15 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
 
 - The SOCKS5 listener runs WITH NO AUTHENTICATION. Isolation comes
   entirely from the Docker `snapper-internal` network. The CI lint
-  hook `scripts/check_egress_compose.py` rejects any `ports:` entry
-  or `network_mode: host` on the snapper-egress service so an
-  operator cannot accidentally publish the listener to the host.
+  hook `scripts/check_egress_compose.py` rejects any `ports:` entry,
+  `network_mode: host`, or env-interpolated bypass on the
+  snapper-egress service so an operator cannot accidentally publish
+  the listener to the host.
+- The same lint hook also enforces the unified-image runtime contract:
+  `snapper-egress` must use the same image as `snapper`, run
+  `command: ["egress"]` as `user: "0:0"`, include `NET_ADMIN`, and
+  mount `/app/data` when the monolith does. The `snapper` service must
+  remain unprivileged, with no `cap_add` and no `user` override.
 - All traffic on `snapper-internal` is trusted equally. Do NOT
   attach untrusted containers (other tenants, debugging shells from
   unknown sources) to that network. If you must, add SOCKS5

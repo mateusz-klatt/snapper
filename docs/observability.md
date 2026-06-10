@@ -181,7 +181,7 @@ Runs at every sample and degrades silently when paths are absent:
   `/sys/fs/cgroup/memory.max`, `cpu.max`, `cpu.stat`, `memory.current`.
 - v1 fallback: `memory/memory.limit_in_bytes`,
   `memory/memory.usage_in_bytes`, `cpu,cpuacct/cpu.cfs_quota_us`
-  (or the legacy `cpu/cpu.cfs_quota_us` mount), and the matching
+  (or the older `cpu/cpu.cfs_quota_us` mount), and the matching
   `cpu.stat` file for `nr_throttled`.
 - `cgroup_version` reports the detected layout; `null` on dev hosts
   without cgroup (macOS, non-containerised Linux without unified

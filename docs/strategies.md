@@ -282,6 +282,8 @@ from snapper.strategies.cointegration import CointegrationPairs
 `MultiLegSpreadMixin` — its 2-leg invariants are enforced by
 `self._init_legs(expected_count=2)` and `instrument1` / `instrument2`
 are backwards-compatible aliases for `self.legs[0]` / `self.legs[1]`.
+It declares `PAIRED_EXECUTION_POLICY = SIMULTANEOUS`, so its
+entry/exit pairs emit as one synchronized paired-execution group.
 See the next section for the generalized N-leg API.
 
 **Parameters:**
@@ -365,7 +367,7 @@ synchronized N-leg rebalance behaves identically across paths.
 
 ```python
 from snapper.messaging.schemas.data import CandleData
-from snapper.core.types import TradeSide
+from snapper.core.types import PairedExecutionPolicyEnum, TradeSide
 from snapper.strategies.base import BaseStrategy, StrategyConfig, StrategySignal
 from snapper.strategies.base import StrategySignalResult
 from snapper.strategies.decorators import register_strategy, create_strategy_process
@@ -389,6 +391,8 @@ from snapper.strategies.multi_leg import MultiLegSpreadMixin
 )
 class EqualWeightBasket(BaseStrategy, MultiLegSpreadMixin):
     """Z-score each leg vs the basket mean and rebalance when it diverges."""
+
+    PAIRED_EXECUTION_POLICY = PairedExecutionPolicyEnum.SIMULTANEOUS
 
     def __init__(self, config: StrategyConfig) -> None:
         super().__init__(config)
@@ -443,7 +447,11 @@ anything is published or recorded:
 
 - every entry must be a `StrategySignal`;
 - no two legs may share an instrument;
-- every leg's instrument must map to a configured output topic.
+- every leg's instrument must map to a configured output topic;
+- a multi-leg group on a **live** (non-paper) exchange is rejected
+  outright unless `PAIRED_EXECUTION_GUARD_ENABLED` is true — the
+  fail-closed gate that keeps real-money spreads dark until the
+  paired-execution guard is deliberately switched on.
 
 If any check fails the whole group is rejected (the call raises) and
 **nothing is emitted** — a malformed multi-leg return can never leave one
@@ -452,16 +460,33 @@ and `process_time_batch` records each leg, so the live/paper path and the
 backtest path behave identically: the full N-leg basket is one
 synchronized group.
 
+Every multi-leg strategy **must declare a coordination policy** via the
+`PAIRED_EXECUTION_POLICY` class attribute
+(`PairedExecutionPolicyEnum.SIMULTANEOUS` for same-instant spreads, as
+`CointegrationPairs` declares, or `SEQUENTIAL_HANDOFF` for
+exit-then-enter chains); emitting a `list[StrategySignal]` without one
+raises `ValueError`. On emission `BaseStrategy` stamps the group with a
+shared `paired_group_id` (uuid7), `paired_group_size`, per-leg
+`paired_group_index`, the declared `paired_group_policy`, and a
+canonical `paired_group_key` — the descriptors the paired-execution
+guard correlates on.
+
 > **Scope — emission, not venue atomicity.** This wires up paired
 > *emission*: both legs are published together or not at all. It does
 > NOT provide venue-level execution atomicity. If one leg rejects,
 > partially fills, or fills late, exposure is still possible because the
 > two legs are independent sends to independent executors/coordinators
 > (and at N≥2 instances the legs can be owned by *different*
-> coordinators, since the shard key includes the instrument). Do NOT
-> enable real-money (non-paper) multi-leg strategies until the separate
-> paired-execution guard lands (group-id correlation, halt-both-shards
-> on one-leg failure/timeout, compensating reduce-only flatten).
+> coordinators, since the shard key includes the instrument). Venue-side
+> atomicity is the **paired-execution guard**'s job: group-id
+> correlation through an arming barrier, halt-both-shards on one-leg
+> failure/timeout, and compensating reduce-only flattens. The guard is
+> implemented but ships dark — with `PAIRED_EXECUTION_GUARD_ENABLED`
+> false (the default) `BaseStrategy` refuses to emit live multi-leg
+> groups entirely, while paper multi-leg is always allowed. Operator
+> surface: `GET /api/paired-execution/incidents` and
+> `POST /api/paired-execution/groups/{id}/terminalize` — see
+> [docs/paired-execution.md](paired-execution.md).
 
 ### When NOT to use the mixin
 

@@ -3,9 +3,12 @@
 Snapper provides a REST API and WebSocket interface for platform interaction.
 The API accepts JWT authentication either through HTTP-only cookies or an
 `Authorization: Bearer <jwt>` header. When both are present, Bearer auth
-wins. Cookie-authenticated mutating requests require a valid
-`X-CSRF-Token` header; Bearer-authenticated requests skip CSRF because
-they are not ambient browser credentials.
+wins. Cookie-authenticated mutating requests that use the CSRF guard
+require a valid `X-CSRF-Token` header; Bearer-authenticated requests
+skip CSRF because they are not ambient browser credentials. The auth
+token lifecycle routes (`/api/auth/login`, `/api/auth/refresh`,
+`/api/auth/logout`, `/api/auth/ws_token`) intentionally omit the CSRF
+guard.
 
 ## Authentication
 
@@ -18,9 +21,9 @@ as a Bearer token instead.
 
 | Role | Access |
 | ---- | ------ |
-| `viewer` | Read-only market data, orders, positions, strategies, system status |
-| `ai_delegate` | Scoped automation principal for MCP and AI-review workflows; can read market/orders/positions/strategies/signals/backtests/system status and create/cancel/manage scoped orders/positions, but cannot manage users, settings, processes, credentials, or scope grants |
-| `operator` | Viewer permissions plus trade execution, process management |
+| `viewer` | Read-only market data, orders, positions, strategies, system status, backtests, notifications; can register and manage the caller's own notification devices |
+| `ai_delegate` | Scoped automation principal for MCP and AI-review workflows; can read market/orders/positions/strategies/signals/backtests/system status and create/cancel/manage scoped orders/positions, but cannot manage users, settings, processes, credentials, scope grants, notifications, or paired execution |
+| `operator` | Viewer permissions plus trade execution, process and strategy lifecycle management, backtest management, and paired-execution terminalization |
 | `admin` | Full access including user management, system configuration, wallet/credential management, scope grant management, operator impersonation |
 
 Multi-tenant permissions (ADMIN only): ``read:wallet_credentials``,
@@ -430,7 +433,8 @@ is `AdminResetPasswordRequest`.
 
 The `csrf_token` cookie is readable by JavaScript (not HttpOnly). For
 cookie-authenticated mutating requests outside `/api/auth/login`,
-`/api/auth/refresh`, and `/api/auth/logout`, include its value as a header:
+`/api/auth/refresh`, `/api/auth/logout`, and
+`/api/auth/ws_token`, include its value as a header:
 
 ```http
 X-CSRF-Token: <value from csrf_token cookie>
@@ -2789,25 +2793,41 @@ async function connect() {
 
 Backtest endpoints manage strategy backtesting runs. Read endpoints require
 `read:backtests` permission (viewer+). Mutation endpoints require
-`manage:backtests` (operator+). Reads are wallet-scoped when the caller
-has an active wallet selected; admins without a wallet selection see all runs.
+`manage:backtests` (operator+). Every read and mutation is wallet-scoped
+and fails with 400 when the caller has no active wallet selected.
 
 ### POST /api/backtests
 
-Create and launch a new backtest run. Requires an active wallet selection.
+Create and launch a new backtest run. Requires an active wallet
+selection. The route accepts a `BacktestCreateCommand` envelope
+wrapping a `BacktestCreateBody` payload, creates a pending run row,
+and starts a one-shot `BacktestRunnerProcess`.
 
 **Request body:**
 
 ```json
 {
-    "strategy_class": "sma_cross",
-    "instrument_public_id": "BTC-USD",
-    "exchange": "kraken",
-    "timeframe": "1h",
-    "start_date": "2026-01-01T00:00:00Z",
-    "end_date": "2026-06-01T00:00:00Z",
-    "initial_cash": 10000.0,
-    "strategy_params": {"fast": 10, "slow": 30}
+    "type": "backtest_create_command",
+    "sequence_id": 1,
+    "public_id": "<client-uuid7>",
+    "timestamp": "2026-01-18T12:00:00Z",
+    "session_id": "<client-session>",
+    "topic": null,
+    "payload": {
+        "strategy_class": "RSIReversion",
+        "instrument_public_id": "<instrument-public-id>",
+        "exchange": "kraken",
+        "timeframe": "1h",
+        "start_date": "2026-01-01T00:00:00Z",
+        "end_date": "2026-06-01T00:00:00Z",
+        "initial_cash": 10000.0,
+        "strategy_params": {"period": 14, "upper": 70.0, "lower": 30.0},
+        "execution_mode": "direct_db",
+        "fill_model": "market",
+        "slippage_bps": 0.0,
+        "commission_bps": 0.0,
+        "target_execution_exchange": null
+    }
 }
 ```
 
@@ -2822,7 +2842,7 @@ List backtest runs with optional filters.
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
 | `strategy` | string | Filter by strategy name |
-| `status` | string | Filter by status (pending, running, completed, failed, cancelled) |
+| `status` | string | Filter by status (`pending`, `running`, `completed`, `failed`, `cancel_requested`, `cancelled`) |
 | `config_hash` | string | Pairing-stable SHA-256 config hash used by comparison auto-pairing |
 | `limit` | int | Page size (1-100, default 20) |
 | `offset` | int | Page offset (default 0) |
@@ -2839,8 +2859,9 @@ create-backtest strategy selector.
 Create or return an idempotent existing comparison row for two terminal
 runs. Manual mode supplies `run_a_public_id` and `run_b_public_id`; auto
 mode supplies `config_hash` and optionally `anchor_run_public_id`.
-Requires an active wallet and `read:backtests`. See
-[backtesting.md](backtesting.md#comparison) for pairing semantics.
+The route accepts a `BacktestCompareRequest` envelope wrapping
+`BacktestCompareBody`. Requires an active wallet and `read:backtests`.
+See [backtesting.md](backtesting.md#comparison) for pairing semantics.
 
 ### GET /api/backtests/compare
 
@@ -2859,9 +2880,11 @@ Get backtest run detail by public ID.
 
 ### POST /api/backtests/{run_id}/cancel
 
-Cancel a pending or running backtest. Sets status to `cancel_requested`
-via SCD2 close-and-insert. Returns 409 if the run is already in a
-terminal state.
+Cancel a pending or running backtest. The route accepts a
+`BacktestCancelCommand` envelope wrapping `BacktestCancelBody`
+(`reason` is optional), sets status to `cancel_requested` via SCD2
+close-and-insert, and returns 409 if the run is already in a terminal
+state.
 
 ### POST /api/backtests/{run_id}/rerun
 
@@ -2869,11 +2892,11 @@ Create a new backtest run with the same configuration as the original.
 
 ### GET /api/backtests/{run_id}/trades
 
-Get paginated trades for a completed backtest run.
+Get paginated trades for a backtest run.
 
 ### GET /api/backtests/{run_id}/signals
 
-Get paginated signals for a completed backtest run.
+Get paginated signals for a backtest run.
 
 ### GET /api/backtests/{run_id}/events
 

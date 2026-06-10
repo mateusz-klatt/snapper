@@ -46,7 +46,7 @@ DB_URL=postgresql+asyncpg://user:password@localhost:5432/snapper
 
 The `Default` column reflects the Pydantic defaults on
 `BootstrapSettingsLoader` (`src/snapper/config/bootstrap.py`) for
-the server / encryption / ZMQ / coordinator rows. The
+the server / encryption / ZMQ / coordinator / trade-safety rows. The
 observability rows further down (`SYSTEM_METRICS_*`, `RETENTION_*`,
 `DB_METRICS_*`, `DB_POOL_*`, `SNAPPER_*_PROBE`) are NOT loaded
 through that class.
@@ -107,12 +107,27 @@ The trade runtime supports horizontal sharding via these variables.
 With `SNAPPER_COORDINATOR_INSTANCE_COUNT > 1` each instance owns a
 partition of the active wallets / outbox rows, enabling multi-worker
 uvicorn deployments and parallel `trade-zmq` instances.
+Multi-instance coordinator deployments require PostgreSQL; startup
+fails fast on SQLite when `SNAPPER_COORDINATOR_INSTANCE_COUNT > 1`
+because SQLite does not enforce `SELECT ... FOR UPDATE` row claims.
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
 | `SNAPPER_COORDINATOR_INSTANCE_ID` | `0` | Zero-based shard index for this instance |
 | `SNAPPER_COORDINATOR_INSTANCE_COUNT` | `1` | Total number of instances in the cluster |
 | `SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS` | `1000` | Per-tick upper bound on outbox rows scanned by this shard; set to `unbounded`, `none`, or an empty value to disable the cap. Positive integers are accepted. |
+
+### Trade Runtime Safety
+
+These bootstrap variables gate stale trade dispatch and live multi-leg
+execution safety.
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `TRADE_COMMAND_DISPATCH_TTL_S` | `30.0` | Max age, in seconds, for trade commands. Stale `CREATED` submits expire in the outbox before publishing; executor stale-frame handling verifies venue state before any order placement. Values `<= 0` disable the cap. Keep this below the engine's 60 s in-flight valve. |
+| `PAIRED_EXECUTION_GUARD_ENABLED` | `false` | Fail-closed live multi-leg strategy gate. With the default, live exchanges refuse multi-leg groups while paper multi-leg remains allowed. Enable only after the paired-execution guard is deployed. |
+| `PAIRED_EXECUTION_ASSEMBLY_TIMEOUT_S` | `5.0` | Seconds a paired-execution group waits for all sibling legs to register durable commands before the guard can break the group. |
+| `PAIRED_EXECUTION_FILL_TIMEOUT_S` | `30.0` | Seconds an armed paired-execution group waits for fills before the guard treats a lagging leg as breakage and compensates. |
 
 ### Observability Pipeline
 
@@ -325,6 +340,10 @@ ZMQ_BROKER_XPUB=tcp://127.0.0.1:7501
 SNAPPER_COORDINATOR_INSTANCE_ID=0
 SNAPPER_COORDINATOR_INSTANCE_COUNT=1
 SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS=1000
+TRADE_COMMAND_DISPATCH_TTL_S=30.0
+# PAIRED_EXECUTION_GUARD_ENABLED=false
+# PAIRED_EXECUTION_ASSEMBLY_TIMEOUT_S=5.0
+# PAIRED_EXECUTION_FILL_TIMEOUT_S=30.0
 
 # Observability pipeline (system-metrics snapshotter)
 SYSTEM_METRICS_INTERVAL_SECONDS=5
