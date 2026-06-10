@@ -130,3 +130,19 @@ class TestZmqBrokerBindEndpoints:
         loader = BootstrapSettingsLoader()
         assert loader.zmq_broker_bind_xsub == "tcp://0.0.0.0:7500"
         assert loader.zmq_broker_bind_xpub == "tcp://0.0.0.0:7501"
+
+
+class TestTradeCommandDispatchTtl:
+    """``TRADE_COMMAND_DISPATCH_TTL_S`` env round-trip (#145 P0-4)."""
+
+    def test_default_is_thirty_seconds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Default TTL is 30s — below the engine's 60s in-flight valve."""
+        monkeypatch.delenv("TRADE_COMMAND_DISPATCH_TTL_S", raising=False)
+        loader = BootstrapSettingsLoader()
+        assert loader.trade_command_dispatch_ttl_s == pytest.approx(30.0)
+
+    def test_env_overrides_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Setting the env var changes the loaded value."""
+        monkeypatch.setenv("TRADE_COMMAND_DISPATCH_TTL_S", "12.5")
+        loader = BootstrapSettingsLoader()
+        assert loader.trade_command_dispatch_ttl_s == pytest.approx(12.5)

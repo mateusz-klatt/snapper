@@ -3,11 +3,13 @@
 import asyncio
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
 
 from snapper.application.trade.outbox import OutboxDispatcher
+from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository_types import TradeCommandRow
 
 
@@ -317,3 +319,216 @@ async def test_dispatch_revert_db_failure_logged() -> None:
     await asyncio.sleep(0.05)
     dispatcher.stop()
     await task
+
+
+class TestDispatchTtl:
+    """Stale CREATED commands expire instead of dispatching (#145 P0-4)."""
+
+    def _stale_cmd(self, age_s: float = 120.0, command_type: str = "submit") -> TradeCommandRow:
+        """Build a command row created age_s seconds in the past."""
+        cmd = _make_cmd_row()
+        cmd["command_type"] = command_type
+        cmd["created_at"] = datetime.now(UTC) - timedelta(seconds=age_s)
+        return cmd
+
+    def _dispatcher(
+        self,
+        repo: AsyncMock,
+        publish_fn: AsyncMock,
+        expire_fn: AsyncMock | None,
+        ttl: float | None = 30.0,
+    ) -> OutboxDispatcher:
+        """Build a dispatcher with the TTL gate armed."""
+        return OutboxDispatcher(
+            repository=repo,
+            publish_fn=publish_fn,
+            poll_interval=0.01,
+            dispatch_ttl_s=ttl,
+            expire_fn=expire_fn,
+        )
+
+    def _repo(self, cmd: TradeCommandRow) -> AsyncMock:
+        """Build a repo serving the command once, with healthy defaults."""
+        repo = AsyncMock()
+        served = False
+
+        async def _get_cmds(
+            as_of: datetime, limit: int = 10, offset: int = 0
+        ) -> list[TradeCommandRow]:
+            nonlocal served
+            if not served:
+                served = True
+                return [cmd]
+            return []
+
+        repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
+        repo.bulk_dispatch_trade_commands = AsyncMock(return_value=1)
+        repo.has_order_submit_evidence = AsyncMock(return_value=False)
+        repo.cas_trade_command_status = AsyncMock(return_value=True)
+        return repo
+
+    @pytest.mark.asyncio
+    async def test_stale_submit_expires_and_never_publishes(self) -> None:
+        """A stale submit transitions to EXPIRED and skips the bus.
+
+        Given: A submit row older than the TTL with no submit evidence,
+        When: One dispatch cycle runs,
+        Then: CAS CREATED->EXPIRED fires, the expiry callback receives
+            the row, and publish_fn is never called.
+        """
+        cmd = self._stale_cmd()
+        repo = self._repo(cmd)
+        publish_fn = AsyncMock()
+        expire_fn = AsyncMock()
+        dispatcher = self._dispatcher(repo, publish_fn, expire_fn)
+        await dispatcher._dispatch_batch()
+        publish_fn.assert_not_awaited()
+        kwargs = repo.cas_trade_command_status.await_args.kwargs
+        assert kwargs["public_id"] == cmd["public_id"]
+        assert kwargs["expected_status"] == TradeCommandStatusEnum.CREATED
+        assert kwargs["new_status"] == TradeCommandStatusEnum.EXPIRED
+        assert "expired by outbox dispatch TTL" in kwargs["last_error"]
+        expire_fn.assert_awaited_once_with(cmd)
+
+    @pytest.mark.asyncio
+    async def test_stale_with_submit_evidence_publishes_for_dedup(self) -> None:
+        """A stale row with durable evidence falls through to publish.
+
+        Given: A stale submit whose client id has venue-event evidence
+            (coordinator crashed after publishing, before the commit),
+        When: One dispatch cycle runs,
+        Then: The row publishes normally — expiring it would fabricate
+            a terminal state for a possibly-live order; the executor's
+            duplicate guard absorbs the replay.
+        """
+        cmd = self._stale_cmd()
+        repo = self._repo(cmd)
+        repo.has_order_submit_evidence = AsyncMock(return_value=True)
+        publish_fn = AsyncMock()
+        expire_fn = AsyncMock()
+        dispatcher = self._dispatcher(repo, publish_fn, expire_fn)
+        await dispatcher._dispatch_batch()
+        publish_fn.assert_awaited_once_with(cmd)
+        repo.cas_trade_command_status.assert_not_awaited()
+        expire_fn.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fresh_submit_publishes_normally(self) -> None:
+        """A fresh row inside the TTL dispatches untouched.
+
+        Given: A just-created submit and an armed TTL,
+        When: One dispatch cycle runs,
+        Then: It publishes; no evidence probe, no CAS.
+        """
+        cmd = self._stale_cmd(age_s=1.0)
+        repo = self._repo(cmd)
+        publish_fn = AsyncMock()
+        dispatcher = self._dispatcher(repo, publish_fn, AsyncMock())
+        await dispatcher._dispatch_batch()
+        publish_fn.assert_awaited_once_with(cmd)
+        repo.has_order_submit_evidence.assert_not_awaited()
+        repo.cas_trade_command_status.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stale_cancel_is_exempt(self) -> None:
+        """A stale cancel still dispatches — expiring it strands a live order.
+
+        Given: A cancel row far older than the TTL,
+        When: One dispatch cycle runs,
+        Then: It publishes; the TTL gate never touches cancels.
+        """
+        cmd = self._stale_cmd(command_type="cancel")
+        repo = self._repo(cmd)
+        publish_fn = AsyncMock()
+        dispatcher = self._dispatcher(repo, publish_fn, AsyncMock())
+        await dispatcher._dispatch_batch()
+        publish_fn.assert_awaited_once_with(cmd)
+        repo.cas_trade_command_status.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_lost_expiry_race_skips_callback(self) -> None:
+        """Losing the CAS race never double-releases engine intent.
+
+        Given: A stale submit whose CAS reports a concurrent transition,
+        When: One dispatch cycle runs,
+        Then: The expiry callback is NOT invoked and nothing publishes.
+        """
+        cmd = self._stale_cmd()
+        repo = self._repo(cmd)
+        repo.cas_trade_command_status = AsyncMock(return_value=False)
+        publish_fn = AsyncMock()
+        expire_fn = AsyncMock()
+        dispatcher = self._dispatcher(repo, publish_fn, expire_fn)
+        await dispatcher._dispatch_batch()
+        publish_fn.assert_not_awaited()
+        expire_fn.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ttl_handling_failure_defers_row(self) -> None:
+        """A probe/CAS failure defers the stale row, never publishes it.
+
+        Given: The evidence probe raising (DB blip) for a stale row,
+        When: One dispatch cycle runs,
+        Then: The row neither publishes nor expires — it waits for the
+            next tick.
+        """
+        cmd = self._stale_cmd()
+        repo = self._repo(cmd)
+        repo.has_order_submit_evidence = AsyncMock(side_effect=RuntimeError("db down"))
+        publish_fn = AsyncMock()
+        expire_fn = AsyncMock()
+        dispatcher = self._dispatcher(repo, publish_fn, expire_fn)
+        await dispatcher._dispatch_batch()
+        publish_fn.assert_not_awaited()
+        expire_fn.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_expire_without_callback_does_not_crash(self) -> None:
+        """Expiry with no callback configured is safe.
+
+        Given: A stale submit and expire_fn=None,
+        When: One dispatch cycle runs,
+        Then: The CAS fires and the cycle completes without error.
+        """
+        cmd = self._stale_cmd()
+        repo = self._repo(cmd)
+        publish_fn = AsyncMock()
+        dispatcher = self._dispatcher(repo, publish_fn, None)
+        await dispatcher._dispatch_batch()
+        publish_fn.assert_not_awaited()
+        repo.cas_trade_command_status.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_disabled_ttl_is_behavior_identical(self) -> None:
+        """TTL=None keeps the legacy dispatch byte-for-byte.
+
+        Given: A very stale submit and no TTL configured,
+        When: One dispatch cycle runs,
+        Then: It publishes; the evidence probe is never consulted.
+        """
+        cmd = self._stale_cmd(age_s=10_000.0)
+        repo = self._repo(cmd)
+        publish_fn = AsyncMock()
+        dispatcher = self._dispatcher(repo, publish_fn, None, ttl=None)
+        await dispatcher._dispatch_batch()
+        publish_fn.assert_awaited_once_with(cmd)
+        repo.has_order_submit_evidence.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_expire_callback_failure_does_not_kill_the_cycle(self) -> None:
+        """A failing release callback is logged, never propagated.
+
+        Given: A stale submit whose expire_fn raises after the CAS,
+        When: One dispatch cycle runs,
+        Then: The cycle completes (no exception escapes) — engine
+            intent self-heals via its timeout valve and the loud
+            CRITICAL log is the operator signal.
+        """
+        cmd = self._stale_cmd()
+        repo = self._repo(cmd)
+        publish_fn = AsyncMock()
+        expire_fn = AsyncMock(side_effect=RuntimeError("release pipeline down"))
+        dispatcher = self._dispatcher(repo, publish_fn, expire_fn)
+        await dispatcher._dispatch_batch()
+        publish_fn.assert_not_awaited()
+        expire_fn.assert_awaited_once_with(cmd)

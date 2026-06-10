@@ -1704,6 +1704,7 @@ async def test_outbox_publish_sends_to_zmq() -> None:
     cmd: dict[str, Any] = {
         "public_id": "cmd-1",
         "client_order_id": "cid-1",
+        "created_at": datetime(2024, 1, 1, tzinfo=UTC),
         "command_type": "create",
         "shard_key": "kraken.BTC-USD.live",
         "exchange": "kraken",
@@ -1743,6 +1744,7 @@ async def test_outbox_publish_submit_registers_order_shard_key() -> None:
     cmd: dict[str, Any] = {
         "public_id": "cmd-submit",
         "client_order_id": "cid-submit",
+        "created_at": datetime(2024, 1, 1, tzinfo=UTC),
         "command_type": "submit",
         "shard_key": "kraken.BTC-USD.live.w123456789abc",
         "exchange": "kraken",
@@ -1777,6 +1779,7 @@ async def test_outbox_publish_replace_does_not_register_order_shard_key() -> Non
     cmd: dict[str, Any] = {
         "public_id": "cmd-replace",
         "client_order_id": "cid-replace",
+        "created_at": datetime(2024, 1, 1, tzinfo=UTC),
         "command_type": "replace",
         "shard_key": "kraken.BTC-USD.live.w123456789abc",
         "exchange": "kraken",
@@ -1952,6 +1955,7 @@ async def test_outbox_publish_propagates_leverage_and_reduce_only() -> None:
     cmd: dict[str, Any] = {
         "public_id": "cmd-lev",
         "client_order_id": "cid-lev",
+        "created_at": datetime(2024, 1, 1, tzinfo=UTC),
         "command_type": "create",
         "shard_key": "kraken.BTC-USD.live",
         "exchange": "kraken",
@@ -3203,3 +3207,133 @@ async def test_reconcile_mixed_engines_processes_each_independently() -> None:
     assert shard_existing.active_cycle_public_id == "cycle-existing"
     shard_bootstrap = coord.trade_service._get_or_create_shard("kraken.ETH-USD.live.wdd")
     assert shard_bootstrap.active_cycle_public_id == "cycle-new"
+
+
+@pytest.mark.asyncio
+async def test_outbox_publish_forwards_true_age_via_signaled_at() -> None:
+    """The outbox publish forwards the command's creation time (#145 P0-4).
+
+    Given: a TradeCommandRow created at a known past instant,
+    When: _outbox_publish builds the OrderRequestData,
+    Then: signaled_at carries created_at (the honest age anchor for the
+        executor's stale gate) while the frame timestamp stays freshly
+        stamped (each publish IS a new bus frame).
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.msg_publisher = AsyncMock()
+    coord._order_shard_keys = {}
+    created = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    cmd: dict[str, Any] = {
+        "public_id": "cmd-age",
+        "client_order_id": "cid-age",
+        "created_at": created,
+        "command_type": "submit",
+        "shard_key": "kraken.BTC-USD.live",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "engine-buy",
+        "side": "buy",
+        "order_type": "market",
+        "quantity": 0.5,
+        "price": None,
+        "leverage": None,
+        "reduce_only": False,
+        "session_id": "s1",
+        "sequence_id": 1,
+    }
+    await coord._outbox_publish(cmd)
+    sent_order = coord.msg_publisher.send.call_args.args[1]
+    assert sent_order.signaled_at == created
+    assert sent_order.timestamp != created
+
+
+@pytest.mark.asyncio
+async def test_on_command_expired_releases_engine_intent() -> None:
+    """Outbox expiry releases the engine guard through the expired pipeline.
+
+    Given: a coordinator with an engine holding in-flight intent for
+        the expired command's client id,
+    When: _on_command_expired runs for that command row,
+    Then: the synthetic OrderEventData rides _handle_order_event —
+        clearing pending intent, shadow-writing the terminal state, and
+        projecting the paired-execution leg EXPIRED.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    engine = MagicMock()
+    engine.clear_pending_intent = MagicMock(return_value=True)
+    coord.engines = {"BTC-USD@kraken-live": engine}
+    coord._order_shard_keys = {}
+    coord._sync_order_event_to_trade_service = MagicMock()
+    coord._project_paired_execution_leg_terminal = AsyncMock()
+    cmd: dict[str, Any] = {
+        "public_id": "cmd-exp",
+        "client_order_id": "cid-exp",
+        "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+        "command_type": "submit",
+        "shard_key": "kraken.BTC-USD.live",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "engine-buy",
+        "side": "buy",
+        "order_type": "market",
+        "quantity": 0.5,
+        "price": None,
+        "leverage": None,
+        "reduce_only": False,
+        "session_id": "s1",
+        "sequence_id": 1,
+        "wallet_public_id": None,
+        "operator_public_id": None,
+        "user_public_id": None,
+    }
+    await coord._on_command_expired(cmd)
+    engine.clear_pending_intent.assert_called_once_with("cid-exp")
+    assert coord._order_shard_keys == {"cid-exp": "kraken.BTC-USD.live"}
+    coord._sync_order_event_to_trade_service.assert_called_once()
+    coord._project_paired_execution_leg_terminal.assert_awaited_once()
+    leg_call = coord._project_paired_execution_leg_terminal.await_args
+    assert leg_call is not None
+    assert leg_call.args[0] == "cid-exp"
+
+
+def test_setup_trade_services_wires_dispatch_ttl_and_expiry() -> None:
+    """The outbox receives the configured TTL and the expiry callback.
+
+    Given:
+        A coordinator whose settings carry a positive dispatch TTL,
+
+    When:
+        ``_setup_trade_services`` runs,
+
+    Then:
+        The dispatcher is armed with that TTL and the coordinator's
+        ``_on_command_expired`` release callback (#145 P0-4); a
+        non-positive TTL disables the gate (``None``).
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord.balance_service = BalanceService()
+    coord.outbox = None
+    coord.repository = MagicMock(spec=SQLAlchemyRepository)
+    coord.settings = MagicMock()
+    coord.settings.trade_command_dispatch_ttl_s = 30.0
+    coord.settings.coordinator_outbox_max_scan_rows = 1000
+    coord._ownership = None
+    coord._setup_trade_services()
+    assert coord.outbox is not None
+    assert coord.outbox._dispatch_ttl_s == pytest.approx(30.0)
+    assert coord.outbox._expire_fn == coord._on_command_expired
+
+    coord.outbox = None
+    coord.settings.trade_command_dispatch_ttl_s = 0.0
+    coord._setup_trade_services()
+    assert coord.outbox is not None
+    assert coord.outbox._dispatch_ttl_s is None
+
+    coord.outbox = None
+    coord.settings = SimpleNamespace(coordinator_outbox_max_scan_rows=None)
+    coord._setup_trade_services()
+    assert coord.outbox is not None
+    assert coord.outbox._dispatch_ttl_s is None

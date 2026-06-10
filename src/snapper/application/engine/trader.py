@@ -61,6 +61,7 @@ from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import FillStatusEnum
 from snapper.core.types import OrderCommandEnum
+from snapper.core.types import OrderEventEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import OrderType
 from snapper.core.types import PairedExecutionGroupStatusEnum
@@ -109,6 +110,7 @@ from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.schemas.messages import parse_message
 from snapper.messaging.topics.builders import accrual_topic
 from snapper.messaging.topics.builders import order_command_topic
+from snapper.messaging.topics.builders import order_event_topic
 from snapper.messaging.topics.builders import parse_order_event_topic
 from snapper.messaging.topics.builders import parse_signal_topic
 
@@ -3181,12 +3183,18 @@ class TraderCoordinator(RegisterableProcess):
         in-process ZMQ send path is exercised directly.
         """
         if isinstance(self.repository, SQLAlchemyRepository):
+            try:
+                configured_ttl = float(self.settings.trade_command_dispatch_ttl_s)
+            except (AttributeError, TypeError, ValueError):
+                configured_ttl = 0.0
             self.outbox = OutboxDispatcher(
                 repository=self.repository,
                 publish_fn=self._outbox_publish,
                 poll_interval=0.05,
                 ownership=self._ownership,
                 max_scan_rows=self.settings.coordinator_outbox_max_scan_rows,
+                dispatch_ttl_s=configured_ttl if configured_ttl > 0 else None,
+                expire_fn=self._on_command_expired,
             )
             logger.info("TraderCoordinator: durable command mode (outbox active)")
         else:
@@ -3239,6 +3247,43 @@ class TraderCoordinator(RegisterableProcess):
             tasks.append(asyncio.create_task(recon.run()))
         logger.info(f"TraderCoordinator: reconciliation loops enabled for {exchanges}")
         return tasks
+
+    async def _on_command_expired(self, cmd: TradeCommandRow) -> None:
+        """Release engine intent for a command the outbox expired (#145 P0-4).
+
+        The command was never published, so no executor event will ever
+        arrive for it — without this release the engine's in-flight
+        guard (armed at command INSERT) would wedge for its full 60s
+        valve per expiry. The outbox runs in-process, so instead of
+        fabricating bus traffic this routes a synthetic
+        ``OrderEventData(event="expired")`` through
+        ``_handle_order_event`` — the exact pipeline a venue expiry
+        uses: clears ``order_in_flight`` via ``clear_pending_intent``,
+        shadow-writes ``order_terminal`` to TradeService, and projects
+        the paired-execution leg EXPIRED.
+
+        Args:
+            cmd: The expired TradeCommandRow.
+        """
+        self._register_order_shard_key(cmd["client_order_id"], cmd["shard_key"])
+        exchange = cast(OrderExchange, cmd["exchange"])
+        topic = order_event_topic(exchange, cmd["instrument"], OrderEventEnum.EXPIRED)
+        event = OrderEventData(
+            public_id=cmd["client_order_id"],
+            timestamp=datetime.now(UTC),
+            session_id=cmd["session_id"],
+            sequence_id=cmd["sequence_id"],
+            exchange_order_id="",
+            client_order_id=cmd["client_order_id"],
+            exchange=exchange,
+            instrument=cmd["instrument"],
+            event=OrderEventEnum.EXPIRED,
+            reason="expired by outbox dispatch TTL",
+            wallet_public_id=cmd.get("wallet_public_id") or "",
+            operator_public_id=cmd.get("operator_public_id"),
+            user_public_id=cmd.get("user_public_id"),
+        )
+        await self._handle_order_event(topic, event)
 
     async def _outbox_publish(self, cmd: TradeCommandRow) -> None:
         """Publish a trade command from outbox to ZMQ.
@@ -3308,6 +3353,7 @@ class TraderCoordinator(RegisterableProcess):
             wallet_public_id=cmd.get("wallet_public_id") or "",
             operator_public_id=cmd.get("operator_public_id"),
             user_public_id=cmd.get("user_public_id"),
+            signaled_at=cmd["created_at"],
         )
         if command_type in ("create", OrderCommandEnum.SUBMIT.value):
             self._register_order_shard_key(cmd["client_order_id"], cmd["shard_key"])

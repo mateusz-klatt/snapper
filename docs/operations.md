@@ -374,10 +374,38 @@ resumes its normal lifecycle with the guard still held until fills); a
 COMPLETE fill or a rejection releases the guard entirely. A partial
 fill alone neither clears the flag nor the guard — the order stays
 guarded until its terminal event.
-A PARKED UNKNOWN order (inline verification could not resolve it)
-currently requires operator resolution — check the venue's open and
-closed orders for the client id from the alert before taking any
-manual action. The recon-loop automatic resolver is the next slice.
+A PARKED UNKNOWN order is retried by the 60s reconciliation loop
+(fresh venue-verification round each cycle); if it stays unresolved
+across cycles, check the venue's open and closed orders for the client
+id from the alert before taking any manual action.
+
+### Duplicate-dispatch guard and dispatch TTL
+
+Two executor/outbox gates close the remaining order-flow loss windows:
+
+- **Duplicate-submit guard.** A coordinator crash between the ZMQ
+  publish and the CREATED→DISPATCHED commit (or a failed bulk write)
+  re-publishes the same `client_order_id`. The executor now drops such
+  replays silently: an entry already pending, an accepted order
+  awaiting its durable-event heal, or durable venue-event evidence
+  (accepted/fill/terminal/unknown — rejections excluded so legitimate
+  retries still flow) all block the re-submit before any venue call.
+  A failed evidence check drops FAIL-CLOSED.
+- **Dispatch max-age TTL** (`TRADE_COMMAND_DISPATCH_TTL_S`, default
+  30s, `<= 0` disables). Stale CREATED submits expire at the outbox to
+  the terminal EXPIRED status (never published; engine intent released
+  through the regular expired pipeline), and stale frames buffered
+  through an outage (the order-flow socket has no high-water mark) are
+  resolved at the executor against venue truth: a frame whose order
+  EXISTS under the client id is adopted as accepted (a crash-window
+  replay that actually placed), an unverifiable frame drops silently
+  (the reconciler WARN and engine valve cover it), and only a
+  venue-verified-absent frame rejects. A stale row that DOES
+  carry submit evidence publishes anyway and is absorbed by the
+  duplicate guard — expiring it would fabricate a terminal state for a
+  possibly-live order. Cancels are exempt: expiring a stale cancel
+  would strand a live order. Keep the TTL below the engine's 60s
+  in-flight valve.
 
 ### Fault-injection testing
 

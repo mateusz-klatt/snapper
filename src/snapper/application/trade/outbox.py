@@ -23,6 +23,16 @@ from snapper.data.repository_types import TradeCommandDispatchUpdate
 from snapper.data.repository_types import TradeCommandRow
 
 PublishFn = Callable[[TradeCommandRow], Awaitable[None]]
+ExpireFn = Callable[[TradeCommandRow], Awaitable[None]]
+
+_EXPIRABLE_COMMAND_TYPES: tuple[str, ...] = ("create", "submit")
+"""Command types subject to the dispatch TTL (#145 P0-4).
+
+Cancels (and replaces) are exempt: expiring a stale cancel strands a
+live order, a late cancel carries no double-exposure risk, and its
+client_order_id is the ORIGINAL order's — the submit-evidence probe
+would false-positive on it.
+"""
 
 
 class OutboxDispatcher:
@@ -62,6 +72,8 @@ class OutboxDispatcher:
         *,
         ownership: ShardOwnership | None = None,
         max_scan_rows: int | None = None,
+        dispatch_ttl_s: float | None = None,
+        expire_fn: ExpireFn | None = None,
     ) -> None:
         """Initialize outbox dispatcher.
 
@@ -73,6 +85,14 @@ class OutboxDispatcher:
             ownership: shard-ownership filter (opt-in).
             max_scan_rows: Pagination safety cap for ownership-filter
                 scans. ``None`` = scan until DB exhaustion.
+            dispatch_ttl_s: Max age (seconds, from ``created_at``) a
+                create/submit command may reach before dispatch expires
+                it instead of publishing (#145 P0-4). ``None`` (and any
+                value ``<= 0``) disables the gate.
+            expire_fn: Async callback invoked after a command is
+                CAS-transitioned to EXPIRED, so the coordinator can
+                release the engine's in-flight intent and project the
+                terminal state.
         """
         self._repo = repository
         self._publish_fn = publish_fn
@@ -80,6 +100,8 @@ class OutboxDispatcher:
         self._batch_size = batch_size
         self._ownership = ownership
         self._max_scan_rows = max_scan_rows
+        self._dispatch_ttl_s = dispatch_ttl_s
+        self._expire_fn = expire_fn
         self._wake = asyncio.Event()
         self._running = False
 
@@ -177,6 +199,93 @@ class OutboxDispatcher:
                 break
         return owned
 
+    async def _expire_if_stale(self, cmd: TradeCommandRow) -> bool:
+        """Expire a stale create/submit command instead of dispatching it.
+
+        Returns True when the command was handled here (expired, lost
+        the expiry race, or deferred on an error) and must NOT be
+        published this cycle; False when it should dispatch normally.
+
+        Decision table (#145 P0-4):
+
+        - TTL disabled, non-expirable command type, or fresh → publish.
+        - Stale WITH durable submit evidence → publish anyway with a
+          WARN: the coordinator crashed after publishing but before the
+          CREATED→DISPATCHED commit, so the order may be live — expiring
+          would fabricate a terminal state for it (the P0-1 sin). The
+          executor's duplicate-submit guard absorbs the re-publish and
+          the normal bulk path performs the missing transition.
+        - Stale without evidence → CAS CREATED→EXPIRED (race-safe
+          against concurrent dispatchers and the guard scanner's
+          CREATED→CANCELLED); only the CAS winner invokes ``expire_fn``
+          so the engine releases its in-flight intent exactly once.
+        - Probe/CAS failure → defer the row to the next 50ms tick
+          (logged); publishing a known-stale order on a DB blip would
+          defeat the gate.
+
+        Args:
+            cmd: Candidate command row from the fetched batch.
+
+        Returns:
+            True when the row must be skipped by the publish loop.
+        """
+        ttl = self._dispatch_ttl_s
+        if ttl is None or ttl <= 0:
+            return False
+        if cmd["command_type"] not in _EXPIRABLE_COMMAND_TYPES:
+            return False
+        now = datetime.now(UTC)
+        age_s = (now - cmd["created_at"]).total_seconds()
+        if age_s <= ttl:
+            return False
+        try:
+            if await self._repo.has_order_submit_evidence(cmd["client_order_id"]):
+                logger.warning(
+                    f"OutboxDispatcher: command {cmd['public_id']} is stale "
+                    f"(age {age_s:.1f}s > TTL {ttl:.1f}s) but durable submit evidence "
+                    f"exists — publishing for the executor guard to dedup instead of "
+                    f"expiring a possibly-live order"
+                )
+                return False
+            won = await self._repo.cas_trade_command_status(
+                public_id=cmd["public_id"],
+                expected_status=TradeCommandStatusEnum.CREATED,
+                new_status=TradeCommandStatusEnum.EXPIRED,
+                bus_time=now,
+                session_id=cmd["session_id"],
+                sequence_id=cmd["sequence_id"],
+                terminal_at=now,
+                last_error=f"expired by outbox dispatch TTL (age {age_s:.1f}s > {ttl:.1f}s)",
+            )
+        except Exception:
+            logger.exception(
+                f"OutboxDispatcher: TTL handling failed for {cmd['public_id']} — "
+                f"deferring the stale row to the next tick rather than publishing it"
+            )
+            return True
+        if not won:
+            logger.info(
+                f"OutboxDispatcher: lost the expiry race for {cmd['public_id']} "
+                f"(status moved concurrently); skipping this cycle"
+            )
+            return True
+        logger.warning(
+            f"OutboxDispatcher: EXPIRED stale command {cmd['public_id']} "
+            f"({cmd['client_order_id']}, age {age_s:.1f}s > TTL {ttl:.1f}s) — never published"
+        )
+        if self._expire_fn is not None:
+            try:
+                await self._expire_fn(cmd)
+            except Exception:
+                logger.critical(
+                    f"OutboxDispatcher: expiry release callback failed for "
+                    f"{cmd['public_id']} AFTER the EXPIRED transition — engine intent "
+                    f"self-heals via its in-flight timeout valve and the paired-group "
+                    f"deadlines cover the leg, but verify shard "
+                    f"{cmd['shard_key']} manually"
+                )
+        return True
+
     async def _dispatch_batch(self) -> None:
         """Fetch and dispatch one batch of undispatched commands.
 
@@ -192,6 +301,8 @@ class OutboxDispatcher:
         success_updates: list[TradeCommandDispatchUpdate] = []
         published_pids: list[str] = []
         for cmd in commands:
+            if await self._expire_if_stale(cmd):
+                continue
             try:
                 if self._publish_fn is not None:
                     await self._publish_fn(cmd)
@@ -232,8 +343,9 @@ class OutboxDispatcher:
         except Exception:
             logger.exception(
                 "OutboxDispatcher: bulk dispatch DB write failed for "
-                f"{len(success_updates)} published commands "
-                "— NOT reverting to 'created' to prevent re-publish duplicates"
+                f"{len(success_updates)} published commands — rows remain 'created' "
+                "and WILL re-publish on the next tick; the executor-side "
+                "duplicate-submit guard is the dedup boundary"
             )
 
     def stop(self) -> None:

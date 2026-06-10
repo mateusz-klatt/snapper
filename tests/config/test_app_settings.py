@@ -856,3 +856,17 @@ class TestZmqBrokerBindProperties:
         settings = AppSettings(bootstrap, settings_service=None)
         assert settings.zmq_broker_bind_xsub == "tcp://0.0.0.0:7500"
         assert settings.zmq_broker_bind_xpub == "tcp://0.0.0.0:7501"
+
+
+def test_trade_command_dispatch_ttl_passthrough() -> None:
+    """The dispatch TTL passes through from bootstrap untouched.
+
+    Given AppSettings over a bootstrap with an explicit TTL,
+    When reading trade_command_dispatch_ttl_s,
+    Then the bootstrap float is returned as-is (#145 P0-4).
+    """
+    bootstrap = BootstrapSettingsLoader(
+        DB_URL="sqlite:///:memory:", TRADE_COMMAND_DISPATCH_TTL_S=17.0
+    )
+    settings = AppSettings(bootstrap, settings_service=None)
+    assert settings.trade_command_dispatch_ttl_s == pytest.approx(17.0)

@@ -420,6 +420,22 @@ _TRADE_COMMAND_TERMINAL_STATUSES: tuple[str, ...] = (
     TradeCommandStatusEnum.REJECTED,
     TradeCommandStatusEnum.FAILED,
 )
+_ORDER_SUBMIT_EVIDENCE_EVENT_TYPES: tuple[str, ...] = (
+    "order_accepted",
+    "fill_observed",
+    "order_terminal",
+    "order_submit_unknown",
+)
+"""Venue event types proving an order submit may have reached the venue.
+
+The duplicate-submit guard (#145 P0-5) drops a replayed command whose
+client_order_id carries any of these — the order is or was live (or its
+state is UNKNOWN pending verification), so re-submitting could double a
+MARKET position. ``order_rejected`` is deliberately EXCLUDED: a cid
+whose only durable history is a rejection definitively never placed,
+and re-publishing such a command is the outbox's legitimate retry path
+— including it would strand every retried command.
+"""
 _CandleNaturalKey = tuple[str, str, datetime]
 _CANDLE_LOOKUP_CHUNK_SIZE = 300
 _CANDLE_ID_CACHE_LOOKBACK: Final[timedelta] = timedelta(days=2)
@@ -7621,6 +7637,14 @@ class SQLAlchemyRepository(Repository):
         transitioned. Per-row ``last_error`` is cleared on the new
         version (success path never carries a previous error forward).
 
+        CAS semantics on the CURRENT row (#145 P0-4 hardening): only an
+        ACTIVE row still at ``status='created'`` transitions. A command
+        that a concurrent writer already moved (outbox TTL
+        CREATED→EXPIRED, guard-scanner CREATED→CANCELLED) between this
+        dispatcher's publish and the bulk write is SKIPPED — writing
+        DISPATCHED over it would resurrect a terminal command and fork
+        overlapping SCD2 successors.
+
         Failure semantics: any DB error rolls back the entire transaction.
         The OutboxDispatcher therefore falls back to per-row
         ``update_trade_command_status`` for non-success transitions (e.g.
@@ -7637,20 +7661,21 @@ class SQLAlchemyRepository(Repository):
             for offset in range(0, len(public_ids), _OUTBOX_BULK_LOOKUP_CHUNK_SIZE):
                 pid_chunk = public_ids[offset : offset + _OUTBOX_BULK_LOOKUP_CHUNK_SIZE]
                 spec_chunk = [spec_by_pid[pid] for pid in pid_chunk]
-                min_bus_time = min(spec["bus_time"] for spec in spec_chunk)
                 max_bus_time = max(spec["bus_time"] for spec in spec_chunk)
                 result = await s.execute(
                     select(TradeCommand)
                     .where(
                         TradeCommand.public_id.in_(pid_chunk),
                         TradeCommand.timestamp <= max_bus_time,
-                        TradeCommand.known_to > min_bus_time,
+                        TradeCommand.known_to == KNOWN_TO_MAX,
                     )
                     .with_for_update()
                 )
                 for existing in result.scalars().all():
                     spec = spec_by_pid[existing.public_id]
                     bus_time = spec["bus_time"]
+                    if existing.status != TradeCommandStatusEnum.CREATED.value:
+                        continue
                     if not (existing.timestamp <= bus_time and existing.known_to > bus_time):
                         continue
                     await s.execute(
@@ -10007,6 +10032,39 @@ class SQLAlchemyRepository(Repository):
             if ve is None:
                 return None
             return self._venue_event_to_row(ve)
+
+    async def has_order_submit_evidence(self, client_order_id: str) -> bool:
+        """Return True when durable evidence shows the submit may have reached the venue.
+
+        Probes the append-only ``venue_events`` for any
+        ``_ORDER_SUBMIT_EVIDENCE_EVENT_TYPES`` row of the client order
+        id — the duplicate-submit guard's durable check (#145 P0-5),
+        covering crash-replay where a fresh executor process has no
+        in-memory pending state. Served by
+        ``ix_venue_events_cid_event_type``; no ``known_to`` filter is
+        needed because venue events are never closed.
+
+        Residual gap, documented deliberately: a crash after the venue
+        accepted the order but before the ``order_accepted`` row
+        committed (and before recon healed it) leaves no durable trace
+        — only a venue lookup by client id could close that window.
+
+        Args:
+            client_order_id: Client order id of the replayed command.
+
+        Returns:
+            True when at least one evidence event exists.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(VenueEvent.id)
+                .where(
+                    VenueEvent.client_order_id == client_order_id,
+                    VenueEvent.event_type.in_(_ORDER_SUBMIT_EVIDENCE_EVENT_TYPES),
+                )
+                .limit(1)
+            )
+            return result.first() is not None
 
     async def upsert_checkpoint(self, row: CheckpointUpsertRow) -> int:
         """SCD2 upsert for trade projection checkpoint.

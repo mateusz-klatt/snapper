@@ -9766,3 +9766,71 @@ class TestRepositoryWaitUntilReady:
         with pytest.raises(ValueError, match="boom"):
             await repo.wait_until_ready(timeout_s=1.0, interval_s=0.001)
         assert sess.execute_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_bulk_dispatch_skips_concurrently_expired_command(tmp_path: Path) -> None:
+    """A command another writer moved past CREATED is never resurrected.
+
+    Given: A created command CAS-transitioned to EXPIRED (the outbox
+        dispatch TTL racing a dispatcher that already published it,
+        #145 P0-4),
+    When: bulk_dispatch_trade_commands later runs for that public_id,
+    Then: The row is SKIPPED — the command stays terminally EXPIRED and
+        no DISPATCHED successor forks the SCD2 history.
+    """
+    db_path = tmp_path / "cmd_bulk_cas_race.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _, pid = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-race",
+            "client_order_id": "cid-race-1",
+            "venue_client_id": "vcid-race-1",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-race-1",
+            "session_id": "s1",
+            "sequence_id": 10,
+            "timestamp": now,
+        }
+    )
+    expired_at = now + timedelta(seconds=1)
+    won = await r.cas_trade_command_status(
+        public_id=pid,
+        expected_status="created",
+        new_status="expired",
+        bus_time=expired_at,
+        session_id="s1",
+        sequence_id=11,
+        terminal_at=expired_at,
+        last_error="expired by outbox dispatch TTL",
+    )
+    assert won is True
+    later = now + timedelta(seconds=2)
+    applied = await r.bulk_dispatch_trade_commands(
+        [
+            {
+                "public_id": pid,
+                "bus_time": later,
+                "session_id": "s1",
+                "sequence_id": 12,
+                "dispatched_at": later,
+                "attempt_count": 1,
+            }
+        ]
+    )
+    assert applied == 0
+    active = await r.get_active_commands_for_shard("kraken.BTC-USD.live", later)
+    assert active == []
+    assert await r.get_undispatched_commands(as_of=later, limit=10) == []

@@ -168,6 +168,19 @@ class BootstrapSettingsLoader(BaseSettings):
     paired_execution_fill_timeout_s: float = Field(
         default=30.0, alias="PAIRED_EXECUTION_FILL_TIMEOUT_S"
     )
+    trade_command_dispatch_ttl_s: float = Field(default=30.0, alias="TRADE_COMMAND_DISPATCH_TTL_S")
+    """Max age of a trade command before dispatch refuses it (#145 P0-4).
+
+    Gates BOTH the outbox fetch (stale CREATED submits expire to the
+    terminal EXPIRED status, never published) and the executor's
+    ``_process_order`` (stale frames reject before any venue call), so
+    an outage backlog cannot fire MARKET orders priced off old signals.
+    Must stay BELOW the engine's 60s in-flight timeout valve minus
+    coordinator/executor clock skew (gates compare wall-clock
+    ``created_at`` across hosts; NTP assumed) — past 60s the engine may
+    re-emit a replacement and a late-executing stale original would
+    double exposure. ``<= 0`` disables both gates.
+    """
 
     @model_validator(mode="before")
     @classmethod

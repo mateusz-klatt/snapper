@@ -4086,3 +4086,55 @@ async def test_get_current_paired_execution_group_reads_current_active(
     assert found is not None
     assert found["public_id"] == gid
     assert await _repo.get_current_paired_execution_group(_pid(997)) is None
+
+
+class TestHasOrderSubmitEvidence:
+    """Durable evidence probe for the duplicate-submit guard (#145 P0-5)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "event_type",
+        ["order_accepted", "fill_observed", "order_terminal", "order_submit_unknown"],
+    )
+    async def test_evidence_event_types_return_true(
+        self, _repo: SQLAlchemyRepository, event_type: str
+    ) -> None:
+        """Each evidence event type proves the submit may have reached the venue.
+
+        Given: A venue event of an evidence type for the client id,
+        When: has_order_submit_evidence is queried,
+        Then: True — a replayed command for this id must be dropped.
+        """
+        await _insert_fill_event(
+            _repo, client_order_id="cid-ev-1", cum_fill_size=None, event_type=event_type
+        )
+        assert await _repo.has_order_submit_evidence("cid-ev-1") is True
+
+    @pytest.mark.asyncio
+    async def test_rejection_only_history_is_not_evidence(
+        self, _repo: SQLAlchemyRepository
+    ) -> None:
+        """A definitive rejection never blocks a legitimate outbox retry.
+
+        Given: Only an order_rejected venue event for the client id,
+        When: has_order_submit_evidence is queried,
+        Then: False — the original submit definitively never placed.
+        """
+        await _insert_fill_event(
+            _repo, client_order_id="cid-ev-2", cum_fill_size=None, event_type="order_rejected"
+        )
+        assert await _repo.has_order_submit_evidence("cid-ev-2") is False
+
+    @pytest.mark.asyncio
+    async def test_no_rows_and_foreign_rows_are_not_evidence(
+        self, _repo: SQLAlchemyRepository
+    ) -> None:
+        """Absence of rows for the id answers False.
+
+        Given: No venue events for the queried id and an evidence row
+            for a DIFFERENT client id,
+        When: has_order_submit_evidence is queried,
+        Then: False — foreign evidence never leaks across ids.
+        """
+        await _insert_fill_event(_repo, client_order_id="cid-ev-other", cum_fill_size=1.0)
+        assert await _repo.has_order_submit_evidence("cid-ev-3") is False

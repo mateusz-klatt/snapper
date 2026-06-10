@@ -262,6 +262,19 @@ class AppSettings:
         return value
 
     @property
+    def trade_command_dispatch_ttl_s(self) -> float:
+        """Return the dispatch max-age TTL for trade commands (#145 P0-4).
+
+        Gates both the outbox dispatch (stale CREATED submits expire to
+        EXPIRED) and the executor submit path (stale frames reject
+        before any venue call). ``<= 0`` disables both gates.
+
+        Returns:
+            TTL in seconds; values ``<= 0`` mean disabled.
+        """
+        return self._bootstrap.trade_command_dispatch_ttl_s
+
+    @property
     def telemetry_recording_enabled(self) -> bool:
         """Return whether data-plane telemetry recording is enabled.
 

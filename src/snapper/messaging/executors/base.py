@@ -710,6 +710,188 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if self._validate_command_invariants(replace_msg, exchange_name, topic_instrument):
             await self._process_replace(replace_msg)
 
+    async def _is_duplicate_submit(self, order: OrderRequestData) -> bool:
+        """Detect a replayed submit command before it can touch the venue.
+
+        The outbox can publish the same client_order_id twice: a
+        coordinator crash between the ZMQ publish and the bulk
+        CREATED→DISPATCHED commit replays the row on restart, and a
+        failed bulk write leaves it re-fetchable on the very next 50ms
+        tick. Venue-side cl_ord_id dedupe covers only OPEN orders while
+        strategy orders are MARKET, so an unguarded replay double-places
+        a real position (#145 P0-5).
+
+        Checks, cheapest first:
+
+        1. in-memory pending entry — same-process replays, including a
+           parked-UNKNOWN entry whose ambiguous/fill-tracking state the
+           submit path's unconditional overwrite would destroy;
+        2. the unhealed-accept queue — accepted order whose pending
+           entry a terminal fill already popped;
+        3. durable venue-event evidence (``has_order_submit_evidence``)
+           — fresh-process crash-replay where memory is empty but an
+           accepted/fill/terminal/unknown row exists. ``order_rejected``
+           is excluded there so the outbox's legitimate
+           retry-after-definitive-reject path still flows.
+
+        A durable-check failure is FAIL-CLOSED: the command is dropped
+        as if duplicate. Proceeding on a true duplicate irreversibly
+        doubles a MARKET position; dropping a fresh command self-heals
+        via the engine's in-flight timeout valve with a NEW id.
+
+        Dropped duplicates publish NOTHING: the outbox transitions the
+        row from its own publish success, never from executor events,
+        and a synthetic REJECTED here would fabricate terminal state
+        for a possibly-live order.
+
+        Args:
+            order: The incoming order request.
+
+        Returns:
+            True when the command must be dropped as a duplicate.
+        """
+        exchange_name = self._get_exchange_name()
+        cid = order.client_order_id
+        if cid in self.pending_orders:
+            logger.warning(
+                f"[{exchange_name}] Duplicate submit {cid} dropped: already pending "
+                f"in this executor (replayed dispatch)"
+            )
+            return True
+        if cid in self._unhealed_accept_events:
+            logger.warning(
+                f"[{exchange_name}] Duplicate submit {cid} dropped: accepted order "
+                f"awaiting durable-event heal"
+            )
+            return True
+        if isinstance(self.repository, SQLAlchemyRepository):
+            try:
+                if await self.repository.has_order_submit_evidence(cid):
+                    logger.warning(
+                        f"[{exchange_name}] Duplicate submit {cid} dropped: durable "
+                        f"venue-event evidence exists (crash-replayed dispatch)"
+                    )
+                    return True
+            except Exception as e:
+                logger.error(
+                    f"[{exchange_name}] Duplicate-evidence check failed for {cid}: {e} "
+                    f"— FAIL-CLOSED, dropping the command (a true duplicate would "
+                    f"double a MARKET position; a fresh command re-emits via the "
+                    f"engine timeout valve)"
+                )
+                return True
+        return False
+
+    async def _reject_if_stale(self, order: OrderRequestData) -> bool:
+        """Reject a command older than the dispatch TTL before any venue call.
+
+        The executor's half of the staleness control (#145 P0-4): the
+        order-flow socket buffers an outage backlog unbounded (HWM=0),
+        so frames can arrive long after the outbox published them. The
+        age anchor is ``signaled_at`` — the command row's creation time
+        forwarded by the outbox publish — because the frame
+        ``timestamp`` is re-stamped at every publish. Runs AFTER the
+        duplicate guard on purpose: a stale REPLAY of an accepted order
+        must drop silently as a duplicate, never reject — a synthetic
+        REJECTED for a live order is the P0-1 fabrication. Frames
+        without ``signaled_at`` (legacy/direct paths) and a disabled
+        TTL skip the gate.
+
+        The rejection is VENUE-TRUTH-BACKED: before rejecting, a single
+        bounded client-id lookup runs. A found order is ADOPTED (it is
+        a replay of a submit that actually placed — e.g. the
+        crash-window replay whose ``order_submit_unknown`` durable
+        write also failed, leaving no evidence for the duplicate
+        guard); a venue that cannot answer (lookup unsupported,
+        unreachable, paper) makes the frame DROP silently — rejecting
+        on no evidence could fabricate a terminal state for a live
+        order, while dropping leaves the row DISPATCHED for the
+        reconciler's stale WARN and the engine's timeout valve. Only
+        an AUTHORITATIVE absence rejects.
+
+        REJECTED (not the expired suffix) is deliberate: the trader's
+        OrderData handler clears engine intent only on ``rejected``;
+        the ``expired`` suffix rides the cancel/replace OrderEventData
+        channel. The durable ``order_rejected`` row never blocks a
+        later legitimate retry because the duplicate guard's evidence
+        set excludes rejections.
+
+        Args:
+            order: The incoming order request.
+
+        Returns:
+            True when the command was consumed here (rejected, adopted,
+            or dropped); False when it should proceed to submit.
+        """
+        ttl = self._resolve_dispatch_ttl()
+        if ttl <= 0 or order.signaled_at is None:
+            return False
+        age_s = (datetime.now(UTC) - order.signaled_at).total_seconds()
+        if age_s <= ttl:
+            return False
+        exchange_name = self._get_exchange_name()
+        if self.exchange_client is None:
+            logger.warning(
+                f"[{exchange_name}] STALE command {order.client_order_id} dropped "
+                f"(age {age_s:.1f}s > TTL {ttl:.1f}s; no venue client to verify absence)"
+            )
+            return True
+        try:
+            async with asyncio.timeout(_AMBIGUOUS_VERIFY_TIMEOUT_S):
+                snapshot = await self.exchange_client.find_order_by_client_id(
+                    order.client_order_id, order.instrument
+                )
+        except Exception as e:
+            logger.warning(
+                f"[{exchange_name}] STALE command {order.client_order_id} dropped "
+                f"(age {age_s:.1f}s > TTL {ttl:.1f}s; venue absence unverifiable: {e}) "
+                f"— rejecting without venue truth could fabricate a terminal state"
+            )
+            return True
+        if snapshot is not None:
+            logger.warning(
+                f"[{exchange_name}] STALE frame {order.client_order_id} is a replay of "
+                f"a PLACED order ({snapshot.id}, status={snapshot.status}) — adopting "
+                f"instead of rejecting"
+            )
+            pending = PendingOrderState(request=order)
+            self.pending_orders[order.client_order_id] = pending
+            await self._adopt_found_order(order, pending, snapshot)
+            return True
+        logger.warning(
+            f"[{exchange_name}] Rejecting STALE command {order.client_order_id}: "
+            f"age {age_s:.1f}s exceeds dispatch TTL {ttl:.1f}s and the venue verified "
+            f"absence — an outage-backlog MARKET order must not fire into a moved market"
+        )
+        await self._publish_order_status(order, OrderEventEnum.REJECTED)
+        await self._record_venue_event(
+            {
+                "event_type": "order_rejected",
+                "exchange_name": exchange_name,
+                "instrument": order.instrument,
+                "client_order_id": order.client_order_id,
+                "side": order.side,
+                "error": f"stale command: age {age_s:.1f}s exceeds dispatch TTL {ttl:.1f}s",
+                "strategy_tag": order.strategy_tag,
+            }
+        )
+        return True
+
+    def _resolve_dispatch_ttl(self) -> float:
+        """Return the dispatch TTL from settings, tolerating test doubles.
+
+        Test fixtures replace ``self.settings`` with plain mocks whose
+        attributes are not floats; treating anything unparseable as
+        disabled keeps the gate strictly opt-in.
+
+        Returns:
+            TTL seconds, or 0.0 when unset/unparseable (gate disabled).
+        """
+        try:
+            return float(self.settings.trade_command_dispatch_ttl_s)
+        except (AttributeError, TypeError, ValueError):
+            return 0.0
+
     async def _process_order(self, order: OrderRequestData) -> None:
         """Submit an order to the exchange and handle the response.
 
@@ -737,6 +919,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             order: Order request data containing order details.
         """
         exchange_name = self._get_exchange_name()
+        if await self._is_duplicate_submit(order):
+            return
+        if await self._reject_if_stale(order):
+            return
         if not is_tradeable(order.instrument, exchange_name):
             logger.warning(
                 f"[{exchange_name}] Rejecting order {order.client_order_id}: "
@@ -916,19 +1102,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     f"[{exchange_name}] Order {order.client_order_id} VERIFIED on venue "
                     f"as {snapshot.id} (status={snapshot.status}) after ambiguous submit"
                 )
-                pending.submit_ambiguous = False
-                pending.exchange_order_id = snapshot.id
-                is_live = snapshot.status in (
-                    ExchangeOrderStatusEnum.PENDING,
-                    ExchangeOrderStatusEnum.PENDING_NEW,
-                    ExchangeOrderStatusEnum.NEW,
-                    ExchangeOrderStatusEnum.OPEN,
-                    ExchangeOrderStatusEnum.PARTIALLY_FILLED,
-                )
-                await self._finalize_accepted_submit(order, snapshot.id, flush_orphans=is_live)
-                if not is_live:
-                    await self._flush_orphaned_inline(snapshot.id)
-                    await self._reconcile_disappeared_order(exchange_name, snapshot.id, pending)
+                await self._adopt_found_order(order, pending, snapshot)
                 return True
             not_found_streak += 1
             if not_found_streak >= 2:
@@ -951,6 +1125,41 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 )
                 return True
         return False
+
+    async def _adopt_found_order(
+        self,
+        order: OrderRequestData,
+        pending: PendingOrderState,
+        snapshot: ExchangeOrderSnapshot,
+    ) -> None:
+        """Adopt an order the venue confirmed exists under our client id.
+
+        Shared by the ambiguous-submit verifier and the stale-frame
+        gate: records the venue id on the pending entry, finalizes
+        acceptance, and — for an already-terminal snapshot — drains any
+        buffered orphan fill inline before projecting through the
+        disappeared-order reconciler (full WS fidelity, no background
+        interleaving).
+
+        Args:
+            order: The original order request.
+            pending: The pending entry tracking the order.
+            snapshot: The venue's order snapshot for the client id.
+        """
+        exchange_name = self._get_exchange_name()
+        pending.submit_ambiguous = False
+        pending.exchange_order_id = snapshot.id
+        is_live = snapshot.status in (
+            ExchangeOrderStatusEnum.PENDING,
+            ExchangeOrderStatusEnum.PENDING_NEW,
+            ExchangeOrderStatusEnum.NEW,
+            ExchangeOrderStatusEnum.OPEN,
+            ExchangeOrderStatusEnum.PARTIALLY_FILLED,
+        )
+        await self._finalize_accepted_submit(order, snapshot.id, flush_orphans=is_live)
+        if not is_live:
+            await self._flush_orphaned_inline(snapshot.id)
+            await self._reconcile_disappeared_order(exchange_name, snapshot.id, pending)
 
     async def _handle_ambiguous_submit(
         self, order: OrderRequestData, error: AmbiguousOrderSubmitError

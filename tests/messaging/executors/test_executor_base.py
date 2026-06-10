@@ -7,6 +7,7 @@ import time as time_module
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from types import SimpleNamespace
 from types import TracebackType
 from typing import Any
@@ -6339,7 +6340,6 @@ class TestAmbiguousSubmitHandling:
         ex._execute_live_order = AsyncMock(return_value="ex-live-9")
         ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
         order = make_order()
-        ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "accepted"]
@@ -6453,7 +6453,6 @@ class TestAmbiguousSubmitHandling:
         ex._publish_order_status = AsyncMock(return_value=False)
         ex._execute_live_order = AsyncMock(return_value="ex-live-11")
         order = make_order()
-        ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
         await ex._process_order(order)
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["submitted", "accepted"]
@@ -6670,3 +6669,312 @@ class TestAmbiguousVerification:
         await ex._handle_ambiguous_submit(order, self._ambiguous(order))
         assert call_order == ["orphan-fill", "reconcile"]
         assert "ex-ver-4" not in ex.orphaned_executions
+
+
+class TestDuplicateSubmitGuard:
+    """Replayed dispatches never reach the venue twice (#145 P0-5)."""
+
+    def _executor(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        """Build a running executor with tracked submit-path mocks."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex._publish_order_status = AsyncMock(return_value=True)
+        ex._record_venue_event = AsyncMock()
+        ex._execute_live_order = AsyncMock(return_value="ex-dup-1")
+        monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: True)
+        return ex
+
+    @pytest.mark.asyncio
+    async def test_pending_duplicate_is_dropped_and_state_preserved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A same-process replay never overwrites live pending state.
+
+        Given: A parked-UNKNOWN pending entry with fill tracking for
+            the client id,
+        When: A replayed dispatch of the same id arrives,
+        Then: Nothing is published, the venue is never called, and the
+            ORIGINAL entry object with its ambiguous/fill state
+            survives untouched.
+        """
+        ex = self._executor(monkeypatch)
+        order = make_order()
+        original = base_module.PendingOrderState(request=order)
+        original.submit_ambiguous = True
+        original.last_seen_cum_qty = 0.7
+        ex.pending_orders[order.client_order_id] = original
+        await ex._process_order(order)
+        ex._publish_order_status.assert_not_awaited()
+        ex._execute_live_order.assert_not_awaited()
+        survivor = ex.pending_orders[order.client_order_id]
+        assert survivor is original
+        assert survivor.submit_ambiguous is True
+        assert survivor.last_seen_cum_qty == pytest.approx(0.7)
+
+    @pytest.mark.asyncio
+    async def test_unhealed_accept_duplicate_is_dropped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An accepted order awaiting durable heal blocks its replay.
+
+        Given: The client id queued in _unhealed_accept_events with no
+            pending entry (terminal fill popped it),
+        When: A replayed dispatch arrives,
+        Then: The command is dropped silently.
+        """
+        ex = self._executor(monkeypatch)
+        order = make_order()
+        ex._unhealed_accept_events[order.client_order_id] = {"event_type": "order_accepted"}
+        await ex._process_order(order)
+        ex._publish_order_status.assert_not_awaited()
+        ex._execute_live_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_durable_evidence_drops_crash_replay(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fresh process drops a replay backed by venue-event evidence.
+
+        Given: Empty in-memory state and a repository reporting durable
+            submit evidence for the id,
+        When: The crash-replayed dispatch arrives,
+        Then: The command is dropped before any publish or venue call.
+        """
+        ex = self._executor(monkeypatch)
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.has_order_submit_evidence = AsyncMock(return_value=True)
+        ex.repository = repo
+        order = make_order()
+        await ex._process_order(order)
+        repo.has_order_submit_evidence.assert_awaited_once_with(order.client_order_id)
+        ex._publish_order_status.assert_not_awaited()
+        ex._execute_live_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_evidence_proceeds_with_normal_submit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fresh command with clean history submits normally.
+
+        Given: A repository reporting no durable evidence,
+        When: The dispatch arrives,
+        Then: The full submit flow runs (SUBMITTED then ACCEPTED).
+        """
+        ex = self._executor(monkeypatch)
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.has_order_submit_evidence = AsyncMock(return_value=False)
+        ex.repository = repo
+        order = make_order()
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "accepted"]
+        ex._execute_live_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_non_sqlalchemy_repository_skips_durable_check(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without a SQLAlchemy repository the durable check is skipped.
+
+        Given: A plain mock repository (not SQLAlchemyRepository),
+        When: The dispatch arrives,
+        Then: The submit proceeds (same exposure model as the durable
+            venue-event writes).
+        """
+        ex = self._executor(monkeypatch)
+        ex.repository = MagicMock()
+        order = make_order()
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "accepted"]
+
+    @pytest.mark.asyncio
+    async def test_evidence_check_failure_drops_fail_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing durable check drops the command, never submits.
+
+        Given: The evidence query raising (DB blip),
+        When: The dispatch arrives,
+        Then: FAIL-CLOSED — dropped with an ERROR log; a true duplicate
+            would double a MARKET position while a fresh command
+            re-emits via the engine timeout valve.
+        """
+        ex = self._executor(monkeypatch)
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.has_order_submit_evidence = AsyncMock(side_effect=RuntimeError("db down"))
+        ex.repository = repo
+        order = make_order()
+        await ex._process_order(order)
+        ex._publish_order_status.assert_not_awaited()
+        ex._execute_live_order.assert_not_awaited()
+
+
+class TestStaleCommandGate:
+    """Outage-backlog frames reject before any venue call (#145 P0-4)."""
+
+    def _executor(self, monkeypatch: pytest.MonkeyPatch, ttl: float = 30.0) -> Any:
+        """Build a running executor with the TTL configured.
+
+        The venue client answers authoritative absence by default so
+        the reject path is reachable; adoption/unverifiable tests
+        override the lookup.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.settings = SimpleNamespace(trade_command_dispatch_ttl_s=ttl)
+        ex._publish_order_status = AsyncMock(return_value=True)
+        ex._record_venue_event = AsyncMock()
+        ex._execute_live_order = AsyncMock(return_value="ex-stale-1")
+        ex.exchange_client = MagicMock()
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
+        monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: True)
+        return ex
+
+    @pytest.mark.asyncio
+    async def test_stale_frame_rejects_before_venue(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A frame older than the TTL rejects without touching the venue.
+
+        Given: An order whose signaled_at is far beyond the TTL,
+        When: _process_order runs,
+        Then: REJECTED publishes with a stale-command venue event and
+            create_order is never reached; no pending entry appears.
+        """
+        ex = self._executor(monkeypatch)
+        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300))
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["rejected"]
+        event = ex._record_venue_event.await_args.args[0]
+        assert event["event_type"] == "order_rejected"
+        assert "stale command" in event["error"]
+        ex._execute_live_order.assert_not_awaited()
+        assert order.client_order_id not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_fresh_frame_proceeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A frame inside the TTL submits normally."""
+        ex = self._executor(monkeypatch)
+        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=1))
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "accepted"]
+
+    @pytest.mark.asyncio
+    async def test_frame_without_age_anchor_proceeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Legacy frames without signaled_at skip the gate."""
+        ex = self._executor(monkeypatch)
+        order = make_order(signaled_at=None)
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "accepted"]
+
+    @pytest.mark.asyncio
+    async def test_disabled_ttl_proceeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """TTL <= 0 disables the gate entirely."""
+        ex = self._executor(monkeypatch, ttl=0.0)
+        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=9_000))
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "accepted"]
+
+    @pytest.mark.asyncio
+    async def test_unparseable_settings_disable_gate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Absent or non-numeric settings disable the gate rather than crash.
+
+        Given: Settings lacking the TTL attribute, then carrying a
+            non-numeric value,
+        When: A very old frame arrives in each case,
+        Then: The gate stays disabled and the submit proceeds.
+        """
+        ex = self._executor(monkeypatch)
+        ex.settings = SimpleNamespace()
+        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=9_000))
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "accepted"]
+        ex._publish_order_status.reset_mock()
+        ex.settings = SimpleNamespace(trade_command_dispatch_ttl_s="not-a-number")
+        ex.pending_orders.clear()
+        await ex._process_order(make_order(client_order_id="c-unparse-2"))
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "accepted"]
+
+    @pytest.mark.asyncio
+    async def test_stale_duplicate_drops_silently_not_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The duplicate guard outranks the stale gate — ordering invariant.
+
+        Given: A stale frame whose client id is already pending (a
+            replayed dispatch of a live order),
+        When: _process_order runs,
+        Then: It drops SILENTLY as a duplicate — TTL-rejecting it would
+            publish REJECTED for a possibly-live order (the P0-1
+            fabrication).
+        """
+        ex = self._executor(monkeypatch)
+        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300))
+        ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
+        await ex._process_order(order)
+        ex._publish_order_status.assert_not_awaited()
+        ex._record_venue_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stale_replay_of_placed_order_is_adopted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale frame whose order EXISTS on the venue adopts, never rejects.
+
+        Given: A stale frame and the venue answering with a live order
+            for the client id (crash-window replay whose unknown-event
+            durable write also failed — no evidence for the duplicate
+            guard),
+        When: _process_order runs,
+        Then: The order is adopted as accepted; REJECTED never appears.
+        """
+        ex = self._executor(monkeypatch)
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            return_value=SimpleNamespace(
+                id="ex-stale-live", status=base_module.ExchangeOrderStatusEnum.OPEN
+            )
+        )
+        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300))
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["accepted"]
+        assert ex.client_by_exchange["ex-stale-live"] == order.client_order_id
+        ex._execute_live_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stale_unverifiable_drops_silently(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unverifiable stale frame drops without fabricating REJECTED.
+
+        Given: A stale frame and a venue lookup that raises (outage or
+            unsupported venue),
+        When: _process_order runs,
+        Then: Nothing publishes — rejecting without venue truth could
+            fabricate a terminal state for a live order; the reconciler
+            WARN and engine valve cover the silence.
+        """
+        ex = self._executor(monkeypatch)
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            side_effect=NotImplementedError("no lookup")
+        )
+        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300))
+        await ex._process_order(order)
+        ex._publish_order_status.assert_not_awaited()
+        ex._record_venue_event.assert_not_awaited()
+        ex._execute_live_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stale_without_exchange_client_drops_silently(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale frame with no venue client to ask drops silently."""
+        ex = self._executor(monkeypatch)
+        ex.exchange_client = None
+        order = make_order(signaled_at=datetime.now(tz=UTC) - timedelta(seconds=300))
+        await ex._process_order(order)
+        ex._publish_order_status.assert_not_awaited()
+        ex._record_venue_event.assert_not_awaited()
