@@ -276,8 +276,9 @@ def main(root: Path | None = None) -> int:
 
     Returns:
         ``0`` when every Compose file either lacks the snapper-egress
-        service entirely OR declares it with no host port mapping
-        and no host networking. ``1`` on any violation.
+        service entirely OR declares it with no host port mapping,
+        no host networking, and the required unified-image invariants.
+        ``1`` on any violation.
     """
     project_root = root or Path.cwd()
     errors: list[str] = []

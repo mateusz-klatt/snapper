@@ -9,11 +9,19 @@ Authentication Flow
     4. Server validates token and extracts user profile
     5. Server sends auth_complete with allowed topics for user's role
     6. Client can subscribe to topics based on permissions
-Topics are role-based
-    VIEWER: market data topics only
-    OPERATOR: market data + signals
-    ADMIN: all topics including system events
-Example
+Topics are permission-category based
+    VIEWER receives read-only categories such as market data, trade
+    events, strategy status, system status, backtests, and
+    notifications.
+    OPERATOR adds trade commands, signals, strategy control, process
+    administration, and AI-review topics.
+    AI_DELEGATE receives the narrowed automation categories granted by
+    its permissions, including market data, trade commands, trade
+    events, signal streams, strategy status, system status, backtests,
+    and AI-review topics.
+    ADMIN receives every category, including admin topics.
+
+Example:
     Client-side WebSocket connection
         const ws = new WebSocket('wss://host/api/ws')
         ws.onopen = () => {

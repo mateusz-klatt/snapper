@@ -5,8 +5,9 @@ Usage:
 
 Requires: database with ``wallet_credentials`` rows seeded for the
 live-money wallet(s). Credentials live in the ``wallet_credentials``
-table — the script enumerates active rows via ``CredentialResolver``
-and builds one exchange client per row.
+table — the script enumerates active rows through the repository,
+decrypts their envelopes, and builds one exchange client per supported
+exchange.
 """
 
 import asyncio

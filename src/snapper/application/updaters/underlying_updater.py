@@ -207,6 +207,7 @@ class _InstrumentInfo:
         quote: str | None,
         asset_type: str,
     ) -> None:
+        """Store active instrument fields needed by the matcher."""
         self.instrument_public_id = instrument_public_id
         self.exchange = exchange
         self.native_symbol = native_symbol
@@ -234,6 +235,7 @@ class _MatchResult:
         instrument_type: str | None = None,
         expiry_override: datetime | None = None,
     ) -> None:
+        """Store resolved metadata for one underlying match."""
         self.underlying_ticker = underlying_ticker
         self.relationship_type = relationship_type
         self.contract_family = contract_family
@@ -252,6 +254,7 @@ class _RuleCandidate:
         rule: PatternRule,
         rule_index: int,
     ) -> None:
+        """Store an indexed rule with its definition and rule order."""
         self.ticker = ticker
         self.rule = rule
         self.rule_index = rule_index
@@ -263,6 +266,7 @@ class _RuleMatcher:
     __slots__ = ("_definition_indexes", "_exact", "_regex_by_exchange")
 
     def __init__(self) -> None:
+        """Create empty exact and regex indexes keyed by exchange."""
         self._definition_indexes: dict[str, int] = {}
         self._exact: dict[tuple[str, str], list[_RuleCandidate]] = {}
         self._regex_by_exchange: dict[str, list[_RuleCandidate]] = {}

@@ -2143,9 +2143,23 @@ class PositionCycle(TemporalMixin, Base):
     open) atomically when the sign reverses in a single fill.
 
     Attributes:
+        instrument_public_id: Instrument UUID7 for the position shard.
+        exchange: Exchange name for the shard.
+        mode: Trading mode, either ``live`` or ``paper``.
+        shard_key: Stable instrument/exchange/mode/wallet shard key.
+        wallet_public_id: Wallet UUID7 that owns the cycle.
+        operator_public_id: Owning operator UUID7 when available.
+        direction: Cycle direction, either ``long`` or ``short``.
         max_qty: Per-cycle peak absolute quantity (NOT lifetime). Resets to
             abs(opening_qty) on each new cycle. See column docstring for the
             worked example + UI scope rule.
+        status: Cycle lifecycle status.
+        opened_at: UTC timestamp when the cycle opened.
+        closed_at: UTC timestamp when the cycle closed, if closed.
+        opening_command_public_id: Trade command that opened the cycle,
+            when available.
+        closing_command_public_id: Trade command that closed the cycle,
+            when available.
     """
 
     __tablename__ = "position_cycles"

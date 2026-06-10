@@ -57,9 +57,9 @@ async def iter_sorted_candle_chunks(
 
     Memory footprint: O(N_streams x per_stream_buffer) — one row per
     instrument is held by the merge heap at any given time. The
-    repository still materializes its own row list per call, so peak
-    memory remains O(per-instrument-rows + N_streams). Future work
-    pushes pagination into the repository layer for true streaming.
+    repository still materializes its own row list per call, so the
+    direct-DB path's peak memory remains
+    O(per-instrument-rows + N_streams).
 
     Args:
         config: Backtest configuration with instruments and date range.
@@ -213,8 +213,8 @@ class DirectDbEngine:
 
         The DB read is bounded by ``_CANCEL_PROBE_TIMEOUT_S``: if the
         repository hangs (lock contention, slow DB), the probe is skipped
-        with a warning instead of stalling the engine. A future probe will
-        retry; the user-visible cancel SLA degrades gracefully rather than
+        with a warning instead of stalling the engine. The next eligible
+        probe will retry; the user-visible cancel SLA degrades gracefully rather than
         hanging behind the SQLite driver's 30s lock timeout
         (see data/repository.py).
 

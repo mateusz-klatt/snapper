@@ -239,6 +239,7 @@ class BacktestRunnerProcess(RegisterableProcess):
         run_short = self._run_public_id[:8]
 
         async def _publish(topic: str, data: BacktestProgressData) -> None:
+            """Send one progress frame, logging and dropping send failures."""
             try:
                 await msg_publisher.send(topic, data)
             except Exception as exc:

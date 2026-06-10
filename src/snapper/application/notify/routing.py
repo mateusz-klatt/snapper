@@ -1,8 +1,9 @@
-"""Per-(device, alert) routing with the 4-level precedence cascade.
+"""Per-(device, alert) routing with scoped preferences and default fallback.
 
 Given an ``AlertEventRow`` (already persisted) and the caller's user +
 device prefs + user-level defaults, decide which active devices
-actually receive the push. Precedence (narrowest first):
+actually receive the push. Explicit preference precedence
+(narrowest first), followed by the implicit default:
 
 1. **Wallet scope** — pref where ``operator_public_id`` and
    ``wallet_public_id`` both match the alert's wallet triple.
@@ -11,7 +12,7 @@ actually receive the push. Precedence (narrowest first):
 3. **Device-global scope** — pref with both scope columns NULL.
 4. **User-level default** — ``UserAlertDefault`` for the user+alert_type.
 5. **Default on for ``medium``+** — implicit safe fallback when no
-   pref exists at any layer.
+   pref exists at any explicit layer.
 
 Deny-wins at the narrowest matching depth (an ``enabled=False``
 wallet pref beats an ``enabled=True`` operator pref). Safety-critical
@@ -56,9 +57,9 @@ async def route_alert_to_devices(
         repo: Repository handle for device + pref + user-default reads.
         now: Entry-boundary timestamp threaded from the sidecar.
         push_beta: Active push-beta gate config (rollout allowlist).
-            ``None`` (the default — preserved for the existing
-            sidecar call sites that pre-date the gate) is treated as
-            "gate disabled" so legacy callers behave exactly as
+            ``None`` (the default — preserved for existing sidecar
+            call sites that pre-date the gate) is treated as
+            "gate disabled" so those callers behave exactly as
             before. The sidecar is expected to inject a freshly-read
             ``PushBetaConfig`` once per dispatch so the gate honours
             live admin updates.
@@ -104,7 +105,7 @@ def _policy_allows(
     user_defaults: list[UserAlertDefaultRow],
     now: datetime,
 ) -> bool:
-    """Apply the 4-level precedence cascade to a single (device, alert) pair."""
+    """Apply explicit preferences and the implicit fallback to one device."""
     matches = _narrowest_matches(device=device, alert=alert, prefs=device_prefs)
     if matches:
         narrowest = matches[0]

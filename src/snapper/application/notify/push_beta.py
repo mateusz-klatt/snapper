@@ -6,7 +6,7 @@ intercepts ``application/notify/routing.route_alert_to_devices``
 before the per-device cascade runs:
 
 - ``enabled = False`` (default) — every authenticated user gets
-  pushes (legacy behaviour).
+  pushes.
 - ``enabled = True`` — only users whose ``user_public_id`` is in
   ``user_public_ids`` receive pushes; everyone else is silently
   dropped at the routing layer regardless of their per-device prefs.
@@ -53,8 +53,8 @@ class PushBetaConfig:
                 when the gate is enabled, admitted when disabled.
 
         Returns:
-            ``True`` when the gate is disabled (legacy / default
-            open) or when the gate is enabled and the user is on the
+            ``True`` when the gate is disabled (default open) or when
+            the gate is enabled and the user is on the
             allowlist. ``False`` otherwise.
         """
         if not self.enabled:

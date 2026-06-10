@@ -2,9 +2,9 @@
 
 Generalizes the 2-leg pattern in :class:`CointegrationPairs` to any
 N-leg basket strategy. The existing 2-leg cointegration adopts the
-:class:`MultiLegSpreadMixin` as a backwards-compatible migration —
-``instrument1`` / ``instrument2`` remain available as aliases over
-``self.legs[0]`` / ``self.legs[1]``.
+:class:`MultiLegSpreadMixin` while keeping ``instrument1`` /
+``instrument2`` available as aliases over ``self.legs[0]`` /
+``self.legs[1]``.
 
 Two pieces ship here:
 
@@ -35,9 +35,9 @@ def _extract_instrument_from_topic(topic: str) -> str:
     """Return the instrument symbol embedded in a market-data topic.
 
     Falls back to the topic string itself when the topic does not parse
-    as a canonical market topic. Mirrors the behaviour of
-    ``CointegrationPairs._extract_instrument`` so the migration is
-    byte-identical for the 2-leg case.
+    as a canonical market topic. Matches the behaviour of
+    ``CointegrationPairs._extract_instrument`` for the 2-leg
+    compatibility path.
 
     Args:
         topic: ZMQ topic string.

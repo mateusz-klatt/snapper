@@ -2,8 +2,9 @@
 
 Inserts a small but realistic set of facts on top of an already-migrated
 ``dev`` profile database (paper wallet, default operator, instruments).
-Idempotent: skips when ``orders`` table already has rows, so re-runs are a
-no-op.
+Idempotent: skips when ``orders`` already contains rows stamped with this
+script's stable demo ``session_id``, so unrelated local rows do not block
+the demo data from being inserted.
 
 Demo set as of 2026-05-05 (entries chosen to match REAL Kraken Futures
 ``market_snapshots`` so unrealized P&L is plausible against the live mark):
@@ -14,7 +15,8 @@ Demo set as of 2026-05-05 (entries chosen to match REAL Kraken Futures
   current mark $2,345.60 → unrealized +$2,231.56 on 4.7 ETH = +16.8% on
   notional $13,256. Relative-value: ETH lagged BTC's bounce hard.
 - One open limit buy BTC + one cancelled stop sell ETH
-- Three completed backtest runs (RSI BTC, MACD BTC, RSI XLE) so the
+- Two completed BTC futures backtest runs, plus CLM6/GCM6 Kraken Equities
+  backtest rows when those instruments are available, so the
   Backtests/Compare page renders meaningful rows.
 
 Bypasses fact -> projection chain: positions are inserted directly so the

@@ -1059,7 +1059,10 @@ class ZmqWebSocketBridgeService:
         Args:
             topic: The topic being handled.
             socket: The ZMQ socket to receive from.
-            _config: Topic configuration (unused; reserved for future filtering).
+            _config: Topic configuration supplied by the caller. The
+                handler routes by ``topic`` and socket frames while
+                keeping this argument for the subscriber callback
+                interface.
         """
         try:
             while True:

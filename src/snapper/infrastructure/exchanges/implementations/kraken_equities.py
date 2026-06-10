@@ -10,7 +10,8 @@ REST API Operations:
       backfill service — see ``get_ohlcv``.
 
 WebSocket Subscriptions (via SpotWSClient with overridden URL):
-    - Public: tickers, trades.
+    - Public: tickers, trades, and 1-minute candles synthesized
+      from trades.
 
 The Kraken Equities WebSocket uses the same v2 protocol as Kraken Spot,
 with an additional ``asset_class`` field. This implementation reuses the
@@ -23,11 +24,12 @@ Limitations:
       reverse-engineered. Market-data only.
     - No execution subscriptions (``subscribe_executions`` raises
       ``NotImplementedError``).
-    - Live candle subscriptions not available — use REST ``get_ohlcv``
-      for historical + client-side tick aggregation for live.
+    - Live candle subscriptions are synthesized from trades and
+      support only ``1m``; use REST ``get_ohlcv`` for historical and
+      non-1m intervals.
     - ``supports_websocket_executions = False``.
-    - Feed is delayed (~10 minutes). Every TickerUpdate carries
-      ``is_delayed=True`` via envelope-level routing in ``_on_ws_message``.
+    - Feed is delayed (~10 minutes). TickerUpdate carries the
+      envelope-level delayed flag routed through ``_on_ws_message``.
 """
 
 import asyncio
@@ -467,10 +469,9 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         queue (for downstream consumers that want raw fills) AND fed
         into :attr:`_candle_builder` so the once-per-second
         :meth:`_candle_aggregator` can emit completed 1-minute candles
-        synthesized from the trade stream. This replaces the previous
-        no-op candle path: Kraken Equities has no WS OHLC channel and
-        REST polling 100+ FCM contracts every minute risks rate-limit
-        / IP-ban on the iapi endpoint.
+        synthesized from the trade stream. Kraken Equities has no WS
+        OHLC channel, and REST polling 100+ FCM contracts every minute
+        risks rate-limit / IP-ban on the iapi endpoint.
         """
         for item in message.get("data", []):
             if isinstance(item, dict):
@@ -860,8 +861,8 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
 
         Args:
             symbols: Native dash-separated symbols (e.g. ``MNQM6-CME``).
-                Currently informational only — the builder emits a
-                candle for every symbol that actually saw trades.
+                Advisory for the public interface; the builder emits
+                a candle for every symbol that actually saw trades.
             timeframe: Candle interval. Only ``"1m"`` is supported;
                 anything else raises ``ValueError``.
 
@@ -886,7 +887,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         shutdown does not leak the task.
 
         Args:
-            symbols: Native dash-separated symbols (informational; the
+            symbols: Native dash-separated symbols (advisory; the
                 builder emits whatever trades it has actually seen).
             timeframe: Candle interval. Must be ``"1m"``.
 

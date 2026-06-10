@@ -127,7 +127,7 @@ async def get_settings() -> Any:
     etc.) the per-exchange runners downstream expect.
 
     Returns:
-        ``SimpleNamespace`` with eight credential attributes (empty
+        ``SimpleNamespace`` with six credential attributes (empty
         string when the corresponding wallet credential row is absent).
     """
     bootstrap = get_bootstrap_settings()
@@ -170,7 +170,7 @@ async def run_walutomat(settings: Any, scenarios: list[str] | None = None) -> No
     - Minimum volume: 1.00 EUR (2 decimal places)
 
     Args:
-        settings: AppSettings with exchange credentials.
+        settings: Credential namespace returned by :func:`get_settings`.
         scenarios: Optional list of scenarios to run.
     """
     if not settings.walutomat_api_key:
@@ -303,11 +303,10 @@ async def run_kraken_spot(settings: Any, scenarios: list[str] | None = None) -> 
     - CCXT create_order may return status=None → subsequent fetch_order
     - CCXT cancel returns empty → subsequent fetch_order
     - Minimum: 0.0001 BTC
-    - Leverage via params["leverage"] (integer, 2-5x)
     - post_only via params["postOnly"]
 
     Args:
-        settings: AppSettings with exchange credentials.
+        settings: Credential namespace returned by :func:`get_settings`.
         scenarios: Optional list of scenarios to run.
     """
     if not settings.kraken_api_key or not settings.kraken_api_secret:
@@ -425,7 +424,7 @@ async def run_kraken_spot(settings: Any, scenarios: list[str] | None = None) -> 
 
 
 async def run_kraken_futures(settings: Any, scenarios: list[str] | None = None) -> None:
-    """Test order lifecycle on Kraken Futures PF_XBTUSD.
+    """Test order lifecycle on Kraken Futures BTC-USD-PERP.
 
     Kraken Futures specifics:
     - SDK-based (not CCXT), Trade.create_order() / cancel_order()
@@ -433,10 +432,10 @@ async def run_kraken_futures(settings: Any, scenarios: list[str] | None = None) 
     - Leverage per-instrument (not per-order)
     - reduceOnly flag supported
     - post_only via orderType="post"
-    - Minimum: 0.0001 BTC for PF_XBTUSD (linear perpetual)
+    - Minimum: 0.0001 BTC for BTC-USD-PERP (linear perpetual)
 
     Args:
-        settings: AppSettings with exchange credentials.
+        settings: Credential namespace returned by :func:`get_settings`.
         scenarios: Optional list of scenarios to run.
     """
     if not settings.kraken_futures_api_key or not settings.kraken_futures_api_secret:

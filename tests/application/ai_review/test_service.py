@@ -1,9 +1,9 @@
-"""Unit tests for the AiReviewService skeleton.
+"""Unit tests for core AiReviewService process-local behavior.
 
 Covers the singleton lifecycle, the in-memory ``asyncio.Future`` registry that
 backs the strategy-side await primitive, and the bus-publisher injection seam.
-The heavier state-machine paths (create_review, submit_decision, reaper, etc.)
-land in subsequent commits with their own dedicated tests.
+Dedicated modules cover create-review, submit-decision, reaper, and bus-listener
+state-machine paths.
 """
 
 import asyncio

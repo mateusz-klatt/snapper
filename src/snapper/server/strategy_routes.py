@@ -2,12 +2,12 @@
 
 Provides a lightweight endpoint for viewing configured strategies
 without requiring full process management permissions. This allows
-viewers with READ_STRATEGIES permission to see strategy status.
+callers with READ_STRATEGIES permission to see strategy status.
 
 Endpoints:
     - ``GET /strategies`` - List configured strategy processes.
 
-The endpoint requires only READ_STRATEGIES permission (viewer+).
+The endpoint requires only READ_STRATEGIES permission.
 """
 
 import datetime as dt

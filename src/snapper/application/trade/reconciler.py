@@ -1,14 +1,18 @@
-"""Exchange reconciliation for detecting and resolving state drift.
+"""Exchange reconciliation loop for active trade-command health.
 
-Periodically compares exchange order/balance state with local DB state
-and emits corrective VenueEvents for discrepancies. Runs as an asyncio
-task inside each executor process.
+Periodically scans active DB commands for one exchange, logs stale rows,
+and feeds reconciliation success/failure counters into
+:class:`TradeService`. Runs as an asyncio task inside each executor
+process.
 
 Reconciliation policy:
-- Exchange has order, DB doesn't → log warning + create VenueEvent
-- DB has active command, exchange doesn't → mark command terminal
-- Fill gap (exchange filled > DB filled) → query fill history, insert missing
-- Balance mismatch → emit BalanceMismatch event for manual review
+- Active commands older than three intervals are logged for operator
+  investigation.
+- A successful scan clears the failure counter for every shard seen in
+  the active command set.
+- A scan exception records a reconciliation failure on the exchange
+  fallback shard; repeated failures halt that shard via
+  :class:`TradeService`.
 """
 
 import asyncio
@@ -62,6 +66,7 @@ class ReconciliationLoop:
             trade_service: Trade service for circuit breaker feedback.
             interval_seconds: Polling interval in seconds.
             ownership: Optional shard-ownership filter for
+                multi-instance coordinators.
         """
         self._exchange = exchange_name
         self._repo = repository

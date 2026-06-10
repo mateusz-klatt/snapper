@@ -10,7 +10,8 @@ REST API Operations:
     - Account: wallet balances (via kraken.futures.User)
 
 WebSocket Subscriptions (via callback-to-queue bridge):
-    - Public: tickers, trades
+    - Public: tickers, trades, and 1-minute candles synthesized
+      from live trades
     - Private: fills, open_orders (authenticated)
 
 The Kraken Futures SDK uses a callback-driven WebSocket client. This
@@ -387,7 +388,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """Route incoming WS messages to the appropriate queue.
 
         This is the callback passed to FuturesWSClient. It parses the
-        feed type and dispatches to tick_queue or trade_queue.
+        feed type and dispatches to the tick queue, trade queue, and
+        trade-backed candle builder.
 
         Kraken Futures emits two different shapes on the trade channel:
 
@@ -398,10 +400,10 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
           ``trades: [...]`` with up to ~100 historical fills wrapped in
           a single envelope keyed by ``product_id``.
 
-        The legacy handler only iterated ``message.get("trades", [])``
-        which silently dropped every live ``feed=trade`` update (the
-        single-trade envelope has no ``trades`` array). This branch
-        normalizes both shapes through the same parse path.
+        Live ``feed=trade`` messages are normalized through the trade
+        parser. ``trade_snapshot`` batches are skipped as replay
+        artifacts so boot-time historical fills do not create
+        duplicate trade or candle output.
 
         Args:
             message: Raw WebSocket message dictionary.
@@ -483,7 +485,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         return {**message, "symbol": product_id}
 
     def _handle_trade_feed(self, feed: object, message: dict[str, Any]) -> None:
-        """Parse and enqueue one live trade feed message.
+        """Parse live trade frames and skip snapshot replay batches.
 
         Args:
             feed: Raw feed discriminator.
@@ -501,7 +503,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         self._enqueue_trade_message(message, product_id)
 
     def _enqueue_trade_message(self, message: dict[str, Any], product_id: object) -> None:
-        """Parse and enqueue one normalized trade message.
+        """Parse, enqueue, and fold one live trade message into candle state.
 
         Args:
             message: Raw trade feed message.
@@ -1613,22 +1615,21 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
     ) -> AsyncIterator[CandleUpdate]:
         """Subscribe to 1-minute candles synthesized from the live trade stream.
 
-        Kraken Futures has no WebSocket candle channel. The previous
-        implementation polled the REST ``/derivatives/api/v4/charts/`` /
-        CCXT ``fetch_ohlcv`` endpoint per symbol per minute, which on
-        the 330-product live wildcard meant hundreds of REST calls per
-        minute against the venue and was a real IP-ban risk over a
-        multi-hour session. This implementation folds every trade
-        delivered via the WS ``trade`` / ``trade_snapshot`` channels
-        into a per-symbol-per-minute accumulator (see
+        Kraken Futures has no WebSocket candle channel. Per-symbol
+        REST/CCXT polling for the live wildcard would mean hundreds
+        of REST calls per minute against the venue. This implementation
+        folds every live WS ``trade`` message into a
+        per-symbol-per-minute accumulator (see
         :class:`snapper.infrastructure.exchanges._trade_candle_builder.TradeCandleBuilder`)
-        and emits the candle once the minute closes. Symbols with no
-        trades in a minute simply have no candle row for that minute.
+        and emits the candle once the minute closes. ``trade_snapshot``
+        replay batches are intentionally skipped before aggregation.
+        Symbols with no trades in a minute simply have no candle row
+        for that minute.
 
         Args:
-            symbols: Native symbols (e.g. ``BTC-USD-PERP``). Currently
-                informational only — the builder emits a candle for
-                every symbol whose trades it has actually seen.
+            symbols: Native symbols (e.g. ``BTC-USD-PERP``). Advisory
+                for the public interface; the builder emits a candle
+                for every symbol whose trades it has actually seen.
             timeframe: Candle interval. Only ``"1m"`` is supported;
                 anything else raises ``ValueError`` (use
                 :meth:`get_ohlcv` for historical / multi-interval
@@ -1655,7 +1656,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         shutdown does not leak the task.
 
         Args:
-            symbols: Native symbols (informational — see ``subscribe_candles``).
+            symbols: Native symbols (advisory; see ``subscribe_candles``).
             timeframe: Candle interval. Must be ``"1m"``.
 
         Yields:

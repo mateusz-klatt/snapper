@@ -220,14 +220,14 @@ class TradingEngineService:
                 propagation onto every TradeCommand and OrderRequestData
                 this engine emits.
             ownership: partitioning — the coordinator's
-                class:`ShardOwnership` view, forwarded to
-                meth:`Repository.insert_trade_command` as a
+                :class:`ShardOwnership` view, forwarded to
+                :meth:`Repository.insert_trade_command` as a
                 defense-in-depth guard against operational misconfig
                 ``None`` bypasses the guard (test fixtures,
                 CLI tools, and single-instance deployments).
             caps_enforcer: enforcer — when present
                 ``_send_order`` wraps the insert with
-                meth:`TradingCapsEnforcer.guard_service_principal`
+                :meth:`TradingCapsEnforcer.guard_service_principal`
                 so cap enforcement logic is exercised even on the
                 strategy hot path (bypass is explicit at the call
                 site). ``None`` preserves the

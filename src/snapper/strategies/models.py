@@ -68,11 +68,13 @@ class StrategyConfig:
         exchange: Target exchange for order execution.
         params: Strategy-specific parameters.
         wallet_public_id: Wallet that will execute orders for this strategy.
-            Empty default for backwards compatibility; becomes required
-            after the NOT NULL tightening migration lands.
+            Empty means the config is unscoped; when populated with an
+            operator, process routes validate active grant coverage
+            before launch.
         operator_public_id: Trading-identity operator that owns this
-            strategy instance. Empty default; validated against the
-            launching principal's ``operator_public_ids`` when populated.
+            strategy instance. Empty pairs with an unscoped wallet; when
+            populated, process routes validate it against the launching
+            principal's ``operator_public_ids``.
     """
 
     name: str

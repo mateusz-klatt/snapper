@@ -22,9 +22,9 @@ Locking:
 SQLite is single-process in local dev, so the asyncio lock is
 sufficient.
 Pricing for the 24h-notional cap is delegated to
-class:`~snapper.application.pricing.usd_converter.USDConverter`.
+:class:`~snapper.application.pricing.usd_converter.USDConverter`.
 A :class:`PriceUnavailableError` from the converter is mapped to
-class:`CapsViolationError` with ``cap_type='price_unavailable'``
+:class:`CapsViolationError` with ``cap_type='price_unavailable'``
 so the HTTP layer can return the ``caps_price_unavailable``
 error code.
 """
@@ -78,7 +78,7 @@ class CapsViolationError(Exception):
         ``max_daily_notional_usd``
         ``max_cancels_per_minute``
         ``missing_user_public_id`` — caller invoked
-          meth:`TradingCapsEnforcer.guard` without threading a
+          :meth:`TradingCapsEnforcer.guard` without threading a
           user; fail-closed per canonical rule (prevents
           silent cap bypass).
         ``price_unavailable`` — USDConverter could not resolve
@@ -267,7 +267,7 @@ class TradingCapsEnforcer:
         audit trail at every insert site reveals whether caps are
         on or off. A REST handler that silently drops the user ID
         cannot accidentally hit this path — it would call
-        meth:`guard`, which fails closed with
+        :meth:`guard`, which fails closed with
         ``missing_user_public_id``.
         """
         assigned = str(uuid7())
@@ -356,7 +356,7 @@ class TradingCapsEnforcer:
 
         Submit / replace branches exercise quantity + open-orders
         + notional caps. Cancel branch exercises only the
-        cancels-per-minute cap per.
+        cancels-per-minute cap.
         """
         assert (
             submission.user_public_id is not None
@@ -436,13 +436,12 @@ class TradingCapsEnforcer:
     ) -> None:
         """Reject if new submission pushes rolling 24h USD above cap.
 
-        Sum basis: ``submit_qty × submit_price`` per
-        prior non-rejected row. For, prior rows where
-        ``price IS NULL`` (market orders) are SKIPPED with a WARN
-        log — a follow-up plan can stamp the submit-time USD
-        notional into a dedicated column when needed.
-        The NEW submission's notional is computed via
-        meth:`USDConverter.to_usd` (falls back to
+        Sum basis: ``submit_qty × submit_price`` per prior
+        non-rejected row. Prior rows where ``price IS NULL`` (market
+        orders) are SKIPPED with a WARN log because no submit-time
+        price was committed on those rows. The NEW submission's
+        notional is computed via :meth:`USDConverter.to_usd`
+        (falls back to
         ``CapsViolationError(price_unavailable)`` if the oracle
         is stale / missing).
 

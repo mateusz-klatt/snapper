@@ -212,14 +212,14 @@ def openapi_schema(model: type[BaseModel], *, required: bool = True) -> dict[str
     Pass the return value as ``openapi_extra`` on the route decorator to
     restore the schema in the OpenAPI spec.
     The model and its sub-schemas are registered for injection by
-    func:`patch_openapi`. The returned dict uses a ``$ref`` pointer
+    :func:`patch_openapi`. The returned dict uses a ``$ref`` pointer
     to ``components/schemas/{ModelName}``.
 
     Args:
         model: The Pydantic model whose JSON schema to embed.
         required: Whether the requestBody is mandatory. Pass
             ``required=False`` for endpoints using
-            func:`optional_json_body` so the generated OpenAPI / typed
+            :func:`optional_json_body` so the generated OpenAPI / typed
             clients don't wrongly mark the body required.
 
     Returns:

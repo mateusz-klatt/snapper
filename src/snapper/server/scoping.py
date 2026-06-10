@@ -8,7 +8,7 @@ query parameters.
 Authorization rules
 ADMIN: when neither query param is set, returns ``None`` (no
   filter — see all). When a param is set, narrows accordingly.
-VIEWER / OPERATOR: always scoped to the wallets their operator set
+Non-ADMIN: always scoped to the wallets their operator set
   covers via ``list_accessible_wallets_for_operators``. An explicit
   ``operator_public_id`` narrows to a single operator; an explicit
   ``wallet_public_id`` narrows to a single wallet. 403 is raised

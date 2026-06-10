@@ -275,7 +275,7 @@ class TraderCoordinator(RegisterableProcess):
                 without going through the DB-backed settings service.
                 When ``None`` (production), :meth:`_initialize_settings`
                 upgrades ``self.settings`` via
-                func:`get_settings_with_service` exactly as before.
+                :func:`get_settings_with_service` exactly as before.
         """
         self.settings = get_settings()
         self._injected_settings: AppSettings | None = settings
@@ -475,13 +475,13 @@ class TraderCoordinator(RegisterableProcess):
 
         Wires ``USDConverter(repository)`` as the pricing oracle and
         hands both to the enforcer. Called once at
-        meth:`start` after settings resolve + ownership is built so
+        :meth:`start` after settings resolve + ownership is built so
         the enforcer is ready before any child engine is spawned.
         Returns ``None`` when the repository is not a
-        class:`SQLAlchemyRepository` — test fixtures that inject a
+        :class:`SQLAlchemyRepository` — test fixtures that inject a
         MagicMock repo fall through the enforcer entirely, which is
-        the same behavior the engine had before so pre
-        existing coordinator tests stay byte-identical.
+        the same behavior the engine had before so pre-existing
+        coordinator tests stay byte-identical.
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
             return None

@@ -409,9 +409,11 @@ class UserService:
     ) -> UserProfile | None:
         """Update the caller's self-service preferences via SCD2 close+insert.
 
-        Currently only ``default_language`` is preference-managed. The
-        admin-facing :meth:`update_user` is intentionally separate so
-        ``MANAGE_USERS`` permission stays narrowly-scoped.
+        Writes a new active ``users`` row with the caller's
+        ``default_language`` preference while preserving the other
+        profile fields. The admin-facing :meth:`update_user` is
+        intentionally separate so ``MANAGE_USERS`` permission stays
+        narrowly scoped.
 
         Args:
             user_id: Caller's username (from auth principal).

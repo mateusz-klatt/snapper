@@ -5,9 +5,12 @@ settings stored in the database. All endpoints require CONFIGURE_SYSTEM
 permission (admin role).
 
 Endpoints:
+    - ``GET /settings/features`` - Return public feature flags.
     - ``GET /settings`` - List all settings, optionally filtered by category.
     - ``GET /settings/categories`` - List distinct setting categories.
     - ``POST /settings/{key}/set`` - Set (update or create) a setting.
+    - ``GET /settings/push-beta/users`` - Read push-beta gate configuration.
+    - ``POST /settings/push-beta/users`` - Update push-beta gate configuration.
     - ``POST /settings/{key}/remove`` - Remove a setting.
 
 Settings are stored in the ``settings`` table with encryption support
@@ -21,8 +24,14 @@ Example:
 
     Update a setting::
 
-        PUT /api/settings/kraken_api_key
-        {"value": "new-api-key", "category": "exchanges"}
+        POST /api/settings/polygon_api_key/set
+        {
+            "type": "setting_update",
+            "payload": {
+                "value": "new-api-key",
+                "category": "api"
+            }
+        }
 """
 
 from datetime import UTC
@@ -93,11 +102,8 @@ async def get_public_feature_flags(
             stamps provenance on the response envelope.
 
     Returns:
-        class:`FeatureFlagsResponse` with the current state of every
-        public feature flag. Currently only
-        ``ai_integration_enabled`` is exposed; future flags can be
-        added to :class:`FeatureFlagsPayload` without changing the
-        envelope shape.
+        :class:`FeatureFlagsResponse` with the current
+        ``ai_integration_enabled`` public feature flag state.
     """
     settings_service = getattr(request.app.state, "settings_service", None)
     ai_integration_enabled = bool(

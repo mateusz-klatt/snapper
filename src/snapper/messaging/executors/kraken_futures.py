@@ -52,14 +52,18 @@ class KrakenFuturesOrderExecutor(ExchangeExecutorService[KrakenFuturesExchangeCl
     Topics Subscribed:
         - orders.commands.kraken_futures.{instrument}.submit
         - orders.commands.kraken_futures.{instrument}.cancel
+        - orders.commands.kraken_futures.{instrument}.replace
         - system.symbol_aliases
         - system.settings
 
     Topics Published:
         - orders.events.kraken_futures.{instrument}.submitted
+        - orders.events.kraken_futures.{instrument}.accepted
         - orders.events.kraken_futures.{instrument}.executed
+        - orders.events.kraken_futures.{instrument}.cancelled
+        - orders.events.kraken_futures.{instrument}.unknown
         - orders.events.kraken_futures.{instrument}.rejected
-        - system.heartbeats.executor.kraken_futures
+        - system.heartbeats.executor.kraken_futures[.{wallet_short}]
 
     Attributes:
         Inherits all attributes from ExchangeExecutorService.

@@ -4,7 +4,7 @@ Provides the frontend operator picker with the list of
 operators the current principal may act AS. ADMIN principals see
 every active operator (matching the ADMIN-wide expansion rule in
 ``UserService.build_auth_principal`` / ``get_user_with_operators``)
-VIEWER and OPERATOR principals see only the operators covered by
+non-ADMIN principals see only the operators covered by
 their ``user_operator_memberships`` (exposed on the principal as
 ``operator_public_ids`` at token issue time).
 The endpoint performs a server-side filter even though
@@ -45,7 +45,7 @@ async def list_operators(
 ) -> OperatorListResponse:
     """List operators accessible to the current principal.
 
-    ADMIN sees every active operator. VIEWER and OPERATOR see only
+    ADMIN sees every active operator. Non-ADMIN callers see only
     the operators in ``principal.operator_public_ids``, resolved to
     ``OperatorInfo`` projections via ``list_active_operators`` so
     the label / description fields are populated for the picker UI.

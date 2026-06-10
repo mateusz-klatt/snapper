@@ -5,8 +5,8 @@ command state, position state, cash and turnover state, execution
 deduplication, and reconciliation circuit-breaker counters. It exposes
 the live read model used inside the trade runtime and produces snapshots
 that TraderCoordinator persists as TradeProjectionCheckpoint rows.
-Canonical Order and Execution rows are currently persisted on the
-executor/exchange-client path.
+Canonical Order and Execution rows are persisted on the
+executor / exchange-client path.
 """
 
 import json
@@ -225,8 +225,9 @@ class TradeService:
     def register_command(self, shard_key: str, cmd: TradeCommandRow) -> None:
         """Register a newly created trade command in the in-memory state.
 
-        Called by the outbox dispatcher after writing TradeCommand to DB.
-        Sets the command state to in-flight.
+        Use when a caller has already inserted a ``TradeCommand`` row
+        and needs the runtime projection to reflect the command as
+        in-flight.
 
         Args:
             shard_key: Unique identifier for the trading shard.
@@ -322,7 +323,7 @@ class TradeService:
     def _dedup_fill(self, shard: ShardState, event: VenueEventRow) -> bool:
         """Return True if the fill is new and should be applied.
 
-        Adds exec_id and trade_id to the seen set for future dedup.
+        Adds exec_id and trade_id to the seen set for subsequent dedup.
         """
         exec_id = event.get("exec_id")
         trade_id = event.get("trade_id")

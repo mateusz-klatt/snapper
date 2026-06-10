@@ -19,7 +19,7 @@ Process Types:
     - **One-shot**: Tasks that complete (backfill, sync)
 
 Most endpoints require MANAGE_PROCESSES permission (operator/admin role).
-The summary endpoint requires only READ_SYSTEM_STATUS (viewer+).
+The summary endpoint requires only READ_SYSTEM_STATUS.
 
 Example:
     Start a process::
@@ -355,26 +355,17 @@ async def _enforce_strategy_scope(
 ) -> None:
     """Validate operator/wallet scope for a strategy process launch.
 
-    Transitional rules:
-
-    - If ``role`` is not ``STRATEGY`` the check is skipped — non-strategy
-      process templates (feeds, executors, services) do not yet carry
-      operator/wallet scope.
-    - ``operator_public_id`` and ``wallet_public_id`` are *both* optional
-      during the transition. If neither is set, the launch is
-      allowed for backwards compatibility (matches the empty-string
-      defaults on ``StrategyProcessParameters``).
-    - If ``operator_public_id`` is set, it must be in
-      ``principal.operator_public_ids``. ADMIN principals see every
-      active operator (resolved at login) so this naturally allows
-      admins on any operator.
-    - If both ``operator_public_id`` AND ``wallet_public_id`` are set,
-      an active scope grant for that pair must exist in
-      ``wallet_operator_scope_grants``.
-
-    NOT NULL tightening will eventually make both fields
-    required at the schema layer, at which point this helper will reject
-    the empty-defaults path.
+    Non-strategy process templates are skipped because their
+    parameters do not carry trading operator/wallet scope. Strategy
+    configs may be unscoped when both fields are empty, matching the
+    dataclass defaults used by existing strategy templates. A wallet
+    without an operator is invalid. A populated operator must already be
+    present on ``principal.operator_public_ids``; ADMIN principals
+    satisfy that check through the operator expansion performed during
+    principal construction. When both operator and wallet are populated,
+    SQL repositories must show an active grant for the pair and every
+    configured live-exchange output instrument must be covered by that
+    grant set. Non-SQL repositories skip the DB-backed grant checks.
 
     Raises:
         HTTPException: 403 on operator mismatch or missing grant; 400
@@ -570,7 +561,8 @@ async def get_process_summary(
 
     Returns running/total counts per category (feeds, strategies,
     executors, brokers) for the overview dashboard. Requires only
-    READ_SYSTEM_STATUS permission so viewers can see process health.
+    READ_SYSTEM_STATUS permission so read-only callers can see process
+    health.
 
     Feed publishers run in a dedicated container, so their running-state
     is unioned from the cross-coordinator summary cache; without it the

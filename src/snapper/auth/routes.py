@@ -614,11 +614,11 @@ async def update_current_user_preferences(
 ) -> UserResponse:
     """Update the caller's self-service preferences.
 
-    Currently exposes ``default_language`` only. Mirrors the codebase's
-    ``POST + verb`` admin endpoint shape (:func:`update_user` at
-    ``POST /api/users/{user_id}/update``) so CORS stays untouched —
-    ``POST`` is already in the allowlist and we don't introduce REST
-    ``PATCH`` semantics here.
+    Applies the caller's ``default_language`` preference. Mirrors the
+    codebase's ``POST + verb`` admin endpoint shape
+    (:func:`update_user` at ``POST /api/users/{user_id}/update``) so
+    CORS stays untouched - ``POST`` is already in the allowlist and
+    this route does not introduce REST ``PATCH`` semantics.
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).

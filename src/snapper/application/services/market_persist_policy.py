@@ -156,7 +156,7 @@ class MarketPersistPolicy:
         repository: Repository,
         settings_service: SettingsService,
     ) -> None:
-        """Initialise the policy with stub empty state.
+        """Initialise the policy with an empty applied-policy snapshot.
 
         :meth:`initial_rebuild` must be awaited before the publishers
         start, otherwise :meth:`should_persist` returns ``False`` for

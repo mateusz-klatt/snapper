@@ -6,9 +6,10 @@ Loads seed profiles from TOML files using a three-tier lookup:
 -> package-bundled ``snapper/data/seed/{profile}.toml`` (installed wheel).
 
 Provides idempotent semantics so ``db-seed`` can be run repeatedly
-without duplicating data.  Users are skipped entirely when any account
+without duplicating data. Users are skipped entirely when any account
 already exists; settings use INSERT OR IGNORE to preserve manually
-configured values.
+configured values; operator/wallet bootstrap is skipped when active
+operators or wallets already exist.
 
 Example:
     >>> from snapper.data.seed.loader import run_seed
@@ -82,8 +83,8 @@ class SeedWalletCredential:
             ``"paper"``). Must pass the ``ck_wallet_credentials_exchange_lower``
             CHECK constraint — always lowercase.
         credential_type: One of ``"api_key_secret"``, ``"rsa_pem"``,
-            ``"oauth"``, ``"paper"``. Determines which fields of this
-            dataclass are packed into the encrypted envelope.
+            ``"paper"``. Determines which fields of this dataclass are
+            packed into the encrypted envelope.
         api_key: Exchange API key (for ``api_key_secret`` / ``rsa_pem``).
         api_secret: Exchange API secret (for ``api_key_secret``).
         private_key_pem_base64: Base64-encoded PEM private key
@@ -190,7 +191,7 @@ def load_seed_profile(profile: str) -> SeedProfile:
         profile: Seed profile name.
 
     Returns:
-        Parsed SeedProfile with users and settings.
+        Parsed SeedProfile with users, settings, and wallets.
     """
     path = resolve_seed_path(profile)
     data = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -640,13 +641,16 @@ def run_seed(profile: str) -> tuple[int, int]:
     """Load a seed profile and apply it to the database.
 
     Creates a synchronous SQLAlchemy engine, loads the TOML profile,
-    and seeds users and settings in a single transaction.
+    and seeds users, settings, and default multi-tenant rows in a
+    single transaction.
 
     Args:
         profile: Seed profile name (e.g. "dev", "prod").
 
     Returns:
-        Tuple of (users_count, settings_count).
+        Tuple of (users_count, settings_count). Wallet/operator
+        bootstrap counts are intentionally not part of the return
+        value.
     """
     seed_data = load_seed_profile(profile)
     db_url = _sync_db_url(BootstrapSettingsLoader().db_url)

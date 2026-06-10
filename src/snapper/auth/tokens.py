@@ -99,8 +99,8 @@ class VerifyOutcome:
     callers can branch directly on the failure type without
     re-reading cache state.
     ``rejection_reason`` is ``None`` on success, one of
-    data:`REJECTION_REASON_USER_DEACTIVATED` /
-    data:`REJECTION_REASON_INVALID` on failure.
+    :data:`REJECTION_REASON_USER_DEACTIVATED` /
+    :data:`REJECTION_REASON_INVALID` on failure.
     """
 
     claims: TokenClaims | None
@@ -176,7 +176,8 @@ class TokenManager:
     """JWT token manager singleton.
 
     Handles creation, verification, and blacklisting of JWT tokens.
-    Uses HMAC-SHA256 algorithm for token signing.
+    Uses the configured JWT signing algorithm for token signing
+    (HS256 by default).
 
     Features:
     - Token pair creation (access + refresh)
@@ -342,7 +343,7 @@ class TokenManager:
                 absent.
 
         Returns:
-            class:`LongLivedTokenResult` with the JWT, the UTC
+            :class:`LongLivedTokenResult` with the JWT, the UTC
             ``expires_at`` datetime, the JTI, and the lifetime in
             seconds (for REST envelope ``expires_in``).
         """
@@ -406,10 +407,10 @@ class TokenManager:
         so signature failure here would be a programming error, not
         an auth failure. We still pass through :mod:`jwt.decode` so
         the exp/iat validation behaviour matches the verify path and
-        any future signing-key rotation surfaces a clear exception
+        signing-key rotation surfaces a clear exception
         instead of silent misbehaviour. No blacklist or DB check is
         performed — this helper is exclusively for
-        meth:`persist_tokens` extracting ``jti``/``iat``/``exp``
+        :meth:`persist_tokens` extracting ``jti``/``iat``/``exp``
         from a freshly-minted pair.
 
         Args:
@@ -796,7 +797,7 @@ class TokenManager:
         The ``gen_before`` parameter guards against a race:
         if the caller sampled the per-user generation
         before the DB read and a concurrent
-        meth:`invalidate_user_cache` incremented it during that
+        :meth:`invalidate_user_cache` incremented it during that
         read, the verdict we are about to cache may reflect a user
         state that an admin event has already superseded. In that
         case we do NOT cache — the next verify hit re-reads the DB

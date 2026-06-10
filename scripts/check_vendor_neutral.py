@@ -6,8 +6,9 @@ single AI client (Claude Desktop, Cursor, Windsurf, ChatGPT, Gemini, Copilot,
 `integrations/snapper-mcp/`), not the core engine.
 
 The check regex-scans every `*.py` file under `src/snapper/` for the terms
-listed in `VENDOR_PATTERN`.  A line with a trailing `# vendor-neutral-ok`
-comment is treated as an intentional, reviewed exemption.
+listed in `VENDOR_PATTERN`.  A line with a same-line real Python
+`# vendor-neutral-ok` comment is treated as an intentional, reviewed
+exemption.
 """
 
 import io
@@ -174,7 +175,7 @@ def check_file(filepath: Path) -> list[Violation]:
     """Scan a single file and return vendor-string violations.
 
     The function reads the file once, derives the set of lines whose
-    trailing ``#`` comment carries the allowlist marker via
+    same-line ``#`` comment carries the allowlist marker via
     :func:`_collect_allowlisted_lines` (file-level tokenization so a
     docstring body cannot bypass), then regex-scans every line for
     vendor names. Lines in the allowlist set are skipped.
@@ -271,7 +272,7 @@ def run_scan(root: Path, strict_mode: bool) -> int:
     print(f"\n  Vendor-specific-name violations: {total}")
     if total > 0:
         print(
-            "\nAdd a trailing '# vendor-neutral-ok' comment to intentional "
+            "\nAdd a same-line '# vendor-neutral-ok' comment to intentional "
             "references, or move vendor-specific code to adjacent public repos."
         )
         if strict_mode:

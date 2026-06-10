@@ -17,19 +17,19 @@ Supported specs:
 Unsupported specs (raise at parse time so silent drift surfaces
 immediately):
 
-- ``%d``, ``%f``, ``%s`` etc. — not used in the 10 alert templates
-  today; if a future key needs them, add an explicit case rather than
-  let an unknown spec slip through.
-- ``%%`` (literal percent) — none of the alert templates today; if
-  added, extend the converter to map ``%%`` → ``%`` after the spec
-  replacements.
+- ``%d``, ``%f``, ``%s`` etc. — not part of the generated alert
+  catalog; add an explicit case when catalog generation starts
+  emitting one rather than letting an unknown spec slip through.
+- ``%%`` (literal percent) — not part of the generated alert catalog;
+  extend the converter to map ``%%`` → ``%`` after the spec replacements
+  when catalog generation starts emitting literal percents.
 """
 
 import re
 from collections.abc import Sequence
 
 _SUPPORTED_SPEC_RE: re.Pattern[str] = re.compile(r"%(@|lld)")
-"""Matches the two specs used by the alerts.* catalog today."""
+"""Matches the two specs used by the generated ``alerts.*`` catalog."""
 
 _ANY_PERCENT_RE: re.Pattern[str] = re.compile(r"%[^@ld%]?")
 """Sentinel for unsupported specs.

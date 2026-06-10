@@ -748,19 +748,16 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
         Live data consumers (publishers + WS message adapters) only
         ever resolve currently-subscribed symbols, and the publishers
-        already exclude delisted symbols via ``can_market_data`` (see
-        commit ``c940e791``); they tolerate alias closure without
-        change. Historical backfill helpers
-        (``application/updaters/historical/*``) expand only ACTIVE
-        symbols via ``get_available_*`` and additionally use null-safe
-        ``.get()`` for reverse lookups, so they degrade gracefully on
-        a missing alias. A bitemporal AS-OF lookup helper is NOT
-        shipped today — no current caller needs one. If a future
-        replay path needs to resolve a delisted exchange symbol AT
-        the historical time of delivery, build the helper then; the
-        closed alias row's slice still covers the historical period
-        (``timestamp <= as_of < known_to``), the in-memory mapper
-        dict is just current-only.
+        already exclude delisted symbols via ``can_market_data``; they
+        tolerate alias closure without change. Historical backfill
+        helpers (``application/updaters/historical/*``) expand only
+        ACTIVE symbols via ``get_available_*`` and additionally use
+        null-safe ``.get()`` for reverse lookups, so they degrade
+        gracefully on a missing current alias. No current application
+        caller performs bitemporal alias lookup; the closed alias row's
+        slice still covers the historical period
+        (``timestamp <= as_of < known_to``) for any repository-level
+        helper that needs that contract.
 
         Args:
             session: SQLAlchemy session (shared with caller's

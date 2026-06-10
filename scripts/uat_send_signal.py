@@ -33,7 +33,7 @@ def build_signal_payload(
         instrument: Trading instrument symbol.
         side: Signal side ('buy' or 'sell').
         strength: Signal strength (0.0 to 1.0).
-        price: Reference price (positive value required).
+        price: Reference price to place in the payload.
 
     Returns:
         Dict matching SignalData schema, ready for JSON serialization.

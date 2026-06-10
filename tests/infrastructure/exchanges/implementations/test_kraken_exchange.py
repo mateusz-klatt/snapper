@@ -2605,7 +2605,7 @@ class TestTickerSubscriptionAck:
     async def test_process_ticker_ack_status_not_ok(
         self, kraken_client: KrakenExchangeClient
     ) -> None:
-        """Verify process ticker ack status not ok."""
+        """Do not exercise non-OK ticker ack handling in this no-op body."""
         pass
 
     @pytest.mark.asyncio

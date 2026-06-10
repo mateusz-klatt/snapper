@@ -20,12 +20,9 @@ Requires a ``wallet_credentials`` row with ``exchange="kraken"``,
 startup via ``CredentialResolver``. ``wallet_credentials`` is the
 single source of truth for Kraken API credentials.
 
-Example:
--------
-Register and run via process manager::
-
-    executor = KrakenOrderExecutor()
-    await executor.start()  # Listens for orders until stopped
+The process manager spawns per-wallet instances with
+``wallet_public_id`` so credentials resolve before the exchange
+client is created.
 """
 
 from snapper.application.process_manager.registry import register_process
@@ -56,23 +53,24 @@ class KrakenOrderExecutor(ExchangeExecutorService[KrakenExchangeClient]):
     Topics Subscribed:
         - orders.commands.kraken.{instrument}.submit
         - orders.commands.kraken.{instrument}.cancel
+        - orders.commands.kraken.{instrument}.replace
         - system.symbol_aliases
         - system.settings
 
     Topics Published:
         - orders.events.kraken.{instrument}.submitted
+        - orders.events.kraken.{instrument}.accepted
         - orders.events.kraken.{instrument}.executed
+        - orders.events.kraken.{instrument}.cancelled
+        - orders.events.kraken.{instrument}.unknown
         - orders.events.kraken.{instrument}.rejected
-        - system.heartbeats.executor.kraken
+        - system.heartbeats.executor.kraken[.{wallet_short}]
 
     Attributes:
         Inherits all attributes from ExchangeExecutorService.
 
-    Example:
-        ::
-
-            executor = KrakenOrderExecutor()
-            await executor.start()
+    Direct construction with an empty ``wallet_public_id`` is for
+    tests that inject ``self._credentials`` before ``start()``.
     """
 
     def _create_exchange_client(self) -> KrakenExchangeClient:

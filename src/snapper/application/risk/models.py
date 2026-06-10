@@ -155,8 +155,12 @@ class RiskEvaluator:
         Args:
             desired_size: Requested position size.
             lot_size: Minimum lot size increment.
-            price: Current price (unused, for future notional rounding).
-            tick_size: Minimum price increment (unused).
+            price: Current price accepted by the shared sizing
+                interface; the current implementation rounds quantity
+                only.
+            tick_size: Minimum price increment accepted by the shared
+                sizing interface; it does not change lot-size
+                rounding.
 
         Returns:
             Position size rounded down to lot_size.

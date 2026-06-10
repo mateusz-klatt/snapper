@@ -4,8 +4,8 @@ This module provides the abstract base classes for implementing
 trading strategies with ZMQ-based messaging.
 
 Data models (StrategySignal, StrategyConfig) are defined in
-snapper.strategies.models and re-exported here for backwards
-compatibility.
+snapper.strategies.models and re-exported here for compatibility with
+existing imports.
 """
 
 import asyncio

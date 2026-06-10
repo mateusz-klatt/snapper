@@ -1064,7 +1064,7 @@ def _wrap_compare(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 class TestNoActiveWalletGuards:
-    """Cover backtest_routes 400 fail-closed branches (lines 180, 424)."""
+    """Cover backtest_routes 400 fail-closed branches for missing wallets."""
 
     def test_list_no_active_wallet_returns_400(self) -> None:
         """GET /api/backtests with no active wallet → 400.
@@ -1085,7 +1085,7 @@ class TestNoActiveWalletGuards:
 
         Given: A principal with active_wallet_public_id=None,
         When: GET /api/backtests/run-1 is called and the run exists,
-        Then: 400 (fail-closed, not the legacy truthy bypass).
+        Then: 400 fail-closed response.
         """
         bt = AsyncMock()
         bt.get_run = AsyncMock(return_value=_make_run_row())

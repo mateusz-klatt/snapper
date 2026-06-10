@@ -31,7 +31,7 @@ back to topic-only keying.
 
 @dataclass
 class _StreamState:
-    """Tracked state for one received topic stream."""
+    """Tracked state for one partitioned message stream."""
 
     last_session_id: str
     expected_sequence_id: int
@@ -51,7 +51,7 @@ class GapDetectorStats:
 class GapDetector:
     """Detect sequence gaps and producer session resets.
 
-    Maintains per-received-topic state to detect:
+    Maintains per-``(received_topic, wallet_public_id)`` state to detect:
     - sequence gaps (missing messages)
     - session resets (producer restarted)
     - duplicates or reordered messages
@@ -96,8 +96,8 @@ class GapDetector:
             sequence_id: Sequence number from the message payload.
             wallet_public_id: Owning wallet for per-wallet stream
                 partitioning. Empty string keeps the
-                legacy topic-only behavior for producers or message
-                types that do not carry a wallet.
+                topic-only behavior for producers or message types
+                that do not carry a wallet.
 
         Returns:
             True if the message carries valid provenance and was processed,

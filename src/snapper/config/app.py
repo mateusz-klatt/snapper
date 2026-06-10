@@ -11,7 +11,7 @@ two sources:
    - ZMQ broker endpoints
 
 2. **Database settings** - Runtime configuration stored in DB (via SettingsService)
-   - API keys for exchanges (Kraken, Polygon, Walutomat)
+   - Shared service secrets such as the Polygon API key
    - Trading parameters (instruments, timeframes, risk limits)
    - Authentication settings (token expiry, CSRF configuration)
 

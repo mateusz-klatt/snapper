@@ -3,18 +3,14 @@
 The audit walks router files (``*_routes.py`` plus the well-known
 ``auth/routes.py`` and ``settings_routes.py``) and checks each function
 decorated with an HTTP-verb router decorator (``@router.get``,
-``@app.post``, etc.):
+``@app.post``, etc.). Return annotations must not be a plain dict /
+mapping / ``Any`` / ``Response`` / ``JSONResponse``. Acceptable return
+types are concrete Pydantic models, unions of Pydantic models, or
+routes that declare their response schema through FastAPI metadata.
 
-1. **Return annotation** must not be a plain dict / mapping / ``Any`` /
-   ``Response`` / ``JSONResponse``. Acceptable return types are concrete
-   Pydantic models, or unions of Pydantic models.
-2. **Body parameters** (anything annotated ``Body(...)`` or consumed via
-   the ``json_body``/``optional_json_body`` dependency) must reference a
-   Pydantic model — never ``dict``, ``Any``, or ``JsonObject``.
-
-A request body that goes through ``Depends(json_body(Model))`` already
-passes a Pydantic class via the dependency factory, so the function
-parameter annotation can stay as ``Model | None`` — those are accepted.
+Routes that explicitly set ``response_model=None`` must provide a
+``responses={...}`` entry with a Pydantic ``model`` so OpenAPI still
+emits a schema.
 
 The script reports violations and exits non-zero so it can run inside
 ``make check-all``.

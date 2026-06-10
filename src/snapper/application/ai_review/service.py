@@ -1696,8 +1696,8 @@ class AiReviewService:
         """``bus.delegate_offline`` subscriber entry point.
 
         Wraps :meth:`_delegate_offline_tick` so the ZMQ listener loop
-        (wired in a follow-up commit) can dispatch on the message
-        envelope without knowing the ``_tick`` argument shape.
+        can dispatch on the message envelope without knowing the
+        ``_tick`` argument shape.
 
         Args:
             msg: Decoded ``bus.delegate_offline`` payload published by

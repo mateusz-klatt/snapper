@@ -41,7 +41,8 @@ class OutboxDispatcher:
     Runs as an asyncio task inside the trade runtime process. Uses
     asyncio.Event for immediate wake-up on new commands, with 50ms
     polling as crash-recovery fallback.
-     Under multi-instance partitioning
+
+    Under multi-instance partitioning
     every coordinator's OutboxDispatcher receives every ``created``
     row on a poll. The ``ownership`` kwarg filters rows in Python so
     each dispatcher only publishes its own shards. Scans paginate via
@@ -161,7 +162,7 @@ class OutboxDispatcher:
 
         When ``self._ownership`` is ``None``
         this is a straight pass-through to
-        meth:`Repository.get_undispatched_commands` with ``limit=batch_size``.
+        :meth:`Repository.get_undispatched_commands` with ``limit=batch_size``.
         When ``self._ownership`` is set, the method pages through the
         ``status='created'`` set with a larger page size, filters in
         Python, and stops when it has collected ``batch_size`` owned

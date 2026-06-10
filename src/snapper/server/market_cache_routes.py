@@ -22,7 +22,7 @@ parity with the smart ``/api/candles`` router). See
 helpers; this module deliberately holds only the pair-stats + health
 diagnostics.
 
-RBAC: both routes require :data:`Permission.READ_MARKET_DATA`,
+RBAC: all routes require :data:`Permission.READ_MARKET_DATA`,
 matching the existing DB-backed market routes; no per-row operator-
 scope filter (cache + stats surface public price/volume only).
 """

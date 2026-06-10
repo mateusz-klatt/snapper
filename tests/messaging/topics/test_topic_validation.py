@@ -2479,11 +2479,11 @@ class TestSystemTopicBranches:
         assert "2 segments" in _err.lower()
 
     def test_system_heartbeats_invalid_format(self) -> None:
-        """Placeholder test for system heartbeats format.
+        """Do not exercise system heartbeat invalid-format validation.
 
-        Given: A system heartbeats topic,
-        When: Format is checked,
-        Then: Placeholder passes.
+        Given: No system heartbeat topic input is created,
+        When: The test runs,
+        Then: No validation helper is called.
         """
         pass
 
@@ -3161,11 +3161,11 @@ class TestExecutionFieldValidators:
         assert not valid
 
     def test_validate_event_type_unknown(self) -> None:
-        """Verify unknown event type validation.
+        """Do not exercise unknown execution event validation.
 
-        Given: N/A - placeholder test,
-        When: N/A,
-        Then: Test passes.
+        Given: No execution topic input is created,
+        When: The test runs,
+        Then: No validation helper is called.
         """
         pass
 

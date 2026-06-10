@@ -1,4 +1,4 @@
-"""Tests for advanced backtest metrics (3 new + warnings side-channel).
+"""Tests for advanced backtest metrics and warnings side-channel.
 
 Covers ``max_drawdown_duration_seconds``, ``exposure_ratio``, and
 ``turnover_ratio`` — including edge-case policy (``None`` + warning
@@ -222,10 +222,10 @@ class TestTurnoverRatio:
 
 
 class TestComputeMetricsIntegratesWarnings:
-    """compute_metrics drains the 3 new edge cases into ``warnings``."""
+    """compute_metrics drains advanced-metric edge cases into ``warnings``."""
 
     def test_empty_curve_yields_all_three_warnings(self) -> None:
-        """No equity data trips every new-metric degeneracy check."""
+        """No equity data trips every advanced-metric degeneracy check."""
         metrics = compute_metrics([], [])
         assert metrics.max_drawdown_duration_seconds is None
         assert metrics.exposure_ratio is None

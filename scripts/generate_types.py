@@ -1,16 +1,17 @@
-"""Unified type generator for frontend and iOS from backend schemas.
+"""Unified type generator for frontend, iOS, and bridge contracts.
 
-This script consolidates type generation for all platforms:
-- Exports Pydantic WebSocket schemas to JSON Schema
-- Exports OpenAPI REST schemas to JSON Schema
-- Generates Zod schemas for frontend (TypeScript)
-- Prepares schemas for iOS Swift generation (via quicktype)
+This script consolidates generated artifacts derived from backend schemas:
+- Exports Pydantic WebSocket schemas and the FastAPI OpenAPI spec
+- Generates frontend Zod schemas, entity interfaces, and permission constants
+- Generates iOS Swift models and permission constants
+- Generates the snapper-mcp bridge wire-contract when explicitly requested
 
 Usage:
     python scripts/generate_types.py --export       # Export JSON schemas only
-    python scripts/generate_types.py --frontend     # Generate frontend types (Zod)
-    python scripts/generate_types.py --ios          # Prepare iOS schemas
-    python scripts/generate_types.py --all          # All of the above (default)
+    python scripts/generate_types.py --frontend     # Generate frontend Zod schemas
+    python scripts/generate_types.py --ios          # Generate iOS Swift types
+    python scripts/generate_types.py --bridge       # Generate bridge wire contract
+    python scripts/generate_types.py --all          # Default main-repo targets
 """
 
 import argparse
@@ -444,7 +445,7 @@ def _register_openapi_schema(
 
 
 def export_openapi_schemas(project_root: Path) -> Path:
-    """Export OpenAPI component schemas to JSON Schema format for quicktype.
+    """Export OpenAPI component schemas to combined JSON Schema format.
 
     Args:
         project_root: Root directory of the project.
@@ -2107,12 +2108,9 @@ def _bridge_envelope_spec() -> tuple[frozenset[str], str]:
 
     The bridge envelope mirrors whichever provenance fields the
     ``StrictDataSchema`` base currently declares (excluding the
-    per-subclass ``type`` discriminator). Today that's the four
-    fields ``session_id`` / ``sequence_id`` / ``public_id`` /
-    ``timestamp``; once the upcoming topic-on-data work lands, the
-    base picks up ``topic: str | None`` and this helper reflects the
-    fifth field automatically — every regenerated bridge interface
-    inherits it without further generator changes.
+    per-subclass ``type`` discriminator). That includes fields such
+    as ``session_id``, ``sequence_id``, ``public_id``, ``timestamp``,
+    and ``topic`` whenever they are present on the base schema.
 
     Returns:
         A pair of:
@@ -2121,7 +2119,7 @@ def _bridge_envelope_spec() -> tuple[frozenset[str], str]:
           interface bodies (these live on ``FrameEnvelope`` instead).
         - The full ``export interface FrameEnvelope { ... }`` block
           ready to drop into the generated TS file. Field order
-          mirrors the Pydantic dataclass declaration order.
+          mirrors the Pydantic schema declaration order.
     """
     schema = StrictDataSchema.model_json_schema(mode="serialization")
     properties: dict[str, Any] = schema.get("properties", {})

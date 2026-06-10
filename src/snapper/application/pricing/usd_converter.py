@@ -2,19 +2,19 @@
 
 Resolves ``submission.quantity × price_usd`` for the rolling
 24h-notional cap. Reads the active
-class:`~snapper.data.models.MarketSnapshot` for the instrument
+:class:`~snapper.data.models.MarketSnapshot` for the instrument
 and uses its ``last_price`` as the submit-time commitment value.
 
 Scope: one-hop conversion only.
 If ``Instrument.quote == "USD"``, returns ``last_price × quantity``.
 If ``Instrument.quote != "USD"``, raises
-class:`PriceUnavailableError` with ``quote_currency_not_usd``.
+:class:`PriceUnavailableError` with ``quote_currency_not_usd``.
 
 Cache + staleness:
 In-process TTL cache (60s) keyed by ``instrument_public_id`` stores
 ``(last_price, snapshot_timestamp, cached_at)``.
 If ``snapshot_timestamp < now - 300s``, raises
-class:`PriceUnavailableError` with ``price_stale``.
+:class:`PriceUnavailableError` with ``price_stale``.
 """
 
 import asyncio

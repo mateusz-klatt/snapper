@@ -1,15 +1,16 @@
 """Docstring compliance checker for Python files.
 
 Scans Python files and validates:
-- Source files: Google-style docstrings for modules, classes, functions
-- Test files: Docstrings for test_* functions (optionally BDD Given/When/Then)
+- Source files: module docstrings plus public class/function docstrings
+- Test files: module docstrings plus docstrings for test_* functions
+- Optional checks: BDD Given/When/Then tests and Google Args/Returns sections
 
 Usage:
     python scripts/check_docstrings.py [--strict] [--verbose] [--enforce-bdd] [--enforce-google-sections]
 
 Options:
     --strict   Exit with code 1 if any issues found
-    --verbose  Show passing checks too
+    --verbose  Accepted for compatibility; output is currently unchanged
     --enforce-bdd             Require Given/When/Then docstrings for test_* functions
     --enforce-google-sections Require Args/Returns sections for functions
 """
@@ -253,7 +254,9 @@ def validate_google_docstring(
 def validate_bdd_docstring(docstring: str) -> list[str]:
     """Validate BDD-style docstring for a test function.
 
-    Expected format:
+    The current check requires enough lines for a short description and
+    Given/When/Then clauses, then verifies those clause words are present:
+
         Short description.
 
         Given ...,
@@ -423,7 +426,7 @@ def _should_skip_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
         node: The FunctionDef AST node.
 
     Returns:
-        True if the function is private or a dunder method.
+        True if the function uses a leading underscore.
     """
     return node.name.startswith("_")
 
@@ -636,7 +639,7 @@ def print_results(result: ScanResult, root: Path, verbose: bool = False) -> None
     Args:
         result: The scan result to print.
         root: Root directory for relative path display.
-        verbose: Whether to show verbose output.
+        verbose: Compatibility flag accepted by callers; output is unchanged.
     """
     print("=" * 70)
     print("Docstring Compliance Scanner")

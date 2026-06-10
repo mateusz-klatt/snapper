@@ -1,10 +1,10 @@
 """MCP wallet-scope re-validation helper.
 
-The bearer-auth middleware verifies that an MCP caller holds
-a valid JWT, and the DB-backed ``verify_token_with_db`` path
-guarantees the token has not been revoked or the user deactivated.
-Neither check, however, covers the narrower question a write tool
-must answer on every call
+The bearer-auth middleware verifies that an MCP caller holds a valid
+JWT, and the DB-backed ``verify_token_with_reason`` path guarantees the
+token has not been revoked or the user deactivated. Neither check,
+however, covers the narrower question a write tool must answer on every
+call
     *Does this caller still have an active wallet scope grant
     covering the wallet they just referenced in this tool
     invocation?*
@@ -13,9 +13,9 @@ grant row can be revoked at any later moment by an admin without
 invalidating the token itself. WebSocket subscriptions handle this
 via the ``admin.scope_revoked`` subscriber, but synchronous MCP
 tool dispatch needs an equivalent per-call gate.
-func:`validate_user_wallet_scope` is that gate. It is a thin
+:func:`validate_user_wallet_scope` is that gate. It is a thin
 adapter over
-meth:`snapper.data.repository.Repository.list_accessible_wallets_for_operators`
+:meth:`snapper.data.repository.Repository.list_accessible_wallets_for_operators`
 so cross-surface policy stays in one place (the REST list
 endpoints go through :func:`snapper.server.scoping.resolve_target_wallets`
 which consults the same primitive). Keeping the MCP helper

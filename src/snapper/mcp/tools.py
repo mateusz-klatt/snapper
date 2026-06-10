@@ -1,28 +1,24 @@
 """MCP tool registrations.
 
-Thin wrappers over the existing :class:`Repository` and trade-command
-insertion pipeline. Every tool
-    Reads the authenticated :class:`TokenClaims` from
-      data:`snapper.mcp.server.TOKEN_CLAIMS_CTX` via a caller-supplied
-      ``claims_getter``.
-    Enforces the permission matrix: AI_DELEGATE (and every
-      higher role) is admitted for read tools; write tools additionally
-      require the caller to hold the corresponding Permission (e.g.
-      ``CREATE_ORDERS`` for ``submit_manual_order``).
-    Write tools stamp ``source_surface="mcp"`` and wrap the insert
-      with :meth:`TradingCapsEnforcer.guard` so per-user caps apply
-      identically to REST-initiated writes.
-    ``list_instruments(exchange)`` — read-only, returns native
-      symbols available on the given exchange (read permission).
-    ``submit_manual_order(...)`` — write, inserts a ``manual_once``
-      class:`ExecutionPlan` + its initial ``TradeCommand`` with
-      ``source_surface="mcp"`` and ``idempotency_key`` required. Caps
-      evaluated via the shared enforcer before persistence.
-Additional read and write tools (``cancel_order``,
-``list_orders``, ``get_order_status``, ``list_positions``,
-``get_position_cycle``, ``get_ohlcv``, ``list_recent_signals``,
-``submit_ai_review_decision``) follow the same access and
-wallet-scope checks.
+Thin wrappers over :class:`Repository` and the trade-command insertion
+pipeline. Each tool reads authenticated :class:`TokenClaims` from the
+caller-supplied ``claims_getter`` and enforces the same
+role-to-permission matrix as REST routes, using the permission that
+matches the action:
+
+- ``READ_MARKET_DATA`` for ``list_instruments`` and ``get_ohlcv``.
+- ``READ_ORDERS`` for ``list_orders`` and ``get_order_status``.
+- ``READ_POSITIONS`` for ``list_positions`` and ``get_position_cycle``.
+- ``READ_SIGNALS`` for ``list_recent_signals``.
+- ``CREATE_ORDERS`` for ``submit_manual_order`` and
+  ``submit_ai_review_decision``.
+- ``CANCEL_ORDERS`` for ``cancel_order``.
+
+Write tools that create trade commands stamp ``source_surface="mcp"``
+and use :meth:`TradingCapsEnforcer.guard` so per-user caps apply
+identically to REST-initiated writes. Tools that reference a wallet also
+re-check wallet scope against active grants on every call because JWT
+claims are only a login-time snapshot.
 """
 
 import datetime as dt
@@ -251,13 +247,12 @@ def _envelope_for_permission_check(
 
     Returns the structured ``permission_denied`` envelope when the
     caller's role does not include ``permission``; ``None`` when the
-    check passes (caller proceeds with the tool body). The legacy
-    :func:`_require_permission` raises a :class:`PermissionError`
-    that FastMCP surfaces as a generic tool error — the original
-    tools (``list_instruments``, ``submit_manual_order``,
-    ``submit_ai_review_decision``) still use that raising path,
-    while the envelope-first tools wrap the check here at their
-    entry point so clients receive the canonical envelope.
+    check passes and the caller proceeds with the tool body.
+    :func:`_require_permission` is the raising-path helper used by the
+    original tools (``list_instruments``, ``submit_manual_order``,
+    ``submit_ai_review_decision``); envelope-first tools wrap the
+    check here at their entry point so clients receive the canonical
+    envelope.
     """
     role_permissions = ROLE_PERMISSIONS.get(claims.role, set())
     if permission not in role_permissions:
@@ -1473,7 +1468,7 @@ def register_mcp_tools(
         """Submit a single manual order — wraps REST ``create_order`` via MCP.
 
         Caps are evaluated against the caller's
-        class:`UserTradingCaps` row before persistence. Writes are
+        :class:`UserTradingCaps` row before persistence. Writes are
         tagged ``source_surface="mcp"`` on both the plan decision and
         the trade command for audit parity with REST writes.
 
@@ -1488,7 +1483,7 @@ def register_mcp_tools(
             wallet_public_id: UUID7 of the wallet the order attaches
                 to. Caller must have scope access to this wallet.
             idempotency_key: Client-supplied uniqueness key; required
-        because MCP clients are the most
+                because MCP clients are the most
                 likely source of accidental retries.
             price: Limit / stop price. Required for non-market order
                 types.
@@ -1509,7 +1504,7 @@ def register_mcp_tools(
 
         Raises:
             PermissionError: if the caller lacks
-                data:`Permission.CREATE_ORDERS`.
+                :data:`Permission.CREATE_ORDERS`.
             RuntimeError: if repository / caps enforcer are not
                 initialized yet.
             CapsViolationError: on a caps rejection — surfaced to the

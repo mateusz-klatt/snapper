@@ -2,16 +2,16 @@
 
 Parent-app slowapi middleware does not propagate into Starlette
 sub-apps mounted via ``app.mount`` (the same reason
-class:`snapper.mcp.server.BearerAuthMiddleware` is re-applied
+:class:`snapper.mcp.server.BearerAuthMiddleware` is re-applied
 here). Without a dedicated limiter, an automated AI client in a
 retry loop could pound ``/api/mcp`` faster than any other surface
 in Snapper. This module closes that gap by wiring a
 Starlette middleware that consumes one
-class:`~limits.limits.RateLimitItem` per request, keyed by the
+:class:`~limits.limits.RateLimitItem` per request, keyed by the
 authenticated principal.
 Design choices
     **Keying** — we prefer ``user_public_id`` from the
-      class:`~snapper.auth.schemas.tokens.TokenClaims` stashed on
+      :class:`~snapper.auth.schemas.tokens.TokenClaims` stashed on
       ``request.state`` by :class:`BearerAuthMiddleware`. If the
       claims never landed (misordered middleware), the limiter
       falls back to the client IP so a misconfigured deployment

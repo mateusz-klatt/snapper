@@ -2238,8 +2238,8 @@ def egress(ctx: typer.Context) -> None:
     The CLI subcommand is the unified-image dispatch path: under
     ``ENTRYPOINT ["snapper"]``, the sidecar service runs
     ``command: ["egress"]`` in compose and lands here, while the
-    legacy ``python -m snapper.egress`` entrypoint still works for
-    bare-shell invocations.
+    module entrypoint ``python -m snapper.egress`` remains supported
+    for bare-shell invocations.
 
     Args:
         ctx: Typer context with ``allow_extra_args=True``; ``ctx.args``

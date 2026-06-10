@@ -1,15 +1,17 @@
 """Kraken Equities (FCM Futures) market data publisher.
 
 This module provides a market data feed publisher for FCM commodity/index
-futures on Kraken's equities platform. It streams real-time ticks and trades
-via the Kraken Equities WebSocket (``wss://ws-equities.kraken.com``) and
-publishes normalized data to the ZMQ messaging bus.
+futures on Kraken's equities platform. It streams delayed ticks, trades, and
+trade-synthesized 1-minute candles via the Kraken Equities WebSocket
+(``wss://ws-equities.kraken.com``) and publishes normalized data to the ZMQ
+messaging bus.
 
 Configuration
 -------------
 Symbols are configured via settings.instruments["kraken_equities"].
 The publisher uses public (anonymous) WebSocket connections.
 Data is delayed (~10 minutes).
+Historical and non-1m candles remain REST/backfill concerns.
 """
 
 from datetime import UTC
@@ -121,6 +123,7 @@ class KrakenEquitiesMarketDataPublisher(
     Topics Published:
         - market.kraken_equities.{instrument}.ticks
         - market.kraken_equities.{instrument}.trades
+        - market.kraken_equities.{instrument}.candles.1m
         - system.heartbeats.feed.kraken_equities
     """
 

@@ -2,12 +2,13 @@
 
 This module provides a market data feed publisher for the Kraken Futures
 exchange. It streams real-time ticks and trades via Kraken's Futures
-WebSocket API and publishes normalized data to the ZMQ messaging bus.
+WebSocket API, derives 1-minute candles from the live trade stream, and
+publishes normalized data to the ZMQ messaging bus.
 
-Candle data is ingested via REST OHLCV polling (no WebSocket candle
-feed available). The base class ``_candle_loop()`` drives polling
-through ``subscribe_candles()``, which polls ``get_ohlcv()`` at
-regular intervals.
+Kraken Futures has no WebSocket candle channel. The exchange client
+aggregates live trades into 1-minute candles; historical and
+multi-interval OHLCV still use ``get_ohlcv()`` through REST/CCXT
+backfill paths.
 
 Configuration
 -------------
@@ -69,6 +70,7 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
     Topics Published:
         - market.kraken_futures.{instrument}.ticks
         - market.kraken_futures.{instrument}.trades
+        - market.kraken_futures.{instrument}.candles.1m
         - system.heartbeats.feed.kraken_futures
 
     Attributes:

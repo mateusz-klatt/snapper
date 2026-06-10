@@ -22,7 +22,7 @@ Four overrides relative to ``BaseStrategy``
    into ``state.acked_topics`` (firing ``state.subscriber_ready`` when
    every expected topic has been seen), buffers real candles by
    ``open_at``, flushes per-time-batch through
-   func:`snapper.application.backtest.batch_processor.process_time_batch`
+   :func:`snapper.application.backtest.batch_processor.process_time_batch`
    bumps ``drain.on_processed`` inside the market guard, and on exception
    sets ``self._running = False`` before re-raising so the base class's
    stop-side invariant survives.

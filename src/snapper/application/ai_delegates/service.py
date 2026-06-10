@@ -6,7 +6,7 @@ Creation is the load-bearing path: a single DB transaction
 inserts the :class:`~snapper.data.models.User` row (with
 ``role=AI_DELEGATE`` and ``created_by_user_public_id`` pointing
 at the creating operator) and the per-delegate
-class:`~snapper.data.models.UserTradingCaps` row. The minted
+:class:`~snapper.data.models.UserTradingCaps` row. The minted
 access JWT is long-lived (~3 months) and lives only in the
 client; Snapper does not store it.
 """
@@ -172,7 +172,7 @@ class DelegateService:
 
         Steps (all in one transaction)
             1. Resolve + validate the target operator binding via
-               meth:`_resolve_operator_binding` so the delegate
+               :meth:`_resolve_operator_binding` so the delegate
                inherits a concrete ``operator_public_id`` the
                caller is authorised to act AS.
             2. Derive a unique username ``ai-<slug>-<suffix>`` from
@@ -194,11 +194,11 @@ class DelegateService:
                can later re-resolve identical
                ``operator_public_ids`` from DB.
             6. Mint an access+refresh pair via
-               meth:`TokenManager.create_tokens`. The principal
+               :meth:`TokenManager.create_tokens`. The principal
                passed in carries ``operator_public_ids=[bound]``
                so the minted JWT decodes with populated operator
                scope and
-               func:`~snapper.mcp.auth.validate_user_wallet_scope`
+               :func:`~snapper.mcp.auth.validate_user_wallet_scope`
                admits the delegate's first write call.
             7. Insert both ``user_active_tokens`` rows so
                ``verify_token_with_db`` admits them on the next
@@ -215,7 +215,7 @@ class DelegateService:
                 human-readable label + optional caps.
 
         Returns:
-            class:`DelegateCreatedPayload` with the delegate's
+            :class:`DelegateCreatedPayload` with the delegate's
             read projection + the access/refresh JWT pair. The
             tokens are surfaced EXACTLY ONCE (no re-serve).
 
@@ -459,10 +459,10 @@ class DelegateService:
             owner_public_id: Calling operator's UUID; the
                 DB-level WHERE clause enforces the ownership
                 predicate so cross-tenant reads surface as
-                class:`DelegateNotFoundError` (404 upstream).
+                :class:`DelegateNotFoundError` (404 upstream).
 
         Returns:
-            class:`DelegateRead` projection of the active
+            :class:`DelegateRead` projection of the active
             delegate + its caps.
 
         Raises:
@@ -504,7 +504,7 @@ class DelegateService:
                 ``None`` field means "unbounded" on that axis.
 
         Returns:
-            class:`DelegateRead` projection after the new caps
+            :class:`DelegateRead` projection after the new caps
             row has committed.
 
         Raises:
@@ -548,7 +548,7 @@ class DelegateService:
         operator session. Counts ONLY active (``is_active=True``)
         open-ended delegate Users; deactivated rows don't count
         so rotations remain unbounded. Fails-closed with
-        class:`DelegateProliferationError` so the route can map
+        :class:`DelegateProliferationError` so the route can map
         to 409 before the atomic create transaction opens.
         The count
         + insert pair runs under PostgreSQL's default READ
@@ -611,7 +611,7 @@ class DelegateService:
         through would persist ``created_by_user_public_id=""`` on
         new delegates, visible to every other blank-ID operator
         principal. Fail closed with
-        class:`InvalidOwnerPrincipalError` so the route layer
+        :class:`InvalidOwnerPrincipalError` so the route layer
         raises 401 instead of silently creating orphan rows.
         """
         if not owner_public_id:

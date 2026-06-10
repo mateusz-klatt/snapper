@@ -9,6 +9,8 @@ from typing import TypedDict
 
 
 class _WalutomatSymbolRequired(TypedDict):
+    """Required keys emitted by the Walutomat symbol updater."""
+
     native_symbol: str
     base: str
     quote: str
@@ -21,6 +23,8 @@ class WalutomatSymbolRecord(_WalutomatSymbolRequired, total=False):
 
 
 class _PolygonSymbolRequired(TypedDict):
+    """Required keys emitted by the Polygon symbol updater."""
+
     ticker: str
 
 
@@ -33,6 +37,8 @@ class PolygonSymbolRecord(_PolygonSymbolRequired, total=False):
 
 
 class _KrakenSymbolRequired(TypedDict):
+    """Required keys emitted by the Kraken Spot symbol updater."""
+
     native_symbol: str
     base_currency: str
     quote_currency: str

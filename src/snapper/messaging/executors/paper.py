@@ -1,8 +1,9 @@
 """Paper trading order executor.
 
 This module provides a simulated order execution service for paper trading.
-It receives order requests via ZMQ and simulates execution with configurable
-fill delays, providing a safe environment for strategy testing.
+It receives order requests via ZMQ and simulates execution with the
+``PaperExchangeClient`` fill delay, providing a safe environment for
+strategy testing.
 
 The paper executor maintains a simulated balance and tracks positions without
 connecting to real exchange APIs.
@@ -14,16 +15,11 @@ PaperOrderExecutor
 
 Configuration
 -------------
-Configurable via constructor:
-- fill_delay: Simulated execution delay (default: 0.1s)
-- initial_balance: Starting paper balance (default: $10,000)
-
-Example:
--------
-Register and run via process manager::
-
-    executor = PaperOrderExecutor()
-    await executor.start()
+Requires a ``wallet_credentials`` row with ``exchange="paper"``,
+``credential_type="paper"``, and a Fernet-encrypted envelope
+``{"initial_balance": "..."}``. Loaded at executor startup via
+``CredentialResolver``. The concrete executor passes a fixed
+``fill_delay=0.1`` to ``PaperExchangeClient``.
 """
 
 from snapper.application.process_manager.registry import register_process
@@ -49,29 +45,29 @@ class PaperOrderExecutor(ExchangeExecutorService[PaperExchangeClient]):
     """Paper trading order execution service.
 
     Simulates order execution without connecting to real exchanges.
-    Useful for strategy backtesting and development. Supports immediate
-    simulated fills with configurable delay.
+    Useful for strategy backtesting and development. Uses the
+    ``PaperExchangeClient`` simulated fill path.
 
     Topics Subscribed:
         - orders.commands.paper.{instrument}.submit
         - orders.commands.paper.{instrument}.cancel
+        - orders.commands.paper.{instrument}.replace
         - system.symbol_aliases
         - system.settings
 
     Topics Published:
+        - orders.events.paper.{instrument}.submitted
         - orders.events.paper.{instrument}.accepted
         - orders.events.paper.{instrument}.executed
+        - orders.events.paper.{instrument}.cancelled
         - orders.events.paper.{instrument}.rejected
-        - system.heartbeats.executor.paper
+        - system.heartbeats.executor.paper[.{wallet_short}]
 
     Attributes:
         Inherits all attributes from ExchangeExecutorService.
 
-    Example:
-        ::
-
-            executor = PaperOrderExecutor()
-            await executor.start()  # Simulates order execution
+    Direct construction with an empty ``wallet_public_id`` is for
+    tests that inject ``self._credentials`` before ``start()``.
     """
 
     def _create_exchange_client(self) -> PaperExchangeClient:

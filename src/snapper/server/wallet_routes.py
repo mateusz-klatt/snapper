@@ -3,12 +3,11 @@
 Provides the frontend wallet picker with the list of
 wallets the current principal can act on, plus a guarded create
 endpoint backing the admin Wallet Credentials tab. ADMIN
-principals see every active wallet; VIEWER and OPERATOR principals
-see only the subset covered by at least one of their active scope
-grants.
-Credential management (add / rotate / restart) lives on the
-future routes under ``/wallets/{id}/credentials`` and never
-co-returns the encrypted payload. Gap detection provenance
+principals see every active wallet; non-ADMIN principals see only
+the subset covered by at least one of their active scope grants.
+Credential management (add / rotate / restart) lives on dedicated
+routes under ``/wallets/{id}/credentials`` and never co-returns the
+encrypted payload. Gap detection provenance
 (``session_id``, ``sequence_id``, ``public_id``, ``timestamp``) is
 minted from ``request.app.state.rest_tracker`` so the stream stays
 uniform with the rest of the REST surface.
@@ -70,7 +69,7 @@ async def list_wallets(
 ) -> WalletListResponse:
     """List wallets accessible to the current principal.
 
-    ADMIN sees every active wallet. VIEWER and OPERATOR see only the
+    ADMIN sees every active wallet. Non-ADMIN callers see only the
     wallets covered by at least one active scope grant from the
     principal's operator set — matching the wallet picker
     contract that the picker is filtered server-side.
@@ -121,7 +120,7 @@ async def create_wallet(
     """Create a new active wallet.
 
     Guarded by the ``MANAGE_WALLET_CREDENTIALS`` permission, which
-    is ADMIN-only at launch. A wallet is the container for
+    is currently granted only to ADMIN. A wallet is the container for
     credentials, so the same permission that manages credential
     rotation also creates the wallets that hold them.
     The active-unique index on ``(label, is_paper)`` is enforced at

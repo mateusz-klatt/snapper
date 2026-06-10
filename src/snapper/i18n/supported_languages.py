@@ -4,14 +4,8 @@ Union of ``CatalogLanguage`` codes from both the iOS xcstrings catalog
 (``ios/Snapper/I18n/CatalogLanguage.swift``) and the frontend i18n
 catalog (``frontend/src/i18n/types.ts``). The two clients ship slightly
 different code forms for the same languages (e.g. iOS uses ``pt-BR`` and
-``nb``; frontend uses ``pt`` and ``no``) — a future canonical
-normalization layer will unify these, but for now both forms are accepted
-so each client can send what its own catalog uses without a translation
-step.
-
-A future revision will replace this hardcoded set with a generator-driven
-constant sourced from the authoritative xcstrings parse + a
-frontend-↔-iOS code mapping table.
+``nb``; frontend uses ``pt`` and ``no``). Both forms are accepted so each
+client can send the code its own catalog uses without a translation step.
 """
 
 SUPPORTED_LANGUAGES: frozenset[str] = frozenset(
@@ -71,8 +65,7 @@ SUPPORTED_LANGUAGES: frozenset[str] = frozenset(
 """Frozen set of catalog language codes a user may select as their
 ``default_language``. Source: union of iOS ``CatalogLanguage`` (45
 cases) and frontend ``CatalogLanguage`` (45 cases), differing in 5
-codes — total 50. A future normalization layer will collapse the
-union."""
+codes - total 50."""
 
 
 def is_supported_language(value: str) -> bool:
@@ -87,6 +80,7 @@ def is_supported_language(value: str) -> bool:
 
     Returns:
         ``True`` when ``value`` is in ``SUPPORTED_LANGUAGES``;
-        ``False`` otherwise (typos, empty strings, drift from iOS).
+        ``False`` otherwise (typos, empty strings, or client-catalog
+        drift).
     """
     return value in SUPPORTED_LANGUAGES

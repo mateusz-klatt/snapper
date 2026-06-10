@@ -1,4 +1,4 @@
-"""Targeted backtest coverage for small leftover branches.
+"""Targeted backtest coverage for branch behavior outside the main suites.
 
 Covers:
 
@@ -75,7 +75,7 @@ def _ep(hours: float, equity: float) -> BacktestEquityPointInsertRow:
 
 
 class TestBatchProcessorEmitterBranch:
-    """batch_processor.process_time_batch emitter-present path (lines 181-182)."""
+    """batch_processor.process_time_batch emitter-present path."""
 
     @pytest.mark.asyncio
     async def test_emitter_on_candle_processed_fires(self) -> None:
@@ -136,7 +136,7 @@ class TestBatchProcessorEmitterBranch:
 
 
 class TestMaxDrawdownDurationFlatThenDrop:
-    """Exercise the in-drawdown peak-refresh branches (metrics.py 312/315)."""
+    """Exercise the in-drawdown peak-refresh branches."""
 
     def test_drawdown_after_flat_region(self) -> None:
         """Given: equity that stays flat then drops; When: computed; Then: duration reflects drop-from-original."""
@@ -148,7 +148,7 @@ class TestMaxDrawdownDurationFlatThenDrop:
 
 
 class TestMaxDrawdownDurationBranches:
-    """Cover the elif-without-drawdown and not-greater branches (312/315)."""
+    """Cover the elif-without-drawdown and not-greater branches."""
 
     def test_peak_refresh_without_drawdown_first(self) -> None:
         """First sample equals start, then drops then recovers — second drawdown stays smaller."""
@@ -180,7 +180,7 @@ class TestMaxDrawdownDurationBranches:
 
 
 class TestRunnerCountExceptionFallback:
-    """runner._count_expected_batches exception path (lines 84-90)."""
+    """runner._count_expected_batches exception path."""
 
     @pytest.mark.asyncio
     async def test_repository_raises_returns_none(self) -> None:
@@ -203,14 +203,14 @@ class TestRunnerCountExceptionFallback:
 
 
 class TestCliConfigHashFallback:
-    """cli.app backtest command config_hash exception fallback (lines 1574-1575)."""
+    """cli.app backtest command config_hash exception fallback."""
 
     def test_cli_backtest_run_handles_fingerprint_exception(self, tmp_path: Any) -> None:
         """Given: compute_fingerprint raises in the CLI path; Then: config_hash=None is stored.
 
         Drives the CLI ``backtest-run`` command end-to-end against a fresh
         SQLite DB with mocked engine + strategy so the only side effect
-        observed is the ``except`` branch in ``cli/app.py:1574-1575``.
+        observed is the config-hash fallback branch.
         """
         runner = CliRunner()
         db_path = tmp_path / "cli.db"
@@ -278,14 +278,14 @@ class TestCliConfigHashFallback:
 
 
 class TestRunnerCancelEmitterBranch:
-    """runner.py cancel path emitter notification (line 323-326)."""
+    """BacktestRunnerProcess cancel path emitter notification."""
 
     @pytest.mark.asyncio
     async def test_cancel_before_emitter_construct_skips_terminal(self) -> None:
         """Given: CancelledError fires before the emitter is built; Then: cancel handler still runs cleanly.
 
-        Exercises the ``if emitter is not None`` False branch (323->326) —
-        the cancel arrives during ``BacktestConfig.model_validate`` so
+        Exercises the ``if emitter is not None`` False branch: the cancel
+        arrives during ``BacktestConfig.model_validate`` so
         the local ``emitter`` is still ``None`` when the except handler
         runs.
         """
@@ -460,7 +460,7 @@ class TestBridgeBacktestDualGateMalformed:
 
 
 class TestSubscribeBacktestInvalidPrefix:
-    """handlers.subscribe._validate_ws_topics malformed backtest prefix (line 80)."""
+    """handlers.subscribe._validate_ws_topics malformed backtest prefix."""
 
     @pytest.mark.asyncio
     async def test_malformed_backtest_prefix_is_rejected(self) -> None:
@@ -491,7 +491,7 @@ class TestSubscribeBacktestInvalidPrefix:
 
 
 class TestBacktestTopicValidatorEdges:
-    """validation.py backtest validator edge branches (lines 945, 993, 1013, 1016, 1018)."""
+    """validation.py backtest validator edge branches."""
 
     def test_wrong_category_segment_rejected(self) -> None:
         """Given: topic with wrong first segment; Then: 'Expected backtest' error."""
@@ -530,7 +530,7 @@ class TestBacktestTopicValidatorEdges:
 
 
 class TestCreateBacktestConfigHashFallback:
-    """server.backtest_routes.create_backtest config_hash exception branch (lines 303-305)."""
+    """server.backtest_routes.create_backtest config_hash exception branch."""
 
     @pytest.mark.asyncio
     async def test_fingerprint_exception_stores_null(self) -> None:

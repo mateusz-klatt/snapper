@@ -33,11 +33,16 @@ class BacktestCreateBody(StrictBody):
         end_date: Backtest period end.
         initial_cash: Starting cash balance.
         strategy_params: Strategy-specific parameters.
+        execution_mode: Engine execution path. ``direct_db`` reads and
+            writes through the repository; ``zmq_replay`` is accepted
+            by the public contract for replay-oriented runs.
+        fill_model: Simulated fill model. Only ``market`` is accepted.
+        slippage_bps: Simulated slippage in basis points, from 0 to 500.
+        commission_bps: Simulated commission in basis points, from 0 to 500.
         target_execution_exchange: Optional order-capable venue that
             simulated fills are attributed to. ``None`` (default) keeps
-            fills on the source feed (single-exchange backtest, byte-
-            identical to legacy behaviour). When set, the engine
-            attributes simulated trades to this venue at fill time —
+            fills on the source feed for single-exchange backtests.
+            When set, the engine attributes simulated trades to this venue at fill time -
             enables observe-on-feed-A / trade-on-venue-B (cross-asset)
             runs from the public REST surface. Must be one of the
             order-capable values: ``paper`` / ``kraken`` /
@@ -109,7 +114,7 @@ class BacktestCreateBody(StrictBody):
     @field_validator("fill_model")
     @classmethod
     def validate_fill_model(cls, v: str) -> str:
-        """Only ships the 'market' fill model.
+        """Validate that the fill model is ``market``.
 
         Args:
             v: Fill model value.
@@ -202,6 +207,12 @@ class BacktestRunData(StrictDataSchema[Literal["backtest_run"]]):
         end_date: Period end.
         initial_cash: Starting balance.
         status: Run lifecycle status.
+        execution_mode: Engine execution path used by the run.
+        fill_model: Simulated fill model used by the run.
+        slippage_bps: Simulated slippage in basis points.
+        commission_bps: Simulated commission in basis points.
+        config_hash: Stable hash of the run configuration when
+            available.
         started_at: When execution started.
         completed_at: When execution finished.
         error: Error message if failed.

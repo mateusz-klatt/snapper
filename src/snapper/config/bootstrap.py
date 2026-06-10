@@ -7,9 +7,14 @@ These settings are loaded from environment variables and/or a .env file.
 Bootstrap settings include:
     - Database connection URL
     - Master password for settings encryption
-    - HTTP server configuration (host, port, reload)
+    - HTTP server configuration (host, port, reload, API-only mode)
     - Reverse proxy trust configuration (proxy headers, trusted proxy IPs)
-    - ZMQ broker endpoints
+    - Process autostart profile
+    - ZMQ broker connect and bind endpoints
+    - Telemetry recording toggle
+    - Coordinator partitioning controls
+    - Paired-execution guard and timeout controls
+    - Trade-command dispatch TTL
 
 Example:
     Load settings from environment::
@@ -24,10 +29,22 @@ Example:
         MASTER_PASSWORD=secure-password
         SERVER_HOST=0.0.0.0
         SERVER_PORT=8000
+        SERVER_API_ONLY=false
+        PROCESS_AUTOSTART_PROFILE=all
         SERVER_PROXY_HEADERS=true
         SERVER_FORWARDED_ALLOW_IPS=127.0.0.1
         ZMQ_BROKER_XSUB=tcp://127.0.0.1:7500
         ZMQ_BROKER_XPUB=tcp://127.0.0.1:7501
+        ZMQ_BROKER_BIND_XSUB=tcp://0.0.0.0:7500
+        ZMQ_BROKER_BIND_XPUB=tcp://0.0.0.0:7501
+        TELEMETRY_RECORDING_ENABLED=false
+        SNAPPER_COORDINATOR_INSTANCE_ID=0
+        SNAPPER_COORDINATOR_INSTANCE_COUNT=1
+        SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS=1000
+        PAIRED_EXECUTION_GUARD_ENABLED=false
+        PAIRED_EXECUTION_ASSEMBLY_TIMEOUT_S=5.0
+        PAIRED_EXECUTION_FILL_TIMEOUT_S=30.0
+        TRADE_COMMAND_DISPATCH_TTL_S=30.0
 """
 
 from typing import Any
@@ -132,6 +149,9 @@ class BootstrapSettingsLoader(BaseSettings):
         paired_execution_fill_timeout_s: Seconds an armed paired-execution
             group waits for its legs to fill before the guard treats a
             laggard as a breakage. Sets ``fill_deadline = created_at + this``.
+        trade_command_dispatch_ttl_s: Maximum command age before outbox
+            dispatch and executor order processing refuse a stale trade
+            command. ``<= 0`` disables both gates.
     """
 
     model_config = SettingsConfigDict(

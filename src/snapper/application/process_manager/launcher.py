@@ -1580,6 +1580,7 @@ class ProcessLauncherService:
         """
 
         def _callback(completed_task: asyncio.Task[Any]) -> None:
+            """Schedule async completion handling from the task callback."""
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
@@ -1589,6 +1590,7 @@ class ProcessLauncherService:
                 return
 
             async def _handle_completion() -> None:
+                """Process completion and chain coroutine/task results."""
                 if not completed_task.cancelled():
                     try:
                         result = completed_task.result()
@@ -1648,6 +1650,7 @@ class ProcessLauncherService:
             self._process_metrics[name] = (rss, cpu)
 
     def _start_native_process_monitoring(self) -> None:
+        """Start the native-process monitor task when PROCESS children exist."""
         existing_monitor = self.process_tasks.get("_native_monitor")
         if existing_monitor and not existing_monitor.done():
             return
@@ -1663,6 +1666,7 @@ class ProcessLauncherService:
         logger.info("Started native process monitoring")
 
     async def _monitor_native_processes(self) -> None:
+        """Poll native subprocesses for exit, metrics, and summary events."""
         try:
             while True:
                 try:

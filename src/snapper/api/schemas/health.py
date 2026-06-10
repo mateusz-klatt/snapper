@@ -320,6 +320,7 @@ class RestRateData(StrictDataSchema[Literal["rest_rate"]]):
     """Payload for the ``GET /api/metrics/rest-rate`` endpoint.
 
     Attributes:
+        type: Payload item type discriminator.
         exchanges: Per-exchange sliding-window stats. Exchanges appear
             in the map only after at least one REST call has been
             recorded against them since process startup.

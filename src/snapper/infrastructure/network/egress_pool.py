@@ -4,10 +4,10 @@ The pool is a singleton populated by ``configure_egress_pool`` during
 startup; ``get_egress_pool`` returns the configured instance or
 ``None``.
 
-DNS resolution and ``python-socks`` availability checks are done
-asynchronously in ``initialize_egress_pool``, which is invoked from
-the FastAPI lifespan BEFORE publishers come up. The pool itself
-performs no I/O on construction — that work lives in the
+DNS resolution, ``python-socks`` availability, and SOCKS5 listener
+checks are done asynchronously in ``initialize_egress_pool``, which
+is invoked from the FastAPI lifespan BEFORE publishers come up. The
+pool itself performs no I/O on construction — that work lives in the
 preflight.
 
 All pool mutation is guarded by a single ``threading.RLock`` because
@@ -172,11 +172,11 @@ class EgressPool(EgressPoolBase):
               ``AllRoutesQuarantinedError``.
 
         Args:
-            exchange: The exchange name (informational; not used by
-                v1 selection but reserved for future per-exchange
-                policy).
-            purpose: ``"websocket"`` or ``"http"`` (informational in
-                v1).
+            exchange: The exchange name used to filter routes by
+                ``RouteConfig.allowed_exchanges``. Routes with an
+                empty allow-list serve any exchange.
+            purpose: ``"websocket"`` or ``"http"``; included in
+                route-exhaustion error messages.
             preferred_route: Optional route id hint.
 
         Returns:
@@ -405,7 +405,8 @@ async def initialize_egress_pool(
 
     Invoked from the FastAPI lifespan AFTER ``_initialize_settings_service``
     and BEFORE publishers come up. The preflight runs DNS lookups
-    asynchronously so the event loop is not blocked.
+    and SOCKS5 listener probes asynchronously so the event loop is
+    not blocked.
 
     The preflight:
 
@@ -416,13 +417,14 @@ async def initialize_egress_pool(
     3. Validates via ``EgressPoolConfig.model_validate``. On any
        parse or validation error, logs + returns ``None``
        (disabled-equivalent).
-    4. For each SOCKS5 route, awaits
-       ``loop.getaddrinfo(host, None)``. Routes that fail DNS or
-       have no ``proxy_url`` (defensive) are auto-disabled in the
-       effective config copy.
-    5. Checks ``importlib.util.find_spec("python_socks")``; when
+    4. Checks ``importlib.util.find_spec("python_socks")``; when
        missing AND any SOCKS5 route is present, those routes are
        auto-disabled with a single throttled warning.
+    5. For each SOCKS5 route, awaits
+       ``loop.getaddrinfo(host, None)`` and opens a short
+       TCP/SOCKS5 NO_AUTH greeting probe. Routes that fail DNS, have
+       no ``proxy_url`` or port, or fail the greeting are
+       auto-disabled in the effective config copy.
     6. Calls ``configure_egress_pool(effective_config)`` to install
        the singleton.
 
@@ -457,9 +459,10 @@ async def safely_initialize_egress_pool(settings_service: SettingsService) -> No
     """Run the egress-pool preflight without crashing the caller on failure.
 
     Reads the ``egress_pool`` setting, validates the schema, resolves SOCKS5
-    DNS, and installs the process-local singleton. Errors (malformed JSON,
-    Pydantic mismatch, DNS timeouts) are logged but never propagate — the pool
-    is best-effort infrastructure. This is called once per process during
+    DNS, verifies SOCKS5 listener handshakes, and installs the process-local
+    singleton. Errors (malformed JSON, Pydantic mismatch, DNS timeouts,
+    listener failures) are logged but never propagate — the pool is
+    best-effort infrastructure. This is called once per process during
     startup (the singleton is empty beforehand), so on failure the pool stays
     empty and the connect shim falls back to the direct path; it does not reset
     a previously-installed pool, so it is not safe for hot-reload as written.
@@ -520,6 +523,8 @@ async def _preflight_routes(config: EgressPoolConfig) -> EgressPoolConfig:
     * If the route is SOCKS5 and ``python-socks`` is missing, disable.
     * If the route is SOCKS5 and DNS resolution of the proxy host
       fails, disable.
+    * If the route is SOCKS5 and its listener does not complete the
+      SOCKS5 NO_AUTH greeting, disable.
 
     Returns a NEW config object (does not mutate the input) with
     ``RouteConfig.enabled`` overridden to ``False`` on routes that
@@ -562,11 +567,9 @@ async def _preflight_one_route(
 ) -> RouteConfig:
     """Run async DNS + python-socks + SOCKS5-greeting checks for one route.
 
-    The SOCKS5 greeting probe closes a gap where the sidecar container
-    was healthy but a tunnel's listener was absent — DNS would resolve,
-    the pool would admit the route, and the shim would keep picking the
-    broken route because generic proxy-connection failures do not
-    quarantine.
+    The SOCKS5 greeting probe catches absent or broken tunnel
+    listeners at startup before the first publisher dial or reconnect
+    cycle has to discover and quarantine the route.
 
     Returns a new ``RouteConfig`` with ``enabled=False`` if the route
     failed preflight; otherwise the input route (frozen Pydantic

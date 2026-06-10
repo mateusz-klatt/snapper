@@ -19,11 +19,14 @@ group; the guard scanner's quiet-halt sweep then clears the scope's durable
 halt and every coordinator's in-memory mirror within one cycle — the REST
 process never needs a control channel into the trader.
 
-Both endpoints enforce wallet scoping on top of role permissions: VIEWER /
-OPERATOR principals see and attest only scopes whose ``wallet_public_id`` is
-in their accessible set; ADMIN is unscoped. The paired-execution tables exist
-only on the SQL repository, so both endpoints narrow the injected repository
-exactly like the trader does and answer 503 on a non-SQL deployment.
+Both endpoints enforce wallet scoping on top of action-specific
+permissions. The incident list requires ``READ_POSITIONS`` and filters
+non-ADMIN callers to accessible wallets. The terminalize endpoint
+requires ``MANAGE_PAIRED_EXECUTION`` and applies the same non-ADMIN
+wallet filter before recording the attestation. ADMIN is unscoped. The
+paired-execution tables exist only on the SQL repository, so both
+endpoints narrow the injected repository exactly like the trader does
+and answer 503 on a non-SQL deployment.
 """
 
 import datetime as dt

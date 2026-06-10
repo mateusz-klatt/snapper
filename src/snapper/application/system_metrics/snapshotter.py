@@ -23,8 +23,7 @@ Sampler hot-path invariants:
 
 Configuration: ``SYSTEM_METRICS_INTERVAL_SECONDS`` (default 5),
 ``SYSTEM_METRICS_HISTORY_CAP`` (default 17280) read directly from
-``os.environ.get(...)`` in :meth:`__init__` — no ``AppSettings``
-extension this iteration.
+``os.environ.get(...)`` in :meth:`__init__`.
 """
 
 import asyncio
@@ -463,9 +462,9 @@ class SystemMetricsSnapshotter:
 
         ``aiosqlite_live_connections`` is read via atomic ``len(...)``
         — DICT iteration would race with SQLAlchemy connect / close
-        hooks. ``pool_size`` / ``pool_checked_out`` are populated when
-        the live engine uses a queue pool (PG / DB_POOL_MODE=queue);
-        ``None`` under NullPool (file-backed SQLite default).
+        hooks. ``pool_size`` / ``pool_checked_out`` are reserved for
+        queue-pool instrumentation and currently return ``None`` from
+        this sampler.
         """
         live = len(_live_aiosqlite_connections)
         pool_size: int | None = None

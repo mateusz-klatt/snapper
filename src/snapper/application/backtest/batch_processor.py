@@ -1,11 +1,10 @@
 """Pure module-level batch processor shared by Direct-DB and ZMQ replay engines.
 
 Houses the per-timestamp candle-batch processing helper extracted from
-mod:`snapper.application.backtest.direct_engine` so the forthcoming
-``ZmqReplayEngine`` can reuse the same fill
-simulation, signal recording, and equity sampling logic without
-inheritance gymnastics. Behaviour is byte-for-byte identical to the
-previous ``DirectDbEngine._process_time_batch``.
+:mod:`snapper.application.backtest.direct_engine` so ``DirectDbEngine``
+and ``ZmqReplayEngine`` use the same fill simulation, signal recording,
+and equity sampling logic without inheritance gymnastics. Behaviour
+matches the helper originally hosted on ``DirectDbEngine``.
 Also re-homes the candle data structures (``CandleEvent`` /
 ``candle_row_to_data``) here so engines can depend downward on
 ``batch_processor`` without circular imports — engines own loop control

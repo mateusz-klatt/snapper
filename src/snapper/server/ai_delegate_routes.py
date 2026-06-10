@@ -125,7 +125,7 @@ def ai_integration_disabled_handler(
     """Translate :class:`AiIntegrationDisabledError` to MCP-parity 503.
 
     The body shape is identical to
-    class:`~snapper.mcp.server.FeatureFlagMiddleware`'s 503 so a
+    :class:`~snapper.mcp.server.FeatureFlagMiddleware`'s 503 so a
     frontend / CLI branching on ``error_code`` sees one payload
     regardless of which surface returned the 503.
 

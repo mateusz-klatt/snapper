@@ -103,11 +103,11 @@ class UpdateAuthMeBody(StrictBody):
     """Self-service caller preferences request body.
 
     Used by the authenticated user to update their own preferences via
-    ``POST /api/auth/me/update``. Currently exposes only
-    ``default_language`` — additional preference fields may be added
-    later as the feature evolves. The admin-facing
+    ``POST /api/auth/me/update``. The body manages the caller's
+    ``default_language`` preference. The admin-facing
     :class:`UpdateUserBody` deliberately stays separate so the
-    ``MANAGE_USERS`` permission does not silently expand its scope.
+    ``MANAGE_USERS`` permission does not silently expand into
+    self-service preference writes.
 
     Attributes:
         default_language: Catalog-language code (one of

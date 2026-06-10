@@ -81,8 +81,8 @@ class CointegrationPairs(BaseStrategy, MultiLegSpreadMixin):
         exit_threshold: Z-score threshold for exit.
         lookback_window: Window for spread statistics.
         min_data_points: Minimum data points required.
-        instrument1: First instrument symbol — backwards-compatible alias
-            for ``self.legs[0]``.
+        instrument1: First instrument symbol — compatibility alias for
+            ``self.legs[0]``.
         instrument2: Second instrument symbol — alias for ``self.legs[1]``.
     """
 
@@ -125,11 +125,11 @@ class CointegrationPairs(BaseStrategy, MultiLegSpreadMixin):
 
     @staticmethod
     def _extract_instrument(topic: str) -> str:
-        """Backwards-compat alias for :func:`_extract_instrument_from_topic`.
+        """Compatibility alias for :func:`_extract_instrument_from_topic`.
 
         Kept so existing call sites and unit tests that reach into this
         static method (e.g. ``CointegrationPairs._extract_instrument``)
-        keep working after the migration to the multi-leg helper module.
+        keep working with the shared multi-leg helper.
 
         Args:
             topic: ZMQ topic string.
@@ -387,7 +387,7 @@ Sweet-spot params from the cointegration screening session:
 
 Engine FET/RENDER backtest with these params produced Sharpe 0.61 /
 return +60% / max DD -65% over the 2023-11 → 2026-05 period after
-the paired-signal fix.
+paired-signal group emission.
 """
 
 _create_strategy_process(

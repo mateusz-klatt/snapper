@@ -1,12 +1,12 @@
 """Pre-insert DTO for trade-command submissions.
 
-class:`TradeCommandSubmission` is the value object every insert
+:class:`TradeCommandSubmission` is the value object every insert
 site constructs BEFORE acquiring the cap-enforcer guard. It is
 intentionally **distinct** from :class:`TradeCommandRow` (the
 post-insert DB-projection TypedDict): this one carries the request
 context that the enforcer needs for cap evaluation, without the
 DB-assigned fields (``public_id``, ``created_at``, ``session_id``
-``sequence_id``, ``timestamp``) which are populated at insert
+``sequence_id``, ``timestamp``), which are populated at insert
 time.
 The DTO is frozen so an insert pipeline can pass it by reference
 without worrying about mutations between cap check and actual
@@ -82,4 +82,4 @@ class TradeCommandSubmission:
     reads ``dispatch_version`` from the cited ``ai_reviews`` row at
     publish time so the bus event always uses the row-of-record value.
     Default ``None`` preserves byte-identical behaviour for every
-    submission that does not threadattribution."""
+    submission that does not thread AI-review attribution."""

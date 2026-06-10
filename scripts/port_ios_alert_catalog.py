@@ -1,7 +1,7 @@
 """Port the iOS ``alerts.*`` xcstrings catalog into frontend JSON locales.
 
 Reads ``ios/Snapper/Resources/Localization/Localizable.xcstrings``,
-filters keys with the ``alerts.`` prefix (30 keys at time of writing),
+filters keys with the ``alerts.`` prefix (32 keys at time of writing),
 maps each iOS locale code to its corresponding frontend
 ``src/locales/<dir>/`` and writes ``alerts.json`` per locale.
 

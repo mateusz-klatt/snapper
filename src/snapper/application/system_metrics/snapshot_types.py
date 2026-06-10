@@ -105,8 +105,8 @@ class DbInternalMetrics(TypedDict):
     no iteration. Each live aiosqlite Connection corresponds to one OS
     thread under NullPool semantics; this metric is the diagnostic for
     aiosqlite thread leaks.
-    ``pool_size`` and ``pool_checked_out`` are populated when the engine
-    uses a queue pool (PG / DB_POOL_MODE=queue); ``None`` under NullPool.
+    ``pool_size`` and ``pool_checked_out`` are reserved for queue-pool
+    instrumentation and are ``None`` in the current sampler output.
     """
 
     aiosqlite_live_connections: int

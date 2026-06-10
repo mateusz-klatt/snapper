@@ -222,8 +222,9 @@ class StrategyProcessParameters(StrictBody):
         exchange: Exchange for order execution.
         params: Strategy-specific opaque parameters.
         wallet_public_id: Wallet that owns positions and credentials for
-            order execution. Empty default for backwards compatibility;
-            becomes required after NOT NULL tightening.
+            order execution. Empty default preserves compatibility with
+            serialized process configs that predate wallet scoping; new
+            runtime-created strategy configs should pass a real wallet id.
         operator_public_id: Trading-identity operator that owns this
             strategy instance. Empty default.
     """

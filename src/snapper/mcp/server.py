@@ -9,12 +9,10 @@ before the settings service has finished initialising — so the
 MCP endpoint is reachable on a fresh install without manual setup.
 Operators flip the flag at runtime to disable it without
 restarting the API server.
-The bearer-header auth extension shipped in
-(:func:`snapper.auth.dependencies.get_current_user`) provides the
-transport; this module's auth middleware translates its absence /
-invalidity into MCP-compatible JSON error responses. Per-tool
-fine-grained authorization is handled by the individual tool
-wrappers.
+The auth middleware reuses the REST bearer-header extractor and token
+manager, then translates missing or invalid credentials into
+MCP-compatible JSON error responses. Per-tool fine-grained
+authorization is handled by the individual tool wrappers.
 """
 
 from collections.abc import Callable
@@ -151,12 +149,10 @@ class FeatureFlagMiddleware(BaseHTTPMiddleware):
 def _build_rejection_response(rejection_reason: str | None) -> JSONResponse:
     """Return a 401 JSONResponse whose ``error_code`` matches ``rejection_reason``.
 
-    The reason comes straight from
-    meth:`TokenManager.verify_token_with_reason` so the classifier
-    cannot be fooled by a stale cache entry left over from an
-    earlier request. Success is
-    never routed here; only rejection reasons land in this
-    function.
+    The reason comes straight from ``TokenManager.verify_token_with_reason``
+    so the classifier cannot be fooled by a stale cache entry left over
+    from an earlier request. Success is never routed here; only
+    rejection reasons land in this function.
 
     Args:
         rejection_reason: One of :data:`REJECTION_REASON_USER_DEACTIVATED`
@@ -193,22 +189,21 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 
     Rejects with 401 when the header is absent, malformed, or carries
     an unverifiable JWT. The verified :class:`TokenClaims` is stashed
-    on ``request.state.token_claims`` for downstream tool dispatch
+    on ``request.state.token_claims`` for downstream tool dispatch.
     The MCP transport has no cookie
     semantics — clients exclusively present the bearer token they
     obtained via ``POST /api/auth/login?return_tokens=true``.
-    Verification routes through
-    meth:`TokenManager.verify_token_with_db` so each MCP call
-    checks the ``user_active_tokens`` inventory + SCD2-active
-    ``users.is_active`` via the 30-second LRU cache. Kill-switch
-    propagation
+    Verification routes through ``TokenManager.verify_token_with_reason``
+    so each MCP call checks the ``user_active_tokens`` inventory +
+    SCD2-active ``users.is_active`` via the 30-second LRU cache.
+    Kill-switch propagation
         **Same-instance** — immediate. The JTI blacklist seeded
           by :meth:`TokenManager.revoke_user_sessions` is
           consulted inside the sync ``verify_token`` layer BEFORE
           the LRU, so revoked tokens cannot serve from cache.
         **Cross-instance** — bounded by the 30-second LRU TTL
           until the admin-bus subscriber calls
-          meth:`TokenManager.invalidate_user_cache` on
+          ``TokenManager.invalidate_user_cache`` on
           ``admin.user_deactivated``, collapsing latency to one
           bus round-trip.
     The effective ceiling drops from the 15-minute access-token
@@ -318,21 +313,21 @@ def build_mcp_app(
 
     Args:
         settings_service_getter: Zero-arg callable returning the
-            class:`SettingsService` singleton at request time. This
+            :class:`SettingsService` singleton at request time. This
             must be a getter (not the service itself) because the
             sub-app is constructed in ``create_app()`` BEFORE the
             FastAPI lifespan has initialized the settings service.
             The typical wiring is
             ``build_mcp_app(lambda: getattr(app.state, "settings_service", None))``.
         repository_getter: Zero-arg callable returning the shared
-            class:`Repository` singleton. Tools read-only methods
+            :class:`Repository` singleton. Tools read-only methods
             (``list_instruments``, ``list_positions``, etc.) call
             through this. ``None`` at construction time is supported
             and treated as "tools unavailable" at request time — so
             the sub-app can still be mounted before lifespan startup
             completes.
         caps_enforcer_getter: Zero-arg callable returning the shared
-            class:`TradingCapsEnforcer` singleton. Write tools
+            :class:`TradingCapsEnforcer` singleton. Write tools
             (``submit_manual_order``, ``cancel_order``) wrap inserts
             in ``guard(submission)`` against this enforcer so
             per-user caps apply to MCP-initiated writes identically

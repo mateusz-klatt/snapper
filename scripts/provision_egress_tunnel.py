@@ -6,12 +6,14 @@ SettingsService:
 
 1. ``egress_tunnel_<id>``                — TunnelDescriptor JSON (plain).
 2. ``egress_tunnel_<id>_private_key``    — Fernet-encrypted Curve25519 key.
-3. ``egress_pool`` (read-modify-write)   — append a ``socks5`` route and
+3. Optional ``egress_tunnel_<id>_preshared_key`` — Fernet-encrypted PSK.
+4. ``egress_pool`` (read-modify-write)   — append a ``socks5`` route and
    force ``enabled: true`` if currently false.
 
-Then triggers a snapper-egress restart so the sidecar picks up the new
-tunnel via its bootstrap path. The snapper-api egress pool reconfigures
-itself from the ZMQ settings-change event without a hard restart.
+With ``--restart-sidecar``, the script also restarts snapper-egress so
+the sidecar picks up the new tunnel via its bootstrap path. The
+snapper-api egress pool reconfigures itself from the ZMQ settings-change
+event without a hard restart.
 
 Run inside the ``snapper`` container so it shares ``DB_URL`` +
 ``ZMQ_BROKER_XSUB`` env vars with the live service:
@@ -27,10 +29,11 @@ Run inside the ``snapper`` container so it shares ``DB_URL`` +
         --socks5-listen-port 1081 \\
         --priority 10
 
-The script is intentionally explicit (no defaults that mask provider-side
-typos). Each step is idempotent — re-running with the same tunnel-id
-overwrites the descriptor + key in place and does not duplicate the route
-inside egress_pool.
+The provider identity, endpoint, and key fields are intentionally
+explicit so typos do not hide behind defaults; conventional routing and
+operator controls still have defaults. Each write step is idempotent —
+re-running with the same tunnel-id overwrites the descriptor/key values
+in place and does not duplicate the route inside egress_pool.
 """
 
 import argparse
@@ -45,7 +48,7 @@ from snapper.infrastructure.network.egress_tunnel_models import TunnelDescriptor
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    """CLI parser — all fields are required to avoid silent provider drift."""
+    """CLI parser with required provider fields and explicit operator flags."""
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--tunnel-id", required=True, help="Stable id without underscores (used in setting key)"
@@ -90,7 +93,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 async def _amain(args: argparse.Namespace) -> int:
-    """Async core — performs the three DB writes + pool merge.
+    """Async core that validates input, writes settings, and merges the pool route.
 
     The ``--dry-run`` flag short-circuits AFTER descriptor Pydantic
     validation but BEFORE any DB write or sidecar restart, so the

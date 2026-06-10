@@ -214,9 +214,8 @@ def test_ai_delegate_fails_require_permission_for_manage_users() -> None:
 def test_ws_has_permission_rejects_ai_delegate_for_viewer() -> None:
     """``WebSocketAuthManager.has_permission()`` rejects AI_DELEGATE.
 
-    Given: a registered AI_DELEGATE WebSocket connection (the SECOND
-        ``role_hierarchy`` dict, at ``websocket_auth.py:259-263``,
-        also adds ``AI_DELEGATE: -1``),
+    Given: a registered AI_DELEGATE WebSocket connection using the
+        WebSocket role hierarchy,
     When: ``has_permission(ws, VIEWER)`` runs,
     Then: it returns False — the dict must be updated in lockstep
         with ``dependencies.py`` or a ``KeyError`` would fire at

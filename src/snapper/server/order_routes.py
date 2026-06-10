@@ -211,7 +211,7 @@ async def create_order(
         caps_enforcer: Per-user :class:`TradingCapsEnforcer`
             injected by :func:`get_caps_enforcer_dependency`
             wraps the TradeCommand insert with
-            meth:`guard` so the caller's caps
+            :meth:`guard` so the caller's caps
             (quantity, open orders, daily USD notional) are
             evaluated before persistence.
 
@@ -456,8 +456,8 @@ async def _cancel_plan(
       :class:`PlanConcurrentChangeError` /
       :class:`PlanCancelIdempotencyKeyMismatchError` → 409 (the last is
       unreachable for REST today because we pass
-      ``idempotency_key=None``, but is mapped defensively so future
-      REST callers that opt into idempotency get the conflict envelope)
+      ``idempotency_key=None``, but is mapped defensively so REST
+      idempotency callers get the conflict envelope)
     * :class:`CapsViolationError` → 422 (unchanged contract)
     * :class:`PlanCancelEmitError` → 500 ``Failed to emit cancel command``
 

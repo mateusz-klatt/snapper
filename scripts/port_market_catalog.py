@@ -67,7 +67,7 @@ frontend JSON and iOS view-consumed keys drift apart.
 CATALOG_NAMESPACE: Final[str] = "market"
 """xcstrings key prefix. Frontend JSON keys are already nested under
 their namespace (no prefix in the JSON), so we prepend ``market.``
-during port. Backend resolver consumes the same flat-dotted shape.
+during port. The xcstrings catalog stores the resulting flat-dotted keys.
 """
 
 FRONTEND_TO_IOS_LOCALE: Final[dict[str, str]] = {
