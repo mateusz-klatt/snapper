@@ -211,15 +211,20 @@ gaps** (exchange has more filled quantity than the executor observed)
 and **disappeared orders** (pending orders absent from the open-orders
 snapshot).
 
-Always-on — runs alongside the executor's order handler + heartbeat
-tasks (no feature flag; the defensive polling is cheap enough that
-gating it provided no value).
+Always-on — runs alongside the executor's order handler, heartbeat,
+and supervised private fill-stream tasks (no feature flag; the
+defensive polling is cheap enough that gating it provided no value).
+Reconciliation cycles are serialized on an executor-level lock: the
+periodic 60s cycle and the fill-stream supervisor's post-reconnect
+heal cannot run concurrently and double-emit the same corrective.
 
 **`_reconcile_fill_gap`** (in `messaging/executors/base.py`)
 emits a corrective `ExecutionUpdate` covering the observed cum-qty
-delta, stamping the synthetic execution with
-`exec_id=recon-<exchange_oid>-<monotonic_ns>` so downstream de-dup
-stays correct.
+delta, stamping the synthetic execution with the deterministic
+`exec_id=recon-<exchange_oid>-c<venue_cum>` — re-emitting the same
+gap (after a failed publish, or again at the next startup recovery)
+dedupes at every consumer instead of double-applying, while a gap
+whose venue cumulative advanced gets a fresh id.
 
 **`_reconcile_disappeared_order`** (in `messaging/executors/base.py`)
 calls `get_order()` on orders missing from the open-orders snapshot to
@@ -246,6 +251,47 @@ exchange's fill history. Operators seeing this ERROR should not patch
 Snapper to approximate from ticks; the skip is an intentional
 trade-off (predictable behaviour + observable gap) over silent
 approximation drift.
+
+#### Private fill-stream supervision
+
+The private execution WebSocket stream is supervised, not spawn-once.
+`_supervise_execution_stream` (in `messaging/executors/base.py`)
+treats ANY termination of the stream handler — venue SDK
+reconnect-budget exhaustion, a raised error, or a clean generator
+return — as death and respawns it with capped jittered exponential
+backoff (1 s → 60 s, reset after 300 s of healthy runtime), never
+abandoning. Previously the stream was started once: after an outage
+exceeding the SDK's internal reconnect budget (~2 min futures,
+~5 min spot), fills went permanently dark while the process kept
+reporting RUNNING.
+
+Death is detectable because the venue clients raise instead of
+exiting cleanly: the spot executions generator raises
+`ConnectionError` when its consume loop ends on a terminal SDK error
+(closing the poisoned client), ensure-connected on both venues
+rebuilds a slot whose client carries a terminal SDK error instead of
+returning it as connected, and subscribe sends are bounded by a 5 s
+timeout so a wedged socket cannot hang an attempt.
+
+Resubscribe is idempotent: subscription is snapshot-free at the
+source (spot subscribes with order/trade snapshots disabled; futures
+drops `fills_snapshot` frames) because startup recovery and the
+recon loop own snapshot-shaped state — a venue snapshot replayed on
+top of recovered watermarks would inflate cumulatives above venue
+truth. Before each post-death re-entry the supervisor runs a
+best-effort reconciliation pass so the dark-window fill gap is
+healed before the stream re-attaches.
+
+Per-order fill booking is atomic: each tracked order carries a
+`fill_lock` serializing the dedupe gate, delta build, durable
+venue-event write, publish, and watermark advance across the stream
+task, recon correctives, orphan flush, and cancel handling. Two
+cumulative watermarks are kept per order: `last_seen_cum_qty`
+(committed — advances only on publish success, so ZMQ deltas anchor
+to what the engine actually received) and `last_recorded_cum_qty`
+(durable — advances on venue-event write success, so additive
+checkpoint replay of the durable rows sums to venue truth whichever
+prior step failed).
 
 ### Application (`src/snapper/application/`)
 
@@ -535,6 +581,29 @@ network retry — an ambiguous network failure may have placed the
 order, and Kraken's `cl_ord_id` dedupe covers only open orders, so a
 blind retry of a MARKET order could double-place. The 429 rate-limit
 retry is kept (an exhausted 429 is a definitive venue-side rejection).
+
+Executor startup recovery emits corrective fills instead of silently
+re-baselining: the old recovery seeded fill tracking from the venue's
+current cumulative, so every fill that landed while the executor was
+down became invisible to projections forever. Recovery now reads both
+truth planes per order — the durable `venue_events` fill rows and the
+`executions` log (rows exist only for successfully published fills) —
+seeds the committed/durable watermarks from what each plane proves,
+republishes recorded-but-unpublished fills under their original exec
+ids (idempotent — the engine, checkpoint replay, and the executions
+insert all dedupe by exec id), and emits the remaining venue-ahead
+gap as a recon corrective with a deterministic id, so repeated
+restarts and publish retries converge instead of double-applying.
+Orders that went terminal during the downtime get their fill gap
+healed before the terminal event is projected; orders the venue
+cannot verify at startup are parked with DB-derived seeds and retried
+each recon cycle. Fills without a venue exec id (Walutomat-class
+cumulative polls) are never republished — they dedupe on an
+identity-shaped fallback key shared by the live engine and checkpoint
+replay, count toward the committed seed as already shown, and the
+durable rows heal a coordinator that missed them at its next restart.
+Operator notes are in [`docs/operations.md`](operations.md)
+"Recovery-time corrective fills".
 
 The `TraderCoordinator` class acts as the trade runtime coordinator
 and integrates `TradeService` (command lifecycle) and `BalanceService`

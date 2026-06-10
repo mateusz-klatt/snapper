@@ -301,10 +301,12 @@ action:
   on a client whose socket never came up, and one such send once wedged
   the shared subscribe throttle lock — starving the post-reconnect
   subscription replay and leaving the feed connected-but-dark until a
-  process restart. Spot and Equities subscribe sends are not wrapped —
-  the spinning `send_message` is a Futures-SDK behavior, so those venues
-  rely on the bounded connect, the ping/close timeouts, and the 180 s
-  per-attempt recovery bound instead. Client (re)connects are serialized
+  process restart. Spot and Equities market-data subscribe sends are not
+  wrapped — the spinning `send_message` is a Futures-SDK behavior, so
+  those venues rely on the bounded connect, the ping/close timeouts, and
+  the 180 s per-attempt recovery bound instead; the Spot *private*
+  executions subscribe send IS bounded by the same 5 s timeout (see
+  "Private fill-stream supervision"). Client (re)connects are serialized
   per venue (`_ws_connect_lock`), slot writes are compare-and-clear, and
   a connect raced by a disconnect closes its own client instead of
   leaking it.
@@ -422,6 +424,51 @@ Two executor/outbox gates close the remaining order-flow loss windows:
   stale cancel would strand a live order, and replace outcomes are
   reported on the lightweight cancel/replace event path. Keep the TTL
   below the engine's 60s in-flight valve.
+
+### Private fill-stream supervision
+
+The private execution (fills) WebSocket in each executor is supervised,
+not spawned once. Previously any termination of that stream — typically
+SDK reconnect-budget exhaustion after ~2 min (Futures) / ~5 min (Spot)
+of network outage — left fills permanently dark while the executor kept
+reporting RUNNING until a manual restart: Futures surfaced a single
+error line, Spot exited silently and kept treating the dead client as
+connected, blocking any rebuild. Now:
+
+- **Death is detectable.** A Spot stream whose connection is terminally
+  lost raises instead of ending cleanly and closes the poisoned client,
+  and on both venues ensure-connected rebuilds a slot holding a
+  terminally-failed client instead of returning it as connected. The
+  Spot private subscribe send is bounded by a 5 s timeout
+  (`_SDK_SEND_TIMEOUT_S`) so a wedged socket fails the attempt fast
+  instead of hanging the resubscribe.
+- **A supervisor respawns dead streams.** Any termination — a clean
+  generator return included — triggers a respawn with capped jittered
+  exponential backoff (1→60 s); it never abandons the stream. A stream
+  that ran healthy for 5+ minutes resets the backoff so an old
+  incident's ceiling is not inherited by the next blip.
+- **The dark window is healed before re-entry.** Every post-death
+  respawn first runs a best-effort reconciliation pass (serialized with
+  the periodic 60 s cycle so two concurrent cycles cannot double-emit
+  the same corrective fill), then resubscribes.
+- **Resubscribe is idempotent.** Spot subscribes without order/trade
+  snapshots and Futures drops `fills_snapshot` frames at the source, so
+  neither a supervised respawn nor an SDK in-budget reconnect replays
+  already-booked fills.
+- **Per-order fill booking is atomic.** A per-order lock plus exec-id
+  dedupe serializes booking across the live stream, recon corrective
+  fills, and cancel handling, so concurrent paths cannot double-book a
+  fill, and a publish failure no longer silently corrupts fill tracking
+  (the gap is re-absorbed by later frames or the recon corrective).
+
+During a private WS outage expect recurring executor-log warnings —
+`Execution stream died (...) - respawn #N after Ns backoff` or
+`Execution stream returned cleanly - respawn #N ...` — that is the
+supervisor retrying; no manual restart is needed, and fills plus the
+dark-window gap reconcile automatically once connectivity returns. The
+supervisor exits permanently only on shutdown and on venues without
+WebSocket execution streaming, where the 60 s reconciliation loop is
+the only fill source.
 
 ### Recovery-time corrective fills
 

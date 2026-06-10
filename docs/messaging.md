@@ -841,6 +841,33 @@ resolve, the executor publishes `OrderData` on
 holds its in-flight guard) and the reconciliation loop re-verifies parked
 entries each cycle until the order resolves to accepted or rejected.
 
+Fills arrive on the venue's private execution WebSocket stream. A
+supervisor task owns the stream's lifecycle: any termination — SDK
+reconnect-budget exhaustion during an outage, a raised error, even a
+clean generator return — counts as death and triggers a respawn with
+capped jittered backoff (1 s doubling to 60 s; a stream that survived
+5 minutes resets the backoff), so a dead stream can no longer leave
+fills permanently dark while the process keeps reporting healthy.
+Before each respawn the supervisor runs a best-effort reconciliation
+pass that heals the dark-window fill gap first, and the resubscribe is
+idempotent: both Kraken clients suppress subscribe-time snapshots (spot
+requests `snap_orders`/`snap_trades` as explicit false, futures drops
+`fills_snapshot` frames), so neither a respawn nor an in-budget SDK
+reconnect that replays the cached subscription can re-deliver
+already-booked fills. Venues without WebSocket executions skip the
+stream entirely; the periodic reconciliation loop is their only fill
+source.
+
+Fill booking is atomic per order: a lock on the pending entry
+serializes the dedupe gate, delta computation, durable `fill_observed`
+write, execution publish, watermark advances, and lifecycle removal
+across the live stream task, reconciliation correctives, and cancel
+handling. Duplicates are dropped via an exec-id LRU plus a
+cumulative-monotonic guard; the committed cumulative advances only
+after a successful publish, so a fill whose publish failed is absorbed
+by the venue's redelivery or by the next fill's cumulative-anchored
+delta and published deltas always sum to venue truth.
+
 Failed `VenueEvent` persistence is fail-closed on the fill path: the
 `fill_observed` write precedes the execution publish, and a write failure
 aborts the publish. The accepted path differs because the order is already
@@ -856,7 +883,15 @@ explicit cancel + new-order workflow.
 
 The trade runtime subscribes to `orders.events.*` to keep `TradeService` and
 `BalanceService` in sync during normal operation. `VenueEvent` rows are used as
-the durable recovery and reconciliation backbone.
+the durable recovery and reconciliation backbone. At startup the
+executor recovers open orders from those rows and the `executions` log
+(rows exist only for successfully published fills):
+recorded-but-unpublished fills are republished under their original
+exec ids (every consumer dedupes by exec id), and the remaining
+venue-ahead gap is emitted as corrective fills with deterministic
+synthetic ids — fills that landed while the executor was down are
+projected instead of being silently re-baselined away (see
+docs/operations.md → Recovery-time corrective fills).
 
 `PlanExecutorService` (see docs/architecture.md → Execution Plans) also
 subscribes to `orders.events.` and `market.` on the broker XPUB, routes

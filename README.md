@@ -160,6 +160,12 @@ publishing them, so an outage backlog cannot fire orders priced off
 old signals. Cancels are exempt — expiring a stale cancel would strand
 a live order.
 
+Private fill streams are supervised: a dead venue execution stream is
+respawned with capped backoff, each respawn reconciles fills missed
+during the dark window before resubscribing, and executor startup
+recovery emits corrective fills for anything filled while the executor
+was down instead of re-baselining to the venue's current cumulative.
+
 ### Process-Managed Executors
 
 Process-managed deployments run one executor per `(exchange, wallet)`
