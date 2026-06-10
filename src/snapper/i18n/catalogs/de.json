@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ wegen Margin blockiert: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ ausgeführt auf %@",
   "alerts.body.order_rejected": "%@ %@ %@ abgelehnt: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ Status unbekannt: %@ — Überprüfung läuft",
   "alerts.body.position_stop_loss_fired": "Stop-Loss ausgelöst für %@ (%@)",
   "alerts.title.critical_system_error": "System beeinträchtigt: %@",
   "alerts.title.margin_warning": "Margin-Warnung",
   "alerts.title.order_fill_full": "Order ausgeführt",
   "alerts.title.order_rejected": "Order abgelehnt",
+  "alerts.title.order_unknown": "Orderstatus unbekannt",
   "alerts.title.position_stop_loss_fired": "Stop-Loss ausgelöst"
 }

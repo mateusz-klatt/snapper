@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ zablokováno kvůli marginu: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ provedeno na %@",
   "alerts.body.order_rejected": "%@ %@ %@ zamítnuto: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ stav neznámý: %@ — probíhá ověření",
   "alerts.body.position_stop_loss_fired": "Stop-loss aktivován pro %@ (%@)",
   "alerts.title.critical_system_error": "Systém je degradovaný: %@",
   "alerts.title.margin_warning": "Upozornění na margin",
   "alerts.title.order_fill_full": "Pokyn proveden",
   "alerts.title.order_rejected": "Pokyn zamítnut",
+  "alerts.title.order_unknown": "Stav pokynu neznámý",
   "alerts.title.position_stop_loss_fired": "Stop-loss aktivován"
 }

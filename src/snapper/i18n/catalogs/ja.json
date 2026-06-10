@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ は証拠金によりブロックされました: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ を $%@ で %@ にて約定",
   "alerts.body.order_rejected": "%@ %@ %@ は拒否されました: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ の状態が不明です: %@ — 取引所に確認中",
   "alerts.body.position_stop_loss_fired": "%@（%@）でストップロス発動",
   "alerts.title.critical_system_error": "システム劣化: %@",
   "alerts.title.margin_warning": "証拠金警告",
   "alerts.title.order_fill_full": "注文約定",
   "alerts.title.order_rejected": "注文拒否",
+  "alerts.title.order_unknown": "注文状態不明",
   "alerts.title.position_stop_loss_fired": "ストップロス発動"
 }

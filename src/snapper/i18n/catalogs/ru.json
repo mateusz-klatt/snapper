@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ заблокировано из-за маржи: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ исполнено на %@",
   "alerts.body.order_rejected": "%@ %@ %@ отклонено: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ статус неизвестен: %@ — идёт проверка",
   "alerts.body.position_stop_loss_fired": "Стоп-лосс сработал для %@ (%@)",
   "alerts.title.critical_system_error": "Система деградирована: %@",
   "alerts.title.margin_warning": "Предупреждение о марже",
   "alerts.title.order_fill_full": "Ордер исполнен",
   "alerts.title.order_rejected": "Ордер отклонён",
+  "alerts.title.order_unknown": "Статус ордера неизвестен",
   "alerts.title.position_stop_loss_fired": "Стоп-лосс сработал"
 }

@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ bloķēts maržas dēļ: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ izpildīts biržā %@",
   "alerts.body.order_rejected": "%@ %@ %@ noraidīts: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ statuss nezināms: %@ — notiek pārbaude",
   "alerts.body.position_stop_loss_fired": "Stop-loss aktivizēts %@ (%@)",
   "alerts.title.critical_system_error": "Sistēma degradēta: %@",
   "alerts.title.margin_warning": "Maržas brīdinājums",
   "alerts.title.order_fill_full": "Rīkojums izpildīts",
   "alerts.title.order_rejected": "Rīkojums noraidīts",
+  "alerts.title.order_unknown": "Rīkojuma statuss nezināms",
   "alerts.title.position_stop_loss_fired": "Stop-loss aktivizēts"
 }

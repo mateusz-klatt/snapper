@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ blocáilte mar gheall ar chorrlach: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ comhlíonta ar %@",
   "alerts.body.order_rejected": "%@ %@ %@ diúltaithe: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ stádas anaithnid: %@ — fíorú ar siúl",
   "alerts.body.position_stop_loss_fired": "Spreagadh stopchaillteanas do %@ (%@)",
   "alerts.title.critical_system_error": "Díghrádú córais: %@",
   "alerts.title.margin_warning": "Rabhadh corrlaigh",
   "alerts.title.order_fill_full": "Ordú comhlíonta",
   "alerts.title.order_rejected": "Ordú diúltaithe",
+  "alerts.title.order_unknown": "Stádas an ordaithe anaithnid",
   "alerts.title.position_stop_loss_fired": "Spreagadh stopchaillteanas"
 }

@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ geblokkeerd door margin: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ uitgevoerd op %@",
   "alerts.body.order_rejected": "%@ %@ %@ geweigerd: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ status onbekend: %@ — verificatie loopt",
   "alerts.body.position_stop_loss_fired": "Stop-loss geactiveerd voor %@ (%@)",
   "alerts.title.critical_system_error": "Systeem gedegradeerd: %@",
   "alerts.title.margin_warning": "Marginwaarschuwing",
   "alerts.title.order_fill_full": "Order uitgevoerd",
   "alerts.title.order_rejected": "Order geweigerd",
+  "alerts.title.order_unknown": "Orderstatus onbekend",
   "alerts.title.position_stop_loss_fired": "Stop-loss geactiveerd"
 }

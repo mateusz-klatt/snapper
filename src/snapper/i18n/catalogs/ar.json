@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "تم حظر %@ %@ %@ بسبب الهامش: %@",
   "alerts.body.order_fill_full": "تم تنفيذ %@ %@ %@ بسعر $%@ على %@",
   "alerts.body.order_rejected": "تم رفض %@ %@ %@: %@",
+  "alerts.body.order_unknown": "حالة %@ %@ %@ غير معروفة: %@ — جارٍ التحقق",
   "alerts.body.position_stop_loss_fired": "تم تفعيل وقف الخسارة على %@ (%@)",
   "alerts.title.critical_system_error": "تدهور النظام: %@",
   "alerts.title.margin_warning": "تحذير الهامش",
   "alerts.title.order_fill_full": "تم تنفيذ الأمر",
   "alerts.title.order_rejected": "تم رفض الأمر",
+  "alerts.title.order_unknown": "حالة الأمر غير معروفة",
   "alerts.title.position_stop_loss_fired": "تم تفعيل وقف الخسارة"
 }

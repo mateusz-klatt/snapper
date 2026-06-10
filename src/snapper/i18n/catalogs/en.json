@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ blocked by margin: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ filled on %@",
   "alerts.body.order_rejected": "%@ %@ %@ rejected: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ state unknown: %@ — verifying with exchange",
   "alerts.body.position_stop_loss_fired": "Stop-loss fired on %@ (%@)",
   "alerts.title.critical_system_error": "System degraded: %@",
   "alerts.title.margin_warning": "Margin warning",
   "alerts.title.order_fill_full": "Order filled",
   "alerts.title.order_rejected": "Order rejected",
+  "alerts.title.order_unknown": "Order state unknown",
   "alerts.title.position_stop_loss_fired": "Stop-loss fired"
 }

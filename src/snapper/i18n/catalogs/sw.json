@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ limezuiwa na dhamana: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ limetekelezwa kwenye %@",
   "alerts.body.order_rejected": "%@ %@ %@ limekataliwa: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ hali haijulikani: %@ — uthibitisho unaendelea",
   "alerts.body.position_stop_loss_fired": "Kusitisha hasara kumetekelezwa kwa %@ (%@)",
   "alerts.title.critical_system_error": "Mfumo umezorota: %@",
   "alerts.title.margin_warning": "Onyo la dhamana",
   "alerts.title.order_fill_full": "Agizo limetekelezwa",
   "alerts.title.order_rejected": "Agizo limekataliwa",
+  "alerts.title.order_unknown": "Hali ya agizo haijulikani",
   "alerts.title.position_stop_loss_fired": "Kusitisha hasara kumetekelezwa"
 }

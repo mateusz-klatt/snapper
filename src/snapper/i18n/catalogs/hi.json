@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ मार्जिन के कारण ब्लॉक हुआ: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ %@ पर पूरा हुआ",
   "alerts.body.order_rejected": "%@ %@ %@ अस्वीकृत: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ स्थिति अज्ञात: %@ — सत्यापन जारी",
   "alerts.body.position_stop_loss_fired": "%@ (%@) पर स्टॉप-लॉस ट्रिगर हुआ",
   "alerts.title.critical_system_error": "सिस्टम की स्थिति अवनत: %@",
   "alerts.title.margin_warning": "मार्जिन चेतावनी",
   "alerts.title.order_fill_full": "ऑर्डर पूरा हुआ",
   "alerts.title.order_rejected": "ऑर्डर अस्वीकृत",
+  "alerts.title.order_unknown": "ऑर्डर की स्थिति अज्ञात",
   "alerts.title.position_stop_loss_fired": "स्टॉप-लॉस ट्रिगर हुआ"
 }

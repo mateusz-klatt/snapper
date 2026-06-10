@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ zablokowano z powodu depozytu zabezpieczającego: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ zrealizowane na %@",
   "alerts.body.order_rejected": "%@ %@ %@ odrzucono: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ stan nieznany: %@ — trwa weryfikacja na giełdzie",
   "alerts.body.position_stop_loss_fired": "Stop loss aktywowany dla %@ (%@)",
   "alerts.title.critical_system_error": "Degradacja systemu: %@",
   "alerts.title.margin_warning": "Ostrzeżenie o depozycie zabezpieczającym",
   "alerts.title.order_fill_full": "Zlecenie zrealizowane",
   "alerts.title.order_rejected": "Zlecenie odrzucone",
+  "alerts.title.order_unknown": "Stan zlecenia nieznany",
   "alerts.title.position_stop_loss_fired": "Stop loss aktywowany"
 }

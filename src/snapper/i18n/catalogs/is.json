@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ lokað vegna tryggingarfjár: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ framkvæmt á %@",
   "alerts.body.order_rejected": "%@ %@ %@ hafnað: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ staða óþekkt: %@ — staðfesting í gangi",
   "alerts.body.position_stop_loss_fired": "Stop-loss virkjað fyrir %@ (%@)",
   "alerts.title.critical_system_error": "Kerfi í skertu ástandi: %@",
   "alerts.title.margin_warning": "Viðvörun um tryggingarfé",
   "alerts.title.order_fill_full": "Pöntun framkvæmd",
   "alerts.title.order_rejected": "Pöntun hafnað",
+  "alerts.title.order_unknown": "Staða pöntunar óþekkt",
   "alerts.title.position_stop_loss_fired": "Stop-loss virkjað"
 }

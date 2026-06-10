@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ արգելափակվել է մարժայի պատճառով՝ %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ կատարվեց %@-ում",
   "alerts.body.order_rejected": "%@ %@ %@ մերժվել է՝ %@",
+  "alerts.body.order_unknown": "%@ %@ %@ կարգավիճակն անհայտ է՝ %@ — ընթանում է ստուգում",
   "alerts.body.position_stop_loss_fired": "Stop-loss-ը գործարկվեց %@ (%@)-ի համար",
   "alerts.title.critical_system_error": "Համակարգի աշխատանքը խաթարված է՝ %@",
   "alerts.title.margin_warning": "Մարժայի զգուշացում",
   "alerts.title.order_fill_full": "Հանձնարարականը կատարված է",
   "alerts.title.order_rejected": "Հանձնարարականը մերժվել է",
+  "alerts.title.order_unknown": "Հանձնարարականի կարգավիճակն անհայտ է",
   "alerts.title.position_stop_loss_fired": "Կորստի սահմանափակումը գործարկվեց"
 }

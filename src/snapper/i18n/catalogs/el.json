@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ μπλοκαρίστηκε λόγω περιθωρίου: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ εκτελέστηκε στο %@",
   "alerts.body.order_rejected": "%@ %@ %@ απορρίφθηκε: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ άγνωστη κατάσταση: %@ — επαλήθευση σε εξέλιξη",
   "alerts.body.position_stop_loss_fired": "Το stop-loss ενεργοποιήθηκε για %@ (%@)",
   "alerts.title.critical_system_error": "Υποβαθμισμένο σύστημα: %@",
   "alerts.title.margin_warning": "Προειδοποίηση περιθωρίου",
   "alerts.title.order_fill_full": "Η εντολή εκτελέστηκε",
   "alerts.title.order_rejected": "Η εντολή απορρίφθηκε",
+  "alerts.title.order_unknown": "Άγνωστη κατάσταση εντολής",
   "alerts.title.position_stop_loss_fired": "Ενεργοποιήθηκε το όριο ζημίας"
 }

@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ užblokuota dėl maržos: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ įvykdyta biržoje %@",
   "alerts.body.order_rejected": "%@ %@ %@ atmesta: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ būsena nežinoma: %@ — vyksta patikra",
   "alerts.body.position_stop_loss_fired": "Stop-loss suveikė %@ (%@)",
   "alerts.title.critical_system_error": "Sistema veikia pablogintai: %@",
   "alerts.title.margin_warning": "Įspėjimas dėl maržos",
   "alerts.title.order_fill_full": "Pavedimas įvykdytas",
   "alerts.title.order_rejected": "Pavedimas atmestas",
+  "alerts.title.order_unknown": "Pavedimo būsena nežinoma",
   "alerts.title.position_stop_loss_fired": "Suveikė stop-loss"
 }

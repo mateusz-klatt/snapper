@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ 因保证金不足被阻止：%@",
   "alerts.body.order_fill_full": "%@ %@ %@ 以 $%@ 在 %@ 成交",
   "alerts.body.order_rejected": "%@ %@ %@ 已拒绝：%@",
+  "alerts.body.order_unknown": "%@ %@ %@ 状态未知：%@ — 正在与交易所核实",
   "alerts.body.position_stop_loss_fired": "%@（%@）触发止损",
   "alerts.title.critical_system_error": "系统降级：%@",
   "alerts.title.margin_warning": "保证金警告",
   "alerts.title.order_fill_full": "订单已成交",
   "alerts.title.order_rejected": "订单已拒绝",
+  "alerts.title.order_unknown": "订单状态未知",
   "alerts.title.position_stop_loss_fired": "止损已触发"
 }

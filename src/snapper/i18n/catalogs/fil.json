@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ hinarang dahil sa margin: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ naisagawa sa %@",
   "alerts.body.order_rejected": "%@ %@ %@ tinanggihan: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ hindi alam ang status: %@ — isinasagawa ang beripikasyon",
   "alerts.body.position_stop_loss_fired": "Na-activate ang tigil-pagkalugi sa %@ (%@)",
   "alerts.title.critical_system_error": "Humina ang sistema: %@",
   "alerts.title.margin_warning": "Babala sa margin",
   "alerts.title.order_fill_full": "Naisagawa ang order",
   "alerts.title.order_rejected": "Tinanggihan ang order",
+  "alerts.title.order_unknown": "Hindi alam ang status ng order",
   "alerts.title.position_stop_loss_fired": "Na-activate ang tigil-pagkalugi"
 }

@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ ကို အာမခံငွေကြောင့် တားဆီးထားသည်: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ ကို $%@ နှုန်းဖြင့် %@ တွင် ဖြည့်ဆည်းပြီး",
   "alerts.body.order_rejected": "%@ %@ %@ ကို ပယ်ချခဲ့သည်: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ အခြေအနေ မသိရပါ: %@ — စိစစ်နေသည်",
   "alerts.body.position_stop_loss_fired": "%@ (%@) တွင် အရှုံးရပ်ချက် အသက်ဝင်ခဲ့သည်",
   "alerts.title.critical_system_error": "စနစ် လုပ်ဆောင်နိုင်မှု ကျဆင်းနေသည်: %@",
   "alerts.title.margin_warning": "အာမခံငွေ သတိပေးချက်",
   "alerts.title.order_fill_full": "အော်ဒါ ပြည့်ပြီး",
   "alerts.title.order_rejected": "အော်ဒါ ပယ်ချခံရသည်",
+  "alerts.title.order_unknown": "အော်ဒါ အခြေအနေ မသိရပါ",
   "alerts.title.position_stop_loss_fired": "အရှုံးရပ်ချက် အသက်ဝင်ပြီး"
 }

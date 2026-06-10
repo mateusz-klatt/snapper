@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ blokirano zbog marže: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ izvršeno na %@",
   "alerts.body.order_rejected": "%@ %@ %@ odbijeno: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ status nepoznat: %@ — provjera u toku",
   "alerts.body.position_stop_loss_fired": "Stop-loss aktiviran za %@ (%@)",
   "alerts.title.critical_system_error": "Sistem degradiran: %@",
   "alerts.title.margin_warning": "Upozorenje o marži",
   "alerts.title.order_fill_full": "Nalog izvršen",
   "alerts.title.order_rejected": "Nalog odbijen",
+  "alerts.title.order_unknown": "Status naloga nepoznat",
   "alerts.title.position_stop_loss_fired": "Stop-loss aktiviran"
 }

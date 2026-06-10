@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ blocat de marjă: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ executat pe %@",
   "alerts.body.order_rejected": "%@ %@ %@ respins: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ stare necunoscută: %@ — verificare în curs",
   "alerts.body.position_stop_loss_fired": "Stop-loss declanșat pe %@ (%@)",
   "alerts.title.critical_system_error": "Sistem degradat: %@",
   "alerts.title.margin_warning": "Avertisment de marjă",
   "alerts.title.order_fill_full": "Ordin executat",
   "alerts.title.order_rejected": "Ordin respins",
+  "alerts.title.order_unknown": "Stare ordin necunoscută",
   "alerts.title.position_stop_loss_fired": "Stop-loss declanșat"
 }

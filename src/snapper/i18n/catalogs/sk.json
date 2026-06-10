@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ zablokované kvôli marži: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ vykonané na %@",
   "alerts.body.order_rejected": "%@ %@ %@ zamietnuté: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ stav neznámy: %@ — prebieha overenie",
   "alerts.body.position_stop_loss_fired": "Stop-loss spustený pre %@ (%@)",
   "alerts.title.critical_system_error": "Systém je degradovaný: %@",
   "alerts.title.margin_warning": "Upozornenie na maržu",
   "alerts.title.order_fill_full": "Pokyn vykonaný",
   "alerts.title.order_rejected": "Pokyn zamietnutý",
+  "alerts.title.order_unknown": "Stav pokynu neznámy",
   "alerts.title.position_stop_loss_fired": "Stop-loss spustený"
 }

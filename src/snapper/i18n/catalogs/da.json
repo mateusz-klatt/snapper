@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ blokeret af marginkrav: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ udført på %@",
   "alerts.body.order_rejected": "%@ %@ %@ afvist: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ status ukendt: %@ — verificering i gang",
   "alerts.body.position_stop_loss_fired": "Stop-loss udløst for %@ (%@)",
   "alerts.title.critical_system_error": "System degraderet: %@",
   "alerts.title.margin_warning": "Margin-advarsel",
   "alerts.title.order_fill_full": "Ordre udført",
   "alerts.title.order_rejected": "Ordre afvist",
+  "alerts.title.order_unknown": "Ordrestatus ukendt",
   "alerts.title.position_stop_loss_fired": "Stop-loss udløst"
 }

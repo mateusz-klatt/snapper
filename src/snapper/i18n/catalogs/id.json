@@ -3,10 +3,12 @@
   "alerts.body.margin_warning": "%@ %@ %@ diblokir oleh margin: %@",
   "alerts.body.order_fill_full": "%@ %@ %@ @ $%@ dieksekusi di %@",
   "alerts.body.order_rejected": "%@ %@ %@ ditolak: %@",
+  "alerts.body.order_unknown": "%@ %@ %@ status tidak diketahui: %@ — verifikasi sedang berlangsung",
   "alerts.body.position_stop_loss_fired": "Stop-loss terpicu pada %@ (%@)",
   "alerts.title.critical_system_error": "Sistem terdegradasi: %@",
   "alerts.title.margin_warning": "Peringatan margin",
   "alerts.title.order_fill_full": "Pesanan terisi",
   "alerts.title.order_rejected": "Pesanan ditolak",
+  "alerts.title.order_unknown": "Status pesanan tidak diketahui",
   "alerts.title.position_stop_loss_fired": "Stop-loss terpicu"
 }
