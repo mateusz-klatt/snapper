@@ -26,6 +26,7 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
+from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 from snapper.infrastructure.exchanges.implementations.walutomat import _active_execution_status
 from snapper.infrastructure.exchanges.implementations.walutomat import _should_emit_active_execution
@@ -4701,3 +4702,179 @@ MIIJQQIBADANBgkqhkiG9w0BAQEFAA corrupted data here!!!
         pem_numbers = client_pem._private_key.private_numbers()
         base64_numbers = client_base64._private_key.private_numbers()
         assert pem_numbers.public_numbers.n == base64_numbers.public_numbers.n
+
+
+class _StatusErrorResponse:
+    """Stub response whose raise_for_status raises a real HTTPStatusError."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        """Raise httpx.HTTPStatusError carrying the stub status code."""
+        raise httpx.HTTPStatusError(
+            f"HTTP {self.status_code}",
+            request=httpx.Request("POST", "https://api.walutomat.pl/api/v2.0.0/market_fx/orders"),
+            response=httpx.Response(self.status_code),
+        )
+
+    def json(self) -> Any:
+        """Return an empty payload (never reached in these tests)."""
+        return {}
+
+
+class _UnparseableResponse:
+    """Stub 200 response whose body fails to parse as JSON."""
+
+    status_code = 200
+
+    def raise_for_status(self) -> None:
+        """No-op for the 200 status."""
+
+    def json(self) -> Any:
+        """Raise the json decode failure."""
+        raise ValueError("invalid json")
+
+
+class TestWalutomatAmbiguousSubmitClassification:
+    """Exception taxonomy pins for Walutomat create_order (#145 P0-1).
+
+    Connect-phase failures provably happened before the request left
+    the process and stay plain; post-send transport failures, gateway
+    5xx, and unusable success bodies wrap as ambiguous because the
+    venue may have accepted the order under the submitId.
+    """
+
+    def _client(
+        self, monkeypatch: pytest.MonkeyPatch, responses: list[Any]
+    ) -> WalutomatExchangeClient:
+        """Build an authenticated client with stubbed POST responses."""
+        client = WalutomatExchangeClient(
+            api_key="key",
+            private_key_data=_generate_private_key_pem(),
+        )
+        client._http_client = cast(httpx.AsyncClient, StubAsyncClient(post_responses=responses))
+        monkeypatch.setattr(
+            client, "_get_auth_headers", lambda *_args, **_kwargs: {"X-API-Key": "key"}
+        )
+        return client
+
+    def _request(self) -> ExchangeOrderRequest:
+        """Build a market order request with a fixed submit id."""
+        return ExchangeOrderRequest(
+            symbol="EUR-PLN",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.MARKET,
+            amount=100.0,
+            client_order_id="amb-w1",
+        )
+
+    @pytest.mark.asyncio()
+    async def test_connect_error_is_not_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A connection-refused failure keeps its native type.
+
+        Given: The POST raising ConnectError (request never left),
+        When: create_order is called,
+        Then: The plain ConnectError propagates (safe to reject).
+        """
+        client = self._client(monkeypatch, [httpx.ConnectError("refused")])
+        with pytest.raises(httpx.ConnectError):
+            await client.create_order(self._request())
+
+    @pytest.mark.asyncio()
+    async def test_read_timeout_is_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A post-send read timeout wraps as ambiguous.
+
+        Given: The POST raising ReadTimeout (the venue may have
+            accepted the order under this submitId),
+        When: create_order is called,
+        Then: AmbiguousOrderSubmitError surfaces with the original
+            error chained and the submit identity attached.
+        """
+        client = self._client(monkeypatch, [httpx.ReadTimeout("read timed out")])
+        with pytest.raises(AmbiguousOrderSubmitError) as exc_info:
+            await client.create_order(self._request())
+        assert isinstance(exc_info.value.__cause__, httpx.ReadTimeout)
+        assert exc_info.value.client_order_id == "amb-w1"
+        assert exc_info.value.instrument == "EUR-PLN"
+
+    @pytest.mark.asyncio()
+    async def test_gateway_5xx_is_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A 5xx response wraps as ambiguous.
+
+        Given: The venue answering 502 (a gateway may have forwarded
+            the request to the backend before failing),
+        When: create_order is called,
+        Then: AmbiguousOrderSubmitError surfaces.
+        """
+        client = self._client(monkeypatch, [cast(Any, _StatusErrorResponse(502))])
+        with pytest.raises(AmbiguousOrderSubmitError):
+            await client.create_order(self._request())
+
+    @pytest.mark.asyncio()
+    async def test_client_4xx_is_not_wrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A 4xx response keeps its native HTTPStatusError type.
+
+        Given: The venue answering 400 (an authoritative rejection),
+        When: create_order is called,
+        Then: The plain HTTPStatusError propagates (safe to reject).
+        """
+        client = self._client(monkeypatch, [cast(Any, _StatusErrorResponse(400))])
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.create_order(self._request())
+
+    @pytest.mark.asyncio()
+    async def test_unparseable_success_body_is_wrapped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An HTTP 200 with an unparseable body wraps as ambiguous.
+
+        Given: A 200 response whose body fails JSON decoding (the venue
+            likely accepted but the confirmation is unusable),
+        When: create_order is called,
+        Then: AmbiguousOrderSubmitError surfaces.
+        """
+        client = self._client(monkeypatch, [cast(Any, _UnparseableResponse())])
+        with pytest.raises(AmbiguousOrderSubmitError):
+            await client.create_order(self._request())
+
+    @pytest.mark.asyncio()
+    async def test_success_without_order_id_is_wrapped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """success=true with no orderId wraps as ambiguous.
+
+        Given: A success body lacking result.orderId (accepted but the
+            id was lost),
+        When: create_order is called,
+        Then: AmbiguousOrderSubmitError surfaces.
+        """
+        client = self._client(monkeypatch, [StubResponse({"success": True, "result": {}})])
+        with pytest.raises(AmbiguousOrderSubmitError):
+            await client.create_order(self._request())
+
+    @pytest.mark.asyncio()
+    async def test_success_with_empty_order_id_is_wrapped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """success=true with an empty orderId wraps as ambiguous.
+
+        A falsy id passed downstream would be misread as a definitive
+        venue rejection while the order may be live.
+        """
+        client = self._client(
+            monkeypatch, [StubResponse({"success": True, "result": {"orderId": ""}})]
+        )
+        with pytest.raises(AmbiguousOrderSubmitError):
+            await client.create_order(self._request())
+
+    @pytest.mark.asyncio()
+    async def test_success_with_null_order_id_is_wrapped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """success=true with a null orderId wraps as ambiguous."""
+        client = self._client(
+            monkeypatch, [StubResponse({"success": True, "result": {"orderId": None}})]
+        )
+        with pytest.raises(AmbiguousOrderSubmitError):
+            await client.create_order(self._request())

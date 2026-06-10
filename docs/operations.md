@@ -341,6 +341,35 @@ breaker so a sustained outage trips fail-fast mode. Idempotent calls
 transient submit failures in logs during connectivity incidents — that
 is the guard working as intended, not a regression.
 
+### Ambiguous submits — the UNKNOWN order state
+
+On every venue (Kraken Spot ccxt + native, Kraken Futures, Walutomat)
+an order submit that fails *after the request may have left the
+process* (request timeout, connection reset, gateway 5xx, unparseable
+success body) no longer fabricates a REJECTED event. The executor
+parks the order, records a non-terminal `order_submit_unknown` venue
+event, and publishes a single `orders.events.*.unknown` message:
+
+- the engine **holds its in-flight guard indefinitely** (the 60 s
+  timeout valve is disabled while UNKNOWN) so no replacement order can
+  double exposure while the original may be live;
+- a safety-critical `order_unknown` operator alert fires ("do not
+  assume flat", 5-minute dedup window);
+- failures that provably happened *before* any send (circuit breaker
+  open, credentials, symbol/order-type validation, connection refused)
+  and authoritative venue answers (4xx, `success=false`, exhausted
+  429) still reject immediately — only genuine ambiguity parks.
+
+Resolution: a late `accepted` event clears the UNKNOWN flag (the order
+resumes its normal lifecycle with the guard still held until fills); a
+COMPLETE fill or a rejection releases the guard entirely. A partial
+fill alone neither clears the flag nor the guard — the order stays
+guarded until its terminal event.
+Until automated venue verification lands (lookup by `cl_ord_id` /
+`cliOrdId` / `submitId`), a parked UNKNOWN order requires operator
+resolution — check the venue's open/closed orders for the client id
+from the alert before taking any manual action.
+
 ### Fault-injection testing
 
 `scripts/resilience_fault_injection.py` simulates a real exchange outage and

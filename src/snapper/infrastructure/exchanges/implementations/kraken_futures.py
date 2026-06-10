@@ -32,6 +32,7 @@ from typing import Literal
 from typing import cast
 
 import ccxt
+import requests
 from kraken.futures import FuturesWSClient
 from kraken.futures import Market
 from kraken.futures import Trade
@@ -67,6 +68,7 @@ from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
 from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 
@@ -788,6 +790,19 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
 
         Raises:
             RuntimeError: If API credentials are missing.
+            ValueError: If the order type or symbol is unsupported
+                (raised before any network send — safe to reject).
+            AmbiguousOrderSubmitError: If the HTTP transport failed in a
+                way where the request may have reached the venue
+                (timeout, reset, gateway error) — the order MAY exist
+                with this cliOrdId; the executor must verify, not
+                reject (#145 P0-1). The whole ``RequestException``
+                umbrella is wrapped DELIBERATELY, connect-phase
+                failures included: ``requests`` does not reliably
+                distinguish sent-vs-not-sent (a ConnectionError can
+                fire mid-body), and a false-ambiguous merely parks the
+                order with an alert while a false-definitive can
+                double a position.
             Exception: If order creation fails.
         """
         self._require_authenticated()
@@ -822,7 +837,14 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         if request.reduce_only:
             kwargs["reduceOnly"] = True
         self._record_rest_call()
-        result = await asyncio.to_thread(cast(Trade, self._trade_client).create_order, **kwargs)
+        try:
+            result = await asyncio.to_thread(cast(Trade, self._trade_client).create_order, **kwargs)
+        except requests.exceptions.RequestException as e:
+            raise AmbiguousOrderSubmitError(
+                client_order_id=request.client_order_id or "",
+                instrument=request.symbol,
+                message=f"Kraken Futures create_order transport failure (order may exist): {e}",
+            ) from e
         send_status = result.get("sendStatus", {})
         order_id = send_status.get("order_id", "")
         status_str = send_status.get("status", "placed")

@@ -249,6 +249,51 @@ async def test_log_order_to_db_returns_none_when_no_repository() -> None:
 @patch(
     "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
     new_callable=AsyncMock,
+    side_effect=RuntimeError("connection pool torn down"),
+)
+async def test_log_order_to_db_never_raises(mock_resolve: AsyncMock) -> None:
+    """Any failure in the post-accept DB write returns None, never raises.
+
+    Given: A repository layer raising a non-SQLAlchemy error (pool
+        teardown, timeout) during the auxiliary post-accept write,
+    When: _log_order_to_db is called,
+    Then: It returns None — an escaping exception would ride the venue
+        client back into the executor's definitive-reject branch and
+        misreport a LIVE order as rejected (#145 P0-1).
+    """
+    mock_repo = MagicMock(spec=Repository)
+    client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
+    request = ExchangeOrderRequest(
+        client_order_id="client_123",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        type=ExchangeOrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=50000.0,
+    )
+    order = ExchangeOrderSnapshot(
+        id="order_123",
+        client_order_id="client_123",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        type=ExchangeOrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=50000.0,
+        filled=0.0,
+        remaining=0.0,
+        status=ExchangeOrderStatusEnum.OPEN,
+        timestamp=datetime.now(UTC).timestamp(),
+    )
+    result = await client._log_order_to_db(request, order)
+    assert result is None
+    mock_resolve.assert_awaited_once()
+
+
+@pytest.mark.asyncio()
+@patch(
+    "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
+    new_callable=AsyncMock,
     return_value="fake-spid",
 )
 async def test_log_order_to_db_logs_successfully(mock_resolve: AsyncMock) -> None:

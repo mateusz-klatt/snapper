@@ -37,6 +37,7 @@ from typing import Literal
 from typing import cast
 
 import ccxt
+import requests
 from kraken.spot import SpotWSClient
 from kraken.spot import Trade
 from loguru import logger
@@ -71,6 +72,7 @@ from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenExecutionSubscribeParamsSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenExecutionSubscriptionAckSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenInstrumentPairSchema
@@ -542,15 +544,22 @@ class KrakenExchangeClient(ExchangeClientBase):
         re-send after an ambiguous network failure (request possibly
         executed, response lost) can double-place a market order because
         Kraken's ``cl_ord_id`` dedupe covers only open orders (#145
-        audit, gap P0-2). The ambiguous failure propagates to the
-        executor instead of being retried here; venue-truth verification
-        before declaring the order dead is the executor's job (P0-1).
+        audit, gap P0-2). The ambiguous failure is re-raised as
+        ``AmbiguousOrderSubmitError`` so the executor routes it to the
+        UNKNOWN/verify path instead of fabricating a rejection (P0-1).
+        ``RateLimitExceeded`` is re-raised plain FIRST because it
+        subclasses ``NetworkError`` while being a definitive venue-side
+        rejection (the exhausted 429 cannot have placed the order).
 
         Args:
             request: Order parameters.
 
         Returns:
             Created order snapshot.
+
+        Raises:
+            AmbiguousOrderSubmitError: If the venue call failed in a way
+                where the order MAY exist on the venue.
         """
         ccxt_symbol = native_to_ccxt(request.symbol)
         ccxt_params: dict[str, Any] = {}
@@ -560,16 +569,25 @@ class KrakenExchangeClient(ExchangeClientBase):
             ccxt_params["leverage"] = request.leverage
         if request.post_only:
             ccxt_params["postOnly"] = True
-        order_data = await self._with_retry(
-            self._ccxt_client.create_order,
-            ccxt_symbol,
-            request.type.value,
-            request.side.value,
-            float(request.amount),
-            float(request.price) if request.price else None,
-            ccxt_params,
-            retry_network_errors=False,
-        )
+        try:
+            order_data = await self._with_retry(
+                self._ccxt_client.create_order,
+                ccxt_symbol,
+                request.type.value,
+                request.side.value,
+                float(request.amount),
+                float(request.price) if request.price else None,
+                ccxt_params,
+                retry_network_errors=False,
+            )
+        except ccxt.RateLimitExceeded:
+            raise
+        except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
+            raise AmbiguousOrderSubmitError(
+                client_order_id=request.client_order_id or "",
+                instrument=request.symbol,
+                message=f"Kraken Spot create_order network failure (order may exist): {e}",
+            ) from e
         exchange_id = str(order_data.get("id") or "")
         order = ExchangeOrderSnapshot(
             id=exchange_id,
@@ -625,11 +643,20 @@ class KrakenExchangeClient(ExchangeClientBase):
                 extra_params["cl_ord_id"] = str(request.client_order_id)
             if kraken_rest_symbol.endswith(("x/USD", "x/EUR")):
                 extra_params["asset_class"] = "tokenized_asset"
-            result = await asyncio.to_thread(
-                trade_client.create_order,
-                **kraken_params,
-                extra_params=extra_params or None,
-            )
+            try:
+                result = await asyncio.to_thread(
+                    trade_client.create_order,
+                    **kraken_params,
+                    extra_params=extra_params or None,
+                )
+            except requests.exceptions.RequestException as e:
+                raise AmbiguousOrderSubmitError(
+                    client_order_id=request.client_order_id or "",
+                    instrument=request.symbol,
+                    message=(
+                        f"Kraken native create_order transport failure (order may exist): {e}"
+                    ),
+                ) from e
             order = self._convert_kraken_native_order(result, request)
             db_result = await self._log_order_to_db(request, order)
             if db_result is not None:

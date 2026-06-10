@@ -100,14 +100,15 @@ class TestRuleRegistry:
 class TestLoadDefaultRegistry:
     """Verifies the default v1.11 registry contract."""
 
-    def test_default_registry_has_five_rules(self) -> None:
-        """load_default_registry wires all 5 P0 rules (incl. margin_warning)."""
+    def test_default_registry_has_six_rules(self) -> None:
+        """load_default_registry wires the 5 P0 rules plus order_unknown (#145 P0-1)."""
         reg = load_default_registry()
 
         alert_types = {rule.alert_type for rule in reg._rules}
         assert alert_types == {
             "order_fill_full",
             "order_rejected",
+            "order_unknown",
             "position_stop_loss_fired",
             "critical_system_error",
             "margin_warning",

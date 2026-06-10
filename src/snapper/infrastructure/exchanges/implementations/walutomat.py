@@ -59,6 +59,7 @@ from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketPair
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketResponse
 from snapper.infrastructure.network.pooled_httpx_transport import PooledAsyncTransport
@@ -1059,6 +1060,17 @@ class WalutomatExchangeClient(ExchangeClientBase):
     async def create_order(self, request: ExchangeOrderRequest) -> ExchangeOrderSnapshot:
         """Create a new FX order on Walutomat.
 
+        Transport failures are split by safety class (#145 P0-1):
+        connect-phase errors (connection refused, connect timeout, no
+        pool slot, SOCKS handshake) provably happened BEFORE the request
+        left the process and re-raise plain — safe to reject. Anything
+        after send (read/write timeout, reset, protocol error, gateway
+        5xx, unparseable success body) is wrapped in
+        ``AmbiguousOrderSubmitError`` — Walutomat may have accepted the
+        order under this ``submitId``. A 4xx and an explicit
+        ``success=false`` body are authoritative venue answers and stay
+        definitive rejections.
+
         Args:
             request: Order parameters.
 
@@ -1066,7 +1078,10 @@ class WalutomatExchangeClient(ExchangeClientBase):
             Created order snapshot.
 
         Raises:
-            RuntimeError: If not connected or not authenticated.
+            RuntimeError: If not connected or not authenticated, or the
+                venue answered ``success=false``.
+            AmbiguousOrderSubmitError: If the call failed in a way where
+                the order MAY exist on the venue.
         """
         client = self._require_authenticated()
         walutomat_rest_symbol = native_to_walutomat_rest(request.symbol)
@@ -1088,12 +1103,60 @@ class WalutomatExchangeClient(ExchangeClientBase):
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         url = f"{self.api_base_url}/market_fx/orders"
         await self._acquire_rest_slot()
-        response = await client.post(url, content=body, headers=headers)
-        response.raise_for_status()
-        result = response.json()
+        try:
+            response = await client.post(url, content=body, headers=headers)
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ProxyError):
+            raise
+        except httpx.TransportError as e:
+            raise AmbiguousOrderSubmitError(
+                client_order_id=submit_id,
+                instrument=request.symbol,
+                message=f"Walutomat create_order transport failure (order may exist): {e}",
+            ) from e
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code >= 500:
+                raise AmbiguousOrderSubmitError(
+                    client_order_id=submit_id,
+                    instrument=request.symbol,
+                    message=(
+                        f"Walutomat create_order gateway error "
+                        f"{e.response.status_code} (order may exist): {e}"
+                    ),
+                ) from e
+            raise
+        try:
+            result = response.json()
+        except ValueError as e:
+            raise AmbiguousOrderSubmitError(
+                client_order_id=submit_id,
+                instrument=request.symbol,
+                message=f"Walutomat create_order returned unparseable body (order may exist): {e}",
+            ) from e
         if not result.get("success"):
             raise RuntimeError(f"ExchangeOrderSnapshot creation failed: {result}")
-        order_id = result["result"]["orderId"]
+        try:
+            order_id = result["result"]["orderId"]
+        except (KeyError, TypeError) as e:
+            raise AmbiguousOrderSubmitError(
+                client_order_id=submit_id,
+                instrument=request.symbol,
+                message=(
+                    f"Walutomat accepted the submit but the response lacks orderId "
+                    f"(order may exist): {result}"
+                ),
+            ) from e
+        if not isinstance(order_id, str) or not order_id:
+            raise AmbiguousOrderSubmitError(
+                client_order_id=submit_id,
+                instrument=request.symbol,
+                message=(
+                    f"Walutomat accepted the submit but returned an unusable orderId "
+                    f"{order_id!r} (order may exist): a falsy id would be misread as a "
+                    f"definitive rejection downstream"
+                ),
+            )
         logger.info(
             f"Created order {order_id}: {request.side.value} {request.amount} {request.symbol}"
         )

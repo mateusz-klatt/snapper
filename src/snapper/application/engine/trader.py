@@ -2292,6 +2292,27 @@ class TraderCoordinator(RegisterableProcess):
                 f"{parsed.suffix} (submit rejection) {order_status.instrument} "
                 f"on {parsed.exchange}"
             )
+        elif parsed.suffix == "unknown":
+            for engine in self.engines.values():
+                if engine.mark_pending_unknown(order_status.client_order_id):
+                    logger.warning(
+                        f"ZMQTrader: Order {order_status.client_order_id} submit state "
+                        f"UNKNOWN on {parsed.exchange} — engine guard held, no "
+                        f"re-emission until venue verification resolves"
+                    )
+                    break
+        elif parsed.suffix == "accepted":
+            for engine in self.engines.values():
+                if engine.clear_pending_unknown(order_status.client_order_id):
+                    logger.info(
+                        f"ZMQTrader: Order {order_status.client_order_id} resolved from "
+                        f"UNKNOWN to accepted on {parsed.exchange}"
+                    )
+                    break
+            logger.info(
+                f"ZMQTrader: Order status - {order_status.client_order_id} {parsed.suffix} "
+                f"{order_status.instrument} on {parsed.exchange}"
+            )
         else:
             logger.info(
                 f"ZMQTrader: Order status - {order_status.client_order_id} {parsed.suffix} "

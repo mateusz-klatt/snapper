@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import ccxt
 import pytest
+import requests
 from ccxt.base.errors import NetworkError
 from loguru import logger
 from pydantic import ValidationError
@@ -34,6 +35,7 @@ from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.implementations import kraken as kr
 from snapper.infrastructure.exchanges.implementations.kraken import (
     _OHLC_DEPRECATED_TIMESTAMP_NOTICE,
@@ -2887,14 +2889,16 @@ class TestCreateOrderNetworkRetryExclusion:
         When: create_order is called,
         Then: The venue call is made exactly once, the control flag is
             consumed by _with_retry rather than forwarded to the venue
-            call, and the timeout propagates without any blind re-send.
+            call, and the ambiguous failure surfaces as
+            AmbiguousOrderSubmitError carrying the original timeout as
+            __cause__ plus the submit identity (#145 P0-1).
         """
         mock_client = AsyncMock()
         mock_client.create_order.side_effect = ccxt.RequestTimeout("request timed out")
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
             patch("asyncio.sleep", new_callable=AsyncMock),
-            pytest.raises(ccxt.RequestTimeout),
+            pytest.raises(AmbiguousOrderSubmitError) as exc_info,
         ):
             await kraken_client.create_order(
                 ExchangeOrderRequest(
@@ -2907,6 +2911,9 @@ class TestCreateOrderNetworkRetryExclusion:
             )
         mock_client.create_order.assert_called_once()
         assert "retry_network_errors" not in mock_client.create_order.call_args.kwargs
+        assert isinstance(exc_info.value.__cause__, ccxt.RequestTimeout)
+        assert exc_info.value.client_order_id == "client_p02"
+        assert exc_info.value.instrument == "BTC-USD"
 
     @pytest.mark.asyncio
     async def test_unretried_network_failure_feeds_circuit_breaker(
@@ -2925,7 +2932,7 @@ class TestCreateOrderNetworkRetryExclusion:
         kraken_client._circuit_failures = kraken_client._max_failures - 1
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
-            pytest.raises(ccxt.NetworkError),
+            pytest.raises(AmbiguousOrderSubmitError),
         ):
             await kraken_client.create_order(
                 ExchangeOrderRequest(
@@ -2996,6 +3003,117 @@ class TestCreateOrderNetworkRetryExclusion:
         ):
             await kraken_client._with_retry(failing_function)
         assert call_count == 3
+
+
+class TestAmbiguousSubmitClassification:
+    """Exception taxonomy pins for spot create_order (#145 P0-1).
+
+    Only genuinely ambiguous failures (request possibly executed) may
+    wrap into AmbiguousOrderSubmitError; definitive venue answers and
+    provably-not-sent failures must keep their native types so the
+    executor's reject path still handles them.
+    """
+
+    @pytest.fixture
+    def kraken_client(self) -> KrakenExchangeClient:
+        """Provide test client instance."""
+        return KrakenExchangeClient(
+            api_key="test_key",
+            api_secret="test_secret",
+            sandbox=False,
+        )
+
+    def _request(self) -> ExchangeOrderRequest:
+        """Build a market order request."""
+        return ExchangeOrderRequest(
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.MARKET,
+            amount=float("0.1"),
+            client_order_id="client_tax",
+        )
+
+    @pytest.mark.asyncio
+    async def test_exhausted_rate_limit_is_not_wrapped(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """An exhausted 429 keeps its native type despite subclassing NetworkError.
+
+        Given: CCXT create_order raising RateLimitExceeded on every
+            attempt (a definitive venue-side rejection — the order was
+            never placed),
+        When: create_order exhausts the rate-limit retries,
+        Then: RateLimitExceeded propagates plain, never as ambiguous.
+        """
+        mock_client = AsyncMock()
+        mock_client.create_order.side_effect = ccxt.RateLimitExceeded("rate limited")
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(ccxt.RateLimitExceeded),
+        ):
+            await kraken_client.create_order(self._request())
+
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_open_is_not_wrapped(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A pre-send breaker rejection keeps its native RuntimeError type.
+
+        Given: The REST circuit breaker open (raised BEFORE any send —
+            the order provably never left the process),
+        When: create_order is called,
+        Then: The plain RuntimeError propagates (safe to reject).
+        """
+        kraken_client._circuit_open_until = time.time() + 3600
+        mock_client = AsyncMock()
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            pytest.raises(RuntimeError, match="Circuit breaker open"),
+        ):
+            await kraken_client.create_order(self._request())
+        mock_client.create_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_exchange_error_is_not_wrapped(self, kraken_client: KrakenExchangeClient) -> None:
+        """A definitive venue rejection keeps its native ExchangeError type.
+
+        Given: CCXT create_order raising InsufficientFunds (the venue
+            answered authoritatively — no order was placed),
+        When: create_order is called,
+        Then: The ExchangeError propagates plain.
+        """
+        mock_client = AsyncMock()
+        mock_client.create_order.side_effect = ccxt.InsufficientFunds("no funds")
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            pytest.raises(ccxt.InsufficientFunds),
+        ):
+            await kraken_client.create_order(self._request())
+
+    @pytest.mark.asyncio
+    async def test_native_fallback_transport_failure_is_wrapped(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """The native Trade API path wraps transport failures as ambiguous.
+
+        Given: A native-only symbol whose Trade API send raises a
+            requests transport error (the order may have reached
+            Kraken),
+        When: _create_order_via_native is called,
+        Then: AmbiguousOrderSubmitError surfaces with the original
+            error chained.
+        """
+        trade_client = MagicMock()
+        trade_client.create_order.side_effect = requests.exceptions.ConnectionError(
+            "reset after send"
+        )
+        with (
+            patch.object(kraken_client, "_get_trade_client", return_value=trade_client),
+            pytest.raises(AmbiguousOrderSubmitError) as exc_info,
+        ):
+            await kraken_client._create_order_via_native(self._request())
+        assert isinstance(exc_info.value.__cause__, requests.exceptions.ConnectionError)
 
 
 class TestStatusBranchInSubscriptions:

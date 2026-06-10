@@ -5222,3 +5222,211 @@ class TestResolveInstrumentSpecs:
         )
         result = await cast(Any, coord)._resolve_instrument_specs("BTC-USD", "kraken")
         assert result == {"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}}
+
+
+class TestUnknownSubmitGuard:
+    """Engine-side guard semantics for the #145 P0-1 UNKNOWN submit state."""
+
+    def _make_engine_inflight(self) -> Any:
+        """Create a real engine with an in-flight order past its timeout."""
+        socket = MagicMock()
+        socket.tracker = SequenceTracker()
+        engine = TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            cfg=EngineConfigModel(initial_cash=10000.0),
+            exchange="kraken",
+        )
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "order-123"
+        engine._in_flight_since = time.monotonic() - 120.0
+        return engine
+
+    def test_mark_pending_unknown_matches_current_order(self) -> None:
+        """Mark sets the flag only for the matching pending order.
+
+        Given: An engine with order-123 in flight,
+        When: mark_pending_unknown is called for order-123 and a stale id,
+        Then: Only the matching call sets the flag and returns True.
+        """
+        engine = self._make_engine_inflight()
+        assert engine.mark_pending_unknown("stale-order") is False
+        assert engine._pending_unknown is False
+        assert engine.mark_pending_unknown("order-123") is True
+        assert engine._pending_unknown is True
+
+    def test_timeout_holds_guard_while_unknown(self) -> None:
+        """The in-flight timeout never clears the guard in UNKNOWN state.
+
+        Given: An engine whose pending order is flagged UNKNOWN and the
+            timeout has long elapsed,
+        When: _check_in_flight_timeout runs,
+        Then: The guard stays held — clearing it would let a replacement
+            order through while the original may be live on the venue.
+        """
+        engine = self._make_engine_inflight()
+        engine.mark_pending_unknown("order-123")
+        engine._check_in_flight_timeout()
+        assert engine.order_in_flight is True
+        assert engine.pending_client_order_id == "order-123"
+
+    def test_timeout_clears_guard_after_unknown_resolved(self) -> None:
+        """Resolving UNKNOWN restores the normal timeout safety valve.
+
+        Given: An engine whose UNKNOWN flag was cleared by a late
+            acceptance,
+        When: _check_in_flight_timeout runs past the timeout,
+        Then: The guard clears as in the ordinary lifecycle.
+        """
+        engine = self._make_engine_inflight()
+        engine.mark_pending_unknown("order-123")
+        assert engine.clear_pending_unknown("order-123") is True
+        engine._check_in_flight_timeout()
+        assert engine.order_in_flight is False
+        assert engine.pending_client_order_id is None
+
+    def test_clear_pending_unknown_reports_actual_transition(self) -> None:
+        """Clear returns True only when the flag was actually set.
+
+        Given: An engine with no UNKNOWN flag,
+        When: clear_pending_unknown is called for the pending order,
+        Then: It returns False so callers do not log a phantom
+            resolution on every ordinary acceptance.
+        """
+        engine = self._make_engine_inflight()
+        assert engine.clear_pending_unknown("stale-order") is False
+        assert engine.clear_pending_unknown("order-123") is False
+        engine.mark_pending_unknown("order-123")
+        assert engine.clear_pending_unknown("stale-order") is False
+        assert engine.clear_pending_unknown("order-123") is True
+        assert engine.clear_pending_unknown("order-123") is False
+
+    def test_reject_clears_unknown_flag(self) -> None:
+        """clear_pending_intent resets the UNKNOWN flag with the guard.
+
+        Given: An engine flagged UNKNOWN,
+        When: clear_pending_intent resolves the order as rejected,
+        Then: Guard and flag both reset so the next order starts clean.
+        """
+        engine = self._make_engine_inflight()
+        engine.mark_pending_unknown("order-123")
+        assert engine.clear_pending_intent("order-123") is True
+        assert engine._pending_unknown is False
+        assert engine.order_in_flight is False
+
+    def test_full_fill_clears_unknown_flag(self) -> None:
+        """A complete fill resets the UNKNOWN flag with the guard.
+
+        Given: An engine flagged UNKNOWN whose order then fully fills
+            (late resolution via the fills stream),
+        When: apply_fill books the complete fill,
+        Then: Guard and flag both reset.
+        """
+        engine = self._make_engine_inflight()
+        engine.mark_pending_unknown("order-123")
+        fill = _make_fill(client_order_id="order-123", status="filled")
+        assert engine.apply_fill(fill) is True
+        assert engine.order_in_flight is False
+        assert engine._pending_unknown is False
+
+
+@pytest.mark.asyncio
+class TestUnknownEventRouting:
+    """Coordinator routing of .unknown order events (#145 P0-1)."""
+
+    async def _dispatch(self, coord: TraderCoordinator, status: str) -> None:
+        """Send an OrderData with the given status through the handler."""
+        order_status = OrderData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            client_order_id="order-123",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            status=status,
+            order_type="market",
+            size=0.5,
+            filled_size=0.0,
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        await coord._handle_order_status(f"orders.events.kraken.BTC-USD.{status}", order_status)
+
+    async def test_unknown_marks_engine_and_holds_intent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The unknown suffix marks the engine and never clears intent.
+
+        Given: An engine with order-123 in flight,
+        When: An unknown event arrives for order-123,
+        Then: mark_pending_unknown is called, clear_pending_intent is
+            NOT, and no paired-leg terminal projection happens.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch)
+        engine.mark_pending_unknown = MagicMock(return_value=True)
+        coord._project_paired_execution_leg_terminal = AsyncMock()
+        await self._dispatch(coord, "unknown")
+        engine.mark_pending_unknown.assert_called_once_with("order-123")
+        engine.clear_pending_intent.assert_not_called()
+        coord._project_paired_execution_leg_terminal.assert_not_awaited()
+
+    async def test_accepted_resolves_unknown_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A late acceptance resolves the engine's UNKNOWN flag.
+
+        Given: An engine whose order was previously flagged UNKNOWN,
+        When: An accepted event arrives for it,
+        Then: clear_pending_unknown is called with the order id.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch)
+        engine.clear_pending_unknown = MagicMock(return_value=True)
+        await self._dispatch(coord, "accepted")
+        engine.clear_pending_unknown.assert_called_once_with("order-123")
+        engine.clear_pending_intent.assert_not_called()
+
+    async def test_unknown_with_no_matching_engine_is_safe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unknown event with no engine match passes through harmlessly.
+
+        Given: An engine whose mark_pending_unknown rejects the id,
+        When: An unknown event arrives,
+        Then: The handler completes without clearing intent anywhere.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch)
+        engine.mark_pending_unknown = MagicMock(return_value=False)
+        await self._dispatch(coord, "unknown")
+        engine.mark_pending_unknown.assert_called_once_with("order-123")
+        engine.clear_pending_intent.assert_not_called()
+
+    async def test_ordinary_acceptance_logs_without_resolution(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An acceptance with no UNKNOWN flag takes the plain-log path.
+
+        Given: An engine whose clear_pending_unknown reports no actual
+            transition (the ordinary acceptance case),
+        When: An accepted event arrives,
+        Then: The handler completes without phantom resolution side
+            effects (intent untouched).
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch)
+        engine.clear_pending_unknown = MagicMock(return_value=False)
+        await self._dispatch(coord, "accepted")
+        engine.clear_pending_unknown.assert_called_once_with("order-123")
+        engine.clear_pending_intent.assert_not_called()
+
+    async def test_submitted_takes_generic_log_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A submitted event takes the generic else branch untouched.
+
+        Given: An engine with an in-flight order,
+        When: A submitted event arrives,
+        Then: No unknown/intent interaction happens at all.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch)
+        engine.mark_pending_unknown = MagicMock()
+        engine.clear_pending_unknown = MagicMock()
+        await self._dispatch(coord, "submitted")
+        engine.mark_pending_unknown.assert_not_called()
+        engine.clear_pending_unknown.assert_not_called()
+        engine.clear_pending_intent.assert_not_called()

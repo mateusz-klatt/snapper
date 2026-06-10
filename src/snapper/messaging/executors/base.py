@@ -55,6 +55,7 @@ from snapper.infrastructure.exchanges.contracts import ExecType
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import to_fill_status
+from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.messaging.infrastructure.gap_detector import GapDetector
@@ -98,6 +99,15 @@ class PendingOrderState:
         order_public_id: Logical order identity (for execution inserts).
         exchange_order_id: Exchange-assigned order ID (set after ACK).
         last_seen_cum_qty: Running cumulative fill quantity for delta fallback.
+        submit_ambiguous: True when the submit failed ambiguously (the
+            venue MAY have the order, #145 P0-1); the entry is parked
+            pending venue verification instead of being rejected.
+        unknown_published: True once the single UNKNOWN order event has
+            been published for this entry (guards duplicate publishes
+            across recon touches).
+        accept_event_pending: True when the order was accepted by the
+            venue but the durable order_accepted venue event failed to
+            persist; the recon loop retries the write until it sticks.
     """
 
     request: OrderRequestData
@@ -105,6 +115,9 @@ class PendingOrderState:
     order_public_id: str | None = field(default=None)
     exchange_order_id: str | None = field(default=None)
     last_seen_cum_qty: float = field(default=0.0)
+    submit_ambiguous: bool = field(default=False)
+    unknown_published: bool = field(default=False)
+    accept_event_pending: bool = field(default=False)
 
 
 class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
@@ -697,12 +710,18 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Publishes order events to orders.events.{exchange}.{instrument}.{event}:
         - submitted: Executor accepted command, sending to exchange
         - accepted: Exchange ACK returned order_id (sync REST response)
-        - rejected: Exchange rejected order or validation failed
+        - rejected: Exchange DEFINITIVELY rejected the order or
+          validation failed before any send
+        - unknown: Submit outcome ambiguous (order may exist on the
+          venue) — pending entry parked, engine holds in-flight
         - executed: Order executed (see _execution_handler for WebSocket fills)
 
         Note: 'accepted' is published when the exchange REST API returns an order_id,
         confirming the order was received and queued. This is a synchronous response.
         Actual fills come asynchronously via WebSocket execution updates.
+        Acceptance finalization runs outside the submit try/except in
+        ``_finalize_accepted_submit`` so a DB blip on a live order can
+        never publish REJECTED (#145 P0-1).
 
         Args:
             order: Order request data containing order details.
@@ -720,42 +739,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             self.pending_orders[order.client_order_id] = PendingOrderState(request=order)
             await self._publish_order_status(order, OrderEventEnum.SUBMITTED)
             exchange_order_id = await self._execute_live_order(order)
-            if exchange_order_id:
-                self.client_by_exchange[exchange_order_id] = order.client_order_id
-                self._try_process_orphaned(exchange_order_id, order.client_order_id)
-                await self._record_venue_event(
-                    {
-                        "event_type": "order_accepted",
-                        "exchange_name": exchange_name,
-                        "instrument": order.instrument,
-                        "exchange_order_id": exchange_order_id,
-                        "client_order_id": order.client_order_id,
-                        "side": order.side,
-                        "strategy_tag": order.strategy_tag,
-                    }
-                )
-                await self._publish_order_status(order, OrderEventEnum.ACCEPTED, exchange_order_id)
-                logger.info(
-                    f"[{exchange_name}] Order {order.client_order_id} "
-                    f"accepted as {exchange_order_id}, waiting for execution"
-                )
-            else:
-                logger.warning(
-                    f"[{exchange_name}] Order {order.client_order_id} rejected by exchange"
-                )
-                self.pending_orders.pop(order.client_order_id, None)
-                await self._publish_order_status(order, OrderEventEnum.REJECTED)
-                await self._record_venue_event(
-                    {
-                        "event_type": "order_rejected",
-                        "exchange_name": exchange_name,
-                        "instrument": order.instrument,
-                        "client_order_id": order.client_order_id,
-                        "side": order.side,
-                        "error": "rejected by exchange",
-                        "strategy_tag": order.strategy_tag,
-                    }
-                )
+        except AmbiguousOrderSubmitError as e:
+            await self._handle_ambiguous_submit(order, e)
+            return
         except Exception as e:
             logger.error(f"[{exchange_name}] Error processing order {order.client_order_id}: {e}")
             self.pending_orders.pop(order.client_order_id, None)
@@ -771,6 +757,151 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "strategy_tag": order.strategy_tag,
                 }
             )
+            return
+        if exchange_order_id:
+            await self._finalize_accepted_submit(order, exchange_order_id)
+        else:
+            logger.warning(f"[{exchange_name}] Order {order.client_order_id} rejected by exchange")
+            self.pending_orders.pop(order.client_order_id, None)
+            await self._publish_order_status(order, OrderEventEnum.REJECTED)
+            await self._record_venue_event(
+                {
+                    "event_type": "order_rejected",
+                    "exchange_name": exchange_name,
+                    "instrument": order.instrument,
+                    "client_order_id": order.client_order_id,
+                    "side": order.side,
+                    "error": "rejected by exchange",
+                    "strategy_tag": order.strategy_tag,
+                }
+            )
+
+    async def _finalize_accepted_submit(
+        self, order: OrderRequestData, exchange_order_id: str
+    ) -> None:
+        """Record and publish acceptance of a venue-confirmed live order.
+
+        Runs OUTSIDE the submit try/except on purpose (#145 P0-1): once
+        the venue returned an order id the order IS live, so nothing in
+        here may publish REJECTED or pop the pending entry. A failed
+        durable ``order_accepted`` write is logged CRITICAL and marked
+        on the pending entry (``accept_event_pending``) for the recon
+        loop to retry — live correctness (engine learns the order is
+        accepted, fills correlate via client_by_exchange) takes priority
+        over the durable row, which recon heals.
+
+        Orphaned-execution flushing happens AFTER the durable-write
+        attempt: a buffered fill can complete the order and pop its
+        pending entry, which would make the ``accept_event_pending``
+        flag unsettable if the write failed.
+
+        Args:
+            order: The original order request.
+            exchange_order_id: Venue-assigned order id from the submit.
+        """
+        exchange_name = self._get_exchange_name()
+        self.client_by_exchange[exchange_order_id] = order.client_order_id
+        try:
+            await self._record_venue_event(
+                {
+                    "event_type": "order_accepted",
+                    "exchange_name": exchange_name,
+                    "instrument": order.instrument,
+                    "exchange_order_id": exchange_order_id,
+                    "client_order_id": order.client_order_id,
+                    "side": order.side,
+                    "strategy_tag": order.strategy_tag,
+                }
+            )
+        except Exception:
+            logger.critical(
+                f"[{exchange_name}] Order {order.client_order_id} accepted as "
+                f"{exchange_order_id} but the order_accepted venue event failed to "
+                f"persist — order is LIVE; recon will retry the durable write"
+            )
+            pending = self.pending_orders.get(order.client_order_id)
+            if pending is not None:
+                pending.accept_event_pending = True
+        self._try_process_orphaned(exchange_order_id, order.client_order_id)
+        await self._publish_order_status(order, OrderEventEnum.ACCEPTED, exchange_order_id)
+        logger.info(
+            f"[{exchange_name}] Order {order.client_order_id} "
+            f"accepted as {exchange_order_id}, waiting for execution"
+        )
+
+    async def _handle_ambiguous_submit(
+        self, order: OrderRequestData, error: AmbiguousOrderSubmitError
+    ) -> None:
+        """Park an ambiguously-failed submit in the UNKNOWN state.
+
+        The venue call failed in a way where the order MAY exist on the
+        venue (#145 P0-1). Publishing REJECTED here would fabricate
+        state: the engine would clear its in-flight intent and could
+        re-emit a replacement order while the original is live, doubling
+        exposure. Instead the pending entry is kept and marked
+        ``submit_ambiguous``, a non-terminal ``order_submit_unknown``
+        venue event is recorded, and a single UNKNOWN order event is
+        published — the engine holds its guard on it and the operator is
+        alerted. Venue verification (lookup by client id) resolves the
+        entry to accepted or rejected in a follow-up change; until then
+        resolution is manual.
+
+        The durable venue-event write is best-effort here: if it fails
+        (likely the same outage), holding the engine guard via the
+        UNKNOWN publish matters more than the durable row. The UNKNOWN
+        publish itself is retried with short backoff and
+        ``unknown_published`` is set ONLY on a confirmed send — a
+        swallowed publish failure would leave the engine's in-flight
+        timeout free to clear the guard and re-emit while the original
+        order may be live. A total publish failure is CRITICAL (the
+        recon-loop retouch that re-attempts the publish lands in a
+        follow-up slice; until then the loud log is the backstop).
+
+        Args:
+            order: The original order request.
+            error: The ambiguous failure raised by the venue client.
+        """
+        exchange_name = self._get_exchange_name()
+        pending = self.pending_orders.get(order.client_order_id)
+        if pending is None:
+            pending = PendingOrderState(request=order)
+            self.pending_orders[order.client_order_id] = pending
+        pending.submit_ambiguous = True
+        logger.error(
+            f"[{exchange_name}] Order {order.client_order_id} submit AMBIGUOUS "
+            f"(order may exist on venue): {error} (cause: {error.__cause__!r})"
+        )
+        try:
+            await self._record_venue_event(
+                {
+                    "event_type": "order_submit_unknown",
+                    "exchange_name": exchange_name,
+                    "instrument": order.instrument,
+                    "client_order_id": order.client_order_id,
+                    "side": order.side,
+                    "error": str(error),
+                    "strategy_tag": order.strategy_tag,
+                }
+            )
+        except Exception:
+            logger.critical(
+                f"[{exchange_name}] order_submit_unknown venue event failed to persist "
+                f"for {order.client_order_id} — still publishing UNKNOWN to hold the "
+                f"engine guard"
+            )
+        if not pending.unknown_published:
+            for delay_s in (0.0, 0.5, 2.0):
+                if delay_s:
+                    await asyncio.sleep(delay_s)
+                if await self._publish_order_status(order, OrderEventEnum.UNKNOWN):
+                    pending.unknown_published = True
+                    break
+            if not pending.unknown_published:
+                logger.critical(
+                    f"[{exchange_name}] UNKNOWN order event for {order.client_order_id} "
+                    f"could not be published after retries — engine guard may clear on "
+                    f"timeout; operator must verify this order on the venue"
+                )
 
     async def _process_cancel(self, cancel: OrderCancelData) -> None:
         """Cancel an existing order on the exchange.
@@ -900,44 +1031,54 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def _execute_live_order(self, order: OrderRequestData) -> str | None:
         """Execute an order on the exchange and return the exchange order ID.
 
+        Exceptions PROPAGATE to the caller (#145 P0-1): the previous
+        blanket except-return-None coerced every failure — including
+        ambiguous network failures where the order may have executed —
+        into the definitive-reject path. ``_process_order`` now
+        distinguishes ``AmbiguousOrderSubmitError`` (UNKNOWN/verify
+        path) from genuine errors (reject path); a ``None``/empty-id
+        return remains the definitive venue-side rejection signal.
+
         Args:
             order: Order request data containing order details.
 
         Returns:
-            Exchange order ID if successful, None otherwise.
+            Exchange order ID if accepted, None when the venue
+            definitively rejected the submit.
+
+        Raises:
+            AmbiguousOrderSubmitError: If the venue call failed in a way
+                where the order MAY exist on the venue.
+            Exception: Any other submit failure (definitive reject).
         """
         exchange_name = self._get_exchange_name()
-        try:
-            order_request = ExchangeOrderRequest(
-                symbol=order.instrument,
-                side=OrderSideEnum(order.side),
-                type=ExchangeOrderTypeEnum(order.order_type),
-                amount=float(order.quantity),
-                price=float(order.price) if order.price else None,
-                client_order_id=order.client_order_id,
-                signaled_at=order.signaled_at,
-                leverage=order.leverage,
-                reduce_only=order.reduce_only,
-                wallet_public_id=self.wallet_public_id,
-                operator_public_id=order.operator_public_id,
+        order_request = ExchangeOrderRequest(
+            symbol=order.instrument,
+            side=OrderSideEnum(order.side),
+            type=ExchangeOrderTypeEnum(order.order_type),
+            amount=float(order.quantity),
+            price=float(order.price) if order.price else None,
+            client_order_id=order.client_order_id,
+            signaled_at=order.signaled_at,
+            leverage=order.leverage,
+            reduce_only=order.reduce_only,
+            wallet_public_id=self.wallet_public_id,
+            operator_public_id=order.operator_public_id,
+        )
+        assert self.exchange_client is not None, _EXCHANGE_NOT_INIT_MSG
+        result = await self.exchange_client.create_order(order_request)
+        exchange_order_id = result.id if result else None
+        if exchange_order_id:
+            pending = self.pending_orders.get(order.client_order_id)
+            if pending is not None:
+                pending.exchange_order_id = exchange_order_id
+                pending.db_order_id = result.db_order_id
+                pending.order_public_id = result.db_order_public_id
+            logger.info(
+                f"[{exchange_name}] ExchangeOrderSnapshot submitted: {order.client_order_id} -> "
+                f"{exchange_order_id}, waiting for execution via WebSocket"
             )
-            assert self.exchange_client is not None, _EXCHANGE_NOT_INIT_MSG
-            result = await self.exchange_client.create_order(order_request)
-            exchange_order_id = result.id if result else None
-            if exchange_order_id:
-                pending = self.pending_orders.get(order.client_order_id)
-                if pending is not None:
-                    pending.exchange_order_id = exchange_order_id
-                    pending.db_order_id = result.db_order_id
-                    pending.order_public_id = result.db_order_public_id
-                logger.info(
-                    f"[{exchange_name}] ExchangeOrderSnapshot submitted: {order.client_order_id} -> "
-                    f"{exchange_order_id}, waiting for execution via WebSocket"
-                )
-            return exchange_order_id
-        except Exception as e:
-            logger.error(f"[{exchange_name}] Live execution error: {e}")
-            return None
+        return exchange_order_id
 
     async def _publish_execution(self, topic: str, fill: ExecutionData) -> None:
         """Send a complete fill notification to ZMQ.
@@ -1632,7 +1773,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         order: OrderRequestData,
         status: OrderEventType,
         exchange_order_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Publish order status event to the ZMQ topic.
 
         The status value is used both as the topic suffix and the payload
@@ -1642,9 +1783,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             order: Order request data containing order details.
             status: Event type for topic suffix and payload status field.
             exchange_order_id: Exchange-assigned order ID (if known).
+
+        Returns:
+            True when the event was handed to the publisher without
+            error; False when the publisher is unavailable or the send
+            raised. Callers of safety-critical statuses (UNKNOWN, #145
+            P0-1) must check this — a swallowed publish failure would
+            leave the engine unaware that its in-flight guard must hold.
         """
         if not self.msg_publisher or not self.running:
-            return
+            return False
         exchange_name = self._get_exchange_name()
         now = datetime.now(UTC)
         try:
@@ -1675,8 +1823,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.info(
                 f"[{exchange_name}] Published order event: {order.client_order_id} - {status}"
             )
+            return True
         except Exception as e:
             logger.error(f"[{exchange_name}] Error publishing order event: {e}")
+            return False
 
     async def _heartbeat_loop(self) -> None:
         """Periodically publish heartbeat messages and cleanup orphans.

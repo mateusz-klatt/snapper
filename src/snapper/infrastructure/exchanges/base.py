@@ -746,6 +746,14 @@ class ExchangeClientBase(ABC):
         This internal method is called after successfully creating an order
         on the exchange. It upserts the instrument and inserts the order record.
 
+        This is a post-accept AUXILIARY write and must NEVER raise: at
+        this point the venue already accepted the order, and an escaping
+        exception would ride the venue client's create_order back into
+        the executor's definitive-reject branch — misreporting a LIVE
+        order as rejected (#145 P0-1). Hence the blanket exception
+        catch; the caller treats None as "not persisted" and downstream
+        reconciliation heals the row.
+
         Args:
             request: Original order request with parameters.
             order: Exchange response with order details.
@@ -791,7 +799,7 @@ class ExchangeClientBase(ABC):
                 leverage=request.leverage,
                 reduce_only=request.reduce_only,
             )
-        except SQLAlchemyError as e:
+        except Exception as e:
             logger.error(f"Failed to log order to database: {e}")
             return None
 

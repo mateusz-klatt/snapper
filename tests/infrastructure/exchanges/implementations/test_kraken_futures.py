@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+import requests
 from loguru import logger
 
 import snapper.infrastructure.exchanges._subscription_health as health_mod
@@ -31,6 +32,7 @@ from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.implementations import kraken_futures as kf
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
@@ -1486,6 +1488,68 @@ class TestOrderMethods:
         """
         with pytest.raises(RuntimeError, match="API credentials required"):
             await client.create_order(MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_create_order_transport_failure_is_ambiguous(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A transport failure on the SDK send wraps as ambiguous.
+
+        Given: The Trade SDK create_order raising a requests transport
+            error (the request may have reached the venue with this
+            cliOrdId, #145 P0-1),
+        When: create_order is called,
+        Then: AmbiguousOrderSubmitError surfaces with the original
+            error chained and the submit identity attached.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock(
+            side_effect=requests.exceptions.ReadTimeout("read timed out")
+        )
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.MARKET,
+            amount=1.0,
+            client_order_id="amb-fut-1",
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            pytest.raises(AmbiguousOrderSubmitError) as exc_info,
+        ):
+            await auth_client.create_order(request)
+        assert isinstance(exc_info.value.__cause__, requests.exceptions.ReadTimeout)
+        assert exc_info.value.client_order_id == "amb-fut-1"
+        assert exc_info.value.instrument == "BTC-USD-PERP"
+
+    @pytest.mark.asyncio
+    async def test_create_order_unsupported_type_is_not_wrapped(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A pre-send validation failure keeps its native ValueError type.
+
+        Given: An unsupported order type (raised BEFORE any network
+            send — the order provably never left the process),
+        When: create_order is called,
+        Then: The plain ValueError propagates (safe to reject).
+        """
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.ICEBERG,
+            amount=1.0,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            pytest.raises(ValueError, match="Unsupported order type"),
+        ):
+            await auth_client.create_order(request)
 
     @pytest.mark.asyncio
     async def test_cancel_order_returns_snapshot(

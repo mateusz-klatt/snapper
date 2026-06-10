@@ -944,6 +944,28 @@ class TestPlanExecutorService:
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
     @patch("snapper.application.plans.service.get_repository")
+    async def test_handle_order_status_ignores_unknown(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Given an UNKNOWN submit outcome, Then the plan is NOT failed.
+
+        The ambiguous state (#145 P0-1) is non-terminal: the order may
+        be live on the venue, so failing the plan would misreport an
+        unresolved submit as a terminal outcome.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=2)
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row()
+        service._register_plan(plan, ManualOnceEvaluator())
+        order_event = _make_order_status(status="unknown")
+        await service._handle_order_status(order_event)
+        mock_repo.update_execution_plan_status.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
     async def test_handle_tick_dispatches_to_matching_plan(
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock
     ) -> None:

@@ -247,6 +247,7 @@ class TradingEngineService:
         self._pending_client_order_id: str | None = None
         self.pending_coid_listener: Callable[[str | None, str | None], None] | None = None
         self._in_flight_since: float | None = None
+        self._pending_unknown = False
         self.seen_exec_ids: OrderedDict[str, None] = OrderedDict()
         self.read_only = False
         self._repository = repository
@@ -364,11 +365,27 @@ class TradingEngineService:
         Called before processing new signals. If the configured timeout
         has passed since the order was sent, logs a warning and clears
         the guard so new signals can be processed.
+
+        EXCEPTION (#145 P0-1): when the pending order's submit outcome
+        is UNKNOWN (``_pending_unknown``), the guard is NEVER cleared on
+        timeout — the order may be live on the venue, and clearing
+        would let a replacement order through, doubling exposure. The
+        guard holds until venue verification resolves the order to
+        accepted (flag clears, normal lifecycle resumes) or rejected
+        (``clear_pending_intent`` releases the guard).
         """
         if not self.order_in_flight or self._in_flight_since is None:
             return
         elapsed = time.monotonic() - self._in_flight_since
         if elapsed > self.IN_FLIGHT_TIMEOUT:
+            if self._pending_unknown:
+                logger.error(
+                    f"Order {self.pending_client_order_id} in-flight timeout "
+                    f"after {elapsed:.1f}s for {self.instrument} but submit state "
+                    f"is UNKNOWN — holding guard (no re-emission until venue "
+                    f"verification resolves)"
+                )
+                return
             logger.warning(
                 f"Order {self.pending_client_order_id} in-flight timeout "
                 f"after {elapsed:.1f}s for {self.instrument}, clearing guard"
@@ -376,6 +393,46 @@ class TradingEngineService:
             self.order_in_flight = False
             self.pending_client_order_id = None
             self._in_flight_since = None
+
+    def mark_pending_unknown(self, client_order_id: str) -> bool:
+        """Flag the current pending order as having an UNKNOWN submit outcome.
+
+        Only acts when the given client_order_id matches the current
+        pending order (mirrors ``clear_pending_intent`` matching) so a
+        stale event cannot freeze the guard for a newer order.
+
+        Args:
+            client_order_id: Order ID from the unknown event.
+
+        Returns:
+            True if the flag was set, False if ID did not match.
+        """
+        if client_order_id != self.pending_client_order_id:
+            return False
+        self._pending_unknown = True
+        return True
+
+    def clear_pending_unknown(self, client_order_id: str) -> bool:
+        """Resolve a previously UNKNOWN submit back to a known state.
+
+        Called when a late ACCEPTED event arrives for the order: the
+        in-flight guard stays held (the order is live, awaiting fills)
+        but the timeout safety valve behaves normally again.
+
+        Args:
+            client_order_id: Order ID from the resolving event.
+
+        Returns:
+            True only when the order matched AND was actually flagged
+            UNKNOWN (so callers can log the resolution without firing
+            on every ordinary acceptance).
+        """
+        if client_order_id != self.pending_client_order_id:
+            return False
+        if not self._pending_unknown:
+            return False
+        self._pending_unknown = False
+        return True
 
     def apply_fill(self, fill: ExecutionData) -> bool:
         """Apply a confirmed execution fill to engine state.
@@ -426,6 +483,7 @@ class TradingEngineService:
             self.order_in_flight = False
             self.pending_client_order_id = None
             self._in_flight_since = None
+            self._pending_unknown = False
         return True
 
     def clear_pending_intent(self, client_order_id: str) -> bool:
@@ -445,6 +503,7 @@ class TradingEngineService:
         self.order_in_flight = False
         self.pending_client_order_id = None
         self._in_flight_since = None
+        self._pending_unknown = False
         return True
 
     @property

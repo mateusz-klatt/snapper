@@ -30,6 +30,7 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.schemas.data import ExecutionData
@@ -1324,12 +1325,17 @@ class TestExecuteLiveOrderErrors:
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
-    async def test_execute_live_order_exception(self, mock_get_settings: MagicMock) -> None:
-        """Verify live order execution handles API exception.
+    async def test_execute_live_order_exception_propagates(
+        self, mock_get_settings: MagicMock
+    ) -> None:
+        """Verify live order execution propagates API exceptions.
 
-        Given: Exchange client that raises exception,
+        Given: Exchange client that raises an exception,
         When: _execute_live_order is called,
-        Then: Returns None without crashing.
+        Then: The exception propagates (#145 P0-1 — the previous
+            blanket swallow coerced ambiguous failures into the
+            definitive-reject path; classification now happens in
+            _process_order).
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
@@ -1339,8 +1345,8 @@ class TestExecuteLiveOrderErrors:
         mock_exchange_client.create_order = AsyncMock(side_effect=Exception("API error"))
         service_any.exchange_client = mock_exchange_client
         order = self._create_order()
-        result = await service_any._execute_live_order(order)
-        assert result is None
+        with pytest.raises(Exception, match="API error"):
+            await service_any._execute_live_order(order)
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2862,11 +2868,11 @@ class TestExecutorCoverage:
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
     async def test_execute_live_order_error(self, mock_get_settings: MagicMock) -> None:
-        """Verify live order execution handles error.
+        """Verify live order execution propagates errors.
 
         Given: Exchange client that raises exception,
         When: Order is executed,
-        Then: None is returned.
+        Then: The exception propagates to the caller (#145 P0-1).
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
@@ -2876,8 +2882,8 @@ class TestExecutorCoverage:
         service_any.exchange_client = mock_exchange_client
         order = self._create_order(mode="live")
         mock_exchange_client.create_order = AsyncMock(side_effect=RuntimeError("boom"))
-        result = await service_any._execute_live_order(order)
-        assert result is None
+        with pytest.raises(RuntimeError, match="boom"):
+            await service_any._execute_live_order(order)
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3763,11 +3769,12 @@ class TestExecutorWebSocketExecutions:
         self,
         mock_get_settings: MagicMock,
     ) -> None:
-        """Verify live order execution handles exception.
+        """Verify live order execution propagates venue exceptions.
 
         Given: Exchange client that raises exception,
         When: Order is executed,
-        Then: None returned and order not in pending.
+        Then: The exception propagates and no pending entry appears
+            (#145 P0-1 — classification happens in _process_order).
         """
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
@@ -3790,8 +3797,8 @@ class TestExecutorWebSocketExecutions:
             exchange="kraken",
         )
         mock_exchange_client.create_order = AsyncMock(side_effect=Exception("Insufficient balance"))
-        result = await service._execute_live_order(order)
-        assert result is None
+        with pytest.raises(Exception, match="Insufficient balance"):
+            await service._execute_live_order(order)
         assert "test-error-123" not in service.pending_orders
 
     @pytest.mark.asyncio
@@ -6224,3 +6231,230 @@ class TestWalletScopedExecutor:
         )
         await cast(Any, executor)._handle_replace_command(payload, "kraken", "BTC-USD")
         replace_mock.assert_not_awaited()
+
+
+class TestAmbiguousSubmitHandling:
+    """Money-safety pins for the #145 P0-1 UNKNOWN submit path.
+
+    An ambiguous venue failure (the order MAY exist) must never reach
+    the REJECTED path: a fabricated rejection clears the engine's
+    in-flight intent and a re-emitted replacement can double real
+    exposure. These tests pin the executor side of that contract.
+    """
+
+    def _executor(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        """Build a running dummy executor with tracked publish/record mocks."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex._publish_order_status = AsyncMock()
+        ex._record_venue_event = AsyncMock()
+        monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: True)
+        return ex
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_submit_parks_unknown_never_rejects(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ambiguous failure publishes UNKNOWN, keeps pending, never REJECTED.
+
+        Given: _execute_live_order raising AmbiguousOrderSubmitError,
+        When: _process_order runs,
+        Then: SUBMITTED then UNKNOWN are published (no REJECTED), an
+            order_submit_unknown venue event is recorded (never
+            order_rejected), and the pending entry is parked with
+            submit_ambiguous set.
+        """
+        ex = self._executor(monkeypatch)
+        ex._execute_live_order = AsyncMock(
+            side_effect=AmbiguousOrderSubmitError(
+                client_order_id="c1", instrument="BTC-USD", message="timeout after send"
+            )
+        )
+        order = make_order()
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "unknown"]
+        event_types = [c.args[0]["event_type"] for c in ex._record_venue_event.await_args_list]
+        assert event_types == ["order_submit_unknown"]
+        pending = ex.pending_orders[order.client_order_id]
+        assert pending.submit_ambiguous is True
+        assert pending.unknown_published is True
+
+    @pytest.mark.asyncio
+    async def test_unknown_published_only_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Repeated ambiguous handling publishes a single UNKNOWN event.
+
+        Given: A pending entry that already published UNKNOWN,
+        When: _handle_ambiguous_submit runs again for the same order,
+        Then: No second UNKNOWN publish is emitted.
+        """
+        ex = self._executor(monkeypatch)
+        order = make_order()
+        error = AmbiguousOrderSubmitError(
+            client_order_id=order.client_order_id, instrument="BTC-USD", message="boom"
+        )
+        await ex._handle_ambiguous_submit(order, error)
+        await ex._handle_ambiguous_submit(order, error)
+        unknown_publishes = [
+            c for c in ex._publish_order_status.await_args_list if c.args[1] == "unknown"
+        ]
+        assert len(unknown_publishes) == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_published_even_when_venue_event_write_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing durable write must not block the UNKNOWN publish.
+
+        Given: _record_venue_event raising (likely the same outage),
+        When: _handle_ambiguous_submit runs,
+        Then: UNKNOWN is still published so the engine guard holds.
+        """
+        ex = self._executor(monkeypatch)
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
+        order = make_order()
+        await ex._handle_ambiguous_submit(
+            order,
+            AmbiguousOrderSubmitError(
+                client_order_id=order.client_order_id, instrument="BTC-USD", message="boom"
+            ),
+        )
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["unknown"]
+
+    @pytest.mark.asyncio
+    async def test_accept_db_failure_never_publishes_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A DB blip on a venue-accepted order must not fabricate REJECTED.
+
+        Given: The venue accepted (exchange_order_id returned) but the
+            durable order_accepted write raises,
+        When: _process_order runs,
+        Then: ACCEPTED is still published, the pending entry survives
+            with accept_event_pending set for recon retry, the
+            exchange-id mapping exists, and REJECTED never appears.
+        """
+        ex = self._executor(monkeypatch)
+        ex._execute_live_order = AsyncMock(return_value="ex-live-9")
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
+        order = make_order()
+        ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "accepted"]
+        pending = ex.pending_orders[order.client_order_id]
+        assert pending.accept_event_pending is True
+        assert ex.client_by_exchange["ex-live-9"] == order.client_order_id
+
+    @pytest.mark.asyncio
+    async def test_definitive_venue_reject_still_rejects(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty exchange id remains the definitive-reject signal.
+
+        Given: _execute_live_order returning None (venue said no),
+        When: _process_order runs,
+        Then: REJECTED is published and the pending entry is dropped.
+        """
+        ex = self._executor(monkeypatch)
+        ex._execute_live_order = AsyncMock(return_value=None)
+        order = make_order()
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "rejected"]
+        assert order.client_order_id not in ex.pending_orders
+        event_types = [c.args[0]["event_type"] for c in ex._record_venue_event.await_args_list]
+        assert event_types == ["order_rejected"]
+
+    @pytest.mark.asyncio
+    async def test_accept_db_failure_without_pending_entry_still_accepts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Acceptance finalization survives a missing pending entry.
+
+        Given: A venue-accepted order whose pending entry vanished
+            (e.g. a racing cancel) AND a failing durable write,
+        When: _finalize_accepted_submit runs,
+        Then: ACCEPTED is still published and the id mapping exists —
+            the flag write is simply skipped.
+        """
+        ex = self._executor(monkeypatch)
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
+        order = make_order()
+        await ex._finalize_accepted_submit(order, "ex-live-10")
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["accepted"]
+        assert ex.client_by_exchange["ex-live-10"] == order.client_order_id
+        assert order.client_order_id not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_unknown_publish_failure_keeps_flag_unset_for_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing UNKNOWN publish never claims success.
+
+        Given: _publish_order_status reporting failure on every retry,
+        When: _handle_ambiguous_submit runs,
+        Then: unknown_published stays False (a later retouch can retry)
+            and all three bounded attempts were made.
+        """
+        ex = self._executor(monkeypatch)
+        ex._publish_order_status = AsyncMock(return_value=False)
+        monkeypatch.setattr(base_module.asyncio, "sleep", AsyncMock())
+        order = make_order()
+        await ex._handle_ambiguous_submit(
+            order,
+            AmbiguousOrderSubmitError(
+                client_order_id=order.client_order_id, instrument="BTC-USD", message="boom"
+            ),
+        )
+        pending = ex.pending_orders[order.client_order_id]
+        assert pending.unknown_published is False
+        assert ex._publish_order_status.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_unknown_publish_retries_until_confirmed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A transient publish failure is retried to a confirmed send.
+
+        Given: _publish_order_status failing once then succeeding,
+        When: _handle_ambiguous_submit runs,
+        Then: unknown_published is True after the second attempt.
+        """
+        ex = self._executor(monkeypatch)
+        ex._publish_order_status = AsyncMock(side_effect=[False, True])
+        monkeypatch.setattr(base_module.asyncio, "sleep", AsyncMock())
+        order = make_order()
+        await ex._handle_ambiguous_submit(
+            order,
+            AmbiguousOrderSubmitError(
+                client_order_id=order.client_order_id, instrument="BTC-USD", message="boom"
+            ),
+        )
+        pending = ex.pending_orders[order.client_order_id]
+        assert pending.unknown_published is True
+        assert ex._publish_order_status.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_accept_publish_failure_never_rejects(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing ACCEPTED publish must not fabricate any rejection.
+
+        Given: A venue-accepted order whose ACCEPTED publish fails,
+        When: _process_order runs,
+        Then: No REJECTED publish happens and the pending entry with
+            its exchange-id mapping survives for fills/recon.
+        """
+        ex = self._executor(monkeypatch)
+        ex._publish_order_status = AsyncMock(return_value=False)
+        ex._execute_live_order = AsyncMock(return_value="ex-live-11")
+        order = make_order()
+        ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
+        await ex._process_order(order)
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["submitted", "accepted"]
+        assert ex.client_by_exchange["ex-live-11"] == order.client_order_id
+        assert order.client_order_id in ex.pending_orders
