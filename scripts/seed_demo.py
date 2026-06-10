@@ -342,10 +342,11 @@ def _seed_demo_alerts_for_user(
 ) -> int:
     """Insert one realistic alert per ``AlertType`` for the given user.
 
-    Five rows total (one per ``AlertType`` literal): order_fill_full,
-    order_rejected, position_stop_loss_fired, margin_warning,
-    critical_system_error. Spaced by 30 minutes so the iOS Alerts
-    tab renders chronologically. Returns the count inserted.
+    Six rows total (one per ``AlertType`` literal): order_fill_full,
+    order_rejected, order_unknown, position_stop_loss_fired,
+    margin_warning, critical_system_error. Spaced by 30 minutes so
+    the iOS Alerts tab renders chronologically. Returns the count
+    inserted.
     """
     short = user_public_id[:8]
     alerts: list[tuple[str, str, bool, str, str, dict[str, object]]] = [
@@ -377,6 +378,20 @@ def _seed_demo_alerts_for_user(
                 "instrument": "BTC-USD-PERP",
                 "exchange": "kraken_futures",
                 "reason": "insufficient_margin",
+            },
+        ),
+        (
+            "order_unknown",
+            "high",
+            True,
+            "Order state unknown",
+            "SELL 0.5 ETH-USD-PERP submit outcome ambiguous — venue verification in progress",
+            {
+                "client_order_id": f"demo-{short}-3",
+                "instrument": "ETH-USD-PERP",
+                "exchange": "kraken_futures",
+                "reason": "venue_timeout",
+                "deep_link_path": f"/orders/demo-{short}-3",
             },
         ),
         (

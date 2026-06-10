@@ -1613,6 +1613,7 @@ class BacktestProgressData(StrictDataSchema[Literal["backtest_progress"]]):
 AlertType = Literal[
     "order_fill_full",
     "order_rejected",
+    "order_unknown",
     "position_stop_loss_fired",
     "margin_warning",
     "critical_system_error",
@@ -1620,13 +1621,18 @@ AlertType = Literal[
 """Canonical alert type enumeration for iOS push notifications.
 
 Mirrored by:
-- ``DeviceAlertPrefBody.alert_type`` (wire schema Literal)
-- ``_ALERT_TYPES`` in ``snapper.messaging.topics.validation`` (topic validator)
-- the iOS-side ``AlertType`` enum in generated Swift types
+- ``DeviceAlertPrefBody.alert_type`` and ``UserAlertDefaultBody.alert_type``
+  (wire schema Literals in ``snapper.api.schemas.devices``)
+- ``_ALERT_TYPES`` in ``snapper.messaging.topics.validation`` (topic
+  validator — derived via ``typing.get_args``, follows automatically)
+- the generated frontend TS/zod unions and the iOS-side ``AlertType``
+  Swift enum (regenerate with ``make ui-gen-types ios-gen-types``)
+- the demo seeder ``scripts/seed_demo.py`` (one sample alert per type)
 
-Any change to this list MUST update all three sites together — the
-topic validator will reject any alerts.*.<unknown_type> at publish
-time and ``make check-all`` will fail.
+Any change to this list MUST update the wire Literals, regenerate the
+frontend/iOS types, and reseed the demo sample together — parity is
+pinned by tests (``TestAlertTypeParity`` and the notify-rule registry
+test), so ``make check-all`` fails on drift.
 """
 
 

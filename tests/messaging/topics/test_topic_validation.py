@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from snapper.api.schemas.devices import DeviceAlertPrefBody
+from snapper.api.schemas.devices import UserAlertDefaultBody
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataTypeEnum
 from snapper.messaging.schemas.data import AlertType
@@ -3902,14 +3903,13 @@ class TestAlertsTopicValidation:
         assert err == ""
 
     def test_valid_all_enumerated_alert_types(self) -> None:
-        """Every enumerated alert_type is accepted."""
-        for alert_type in (
-            "order_fill_full",
-            "order_rejected",
-            "position_stop_loss_fired",
-            "margin_warning",
-            "critical_system_error",
-        ):
+        """Every enumerated alert_type is accepted.
+
+        Derived from ``typing.get_args(AlertType)`` so a new alert
+        type added to the Literal is exercised here automatically
+        instead of silently missing coverage.
+        """
+        for alert_type in typing.get_args(AlertType):
             valid, err = _validate_alerts_topic(f"alerts.{self._USER}.{alert_type}")
 
             assert valid, f"{alert_type} rejected: {err}"
@@ -4193,15 +4193,17 @@ class TestBusTopicValidation:
 class TestAlertTypeParity:
     """Parity between the three ``alert_type`` definition sites.
 
-    The five alert_type strings live in three places
-    (``AlertType`` Literal, ``_ALERT_TYPES``
-    frozenset, ``DeviceAlertPrefBody.alert_type`` wire Literal). The
-    validator's frozenset is now *derived* from ``AlertType`` via
+    The alert_type strings live in four places (``AlertType``
+    Literal, ``_ALERT_TYPES`` frozenset,
+    ``DeviceAlertPrefBody.alert_type`` and
+    ``UserAlertDefaultBody.alert_type`` wire Literals). The
+    validator's frozenset is *derived* from ``AlertType`` via
     ``typing.get_args`` so those two are automatically in sync; the
-    wire schema's Literal is independent (it's imported by Pydantic
-    via a different module path and can't trivially share the same
-    Literal alias). This test asserts the parity at test time so any
-    drift fails CI rather than surfacing as a runtime topic rejection.
+    wire schemas' Literals are independent (they're imported by
+    Pydantic via a different module path and can't trivially share
+    the same Literal alias). These tests assert the parity at test
+    time so any drift fails CI rather than surfacing as a runtime
+    topic rejection.
     """
 
     def test_alert_type_literal_matches_frozenset(self) -> None:
@@ -4218,6 +4220,19 @@ class TestAlertTypeParity:
         alert type that's impossible to publish).
         """
         annotation = DeviceAlertPrefBody.model_fields["alert_type"].annotation
+
+        assert frozenset(typing.get_args(annotation)) == _ALERT_TYPES
+
+    def test_user_default_alert_type_matches_frozenset(self) -> None:
+        """``UserAlertDefaultBody.alert_type`` Literal matches ``_ALERT_TYPES``.
+
+        The user-level fallback prefs body mirrors the same canonical
+        enumeration as the device-level body; a drift here would let
+        ``PATCH /api/alert_defaults`` silently lack a configurable row
+        for a publishable alert type (exactly the order_unknown gap
+        this pin was added after).
+        """
+        annotation = UserAlertDefaultBody.model_fields["alert_type"].annotation
 
         assert frozenset(typing.get_args(annotation)) == _ALERT_TYPES
 

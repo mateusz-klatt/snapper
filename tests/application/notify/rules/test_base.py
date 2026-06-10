@@ -3,6 +3,7 @@
 from datetime import UTC
 from datetime import datetime
 from typing import cast
+from typing import get_args
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
@@ -13,6 +14,7 @@ from snapper.application.notify.rules.base import RuleRegistry
 from snapper.application.notify.rules.registry_factory import load_default_registry
 from snapper.data.repository import Repository
 from snapper.data.repository_types import AlertEventInsertRow
+from snapper.messaging.schemas.data import AlertType
 
 
 class _FixedRule(AlertRule):
@@ -113,6 +115,25 @@ class TestLoadDefaultRegistry:
             "critical_system_error",
             "margin_warning",
         }
+
+    def test_every_default_rule_alert_type_is_a_valid_wire_alert_type(self) -> None:
+        """Every registered rule's alert_type is a member of the AlertType Literal.
+
+        Given: the default rule registry,
+        When: each rule's ``alert_type`` is checked against
+            ``typing.get_args(AlertType)``,
+        Then: every value is a member — the sidecar fan-out builds an
+            ``AlertEventData`` (whose ``alert_type`` field IS the
+            ``AlertType`` Literal) and an ``alerts.{user}.{alert_type}``
+            topic (validated against the same Literal) from
+            ``rule.alert_type``, so a rule registered with a type
+            missing from the Literal would persist its alert_events row
+            and then fail wire validation at fan-out, silently never
+            delivering the push.
+        """
+        wire_types = set(get_args(AlertType))
+        for rule in load_default_registry()._rules:
+            assert rule.alert_type in wire_types
 
     def test_default_prefixes_cover_all_three_topic_families(self) -> None:
         """The aggregated subscribe-prefix set matches the sidecar's expected subscriptions."""

@@ -693,10 +693,10 @@ _ALERT_TYPES: frozenset[str] = frozenset(typing.get_args(AlertType))
 ``snapper.messaging.schemas.data`` via ``typing.get_args`` so the
 validator and the wire schema share a single source of truth
 (eliminates drift risk). Any addition to
-``AlertType`` flows here automatically; the matching entry in
-``DeviceAlertPrefBody.alert_type`` (``src/snapper/api/schemas/devices.py``)
-is still a separate Literal — the parity is asserted in the test
-suite rather than at import time."""
+``AlertType`` flows here automatically; the matching entries in
+``DeviceAlertPrefBody.alert_type`` and ``UserAlertDefaultBody.alert_type``
+(``src/snapper/api/schemas/devices.py``) are still separate Literals —
+the parity is asserted in the test suite rather than at import time."""
 
 
 _ALERT_TOPIC_FORMAT_MSG = "Alert topics must have 3 segments: alerts.{user_public_id}.{alert_type}"

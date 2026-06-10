@@ -128,8 +128,8 @@ class DeviceAlertPrefBody(StrictBody):
     Attributes:
         alert_type: One of the enumerated alert types
             (``order_fill_full``, ``order_rejected``,
-            ``position_stop_loss_fired``, ``margin_warning``,
-            ``critical_system_error``).
+            ``order_unknown``, ``position_stop_loss_fired``,
+            ``margin_warning``, ``critical_system_error``).
         operator_public_id: Optional operator scope.
         wallet_public_id: Optional wallet scope.
         enabled: Whether to deliver this alert_type at this scope.
@@ -148,6 +148,7 @@ class DeviceAlertPrefBody(StrictBody):
     alert_type: Literal[
         "order_fill_full",
         "order_rejected",
+        "order_unknown",
         "position_stop_loss_fired",
         "margin_warning",
         "critical_system_error",
@@ -267,8 +268,8 @@ class UserAlertDefaultBody(StrictBody):
     Attributes:
         alert_type: One of the enumerated alert types
             (``order_fill_full``, ``order_rejected``,
-            ``position_stop_loss_fired``, ``margin_warning``,
-            ``critical_system_error``).
+            ``order_unknown``, ``position_stop_loss_fired``,
+            ``margin_warning``, ``critical_system_error``).
         enabled: Whether to deliver this alert_type at all when no
             device override matches.
         min_priority: Minimum priority required to deliver
@@ -278,6 +279,7 @@ class UserAlertDefaultBody(StrictBody):
     alert_type: Literal[
         "order_fill_full",
         "order_rejected",
+        "order_unknown",
         "position_stop_loss_fired",
         "margin_warning",
         "critical_system_error",
@@ -301,7 +303,7 @@ class UserAlertDefaultInfo(StrictDataSchema[Literal["user_alert_default_info"]])
         type: Payload item type discriminator.
         user_public_id: Owner — the caller's own UUID7 on these
             routes (scoped server-side).
-        alert_type: One of the five enumerated alert types.
+        alert_type: One of the enumerated ``AlertType`` values.
         enabled: Whether this fallback default delivers the alert.
         min_priority: Lower-bound priority filter applied when this
             fallback fires.
