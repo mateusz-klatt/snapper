@@ -587,12 +587,16 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         (not incremental fills) and feeding it through the executor's fill
         pipeline would emit bogus zero-size executions or double-count real
         fills. The ``fills_snapshot`` feed is dropped for the same
-        double-count reason: it replays historical fills the executor has
-        already accounted for — ``_recover_pending_orders`` seeds
-        ``last_seen_cum_qty`` from venue ``filled`` at boot and the recon
-        loop heals gaps steady-state — and the executor pipeline is
-        delta-based for Futures (fills carry no ``cum_qty``), so every
-        replayed fill would inflate the cumulative above venue truth. The
+        double-count reason: it replays historical fills the executor
+        already accounts for elsewhere — startup gaps are healed by
+        watermark-anchored recovery correctives and row republish in
+        ``_recover_pending_orders``, and the recon loop heals gaps
+        steady-state — while the executor pipeline is delta-based for
+        Futures (fills carry no ``cum_qty``), so a replayed snapshot
+        would race those correctives and inflate the cumulative above
+        venue truth (delta-only frames bypass the cum gate; the
+        pre-warmed exec-id LRU and this source suppression are the
+        guards). The
         venue re-sends the snapshot on every subscribe, including each SDK
         in-budget reconnect, so dropping it at the source also makes
         supervised resubscribes idempotent by construction.

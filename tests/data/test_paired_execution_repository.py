@@ -4139,3 +4139,46 @@ class TestHasOrderSubmitEvidence:
         """
         await _insert_fill_event(_repo, client_order_id="cid-ev-other", cum_fill_size=1.0)
         assert await _repo.has_order_submit_evidence("cid-ev-3") is False
+
+
+class TestGetFillVenueEventsForOrder:
+    """Ordered durable fill history for recovery watermark seeding."""
+
+    @pytest.mark.asyncio
+    async def test_returns_cum_fills_ordered_by_cum_then_id(
+        self, _repo: SQLAlchemyRepository
+    ) -> None:
+        """Rows come back monotonic in cum regardless of write order.
+
+        Given: fill_observed rows inserted OUT of cumulative order, plus
+            a null-cum fill row and an order_accepted row,
+        When: get_fill_venue_events_for_order is queried,
+        Then: Only the cumulative fill rows return, ordered
+            (cum_fill_size asc, id asc) — the walkable durable history.
+        """
+        cid = "cid-hist-1"
+        await _insert_fill_event(_repo, client_order_id=cid, cum_fill_size=0.7)
+        await _insert_fill_event(_repo, client_order_id=cid, cum_fill_size=0.3)
+        await _insert_fill_event(_repo, client_order_id=cid, cum_fill_size=None)
+        await _insert_fill_event(
+            _repo, client_order_id=cid, cum_fill_size=None, event_type="order_accepted"
+        )
+        await _insert_fill_event(_repo, client_order_id=cid, cum_fill_size=1.0)
+        rows = await _repo.get_fill_venue_events_for_order(cid)
+        assert [r["cum_fill_size"] for r in rows] == [0.3, 0.7, 1.0]
+        assert all(r["event_type"] == "fill_observed" for r in rows)
+
+    @pytest.mark.asyncio
+    async def test_equal_cums_tiebreak_by_id(self, _repo: SQLAlchemyRepository) -> None:
+        """Identical cumulatives keep insert order via the id tiebreak."""
+        cid = "cid-hist-2"
+        first = await _insert_fill_event(_repo, client_order_id=cid, cum_fill_size=0.5)
+        second = await _insert_fill_event(_repo, client_order_id=cid, cum_fill_size=0.5)
+        rows = await _repo.get_fill_venue_events_for_order(cid)
+        assert [r["id"] for r in rows] == [first, second]
+
+    @pytest.mark.asyncio
+    async def test_empty_and_foreign_isolation(self, _repo: SQLAlchemyRepository) -> None:
+        """No rows for the id returns an empty list; foreign ids never leak."""
+        await _insert_fill_event(_repo, client_order_id="cid-hist-other", cum_fill_size=2.0)
+        assert await _repo.get_fill_venue_events_for_order("cid-hist-3") == []

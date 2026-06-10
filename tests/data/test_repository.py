@@ -3517,6 +3517,19 @@ async def test_get_active_orders_for_recovery(tmp_path: Path) -> None:
     assert len(result) == 1
     assert result[0]["client_order_id"] == "c-open"
     assert result[0]["status"] == "open"
+    row_id = result[0]["id"]
+    assert isinstance(row_id, int)
+    later = now + timedelta(seconds=1)
+    await r.update_order(
+        row_id,
+        status="cancelled",
+        updated_at=later,
+        session_id="s1",
+        sequence_id=22,
+        timestamp=later,
+    )
+    after = await r.get_active_orders_for_recovery(exchange="kraken", as_of=later)
+    assert after == []
 
 
 @pytest.mark.asyncio

@@ -6523,6 +6523,7 @@ class SQLAlchemyRepository(Repository):
             result = await s.execute(query)
             return [
                 {
+                    "id": order.id,
                     "public_id": order.public_id,
                     "timestamp": order.timestamp,
                     "session_id": order.session_id,
@@ -9963,6 +9964,37 @@ class SQLAlchemyRepository(Repository):
             if ve is None:
                 return None
             return self._venue_event_to_row(ve)
+
+    async def get_fill_venue_events_for_order(self, client_order_id: str) -> list[VenueEventRow]:
+        """Return all cumulative ``fill_observed`` venue events for an order.
+
+        Rows with a non-null ``cum_fill_size``, ordered by
+        ``(cum_fill_size asc, id asc)`` so callers can walk the order's
+        durable fill history monotonically regardless of out-of-order
+        executor writes. Recovery reads this to seed the dual watermarks
+        honestly and to republish recorded-but-unpublished fills under
+        their ORIGINAL exec ids (every downstream consumer dedupes by
+        exec id, so republishing is idempotent). Served by
+        ``ix_venue_events_cid_event_type``; no ``known_to`` filter is
+        needed because venue events are never closed.
+
+        Args:
+            client_order_id: Client order id whose fill history to read.
+
+        Returns:
+            Ordered fill rows; empty list when none exist.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(VenueEvent)
+                .where(
+                    VenueEvent.client_order_id == client_order_id,
+                    VenueEvent.event_type == "fill_observed",
+                    VenueEvent.cum_fill_size.isnot(None),
+                )
+                .order_by(VenueEvent.cum_fill_size.asc(), VenueEvent.id.asc())
+            )
+            return [self._venue_event_to_row(ve) for ve in result.scalars().all()]
 
     async def has_order_submit_evidence(self, client_order_id: str) -> bool:
         """Return True when durable evidence shows the submit may have reached the venue.

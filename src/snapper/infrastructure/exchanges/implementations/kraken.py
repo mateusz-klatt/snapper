@@ -1471,13 +1471,13 @@ class KrakenExchangeClient(ExchangeClientBase):
         """Subscribe to user execution reports (private channel).
 
         Snapshots default to ``False`` (sent as explicit ``false`` — the
-        params schema excludes only ``None``): startup state is owned by the
-        executor's REST recovery (``_recover_pending_orders`` seeds
-        ``last_seen_cum_qty`` from venue truth) and the steady-state recon
-        loop. A snapshot replayed on subscribe — or on every SDK in-budget
-        reconnect, which re-sends the cached subscription verbatim — would
-        re-deliver already-accounted executions into the executor's
-        delta-based fill pipeline and double-count them.
+        params schema excludes only ``None``): startup state is owned by
+        the executor's recovery (watermark-anchored seeding plus recovery
+        correctives in ``_recover_pending_orders``) and the steady-state
+        recon loop. A snapshot replayed on subscribe — or on every SDK
+        in-budget reconnect, which re-sends the cached subscription
+        verbatim — would race those correctives and re-deliver
+        already-accounted executions into the fill pipeline.
 
         Args:
             snap_orders: Include order snapshot on subscribe.

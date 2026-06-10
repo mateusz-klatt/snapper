@@ -49,12 +49,14 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import RecordVenueEventParams
+from snapper.data.repository_types import VenueEventRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecType
+from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import to_fill_status
@@ -397,7 +399,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             db_active = []
         recovered = 0
         for db_order in db_active:
-            result = await self._recover_single_order(db_order, exchange_by_id, exchange_name)
+            try:
+                result = await self._recover_single_order(db_order, exchange_by_id, exchange_name)
+            except Exception:
+                logger.exception(
+                    f"[{exchange_name}] Recovery failed for order "
+                    f"{db_order.get('client_order_id')} - continuing sweep"
+                )
+                continue
             if result:
                 recovered += 1
         logger.info(
@@ -411,7 +420,44 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_by_id: dict[str, Any],
         exchange_name: OrderExchange,
     ) -> bool:
-        """Attempt to recover a single order from DB into pending state.
+        """Recover one DB-active order: honest seeds, healing, tracking.
+
+        Replaces the silent re-baseline that seeded both watermarks from
+        the venue's CURRENT cumulative — which made every downtime fill
+        invisible forever (the next recon cycle computed
+        ``gap = filled - last_seen = 0`` by construction). Sequence:
+
+        1. Read the durable plane (``venue_events`` cumulative fill rows)
+           and the published plane (``executions`` sum — rows are inserted
+           only after a successful publish) and seed the dual watermarks
+           from what each plane actually proves.
+        2. Resolve the venue snapshot and classify open / terminal /
+           unverifiable. Unverifiable orders are PARKED with DB seeds and
+           no emission — the recon loop retries them every cycle instead
+           of the order silently vanishing from tracking.
+        3. Register the pending entry FIRST (real ``db_order_id`` PK, so
+           post-recovery status updates hit the actual row) and pre-warm
+           the exec-id LRU with already-published row ids.
+        4. Republish recorded-but-unpublished ID-BEARING rows (the
+           ``durable_max - exec_sum`` tail) through the normal pipeline
+           under their ORIGINAL exec ids — every consumer (engine
+           ``apply_fill``, checkpoint replay, executions insert's partial
+           unique index) dedupes by exec id, so a consumer that already
+           saw a row ignores it and one that missed it applies it once.
+           ID-LESS rows (Walutomat) are NOT republished: after cumulative
+           absorption no identity-shaped key can correlate the
+           republished partition with what a live engine already applied
+           (the venue partition and the published partition legitimately
+           differ), so any republish risks double-application. Their
+           cumulative counts toward the committed seed as shown; the
+           durable rows themselves heal an engine that missed them at
+           its next checkpoint replay, and that residual is logged
+           loudly.
+        5. Emit the remaining venue-ahead-of-durable gap as a recon
+           corrective (stable synthetic id), then for terminal orders the
+           terminal execution — both through the same pipeline recon uses
+           at steady state, so recovery and recon converge on identical
+           emissions instead of recovery hiding state.
 
         Args:
             db_order: Order row from DB recovery query.
@@ -419,19 +465,210 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             exchange_name: Exchange name for logging.
 
         Returns:
-            True if order was recovered into pending state.
+            True if order was recovered into (or parked in) pending state;
+            False for skipped rows and orders that went terminal.
         """
         assert self.exchange_client is not None
         exchange_order_id = db_order.get("exchange_order_id")
         client_order_id = db_order.get("client_order_id", "")
         if not exchange_order_id or not client_order_id:
             return False
-        filled = await self._resolve_order_fill_state(
-            exchange_order_id, client_order_id, db_order, exchange_by_id, exchange_name
+        seeds = await self._read_recovery_watermarks(
+            client_order_id, db_order["public_id"], exchange_name
         )
-        if filled is None:
+        snapshot, classification = await self._resolve_recovery_snapshot(
+            exchange_order_id, db_order, exchange_by_id, exchange_name
+        )
+        fill_rows: list[VenueEventRow]
+        if seeds is None:
+            venue_filled = float(snapshot.filled or 0.0) if snapshot is not None else 0.0
+            last_seen, durable_max, fill_rows = venue_filled, venue_filled, []
+            logger.error(
+                f"[{exchange_name}] Recovery: durable fill history unreadable for "
+                f"{client_order_id} - falling back to venue-truth seeding "
+                f"(downtime gap for this order will NOT be healed)"
+            )
+        else:
+            last_seen, durable_max, fill_rows = seeds
+        pending = PendingOrderState(
+            request=self._build_recovered_request(db_order, client_order_id, exchange_name),
+            db_order_id=db_order.get("id"),
+            order_public_id=db_order["public_id"],
+            exchange_order_id=exchange_order_id,
+            last_seen_cum_qty=last_seen,
+            last_recorded_cum_qty=durable_max,
+        )
+        self.pending_orders[client_order_id] = pending
+        self.client_by_exchange[exchange_order_id] = client_order_id
+        idless_cum_max = 0.0
+        for row in fill_rows:
+            row_cum = row["cum_fill_size"]
+            if row_cum is not None and not row["exec_id"] and row_cum > last_seen + 1e-12:
+                idless_cum_max = max(idless_cum_max, row_cum)
+        if idless_cum_max > last_seen + 1e-12:
+            last_seen = idless_cum_max
+            pending.last_seen_cum_qty = max(pending.last_seen_cum_qty, idless_cum_max)
+            logger.warning(
+                f"[{exchange_name}] Recovery: {client_order_id} has id-less "
+                f"recorded fills up to cum={idless_cum_max} that cannot be "
+                f"safely republished (no venue exec id; after cumulative "
+                f"absorption no identity key can correlate what a live "
+                f"engine already applied) - counted as shown BEFORE the "
+                f"id-bearing republish so a later row's cum-anchored delta "
+                f"cannot re-absorb them; a coordinator that missed their "
+                f"publish heals at its next restart via checkpoint replay"
+            )
+        for row in fill_rows:
+            row_cum = row["cum_fill_size"]
+            if row_cum is None:
+                continue
+            if row_cum <= last_seen + 1e-12:
+                self._register_seen_exec_id(row["exec_id"])
+            else:
+                await self._republish_recorded_fill(row, exchange_order_id, db_order, exchange_name)
+        if classification == "unverifiable":
+            logger.warning(
+                f"[{exchange_name}] Recovery: order {client_order_id} parked with DB "
+                f"seeds - venue unverifiable, recon will retry"
+            )
+            return True
+        assert snapshot is not None
+        live_pending = self.pending_orders.get(client_order_id)
+        if (
+            live_pending is not None
+            and float(snapshot.filled or 0.0) > live_pending.last_seen_cum_qty
+        ):
+            await self._reconcile_fill_gap(exchange_name, exchange_order_id, live_pending, snapshot)
+        if classification == "terminal":
+            terminal_pending = self.pending_orders.get(client_order_id)
+            if terminal_pending is not None:
+                await self._emit_disappeared_terminal(
+                    exchange_name, exchange_order_id, terminal_pending, snapshot
+                )
+            logger.info(
+                f"[{exchange_name}] Recovery: order {client_order_id} went "
+                f"{snapshot.status.value} during downtime - healed and projected"
+            )
             return False
-        fake_request = OrderRequestData(
+        return True
+
+    async def _read_recovery_watermarks(
+        self,
+        client_order_id: str,
+        order_public_id: str,
+        exchange_name: OrderExchange,
+    ) -> tuple[float, float, list[VenueEventRow]] | None:
+        """Read both truth planes and derive honest watermark seeds.
+
+        Returns:
+            ``(last_seen_seed, durable_max, fill_rows)`` where
+            ``last_seen_seed = min(executions_sum, durable_max)`` (the
+            engine was never told more than what was durably recorded —
+            the clamp guards pre-dual-watermark history), or None when
+            the durable plane is unreadable (caller falls back to legacy
+            venue-truth seeding for this order only). An unreadable
+            published plane seeds the committed watermark CONSERVATIVELY
+            to 0.0 and republishes the entire ID-BEARING durable tail —
+            seeding it to the durable max would permanently mark a
+            recorded-but-unpublished fill as shown (the engine never saw
+            it, the venue matches the durable plane, so no later recon
+            gap could ever surface it); republishing is idempotent
+            because every consumer dedupes by exec id. ID-LESS rows are
+            never republished — they count as shown per the recovery
+            policy (see :meth:`_recover_single_order`).
+            Non-SQLAlchemy repositories have no durable plane: both seeds
+            come from the executions sum and no rows exist to republish.
+        """
+        assert self.repository is not None
+        now = datetime.now(UTC)
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            try:
+                execs = await self.repository.get_executions_for_order(order_public_id, now)
+                exec_sum = sum(e["size"] for e in execs)
+            except Exception as e:
+                logger.warning(
+                    f"[{exchange_name}] Recovery: executions unreadable for "
+                    f"{client_order_id}: {e}"
+                )
+                exec_sum = 0.0
+            return exec_sum, exec_sum, []
+        try:
+            fill_rows = await self.repository.get_fill_venue_events_for_order(client_order_id)
+        except Exception as e:
+            logger.error(
+                f"[{exchange_name}] Recovery: venue_events unreadable for "
+                f"{client_order_id}: {e}"
+            )
+            return None
+        durable_max = 0.0
+        for row in fill_rows:
+            row_cum = row["cum_fill_size"]
+            if row_cum is not None and row_cum > durable_max:
+                durable_max = row_cum
+        try:
+            execs = await self.repository.get_executions_for_order(order_public_id, now)
+            exec_sum = sum(e["size"] for e in execs)
+        except Exception as e:
+            logger.warning(
+                f"[{exchange_name}] Recovery: executions unreadable for "
+                f"{client_order_id} - republishing the full durable tail "
+                f"(idempotent via exec-id/fallback dedupe): {e}"
+            )
+            return 0.0, durable_max, fill_rows
+        return min(exec_sum, durable_max), durable_max, fill_rows
+
+    async def _resolve_recovery_snapshot(
+        self,
+        exchange_order_id: str,
+        db_order: OrderRow,
+        exchange_by_id: dict[str, Any],
+        exchange_name: OrderExchange,
+    ) -> tuple[ExchangeOrderSnapshot | None, str]:
+        """Resolve the venue snapshot for a recovering order and classify it.
+
+        Returns:
+            ``(snapshot, classification)`` with classification one of
+            ``"open"`` / ``"terminal"`` / ``"unverifiable"`` (snapshot is
+            None only for unverifiable).
+        """
+        assert self.exchange_client is not None
+        if exchange_order_id in exchange_by_id:
+            return exchange_by_id[exchange_order_id], "open"
+        try:
+            snap = await self.exchange_client.get_order(
+                exchange_order_id, symbol=db_order["instrument"]
+            )
+        except Exception as e:
+            logger.warning(
+                f"[{exchange_name}] Recovery: cannot verify order "
+                f"{exchange_order_id} on exchange: {e}"
+            )
+            return None, "unverifiable"
+        if snap.status in (
+            ExchangeOrderStatusEnum.CLOSED,
+            ExchangeOrderStatusEnum.CANCELED,
+            ExchangeOrderStatusEnum.EXPIRED,
+        ):
+            return snap, "terminal"
+        return snap, "open"
+
+    def _build_recovered_request(
+        self,
+        db_order: OrderRow,
+        client_order_id: str,
+        exchange_name: OrderExchange,
+    ) -> OrderRequestData:
+        """Reconstruct the order request facade for a recovered order.
+
+        Args:
+            db_order: Order row from DB recovery query.
+            client_order_id: Client order id of the recovering order.
+            exchange_name: Exchange identifier.
+
+        Returns:
+            OrderRequestData carrying the recovered order's identity.
+        """
+        return OrderRequestData(
             public_id=db_order["public_id"],
             timestamp=db_order["timestamp"],
             session_id=db_order["session_id"],
@@ -452,74 +689,63 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             wallet_public_id=db_order.get("wallet_public_id") or self.wallet_public_id,
             operator_public_id=db_order.get("operator_public_id"),
         )
-        pending = PendingOrderState(
-            request=fake_request,
-            db_order_id=None,
-            order_public_id=db_order["public_id"],
-            exchange_order_id=exchange_order_id,
-            last_seen_cum_qty=filled,
-            last_recorded_cum_qty=filled,
-        )
-        self.pending_orders[client_order_id] = pending
-        self.client_by_exchange[exchange_order_id] = client_order_id
-        return True
 
-    async def _resolve_order_fill_state(
+    async def _republish_recorded_fill(
         self,
+        row: VenueEventRow,
         exchange_order_id: str,
-        client_order_id: str,
         db_order: OrderRow,
-        exchange_by_id: dict[str, Any],
         exchange_name: OrderExchange,
-    ) -> float | None:
-        """Resolve the current fill state of an order against the exchange.
+    ) -> None:
+        """Republish one recorded-but-unpublished fill row at recovery.
 
-        Returns cumulative filled quantity if the order is still active,
-        or None if the order is terminal or cannot be verified.
+        The frame carries the row's ORIGINAL exec id, cumulative, size,
+        price, and fee, and routes through :meth:`_process_execution` —
+        the engine and checkpoint replay dedupe by exec id, the
+        executions insert dedupes via its partial unique index, and the
+        durable write produces a zero-gap row under the same id (replay-
+        deduped). A consumer that already saw the fill ignores it; one
+        that missed it applies it exactly once.
 
         Args:
-            exchange_order_id: Exchange-assigned order ID.
-            client_order_id: Client-assigned order ID.
-            db_order: DB order row for instrument context.
-            exchange_by_id: Pre-fetched exchange open order snapshots.
-            exchange_name: Exchange name for logging.
-
-        Returns:
-            Cumulative filled quantity, or None if order is terminal/unverifiable.
+            row: The recorded fill_observed venue event.
+            exchange_order_id: Venue order id of the recovering order.
+            db_order: DB order row for instrument/side context.
+            exchange_name: Exchange identifier (logging).
         """
-        assert self.exchange_client is not None
-        if exchange_order_id in exchange_by_id:
-            snap = exchange_by_id[exchange_order_id]
-            return snap.filled or 0.0
-        try:
-            snap = await self.exchange_client.get_order(
-                exchange_order_id, symbol=db_order["instrument"]
-            )
-        except Exception as e:
-            logger.warning(
-                f"[{exchange_name}] Recovery: cannot verify order "
-                f"{exchange_order_id} on exchange: {e}"
-            )
-            return None
-        terminal = (
-            ExchangeOrderStatusEnum.CLOSED,
-            ExchangeOrderStatusEnum.CANCELED,
-            ExchangeOrderStatusEnum.EXPIRED,
+        fees = None
+        fee = row["fee"]
+        if fee is not None and abs(fee) > 1e-12:
+            fees = [ExecutionFeeBreakdown(asset=row["fee_asset"] or "", quantity=fee)]
+        update = ExecutionUpdate(
+            order_id=exchange_order_id,
+            exec_type="trade",
+            exec_id=row["exec_id"],
+            symbol=db_order["instrument"],
+            side=OrderSideEnum(db_order["side"]),
+            order_type=ExchangeOrderTypeEnum.MARKET,
+            order_status=ExchangeOrderStatusEnum.OPEN,
+            timestamp=row["venue_timestamp"] or row["timestamp"],
+            cum_qty=row["cum_fill_size"],
+            last_qty=row["fill_size"],
+            last_price=row["fill_price"],
+            fees=fees,
         )
-        if snap.status in terminal:
-            await self.exchange_client._log_order_update_to_db(
-                db_order_id=db_order["sequence_id"],
-                status=snap.status,
-            )
-            logger.info(
-                f"[{exchange_name}] Recovery: order {client_order_id} "
-                f"is {snap.status.value} on exchange, updated DB"
-            )
-            return None
-        return snap.filled or 0.0
+        logger.info(
+            f"[{exchange_name}] Recovery: republishing recorded-but-unpublished fill "
+            f"{row['exec_id']} (cum={row['cum_fill_size']})"
+        )
+        await self._process_execution(update)
 
     async def start(self) -> None:
-        """Start the execution service and subscribe to order topics."""
+        """Start the execution service and subscribe to order topics.
+
+        ``running`` is set BEFORE recovery on purpose: recovery republishes
+        recorded-but-unpublished fills and emits gap correctives through
+        the normal pipeline, and ``_publish_execution`` refuses to send
+        while ``running`` is False. No task observes the flag early —
+        every loop task spawns only after recovery returns.
+        """
         exchange_name = self._get_exchange_name()
         set_log_context(f"exec:{exchange_name}")
         if self.running:
@@ -536,8 +762,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"ExchangeExecutorService[{exchange_name}]: "
                 f"Exchange client initialized with WebSocket"
             )
-            await self._recover_pending_orders(exchange_name)
             self.running = True
+            await self._recover_pending_orders(exchange_name)
             tasks = [
                 asyncio.create_task(self._order_handler()),
                 asyncio.create_task(self._heartbeat_loop()),
@@ -1789,6 +2015,29 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if snapshot.filled > pending.last_seen_cum_qty:
             await self._reconcile_fill_gap(exchange_name, exchange_oid, pending, snapshot)
 
+        await self._emit_disappeared_terminal(exchange_name, exchange_oid, pending, snapshot)
+
+    async def _emit_disappeared_terminal(
+        self,
+        exchange_name: str,
+        exchange_oid: str,
+        pending: PendingOrderState,
+        snapshot: ExchangeOrderSnapshot,
+    ) -> None:
+        """Emit the synthetic terminal execution for a venue-terminal order.
+
+        Maps the venue's terminal status to the matching ExecType and
+        routes a synthetic terminal ExecutionUpdate through the normal
+        execution pipeline (status projection, lifecycle pop). Extracted
+        from :meth:`_reconcile_disappeared_order` so recovery-time
+        terminal handling can reuse the exact same emission path.
+
+        Args:
+            exchange_name: Exchange identifier for logging.
+            exchange_oid: Venue-assigned order id.
+            pending: Tracked state of the disappeared order.
+            snapshot: Venue order snapshot with a terminal status.
+        """
         terminal_type: ExecType
         terminal_status: ExchangeOrderStatusEnum
         if snapshot.status == ExchangeOrderStatusEnum.CLOSED:
@@ -1913,7 +2162,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             f"local={pending.last_seen_cum_qty}, "
             f"corrective delta={gap} at price~{fill_price}"
         )
-        recon_exec_id = f"recon-{exchange_oid}-{time.monotonic_ns()}"
+        recon_exec_id = f"recon-{exchange_oid}-c{exchange_order.filled!r}"
         corrective = ExecutionUpdate(
             order_id=exchange_oid,
             exec_type="trade",
@@ -2239,6 +2488,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         with no committed cumulative to anchor to, cum-diff deltas would
         repeat-count across frames.
 
+        Status-only frames (neither ``cum_qty`` nor ``last_qty``, e.g.
+        synthetic terminals) resolve to the COMMITTED cumulative with a
+        zero delta: resolving them to 0.0 turned every terminal for a
+        partially-filled order into a NEGATIVE delta that a
+        delta-applying engine would book as a position reversal.
+
         Args:
             execution: Execution update from exchange.
             prev_cum: Previously seen cumulative quantity for this order.
@@ -2253,7 +2508,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         elif execution.last_qty is not None:
             cum_qty = prev_cum + execution.last_qty
         else:
-            cum_qty = 0.0
+            cum_qty = prev_cum
         if (
             tracked
             and execution.cum_qty is not None
@@ -2405,7 +2660,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         - ``exec_id`` LRU: catches venue redelivery of the same execution
           (at-least-once delivery, replays across resubscribes). Futures
           fills carry ``fill_id`` as exec id, spot carries ``exec_id``;
-          recon correctives use unique synthetic ids and never collide.
+          recon correctives use STABLE synthetic ids
+          (``recon-{oid}-c{filled}``) so re-emitting the same gap — after
+          a failed publish, across restarts — dedupes here and at every
+          downstream consumer instead of double-applying; a gap whose
+          venue cumulative advanced gets a new id with disjoint
+          durable-anchored quantities.
         - Cumulative-monotonic guard: a fill carrying absolute ``cum_qty``
           that does not ADVANCE the order's seen cumulative is a replay or
           a stale corrective. This closes the cross-key hole exec ids

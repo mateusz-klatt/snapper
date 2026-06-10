@@ -214,8 +214,15 @@ class ExecutionInsertRow(TypedDict):
 
 
 class OrderRow(TypedDict):
-    """Row dict returned by get_orders."""
+    """Row dict returned by get_orders.
 
+    ``id`` (the integer SCD2 row PK) is populated ONLY by
+    ``get_active_orders_for_recovery`` — startup recovery threads it into
+    ``PendingOrderState.db_order_id`` so post-recovery status updates hit
+    the real row instead of being silently lost.
+    """
+
+    id: NotRequired[int]
     public_id: str
     timestamp: datetime
     session_id: str

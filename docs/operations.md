@@ -423,6 +423,27 @@ Two executor/outbox gates close the remaining order-flow loss windows:
   reported on the lightweight cancel/replace event path. Keep the TTL
   below the engine's 60s in-flight valve.
 
+### Recovery-time corrective fills
+
+Executor startup recovery no longer re-baselines fill tracking to the
+venue's current cumulative (which silently swallowed every fill that
+landed while the stack was down). Instead, recovery reads both truth
+planes per order — the durable `venue_events` fill rows and the
+`executions` log (rows exist only for successfully published fills) —
+seeds the committed and durable watermarks from what each plane proves,
+republishes recorded-but-unpublished fills through the normal pipeline
+under their original exec ids (every consumer dedupes by exec id, so
+this is idempotent), and emits the remaining venue-ahead gap as a recon
+corrective with a deterministic id (`recon-{order}-c{cum}`), so repeated
+restarts and publish retries converge instead of double-applying.
+Orders that went terminal during the downtime get their fill gap healed
+BEFORE the terminal event is projected. Orders the venue cannot verify
+at startup are parked in tracking with DB-derived seeds — the 60s recon
+loop retries them every cycle instead of dropping them. If the durable
+plane is unreadable for an order, recovery degrades to the legacy
+venue-truth seeding for that order only and logs an ERROR (the downtime
+gap for it stays unhealed — fix the DB and restart).
+
 ### Fault-injection testing
 
 `scripts/resilience_fault_injection.py` simulates a real exchange outage and

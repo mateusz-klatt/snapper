@@ -5504,11 +5504,14 @@ class TestExecutorRecovery:
 
     @pytest.mark.asyncio
     async def test_recover_pending_from_exchange_open_order(self) -> None:
-        """Verify open exchange order is recovered into pending state.
+        """Open order recovers with PLANE-honest seeds, not venue truth.
 
-        Given: Exchange reports one open order matching DB active order,
+        Given: Exchange reports an open order with filled=0.3 while the
+            published plane (executions) proves nothing was published,
         When: _recover_pending_orders runs,
-        Then: PendingOrderState is created with correct fill state.
+        Then: The pending entry seeds last_seen from the published plane
+            (0.0) and the venue-ahead gap is handed to the corrective
+            machinery instead of being silently re-baselined away.
         """
         ex: Any = MergedDummyExecutor()
         mock_client = AsyncMock()
@@ -5526,21 +5529,29 @@ class TestExecutorRecovery:
         mock_repo.get_active_orders_for_recovery = AsyncMock(
             return_value=[_make_db_order(exchange_order_id="ex-1", filled_size=0.3)]
         )
+        mock_repo.get_executions_for_order = AsyncMock(return_value=[])
         ex.repository = mock_repo
+        ex._reconcile_fill_gap = AsyncMock()
         await ex._recover_pending_orders("kraken")
         assert "c1" in ex.pending_orders
         pending = ex.pending_orders["c1"]
         assert pending.exchange_order_id == "ex-1"
-        assert pending.last_seen_cum_qty == pytest.approx(0.3)
+        assert pending.last_seen_cum_qty == pytest.approx(0.0)
+        assert pending.last_recorded_cum_qty == pytest.approx(0.0)
         assert "ex-1" in ex.client_by_exchange
+        ex._reconcile_fill_gap.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_recover_db_order_missing_on_exchange_closed(self) -> None:
-        """Verify DB active order that is closed on exchange gets updated.
+        """A terminal-during-downtime order is healed, projected, and popped.
 
-        Given: DB says order is open, but exchange says CLOSED,
+        Given: DB says open, exchange says CLOSED with filled=1.0 and
+            nothing was published pre-crash,
         When: _recover_pending_orders runs,
-        Then: DB is updated and order is NOT added to pending.
+        Then: The downtime fill gap is handed to the corrective machinery
+            and the terminal execution is emitted through the pipeline
+            (which owns the pop and the status projection) — the old
+            broken direct status write (sequence_id passed as PK) is gone.
         """
         ex: Any = MergedDummyExecutor()
         mock_client = AsyncMock()
@@ -5558,10 +5569,17 @@ class TestExecutorRecovery:
         mock_repo.get_active_orders_for_recovery = AsyncMock(
             return_value=[_make_db_order(exchange_order_id="ex-1")]
         )
+        mock_repo.get_executions_for_order = AsyncMock(return_value=[])
         ex.repository = mock_repo
+        ex._reconcile_fill_gap = AsyncMock()
+        ex._emit_disappeared_terminal = AsyncMock(
+            side_effect=lambda *a, **k: ex.pending_orders.pop("c1", None)
+        )
         await ex._recover_pending_orders("kraken")
         assert "c1" not in ex.pending_orders
-        mock_client._log_order_update_to_db.assert_awaited_once()
+        ex._reconcile_fill_gap.assert_awaited_once()
+        ex._emit_disappeared_terminal.assert_awaited_once()
+        mock_client._log_order_update_to_db.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_recover_no_active_orders(self) -> None:
@@ -5622,11 +5640,13 @@ class TestExecutorRecovery:
 
     @pytest.mark.asyncio
     async def test_recover_order_unverifiable_on_exchange(self) -> None:
-        """Verify unverifiable order is skipped during recovery.
+        """An unverifiable order is PARKED with DB seeds, not dropped.
 
         Given: DB active order, exchange get_order raises,
         When: _recover_pending_orders runs,
-        Then: Order is skipped (not added to pending).
+        Then: The order is registered in pending with DB-derived seeds
+            and no emission — recon retries it every cycle instead of
+            the order silently vanishing from tracking forever.
         """
         ex: Any = MergedDummyExecutor()
         mock_client = AsyncMock()
@@ -5635,9 +5655,13 @@ class TestExecutorRecovery:
         ex.exchange_client = mock_client
         mock_repo = AsyncMock()
         mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[_make_db_order()])
+        mock_repo.get_executions_for_order = AsyncMock(return_value=[])
         ex.repository = mock_repo
+        ex._reconcile_fill_gap = AsyncMock()
         await ex._recover_pending_orders("kraken")
-        assert "c1" not in ex.pending_orders
+        assert "c1" in ex.pending_orders
+        assert ex.pending_orders["c1"].last_seen_cum_qty == pytest.approx(0.0)
+        ex._reconcile_fill_gap.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_recover_skips_orders_without_exchange_id(self) -> None:
@@ -7799,3 +7823,662 @@ class TestRestCancelLifecycleLock:
         await ex._process_cancel(cancel_data)
         assert "ex-gone" not in ex.client_by_exchange
         ex._publish_cancel_event.assert_awaited_once()
+
+
+class TestStableReconExecIds:
+    """Stable synthetic exec ids and the extracted terminal helper."""
+
+    def _pending(self, quantity: float = 2.0) -> tuple[Any, Any, Any]:
+        """Build executor + tracked pending order mapped to ex-stable."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(quantity=quantity)
+        pending = base_module.PendingOrderState(request=order)
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex-stable"] = order.client_order_id
+        ex._publish_execution = AsyncMock()
+        ex._record_venue_event = AsyncMock()
+        return ex, order, pending
+
+    @staticmethod
+    def _snapshot(filled: float, price: float | None = 100.0) -> SimpleNamespace:
+        """Venue order snapshot with the given cumulative."""
+        return SimpleNamespace(
+            id="ex-stable",
+            status=ExchangeOrderStatusEnum.OPEN,
+            filled=filled,
+            price=price,
+            average_price=price,
+        )
+
+    @pytest.mark.asyncio
+    async def test_same_gap_reuses_the_same_exec_id(self) -> None:
+        """Re-emitting an identical gap produces an identical exec id.
+
+        Given: The same (order, venue cumulative) gap emitted twice —
+            publish failed, recon retries, or a restart recomputed it,
+        When: _reconcile_fill_gap builds the correctives,
+        Then: Both carry the same deterministic id, so the engine and
+            every replay consumer dedupe instead of double-applying.
+        """
+        ex, order, pending = self._pending()
+        ex._publish_execution = AsyncMock(side_effect=[RuntimeError("zmq down"), None])
+        del ex._publish_execution
+        ex.msg_publisher = SimpleNamespace(
+            send=AsyncMock(side_effect=[RuntimeError("zmq down"), None])
+        )
+        await ex._reconcile_fill_gap("kraken", "ex-stable", pending, self._snapshot(0.5))
+        assert pending.last_seen_cum_qty == 0.0
+        await ex._reconcile_fill_gap("kraken", "ex-stable", pending, self._snapshot(0.5))
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        assert sent[0].trade_id == sent[1].trade_id
+        assert sent[0].trade_id == "recon-ex-stable-c0.5"
+
+    @pytest.mark.asyncio
+    async def test_advanced_cum_changes_the_exec_id(self) -> None:
+        """A gap at a new venue cumulative gets a distinct id."""
+        ex, order, pending = self._pending(quantity=3.0)
+        del ex._publish_execution
+        ex.msg_publisher = SimpleNamespace(send=AsyncMock())
+        await ex._reconcile_fill_gap("kraken", "ex-stable", pending, self._snapshot(0.5))
+        await ex._reconcile_fill_gap("kraken", "ex-stable", pending, self._snapshot(1.0))
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        assert sent[0].trade_id == "recon-ex-stable-c0.5"
+        assert sent[1].trade_id == "recon-ex-stable-c1.0"
+
+    @pytest.mark.asyncio
+    async def test_published_corrective_redelivery_drops_via_lru(self) -> None:
+        """A successfully published corrective's re-emission is LRU-dropped."""
+        ex, order, pending = self._pending(quantity=3.0)
+        del ex._publish_execution
+        ex.msg_publisher = SimpleNamespace(send=AsyncMock())
+        await ex._reconcile_fill_gap("kraken", "ex-stable", pending, self._snapshot(0.5))
+        assert "recon-ex-stable-c0.5" in ex._seen_exec_ids
+        pending.last_seen_cum_qty = 0.0
+        await ex._reconcile_fill_gap("kraken", "ex-stable", pending, self._snapshot(0.5))
+        assert ex.msg_publisher.send.await_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "exec_type"),
+        [
+            (ExchangeOrderStatusEnum.CLOSED, "filled"),
+            (ExchangeOrderStatusEnum.EXPIRED, "expired"),
+            (ExchangeOrderStatusEnum.CANCELED, "canceled"),
+        ],
+    )
+    async def test_emit_disappeared_terminal_status_mapping(
+        self, status: ExchangeOrderStatusEnum, exec_type: str
+    ) -> None:
+        """The extracted helper maps venue terminals to ExecTypes 1:1."""
+        ex, order, pending = self._pending()
+        captured: list[Any] = []
+        ex._process_execution = AsyncMock(side_effect=lambda e: captured.append(e))
+        snapshot = SimpleNamespace(
+            id="ex-stable", status=status, filled=0.0, price=None, average_price=None
+        )
+        await ex._emit_disappeared_terminal("kraken", "ex-stable", pending, snapshot)
+        assert captured[0].exec_type == exec_type
+        assert captured[0].order_status == status
+
+
+def _fill_row(
+    cum: float,
+    size: float,
+    exec_id: str | None,
+    price: float = 100.0,
+    fee: float | None = None,
+) -> dict[str, Any]:
+    """Build a minimal VenueEventRow-shaped dict for recovery tests."""
+    return {
+        "id": 1,
+        "event_type": "fill_observed",
+        "client_order_id": "c1",
+        "exchange_order_id": "ex-1",
+        "cum_fill_size": cum,
+        "fill_size": size,
+        "fill_price": price,
+        "fee": fee,
+        "fee_asset": "USD" if fee is not None else None,
+        "exec_id": exec_id,
+        "venue_timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+        "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+    }
+
+
+class TestRecoveryWatermarkSeeding:
+    """Dual-watermark seeding and downtime healing at recovery."""
+
+    def _executor(
+        self,
+        fill_rows: list[dict[str, Any]],
+        exec_sizes: list[float],
+        snap_filled: float = 0.0,
+        snap_status: ExchangeOrderStatusEnum = ExchangeOrderStatusEnum.OPEN,
+        db_order: dict[str, Any] | None = None,
+    ) -> Any:
+        """Build an executor wired for one-order recovery scenarios."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        mock_client = AsyncMock()
+        snap = SimpleNamespace(id="ex-1", filled=snap_filled, price=100.0, status=snap_status)
+        if snap_status == ExchangeOrderStatusEnum.OPEN:
+            mock_client.get_orders = AsyncMock(return_value=[snap])
+        else:
+            mock_client.get_orders = AsyncMock(return_value=[])
+            mock_client.get_order = AsyncMock(return_value=snap)
+        ex.exchange_client = mock_client
+        repo = AsyncMock(spec=SQLAlchemyRepository)
+        repo.get_active_orders_for_recovery = AsyncMock(return_value=[db_order or _make_db_order()])
+        repo.get_fill_venue_events_for_order = AsyncMock(return_value=fill_rows)
+        repo.get_executions_for_order = AsyncMock(return_value=[{"size": s} for s in exec_sizes])
+        ex.repository = repo
+        ex._record_venue_event = AsyncMock()
+        ex.msg_publisher = SimpleNamespace(send=AsyncMock())
+        return ex
+
+    @pytest.mark.asyncio
+    async def test_executions_ahead_of_rows_clamps_to_durable(self) -> None:
+        """The published seed can never exceed the durable plane.
+
+        Given: Executions summing past the durable max (pre-dual-watermark
+            history anomaly),
+        When: Recovery seeds the watermarks,
+        Then: Both clamp to durable_max and nothing is republished.
+        """
+        ex = self._executor(
+            fill_rows=[_fill_row(0.5, 0.5, "f1")], exec_sizes=[0.5, 0.5], snap_filled=0.5
+        )
+        await ex._recover_pending_orders("kraken")
+        pending = ex.pending_orders["c1"]
+        assert pending.last_seen_cum_qty == pytest.approx(0.5)
+        assert pending.last_recorded_cum_qty == pytest.approx(0.5)
+        ex.msg_publisher.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_recorded_tail_republished_under_original_ids(self) -> None:
+        """Recorded-but-unpublished rows republish with original exec ids.
+
+        Given: Three durable rows (cums 0.3, 0.7, 1.0) while executions
+            prove only 0.3 was published,
+        When: Recovery runs,
+        Then: Exactly the two tail rows republish ascending under their
+            ORIGINAL exec ids with row price/fee, the published watermark
+            telescopes to the durable max, and the already-published
+            row's exec id is pre-warmed into the LRU.
+        """
+        rows = [
+            _fill_row(0.3, 0.3, "f1"),
+            _fill_row(0.7, 0.4, "f2", price=101.0, fee=0.2),
+            _fill_row(1.0, 0.3, "f3", price=102.0),
+        ]
+        ex = self._executor(
+            fill_rows=rows, exec_sizes=[0.3], snap_filled=1.0, db_order=_make_db_order(size=2.0)
+        )
+        await ex._recover_pending_orders("kraken")
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        assert [f.trade_id for f in sent] == ["f2", "f3"]
+        assert [f.size for f in sent] == [pytest.approx(0.7), pytest.approx(1.0)]
+        assert sent[0].last_price == pytest.approx(101.0)
+        assert sent[0].fee == pytest.approx(0.2)
+        pending = ex.pending_orders["c1"]
+        assert pending.last_seen_cum_qty == pytest.approx(1.0)
+        assert "f1" in ex._seen_exec_ids
+        assert "f2" in ex._seen_exec_ids
+
+    @pytest.mark.asyncio
+    async def test_venue_ahead_of_durable_emits_stable_gap_corrective(self) -> None:
+        """The venue-ahead-of-durable remainder becomes one corrective.
+
+        Given: Durable rows up to 0.5 (all published) while the venue
+            reports filled=1.0,
+        When: Recovery runs,
+        Then: One corrective sized 0.5 with the stable recon id covers
+            exactly the quantity present in NO durable row — never the
+            quantity a pre-crash row already carries.
+        """
+        ex = self._executor(
+            fill_rows=[_fill_row(0.5, 0.5, "f1")],
+            exec_sizes=[0.5],
+            snap_filled=1.0,
+            db_order=_make_db_order(size=2.0),
+        )
+        await ex._recover_pending_orders("kraken")
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        assert len(sent) == 1
+        assert sent[0].trade_id == "recon-ex-1-c1.0"
+        assert sent[0].last_size == pytest.approx(0.5)
+        assert ex.pending_orders["c1"].last_seen_cum_qty == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_double_restart_is_idempotent(self) -> None:
+        """A second recovery over healed state emits nothing.
+
+        Given: DB state that already includes the first recovery's
+            corrective row and execution,
+        When: Recovery runs again,
+        Then: Seeds equal the venue cumulative and zero emissions occur.
+        """
+        rows = [_fill_row(0.5, 0.5, "f1"), _fill_row(1.0, 0.5, "recon-ex-1-c1.0")]
+        ex = self._executor(
+            fill_rows=rows,
+            exec_sizes=[0.5, 0.5],
+            snap_filled=1.0,
+            db_order=_make_db_order(size=2.0),
+        )
+        await ex._recover_pending_orders("kraken")
+        ex.msg_publisher.send.assert_not_awaited()
+        pending = ex.pending_orders["c1"]
+        assert pending.last_seen_cum_qty == pytest.approx(1.0)
+        assert pending.last_recorded_cum_qty == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_terminal_with_downtime_fills_heals_then_projects(self) -> None:
+        """A canceled-while-down partial fill is delivered before terminal.
+
+        Given: Venue reports CANCELED with filled=0.5, durable plane empty,
+        When: Recovery runs,
+        Then: The gap corrective publishes first, then the canceled
+            terminal flows through the pipeline, and the order is not
+            left pending.
+        """
+        ex = self._executor(
+            fill_rows=[],
+            exec_sizes=[],
+            snap_filled=0.5,
+            snap_status=ExchangeOrderStatusEnum.CANCELED,
+        )
+        ex._publish_cancel_event = AsyncMock()
+        await ex._recover_pending_orders("kraken")
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        assert len(sent) == 1
+        assert sent[0].trade_id == "recon-ex-1-c0.5"
+        assert sent[0].last_size == pytest.approx(0.5)
+        assert "c1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_db_order_pk_threads_into_pending(self) -> None:
+        """The real integer PK reaches db_order_id for status updates."""
+        db_order = _make_db_order()
+        db_order["id"] = 4242
+        ex = self._executor(fill_rows=[], exec_sizes=[], db_order=db_order)
+        await ex._recover_pending_orders("kraken")
+        assert ex.pending_orders["c1"].db_order_id == 4242
+
+    @pytest.mark.asyncio
+    async def test_venue_events_unreadable_falls_back_to_legacy(self) -> None:
+        """An unreadable durable plane degrades to venue-truth seeding.
+
+        Given: get_fill_venue_events_for_order raises,
+        When: Recovery runs,
+        Then: Both watermarks seed from the venue snapshot (today's
+            behavior, no correctives, never a double-apply).
+        """
+        ex = self._executor(fill_rows=[], exec_sizes=[], snap_filled=0.7)
+        ex.repository.get_fill_venue_events_for_order = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+        await ex._recover_pending_orders("kraken")
+        pending = ex.pending_orders["c1"]
+        assert pending.last_seen_cum_qty == pytest.approx(0.7)
+        assert pending.last_recorded_cum_qty == pytest.approx(0.7)
+        ex.msg_publisher.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_executions_unreadable_republishes_full_tail(self) -> None:
+        """An unreadable published plane republishes everything durably known.
+
+        Given: Durable rows to 0.5, executions read raises, venue at 1.0,
+        When: Recovery runs,
+        Then: The committed seed is conservative (0.0) so the WHOLE
+            durable tail republishes under original ids (consumers that
+            saw a row dedupe it; seeding published=durable would
+            permanently hide a recorded-but-unpublished fill), and the
+            venue-ahead remainder still emits as the stable corrective.
+        """
+        ex = self._executor(
+            fill_rows=[_fill_row(0.5, 0.5, "f1")],
+            exec_sizes=[],
+            snap_filled=1.0,
+            db_order=_make_db_order(size=2.0),
+        )
+        ex.repository.get_executions_for_order = AsyncMock(side_effect=RuntimeError("db down"))
+        await ex._recover_pending_orders("kraken")
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        assert [f.trade_id for f in sent] == ["f1", "recon-ex-1-c1.0"]
+        assert ex.pending_orders["c1"].last_seen_cum_qty == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_idless_rows_count_as_shown_and_never_republish(self) -> None:
+        """Id-less durable fills are never republished, only counted.
+
+        Given: Walutomat-style id-less rows including an ABSORBED
+            partition (rows 0.5 then 0.3 to cum 0.8 — a live engine may
+            have applied the same total as a single 0.8 frame, so no
+            identity key can correlate the partitions),
+        When: Recovery runs with venue at the same cumulative,
+        Then: Nothing publishes (neither republish nor corrective), the
+            committed seed counts the id-less cumulative as shown, and a
+            loud warning records the residual (an engine that missed the
+            publish heals at its next checkpoint replay).
+        """
+        rows = [
+            _fill_row(0.5, 0.5, None, price=4.32),
+            _fill_row(0.8, 0.3, None, price=4.32),
+        ]
+        ex = self._executor(
+            fill_rows=rows,
+            exec_sizes=[],
+            snap_filled=0.8,
+            db_order=_make_db_order(size=2.0),
+        )
+        await ex._recover_pending_orders("kraken")
+        ex.msg_publisher.send.assert_not_awaited()
+        pending = ex.pending_orders["c1"]
+        assert pending.last_seen_cum_qty == pytest.approx(0.8)
+        assert pending.last_recorded_cum_qty == pytest.approx(0.8)
+
+    @pytest.mark.asyncio
+    async def test_idless_cum_below_republished_tail_is_noop(self) -> None:
+        """An id-less row already covered by republished ids changes nothing.
+
+        Given: An id-less row at cum 0.6 alongside an id-bearing row at
+            cum 0.8 whose republish advances the committed watermark past
+            the id-less cumulative,
+        When: Recovery finishes the row sweep,
+        Then: The id-less counted-as-shown adjustment is a no-op (the
+            committed watermark already exceeds it).
+        """
+        rows = [
+            _fill_row(0.6, 0.1, None, price=4.32),
+            _fill_row(0.8, 0.2, "f-big"),
+        ]
+        ex = self._executor(
+            fill_rows=rows,
+            exec_sizes=[0.5],
+            snap_filled=0.8,
+            db_order=_make_db_order(size=2.0),
+        )
+        await ex._recover_pending_orders("kraken")
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        assert [f.trade_id for f in sent] == ["f-big"]
+        assert ex.pending_orders["c1"].last_seen_cum_qty == pytest.approx(0.8)
+
+    @pytest.mark.asyncio
+    async def test_idless_shown_applies_before_idbearing_republish(self) -> None:
+        """Id-less quantities are shown BEFORE id-bearing rows republish.
+
+        Given: An id-less row at cum 0.5 (its publish reached a live
+            engine) followed by an id-bearing recon row at cum 0.8 whose
+            publish failed, with no executions evidence,
+        When: Recovery republishes the id-bearing row,
+        Then: Its cum-anchored delta is 0.3 — counting the id-less span
+            as shown only AFTER the republish would anchor the delta at
+            0.0 and re-absorb the already-applied 0.5 into a 0.8 frame,
+            double-applying it on the live engine.
+        """
+        rows = [
+            _fill_row(0.5, 0.5, None, price=4.32),
+            _fill_row(0.8, 0.3, "recon-ex-1-c0.8", price=4.32),
+        ]
+        ex = self._executor(
+            fill_rows=rows,
+            exec_sizes=[],
+            snap_filled=0.8,
+            db_order=_make_db_order(size=2.0),
+        )
+        await ex._recover_pending_orders("kraken")
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        assert [f.trade_id for f in sent] == ["recon-ex-1-c0.8"]
+        assert sent[0].last_size == pytest.approx(0.3)
+        assert sent[0].size == pytest.approx(0.8)
+        assert ex.pending_orders["c1"].last_seen_cum_qty == pytest.approx(0.8)
+
+    @pytest.mark.asyncio
+    async def test_idless_shown_seed_still_emits_true_venue_gap(self) -> None:
+        """A never-recorded remainder above id-less rows still heals.
+
+        Given: Id-less rows to cum 0.5 and the venue at 0.8 (the 0.3
+            remainder exists in NO durable row, so no engine anywhere can
+            have applied it),
+        When: Recovery runs,
+        Then: Exactly the 0.3 corrective emits with the stable id.
+        """
+        ex = self._executor(
+            fill_rows=[_fill_row(0.5, 0.5, None, price=4.32)],
+            exec_sizes=[],
+            snap_filled=0.8,
+            db_order=_make_db_order(size=2.0),
+        )
+        await ex._recover_pending_orders("kraken")
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        assert len(sent) == 1
+        assert sent[0].trade_id == "recon-ex-1-c0.8"
+        assert sent[0].last_size == pytest.approx(0.3)
+
+    @pytest.mark.asyncio
+    async def test_durable_write_failure_continues_to_next_order(self) -> None:
+        """A failing corrective write never aborts the recovery sweep.
+
+        Given: Two recovering orders where the first's venue-event write
+            raises during its gap corrective,
+        When: Recovery runs,
+        Then: The first order stays seeded with watermarks unmoved and
+            the second order is still recovered.
+        """
+        first = _make_db_order()
+        second = _make_db_order(client_order_id="c2", exchange_order_id="ex-2")
+        ex = self._executor(fill_rows=[], exec_sizes=[], snap_filled=0.5)
+        snap1 = SimpleNamespace(
+            id="ex-1", filled=0.5, price=100.0, status=ExchangeOrderStatusEnum.OPEN
+        )
+        snap2 = SimpleNamespace(
+            id="ex-2", filled=0.0, price=100.0, status=ExchangeOrderStatusEnum.OPEN
+        )
+        ex.exchange_client.get_orders = AsyncMock(return_value=[snap1, snap2])
+        ex.repository.get_active_orders_for_recovery = AsyncMock(return_value=[first, second])
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
+        await ex._recover_pending_orders("kraken")
+        assert ex.pending_orders["c1"].last_seen_cum_qty == pytest.approx(0.0)
+        assert "c2" in ex.pending_orders
+        ex.msg_publisher.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_null_cum_rows_are_skipped_everywhere(self) -> None:
+        """Defensive null-cum rows neither seed nor republish."""
+        rows = [
+            _fill_row(0.5, 0.5, "f1"),
+            {**_fill_row(0.0, 0.0, "weird"), "cum_fill_size": None},
+        ]
+        ex = self._executor(fill_rows=rows, exec_sizes=[0.5], snap_filled=0.5)
+        await ex._recover_pending_orders("kraken")
+        pending = ex.pending_orders["c1"]
+        assert pending.last_recorded_cum_qty == pytest.approx(0.5)
+        ex.msg_publisher.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_terminal_full_fill_pops_before_terminal_emission(self) -> None:
+        """A gap corrective that completes the order makes terminal a no-op.
+
+        Given: A CLOSED order whose gap corrective covers the full size
+            (the pipeline pops it as FILLED),
+        When: The terminal step runs,
+        Then: There is no pending entry left to emit against and recovery
+            finishes cleanly.
+        """
+        ex = self._executor(
+            fill_rows=[],
+            exec_sizes=[],
+            snap_filled=1.0,
+            snap_status=ExchangeOrderStatusEnum.CLOSED,
+        )
+        await ex._recover_pending_orders("kraken")
+        assert "c1" not in ex.pending_orders
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        assert [f.trade_id for f in sent] == ["recon-ex-1-c1.0"]
+
+    @pytest.mark.asyncio
+    async def test_non_sqla_repo_with_unreadable_executions_seeds_zero(self) -> None:
+        """A non-SQLA repo whose executions read fails seeds (0, 0)."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        mock_client = AsyncMock()
+        snap = SimpleNamespace(
+            id="ex-1", filled=0.0, price=None, status=ExchangeOrderStatusEnum.OPEN
+        )
+        mock_client.get_orders = AsyncMock(return_value=[snap])
+        ex.exchange_client = mock_client
+        repo = AsyncMock()
+        repo.get_active_orders_for_recovery = AsyncMock(return_value=[_make_db_order()])
+        repo.get_executions_for_order = AsyncMock(side_effect=RuntimeError("backend"))
+        ex.repository = repo
+        await ex._recover_pending_orders("kraken")
+        pending = ex.pending_orders["c1"]
+        assert pending.last_seen_cum_qty == pytest.approx(0.0)
+        assert pending.last_recorded_cum_qty == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_start_sets_running_before_recovery(self) -> None:
+        """Recovery emissions are publishable: running precedes recovery."""
+        ex: Any = MergedDummyExecutor()
+        observed: list[bool] = []
+
+        async def observe(exchange_name: str) -> None:
+            observed.append(ex.running)
+            raise asyncio.CancelledError()
+
+        ex._recover_pending_orders = AsyncMock(side_effect=observe)
+        ex._initialize_settings = AsyncMock()
+        ex._resolve_credentials = AsyncMock()
+        ex._setup_zmq_sockets = MagicMock()
+        client = AsyncMock()
+        client.set_tracker = MagicMock()
+        client.supports_websocket_executions = False
+        ex._create_exchange_client = MagicMock(return_value=client)
+        with contextlib.suppress(asyncio.CancelledError):
+            await ex.start()
+        assert observed == [True]
+
+
+class TestStatusOnlyTerminalDelta:
+    """Codex P0-3 round-1 regressions: terminal deltas and id collisions."""
+
+    @pytest.mark.asyncio
+    async def test_terminal_for_filled_order_publishes_zero_delta(self) -> None:
+        """A status-only terminal never reverses an applied position.
+
+        Given: An order whose 1.0 fill was already published (committed
+            cumulative 1.0) and a synthetic status-only 'filled' terminal,
+        When: The terminal flows through the pipeline,
+        Then: The published frame carries size=1.0 and last_size=0.0 —
+            resolving status frames to cumulative 0.0 used to emit a
+            NEGATIVE 1.0 delta that a delta-applying engine would book as
+            a position reversal.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(quantity=1.0)
+        pending = base_module.PendingOrderState(
+            request=order, last_seen_cum_qty=1.0, last_recorded_cum_qty=1.0
+        )
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex-term"] = order.client_order_id
+        ex._record_venue_event = AsyncMock()
+        ex.msg_publisher = SimpleNamespace(send=AsyncMock())
+        terminal = SimpleNamespace(
+            order_id="ex-term",
+            exec_type="filled",
+            exec_id=None,
+            order_status=ExchangeOrderStatusEnum.CLOSED,
+            cum_qty=None,
+            average_price=None,
+            fee_usd_equiv=None,
+            fees=None,
+            last_qty=None,
+            last_price=None,
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            side=SimpleNamespace(value="buy"),
+            trade_id=None,
+            liquidity_ind=None,
+        )
+        await ex._process_execution(terminal)
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        assert len(sent) == 1
+        assert sent[0].last_size == pytest.approx(0.0)
+        assert sent[0].size == pytest.approx(1.0)
+        assert order.client_order_id not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_unexpected_per_order_error_never_aborts_sweep(self) -> None:
+        """One order's unexpected recovery error skips it, not the sweep.
+
+        Given: Two DB-active orders where the first's recovery raises an
+            unexpected error,
+        When: _recover_pending_orders runs,
+        Then: The error is logged, the first order is skipped, and the
+            second order is still recovered.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        mock_client = AsyncMock()
+        snap = SimpleNamespace(
+            id="ex-2", filled=0.0, price=None, status=ExchangeOrderStatusEnum.OPEN
+        )
+        mock_client.get_orders = AsyncMock(return_value=[snap])
+        ex.exchange_client = mock_client
+        repo = AsyncMock()
+        repo.get_active_orders_for_recovery = AsyncMock(
+            return_value=[
+                _make_db_order(),
+                _make_db_order(client_order_id="c2", exchange_order_id="ex-2"),
+            ]
+        )
+        repo.get_executions_for_order = AsyncMock(return_value=[])
+        ex.repository = repo
+        original = ex._recover_single_order
+
+        async def explode_first(db_order: Any, *args: Any, **kwargs: Any) -> bool:
+            if db_order["client_order_id"] == "c1":
+                raise RuntimeError("unexpected")
+            return cast(bool, await original(db_order, *args, **kwargs))
+
+        ex._recover_single_order = explode_first
+        await ex._recover_pending_orders("kraken")
+        assert "c1" not in ex.pending_orders
+        assert "c2" in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_near_cum_gaps_get_distinct_exec_ids(self) -> None:
+        """Floats that .12g would collapse stay distinct under repr.
+
+        Given: Two advancing venue cumulatives differing only past the
+            12th significant digit,
+        When: _reconcile_fill_gap emits correctives for both,
+        Then: The deterministic ids differ, so the second gap is NOT
+            swallowed by the exec-id LRU as a duplicate of the first.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(quantity=200001.0)
+        pending = base_module.PendingOrderState(request=order)
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex-big"] = order.client_order_id
+        ex._record_venue_event = AsyncMock()
+        ex.msg_publisher = SimpleNamespace(send=AsyncMock())
+        snap1 = SimpleNamespace(
+            id="ex-big",
+            filled=100000.00000004,
+            price=100.0,
+            status=ExchangeOrderStatusEnum.OPEN,
+        )
+        snap2 = SimpleNamespace(
+            id="ex-big",
+            filled=100000.00000008,
+            price=100.0,
+            status=ExchangeOrderStatusEnum.OPEN,
+        )
+        await ex._reconcile_fill_gap("kraken", "ex-big", pending, snap1)
+        await ex._reconcile_fill_gap("kraken", "ex-big", pending, snap2)
+        sent = [c.args[1] for c in ex.msg_publisher.send.await_args_list]
+        assert len(sent) == 2
+        assert sent[0].trade_id != sent[1].trade_id

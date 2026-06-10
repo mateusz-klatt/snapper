@@ -324,16 +324,34 @@ class TradeService:
         """Return True if the fill is new and should be applied.
 
         Adds exec_id and trade_id to the seen set for subsequent dedup.
+
+        The id-less fallback key mirrors the live engine's apply_fill
+        fallback shape (client_order_id + fill size + fill price) instead
+        of the venue_events row PK: id-less fills (Walutomat cumulative
+        polls carry no venue exec id) must dedupe ACROSS planes — a
+        recovery republish seen live by the engine and the same row seen
+        by checkpoint replay have no common row id, so a row-PK fallback
+        let the two planes double-apply the same quantity after a
+        coordinator restart.
         """
         exec_id = event.get("exec_id")
         trade_id = event.get("trade_id")
-        dedup_key = exec_id or trade_id or f"fallback-{event['id']}"
+        dedup_key = (
+            exec_id
+            or trade_id
+            or (
+                f"fallback-{event.get('client_order_id')}"
+                f"-{event.get('fill_size')}-{event.get('fill_price')}"
+            )
+        )
         if dedup_key in shard.seen_exec_ids:
             return False
         if exec_id:
             shard.seen_exec_ids[exec_id] = None
         if trade_id:
             shard.seen_exec_ids[trade_id] = None
+        if not exec_id and not trade_id:
+            shard.seen_exec_ids[dedup_key] = None
         while len(shard.seen_exec_ids) > 10_000:
             shard.seen_exec_ids.popitem(last=False)
         return True

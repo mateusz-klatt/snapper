@@ -143,6 +143,44 @@ def test_apply_fill_dedup() -> None:
     assert pos.position_qty == 0.5
 
 
+def test_apply_fill_idless_fallback_key_is_identity_shaped() -> None:
+    """Id-less fills dedupe by (client order, size, price), not row PK.
+
+    Given: two venue events with NO exec/trade id carrying the same
+        client_order_id, fill_size, and fill_price but DIFFERENT row ids
+        (a recovery republish of the same Walutomat fill lands in replay
+        next to the original row),
+    When: both are applied,
+    Then: only the first counts — a row-PK fallback key would apply both
+        and double the position after a coordinator restart.
+    """
+    svc = TradeService()
+    event = _make_venue_event(event_id=1, exec_id=None)
+    svc.apply_venue_event(event)
+    event2 = _make_venue_event(event_id=2, exec_id=None)
+    svc.apply_venue_event(event2)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.5
+
+
+def test_apply_fill_idless_distinct_quantities_both_apply() -> None:
+    """Id-less fills with different sizes are NOT false-deduped.
+
+    Given: two id-less venue events for the same order whose fill sizes
+        differ (0.5 then 0.25),
+    When: both are applied,
+    Then: both count — the identity-shaped fallback key includes the
+        quantity, so distinct fills never collide on it.
+    """
+    svc = TradeService()
+    event = _make_venue_event(event_id=1, exec_id=None)
+    svc.apply_venue_event(event)
+    event2 = _make_venue_event(event_id=2, exec_id=None, fill_size=0.25)
+    svc.apply_venue_event(event2)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == pytest.approx(0.75)
+
+
 def test_apply_order_accepted() -> None:
     """Order accepted event updates command state with exchange order id.
 
