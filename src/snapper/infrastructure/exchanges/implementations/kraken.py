@@ -751,6 +751,52 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.error(f"Failed to get order {order_id}: {e}")
             raise
 
+    async def find_order_by_client_id(
+        self, client_order_id: str, symbol: str | None = None
+    ) -> ExchangeOrderSnapshot | None:
+        """Verify whether an order with the given cl_ord_id exists on Kraken.
+
+        Queries open AND closed orders with the ``clientOrderId``
+        param, which ccxt maps to Kraken's ``cl_ord_id`` filter on both
+        endpoints. ``fetch_order`` is deliberately NOT used: its
+        ``clientOrderId`` param maps to the integer ``userref`` field —
+        a silent wrong-identifier query for our uuid7 client ids. The
+        echoed client id on each result is double-checked so a venue
+        ignoring the filter cannot produce a false match.
+
+        Args:
+            client_order_id: Client order id the submit was sent with.
+            symbol: Optional native symbol to narrow the query.
+
+        Returns:
+            The order snapshot when found; None only after BOTH queries
+            succeeded and neither contains the client id (#145 P0-1
+            authoritative-absence contract).
+
+        Raises:
+            RuntimeError: If API credentials are missing.
+            ValueError: If the symbol has no CCXT mapping (native-only
+                instruments cannot be verified on this path).
+            Exception: If either venue query fails — the caller must
+                treat this as could-not-verify, never as absence.
+        """
+        if not self.api_key or not self.api_secret:
+            raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
+        ccxt_symbol = native_to_ccxt(symbol) if symbol else None
+        params = {"clientOrderId": client_order_id}
+        for fetch in (self._ccxt_client.fetch_open_orders, self._ccxt_client.fetch_closed_orders):
+            orders = await self._with_retry(fetch, ccxt_symbol, None, None, params)
+            if not isinstance(orders, list):
+                raise RuntimeError(
+                    f"Kraken returned a non-list order set for {client_order_id}: "
+                    f"cannot answer authoritatively"
+                )
+            for order_data in orders:
+                snapshot = self._convert_ccxt_order(order_data)
+                if snapshot.client_order_id == client_order_id:
+                    return snapshot
+        return None
+
     async def _fetch_orders_from_exchange(
         self,
         symbol: str | None,

@@ -347,8 +347,17 @@ On every venue (Kraken Spot ccxt + native, Kraken Futures, Walutomat)
 an order submit that fails *after the request may have left the
 process* (request timeout, connection reset, gateway 5xx, unparseable
 success body) no longer fabricates a REJECTED event. The executor
-parks the order, records a non-terminal `order_submit_unknown` venue
-event, and publishes a single `orders.events.*.unknown` message:
+first verifies against venue truth — up to three lookups by client id
+(`cl_ord_id` on Kraken Spot via open+closed orders, `cliOrdId` on
+Futures via order status; 2s/5s/10s backoff, 15s bound each). A found
+order finalizes as accepted (an already-terminal one additionally
+projects its fills through the disappeared-order reconciler); two
+consecutive authoritative not-found answers make the rejection
+venue-truth-based and safe. Only when verification cannot resolve —
+venue unreachable, lookup unsupported (Walutomat, Spot native-only
+symbols) — does the executor park the order, record a non-terminal
+`order_submit_unknown` venue event, and publish a single
+`orders.events.*.unknown` message:
 
 - the engine **holds its in-flight guard indefinitely** (the 60 s
   timeout valve is disabled while UNKNOWN) so no replacement order can
@@ -365,10 +374,10 @@ resumes its normal lifecycle with the guard still held until fills); a
 COMPLETE fill or a rejection releases the guard entirely. A partial
 fill alone neither clears the flag nor the guard — the order stays
 guarded until its terminal event.
-Until automated venue verification lands (lookup by `cl_ord_id` /
-`cliOrdId` / `submitId`), a parked UNKNOWN order requires operator
-resolution — check the venue's open/closed orders for the client id
-from the alert before taking any manual action.
+A PARKED UNKNOWN order (inline verification could not resolve it)
+currently requires operator resolution — check the venue's open and
+closed orders for the client id from the alert before taking any
+manual action. The recon-loop automatic resolver is the next slice.
 
 ### Fault-injection testing
 

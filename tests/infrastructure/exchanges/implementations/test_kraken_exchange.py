@@ -6874,3 +6874,141 @@ class TestConnectRaceHardening:
             ws_cls.return_value.close = AsyncMock(side_effect=RuntimeError("close fail"))
             with pytest.raises(RuntimeError, match="replaced during connect"):
                 await client._ensure_ws_connected()
+
+
+class TestFindOrderByClientId:
+    """Spot client-id verification lookups (#145 P0-1 slice 3)."""
+
+    @pytest.fixture
+    def kraken_client(self) -> KrakenExchangeClient:
+        """Provide test client instance."""
+        return KrakenExchangeClient(
+            api_key="test_key",
+            api_secret="test_secret",
+            sandbox=False,
+        )
+
+    def _ccxt_order(self, client_order_id: str) -> dict[str, Any]:
+        """Build a minimal ccxt order dict echoing the client id."""
+        return {
+            "id": "OID-1",
+            "clientOrderId": client_order_id,
+            "symbol": "BTC/USD",
+            "side": "buy",
+            "type": "market",
+            "amount": 0.1,
+            "filled": 0.0,
+            "remaining": 0.1,
+            "status": "open",
+            "timestamp": 1718000000000,
+        }
+
+    @pytest.mark.asyncio
+    async def test_found_in_open_orders(self, kraken_client: KrakenExchangeClient) -> None:
+        """An open order with the client id resolves without the closed query.
+
+        Given: fetch_open_orders returning the order,
+        When: find_order_by_client_id is called,
+        Then: The snapshot is returned, the clientOrderId param reached
+            the venue call, and fetch_closed_orders is never queried.
+        """
+        mock_client = AsyncMock()
+        mock_client.fetch_open_orders.return_value = [self._ccxt_order("cid-find-1")]
+        with patch.object(kraken_client, "_ccxt_client", mock_client):
+            snapshot = await kraken_client.find_order_by_client_id("cid-find-1", "BTC-USD")
+        assert snapshot is not None
+        assert snapshot.id == "OID-1"
+        params = mock_client.fetch_open_orders.call_args.args[3]
+        assert params == {"clientOrderId": "cid-find-1"}
+        mock_client.fetch_closed_orders.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_found_in_closed_orders(self, kraken_client: KrakenExchangeClient) -> None:
+        """A terminal order surfaces through the closed-orders query.
+
+        Given: An empty open list and the order in the closed list,
+        When: find_order_by_client_id is called,
+        Then: The snapshot is returned from the second query.
+        """
+        mock_client = AsyncMock()
+        mock_client.fetch_open_orders.return_value = []
+        mock_client.fetch_closed_orders.return_value = [self._ccxt_order("cid-find-2")]
+        with patch.object(kraken_client, "_ccxt_client", mock_client):
+            snapshot = await kraken_client.find_order_by_client_id("cid-find-2", "BTC-USD")
+        assert snapshot is not None
+        assert snapshot.id == "OID-1"
+
+    @pytest.mark.asyncio
+    async def test_absent_in_both_returns_none(self, kraken_client: KrakenExchangeClient) -> None:
+        """None is returned only after BOTH queries succeed empty.
+
+        Given: Open and closed queries both succeeding with no match,
+        When: find_order_by_client_id is called,
+        Then: None signals authoritative absence.
+        """
+        mock_client = AsyncMock()
+        mock_client.fetch_open_orders.return_value = []
+        mock_client.fetch_closed_orders.return_value = []
+        with patch.object(kraken_client, "_ccxt_client", mock_client):
+            snapshot = await kraken_client.find_order_by_client_id("cid-find-3", "BTC-USD")
+        assert snapshot is None
+        mock_client.fetch_closed_orders.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_mismatched_echo_is_not_a_match(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A venue ignoring the filter cannot produce a false positive.
+
+        Given: Queries returning orders whose echoed client id differs,
+        When: find_order_by_client_id is called,
+        Then: None is returned — only an exact echo counts as found.
+        """
+        mock_client = AsyncMock()
+        mock_client.fetch_open_orders.return_value = [self._ccxt_order("other-cid")]
+        mock_client.fetch_closed_orders.return_value = [self._ccxt_order("another-cid")]
+        with patch.object(kraken_client, "_ccxt_client", mock_client):
+            snapshot = await kraken_client.find_order_by_client_id("cid-find-4", "BTC-USD")
+        assert snapshot is None
+
+    @pytest.mark.asyncio
+    async def test_query_failure_propagates(self, kraken_client: KrakenExchangeClient) -> None:
+        """A failing venue query raises instead of claiming absence.
+
+        Given: fetch_open_orders raising a network error,
+        When: find_order_by_client_id is called,
+        Then: The error propagates (could-not-verify, never absence).
+        """
+        mock_client = AsyncMock()
+        mock_client.fetch_open_orders.side_effect = ccxt.NetworkError("down")
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(ccxt.NetworkError),
+        ):
+            await kraken_client.find_order_by_client_id("cid-find-5", "BTC-USD")
+
+    @pytest.mark.asyncio
+    async def test_requires_credentials(self) -> None:
+        """Missing credentials raise before any venue call."""
+        client = KrakenExchangeClient(api_key="", api_secret="", sandbox=False)
+        with pytest.raises(RuntimeError, match="API credentials"):
+            await client.find_order_by_client_id("cid-find-6", "BTC-USD")
+
+    @pytest.mark.asyncio
+    async def test_non_list_order_set_raises(self, kraken_client: KrakenExchangeClient) -> None:
+        """A non-list venue answer is could-not-verify, not absence.
+
+        Given: fetch_open_orders returning None instead of a list,
+        When: find_order_by_client_id is called,
+        Then: RuntimeError propagates — a defensive guard so a
+            misbehaving transport can never convert into an
+            authoritative-absence answer.
+        """
+        mock_client = AsyncMock()
+        mock_client.fetch_open_orders.return_value = None
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            pytest.raises(RuntimeError, match="non-list order set"),
+        ):
+            await kraken_client.find_order_by_client_id("cid-find-7", "BTC-USD")

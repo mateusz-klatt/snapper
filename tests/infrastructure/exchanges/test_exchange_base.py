@@ -909,3 +909,18 @@ async def test_health_loop_logs_stale_before_retry_passes() -> None:
         client._health_loop_running = True
         await client._subscription_health_loop()
     assert order == ["log", "overdue", "failed", "dark"]
+
+
+@pytest.mark.asyncio()
+async def test_find_order_by_client_id_default_raises() -> None:
+    """The base lookup refuses rather than guessing absence.
+
+    Given: A venue client without a client-id lookup implementation,
+    When: find_order_by_client_id is called,
+    Then: NotImplementedError names the venue — the caller must treat
+        this as could-not-verify, never as authoritative absence
+        (#145 P0-1 contract).
+    """
+    client = DummyExchangeClient(repository=None)
+    with pytest.raises(NotImplementedError, match="dummy"):
+        await client.find_order_by_client_id("cid-x", "BTC-USD")

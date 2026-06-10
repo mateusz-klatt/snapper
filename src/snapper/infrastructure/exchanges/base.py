@@ -615,6 +615,40 @@ class ExchangeClientBase(ABC):
         """
         ...
 
+    async def find_order_by_client_id(
+        self, client_order_id: str, symbol: str | None = None
+    ) -> ExchangeOrderSnapshot | None:
+        """Verify whether an order with the given client id exists on the venue.
+
+        The resolver behind the ambiguous-submit UNKNOWN state (#145
+        P0-1): after a submit whose outcome is unknown, the executor
+        asks the venue for the truth before deciding the order's fate.
+
+        CONTRACT — ``None`` is an AUTHORITATIVE answer: it may be
+        returned only when the venue was queried successfully across
+        the full order universe (open AND closed/terminal) and the
+        client id is absent. Any inability to verify — transport
+        failure, partial query, or a venue without client-id lookup —
+        must RAISE instead (``NotImplementedError`` for the latter), so
+        the caller never converts "could not check" into "venue says
+        no" and rejects a live order.
+
+        Args:
+            client_order_id: Client order id the submit was sent with.
+            symbol: Optional native symbol to narrow the query.
+
+        Returns:
+            The order snapshot when found; None when authoritatively
+            absent.
+
+        Raises:
+            NotImplementedError: If this venue cannot look up orders by
+                client id (default implementation).
+        """
+        raise NotImplementedError(
+            f"{self.exchange_name}: cannot authoritatively verify orders by client id"
+        )
+
     @abstractmethod
     async def get_orders(
         self,

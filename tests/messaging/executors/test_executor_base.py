@@ -6458,3 +6458,214 @@ class TestAmbiguousSubmitHandling:
         assert statuses == ["submitted", "accepted"]
         assert ex.client_by_exchange["ex-live-11"] == order.client_order_id
         assert order.client_order_id in ex.pending_orders
+
+
+class TestAmbiguousVerification:
+    """Venue-truth verification of ambiguous submits (#145 P0-1 slice 3)."""
+
+    def _executor(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        """Build a running executor with a verifying exchange client."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex._publish_order_status = AsyncMock(return_value=True)
+        ex._record_venue_event = AsyncMock()
+        ex._reconcile_disappeared_order = AsyncMock()
+        ex.exchange_client = MagicMock()
+        monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: True)
+        monkeypatch.setattr(base_module.asyncio, "sleep", AsyncMock())
+        return ex
+
+    def _ambiguous(self, order: OrderRequestData) -> AmbiguousOrderSubmitError:
+        """Build the ambiguous error for the given order."""
+        return AmbiguousOrderSubmitError(
+            client_order_id=order.client_order_id, instrument="BTC-USD", message="boom"
+        )
+
+    @pytest.mark.asyncio
+    async def test_found_open_resolves_to_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A live order found by client id resolves as accepted.
+
+        Given: The venue returning an OPEN snapshot for the client id,
+        When: _handle_ambiguous_submit runs,
+        Then: ACCEPTED is published with the venue id, no UNKNOWN and
+            no REJECTED appear, and the ambiguous flag is cleared.
+        """
+        ex = self._executor(monkeypatch)
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            return_value=SimpleNamespace(
+                id="ex-ver-1", status=base_module.ExchangeOrderStatusEnum.OPEN
+            )
+        )
+        order = make_order()
+        await ex._handle_ambiguous_submit(order, self._ambiguous(order))
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["accepted"]
+        assert ex.client_by_exchange["ex-ver-1"] == order.client_order_id
+        pending = ex.pending_orders[order.client_order_id]
+        assert pending.submit_ambiguous is False
+        assert pending.exchange_order_id == "ex-ver-1"
+        ex._reconcile_disappeared_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_found_terminal_routes_through_reconciler(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An already-terminal order projects via the disappeared-order path.
+
+        Given: The venue returning a CLOSED snapshot for the client id,
+        When: _handle_ambiguous_submit runs,
+        Then: ACCEPTED is published and _reconcile_disappeared_order is
+            invoked so fills and the terminal event project normally.
+        """
+        ex = self._executor(monkeypatch)
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            return_value=SimpleNamespace(
+                id="ex-ver-2", status=base_module.ExchangeOrderStatusEnum.CLOSED
+            )
+        )
+        order = make_order()
+        await ex._handle_ambiguous_submit(order, self._ambiguous(order))
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["accepted"]
+        ex._reconcile_disappeared_order.assert_awaited_once()
+        assert ex._reconcile_disappeared_order.await_args.args[1] == "ex-ver-2"
+
+    @pytest.mark.asyncio
+    async def test_two_consecutive_not_found_rejects_safely(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two authoritative absences make the rejection venue-truth-based.
+
+        Given: The venue answering authoritative-absent twice,
+        When: _handle_ambiguous_submit runs,
+        Then: REJECTED is published, the order_rejected venue event
+            carries the verified-absent error, and the entry is gone.
+        """
+        ex = self._executor(monkeypatch)
+        ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
+        order = make_order()
+        await ex._handle_ambiguous_submit(order, self._ambiguous(order))
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["rejected"]
+        assert order.client_order_id not in ex.pending_orders
+        event = ex._record_venue_event.await_args_list[-1].args[0]
+        assert event["event_type"] == "order_rejected"
+        assert "venue verified order absent" in event["error"]
+        assert ex.exchange_client.find_order_by_client_id.await_count == 2
+        assert ex.client_by_exchange == {}
+
+    @pytest.mark.asyncio
+    async def test_single_not_found_after_error_does_not_reject(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A lone absence answer between failures is not enough to reject.
+
+        Given: Verification answering error, absent, error,
+        When: _handle_ambiguous_submit runs,
+        Then: The order parks UNKNOWN — one not-found surrounded by
+            failures never converts into a rejection.
+        """
+        ex = self._executor(monkeypatch)
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            side_effect=[RuntimeError("down"), None, RuntimeError("down")]
+        )
+        order = make_order()
+        await ex._handle_ambiguous_submit(order, self._ambiguous(order))
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["unknown"]
+        assert ex.pending_orders[order.client_order_id].submit_ambiguous is True
+
+    @pytest.mark.asyncio
+    async def test_unsupported_lookup_parks_immediately(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A venue without client-id lookup parks without burning retries.
+
+        Given: find_order_by_client_id raising NotImplementedError,
+        When: _handle_ambiguous_submit runs,
+        Then: Exactly one lookup attempt happens and the order parks.
+        """
+        ex = self._executor(monkeypatch)
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            side_effect=NotImplementedError("no lookup")
+        )
+        order = make_order()
+        await ex._handle_ambiguous_submit(order, self._ambiguous(order))
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["unknown"]
+        assert ex.exchange_client.find_order_by_client_id.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_all_attempts_failing_parks_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unreachable verification parks the order after three attempts.
+
+        Given: Every lookup raising (same outage as the submit),
+        When: _handle_ambiguous_submit runs,
+        Then: Three attempts are made and the order parks UNKNOWN.
+        """
+        ex = self._executor(monkeypatch)
+        ex.exchange_client.find_order_by_client_id = AsyncMock(side_effect=TimeoutError())
+        order = make_order()
+        await ex._handle_ambiguous_submit(order, self._ambiguous(order))
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["unknown"]
+        assert ex.exchange_client.find_order_by_client_id.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_found_open_flushes_orphans(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A live verified order flushes buffered orphan executions.
+
+        Given: A FOUND-open verification result,
+        When: _handle_ambiguous_submit resolves it,
+        Then: Orphan flushing runs for the venue order id (normal
+            acceptance semantics).
+        """
+        ex = self._executor(monkeypatch)
+        ex._try_process_orphaned = MagicMock()
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            return_value=SimpleNamespace(
+                id="ex-ver-3", status=base_module.ExchangeOrderStatusEnum.OPEN
+            )
+        )
+        order = make_order()
+        await ex._handle_ambiguous_submit(order, self._ambiguous(order))
+        ex._try_process_orphaned.assert_called_once_with("ex-ver-3", order.client_order_id)
+
+    @pytest.mark.asyncio
+    async def test_found_terminal_drains_orphan_inline_before_reconcile(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A terminal verified order drains its orphan fill inline first.
+
+        Given: A FOUND-CLOSED verification result with a buffered
+            orphan execution for the venue order id,
+        When: _handle_ambiguous_submit resolves it,
+        Then: The buffered WS fill is processed synchronously BEFORE
+            the REST reconciler runs — full fill fidelity (exec ids,
+            fees) is preserved and no background task can interleave
+            with the synthetic terminal projection.
+        """
+        ex = self._executor(monkeypatch)
+        ex.exchange_client.find_order_by_client_id = AsyncMock(
+            return_value=SimpleNamespace(
+                id="ex-ver-4", status=base_module.ExchangeOrderStatusEnum.CLOSED
+            )
+        )
+        call_order: list[str] = []
+
+        async def record_execution(_execution: Any) -> None:
+            call_order.append("orphan-fill")
+
+        async def record_reconcile(*_args: Any) -> None:
+            call_order.append("reconcile")
+
+        ex._process_execution = record_execution
+        ex._reconcile_disappeared_order = AsyncMock(side_effect=record_reconcile)
+        orphan = SimpleNamespace(order_id="ex-ver-4", exec_type="trade")
+        ex.orphaned_executions["ex-ver-4"] = (orphan, 0.0)
+        order = make_order()
+        await ex._handle_ambiguous_submit(order, self._ambiguous(order))
+        assert call_order == ["orphan-fill", "reconcile"]
+        assert "ex-ver-4" not in ex.orphaned_executions

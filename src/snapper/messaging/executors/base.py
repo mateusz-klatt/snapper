@@ -84,6 +84,15 @@ from snapper.utils.logging import set_log_context
 
 _EXCHANGE_NOT_INIT_MSG = "Exchange client not initialized"
 
+_AMBIGUOUS_VERIFY_TIMEOUT_S = 15.0
+"""Bound on a single venue lookup during ambiguous-submit verification.
+
+The lookup runs while the engine's in-flight guard is held; an
+unbounded venue call here would silently extend the UNKNOWN window. A
+timed-out attempt counts as could-not-verify, never as absence (#145
+P0-1).
+"""
+
 
 @dataclass
 class PendingOrderState:
@@ -777,7 +786,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
 
     async def _finalize_accepted_submit(
-        self, order: OrderRequestData, exchange_order_id: str
+        self,
+        order: OrderRequestData,
+        exchange_order_id: str,
+        *,
+        flush_orphans: bool = True,
     ) -> None:
         """Record and publish acceptance of a venue-confirmed live order.
 
@@ -793,11 +806,18 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Orphaned-execution flushing happens AFTER the durable-write
         attempt: a buffered fill can complete the order and pop its
         pending entry, which would make the ``accept_event_pending``
-        flag unsettable if the write failed.
+        flag unsettable if the write failed. Callers that immediately
+        project the order from a REST snapshot (the terminal-verified
+        ambiguous path) pass ``flush_orphans=False`` to skip the
+        BACKGROUND flush here and instead drain the orphan buffer
+        inline via ``_flush_orphaned_inline`` before reconciling — full
+        WS fill fidelity, no interleaving with the synthetic terminal.
 
         Args:
             order: The original order request.
             exchange_order_id: Venue-assigned order id from the submit.
+            flush_orphans: When False, skip orphaned-execution flushing
+                for this order (caller projects fills from REST).
         """
         exchange_name = self._get_exchange_name()
         self.client_by_exchange[exchange_order_id] = order.client_order_id
@@ -822,12 +842,114 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             pending = self.pending_orders.get(order.client_order_id)
             if pending is not None:
                 pending.accept_event_pending = True
-        self._try_process_orphaned(exchange_order_id, order.client_order_id)
+        if flush_orphans:
+            self._try_process_orphaned(exchange_order_id, order.client_order_id)
         await self._publish_order_status(order, OrderEventEnum.ACCEPTED, exchange_order_id)
         logger.info(
             f"[{exchange_name}] Order {order.client_order_id} "
             f"accepted as {exchange_order_id}, waiting for execution"
         )
+
+    async def _verify_ambiguous_submit(
+        self, order: OrderRequestData, pending: PendingOrderState
+    ) -> bool:
+        """Resolve an ambiguous submit against venue truth by client id.
+
+        Up to three lookups (after 2s/5s/10s — the venue needs a moment
+        to materialize an order whose response was lost), each bounded
+        to 15s. Outcomes (#145 P0-1):
+
+        - FOUND: the order is live or was — finalize as accepted; an
+          already-terminal snapshot is additionally routed through
+          ``_reconcile_disappeared_order`` so its fills and terminal
+          event project normally.
+        - TWO consecutive authoritative not-found answers: the venue
+          never saw the id — now a SAFE definitive rejection. One
+          answer is not enough: closed-order listings can lag the
+          submit by seconds.
+        - Anything else (lookup unsupported, venue unreachable, mixed
+          answers): unresolved — the caller parks the order UNKNOWN.
+
+        Blocking is a known, accepted tradeoff: the sequential order
+        handler can spend up to ~62s here (3 sleeps + 3 bounded
+        lookups) before parking, delaying queued commands for this
+        executor. During the outages that produce ambiguity those
+        commands would fail venue-side anyway, and resolving the
+        current order's truth first is worth more than dispatching the
+        next one into the same outage.
+
+        Args:
+            order: The original order request.
+            pending: The parked pending entry for the order.
+
+        Returns:
+            True when the order was resolved (accepted or rejected);
+            False when verification could not produce an answer.
+        """
+        exchange_name = self._get_exchange_name()
+        if self.exchange_client is None:
+            return False
+        not_found_streak = 0
+        for delay_s in (2.0, 5.0, 10.0):
+            await asyncio.sleep(delay_s)
+            try:
+                async with asyncio.timeout(_AMBIGUOUS_VERIFY_TIMEOUT_S):
+                    snapshot = await self.exchange_client.find_order_by_client_id(
+                        order.client_order_id, order.instrument
+                    )
+            except NotImplementedError:
+                logger.warning(
+                    f"[{exchange_name}] venue cannot verify orders by client id — "
+                    f"parking {order.client_order_id} as UNKNOWN"
+                )
+                return False
+            except Exception as e:
+                logger.warning(
+                    f"[{exchange_name}] ambiguous-submit verification attempt failed "
+                    f"for {order.client_order_id}: {e}"
+                )
+                not_found_streak = 0
+                continue
+            if snapshot is not None:
+                logger.warning(
+                    f"[{exchange_name}] Order {order.client_order_id} VERIFIED on venue "
+                    f"as {snapshot.id} (status={snapshot.status}) after ambiguous submit"
+                )
+                pending.submit_ambiguous = False
+                pending.exchange_order_id = snapshot.id
+                is_live = snapshot.status in (
+                    ExchangeOrderStatusEnum.PENDING,
+                    ExchangeOrderStatusEnum.PENDING_NEW,
+                    ExchangeOrderStatusEnum.NEW,
+                    ExchangeOrderStatusEnum.OPEN,
+                    ExchangeOrderStatusEnum.PARTIALLY_FILLED,
+                )
+                await self._finalize_accepted_submit(order, snapshot.id, flush_orphans=is_live)
+                if not is_live:
+                    await self._flush_orphaned_inline(snapshot.id)
+                    await self._reconcile_disappeared_order(exchange_name, snapshot.id, pending)
+                return True
+            not_found_streak += 1
+            if not_found_streak >= 2:
+                logger.warning(
+                    f"[{exchange_name}] Order {order.client_order_id} verified ABSENT "
+                    f"on venue (2 consecutive authoritative answers) — safe to reject"
+                )
+                self.pending_orders.pop(order.client_order_id, None)
+                await self._publish_order_status(order, OrderEventEnum.REJECTED)
+                await self._record_venue_event(
+                    {
+                        "event_type": "order_rejected",
+                        "exchange_name": exchange_name,
+                        "instrument": order.instrument,
+                        "client_order_id": order.client_order_id,
+                        "side": order.side,
+                        "error": "ambiguous submit; venue verified order absent",
+                        "strategy_tag": order.strategy_tag,
+                    }
+                )
+                return True
+        return False
 
     async def _handle_ambiguous_submit(
         self, order: OrderRequestData, error: AmbiguousOrderSubmitError
@@ -839,12 +961,15 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         state: the engine would clear its in-flight intent and could
         re-emit a replacement order while the original is live, doubling
         exposure. Instead the pending entry is kept and marked
-        ``submit_ambiguous``, a non-terminal ``order_submit_unknown``
-        venue event is recorded, and a single UNKNOWN order event is
-        published — the engine holds its guard on it and the operator is
-        alerted. Venue verification (lookup by client id) resolves the
-        entry to accepted or rejected in a follow-up change; until then
-        resolution is manual.
+        ``submit_ambiguous`` and venue verification runs inline: a
+        bounded lookup by client id that resolves the order to accepted
+        (found — including already-terminal, routed through the
+        disappeared-order reconciler) or rejected (two consecutive
+        authoritative not-found answers). Only when verification cannot
+        resolve — venue unreachable, lookup unsupported — does the
+        entry park: a non-terminal ``order_submit_unknown`` venue event
+        is recorded and a single UNKNOWN order event is published — the
+        engine holds its guard on it and the operator is alerted.
 
         The durable venue-event write is best-effort here: if it fails
         (likely the same outage), holding the engine guard via the
@@ -871,6 +996,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             f"[{exchange_name}] Order {order.client_order_id} submit AMBIGUOUS "
             f"(order may exist on venue): {error} (cause: {error.__cause__!r})"
         )
+        if await self._verify_ambiguous_submit(order, pending):
+            return
         try:
             await self._record_venue_event(
                 {
@@ -1429,6 +1556,30 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"[{exchange_name}] Dropped {len(expired_keys)} orphaned executions after TTL "
                 f"(total drops: {self.orphan_drop_count})"
             )
+
+    async def _flush_orphaned_inline(self, exchange_order_id: str) -> None:
+        """Process a buffered orphan execution synchronously, in caller order.
+
+        The terminal-verified ambiguous path (#145 P0-1) awaits the
+        buffered WS fill BEFORE REST reconciliation: the fill keeps its
+        full fidelity (exec id, fees, exact prices) and advances
+        ``last_seen_cum_qty``, so the reconciler then emits only the
+        remaining gap — no interleaving with the synthetic terminal is
+        possible, unlike the background-task flush used on the normal
+        acceptance path.
+
+        Args:
+            exchange_order_id: Exchange-assigned order ID to flush.
+        """
+        orphan = self.orphaned_executions.pop(exchange_order_id, None)
+        if orphan is not None:
+            execution, _ = orphan
+            exchange_name = self._get_exchange_name()
+            logger.info(
+                f"[{exchange_name}] Processing buffered orphan execution inline "
+                f"for {exchange_order_id} before REST reconciliation"
+            )
+            await self._process_execution(execution)
 
     def _try_process_orphaned(self, exchange_order_id: str, client_order_id: str) -> None:
         """Try to process any orphaned execution for a newly mapped order.

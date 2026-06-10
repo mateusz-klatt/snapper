@@ -936,13 +936,91 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         orders = result.get("orders", [])
         if not orders:
             raise ValueError(f"Order {order_id} not found")
-        entry = orders[0]
+        return self._convert_status_entry(orders[0])
+
+    def _convert_status_entry(self, entry: dict[str, Any]) -> ExchangeOrderSnapshot:
+        """Convert one get_orders_status entry to an order snapshot.
+
+        The endpoint nests the order payload under ``order`` with the
+        authoritative status on the ENTRY level; some shapes inline the
+        payload directly. Shared by get_order and
+        find_order_by_client_id.
+
+        Args:
+            entry: One element of the response ``orders`` list.
+
+        Returns:
+            ExchangeOrderSnapshot for the entry.
+        """
         inner = entry.get("order", {})
         if inner:
             inner["status"] = entry.get("status", inner.get("status", "placed"))
         else:
             inner = entry
         return self._convert_sdk_order(inner)
+
+    async def find_order_by_client_id(
+        self, client_order_id: str, symbol: str | None = None
+    ) -> ExchangeOrderSnapshot | None:
+        """Verify whether an order with the given cliOrdId exists on the venue.
+
+        Uses ``get_orders_status(cliOrdIds=[...])`` — never combined
+        with ``orderIds`` (the SDK's if/elif silently drops the second
+        filter). Absence is claimed ONLY for the venue's explicit
+        shapes: an ``orders`` list that exists and is empty, or a
+        payload-less entry whose status spells not-found. A response
+        without the ``orders`` key, a payload-less entry with any other
+        status, a snapshot without an order id, or an echoed cliOrdId
+        differing from the query are all treated as could-not-verify
+        and RAISE — never as absence and never as a false match.
+
+        Args:
+            client_order_id: Client order id the submit was sent with.
+            symbol: Unused (the cliOrdId filter is global); kept for
+                interface compatibility.
+
+        Returns:
+            The order snapshot when found; None when authoritatively
+            absent.
+
+        Raises:
+            RuntimeError: If API credentials are missing, or the venue
+                response is malformed/unusable for an authoritative
+                answer.
+            Exception: If the venue query fails — the caller must treat
+                this as could-not-verify, never as absence.
+        """
+        self._require_authenticated()
+        self._record_rest_call()
+        result = await asyncio.to_thread(
+            cast(Trade, self._trade_client).get_orders_status, cliOrdIds=[client_order_id]
+        )
+        orders = result.get("orders")
+        if not isinstance(orders, list):
+            raise RuntimeError(
+                f"Kraken Futures order-status response lacks an 'orders' list for "
+                f"{client_order_id}: cannot answer authoritatively ({result})"
+            )
+        if not orders:
+            return None
+        entry = orders[0]
+        status_label = str(entry.get("status", "")).lower()
+        if not entry.get("order"):
+            if status_label in ("notfound", "invalidorderid"):
+                return None
+            raise RuntimeError(
+                f"Kraken Futures order-status entry for {client_order_id} has no order "
+                f"payload and unrecognized status {status_label!r}: cannot answer "
+                f"authoritatively"
+            )
+        snapshot = self._convert_status_entry(entry)
+        echoed = entry.get("order", {}).get("cliOrdId")
+        if not snapshot.id or echoed != client_order_id:
+            raise RuntimeError(
+                f"Kraken Futures order-status entry for {client_order_id} is unusable "
+                f"(id={snapshot.id!r}, echoed cliOrdId={echoed!r}): refusing a false match"
+            )
+        return snapshot
 
     async def get_orders(
         self,

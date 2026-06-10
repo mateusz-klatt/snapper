@@ -5200,3 +5200,126 @@ class TestPrivatePathHardening:
             auth_client._private_ws_client = AsyncMock()
             await gen.aclose()
         original.unsubscribe.assert_not_awaited()
+
+
+class TestFindOrderByClientIdFutures:
+    """Futures cliOrdId verification lookups (#145 P0-1 slice 3)."""
+
+    @pytest.mark.asyncio
+    async def test_found_returns_snapshot(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """A known cliOrdId returns its snapshot with the entry status.
+
+        Given: get_orders_status returning one entry for the cliOrdId,
+        When: find_order_by_client_id is called,
+        Then: The snapshot is returned and ONLY the cliOrdIds filter was
+            sent (never combined with orderIds).
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.get_orders_status = MagicMock(
+            return_value={
+                "orders": [
+                    {
+                        "status": "ENTERED_BOOK",
+                        "order": {
+                            "order_id": "fut-ord-1",
+                            "cliOrdId": "cid-fut-1",
+                            "symbol": "PF_XBTUSD",
+                            "side": "buy",
+                            "orderType": "mkt",
+                            "size": 1.0,
+                            "filled": 0.0,
+                        },
+                    }
+                ]
+            }
+        )
+        snapshot = await auth_client.find_order_by_client_id("cid-fut-1", "BTC-USD-PERP")
+        assert snapshot is not None
+        assert snapshot.id == "fut-ord-1"
+        kwargs = auth_client._trade_client.get_orders_status.call_args.kwargs
+        assert kwargs == {"cliOrdIds": ["cid-fut-1"]}
+
+    @pytest.mark.asyncio
+    async def test_empty_orders_list_is_authoritative_absence(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """An empty orders list answers authoritative absence."""
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.get_orders_status = MagicMock(return_value={"orders": []})
+        snapshot = await auth_client.find_order_by_client_id("cid-fut-2")
+        assert snapshot is None
+
+    @pytest.mark.asyncio
+    async def test_not_found_entry_shape_is_absence(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A payload-less notFound entry answers authoritative absence."""
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.get_orders_status = MagicMock(
+            return_value={"orders": [{"status": "notFound", "order": {}}]}
+        )
+        snapshot = await auth_client.find_order_by_client_id("cid-fut-3")
+        assert snapshot is None
+
+    @pytest.mark.asyncio
+    async def test_requires_credentials(self, client: KrakenFuturesExchangeClient) -> None:
+        """Missing credentials raise before any venue call."""
+        with pytest.raises(RuntimeError, match="API credentials"):
+            await client.find_order_by_client_id("cid-fut-4")
+
+    @pytest.mark.asyncio
+    async def test_missing_orders_key_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A response without the orders key is could-not-verify, not absence."""
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.get_orders_status = MagicMock(return_value={"result": "ok"})
+        with pytest.raises(RuntimeError, match="'orders' list"):
+            await auth_client.find_order_by_client_id("cid-fut-5")
+
+    @pytest.mark.asyncio
+    async def test_non_list_orders_shape_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A falsy non-list orders value is could-not-verify, not absence."""
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.get_orders_status = MagicMock(return_value={"orders": {}})
+        with pytest.raises(RuntimeError, match="'orders' list"):
+            await auth_client.find_order_by_client_id("cid-fut-5b")
+
+    @pytest.mark.asyncio
+    async def test_payloadless_unknown_status_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """A payload-less entry with an unrecognized status refuses to answer."""
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.get_orders_status = MagicMock(
+            return_value={"orders": [{"status": "weirdShape", "order": {}}]}
+        )
+        with pytest.raises(RuntimeError, match="unrecognized status"):
+            await auth_client.find_order_by_client_id("cid-fut-6")
+
+    @pytest.mark.asyncio
+    async def test_echo_mismatch_raises(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """An entry echoing a different cliOrdId refuses a false match."""
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.get_orders_status = MagicMock(
+            return_value={
+                "orders": [
+                    {
+                        "status": "ENTERED_BOOK",
+                        "order": {
+                            "order_id": "fut-ord-x",
+                            "cliOrdId": "someone-elses-cid",
+                            "symbol": "PF_XBTUSD",
+                            "side": "buy",
+                            "orderType": "mkt",
+                            "size": 1.0,
+                            "filled": 0.0,
+                        },
+                    }
+                ]
+            }
+        )
+        with pytest.raises(RuntimeError, match="refusing a false match"):
+            await auth_client.find_order_by_client_id("cid-fut-7")
