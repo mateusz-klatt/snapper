@@ -34,6 +34,7 @@ from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
+from snapper.core.json_types import JsonValue
 from snapper.core.types import CancelEventType
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
@@ -125,6 +126,47 @@ Without the reset, a stream that lived for hours would inherit the
 60s ceiling from an incident long resolved and sit dark a full minute
 on its next blip.
 """
+
+_HB_STREAK_ERROR_S = 600.0
+"""Active death streak age that flips the heartbeat to ERROR.
+
+Pages ~15 minutes before the 1500s ExecutorTaskDeadError ceiling would
+crash the service anyway — the operator hears about persistent dying
+while in-process respawn is still trying."""
+
+_HB_RECON_WARN_S = 300.0
+"""Reconciliation progress age that flips the heartbeat to WARNING.
+
+Recon swallows its per-cycle failures by design (durable-state poison
+must never crash-loop the supervisor), so it can fail forever WITHOUT
+dying — death signals cannot see it. The progress clock can: ~4 failed
+60s cycles or one wedged cycle."""
+
+_HB_RECON_ERROR_S = 900.0
+"""Reconciliation progress age that flips the heartbeat to ERROR.
+
+Three full cycle budgets without one successful pass: the heal engine
+(gap correctives, parked-UNKNOWN verification, accept-event retries) is
+effectively down."""
+
+_HB_INFLIGHT_WARN_S = 120.0
+"""Order-command in-flight age that flips the heartbeat to WARNING.
+
+A command wedged INSIDE its venue call never dies (the supervisor sees
+no termination) and never stamps a progress clock — the only visible
+signal is how long the current command has been in flight. Venue calls
+are individually bounded well below this, so a two-minute in-flight age
+means something upstream of those bounds is stuck."""
+
+_HB_INFLIGHT_ERROR_S = 600.0
+"""Order-command in-flight age that flips the heartbeat to ERROR."""
+
+_HB_DEATHS_WARN = 2
+"""Deaths within ONE active streak that flip the heartbeat to WARNING.
+
+A single death that respawns clean stays HEALTHY — that is the P1-3
+self-heal working as designed, not a page. Dying twice in the same
+streak is a condition the operator should see building."""
 
 _AMBIGUOUS_VERIFY_PER_CYCLE_MAX = 3
 """Fairness cap on parked-ambiguous verifications per recon cycle.
@@ -284,6 +326,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._seen_exec_ids: OrderedDict[str, None] = OrderedDict()
         self._exec_stream_restarts: int = 0
         self._task_restarts: dict[str, int] = {}
+        self._task_last_pass: dict[str, float] = {}
+        self._task_last_death: dict[str, float] = {}
+        self._task_streak_started: dict[str, float] = {}
+        self._task_deaths_in_streak: dict[str, int] = {}
+        self._order_inflight_started: float | None = None
         self._ambiguous_rotation_offset: int = 0
         self._recon_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -847,6 +894,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"Exchange client initialized with WebSocket"
             )
             self.running = True
+            self._task_last_pass["reconciliation"] = time.monotonic()
             await self._recover_pending_orders(exchange_name)
             try:
                 tasks = [
@@ -967,6 +1015,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             except (ValueError, UnicodeDecodeError) as e:
                 logger.error(f"Poison order frame dropped (already consumed): {e}")
                 continue
+            self._order_inflight_started = time.monotonic()
             try:
                 try:
                     parsed_msg = parse_message(payload_str)
@@ -983,6 +1032,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             except Exception as e:
                 if self.running:
                     logger.error(f"Error handling order: {e}")
+            finally:
+                self._order_inflight_started = None
 
     @staticmethod
     def _validate_command_invariants(
@@ -1924,6 +1975,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             await asyncio.sleep(interval)
             try:
                 await self._reconcile_with_exchange()
+                self._task_last_pass["reconciliation"] = time.monotonic()
             except TimeoutError:
                 logger.error(
                     f"[{exchange_name}] Reconciliation cycle exceeded "
@@ -2383,11 +2435,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     f"after {backoff:.0f}s backoff"
                 )
             now = time.monotonic()
+            self._task_last_death[task_label] = now
             if now - started >= _EXEC_STREAM_HEALTHY_RUNTIME_S:
                 backoff = _EXEC_STREAM_BACKOFF_INITIAL_S
                 streak_started = None
+                self._task_streak_started.pop(task_label, None)
+                self._task_deaths_in_streak.pop(task_label, None)
             if streak_started is None:
                 streak_started = now
+                self._task_streak_started[task_label] = now
+                self._task_deaths_in_streak[task_label] = 1
             elif now - streak_started >= _TASK_DEATH_ESCALATION_CEILING_S:
                 logger.critical(
                     f"[{exchange_name}] {task_label} death streak exceeded "
@@ -2395,6 +2452,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     f"a full service restart"
                 )
                 raise ExecutorTaskDeadError(task_label)
+            else:
+                self._task_deaths_in_streak[task_label] = (
+                    self._task_deaths_in_streak.get(task_label, 0) + 1
+                )
             self._task_restarts[task_label] = self._task_restarts.get(task_label, 0) + 1
             await self._sleep_with_jitter(backoff)
             backoff = min(backoff * 2.0, _EXEC_STREAM_BACKOFF_CAP_S)
@@ -2472,8 +2533,19 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     f"respawn #{self._exec_stream_restarts + 1} after {backoff:.0f}s backoff"
                 )
             self._exec_stream_restarts += 1
-            if time.monotonic() - started >= _EXEC_STREAM_HEALTHY_RUNTIME_S:
+            now = time.monotonic()
+            self._task_last_death["execution_stream"] = now
+            if now - started >= _EXEC_STREAM_HEALTHY_RUNTIME_S:
                 backoff = _EXEC_STREAM_BACKOFF_INITIAL_S
+                self._task_streak_started.pop("execution_stream", None)
+                self._task_deaths_in_streak.pop("execution_stream", None)
+            if "execution_stream" not in self._task_streak_started:
+                self._task_streak_started["execution_stream"] = now
+                self._task_deaths_in_streak["execution_stream"] = 1
+            else:
+                self._task_deaths_in_streak["execution_stream"] = (
+                    self._task_deaths_in_streak.get("execution_stream", 0) + 1
+                )
             await self._sleep_with_jitter(backoff)
             backoff = min(backoff * 2.0, _EXEC_STREAM_BACKOFF_CAP_S)
 
@@ -3166,6 +3238,92 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.error(f"[{exchange_name}] Error publishing order event: {e}")
             return False
 
+    def _compute_heartbeat_status(self) -> tuple[HealthStatusEnum, int, list[str]]:
+        """Derive honest heartbeat status from the supervised-loop seams.
+
+        Replaces the hardcoded HEALTHY that kept reporting green while
+        sibling loops were dead or dying. Status comes from CURRENT,
+        self-clearing conditions only — lifetime counters
+        (``_task_restarts``) go to meta forensics, never into status,
+        because they cannot distinguish "dying now" from "died once
+        yesterday". Evaluated ERROR-first:
+
+        A streak counts as ACTIVE only while its last death is younger
+        than ``_EXEC_STREAM_HEALTHY_RUNTIME_S`` — the supervisors clear
+        their streak dicts only at the NEXT death, so without this
+        freshness filter a loop that died once and then self-healed
+        would silently age into a false ERROR page at the streak
+        threshold.
+
+        - ERROR: any active death streak older than ``_HB_STREAK_ERROR_S``
+          (pages well before the 1500s escalation ceiling), or the recon
+          progress clock older than ``_HB_RECON_ERROR_S`` — recon swallows
+          its per-cycle failures by design, so it can fail forever without
+          dying; only the progress clock sees that.
+        The order handler additionally exposes an IN-FLIGHT clock: a
+        command wedged inside its processing never dies and never
+        progresses — only the age of the current command shows it
+        (WARNING at ``_HB_INFLIGHT_WARN_S``, ERROR at
+        ``_HB_INFLIGHT_ERROR_S``).
+
+        - WARNING: >= ``_HB_DEATHS_WARN`` deaths within one active streak
+          (a single clean respawn stays HEALTHY — that is the supervisor
+          working, not a page), recon progress older than
+          ``_HB_RECON_WARN_S``, a non-empty unhealed accept-event backlog,
+          or parked ambiguous submits awaiting venue verification.
+
+        ``lag_ms`` is the recon progress age — honest data-staleness
+        semantics mirroring publisher heartbeats.
+
+        Returns:
+            Tuple of (status, lag_ms, human-readable reasons).
+        """
+        now = time.monotonic()
+        reasons: list[str] = []
+        status = HealthStatusEnum.HEALTHY
+        recon_age = now - self._task_last_pass.get("reconciliation", now)
+        active_streaks = {
+            label: streak_start
+            for label, streak_start in self._task_streak_started.items()
+            if now - self._task_last_death.get(label, now) < _EXEC_STREAM_HEALTHY_RUNTIME_S
+        }
+        for label, streak_start in active_streaks.items():
+            streak_age = now - streak_start
+            if streak_age >= _HB_STREAK_ERROR_S:
+                status = HealthStatusEnum.ERROR
+                reasons.append(f"{label}: death streak {streak_age:.0f}s")
+        if recon_age >= _HB_RECON_ERROR_S:
+            status = HealthStatusEnum.ERROR
+            reasons.append(f"reconciliation: no successful pass for {recon_age:.0f}s")
+        inflight_started = self._order_inflight_started
+        inflight_age = now - inflight_started if inflight_started is not None else 0.0
+        if inflight_age >= _HB_INFLIGHT_ERROR_S:
+            status = HealthStatusEnum.ERROR
+            reasons.append(f"order command in flight for {inflight_age:.0f}s")
+        if status is not HealthStatusEnum.ERROR:
+            for label, deaths in self._task_deaths_in_streak.items():
+                if label in active_streaks and deaths >= _HB_DEATHS_WARN:
+                    status = HealthStatusEnum.WARNING
+                    reasons.append(f"{label}: {deaths} deaths in active streak")
+            if _HB_RECON_WARN_S <= recon_age < _HB_RECON_ERROR_S:
+                status = HealthStatusEnum.WARNING
+                reasons.append(f"reconciliation: pass age {recon_age:.0f}s")
+            if _HB_INFLIGHT_WARN_S <= inflight_age < _HB_INFLIGHT_ERROR_S:
+                status = HealthStatusEnum.WARNING
+                reasons.append(f"order command in flight for {inflight_age:.0f}s")
+            if self._unhealed_accept_events:
+                status = HealthStatusEnum.WARNING
+                reasons.append(f"unhealed accept events: {len(self._unhealed_accept_events)}")
+            parked = sum(
+                1
+                for entry in self.pending_orders.values()
+                if not entry.exchange_order_id and entry.submit_ambiguous
+            )
+            if parked:
+                status = HealthStatusEnum.WARNING
+                reasons.append(f"parked ambiguous orders: {parked}")
+        return status, int(recon_age * 1000), reasons
+
     async def _heartbeat_loop(self) -> None:
         """Periodically publish heartbeat messages and cleanup orphans.
 
@@ -3176,6 +3334,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         The legacy 4-segment format still fires for template-mode
         executors with empty ``wallet_public_id`` (test fixtures that
         have not migrated to the per-wallet path).
+
+        Status, lag and forensics come from
+        :meth:`_compute_heartbeat_status`, wrapped so a crashing
+        computation can NEVER kill the loop (that would be heartbeat
+        absence) and never reports false HEALTHY — it degrades to WARNING
+        with the failure in ``status_reasons``.
         """
         exchange_name = self._get_exchange_name()
         wallet_short = compute_wallet_short(self.wallet_public_id) if self.wallet_public_id else ""
@@ -3190,7 +3354,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 break
             self._cleanup_expired_orphans()
             self.heartbeat_seq += 1
-            lag_ms = 0
+            try:
+                status, lag_ms, reasons = self._compute_heartbeat_status()
+            except Exception as exc:
+                status = HealthStatusEnum.WARNING
+                lag_ms = 0
+                reasons = [f"status_computation_failed: {exc!r}"]
+                logger.error(f"[{exchange_name}] Heartbeat status computation failed: {exc!r}")
             hb_topic = heartbeat_topic("executor", exchange_name, wallet_short=wallet_short)
             hb_msg = HeartbeatData(
                 public_id=str(uuid7()),
@@ -3199,7 +3369,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 sequence_id=self._tracker.next_sequence(hb_topic),
                 component=component,
                 sequence=self.heartbeat_seq,
-                status=HealthStatusEnum.HEALTHY,
+                status=status,
                 lag_ms=lag_ms,
                 meta={
                     "running": self.running,
@@ -3207,6 +3377,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "wallet_public_id": self.wallet_public_id,
                     "broker_xsub": self.settings.zmq_broker_xsub,
                     "broker_xpub": self.settings.zmq_broker_xpub,
+                    "status_reasons": cast("list[JsonValue]", list(reasons)),
+                    "task_restarts": cast("dict[str, JsonValue]", dict(self._task_restarts)),
+                    "exec_stream_restarts": self._exec_stream_restarts,
+                    "unhealed_accept_events": len(self._unhealed_accept_events),
+                    "parked_unknown": sum(
+                        1
+                        for entry in self.pending_orders.values()
+                        if not entry.exchange_order_id and entry.submit_ambiguous
+                    ),
+                    "pending_orders": len(self.pending_orders),
+                    "orphaned_executions": len(self.orphaned_executions),
                 },
             )
             await self._publish_heartbeat(hb_topic, hb_msg)

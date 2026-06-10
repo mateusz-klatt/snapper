@@ -9009,3 +9009,247 @@ class TestTerminalSectionsCancelSafety:
         await ex._process_execution(cancel)
         assert order.client_order_id not in ex.pending_orders
         assert "ex-1" not in ex.client_by_exchange
+
+
+class TestHonestHeartbeatStatus:
+    """Honest status derivation from supervised-loop seams."""
+
+    def _executor(self, recon_age: float = 0.0, now: float = 10_000.0) -> Any:
+        """Build an executor with a seeded recon clock at the given age."""
+        ex: Any = MergedDummyExecutor()
+        ex._task_last_pass["reconciliation"] = now - recon_age
+        return ex, now
+
+    def test_healthy_baseline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fresh seams report HEALTHY with recon-age lag."""
+        ex, now = self._executor(recon_age=42.0)
+        monkeypatch.setattr(base_module, "time", SimpleNamespace(monotonic=lambda: now))
+        status, lag_ms, reasons = ex._compute_heartbeat_status()
+        assert status is base_module.HealthStatusEnum.HEALTHY
+        assert lag_ms == 42_000
+        assert reasons == []
+
+    def test_streak_age_maps_to_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An active death streak past the threshold is ERROR."""
+        ex, now = self._executor()
+        ex._task_streak_started["order_handler"] = now - 601.0
+        ex._task_last_death["order_handler"] = now - 30.0
+        monkeypatch.setattr(base_module, "time", SimpleNamespace(monotonic=lambda: now))
+        status, _lag, reasons = ex._compute_heartbeat_status()
+        assert status is base_module.HealthStatusEnum.ERROR
+        assert any("death streak" in r for r in reasons)
+
+    def test_recon_age_boundaries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """299/301/899/901s recon ages map HEALTHY/WARNING/WARNING/ERROR."""
+        expectations = [
+            (299.0, base_module.HealthStatusEnum.HEALTHY),
+            (301.0, base_module.HealthStatusEnum.WARNING),
+            (899.0, base_module.HealthStatusEnum.WARNING),
+            (901.0, base_module.HealthStatusEnum.ERROR),
+        ]
+        for age, expected in expectations:
+            ex, now = self._executor(recon_age=age)
+            monkeypatch.setattr(base_module, "time", SimpleNamespace(monotonic=lambda now=now: now))
+            status, _lag, _reasons = ex._compute_heartbeat_status()
+            assert status is expected, age
+
+    def test_never_passing_recon_seeded_at_start_ages_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The start() seed means a never-succeeding recon still alarms."""
+        ex: Any = MergedDummyExecutor()
+        ex._task_last_pass["reconciliation"] = 0.0
+        monkeypatch.setattr(base_module, "time", SimpleNamespace(monotonic=lambda: 1000.0))
+        status, lag_ms, _reasons = ex._compute_heartbeat_status()
+        assert status is base_module.HealthStatusEnum.ERROR
+        assert lag_ms == 1_000_000
+
+    def test_self_healed_streak_never_pages(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A streak whose loop self-healed goes stale, not ERROR.
+
+        Given: A streak started 700s ago whose LAST death was 400s ago —
+            the supervisors clear their dicts only at the next death, so
+            the entry lingers while the respawned loop runs fine,
+        When: Status is computed,
+        Then: HEALTHY — without the freshness filter this aged into a
+            false ERROR page at the 600s streak threshold.
+        """
+        ex, now = self._executor()
+        ex._task_streak_started["order_handler"] = now - 700.0
+        ex._task_last_death["order_handler"] = now - 400.0
+        ex._task_deaths_in_streak["order_handler"] = 3
+        monkeypatch.setattr(base_module, "time", SimpleNamespace(monotonic=lambda: now))
+        status, _l, reasons = ex._compute_heartbeat_status()
+        assert status is base_module.HealthStatusEnum.HEALTHY
+        assert reasons == []
+
+    def test_two_deaths_in_streak_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Two deaths in one active streak WARN; one death stays HEALTHY."""
+        ex, now = self._executor()
+        ex._task_streak_started["heartbeat"] = now - 5.0
+        ex._task_last_death["heartbeat"] = now - 5.0
+        ex._task_deaths_in_streak["heartbeat"] = 1
+        monkeypatch.setattr(base_module, "time", SimpleNamespace(monotonic=lambda: now))
+        status, _l, _r = ex._compute_heartbeat_status()
+        assert status is base_module.HealthStatusEnum.HEALTHY
+        ex._task_deaths_in_streak["heartbeat"] = 2
+        status, _l, reasons = ex._compute_heartbeat_status()
+        assert status is base_module.HealthStatusEnum.WARNING
+        assert any("2 deaths" in r for r in reasons)
+
+    def test_inflight_command_ages_to_warning_then_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A command wedged inside processing surfaces via in-flight age.
+
+        Given: An order command in flight for 150s, then 700s — it never
+            dies (no supervisor signal) and never stamps progress,
+        When: Status is computed,
+        Then: WARNING then ERROR — the only visible symptom of a wedge
+            inside the venue-call path.
+        """
+        ex, now = self._executor()
+        monkeypatch.setattr(base_module, "time", SimpleNamespace(monotonic=lambda: now))
+        ex._order_inflight_started = now - 150.0
+        status, _l, reasons = ex._compute_heartbeat_status()
+        assert status is base_module.HealthStatusEnum.WARNING
+        assert any("in flight" in r for r in reasons)
+        ex._order_inflight_started = now - 700.0
+        status, _l, reasons = ex._compute_heartbeat_status()
+        assert status is base_module.HealthStatusEnum.ERROR
+        assert any("in flight" in r for r in reasons)
+
+    def test_backlogs_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unhealed accept events and parked UNKNOWNs map to WARNING."""
+        ex, now = self._executor()
+        monkeypatch.setattr(base_module, "time", SimpleNamespace(monotonic=lambda: now))
+        ex._unhealed_accept_events["c1"] = cast(Any, {"event_type": "order_accepted"})
+        status, _l, reasons = ex._compute_heartbeat_status()
+        assert status is base_module.HealthStatusEnum.WARNING
+        assert any("unhealed" in r for r in reasons)
+        ex._unhealed_accept_events.clear()
+        order = make_order(client_order_id="amb-hb")
+        ex.pending_orders["amb-hb"] = base_module.PendingOrderState(
+            request=order, submit_ambiguous=True
+        )
+        status, _l, reasons = ex._compute_heartbeat_status()
+        assert status is base_module.HealthStatusEnum.WARNING
+        assert any("parked ambiguous" in r for r in reasons)
+
+    def test_error_precedence_over_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """ERROR conditions suppress WARNING reason scanning."""
+        ex, now = self._executor(recon_age=901.0)
+        ex._unhealed_accept_events["c1"] = cast(Any, {"event_type": "order_accepted"})
+        monkeypatch.setattr(base_module, "time", SimpleNamespace(monotonic=lambda: now))
+        status, _l, reasons = ex._compute_heartbeat_status()
+        assert status is base_module.HealthStatusEnum.ERROR
+        assert all("unhealed" not in r for r in reasons)
+
+    @pytest.mark.asyncio
+    async def test_tick_publishes_honest_frame_with_forensics(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One heartbeat tick carries derived status, lag and meta."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.settings = SimpleNamespace(
+            zmq_heartbeat_interval_ms=1,
+            zmq_broker_xsub="xsub",
+            zmq_broker_xpub="xpub",
+        )
+        ex._task_last_pass["reconciliation"] = 0.0
+        ex._task_restarts["order_handler"] = 3
+        captured: list[Any] = []
+
+        async def capture(topic: str, message: Any) -> None:
+            captured.append(message)
+            ex.running = False
+
+        ex._publish_heartbeat = AsyncMock(side_effect=capture)
+        monkeypatch.setattr(
+            base_module,
+            "time",
+            SimpleNamespace(monotonic=lambda: 1000.0),
+        )
+
+        async def one_sleep(_d: float) -> None:
+            return None
+
+        monkeypatch.setattr(
+            base_module, "asyncio", SimpleNamespace(sleep=one_sleep, timeout=asyncio.timeout)
+        )
+        await ex._heartbeat_loop()
+        frame = captured[0]
+        assert frame.status is base_module.HealthStatusEnum.ERROR
+        assert frame.lag_ms == 1_000_000
+        assert frame.meta["task_restarts"] == {"order_handler": 3}
+        assert frame.meta["status_reasons"]
+        assert frame.meta["running"] is True
+
+    @pytest.mark.asyncio
+    async def test_crashing_status_computation_degrades_not_kills(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising computation publishes WARNING and the loop survives."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.settings = SimpleNamespace(
+            zmq_heartbeat_interval_ms=1,
+            zmq_broker_xsub="xsub",
+            zmq_broker_xpub="xpub",
+        )
+        ex._compute_heartbeat_status = MagicMock(side_effect=RuntimeError("boom"))
+        captured: list[Any] = []
+
+        async def capture(topic: str, message: Any) -> None:
+            captured.append(message)
+            if len(captured) >= 2:
+                ex.running = False
+
+        ex._publish_heartbeat = AsyncMock(side_effect=capture)
+
+        async def fast_sleep(_d: float) -> None:
+            return None
+
+        monkeypatch.setattr(
+            base_module, "asyncio", SimpleNamespace(sleep=fast_sleep, timeout=asyncio.timeout)
+        )
+        await ex._heartbeat_loop()
+        assert len(captured) == 2
+        assert all(f.status is base_module.HealthStatusEnum.WARNING for f in captured)
+        assert all(
+            any("status_computation_failed" in r for r in f.meta["status_reasons"])
+            for f in captured
+        )
+
+    @pytest.mark.asyncio
+    async def test_supervisor_death_populates_health_seams(self) -> None:
+        """Loop deaths stamp last-death, streak and per-streak counts."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex._sleep_with_jitter = AsyncMock()
+        attempt = AsyncMock(
+            side_effect=[RuntimeError("d1"), RuntimeError("d2"), asyncio.CancelledError()]
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await ex._supervise_loop("order_handler", attempt)
+        assert "order_handler" in ex._task_last_death
+        assert "order_handler" in ex._task_streak_started
+        assert ex._task_deaths_in_streak["order_handler"] == 2
+
+    @pytest.mark.asyncio
+    async def test_stream_supervisor_death_populates_health_seams(self) -> None:
+        """Fill-stream deaths stamp the execution_stream label."""
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.exchange_client = MagicMock()
+        ex.exchange_client.supports_websocket_executions = True
+        ex._sleep_with_jitter = AsyncMock()
+        ex._post_reconnect_reconcile = AsyncMock()
+        ex._execution_handler = AsyncMock(
+            side_effect=[ConnectionError("ws"), asyncio.CancelledError()]
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await ex._supervise_execution_stream()
+        assert ex._task_deaths_in_streak["execution_stream"] == 1
+        assert "execution_stream" in ex._task_streak_started

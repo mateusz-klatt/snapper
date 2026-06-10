@@ -41,6 +41,7 @@ from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
 from snapper.core.json_types import JsonObject
+from snapper.core.types import HealthStatusEnum
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRestartPolicyEnum
@@ -10024,3 +10025,322 @@ class TestWatchdogConcurrencyRegressions:
         assert result.status == "not_running"
         assert factory._restart_tasks.get("pub") is None
         assert factory._desired_state.get("pub") is None
+
+
+class TestParkedExecutorDetection:
+    """Give-up branch: synthetic park heartbeats + /health flip."""
+
+    def _factory(self) -> ProcessLauncherService:
+        """Launcher with a stubbed publisher capturing sends."""
+        factory = ProcessLauncherService(MagicMock())
+        publisher = MagicMock()
+        publisher.tracker = MagicMock()
+        publisher.tracker.session_id = "s1"
+        publisher.tracker.next_sequence = MagicMock(return_value=7)
+        publisher.send = mock.AsyncMock()
+        factory.set_msg_publisher(publisher)
+        return factory
+
+    @pytest.mark.asyncio
+    async def test_executor_park_publishes_three_error_frames(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A parked per-wallet executor bursts 3 ERROR frames on its topic.
+
+        Given: _escalate_restart's give-up branch for an executor
+            instance name,
+        When: The park burst task runs,
+        Then: Exactly 3 ERROR heartbeats go out on the instance's own
+            5-segment topic with forensic meta — the existing
+            critical-system-error pipeline alerts with NO new AlertType.
+        """
+        factory = self._factory()
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher._PARK_HEARTBEAT_SPACING_S",
+            0.0,
+        )
+        factory._restart_attempts["executor_kraken_wabc123def456"] = 6
+        factory._total_failed_restarts["executor_kraken_wabc123def456"] = 9
+        config = _watchdog_config(
+            name="executor_kraken_wabc123def456", role=ProcessRoleEnum.CORE, tags=("orders",)
+        )
+        publisher = cast(Any, factory)._msg_publisher
+        sent = asyncio.Event()
+
+        async def count_sends(topic: str, frame: Any) -> None:
+            if publisher.send.await_count >= 3:
+                sent.set()
+
+        publisher.send = mock.AsyncMock(side_effect=count_sends)
+        factory._escalate_restart("executor_kraken_wabc123def456", config)
+        assert "executor_kraken_wabc123def456" in factory._parked_processes
+        assert "executor_kraken_wabc123def456" in factory._park_heartbeat_tasks
+        await asyncio.wait_for(sent.wait(), timeout=5.0)
+        burst = factory._park_heartbeat_tasks["executor_kraken_wabc123def456"]
+        factory._unpark("executor_kraken_wabc123def456")
+        with contextlib.suppress(asyncio.CancelledError):
+            await burst
+        assert publisher.send.await_count == 3
+        topics = {c.args[0] for c in publisher.send.await_args_list}
+        assert topics == {"system.heartbeats.executor.kraken.abc123def456"}
+        frames = [c.args[1] for c in publisher.send.await_args_list]
+        assert [f.sequence for f in frames] == [1, 2, 3]
+        assert all(f.status == "error" for f in frames)
+        assert frames[0].meta["synthetic"] is True
+        assert frames[0].meta["reason"] == "restart_budget_exhausted"
+        assert frames[0].meta["consecutive_failures"] == 6
+
+    def test_non_executor_park_flips_health_without_frames(self) -> None:
+        """Non-executor give-ups join the /health flip but emit nothing."""
+        factory = self._factory()
+        config = _watchdog_config(name="some_strategy_job", role=ProcessRoleEnum.STRATEGY)
+        factory._escalate_restart("some_strategy_job", config)
+        assert "some_strategy_job" in factory._parked_processes
+        assert not factory._park_heartbeat_tasks
+
+    @pytest.mark.asyncio
+    async def test_parked_name_rebursts_until_unparked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A still-parked name re-bursts after the reburst pause.
+
+        Given: A parked executor whose first 3-frame burst the sidecar
+            may have missed entirely,
+        When: The reburst period elapses while still parked,
+        Then: Another burst goes out — parked alerting is level-triggered
+            and survives notify restarts; unparking ends the loop.
+        """
+        factory = self._factory()
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher._PARK_HEARTBEAT_SPACING_S", 0.0
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher._PARK_REBURST_PERIOD_S", 0.0
+        )
+        factory._parked_processes.add("executor_kraken_wabc")
+        publisher = cast(Any, factory)._msg_publisher
+        calls = 0
+
+        async def count_and_stop(topic: str, frame: Any) -> None:
+            nonlocal calls
+            calls += 1
+            if calls >= 6:
+                factory._parked_processes.discard("executor_kraken_wabc")
+
+        publisher.send = mock.AsyncMock(side_effect=count_and_stop)
+        await factory._publish_park_heartbeats("executor_kraken_wabc", "kraken", "abc", 6, 9)
+        assert calls == 6
+
+    @pytest.mark.asyncio
+    async def test_unpark_mid_burst_aborts_remaining_frames(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An operator stop between frames silences the rest of the burst.
+
+        Given: A park burst whose first frame went out,
+        When: The name is unparked before the next frame,
+        Then: Frames 2-3 are never sent — an accepted parking can never
+            complete the rule's 3-consecutive gate and page anyway.
+        """
+        factory = self._factory()
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher._PARK_HEARTBEAT_SPACING_S",
+            0.0,
+        )
+        factory._parked_processes.add("executor_kraken_wabc")
+        publisher = cast(Any, factory)._msg_publisher
+
+        async def send_then_unpark(topic: str, frame: Any) -> None:
+            factory._unpark("executor_kraken_wabc")
+
+        publisher.send = mock.AsyncMock(side_effect=send_then_unpark)
+        await factory._publish_park_heartbeats("executor_kraken_wabc", "kraken", "abc", 6, 9)
+        assert publisher.send.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_unpark_cancels_suspended_send(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A frame suspended in its socket send dies with the unpark.
+
+        Given: A burst frame whose send is blocked on backpressure,
+        When: The operator unparks the name while the send is in flight,
+        Then: The burst task is CANCELLED — the blocked frame can never
+            resume and complete the rule's 3-consecutive gate after the
+            parking was accepted.
+        """
+        factory = self._factory()
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher._PARK_HEARTBEAT_SPACING_S",
+            0.0,
+        )
+        factory._parked_processes.add("executor_kraken_wabc")
+        publisher = cast(Any, factory)._msg_publisher
+        entered = asyncio.Event()
+
+        async def blocked_send(topic: str, frame: Any) -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+        publisher.send = mock.AsyncMock(side_effect=blocked_send)
+        burst = asyncio.create_task(
+            factory._publish_park_heartbeats("executor_kraken_wabc", "kraken", "abc", 6, 9)
+        )
+        factory._park_heartbeat_tasks["executor_kraken_wabc"] = burst
+        await entered.wait()
+        factory._unpark("executor_kraken_wabc")
+        with contextlib.suppress(asyncio.CancelledError):
+            await burst
+        assert burst.cancelled()
+        assert publisher.send.await_count == 1
+        assert "executor_kraken_wabc" not in factory._park_heartbeat_tasks
+
+    @pytest.mark.asyncio
+    async def test_send_failure_is_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The give-up path never raises through a failing publisher."""
+        factory = self._factory()
+        calls = 0
+
+        async def failing_send(topic: str, frame: Any) -> None:
+            nonlocal calls
+            calls += 1
+            if calls >= 3:
+                factory._parked_processes.discard("executor_kraken_wabc")
+            raise RuntimeError("bus down")
+
+        cast(Any, factory)._msg_publisher.send = mock.AsyncMock(side_effect=failing_send)
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher._PARK_HEARTBEAT_SPACING_S",
+            0.0,
+        )
+        factory._parked_processes.add("executor_kraken_wabc")
+        await factory._publish_park_heartbeats("executor_kraken_wabc", "kraken", "abc", 6, 9)
+        assert calls == 3
+
+    @pytest.mark.asyncio
+    async def test_publisher_none_is_noop(self) -> None:
+        """No publisher wired (boot edge) — burst degrades to nothing."""
+        factory = ProcessLauncherService(MagicMock())
+        factory._parked_processes.add("executor_kraken_wabc")
+        await factory._publish_park_heartbeats("executor_kraken_wabc", "kraken", "abc", 6, 9)
+
+    @pytest.mark.asyncio
+    async def test_parked_set_flips_core_health_until_restart(self) -> None:
+        """/health reports ERROR while parked and recovers on start.
+
+        Given: A parked process in the set,
+        When: get_core_health runs,
+        Then: ERROR without any config scan; start_process for the name
+            clears the set and health recovers.
+        """
+        factory = self._factory()
+        factory.settings.server_api_only = False
+        factory._parked_processes.add("executor_kraken_wabc")
+        status = await factory.get_core_health()
+        assert status == HealthStatusEnum.ERROR
+        factory._core_health_cache = None
+        factory._parked_processes.discard("executor_kraken_wabc")
+        factory.get_process_configs = mock.AsyncMock(return_value=[])
+        status = await factory.get_core_health()
+        assert status == HealthStatusEnum.HEALTHY
+
+    @pytest.mark.asyncio
+    async def test_failed_restart_keeps_parked_marker(self) -> None:
+        """A failed start of a parked name never clears the marker.
+
+        Given: A parked executor whose manual restart raises,
+        When: start_process fails,
+        Then: The name stays parked (and /health stays ERROR) — the old
+            up-front discard reported HEALTHY while nothing ran.
+        """
+        factory = self._factory()
+        _stub_run_tracking(factory)
+        factory._parked_processes.add("executor_kraken_wabc")
+        config = _watchdog_config(name="executor_kraken_wabc", role=ProcessRoleEnum.CORE)
+        with (
+            mock.patch.object(
+                factory, "_start_as_subprocess", side_effect=RuntimeError("boot poison")
+            ),
+            mock.patch.object(factory, "_finalize_process_run", new=mock.AsyncMock()),
+            pytest.raises(RuntimeError, match="boot poison"),
+        ):
+            await factory.start_process(config)
+        assert "executor_kraken_wabc" in factory._parked_processes
+
+    @pytest.mark.asyncio
+    async def test_deliberate_stop_unparks_and_invalidates_cache(self) -> None:
+        """Stopping a parked name drops the marker and the health cache.
+
+        Given: A parked name pinning /health to ERROR via the cache,
+        When: stop_process_by_name runs for it,
+        Then: The marker and cache are dropped — a lingering marker would
+            pin ERROR forever after the operator accepted the state.
+        """
+        factory = self._factory()
+        factory._parked_processes.add("executor_kraken_wabc")
+        factory._core_health_cache = (0.0, HealthStatusEnum.ERROR)
+        await factory.stop_process_by_name("executor_kraken_wabc")
+        assert "executor_kraken_wabc" not in factory._parked_processes
+        assert factory._core_health_cache is None
+
+    @pytest.mark.asyncio
+    async def test_stop_all_unparks_everything(self) -> None:
+        """A full shutdown drops every parked marker."""
+        factory = self._factory()
+        factory._parked_processes.update({"executor_kraken_wa", "executor_kraken_wb"})
+        await factory.stop_all_processes()
+        assert factory._parked_processes == set()
+
+    @pytest.mark.asyncio
+    async def test_stale_burst_callback_never_evicts_newer_task(self) -> None:
+        """A finished old burst cannot evict a re-parked name's new burst."""
+        factory = self._factory()
+
+        async def noop() -> None:
+            return None
+
+        old_task = asyncio.create_task(noop())
+        new_task = asyncio.create_task(noop())
+        await asyncio.gather(old_task, new_task)
+        factory._park_heartbeat_tasks["executor_kraken_wabc"] = new_task
+        factory._discard_park_task("executor_kraken_wabc", old_task)
+        assert factory._park_heartbeat_tasks["executor_kraken_wabc"] is new_task
+        factory._discard_park_task("executor_kraken_wabc", new_task)
+        assert "executor_kraken_wabc" not in factory._park_heartbeat_tasks
+
+    @pytest.mark.asyncio
+    async def test_parked_flips_health_even_in_api_only_mode(self) -> None:
+        """API-only deployments still surface a parked process.
+
+        Given: server_api_only=True (manual REST-started processes can
+            still park) and a parked name,
+        When: get_core_health runs,
+        Then: ERROR — the api-only early-return must not bypass the
+            parked backstop, or the publisher-None/no-burst residual
+            loses its only signal.
+        """
+        factory = self._factory()
+        factory.settings.server_api_only = True
+        factory._parked_processes.add("executor_kraken_wabc")
+        assert await factory.get_core_health() == HealthStatusEnum.ERROR
+        factory._unpark("executor_kraken_wabc")
+        assert await factory.get_core_health() == HealthStatusEnum.HEALTHY
+
+    def test_park_invalidates_health_cache(self) -> None:
+        """Parking drops a cached HEALTHY so /health flips promptly."""
+        factory = self._factory()
+        factory._core_health_cache = (0.0, HealthStatusEnum.HEALTHY)
+        factory._park("executor_kraken_wabc")
+        assert factory._core_health_cache is None
+
+    @pytest.mark.asyncio
+    async def test_publisher_branch_unchanged(self) -> None:
+        """A CORE market-data publisher still trips the feed-exit path."""
+        factory = self._factory()
+        config = _watchdog_config(
+            name="kraken_feed_publisher",
+            role=ProcessRoleEnum.CORE,
+            tags=("market-data", "publisher", "kraken"),
+        )
+        factory._escalate_restart("kraken_feed_publisher", config)
+        assert factory._feed_failed_publisher == "kraken_feed_publisher"
+        assert factory._feed_failure_event.is_set()
+        assert not factory._park_heartbeat_tasks

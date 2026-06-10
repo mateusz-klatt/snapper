@@ -14,8 +14,10 @@ Run record persistence is delegated to run_recorder module.
 
 import asyncio
 import contextlib
+import functools
 import inspect
 import json
+import re
 import time
 import zlib
 from collections.abc import Iterable
@@ -74,11 +76,13 @@ from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
 from snapper.data.repository_types import WalletCredentialRow
 from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import ProcessConfiguredEventData
 from snapper.messaging.schemas.data import ProcessRunEventData
 from snapper.messaging.schemas.data import ProcessSummaryEventData
 from snapper.messaging.schemas.data import ProcessSummaryItem
 from snapper.messaging.schemas.data import StrategyListEventData
+from snapper.messaging.topics.builders import heartbeat_topic
 
 _PROCESSES_SUMMARY_STREAM = "processes.events.summary"
 _PROCESSES_CONFIGURED_STREAM = "processes.events.configured"
@@ -95,6 +99,29 @@ _RESTART_JITTER_FRACTION: Final[float] = 0.25
 _RESTART_HEALTHY_UPTIME_S: Final[float] = 120.0
 _TOTAL_RESET_UPTIME_S: Final[float] = 1200.0
 _MAX_RESTART_ATTEMPTS: Final[int] = 6
+
+_PARK_REBURST_PERIOD_S: Final[float] = 3600.0
+"""Pause between repeated park bursts while a name stays parked.
+
+A one-shot burst could be lost forever: the notify sidecar holds its
+3-consecutive window only in memory, so a restart that swallows even one
+burst frame would silently drop the only page a parked executor ever
+gets. Re-bursting hourly makes parked alerting level-triggered (it
+survives sidecar restarts) while the rule's dedup caps pages at about
+one per hour; an accepted parking stops the loop via the per-frame gate
+and the unpark cancellation."""
+
+_PARK_HEARTBEAT_SPACING_S: Final[float] = 2.0
+"""Spacing between synthetic park-heartbeat frames.
+
+Must exceed the bridge-side 1s throttle on ``system.heartbeats.`` —
+tighter spacing would drop frames 2-3 and the critical-system-error
+rule's 3-consecutive gate would never trip for a parked executor."""
+
+_EXECUTOR_INSTANCE_RE: Final[re.Pattern[str]] = re.compile(
+    r"^executor_(?P<exchange>[a-z0-9_]+)_w(?P<wallet_short>[0-9a-f]+)$"
+)
+"""Per-wallet executor instance names as minted by spawn_per_wallet_executors."""
 _MAX_TOTAL_FAILED_RESTARTS: Final[int] = 20
 
 
@@ -317,6 +344,8 @@ class ProcessLauncherService:
         self._registry_syncer = ProcessRegistrySyncer(settings)
         self._market_persist_policy: MarketPersistPolicy | None = None
         self._msg_publisher: MessagePublisher | None = None
+        self._parked_processes: set[str] = set()
+        self._park_heartbeat_tasks: dict[str, asyncio.Task[None]] = {}
         self._core_health_cache: tuple[float, HealthStatus] | None = None
 
     def set_msg_publisher(self, publisher: MessagePublisher | None) -> None:
@@ -940,7 +969,9 @@ class ProcessLauncherService:
         :meth:`start_per_wallet_instance_by_name`,
         :meth:`_delayed_restart`) and to the boot-time spawners, which
         all set it via :meth:`_arm_desired_running` before invoking this
-        primitive. Were ``start_process`` to set RUNNING itself, a manual
+        primitive. Starting a name also clears it from
+        ``_parked_processes`` — a successful (re)start ends the parked
+        episode, recovering the ``/health`` flip. Were ``start_process`` to set RUNNING itself, a manual
         start racing a stop's pre-lock window could clobber the stop's
         ``STOPPED`` marker. It NEVER clears the watchdog
         desired-state/config/uptime on a startup failure: ownership of
@@ -995,6 +1026,7 @@ class ProcessLauncherService:
             if config.note:
                 logger.info(f"Note for '{config.name}': {config.note}")
             started = True
+            self._unpark(config.name)
         except Exception as exc:
             await self._handle_start_failure(config.name, public_id, exc)
             raise
@@ -1491,6 +1523,8 @@ class ProcessLauncherService:
         Cancels asyncio tasks and stops subprocess instances.
         Cleans up state and clears tracking dictionaries.
         """
+        for parked in tuple(self._parked_processes):
+            self._unpark(parked)
         logger.info("Stopping all processes")
         registry = get_registered_processes()
         tracked_processes = set(self.process_tasks.keys()) | set(self.started_processes.keys())
@@ -1980,6 +2014,52 @@ class ProcessLauncherService:
                 return
             self._schedule_delayed_restart(name)
 
+    def _park(self, name: str) -> None:
+        """Record a give-up parking and invalidate the health cache.
+
+        The cache invalidation makes ``/health`` flip to ERROR on the
+        next probe instead of serving a stale HEALTHY for up to the
+        cache TTL.
+
+        Args:
+            name: Parked process name.
+        """
+        self._parked_processes.add(name)
+        self._core_health_cache = None
+
+    def _unpark(self, name: str) -> None:
+        """End a parked episode and invalidate the health cache.
+
+        Called from the SUCCESS tail of ``start_process`` (an attempted
+        start that fails must keep the parked marker — discarding it
+        up-front made a failed manual restart of a parked executor
+        report HEALTHY while nothing ran) and from the deliberate-stop
+        paths (an operator stopping a parked name accepts its state; a
+        lingering marker would pin ``/health`` to ERROR forever).
+
+        Args:
+            name: Process name whose parked marker to drop.
+        """
+        if name in self._parked_processes:
+            self._parked_processes.discard(name)
+            self._core_health_cache = None
+        burst = self._park_heartbeat_tasks.pop(name, None)
+        if burst is not None:
+            burst.cancel()
+
+    def _discard_park_task(self, name: str, done: asyncio.Task[None]) -> None:
+        """Drop a finished park-burst task from per-name tracking.
+
+        Identity-checked so a finished old burst can never evict a newer
+        one registered for a re-parked name.
+
+        Args:
+            name: Process name the burst belonged to.
+            done: The completed (or cancelled) burst task.
+        """
+        if self._park_heartbeat_tasks.get(name) is done:
+            self._park_heartbeat_tasks.pop(name, None)
+
     def _escalate_restart(self, name: str, config: ProcessConfigModel) -> None:
         """Take the last-resort escalation action for an exhausted process.
 
@@ -2004,6 +2084,102 @@ class ProcessLauncherService:
         logger.error(
             f"Process '{name}' exhausted its restart budget; giving up (no container restart)"
         )
+        self._park(name)
+        match = _EXECUTOR_INSTANCE_RE.match(name)
+        if match is not None:
+            failures = self._restart_attempts.get(name, 0)
+            total = self._total_failed_restarts.get(name, 0)
+            task = asyncio.create_task(
+                self._publish_park_heartbeats(
+                    name, match.group("exchange"), match.group("wallet_short"), failures, total
+                )
+            )
+            self._park_heartbeat_tasks[name] = task
+            task.add_done_callback(functools.partial(self._discard_park_task, name))
+
+    async def _publish_park_heartbeats(
+        self,
+        name: str,
+        exchange: str,
+        wallet_short: str,
+        consecutive_failures: int,
+        total_failed_restarts: int,
+    ) -> None:
+        """Publish a 3-frame synthetic ERROR heartbeat burst for a parked executor.
+
+        The parked executor itself can emit nothing — the launcher speaks
+        for it ON ITS OWN per-wallet topic, so the entire existing
+        pipeline (critical-system-error rule, dedup, fan-out, routing,
+        i18n) alerts without any new AlertType, topic family, or wire
+        contract member — deliberately sidestepping the regen trap.
+        Three frames because the rule gates on 3 consecutive non-HEALTHY
+        beats; spacing must exceed the bridge's 1s heartbeat throttle or
+        frames 2-3 are dropped and the gate never trips. Once-per-parking
+        by construction: the burst fires exactly on the give-up branch,
+        then re-bursts every ``_PARK_REBURST_PERIOD_S`` while the name
+        stays parked — level-triggered, so a sidecar restart that missed
+        a burst still pages on the next one, with the rule's rolling
+        cooldown capping pages at about one per hour. Every frame is
+        gated on the name still being parked AND ``_unpark`` cancels the
+        burst task outright, which also kills a frame whose send is
+        SUSPENDED on socket backpressure at the moment the parking is
+        accepted; an accepted parking can never complete the rule's
+        3-consecutive gate. Send failures are swallowed — the give-up path must
+        never raise; the /health flip remains as the level-triggered
+        backstop.
+
+        Args:
+            name: Parked process instance name (forensics).
+            exchange: Executor exchange segment of the heartbeat topic.
+            wallet_short: Wallet short hash segment of the topic.
+            consecutive_failures: Watchdog failure counter at give-up.
+            total_failed_restarts: Lifetime failed-restart counter.
+        """
+        publisher = self._msg_publisher
+        if publisher is None:
+            return
+        topic = heartbeat_topic("executor", exchange, wallet_short=wallet_short)
+        sequence = 0
+        while True:
+            for _ in range(3):
+                if name not in self._parked_processes:
+                    logger.info(
+                        f"Park heartbeat burst for '{name}' ended - no longer parked "
+                        f"(operator stop or successful restart)"
+                    )
+                    return
+                sequence += 1
+                try:
+                    tracker = publisher.tracker
+                    frame = HeartbeatData(
+                        public_id=str(uuid7()),
+                        timestamp=datetime.now(UTC),
+                        session_id=tracker.session_id,
+                        sequence_id=tracker.next_sequence(topic),
+                        component=f"executor.{exchange}.{wallet_short}",
+                        sequence=sequence,
+                        status=HealthStatusEnum.ERROR,
+                        lag_ms=0,
+                        meta={
+                            "synthetic": True,
+                            "origin": "launcher",
+                            "reason": "restart_budget_exhausted",
+                            "process_name": name,
+                            "consecutive_failures": consecutive_failures,
+                            "total_failed_restarts": total_failed_restarts,
+                        },
+                    )
+                    await publisher.send(topic, frame)
+                except Exception as exc:
+                    logger.error(f"Park heartbeat for '{name}' failed: {exc!r}")
+                await asyncio.sleep(_PARK_HEARTBEAT_SPACING_S)
+            if name not in self._parked_processes:
+                logger.info(
+                    f"Park heartbeat burst for '{name}' ended - no longer parked "
+                    f"(operator stop or successful restart)"
+                )
+                return
+            await asyncio.sleep(_PARK_REBURST_PERIOD_S)
 
     def _rearm_recovery_after_manual_start_failure(self, name: str) -> None:
         """Re-arm watchdog recovery after a failed manual start.
@@ -2837,6 +3013,7 @@ class ProcessLauncherService:
                 if name not in self.started_processes:
                     logger.warning(f"Process '{name}' is not running")
                     self._clear_watchdog_state(name)
+                    self._unpark(name)
                     return ProcessStopResult(
                         status=StopProcessStatusEnum.NOT_RUNNING,
                         message=f"Process '{name}' is not running",
@@ -2853,6 +3030,7 @@ class ProcessLauncherService:
                 logger.info(f"Process '{name}' stopped successfully")
                 await self._finalize_process_run(name, ProcessRunStatusEnum.CANCELLED)
                 self._clear_watchdog_state(name)
+                self._unpark(name)
             await self._emit_summary_snapshot()
             if was_strategy:
                 await self._emit_strategy_list_snapshot()
@@ -2924,8 +3102,11 @@ class ProcessLauncherService:
         :class:`CoreProcessStartupError` at boot, so health checks do
         not need to re-validate each per-wallet instance individually.
 
-        In API-only mode (no autostart), returns "healthy" unconditionally
-        since processes are intentionally not started.
+        In API-only mode (no autostart), returns "healthy" unless a
+        manually started process has PARKED (restart budget exhausted) —
+        the parked check runs before every other branch, including this
+        one and the TTL cache, because it is the only level-triggered
+        backstop for a parked executor whose alert burst was lost.
 
         Returns:
             "healthy" or "error" as HealthStatus string.
@@ -2942,6 +3123,9 @@ class ProcessLauncherService:
         every 5-10s, both within tolerance for noticing a freshly-
         died CORE process.
         """
+        if self._parked_processes:
+            self._core_health_cache = (time.monotonic(), HealthStatusEnum.ERROR)
+            return HealthStatusEnum.ERROR
         if self.settings.server_api_only:
             return HealthStatusEnum.HEALTHY
         now = time.monotonic()

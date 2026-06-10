@@ -17,6 +17,16 @@ from snapper.messaging.schemas.messages import parse_message
 
 _CONSECUTIVE_WARNING_THRESHOLD = 3
 _ROLLING_WINDOW_SECONDS = 600
+
+_ROLLING_COOLDOWN_SECONDS = 3600
+"""In-memory minimum spacing between fires for one component instance.
+
+The hour-bucket dedup key alone is CLOCK-bucketed, not rolling: a fire
+at 12:59:59 and another at 13:00:01 land in different buckets and page
+twice within seconds. This in-memory gate enforces a true rolling hour
+cheaply; the DB check additionally probes the PREVIOUS hour's bucket
+key through the time-windowed dedup helper, so the rolling guarantee
+survives a sidecar restart that wipes this dict."""
 _PERMISSION_FOR_FAN_OUT = "read:system_status"
 
 
@@ -53,6 +63,7 @@ class CriticalSystemErrorRule(AlertRule):
     def __init__(self) -> None:
         """Start with an empty per-``(component, name)`` rolling window."""
         self._rolling_window: dict[tuple[str, str], list[tuple[datetime, str]]] = {}
+        self._last_fired: dict[tuple[str, str], datetime] = {}
 
     async def evaluate(
         self,
@@ -76,12 +87,21 @@ class CriticalSystemErrorRule(AlertRule):
             consecutive non-HEALTHY heartbeats. Empty list on HEALTHY
             (window reset), under-threshold counts, topic / payload
             malformation, empty admin set, or hour-bucket dedup hits.
+
+            Both 4-segment (``system.heartbeats.{component}.{name}``)
+            and 5-segment per-wallet executor topics
+            (``system.heartbeats.executor.{exchange}.{wallet_short}``)
+            are accepted; the per-wallet name joins to
+            ``{exchange}.{wallet_short}`` so windows, dedup buckets, and
+            alert args stay per-instance. The old 4-only parse silently
+            discarded EVERY per-wallet executor heartbeat — non-HEALTHY
+            executor frames could never alert.
         """
         parts = topic.split(".")
-        if len(parts) != 4 or parts[0] != "system" or parts[1] != "heartbeats":
+        if len(parts) not in (4, 5) or parts[0] != "system" or parts[1] != "heartbeats":
             return []
         component = parts[2]
-        name = parts[3]
+        name = ".".join(parts[3:])
         try:
             data = parse_message(payload.decode("utf-8"))
         except (UnicodeDecodeError, MessageParseError):
@@ -101,8 +121,17 @@ class CriticalSystemErrorRule(AlertRule):
         recent = window[-_CONSECUTIVE_WARNING_THRESHOLD:]
         if not all(s != HealthStatusEnum.HEALTHY for _, s in recent):
             return []
+        last_fired = self._last_fired.get(state_key)
+        if last_fired is not None and (now - last_fired) < timedelta(
+            seconds=_ROLLING_COOLDOWN_SECONDS
+        ):
+            return []
         hour_bucket = now.replace(minute=0, second=0, microsecond=0).isoformat()
         dedup_key = f"sys_error.{component}.{name}.{hour_bucket}"
+        prev_bucket = (
+            (now - timedelta(hours=1)).replace(minute=0, second=0, microsecond=0).isoformat()
+        )
+        prev_dedup_key = f"sys_error.{component}.{name}.{prev_bucket}"
         admin_user_ids = await repo.list_users_with_permission(_PERMISSION_FOR_FAN_OUT)
         if not admin_user_ids:
             logger.info(
@@ -118,6 +147,12 @@ class CriticalSystemErrorRule(AlertRule):
                 repo=repo,
                 user_public_id=admin_user_id,
                 dedup_key=dedup_key,
+                window_seconds=self.suppression_window_seconds,
+                now=now,
+            ) or await check_dedup_window(
+                repo=repo,
+                user_public_id=admin_user_id,
+                dedup_key=prev_dedup_key,
                 window_seconds=self.suppression_window_seconds,
                 now=now,
             ):
@@ -157,4 +192,6 @@ class CriticalSystemErrorRule(AlertRule):
                     source_topic=topic,
                 )
             )
+        if rows:
+            self._last_fired[state_key] = now
         return rows
