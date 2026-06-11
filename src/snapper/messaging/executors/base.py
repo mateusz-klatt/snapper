@@ -243,6 +243,16 @@ emits); ``emitted`` is asserted from the COMMITTED watermark (advanced
 only on publish success), so a swallowed corrective publish failure
 also reports ``deferred``; ``no_gap`` is the ordinary clean outcome."""
 
+
+@dataclass(frozen=True)
+class _FillSummaryResolution:
+    """Resolved fill-summary state for a corrective fill decision."""
+
+    fill_price: float | None
+    summary: OrderFillSummary | None
+    summary_unusable: bool
+
+
 _COMMAND_TERMINAL_STATUSES = frozenset(
     {
         TradeCommandStatusEnum.FILLED.value,
@@ -1260,7 +1270,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             try:
                 topic_str, payload_bytes = await self.subscriber.recv_multipart()
                 payload_str = payload_bytes.decode("utf-8")
-            except (ValueError, UnicodeDecodeError) as e:
+            except ValueError as e:
                 logger.error(f"Poison order frame dropped (already consumed): {e}")
                 continue
             self._order_inflight_started = time.monotonic()
@@ -2072,10 +2082,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             error: The ambiguous failure raised by the venue client.
         """
         exchange_name = self._get_exchange_name()
-        pending = self.pending_orders.get(order.client_order_id)
-        if pending is None:
-            pending = PendingOrderState(request=order)
-            self.pending_orders[order.client_order_id] = pending
+        pending = self._ensure_pending_order(order)
         pending.submit_ambiguous = True
         logger.error(
             f"[{exchange_name}] Order {order.client_order_id} submit AMBIGUOUS "
@@ -2083,6 +2090,24 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
         if await self._verify_ambiguous_submit(order, pending):
             return
+        await self._record_submit_unknown(order, error, exchange_name)
+        await self._publish_unknown_until_confirmed(order, pending, exchange_name)
+
+    def _ensure_pending_order(self, order: OrderRequestData) -> PendingOrderState:
+        """Return the existing pending state for an order or create it."""
+        pending = self.pending_orders.get(order.client_order_id)
+        if pending is None:
+            pending = PendingOrderState(request=order)
+            self.pending_orders[order.client_order_id] = pending
+        return pending
+
+    async def _record_submit_unknown(
+        self,
+        order: OrderRequestData,
+        error: AmbiguousOrderSubmitError,
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Persist best-effort venue evidence for an ambiguous submit."""
         try:
             await self._record_venue_event(
                 {
@@ -2101,19 +2126,27 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"for {order.client_order_id} — still publishing UNKNOWN to hold the "
                 f"engine guard"
             )
-        if not pending.unknown_published:
-            for delay_s in (0.0, 0.5, 2.0):
-                if delay_s:
-                    await asyncio.sleep(delay_s)
-                if await self._publish_order_status(order, OrderEventEnum.UNKNOWN):
-                    pending.unknown_published = True
-                    break
-            if not pending.unknown_published:
-                logger.critical(
-                    f"[{exchange_name}] UNKNOWN order event for {order.client_order_id} "
-                    f"could not be published after retries — engine guard may clear on "
-                    f"timeout; operator must verify this order on the venue"
-                )
+
+    async def _publish_unknown_until_confirmed(
+        self,
+        order: OrderRequestData,
+        pending: PendingOrderState,
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Publish UNKNOWN status with short retries until one send confirms."""
+        if pending.unknown_published:
+            return
+        for delay_s in (0.0, 0.5, 2.0):
+            if delay_s:
+                await asyncio.sleep(delay_s)
+            if await self._publish_order_status(order, OrderEventEnum.UNKNOWN):
+                pending.unknown_published = True
+                return
+        logger.critical(
+            f"[{exchange_name}] UNKNOWN order event for {order.client_order_id} "
+            f"could not be published after retries — engine guard may clear on "
+            f"timeout; operator must verify this order on the venue"
+        )
 
     async def _process_cancel(self, cancel: OrderCancelData) -> None:
         """Cancel an existing order on the exchange.
@@ -3209,6 +3242,170 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
         await self._process_execution(corrective)
 
+    @staticmethod
+    def _snapshot_has_fee(exchange_order: ExchangeOrderSnapshot) -> bool:
+        """Return whether an exchange snapshot carries usable cumulative fee fields."""
+        return bool(
+            getattr(exchange_order, "fee", None) and getattr(exchange_order, "fee_currency", None)
+        )
+
+    @staticmethod
+    def _needs_fill_summary(fill_price: float | None, snapshot_has_fee: bool) -> bool:
+        """Return whether a venue fill-summary lookup can improve the corrective."""
+        return fill_price is None or not snapshot_has_fee
+
+    def _fill_summary_source_is_implemented(self) -> bool:
+        """Return whether the exchange client advertises a real fills source."""
+        return self.exchange_client is not None and bool(
+            getattr(self.exchange_client, "supports_fill_summary", False)
+        )
+
+    async def _fetch_order_fill_summary(
+        self, exchange_name: str, exchange_oid: str
+    ) -> tuple[OrderFillSummary | None, bool]:
+        """Fetch a per-order fill summary and classify lookup failures."""
+        assert self.exchange_client is not None
+        try:
+            return await self.exchange_client.get_order_fill_summary(exchange_oid), False
+        except Exception as exc:
+            logger.warning(
+                f"[{exchange_name}] Recon: fill-summary lookup failed for "
+                f"{exchange_oid}, treating as unresolved: {exc}"
+            )
+            return None, True
+
+    def _resolve_summary_coverage(
+        self,
+        exchange_name: str,
+        exchange_oid: str,
+        exchange_order: ExchangeOrderSnapshot,
+        fill_price: float | None,
+        summary: OrderFillSummary,
+    ) -> _FillSummaryResolution:
+        """Accept only whole-order fill-summary coverage."""
+        if summary.covered_qty >= exchange_order.filled * (1.0 - 1e-6):
+            resolved_price = summary.vwap if fill_price is None else fill_price
+            return _FillSummaryResolution(
+                fill_price=resolved_price,
+                summary=summary,
+                summary_unusable=False,
+            )
+        logger.warning(
+            f"[{exchange_name}] Recon: fills page for {exchange_oid} "
+            f"covers only {summary.covered_qty} of "
+            f"{exchange_order.filled}, refusing a partial-page aggregate"
+        )
+        return _FillSummaryResolution(
+            fill_price=fill_price,
+            summary=None,
+            summary_unusable=True,
+        )
+
+    async def _resolve_fill_summary(
+        self,
+        exchange_name: str,
+        exchange_oid: str,
+        exchange_order: ExchangeOrderSnapshot,
+        fill_price: float | None,
+        snapshot_has_fee: bool,
+    ) -> _FillSummaryResolution:
+        """Resolve optional fill-summary data for a corrective fill."""
+        if not self._needs_fill_summary(fill_price, snapshot_has_fee):
+            return _FillSummaryResolution(fill_price, None, False)
+        if self.exchange_client is None:
+            return _FillSummaryResolution(fill_price, None, False)
+        summary, lookup_failed = await self._fetch_order_fill_summary(exchange_name, exchange_oid)
+        if lookup_failed:
+            return _FillSummaryResolution(fill_price, None, True)
+        if summary is None:
+            return _FillSummaryResolution(
+                fill_price,
+                None,
+                self._fill_summary_source_is_implemented(),
+            )
+        return self._resolve_summary_coverage(
+            exchange_name,
+            exchange_oid,
+            exchange_order,
+            fill_price,
+            summary,
+        )
+
+    def _maybe_defer_fee_source(
+        self,
+        exchange_name: str,
+        exchange_oid: str,
+        snapshot_has_fee: bool,
+        summary_unusable: bool,
+    ) -> _GapResult | None:
+        """Return a deferral result when fee evidence is temporarily unusable."""
+        if snapshot_has_fee or not summary_unusable:
+            return None
+        deferral_count = self._gap_fee_deferrals.get(exchange_oid, 0) + 1
+        if deferral_count <= _GAP_FEE_DEFERRAL_MAX:
+            self._gap_fee_deferrals[exchange_oid] = deferral_count
+            logger.warning(
+                f"[{exchange_name}] Recon: deferring the corrective for "
+                f"{exchange_oid} ({deferral_count}/{_GAP_FEE_DEFERRAL_MAX}) — the "
+                f"fee source is unavailable (failed lookup, partial fills page, "
+                f"or an implemented source with no usable rows) and the "
+                f"corrective's stable exec id would freeze a fee-less emission; "
+                f"retrying next cycle"
+            )
+            return "deferred"
+        self._gap_fee_deferrals.pop(exchange_oid, None)
+        logger.critical(
+            f"[{exchange_name}] Recon: fee source for {exchange_oid} stayed "
+            f"unavailable for {_GAP_FEE_DEFERRAL_MAX} cycles (fills page likely "
+            f"aged out) — emitting the corrective FEE-LESS so the terminal can "
+            f"project; reconcile the fee manually against the venue's fill "
+            f"history"
+        )
+        return None
+
+    @staticmethod
+    def _corrective_fill_timestamp(exchange_order: ExchangeOrderSnapshot) -> datetime:
+        """Return the timestamp to stamp on a corrective execution."""
+        snapshot_ts = getattr(exchange_order, "timestamp", None)
+        if snapshot_ts:
+            return datetime.fromtimestamp(snapshot_ts, tz=UTC)
+        return datetime.now(UTC)
+
+    def _build_corrective_fill(
+        self,
+        exchange_oid: str,
+        pending: PendingOrderState,
+        exchange_order: ExchangeOrderSnapshot,
+        gap: float,
+        fill_price: float,
+        summary: OrderFillSummary | None,
+    ) -> ExecutionUpdate:
+        """Build the corrective fill update after price and fee decisions."""
+        cum_fee, cum_fee_currency = self._corrective_fees(exchange_order, summary)
+        return ExecutionUpdate(
+            order_id=exchange_oid,
+            exec_type="trade",
+            symbol=pending.request.instrument,
+            side=OrderSideEnum(pending.request.side),
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.OPEN,
+            timestamp=self._corrective_fill_timestamp(exchange_order),
+            cum_qty=exchange_order.filled,
+            last_qty=gap,
+            last_price=fill_price,
+            exec_id=f"recon-{exchange_oid}-c{exchange_order.filled!r}",
+            cum_fee=cum_fee,
+            cum_fee_currency=cum_fee_currency,
+        )
+
+    @staticmethod
+    def _corrective_committed(
+        pending: PendingOrderState,
+        exchange_order: ExchangeOrderSnapshot,
+    ) -> bool:
+        """Return whether the corrective advanced the committed fill watermark."""
+        return exchange_order.filled <= pending.last_seen_cum_qty + 1e-12
+
     async def _reconcile_fill_gap(
         self,
         exchange_name: str,
@@ -3274,95 +3471,43 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             self._gap_fee_deferrals.pop(exchange_oid, None)
             return "no_gap"
         gap = exchange_order.filled - pending.last_seen_cum_qty
-        fill_price = exchange_order.price
-        summary: OrderFillSummary | None = None
-        snapshot_has_fee = bool(
-            getattr(exchange_order, "fee", None) and getattr(exchange_order, "fee_currency", None)
+        snapshot_has_fee = self._snapshot_has_fee(exchange_order)
+        resolution = await self._resolve_fill_summary(
+            exchange_name,
+            exchange_oid,
+            exchange_order,
+            exchange_order.price,
+            snapshot_has_fee,
         )
-        summary_unusable = False
-        if (fill_price is None or not snapshot_has_fee) and self.exchange_client is not None:
-            try:
-                summary = await self.exchange_client.get_order_fill_summary(exchange_oid)
-            except Exception as exc:
-                logger.warning(
-                    f"[{exchange_name}] Recon: fill-summary lookup failed for "
-                    f"{exchange_oid}, treating as unresolved: {exc}"
-                )
-                summary = None
-                summary_unusable = True
-            if summary is not None:
-                if summary.covered_qty >= exchange_order.filled * (1.0 - 1e-6):
-                    if fill_price is None:
-                        fill_price = summary.vwap
-                else:
-                    logger.warning(
-                        f"[{exchange_name}] Recon: fills page for {exchange_oid} "
-                        f"covers only {summary.covered_qty} of "
-                        f"{exchange_order.filled}, refusing a partial-page aggregate"
-                    )
-                    summary = None
-                    summary_unusable = True
-            elif not summary_unusable and getattr(
-                self.exchange_client, "supports_fill_summary", False
-            ):
-                summary_unusable = True
+        fill_price = resolution.fill_price
         if fill_price is None:
             logger.error(
                 f"[{exchange_name}] Recon: fill gap for {exchange_oid} "
                 f"but no price on market order, skipping corrective fill"
             )
             return "skipped"
-        if not snapshot_has_fee and summary_unusable:
-            deferral_count = self._gap_fee_deferrals.get(exchange_oid, 0) + 1
-            if deferral_count <= _GAP_FEE_DEFERRAL_MAX:
-                self._gap_fee_deferrals[exchange_oid] = deferral_count
-                logger.warning(
-                    f"[{exchange_name}] Recon: deferring the corrective for "
-                    f"{exchange_oid} ({deferral_count}/{_GAP_FEE_DEFERRAL_MAX}) — the "
-                    f"fee source is unavailable (failed lookup, partial fills page, "
-                    f"or an implemented source with no usable rows) and the "
-                    f"corrective's stable exec id would freeze a fee-less emission; "
-                    f"retrying next cycle"
-                )
-                return "deferred"
-            self._gap_fee_deferrals.pop(exchange_oid, None)
-            logger.critical(
-                f"[{exchange_name}] Recon: fee source for {exchange_oid} stayed "
-                f"unavailable for {_GAP_FEE_DEFERRAL_MAX} cycles (fills page likely "
-                f"aged out) — emitting the corrective FEE-LESS so the terminal can "
-                f"project; reconcile the fee manually against the venue's fill "
-                f"history"
-            )
+        fee_deferral = self._maybe_defer_fee_source(
+            exchange_name, exchange_oid, snapshot_has_fee, resolution.summary_unusable
+        )
+        if fee_deferral is not None:
+            return fee_deferral
         logger.warning(
             f"[{exchange_name}] Recon: fill gap for {exchange_oid}: "
             f"exchange={exchange_order.filled} "
             f"local={pending.last_seen_cum_qty}, "
             f"corrective delta={gap} at price~{fill_price}"
         )
-        cum_fee, cum_fee_currency = self._corrective_fees(exchange_order, summary)
-        recon_exec_id = f"recon-{exchange_oid}-c{exchange_order.filled!r}"
-        corrective = ExecutionUpdate(
-            order_id=exchange_oid,
-            exec_type="trade",
-            symbol=pending.request.instrument,
-            side=OrderSideEnum(pending.request.side),
-            order_type=ExchangeOrderTypeEnum.LIMIT,
-            order_status=ExchangeOrderStatusEnum.OPEN,
-            timestamp=(
-                datetime.fromtimestamp(snapshot_ts, tz=UTC)
-                if (snapshot_ts := getattr(exchange_order, "timestamp", None))
-                else datetime.now(UTC)
-            ),
-            cum_qty=exchange_order.filled,
-            last_qty=gap,
-            last_price=fill_price,
-            exec_id=recon_exec_id,
-            cum_fee=cum_fee,
-            cum_fee_currency=cum_fee_currency,
+        corrective = self._build_corrective_fill(
+            exchange_oid,
+            pending,
+            exchange_order,
+            gap,
+            fill_price,
+            resolution.summary,
         )
         await self._process_execution(corrective)
         self._gap_fee_deferrals.pop(exchange_oid, None)
-        if exchange_order.filled > pending.last_seen_cum_qty + 1e-12:
+        if not self._corrective_committed(pending, exchange_order):
             logger.warning(
                 f"[{exchange_name}] Recon: corrective for {exchange_oid} did not "
                 f"COMMIT (publish failed or the fill was orphan-buffered) — treating "

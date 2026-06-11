@@ -273,7 +273,7 @@ class TradeService:
         elif event_type == "order_terminal":
             self._apply_order_terminal(shard, event)
         elif event_type == "order_submit_unknown":
-            self._apply_order_submit_unknown(shard, event)
+            self._apply_order_submit_unknown(event)
         else:
             logger.warning(f"TradeService: unknown venue event type: {event_type}")
 
@@ -284,7 +284,7 @@ class TradeService:
         shard.command.status = TradeCommandStatusEnum.ACCEPTED
         shard.command.exchange_order_id = event.get("exchange_order_id")
 
-    def _apply_order_submit_unknown(self, shard: ShardState, event: VenueEventRow) -> None:
+    def _apply_order_submit_unknown(self, event: VenueEventRow) -> None:
         """Hold command state on an ambiguous submit outcome.
 
         The submit failed in a way where the order MAY exist on the

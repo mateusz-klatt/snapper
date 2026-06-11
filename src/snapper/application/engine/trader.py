@@ -106,6 +106,7 @@ from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.schemas.messages import parse_message
+from snapper.messaging.topics.builders import ParsedOrderTopic
 from snapper.messaging.topics.builders import accrual_topic
 from snapper.messaging.topics.builders import order_command_topic
 from snapper.messaging.topics.builders import order_event_topic
@@ -2253,6 +2254,80 @@ class TraderCoordinator(RegisterableProcess):
                 f"trade_id={fill.trade_id} {fill.instrument} on {parsed.exchange}"
             )
 
+    def _parse_valid_order_status_topic(
+        self, topic: str, order_status: OrderData
+    ) -> ParsedOrderTopic | None:
+        """Parse and validate an order-status topic against its payload."""
+        parsed = parse_order_event_topic(topic)
+        if parsed is None:
+            logger.debug(f"ZMQTrader: Ignoring malformed order status topic: {topic}")
+            return None
+        if order_status.exchange != parsed.exchange or order_status.instrument != parsed.instrument:
+            logger.warning(
+                f"ZMQTrader: Invariant violation - topic '{parsed.exchange}/{parsed.instrument}' "
+                f"!= payload '{order_status.exchange}/{order_status.instrument}'"
+            )
+            return None
+        if order_status.status != parsed.suffix:
+            logger.warning(
+                f"ZMQTrader: Invariant violation - topic suffix '{parsed.suffix}' "
+                f"!= payload status '{order_status.status}', dropping message"
+            )
+            return None
+        return parsed
+
+    def _clear_rejected_order_intent(
+        self, parsed: ParsedOrderTopic, order_status: OrderData
+    ) -> None:
+        """Clear in-flight intent for a rejected submit status."""
+        for engine in self.engines.values():
+            if engine.clear_pending_intent(order_status.client_order_id):
+                logger.info(
+                    f"ZMQTrader: Cleared in-flight for rejected order "
+                    f"{order_status.client_order_id} on {parsed.exchange}"
+                )
+                break
+
+    def _mark_unknown_order_intent(self, parsed: ParsedOrderTopic, order_status: OrderData) -> None:
+        """Mark in-flight intent as unknown after an ambiguous submit."""
+        for engine in self.engines.values():
+            if engine.mark_pending_unknown(order_status.client_order_id):
+                logger.warning(
+                    f"ZMQTrader: Order {order_status.client_order_id} submit state "
+                    f"UNKNOWN on {parsed.exchange} — engine guard held, no "
+                    f"re-emission until venue verification resolves"
+                )
+                break
+
+    def _clear_unknown_order_intent(
+        self, parsed: ParsedOrderTopic, order_status: OrderData
+    ) -> None:
+        """Clear UNKNOWN state after the order resolves to accepted."""
+        for engine in self.engines.values():
+            if engine.clear_pending_unknown(order_status.client_order_id):
+                logger.info(
+                    f"ZMQTrader: Order {order_status.client_order_id} resolved from "
+                    f"UNKNOWN to accepted on {parsed.exchange}"
+                )
+                break
+
+    @staticmethod
+    def _log_order_status(parsed: ParsedOrderTopic, order_status: OrderData) -> None:
+        """Log an accepted, rejected, or ordinary order status."""
+        if parsed.suffix == "unknown":
+            return
+        if parsed.suffix == "rejected":
+            logger.info(
+                f"ZMQTrader: Order status [OrderData] - {order_status.client_order_id} "
+                f"{parsed.suffix} (submit rejection) {order_status.instrument} "
+                f"on {parsed.exchange}"
+            )
+            return
+        logger.info(
+            f"ZMQTrader: Order status - {order_status.client_order_id} {parsed.suffix} "
+            f"{order_status.instrument} on {parsed.exchange}"
+        )
+
     async def _handle_order_status(self, topic: str, order_status: OrderData) -> None:
         """Handle order status event from ZMQ.
 
@@ -2271,61 +2346,16 @@ class TraderCoordinator(RegisterableProcess):
             topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.accepted").
             order_status: Parsed order status data.
         """
-        parsed = parse_order_event_topic(topic)
+        parsed = self._parse_valid_order_status_topic(topic, order_status)
         if parsed is None:
-            logger.debug(f"ZMQTrader: Ignoring malformed order status topic: {topic}")
-            return
-        if order_status.exchange != parsed.exchange or order_status.instrument != parsed.instrument:
-            logger.warning(
-                f"ZMQTrader: Invariant violation - topic '{parsed.exchange}/{parsed.instrument}' "
-                f"!= payload '{order_status.exchange}/{order_status.instrument}'"
-            )
-            return
-        if order_status.status != parsed.suffix:
-            logger.warning(
-                f"ZMQTrader: Invariant violation - topic suffix '{parsed.suffix}' "
-                f"!= payload status '{order_status.status}', dropping message"
-            )
             return
         if parsed.suffix == "rejected":
-            for engine in self.engines.values():
-                if engine.clear_pending_intent(order_status.client_order_id):
-                    logger.info(
-                        f"ZMQTrader: Cleared in-flight for rejected order "
-                        f"{order_status.client_order_id} on {parsed.exchange}"
-                    )
-                    break
-            logger.info(
-                f"ZMQTrader: Order status [OrderData] - {order_status.client_order_id} "
-                f"{parsed.suffix} (submit rejection) {order_status.instrument} "
-                f"on {parsed.exchange}"
-            )
+            self._clear_rejected_order_intent(parsed, order_status)
         elif parsed.suffix == "unknown":
-            for engine in self.engines.values():
-                if engine.mark_pending_unknown(order_status.client_order_id):
-                    logger.warning(
-                        f"ZMQTrader: Order {order_status.client_order_id} submit state "
-                        f"UNKNOWN on {parsed.exchange} — engine guard held, no "
-                        f"re-emission until venue verification resolves"
-                    )
-                    break
+            self._mark_unknown_order_intent(parsed, order_status)
         elif parsed.suffix == "accepted":
-            for engine in self.engines.values():
-                if engine.clear_pending_unknown(order_status.client_order_id):
-                    logger.info(
-                        f"ZMQTrader: Order {order_status.client_order_id} resolved from "
-                        f"UNKNOWN to accepted on {parsed.exchange}"
-                    )
-                    break
-            logger.info(
-                f"ZMQTrader: Order status - {order_status.client_order_id} {parsed.suffix} "
-                f"{order_status.instrument} on {parsed.exchange}"
-            )
-        else:
-            logger.info(
-                f"ZMQTrader: Order status - {order_status.client_order_id} {parsed.suffix} "
-                f"{order_status.instrument} on {parsed.exchange}"
-            )
+            self._clear_unknown_order_intent(parsed, order_status)
+        self._log_order_status(parsed, order_status)
         self._sync_status_to_trade_service(order_status, parsed)
         if parsed.suffix == "rejected":
             await self._project_paired_execution_leg_terminal(

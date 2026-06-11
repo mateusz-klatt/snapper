@@ -88,6 +88,132 @@ class _LifecycleAdvance:
     last_error: str | None
 
 
+@dataclass
+class _LifecycleFoldState:
+    """Mutable accumulator for one command's venue lifecycle fold."""
+
+    acked_at: datetime | None = None
+    exchange_order_id: str | None = None
+    max_cum: float | None = None
+    fill_complete: bool = False
+    terminal_status: TradeCommandStatusEnum | None = None
+    terminal_at: datetime | None = None
+    last_error: str | None = None
+
+    def ingest(self, event: VenueEventRow) -> None:
+        """Apply one venue event to the current fold state."""
+        event_type = event["event_type"]
+        if event_type == "order_accepted":
+            self._ingest_accept(event)
+        elif event_type == "fill_observed":
+            self._ingest_fill(event)
+        elif event_type == "order_rejected":
+            self._ingest_rejection(event)
+        elif event_type == "order_breaker_open":
+            self._ingest_breaker_open(event)
+        elif event_type == "order_terminal":
+            self._ingest_terminal(event)
+
+    def to_advance(self, cmd: TradeCommandRow) -> _LifecycleAdvance | None:
+        """Return the durable status advance represented by this fold."""
+        target = self._target_status(cmd["quantity"])
+        if target is None:
+            return None
+        if _STATUS_RANK[target] <= _STATUS_RANK.get(cmd["status"], 0):
+            return None
+        terminal_at, last_error = self._terminal_fields()
+        return _LifecycleAdvance(
+            status=target,
+            acked_at=self.acked_at,
+            exchange_order_id=self.exchange_order_id,
+            terminal_at=terminal_at,
+            last_error=last_error,
+        )
+
+    def _ingest_accept(self, event: VenueEventRow) -> None:
+        """Fold an order acceptance observation."""
+        self._clear_rejection()
+        if self.acked_at is None:
+            self.acked_at = event["received_at"]
+        self._replace_exchange_order_id(event["exchange_order_id"])
+
+    def _ingest_fill(self, event: VenueEventRow) -> None:
+        """Fold a fill observation."""
+        self._clear_rejection()
+        self.max_cum = _max_cumulative_fill(self.max_cum, event["cum_fill_size"])
+        self.fill_complete = self.fill_complete or event["status"] == "filled"
+        if self.exchange_order_id is None:
+            self._replace_exchange_order_id(event["exchange_order_id"])
+
+    def _ingest_rejection(self, event: VenueEventRow) -> None:
+        """Fold a venue rejection observation."""
+        self.terminal_status = TradeCommandStatusEnum.REJECTED
+        self.terminal_at = event["received_at"]
+        self.last_error = event["error"] or "rejected by venue"
+
+    def _ingest_breaker_open(self, event: VenueEventRow) -> None:
+        """Fold a local circuit-breaker rejection observation."""
+        self.terminal_status = TradeCommandStatusEnum.FAILED
+        self.terminal_at = event["received_at"]
+        self.last_error = "circuit_breaker_open"
+
+    def _ingest_terminal(self, event: VenueEventRow) -> None:
+        """Fold a terminal venue lifecycle observation."""
+        raw_status = (event["status"] or "").lower()
+        mapped = _TERMINAL_EVENT_STATUS_MAP.get(raw_status)
+        self.terminal_status = mapped or TradeCommandStatusEnum.CANCELLED
+        self.terminal_at = event["received_at"]
+        self.last_error = None if mapped else f"unmapped terminal status {raw_status!r}"
+
+    def _clear_rejection(self) -> None:
+        """Clear an earlier REJECTED target once later live evidence lands."""
+        if self.terminal_status is TradeCommandStatusEnum.REJECTED:
+            self.terminal_status = None
+            self.terminal_at = None
+            self.last_error = None
+
+    def _replace_exchange_order_id(self, exchange_order_id: str | None) -> None:
+        """Store a non-empty exchange order id."""
+        if exchange_order_id:
+            self.exchange_order_id = exchange_order_id
+
+    def _target_status(self, quantity: float) -> TradeCommandStatusEnum | None:
+        """Resolve the best durable command status from accumulated evidence."""
+        if self.terminal_status is not None:
+            return self.terminal_status
+        if self.max_cum is not None and self.max_cum > 0:
+            return self._fill_target(quantity)
+        if self.acked_at is not None:
+            return TradeCommandStatusEnum.ACCEPTED
+        return None
+
+    def _fill_target(self, quantity: float) -> TradeCommandStatusEnum:
+        """Resolve partial-vs-full fill state."""
+        filled_completely = self.fill_complete or (
+            bool(quantity)
+            and self.max_cum is not None
+            and self.max_cum >= quantity * (1 - _FILL_COMPLETE_REL_TOL)
+        )
+        if filled_completely:
+            return TradeCommandStatusEnum.FILLED
+        return TradeCommandStatusEnum.PARTIALLY_FILLED
+
+    def _terminal_fields(self) -> tuple[datetime | None, str | None]:
+        """Return terminal payload only when the target is terminal."""
+        if self.terminal_status is not None:
+            return self.terminal_at, self.last_error
+        return None, None
+
+
+def _max_cumulative_fill(current: float | None, candidate: float | None) -> float | None:
+    """Return the greater known cumulative fill value."""
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    return max(current, candidate)
+
+
 def _fold_lifecycle_advance(
     cmd: TradeCommandRow, events: list[VenueEventRow]
 ) -> _LifecycleAdvance | None:
@@ -117,82 +243,10 @@ def _fold_lifecycle_advance(
     Returns:
         The advance to apply, or ``None`` for no-op.
     """
-    acked_at: datetime | None = None
-    exchange_order_id: str | None = None
-    max_cum: float | None = None
-    fill_complete = False
-    terminal_status: TradeCommandStatusEnum | None = None
-    terminal_at: datetime | None = None
-    last_error: str | None = None
-
-    def _supersede_rejection() -> None:
-        """Clear an earlier REJECTED target once later live evidence lands."""
-        nonlocal terminal_status, terminal_at, last_error
-        if terminal_status is TradeCommandStatusEnum.REJECTED:
-            terminal_status = None
-            terminal_at = None
-            last_error = None
-
+    state = _LifecycleFoldState()
     for event in events:
-        event_type = event["event_type"]
-        if event_type == "order_accepted":
-            _supersede_rejection()
-            if acked_at is None:
-                acked_at = event["received_at"]
-            if event["exchange_order_id"]:
-                exchange_order_id = event["exchange_order_id"]
-        elif event_type == "fill_observed":
-            _supersede_rejection()
-            cum = event["cum_fill_size"]
-            if cum is not None and (max_cum is None or cum > max_cum):
-                max_cum = cum
-            if event["status"] == "filled":
-                fill_complete = True
-            if exchange_order_id is None and event["exchange_order_id"]:
-                exchange_order_id = event["exchange_order_id"]
-        elif event_type == "order_rejected":
-            terminal_status = TradeCommandStatusEnum.REJECTED
-            terminal_at = event["received_at"]
-            last_error = event["error"] or "rejected by venue"
-        elif event_type == "order_breaker_open":
-            terminal_status = TradeCommandStatusEnum.FAILED
-            terminal_at = event["received_at"]
-            last_error = "circuit_breaker_open"
-        elif event_type == "order_terminal":
-            raw_status = (event["status"] or "").lower()
-            mapped = _TERMINAL_EVENT_STATUS_MAP.get(raw_status)
-            terminal_status = mapped or TradeCommandStatusEnum.CANCELLED
-            terminal_at = event["received_at"]
-            last_error = None if mapped else f"unmapped terminal status {raw_status!r}"
-    if terminal_status is not None:
-        target = terminal_status
-    elif max_cum is not None and max_cum > 0:
-        quantity = cmd["quantity"]
-        filled_completely = fill_complete or (
-            bool(quantity) and max_cum >= quantity * (1 - _FILL_COMPLETE_REL_TOL)
-        )
-        target = (
-            TradeCommandStatusEnum.FILLED
-            if filled_completely
-            else TradeCommandStatusEnum.PARTIALLY_FILLED
-        )
-        terminal_at = None
-        last_error = None
-    elif acked_at is not None:
-        target = TradeCommandStatusEnum.ACCEPTED
-        terminal_at = None
-        last_error = None
-    else:
-        return None
-    if _STATUS_RANK[target] <= _STATUS_RANK.get(cmd["status"], 0):
-        return None
-    return _LifecycleAdvance(
-        status=target,
-        acked_at=acked_at,
-        exchange_order_id=exchange_order_id,
-        terminal_at=terminal_at,
-        last_error=last_error,
-    )
+        state.ingest(event)
+    return state.to_advance(cmd)
 
 
 class ReconciliationLoop:
@@ -305,6 +359,77 @@ class ReconciliationLoop:
             )
         return applied
 
+    def _filter_owned_commands(self, commands: list[TradeCommandRow]) -> list[TradeCommandRow]:
+        """Filter command rows to shards owned by this loop instance."""
+        if self._ownership is None:
+            return commands
+        return [cmd for cmd in commands if self._ownership.owns(cmd["shard_key"])]
+
+    async def _load_active_commands(self, now: datetime) -> list[TradeCommandRow]:
+        """Load active exchange commands visible to this loop instance."""
+        commands = await self._repo.get_active_commands_for_exchange(
+            exchange=self._exchange, as_of=now
+        )
+        return self._filter_owned_commands(commands)
+
+    @staticmethod
+    def _foldable_commands(commands: list[TradeCommandRow]) -> list[TradeCommandRow]:
+        """Return active commands whose lifecycle is folded from venue events."""
+        return [cmd for cmd in commands if cmd["command_type"] in _FOLD_COMMAND_TYPES]
+
+    @staticmethod
+    def _group_events_by_cid(events: list[VenueEventRow]) -> dict[str, list[VenueEventRow]]:
+        """Group lifecycle events by non-empty client order id."""
+        events_by_cid: dict[str, list[VenueEventRow]] = {}
+        for event in events:
+            cid = event["client_order_id"]
+            if cid:
+                events_by_cid.setdefault(cid, []).append(event)
+        return events_by_cid
+
+    async def _load_events_by_cid(
+        self, fold_commands: list[TradeCommandRow]
+    ) -> dict[str, list[VenueEventRow]]:
+        """Load and group lifecycle events for foldable commands."""
+        if not fold_commands:
+            return {}
+        events = await self._repo.get_order_lifecycle_events(
+            [cmd["client_order_id"] for cmd in fold_commands]
+        )
+        return self._group_events_by_cid(events)
+
+    @staticmethod
+    def _command_events(
+        cmd: TradeCommandRow, events_by_cid: dict[str, list[VenueEventRow]]
+    ) -> list[VenueEventRow]:
+        """Return fold-visible events for a command."""
+        if cmd["command_type"] not in _FOLD_COMMAND_TYPES:
+            return []
+        return events_by_cid.get(cmd["client_order_id"], [])
+
+    @staticmethod
+    def _command_advance(
+        cmd: TradeCommandRow, events_by_cid: dict[str, list[VenueEventRow]]
+    ) -> _LifecycleAdvance | None:
+        """Return a lifecycle advance for a foldable command."""
+        if cmd["status"] not in _FOLD_SOURCE_STATUSES:
+            return None
+        return _fold_lifecycle_advance(cmd, events_by_cid.get(cmd["client_order_id"], []))
+
+    async def _advance_foldable_commands(
+        self,
+        fold_commands: list[TradeCommandRow],
+        events_by_cid: dict[str, list[VenueEventRow]],
+        now: datetime,
+    ) -> int:
+        """Apply lifecycle advances for foldable commands."""
+        advanced = 0
+        for cmd in fold_commands:
+            advance = self._command_advance(cmd, events_by_cid)
+            if advance is not None and await self._advance_command(cmd, advance, now):
+                advanced += 1
+        return advanced
+
     async def _resurrect_falsely_rejected(self, now: datetime) -> int:
         """Restore REJECTED commands whose cid shows later live evidence.
 
@@ -351,6 +476,11 @@ class ReconciliationLoop:
                 )
         return resurrected
 
+    def _is_stale(self, cmd: TradeCommandRow, now: datetime) -> bool:
+        """Return whether a command is old enough for stale reporting."""
+        age = (now - cmd["created_at"]).total_seconds()
+        return age > self._interval * 3
+
     def _report_stale(self, cmd: TradeCommandRow, age: float, events: list[VenueEventRow]) -> bool:
         """Report one over-age command according to its evidence class.
 
@@ -386,6 +516,59 @@ class ReconciliationLoop:
             return True
         return False
 
+    def _collect_stale_report(
+        self,
+        commands: list[TradeCommandRow],
+        events_by_cid: dict[str, list[VenueEventRow]],
+        now: datetime,
+    ) -> tuple[int, set[str]]:
+        """Report stale commands and return count plus observed shards."""
+        stale_count = 0
+        seen_shards: set[str] = set()
+        for cmd in commands:
+            seen_shards.add(cmd["shard_key"])
+            if not self._is_stale(cmd, now):
+                continue
+            age = (now - cmd["created_at"]).total_seconds()
+            if self._report_stale(cmd, age, self._command_events(cmd, events_by_cid)):
+                stale_count += 1
+        return stale_count, seen_shards
+
+    def _log_cycle_result(self, advanced: int, stale_count: int) -> None:
+        """Emit reconciliation cycle summary logs."""
+        if advanced > 0:
+            logger.info(
+                f"ReconciliationLoop[{self._exchange}] folded {advanced} command "
+                f"lifecycle advances from venue evidence"
+            )
+        if stale_count > 0:
+            logger.info(f"ReconciliationLoop[{self._exchange}] found {stale_count} stale commands")
+
+    def _record_cycle_successes(self, seen_shards: set[str]) -> None:
+        """Record reconciliation success for every shard seen this cycle."""
+        for shard_key in seen_shards:
+            self._trade_service.record_recon_success(shard_key)
+
+    def _fallback_failure_shard(self) -> str:
+        """Return the synthetic shard used when a cycle fails before command scan."""
+        mode = (
+            ExecutionModeEnum.PAPER
+            if self._exchange == ExchangeEnum.PAPER
+            else ExecutionModeEnum.LIVE
+        )
+        return f"{self._exchange}.unknown.{mode}"
+
+    def _record_cycle_failure(self) -> None:
+        """Record a reconciliation failure and log shard halt transitions."""
+        logger.exception(f"ReconciliationLoop[{self._exchange}] cycle failed")
+        fallback_shard = self._fallback_failure_shard()
+        halted = self._trade_service.record_recon_failure(fallback_shard)
+        if halted:
+            logger.error(
+                f"ReconciliationLoop[{self._exchange}] shard {fallback_shard} HALTED "
+                f"due to consecutive reconciliation failures"
+            )
+
     async def _reconcile_cycle(self) -> None:
         """Execute one reconciliation cycle.
 
@@ -395,75 +578,17 @@ class ReconciliationLoop:
         """
         now = datetime.now(UTC)
         try:
-            active_cmds = await self._repo.get_active_commands_for_exchange(
-                exchange=self._exchange, as_of=now
-            )
-            if self._ownership is not None:
-                active_cmds = [cmd for cmd in active_cmds if self._ownership.owns(cmd["shard_key"])]
-            fold_cmds = [cmd for cmd in active_cmds if cmd["command_type"] in _FOLD_COMMAND_TYPES]
-            events_by_cid: dict[str, list[VenueEventRow]] = {}
-            if fold_cmds:
-                events = await self._repo.get_order_lifecycle_events(
-                    [cmd["client_order_id"] for cmd in fold_cmds]
-                )
-                for event in events:
-                    cid = event["client_order_id"]
-                    if cid:
-                        events_by_cid.setdefault(cid, []).append(event)
-            advanced = 0
-            for cmd in fold_cmds:
-                if cmd["status"] not in _FOLD_SOURCE_STATUSES:
-                    continue
-                advance = _fold_lifecycle_advance(
-                    cmd, events_by_cid.get(cmd["client_order_id"], [])
-                )
-                if advance is None:
-                    continue
-                if await self._advance_command(cmd, advance, now):
-                    advanced += 1
+            active_cmds = await self._load_active_commands(now)
+            fold_cmds = self._foldable_commands(active_cmds)
+            events_by_cid = await self._load_events_by_cid(fold_cmds)
+            advanced = await self._advance_foldable_commands(fold_cmds, events_by_cid, now)
             advanced += await self._resurrect_falsely_rejected(now)
-            stale_count = 0
-            seen_shards: set[str] = set()
-            for cmd in active_cmds:
-                seen_shards.add(cmd["shard_key"])
-                age = (now - cmd["created_at"]).total_seconds()
-                if age <= self._interval * 3:
-                    continue
-                cmd_events = (
-                    events_by_cid.get(cmd["client_order_id"], [])
-                    if cmd["command_type"] in _FOLD_COMMAND_TYPES
-                    else []
-                )
-                if self._report_stale(cmd, age, cmd_events):
-                    stale_count += 1
-
-            if advanced > 0:
-                logger.info(
-                    f"ReconciliationLoop[{self._exchange}] folded {advanced} command "
-                    f"lifecycle advances from venue evidence"
-                )
-            if stale_count > 0:
-                logger.info(
-                    f"ReconciliationLoop[{self._exchange}] found {stale_count} stale commands"
-                )
-
-            for shard_key in seen_shards:
-                self._trade_service.record_recon_success(shard_key)
+            stale_count, seen_shards = self._collect_stale_report(active_cmds, events_by_cid, now)
+            self._log_cycle_result(advanced, stale_count)
+            self._record_cycle_successes(seen_shards)
             logger.debug(f"ReconciliationLoop[{self._exchange}] cycle completed OK")
         except Exception:
-            logger.exception(f"ReconciliationLoop[{self._exchange}] cycle failed")
-            mode = (
-                ExecutionModeEnum.PAPER
-                if self._exchange == ExchangeEnum.PAPER
-                else ExecutionModeEnum.LIVE
-            )
-            fallback_shard = f"{self._exchange}.unknown.{mode}"
-            halted = self._trade_service.record_recon_failure(fallback_shard)
-            if halted:
-                logger.error(
-                    f"ReconciliationLoop[{self._exchange}] shard {fallback_shard} HALTED "
-                    f"due to consecutive reconciliation failures"
-                )
+            self._record_cycle_failure()
 
     def stop(self) -> None:
         """Signal the reconciliation loop to stop."""
