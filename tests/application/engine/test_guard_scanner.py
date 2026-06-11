@@ -1538,6 +1538,330 @@ async def test_sweep_broken_cleans_held_leg_of_compensating_group(
     assert legs[0]["status"] == PairedExecutionLegStatusEnum.CANCELLED.value
 
 
+async def test_armed_group_breaks_when_command_folded_terminal(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """An ARMED group breaks the cycle its original folds durably terminal.
+
+    Given: an armed group (deadline far in the future) with one FILLED
+        sibling and one WORKING leg whose original command the P2-4 fold
+        advanced to ``cancelled`` (live leg projection missed),
+    When: the armed sweep runs,
+    Then: the stuck leg is projected CANCELLED and the group breaks NOW
+        with the leg-terminal reason — not at fill_deadline.
+    """
+    await _insert_group(_repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.ARMED.value)
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-1",
+        group_public_id="grp-1",
+        leg_index=1,
+        instrument="ETH-USD",
+        shard_key=_ETH_SHARD,
+        command_public_id="cmd-1",
+        status=PairedExecutionLegStatusEnum.WORKING.value,
+    )
+    await _insert_command(
+        _repo, public_id="cmd-0", correlation_id="grp-1", shard_key=_BTC_SHARD, status="filled"
+    )
+    await _insert_command(
+        _repo, public_id="cmd-1", correlation_id="grp-1", shard_key=_ETH_SHARD, status="cancelled"
+    )
+    await _scanner(_repo)._sweep_armed(_T0)
+    groups = await _repo.list_active_paired_execution_groups(
+        [PairedExecutionGroupStatusEnum.BROKEN.value], _FUTURE
+    )
+    assert [group["public_id"] for group in groups] == ["grp-1"]
+    assert groups[0]["failure_reason"] == "leg terminal before fill"
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    statuses = {leg["public_id"]: leg["status"] for leg in legs}
+    assert statuses["leg-1"] == PairedExecutionLegStatusEnum.CANCELLED.value
+    assert statuses["leg-0"] == PairedExecutionLegStatusEnum.FILLED.value
+
+
+async def test_armed_group_with_live_commands_stays_armed(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Live originals never trigger the armed durable-terminal projection.
+
+    Given: an armed group whose legs bind commands still ``dispatched``
+        and ``accepted`` (venue-live),
+    When: the armed sweep runs,
+    Then: no leg is touched and the group stays armed.
+    """
+    await _insert_group(_repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.ARMED.value)
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.WORKING.value,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-1",
+        group_public_id="grp-1",
+        leg_index=1,
+        instrument="ETH-USD",
+        shard_key=_ETH_SHARD,
+        command_public_id="cmd-1",
+        status=PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value,
+    )
+    await _insert_command(
+        _repo, public_id="cmd-0", correlation_id="grp-1", shard_key=_BTC_SHARD, status="dispatched"
+    )
+    await _insert_command(
+        _repo, public_id="cmd-1", correlation_id="grp-1", shard_key=_ETH_SHARD, status="accepted"
+    )
+    await _scanner(_repo)._sweep_armed(_T0)
+    groups = await _repo.list_active_paired_execution_groups(
+        [PairedExecutionGroupStatusEnum.ARMED.value], _FUTURE
+    )
+    assert [group["public_id"] for group in groups] == ["grp-1"]
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert {leg["status"] for leg in legs} == {
+        PairedExecutionLegStatusEnum.WORKING.value,
+        PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value,
+    }
+
+
+async def test_armed_projection_skips_commandless_and_terminal_legs(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Command-less and already-terminal legs are outside the projection.
+
+    Given: an armed group with a WORKING leg that has no command bound and
+        a FILLED leg (not cancel-eligible) bound to a cancelled command,
+    When: the durable-terminal projection runs,
+    Then: neither leg is terminalized — there is nothing durable to
+        project for the first, and fills own the second.
+    """
+    await _insert_group(_repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.ARMED.value)
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id=None,
+        status=PairedExecutionLegStatusEnum.WORKING.value,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-1",
+        group_public_id="grp-1",
+        leg_index=1,
+        instrument="ETH-USD",
+        shard_key=_ETH_SHARD,
+        command_public_id="cmd-1",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    await _insert_command(
+        _repo, public_id="cmd-1", correlation_id="grp-1", shard_key=_ETH_SHARD, status="cancelled"
+    )
+    moved = await _scanner(_repo)._project_durable_terminals_onto_legs(
+        await _repo.get_paired_execution_legs("grp-1", _FUTURE), _T0
+    )
+    assert moved is False
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    statuses = {leg["public_id"]: leg["status"] for leg in legs}
+    assert statuses["leg-0"] == PairedExecutionLegStatusEnum.WORKING.value
+    assert statuses["leg-1"] == PairedExecutionLegStatusEnum.FILLED.value
+
+
+async def test_armed_projection_skips_foreign_shard_leg(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A foreign-shard leg is left to its owning instance.
+
+    Given: a WORKING leg on a shard owned by the OTHER instance, bound to
+        a durably-cancelled command,
+    When: this instance's durable-terminal projection runs,
+    Then: the leg is untouched.
+    """
+    foreign_owner = ShardOwnership._hash(_BTC_SHARD) % 2
+    scanner = PairedExecutionGuardScanner(
+        repository=_repo,
+        ownership=ShardOwnership(instance_id=(foreign_owner + 1) % 2, instance_count=2),
+        trade_service=TradeService(),
+        interval_seconds=0.01,
+        outbox=None,
+    )
+    await _insert_group(_repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.ARMED.value)
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+        status=PairedExecutionLegStatusEnum.WORKING.value,
+    )
+    await _insert_command(
+        _repo, public_id="cmd-0", correlation_id="grp-1", shard_key=_BTC_SHARD, status="cancelled"
+    )
+    moved = await scanner._project_durable_terminals_onto_legs(
+        await _repo.get_paired_execution_legs("grp-1", _FUTURE), _T0
+    )
+    assert moved is False
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.WORKING.value
+
+
+async def test_cancel_eligible_leg_with_durably_cancelled_command_terminalizes(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A durably-terminal command projects its terminal onto a stuck leg.
+
+    Given: a broken group with an owned PARTIALLY_FILLED leg whose original
+        command the P2-4 lifecycle fold already advanced to ``cancelled``
+        (venue terminal recorded durably while the live leg projection was
+        missed),
+    When: the compensation sweep runs,
+    Then: no futile venue cancel is emitted and the leg is CAS'd to
+        CANCELLED, so the next sweep can flatten its residual exposure.
+    """
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-1",
+        status=PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value,
+        filled_signed_qty=0.4,
+    )
+    await _insert_command(
+        _repo, public_id="cmd-1", correlation_id="grp-1", shard_key=_BTC_SHARD, status="cancelled"
+    )
+    await _scanner(_repo)._sweep_compensating(_T0)
+    assert len(await _cancel_commands(_repo, "grp-1")) == 0
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.CANCELLED.value
+    assert legs[0]["filled_signed_qty"] == 0.4
+
+
+async def test_cancel_eligible_leg_with_failed_command_maps_to_rejected(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A FAILED (infra-terminal) command projects the leg to REJECTED.
+
+    Given: a broken group with an owned WORKING leg whose command is
+        durably ``failed`` (e.g. breaker-open disposition),
+    When: the compensation sweep runs,
+    Then: the leg is CAS'd to REJECTED and no venue cancel is emitted.
+    """
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-1",
+        status=PairedExecutionLegStatusEnum.WORKING.value,
+    )
+    await _insert_command(
+        _repo, public_id="cmd-1", correlation_id="grp-1", shard_key=_BTC_SHARD, status="failed"
+    )
+    await _scanner(_repo)._sweep_compensating(_T0)
+    assert len(await _cancel_commands(_repo, "grp-1")) == 0
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.REJECTED.value
+
+
+async def test_cancel_eligible_leg_with_filled_command_is_left_to_fill_projection(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A FILLED command never short-circuits the leg's fill projection.
+
+    Given: a broken group with an owned PARTIALLY_FILLED leg whose command
+        the fold advanced to ``filled`` (fill projection lagging),
+    When: the compensation sweep runs,
+    Then: the leg keeps its status (fill reprojection owns fills) and no
+        venue cancel is emitted.
+    """
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-1",
+        status=PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value,
+        filled_signed_qty=0.4,
+    )
+    await _insert_command(
+        _repo, public_id="cmd-1", correlation_id="grp-1", shard_key=_BTC_SHARD, status="filled"
+    )
+    await _scanner(_repo)._sweep_compensating(_T0)
+    assert len(await _cancel_commands(_repo, "grp-1")) == 0
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value
+
+
+async def test_terminalize_leg_lost_cas_is_clean_skip(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A stale leg snapshot loses the CAS without side effects.
+
+    Given: a leg whose DB status moved (FILLED) after the sweep snapshot
+        captured it as PARTIALLY_FILLED,
+    When: _terminalize_leg_from_durable_command runs with the stale row,
+    Then: the CAS loses and the leg keeps its current status.
+    """
+    await _insert_group(
+        _repo, public_id="grp-1", status=PairedExecutionGroupStatusEnum.BROKEN.value
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-1",
+        status=PairedExecutionLegStatusEnum.FILLED.value,
+        filled_signed_qty=1.0,
+    )
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    stale_leg = dict(legs[0])
+    stale_leg["status"] = PairedExecutionLegStatusEnum.PARTIALLY_FILLED.value
+    await _scanner(_repo)._terminalize_leg_from_durable_command(
+        cast(Any, stale_leg), "cancelled", _T0
+    )
+    legs = await _repo.get_paired_execution_legs("grp-1", _FUTURE)
+    assert legs[0]["status"] == PairedExecutionLegStatusEnum.FILLED.value
+
+
 async def test_cancel_live_original_noop_for_leg_without_command(
     _repo: SQLAlchemyRepository,
 ) -> None:

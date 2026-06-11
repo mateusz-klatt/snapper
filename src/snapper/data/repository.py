@@ -463,6 +463,26 @@ whose only durable history is a rejection definitively never placed,
 and re-publishing such a command is the outbox's legitimate retry path
 — including it would strand every retried command.
 """
+_ORDER_LIFECYCLE_EVENT_TYPES: tuple[str, ...] = (
+    "order_accepted",
+    "order_rejected",
+    "order_terminal",
+    "fill_observed",
+    "order_submit_unknown",
+    "order_breaker_open",
+)
+"""Venue event types the trade-command lifecycle fold consumes.
+
+The coordinator ``ReconciliationLoop`` folds these append-only rows
+into durable ``TradeCommand`` status advances (ack/partial/terminal),
+so the command table can drive venue-side reconciliation instead of
+warning forever about rows stuck at ``dispatched``. Superset of
+``_ORDER_SUBMIT_EVIDENCE_EVENT_TYPES``: the fold also needs
+``order_rejected`` (REJECTED advance) and ``order_breaker_open``
+(FAILED advance) which the duplicate-submit guard deliberately treats
+differently.
+"""
+_ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE = 300
 _CandleNaturalKey = tuple[str, str, datetime]
 _EquityRepairKey = tuple[str, datetime]
 _CANDLE_LOOKUP_CHUNK_SIZE = 300
@@ -7683,6 +7703,51 @@ class SQLAlchemyRepository(Repository):
         active successor. The paired-execution guard scanner uses it to cancel
         a HELD ``created`` command of a broken assembling group. Returns
         ``True`` iff the transition was applied.
+
+        Thin wrapper over :meth:`advance_trade_command_lifecycle` keeping the
+        original call shape (no ack/exchange-id overrides) for the outbox TTL
+        and guard-scanner callers.
+        """
+        return await self.advance_trade_command_lifecycle(
+            public_id=public_id,
+            expected_status=expected_status,
+            new_status=new_status,
+            bus_time=bus_time,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            terminal_at=terminal_at,
+            last_error=last_error,
+        )
+
+    async def advance_trade_command_lifecycle(
+        self,
+        public_id: str,
+        expected_status: str,
+        new_status: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+        *,
+        acked_at: datetime | None = None,
+        exchange_order_id: str | None = None,
+        terminal_at: datetime | None = None,
+        last_error: str | None = None,
+    ) -> bool:
+        """SCD2 CAS advancing a command with venue-evidenced lifecycle fields.
+
+        Same race discipline as :meth:`cas_trade_command_status` (FOR UPDATE
+        on the active row, ``expected_status`` guard, close-insert successor)
+        — disjoint expected-status sets keep the lifecycle fold race-free
+        against the outbox's ``created -> dispatched/expired`` and the guard
+        scanner's ``created -> cancelled`` transitions. Additionally carries
+        the ack-time fields the original CAS cannot express: ``acked_at`` and
+        ``exchange_order_id`` override the successor row when provided and
+        are carried forward from the existing row when ``None``.
+        ``terminal_at`` keeps the same carry-forward rule; ``last_error`` is
+        written verbatim (``None`` CLEARS a previous error — an advance to a
+        healthy lifecycle state supersedes stale dispatch errors, mirroring
+        ``bulk_dispatch_trade_commands``). Returns ``True`` iff the
+        transition was applied.
         """
         async with self.session() as s:
             existing = (
@@ -7729,9 +7794,13 @@ class SQLAlchemyRepository(Repository):
                     last_error=last_error,
                     created_at=existing.created_at,
                     dispatched_at=existing.dispatched_at,
-                    acked_at=existing.acked_at,
+                    acked_at=acked_at if acked_at is not None else existing.acked_at,
                     terminal_at=terminal_at if terminal_at is not None else existing.terminal_at,
-                    exchange_order_id=existing.exchange_order_id,
+                    exchange_order_id=(
+                        exchange_order_id
+                        if exchange_order_id is not None
+                        else existing.exchange_order_id
+                    ),
                     supersedes_command_id=existing.supersedes_command_id,
                     correlation_id=existing.correlation_id,
                     plan_public_id=existing.plan_public_id,
@@ -10221,6 +10290,69 @@ class SQLAlchemyRepository(Repository):
                 .limit(1)
             )
             return result.first() is not None
+
+    async def has_venue_event(self, client_order_id: str, event_type: str) -> bool:
+        """Return True when a venue event of the given type exists for the order.
+
+        Targeted single-type probe (vs the multi-type
+        :meth:`has_order_submit_evidence`) used by write-side dedupe: the
+        executor's ``order_accepted`` heal retry checks whether the
+        supposedly-failed insert actually committed (timeout-after-commit
+        race) before inserting again, keeping the append-only plane free of
+        avoidable duplicates. Served by ``ix_venue_events_cid_event_type``;
+        no ``known_to`` filter is needed because venue events are never
+        closed.
+
+        Args:
+            client_order_id: Client order id to probe.
+            event_type: Exact venue event type to look for.
+
+        Returns:
+            True when at least one matching event exists.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(VenueEvent.id)
+                .where(
+                    VenueEvent.client_order_id == client_order_id,
+                    VenueEvent.event_type == event_type,
+                )
+                .limit(1)
+            )
+            return result.first() is not None
+
+    async def get_order_lifecycle_events(self, client_order_ids: list[str]) -> list[VenueEventRow]:
+        """Return lifecycle venue events for a batch of client order ids.
+
+        Feeds the coordinator's trade-command lifecycle fold: all
+        ``_ORDER_LIFECYCLE_EVENT_TYPES`` rows for the given ids, globally
+        ordered by ``id`` (the append-only plane's only total order) so the
+        fold replays venue truth in observation order. The IN list is
+        chunked to keep statement size bounded; active command sets are
+        small, so a single chunk is the common case. Served by
+        ``ix_venue_events_cid_event_type``.
+
+        Args:
+            client_order_ids: Client order ids of the active command set.
+
+        Returns:
+            Ordered lifecycle rows; empty list for an empty id set.
+        """
+        if not client_order_ids:
+            return []
+        rows: list[VenueEventRow] = []
+        async with self.session() as s:
+            for start in range(0, len(client_order_ids), _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE):
+                chunk = client_order_ids[start : start + _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE]
+                result = await s.execute(
+                    select(VenueEvent).where(
+                        VenueEvent.client_order_id.in_(chunk),
+                        VenueEvent.event_type.in_(_ORDER_LIFECYCLE_EVENT_TYPES),
+                    )
+                )
+                rows.extend(self._venue_event_to_row(ve) for ve in result.scalars().all())
+        rows.sort(key=lambda r: r["id"])
+        return rows
 
     async def upsert_checkpoint(self, row: CheckpointUpsertRow) -> int:
         """SCD2 upsert for trade projection checkpoint.

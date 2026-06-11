@@ -101,6 +101,18 @@ _LEG_FLATTEN_ELIGIBLE_STATUSES = frozenset(
         PairedExecutionLegStatusEnum.REJECTED.value,
     }
 )
+_COMMAND_TERMINAL_TO_LEG_STATUS: dict[str, str] = {
+    TradeCommandStatusEnum.CANCELLED.value: PairedExecutionLegStatusEnum.CANCELLED.value,
+    TradeCommandStatusEnum.EXPIRED.value: PairedExecutionLegStatusEnum.EXPIRED.value,
+    TradeCommandStatusEnum.REJECTED.value: PairedExecutionLegStatusEnum.REJECTED.value,
+    TradeCommandStatusEnum.FAILED.value: PairedExecutionLegStatusEnum.REJECTED.value,
+}
+"""No-more-fills command terminals projected onto a stuck cancel-eligible leg.
+
+``filled`` is deliberately absent: fill reprojection owns fills, and
+flipping a leg terminal without its fill accounting would corrupt
+exposure math. ``created`` (held rows) belongs to the broken sweep.
+"""
 
 
 class PairedExecutionGuardScanner:
@@ -230,7 +242,11 @@ class PairedExecutionGuardScanner:
         live terminal hook) OR the group's ``fill_deadline`` passed with at least
         one leg not fully ``filled``. A terminal leg is broken immediately (before
         the deadline) because one sibling can never complete, so holding the
-        already-filled sibling exposed until the deadline is avoidable risk. The
+        already-filled sibling exposed until the deadline is avoidable risk.
+        Owned cancel-eligible legs are first checked against their command's
+        durable status — a P2-4-folded venue terminal is projected onto the
+        leg (:meth:`_project_durable_terminals_onto_legs`) so such a group
+        breaks THIS cycle instead of sitting exposed until the deadline. The
         break only flips the group status + records the reason; cancelling
         live orders and flattening filled legs is handled by the compensation
         sweep (:meth:`_sweep_compensating`) — the same cycle's later
@@ -252,6 +268,8 @@ class PairedExecutionGuardScanner:
             if group["policy"] != PairedExecutionPolicyEnum.SIMULTANEOUS.value:
                 continue
             legs = await self._repo.get_paired_execution_legs(group["public_id"], now)
+            if await self._project_durable_terminals_onto_legs(legs, now):
+                legs = await self._repo.get_paired_execution_legs(group["public_id"], now)
             reason = self._armed_break_reason(group, legs, now)
             if reason is not None:
                 await self._break_armed_group(group, now, reason)
@@ -259,6 +277,44 @@ class PairedExecutionGuardScanner:
                 leg["status"] == PairedExecutionLegStatusEnum.FILLED.value for leg in legs
             ):
                 await self._try_complete_group(group, now)
+
+    async def _project_durable_terminals_onto_legs(
+        self, legs: list[PairedExecutionLegRow], now: datetime
+    ) -> bool:
+        """Terminalize owned non-terminal legs whose commands folded terminal.
+
+        Armed-stage twin of the compensation sweep's durable-terminal
+        backstop: since the P2-4 lifecycle fold, an original order's venue
+        terminal can land on the COMMAND row while the live leg projection
+        was missed (executor cancel/expire paths record durably without a
+        terminal leg publish). Without this, an ARMED group with such a leg
+        would sit exposed until ``fill_deadline`` — the armed break reason
+        only reads LEG statuses. Projects each owned, cancel-eligible leg's
+        durably-terminal command onto the leg so the same cycle's
+        ``_armed_break_reason`` breaks the group immediately.
+
+        Args:
+            legs: The group's current leg rows.
+            now: Scan-cycle bus time.
+
+        Returns:
+            True when at least one leg was terminalized (caller re-reads).
+        """
+        moved_any = False
+        for leg in legs:
+            if not self._ownership.owns(leg["shard_key"]):
+                continue
+            if leg["status"] not in _LEG_CANCEL_ELIGIBLE_STATUSES:
+                continue
+            command_public_id = leg["command_public_id"]
+            if command_public_id is None:
+                continue
+            command_status = await self._repo.get_current_trade_command_status(command_public_id)
+            if command_status in _LIVE_COMMAND_STATUSES:
+                continue
+            if await self._terminalize_leg_from_durable_command(leg, command_status, now):
+                moved_any = True
+        return moved_any
 
     def _armed_break_reason(
         self,
@@ -374,9 +430,12 @@ class PairedExecutionGuardScanner:
         an idempotent venue cancel command is emitted for the original order.
         BOTH guards are required: leg status alone is not a venue-liveness
         signal (a dispatched leg stays ``pending`` until a fill / venue terminal
-        is projected), and command status alone is not either (venue terminals
-        are projected onto the LEG, not back onto the command, so a FILLED /
-        CANCELLED leg can still read command status ``dispatched``). The leg is
+        is projected), and a still-live command status does not mean the leg is
+        current either. Since the P2-4 lifecycle fold, venue terminals ARE
+        folded back onto the command row — a cancel-eligible leg whose command
+        is durably terminal can no longer fill, so instead of emitting a futile
+        venue cancel the sweep projects the command terminal onto the leg
+        (:meth:`_terminalize_leg_from_durable_command`). The leg is
         NOT claimed or flattened here — it stays fill-projectable until the
         venue cancel / expire / reject (or a fill) terminalizes it; residual
         exposure is then flattened. Lists ``broken`` AND ``compensating`` so a
@@ -476,6 +535,7 @@ class PairedExecutionGuardScanner:
             return
         command_status = await self._repo.get_current_trade_command_status(command_public_id)
         if command_status not in _LIVE_COMMAND_STATUSES:
+            await self._terminalize_leg_from_durable_command(leg, command_status, now)
             return
         await self._ensure_group_compensating(group, now)
         inserted = await self._repo.insert_paired_compensation_command(
@@ -483,6 +543,56 @@ class PairedExecutionGuardScanner:
         )
         if inserted is not None and self._outbox is not None:
             self._outbox.notify()
+
+    async def _terminalize_leg_from_durable_command(
+        self,
+        leg: PairedExecutionLegRow,
+        command_status: str | None,
+        now: datetime,
+    ) -> bool:
+        """Project a durably-terminal original command onto its stuck leg.
+
+        The P2-4 lifecycle fold advances original-order commands to venue
+        terminals from durable evidence. That removed the pre-fold healing
+        path where a cancel-eligible leg's eternally-``dispatched`` command
+        kept the sweep emitting venue cancels until the cancel flow
+        discovered terminality. A leg still cancel-eligible while its
+        command is durably CANCELLED / EXPIRED / REJECTED / FAILED can no
+        longer fill — CAS it to the matching leg terminal (fill accounting
+        is preserved by the SCD2 close-insert) so the next sweep routes it
+        through ``_flatten_leg`` for any residual exposure. ``filled``
+        commands are deliberately NOT projected here (fill reprojection
+        owns fills); ``created`` belongs to the broken sweep; a lost CAS
+        (concurrent fill / terminal projection moved the leg) is a clean
+        skip — the next cycle re-routes the leg by its new status.
+
+        Args:
+            leg: The cancel-eligible leg bound to the terminal command.
+            command_status: The command's current durable status.
+            now: Scan-cycle bus time.
+
+        Returns:
+            True when the leg was terminalized.
+        """
+        target = _COMMAND_TERMINAL_TO_LEG_STATUS.get(command_status or "")
+        if target is None:
+            return False
+        moved = await self._repo.cas_paired_execution_leg_status(
+            leg["public_id"],
+            leg["status"],
+            target,
+            now,
+            self._tracker.session_id,
+            self._tracker.next_sequence("guard.leg.terminal"),
+        )
+        if moved:
+            logger.info(
+                f"PairedExecutionGuardScanner: leg {leg['public_id']} "
+                f"{leg['status']} -> {target} projected from durably-terminal "
+                f"command status {command_status} (residual exposure flattens "
+                f"next sweep)"
+            )
+        return moved
 
     async def _ensure_group_compensating(
         self, group: PairedExecutionGroupRow, now: datetime

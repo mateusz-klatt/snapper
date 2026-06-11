@@ -2141,7 +2141,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         repair. The retry state lives in ``_unhealed_accept_events`` on
         the executor — NOT on the pending entry — so a terminal fill or
         cancel popping the entry before the write sticks cannot lose
-        the retry. Failure keeps the event queued for the next cycle.
+        the retry. Before re-inserting, a durable probe checks whether
+        the supposedly-failed write actually committed (a
+        timeout-after-commit race used to produce known-benign
+        duplicate accept rows): an existing row heals without writing.
+        Failure of the probe or the write keeps the event queued for
+        the next cycle.
 
         Args:
             client_order_id: Key into ``_unhealed_accept_events``.
@@ -2151,7 +2156,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if accept_event is None:
             return
         try:
-            await self._record_venue_event(accept_event)
+            already_durable = isinstance(
+                self.repository, SQLAlchemyRepository
+            ) and await self.repository.has_venue_event(client_order_id, "order_accepted")
+            if not already_durable:
+                await self._record_venue_event(accept_event)
         except Exception:
             logger.warning(
                 f"[{exchange_name}] Recon: order_accepted venue event still failing "
@@ -2162,10 +2171,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         pending = self.pending_orders.get(client_order_id)
         if pending is not None:
             pending.accept_event_pending = False
-        logger.info(
-            f"[{exchange_name}] Recon healed the durable order_accepted event for "
-            f"{client_order_id}"
-        )
+        if already_durable:
+            logger.info(
+                f"[{exchange_name}] Recon: order_accepted for {client_order_id} was "
+                f"already durable (write committed despite the reported failure) — "
+                f"healed without inserting a duplicate"
+            )
+        else:
+            logger.info(
+                f"[{exchange_name}] Recon healed the durable order_accepted event for "
+                f"{client_order_id}"
+            )
 
     async def _reconcile_disappeared_order(
         self,

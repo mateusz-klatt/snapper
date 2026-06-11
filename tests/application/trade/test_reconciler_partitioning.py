@@ -20,7 +20,21 @@ def _cmd(shard_key: str, public_id: str = "cmd") -> dict[str, Any]:
         "status": "dispatched",
         "created_at": datetime.now(UTC),
         "shard_key": shard_key,
+        "command_type": "create",
+        "client_order_id": f"cid-{public_id}",
+        "session_id": "s1",
+        "sequence_id": 1,
+        "quantity": 1.0,
     }
+
+
+def _repo(cmds: list[dict[str, Any]]) -> Any:
+    """Repo mock returning the given active set with empty fold inputs."""
+    repo = AsyncMock()
+    repo.get_active_commands_for_exchange = AsyncMock(return_value=cmds)
+    repo.get_order_lifecycle_events = AsyncMock(return_value=[])
+    repo.advance_trade_command_lifecycle = AsyncMock(return_value=True)
+    return repo
 
 
 @pytest.mark.asyncio
@@ -38,13 +52,7 @@ async def test_ownership_filters_foreign_shards_out_of_cycle() -> None:
     foreign_shard = "kraken.FOREIGN.live"
     owner_id = ShardOwnership._hash(owned_shard) % 2
     ownership = ShardOwnership(instance_id=owner_id, instance_count=2)
-    repo = AsyncMock()
-    repo.get_active_commands_for_exchange = AsyncMock(
-        return_value=[
-            _cmd(owned_shard, "cmd-owned"),
-            _cmd(foreign_shard, "cmd-foreign"),
-        ]
-    )
+    repo = _repo([_cmd(owned_shard, "cmd-owned"), _cmd(foreign_shard, "cmd-foreign")])
     trade_svc = MagicMock(spec=TradeService)
     recon = ReconciliationLoop(
         exchange_name="kraken",
@@ -69,13 +77,7 @@ async def test_no_ownership_preserves_unsharded_behavior() -> None:
     Then: both shards appear in ``record_recon_success`` calls —
         the byte-identical legacy behavior.
     """
-    repo = AsyncMock()
-    repo.get_active_commands_for_exchange = AsyncMock(
-        return_value=[
-            _cmd("kraken.A.live", "cmd-a"),
-            _cmd("kraken.B.live", "cmd-b"),
-        ]
-    )
+    repo = _repo([_cmd("kraken.A.live", "cmd-a"), _cmd("kraken.B.live", "cmd-b")])
     trade_svc = MagicMock(spec=TradeService)
     recon = ReconciliationLoop(
         exchange_name="kraken",
@@ -102,8 +104,7 @@ async def test_all_foreign_no_success_recorded() -> None:
     foreign_owner = ShardOwnership._hash(foreign_shard) % 2
     this_id = (foreign_owner + 1) % 2
     ownership = ShardOwnership(instance_id=this_id, instance_count=2)
-    repo = AsyncMock()
-    repo.get_active_commands_for_exchange = AsyncMock(return_value=[_cmd(foreign_shard)])
+    repo = _repo([_cmd(foreign_shard)])
     trade_svc = MagicMock(spec=TradeService)
     recon = ReconciliationLoop(
         exchange_name="kraken",

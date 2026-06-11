@@ -12,6 +12,7 @@ import httpx
 import pytest
 from loguru import logger
 
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
@@ -788,6 +789,65 @@ class TestAmbiguousReconResolution:
         ex._record_venue_event = AsyncMock()
         await ex._retry_accept_event("ghost-cid")
         ex._record_venue_event.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_accept_event_heal_skips_insert_when_already_durable(self) -> None:
+        """A committed-despite-reported-failure write heals without a duplicate.
+
+        Given: A queued accept event whose original insert actually
+            committed (timeout-after-commit race) so the durable probe
+            finds the order_accepted row,
+        When: _retry_accept_event runs,
+        Then: No second insert happens, the queue entry is removed, and
+            the pending flag clears.
+        """
+        ex = _make_executor()
+        ex.repository = MagicMock(spec=SQLAlchemyRepository)
+        ex.repository.has_venue_event = AsyncMock(return_value=True)
+        pending = _make_pending(exchange_order_id="ex-1")
+        pending.accept_event_pending = True
+        ex.pending_orders["cid-1"] = pending
+        ex._unhealed_accept_events["cid-1"] = self._accept_event()
+        ex._record_venue_event = AsyncMock()
+        await ex._retry_accept_event("cid-1")
+        ex._record_venue_event.assert_not_awaited()
+        ex.repository.has_venue_event.assert_awaited_once_with("cid-1", "order_accepted")
+        assert "cid-1" not in ex._unhealed_accept_events
+        assert pending.accept_event_pending is False
+
+    @pytest.mark.asyncio
+    async def test_accept_event_heal_inserts_when_probe_negative(self) -> None:
+        """A negative durable probe proceeds with the insert retry.
+
+        Given: A queued accept event and a probe finding no durable row,
+        When: _retry_accept_event runs and the insert succeeds,
+        Then: The event is written and the queue entry removed.
+        """
+        ex = _make_executor()
+        ex.repository = MagicMock(spec=SQLAlchemyRepository)
+        ex.repository.has_venue_event = AsyncMock(return_value=False)
+        ex._unhealed_accept_events["cid-1"] = self._accept_event()
+        ex._record_venue_event = AsyncMock()
+        await ex._retry_accept_event("cid-1")
+        ex._record_venue_event.assert_awaited_once()
+        assert "cid-1" not in ex._unhealed_accept_events
+
+    @pytest.mark.asyncio
+    async def test_accept_event_heal_probe_failure_keeps_queue(self) -> None:
+        """A failing durable probe defers the heal to the next cycle.
+
+        Given: A queued accept event and a probe that raises (DB down),
+        When: _retry_accept_event runs,
+        Then: Nothing is written and the queue entry stays for retry.
+        """
+        ex = _make_executor()
+        ex.repository = MagicMock(spec=SQLAlchemyRepository)
+        ex.repository.has_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
+        ex._unhealed_accept_events["cid-1"] = self._accept_event()
+        ex._record_venue_event = AsyncMock()
+        await ex._retry_accept_event("cid-1")
+        ex._record_venue_event.assert_not_awaited()
+        assert "cid-1" in ex._unhealed_accept_events
 
     @pytest.mark.asyncio
     async def test_accept_event_heals_even_when_venue_is_down(self) -> None:

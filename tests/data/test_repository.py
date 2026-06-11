@@ -67,6 +67,7 @@ from snapper.data.repository_types import OrderInsertRow
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TradeRow
 from snapper.data.repository_types import TradeUpsertRow
+from snapper.data.repository_types import VenueEventInsertRow
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 
 
@@ -9688,3 +9689,146 @@ async def test_bulk_dispatch_skips_concurrently_expired_command(tmp_path: Path) 
     active = await r.get_active_commands_for_shard("kraken.BTC-USD.live", later)
     assert active == []
     assert await r.get_undispatched_commands(as_of=later, limit=10) == []
+
+
+@pytest.mark.asyncio
+async def test_advance_trade_command_lifecycle_carries_ack_fields(tmp_path: Path) -> None:
+    """The lifecycle CAS advances a dispatched command with ack metadata.
+
+    Given: A dispatched create command and venue acceptance knowledge,
+    When: advance_trade_command_lifecycle moves dispatched -> accepted with
+        acked_at and exchange_order_id,
+    Then: The CAS applies, the active row carries the ack fields, and a
+        second advance expecting the stale dispatched status loses.
+    """
+    db_path = tmp_path / "cmd_lifecycle_adv.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _, pid = await r.insert_trade_command(
+        {
+            "command_type": "create",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-fold",
+            "client_order_id": "cid-fold-1",
+            "venue_client_id": "cid-fold-1",
+            "side": "buy",
+            "order_type": "limit",
+            "quantity": 1.0,
+            "price": 100.0,
+            "status": "dispatched",
+            "created_at": now,
+            "correlation_id": "corr-fold-1",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
+    )
+    acked = now + timedelta(seconds=2)
+    applied = await r.advance_trade_command_lifecycle(
+        public_id=pid,
+        expected_status="dispatched",
+        new_status="accepted",
+        bus_time=acked,
+        session_id="s1",
+        sequence_id=1,
+        acked_at=acked,
+        exchange_order_id="ex-fold-1",
+    )
+    assert applied is True
+    later = now + timedelta(seconds=5)
+    active = await r.get_active_commands_for_exchange(exchange="kraken", as_of=later)
+    row = next(cmd for cmd in active if cmd["public_id"] == pid)
+    assert row["status"] == "accepted"
+    assert row["acked_at"] == acked
+    assert row["exchange_order_id"] == "ex-fold-1"
+    lost = await r.advance_trade_command_lifecycle(
+        public_id=pid,
+        expected_status="dispatched",
+        new_status="accepted",
+        bus_time=later,
+        session_id="s1",
+        sequence_id=1,
+    )
+    assert lost is False
+    missing = await r.advance_trade_command_lifecycle(
+        public_id="no-such-command",
+        expected_status="dispatched",
+        new_status="accepted",
+        bus_time=later,
+        session_id="s1",
+        sequence_id=1,
+    )
+    assert missing is False
+
+
+@pytest.mark.asyncio
+async def test_has_venue_event_probes_exact_type(tmp_path: Path) -> None:
+    """The single-type venue event probe matches cid AND event type.
+
+    Given: One order_accepted event for cid-A,
+    When: has_venue_event is probed for matching and non-matching keys,
+    Then: Only the exact (cid, event_type) pair returns True.
+    """
+    db_path = tmp_path / "ve_probe.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    await r.insert_venue_event(
+        {
+            "event_type": "order_accepted",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "received_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+            "client_order_id": "cid-A",
+        }
+    )
+    assert await r.has_venue_event("cid-A", "order_accepted") is True
+    assert await r.has_venue_event("cid-A", "order_rejected") is False
+    assert await r.has_venue_event("cid-B", "order_accepted") is False
+
+
+@pytest.mark.asyncio
+async def test_get_order_lifecycle_events_filters_and_orders(tmp_path: Path) -> None:
+    """The lifecycle batch read returns only fold-relevant rows in id order.
+
+    Given: Lifecycle and non-lifecycle events across two client order ids,
+    When: get_order_lifecycle_events is called for one cid,
+    Then: Only that cid's lifecycle-type rows return, ordered by id, and an
+        empty id list short-circuits to an empty result.
+    """
+    db_path = tmp_path / "ve_lifecycle.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+
+    def _event(event_type: str, cid: str, sequence_id: int) -> VenueEventInsertRow:
+        return {
+            "event_type": event_type,
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "received_at": now,
+            "session_id": "s1",
+            "sequence_id": sequence_id,
+            "timestamp": now,
+            "client_order_id": cid,
+        }
+
+    first = await r.insert_venue_event(_event("order_accepted", "cid-A", 1))
+    await r.insert_venue_event(_event("order_accepted", "cid-B", 2))
+    await r.insert_venue_event(_event("balance_mismatch", "cid-A", 3))
+    second = await r.insert_venue_event(_event("fill_observed", "cid-A", 4))
+    rows = await r.get_order_lifecycle_events(["cid-A"])
+    assert [row["id"] for row in rows] == [first, second]
+    assert [row["event_type"] for row in rows] == ["order_accepted", "fill_observed"]
+    assert await r.get_order_lifecycle_events([]) == []
