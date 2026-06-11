@@ -144,7 +144,7 @@ underlying snapshots and the retention window math.
 | `RETENTION_DISABLED` | `false` | Disable the retention loop entirely (still allow on-demand archive via CLI) |
 | `RETENTION_DRY_RUN` | `false` | Compute the window and counts but skip writes/purges |
 | `RETENTION_OUTPUT_DIR` | `data` | Base directory for archive CSV writes (matches the CLI `--output-dir` default) |
-| `DB_METRICS_INTERVAL_SECONDS` | `60` | Cadence for the per-table row-count / index-health sampler |
+| `DB_METRICS_INTERVAL_SECONDS` | `60` | Cadence for the per-table SCD2 row-count sampler |
 | `DB_METRICS_DISABLED` | `false` | Disable the DB stats sampler |
 | `SNAPPER_TICK_PROBE` | unset | Enable per-stage tick hot-path histograms in publisher logs when truthy (`1`, `true`, `yes`) |
 | `SNAPPER_TRADE_PROBE` | unset | Enable per-stage trade hot-path histograms in publisher logs when truthy (`1`, `true`, `yes`) |

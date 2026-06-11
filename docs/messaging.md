@@ -977,13 +977,13 @@ through the same `TradeCommand` outbox as submits, with
 
 ## ZMQ-WebSocket Bridge
 
-Bridge between ZMQ and WebSocket for frontend:
+Bridge between ZMQ and WebSocket clients (browser and iOS):
 
 ```mermaid
 flowchart TB
     XPUB["ZMQ XPUB"] --> Bridge["ZmqWebSocketBridgeService"]
     Bridge -->|subscribe/unsubscribe| Manager["WebSocketConnectionManager"]
-    Manager --> Clients["WebSocket Clients<br/>Browser"]
+    Manager --> Clients["WebSocket Clients<br/>Browser + iOS"]
 ```
 
 Bridge automatically:
@@ -994,11 +994,9 @@ Bridge automatically:
 - Applies per-frame scope filters for `ai_reviews.*`, `orders.events.*`, and
   `alerts.*`; malformed scoped frames fail closed before fan-out
 - Forwards messages via `_forward_to_clients` with per-subscription backpressure
-- Throttles forwarding per subscriber: the live WebSocket subscribe path
-  registers every subscription with a flat 100 ms interval, regardless of
-  topic (topic schemas carry per-prefix `throttle_ms` metadata, but only the
-  schema-aware registration path reads it, and the WebSocket handler does
-  not use that path)
+- Throttles forwarding per subscriber using the matching
+  `TOPIC_REGISTRY` prefix's `throttle_ms`, falling back to 100 ms for
+  unconfigured concrete topics
 - Drops market data when a client exceeds `MAX_PENDING_MESSAGES_MARKET` (100)
 - Disconnects slow clients on trade topics when exceeding `MAX_PENDING_MESSAGES_TRADE` (1000)
 - Unsubscribes when last client disconnects

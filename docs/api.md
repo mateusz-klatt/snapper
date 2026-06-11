@@ -1157,6 +1157,54 @@ current_stop from the evaluator's in-memory state.
 
 **Response (404):** Position cycle not found.
 
+## Paired Execution
+
+The paired-execution operator surface exposes halted or exposed multi-leg
+groups and the manual attestation used after an operator resolves a
+`manual_intervention` group at the venue. Non-admin callers are filtered to
+their accessible wallets; `admin` is unscoped.
+
+### GET /api/paired-execution/incidents
+
+List halted or currently exposed paired-execution scopes visible to the caller.
+Each incident is keyed by `(wallet_public_id, strategy_id, group_key)` and may
+contain an active durable halt, exposed groups, or both. `halt_missing: true`
+marks the anomalous window where an exposed group exists before the scanner has
+restored the durable halt row.
+
+**Permission:** `read:positions`.
+
+**Response (200):** `PairedExecutionIncidentListResponse` with
+`paired_execution_incident` payload items. Each item includes the scope,
+optional `halt`, `halt_missing`, and `groups`; each group contains per-leg
+signed exposure with `open_qty = filled_signed_qty - compensated_signed_qty`.
+
+**Response (503):** Paired-execution tables are unavailable for the active
+repository backend.
+
+### POST /api/paired-execution/groups/{group_public_id}/terminalize
+
+Attest that a paired-execution group in `manual_intervention` (or a
+`compensating` group reopened onto a manual leg) has been resolved at the
+venue. The repository completes the group; the guard scanner clears the
+scope's durable halt and in-memory mirrors within one scan cycle.
+
+**Permission:** `manage:paired_execution`. CSRF token required for
+cookie-authenticated requests.
+
+**Response (200):** `PairedGroupTerminalizeResponse` carrying the completed
+group projection and its legs' true accounting.
+
+**Response (404):** No current active group exists with that id, or the group
+belongs to a wallet outside the caller's accessible set.
+
+**Response (409):** The group is not currently attestable because its status is
+not manual, it has no legs or a held original command, or a sibling leg still
+has automation in flight.
+
+**Response (503):** Paired-execution tables are unavailable for the active
+repository backend.
+
 ### GET /api/position-cycles/open
 
 List all open position cycles with age information. Admin-only endpoint for
@@ -2066,6 +2114,123 @@ X-CSRF-Token: <csrf_token>
 }
 ```
 
+## AI Delegates
+
+AI delegate management is gated by `ai_integration_enabled`, the same feature
+flag used by `/api/mcp`. When disabled, `/api/ai-delegates/*` returns the
+shared `feature_disabled` envelope. Delegate tokens are bearer-only automation
+credentials for MCP-compatible clients and are returned exactly once, on
+creation.
+
+### POST /api/ai-delegates
+
+Create an AI delegate owned by the authenticated operator and mint a long-lived
+access JWT.
+
+**Permission:** `operator` role or higher. CSRF token required for
+cookie-authenticated requests.
+
+**Body (`DelegateCreateRequest` envelope):**
+
+```json
+{
+    "type": "delegate_create_request",
+    "public_id": "<client-uuid7>",
+    "session_id": "<client-session>",
+    "sequence_id": 1,
+    "timestamp": "2026-01-18T12:00:00Z",
+    "payload": {
+        "label": "research-agent",
+        "operator_public_id": null,
+        "caps": {
+            "max_order_quantity_per_instrument": null,
+            "max_open_orders": 2,
+            "max_daily_notional_usd": 1000.0,
+            "max_cancels_per_minute": 5
+        }
+    }
+}
+```
+
+`operator_public_id` must be one of the caller's operator memberships; `null`
+uses the caller's primary operator. All caps are optional; `null` means the
+delegate inherits the Snapper-wide fallback for that cap.
+
+**Response (200):** `DelegateCreatedResponse` with the delegate projection and
+one-shot `access_token`. List and detail endpoints never re-serve the token.
+
+**Response (409):** The label cannot produce a unique delegate username, or the
+owner has reached the per-owner delegate cap.
+
+**Response (422):** The requested operator binding is outside the caller's
+claim set.
+
+### GET /api/ai-delegates
+
+List the caller's active delegates. Deactivated delegates are omitted.
+
+**Permission:** `operator` role or higher.
+
+**Response (200):** `DelegateListResponse` with `DelegateRead` payload items.
+
+### GET /api/ai-delegates/{delegate_public_id}
+
+Fetch one active delegate owned by the caller.
+
+**Permission:** `operator` role or higher.
+
+**Response (200):** `DelegateResponse`.
+
+**Response (404):** The delegate does not exist or is not owned by the caller.
+
+### PATCH /api/ai-delegates/{delegate_public_id}
+
+Replace a delegate's trading caps while preserving username and label
+immutability. The write is SCD2-preserved so cap history remains auditable.
+
+**Permission:** `operator` role or higher. CSRF token required for
+cookie-authenticated requests.
+
+**Body (`DelegateCapsUpdateRequest` envelope):**
+
+```json
+{
+    "type": "delegate_caps_update_request",
+    "public_id": "<client-uuid7>",
+    "session_id": "<client-session>",
+    "sequence_id": 2,
+    "timestamp": "2026-01-18T12:01:00Z",
+    "payload": {
+        "caps": {
+            "max_order_quantity_per_instrument": null,
+            "max_open_orders": 1,
+            "max_daily_notional_usd": 500.0,
+            "max_cancels_per_minute": 3
+        }
+    }
+}
+```
+
+**Response (200):** `DelegateResponse` with the updated caps.
+
+**Response (404):** The delegate does not exist or is not owned by the caller.
+
+### POST /api/ai-delegates/{delegate_public_id}/deactivate
+
+Deactivate a delegate using the shared user kill-switch flow. The server closes
+the active delegate row, revokes active tokens, and publishes the same
+deactivation event used by admin user deactivation.
+
+**Permission:** `operator` role or higher. CSRF token required for
+cookie-authenticated requests.
+
+**Body:** Optional `DelegateDeactivateRequest` envelope with
+`payload.reason` for audit context.
+
+**Response (200):** `DelegateResponse` with `is_active: false`.
+
+**Response (404):** The delegate does not exist or is not owned by the caller.
+
 ## Underlying Assets
 
 ### GET /api/underlyings
@@ -2134,20 +2299,27 @@ Build a continuous futures series for an underlying from active contract
 metadata and candle rows.
 
 ```
-GET /api/underlyings/SPX/continuous?exchange=kraken_equities&contract_family=ES&timeframe=1h&limit=500
+GET /api/underlyings/SPX/continuous?exchange=kraken_equities&contract_family=ES&timeframe=1d&start=2026-01-01T00:00:00Z&end=2026-01-05T00:00:00Z
 ```
 
 Query parameters:
 
-- `exchange` (optional): Filter by exchange
-- `contract_family` (optional): Filter by product root
-- `timeframe` (optional): Candle timeframe, default `1h`
-- `limit` (optional): Maximum points, route-bounded
+- `exchange` (required): Exchange for the contract ladder
+- `contract_family` (required): Product root, e.g. `ES` vs `MES`
+- `timeframe` (required): Candle timeframe to load
+- `start` (required): Inclusive UTC start timestamp
+- `end` (required): Exclusive UTC end timestamp
+- `method` (optional, default `panama`): Adjustment method,
+  `unadjusted`, `ratio`, or `panama`
+- `rollover_days_before` (optional, default `0`): Roll contracts this
+  many days before expiry, range `0..365`
 - `as_of` (optional): Point-in-time query timestamp
 
 Returns a continuous-series response with the selected contract windows
-and candle points. Returns 400 for invalid parameters and 404 when the
-underlying cannot be resolved.
+and candle points. A successful response may be `continuous_full` or
+`continuous_partial`; partial responses include `failed_roll` and
+`message` fields describing the unavailable roll window. Returns 400
+for invalid parameters and 404 when the underlying cannot be resolved.
 
 ## Multi-Tenant (Wallets, Operators, Scope Grants, Credentials)
 
@@ -2312,21 +2484,19 @@ Client-originated control frames (`authenticate`, `reauth`,
     "timestamp": "2026-01-18T12:00:00Z",
     "topic": null,
     "available_topics": [
+        "ai_reviews.",
+        "alerts.",
+        "backtest.",
         "market.",
-        "signals.",
-        "system.heartbeats.",
-        "admin.",
         "orders.commands.",
         "orders.events.",
-        "accruals.",
-        "backtest.",
-        "alerts.",
         "plans.decisions.",
-        "ai_reviews.",
-        "processes.events.summary.",
         "processes.events.configured.",
         "processes.events.runs.",
-        "strategies.events.list."
+        "processes.events.summary.",
+        "signals.",
+        "strategies.events.list.",
+        "system.heartbeats."
     ],
     "user_role": "operator",
     "session_expires_at": "2026-01-18T12:15:00Z",
@@ -2487,8 +2657,22 @@ If the client does not reauthenticate in time:
     "timestamp": "2026-01-18T12:00:02Z",
     "topic": null,
     "subscriptions": ["signals.paper.BTC-USD.rsi_btc_1h"],
-    "available_topics": ["market.", "signals.", "system.heartbeats.", "orders.events.", "alerts.", "backtest."],
-    "total_available": 6
+    "available_topics": [
+        "ai_reviews.",
+        "alerts.",
+        "backtest.",
+        "market.",
+        "orders.commands.",
+        "orders.events.",
+        "plans.decisions.",
+        "processes.events.configured.",
+        "processes.events.runs.",
+        "processes.events.summary.",
+        "signals.",
+        "strategies.events.list.",
+        "system.heartbeats."
+    ],
+    "total_available": 13
 }
 ```
 
@@ -3170,7 +3354,7 @@ Upsert the caller's user-level fallback pref for a given
 ## Metrics
 
 Observability endpoints surfaced for the operations dashboard and
-the iOS health widget. All routes require
+the iOS Home/system-status surface. All routes require
 `Permission.READ_SYSTEM_STATUS`. See
 [observability.md](observability.md) for the underlying retention /
 system-metrics pipeline and snapshot schemas.

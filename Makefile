@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes move-imports run-server run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose move-imports run-server run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -40,16 +40,19 @@ help:
 	$(info check-pydantic-routes     Fail if FastAPI routes use dict/Any/Response on I/O)
 	$(info check-init-files          Validate __init__.py files are empty [strict])
 	$(info check-temporal-mutations  Fail if forbidden temporal mutations exist)
+	$(info check-vendor-neutral      Fail if vendor-specific restricted terms are used)
+	$(info check-egress-compose      Reject unsafe snapper-egress compose wiring)
 	$(info fix-all                   Complete quality fixes [backend + frontend])
 	$(info )
 	$(info Application:)
 	$(info run-server                 Start web dashboard [production mode])
-	$(info run-static                 Refresh verified symbol mappings)
+	$(info run-static                 Refresh symbol mappings, underlyings, and market snapshots)
 	$(info reconcile-aliases          Close SCD2 alias rows for symbols whose capability is deactivated [idempotent])
 	$(info run-polygon-aggregates     Download Polygon OHLCV to CSV cache [no DB write; settings symbols; ["*"] = all mapped])
 	$(info run-polygon-load           Load cached Polygon CSVs into the DB [cache-only, no API])
 	$(info run-polygon                 Download then load Polygon OHLCV [run-polygon-aggregates + run-polygon-load])
 	$(info run-polygon-grouped        Download Polygon grouped daily to CSV [CLI])
+	$(info backfill-kraken-equities-candles Backfill Kraken Equities candles from configured instruments)
 	$(info migrate-dev                Run migrations + seed dev data)
 	$(info migrate-prod               Run migrations + seed prod data)
 	$(info )
@@ -90,12 +93,14 @@ help:
 	$(info ui-cov             Run UI tests with coverage)
 	$(info ui-cov-serial      Run UI tests with coverage sequentially [debugging])
 	$(info ui-i18n-check      Check for hardcoded user-facing strings in frontend)
+	$(info ui-i18n-check-alerts Verify iOS alerts.* catalog matches frontend JSON)
 	$(info ui-i18n-check-market Verify iOS market.* catalog matches frontend JSON)
 	$(info ui-check           UI quality checks [lint + format + dead-code + i18n])
 	$(info ui-fix             UI quality fixes)
 	$(info )
 	$(info iOS [snapper-ios submodule]:)
 	$(info ios-gen-types Generate Swift types from OpenAPI + WebSocket [writes into submodule])
+	$(info gen-backend-i18n-catalog Generate backend alert i18n catalogs from iOS xcstrings)
 	$(info Other iOS targets live in the snapper-ios submodule \(cd ios && make ...\))
 	$(info )
 	$(info Docker:)
@@ -105,7 +110,7 @@ help:
 	$(info docker-migrate-prod           Run migrations + seed prod data in Docker)
 	$(info docker-push                   Push Docker image)
 	$(info docker-run                    Run Docker container [background])
-	$(info docker-run-static             Refresh verified symbol mappings in Docker)
+	$(info docker-run-static             Refresh symbol mappings, underlyings, and market snapshots in Docker)
 	$(info docker-reconcile-aliases      Close SCD2 alias rows whose capability is deactivated in Docker [idempotent])
 	$(info docker-polygon-aggregates     Download Polygon OHLCV to CSV cache in Docker [no DB write; settings symbols; ["*"] = all mapped])
 	$(info docker-polygon-load           Load cached Polygon CSVs into the DB in Docker [cache-only, no API])
@@ -118,7 +123,7 @@ help:
 	$(info server-check                  Health check server [cross-platform])
 	$(info )
 	$(info Docs:)
-	$(info docs-pdf Export README + docs/*.md into frontend/public/snapper.pdf)
+	$(info docs-pdf Export README + docs/*.md into frontend/public/snapper.pdf [frontend submodule])
 	$(info )
 	$(info Code Maintenance:)
 	$(info move-imports Move all imports to top of Python files)
@@ -405,7 +410,7 @@ run-broker:
 	$(PYRUN) snapper broker
 
 run-feed:
-	$(PYRUN) snapper feed --symbols BTC/USD,ETH/USD
+	$(PYRUN) snapper feed --symbols BTC-USD,ETH-USD
 
 .PHONY: stress-equities
 STRESS_ARGS ?= --sweep 1000,3000,6000 --segment 12 --writer-latency-ms 10 --symbols 50
