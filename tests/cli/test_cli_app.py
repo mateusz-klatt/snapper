@@ -9,6 +9,7 @@ import threading
 from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,6 +26,8 @@ from typer.testing import CliRunner
 
 import snapper.cli.app as app_module
 import snapper.messaging.infrastructure.publisher as publisher_module
+from snapper.application.maintenance.equity_candle_repair import EquityCandleRepairChunkStats
+from snapper.application.maintenance.equity_candle_repair import EquityCandleRepairStats
 from snapper.application.services.continuous_contract_builder import BuildResult
 from snapper.application.services.continuous_contract_builder import RollPointInfo
 from snapper.auth.domain.roles import UserRole
@@ -136,6 +139,268 @@ def test_parse_symbols_returns_empty_for_blank_input() -> None:
     Then: Returns empty list.
     """
     assert parse_symbols("   ") == []
+
+
+def test_repair_equity_candle_fragmentation_defaults_to_dry_run(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """Test repair command defaults to a dry run with an omitted end.
+
+    Given: The repair service is patched with a deterministic response,
+    When: The command is invoked with only ``--start``,
+    Then: It passes dry-run defaults and prints would-rewrite totals.
+    """
+    captured: list[tuple[datetime, datetime, datetime, bool, int, timedelta]] = []
+
+    class DummyService:
+        """CLI test double for the repair service."""
+
+        def __init__(self, repository: object) -> None:
+            self.repository = repository
+
+        async def repair(
+            self,
+            *,
+            start: datetime,
+            end: datetime,
+            repair_bus_time: datetime,
+            dry_run: bool,
+            batch_size: int,
+            chunk_size: timedelta,
+        ) -> EquityCandleRepairStats:
+            captured.append((start, end, repair_bus_time, dry_run, batch_size, chunk_size))
+            return EquityCandleRepairStats(
+                dry_run=True,
+                chunks_processed=1,
+                fragmented_minutes_found=3,
+                rows_rewritten=2,
+                unreconstructable_minutes=1,
+                chunk_stats=(
+                    EquityCandleRepairChunkStats(
+                        start=start,
+                        end=end,
+                        fragmented_minutes_found=3,
+                        rows_rewritten=2,
+                        unreconstructable_minutes=1,
+                    ),
+                ),
+            )
+
+    repository = object()
+    monkeypatch.setattr(
+        app_module, "get_bootstrap_settings", lambda: SimpleNamespace(db_url=ASYNC_MEMORY_DB_URL)
+    )
+    monkeypatch.setattr(app_module, "get_repository", lambda db_url: repository)
+    monkeypatch.setattr(app_module, "EquityCandleRepairService", DummyService)
+    result = cli_runner.invoke(
+        app,
+        [
+            "repair-equity-candle-fragmentation",
+            "--start",
+            "2026-01-01T00:00:00+00:00",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "rows_would_rewrite=2" in result.stdout
+    assert "unreconstructable=1" in result.stdout
+    assert "WARNING: 1 fragmented minute(s)" in result.stdout
+    assert "end capped to settled horizon" in result.stdout
+    assert len(captured) == 1
+    start_dt, end_dt, repair_bus_time, dry_run, batch_size, chunk_size = captured[0]
+    assert start_dt == datetime(2026, 1, 1, tzinfo=UTC)
+    assert end_dt.tzinfo is UTC
+    assert end_dt <= datetime.now(UTC) - timedelta(hours=1)
+    assert repair_bus_time.tzinfo is UTC
+    assert dry_run is True
+    assert batch_size == 500
+    assert chunk_size == timedelta(hours=1)
+
+
+def test_repair_equity_candle_fragmentation_no_dry_run_uses_options(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """Test repair command forwards explicit write options.
+
+    Given: The repair service is patched with a write-mode response,
+    When: The command is invoked with ``--no-dry-run`` and custom batch size,
+    Then: It forwards the parsed range and prints rewritten totals.
+    """
+    captured: list[tuple[datetime, datetime, bool, int, timedelta]] = []
+
+    class DummyService:
+        """CLI test double for the repair service."""
+
+        def __init__(self, repository: object) -> None:
+            self.repository = repository
+
+        async def repair(
+            self,
+            *,
+            start: datetime,
+            end: datetime,
+            repair_bus_time: datetime,
+            dry_run: bool,
+            batch_size: int,
+            chunk_size: timedelta,
+        ) -> EquityCandleRepairStats:
+            captured.append((start, end, dry_run, batch_size, chunk_size))
+            return EquityCandleRepairStats(
+                dry_run=False,
+                chunks_processed=1,
+                fragmented_minutes_found=1,
+                rows_rewritten=1,
+                unreconstructable_minutes=0,
+                chunk_stats=(
+                    EquityCandleRepairChunkStats(
+                        start=start,
+                        end=end,
+                        fragmented_minutes_found=1,
+                        rows_rewritten=1,
+                        unreconstructable_minutes=0,
+                    ),
+                ),
+            )
+
+    monkeypatch.setattr(
+        app_module, "get_bootstrap_settings", lambda: SimpleNamespace(db_url=ASYNC_MEMORY_DB_URL)
+    )
+    monkeypatch.setattr(app_module, "get_repository", lambda db_url: object())
+    monkeypatch.setattr(app_module, "EquityCandleRepairService", DummyService)
+    result = cli_runner.invoke(
+        app,
+        [
+            "repair-equity-candle-fragmentation",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-01-02T03:04:05+00:00",
+            "--no-dry-run",
+            "--batch-size",
+            "7",
+            "--chunk-hours",
+            "2.5",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "rows_rewritten=1" in result.stdout
+    assert "WARNING" not in result.stdout
+    assert "end capped to settled horizon" not in result.stdout
+    assert captured == [
+        (
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+            False,
+            7,
+            timedelta(hours=2, minutes=30),
+        )
+    ]
+
+
+def test_repair_equity_candle_fragmentation_caps_explicit_future_end(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """Test an explicit end beyond the settled horizon is capped.
+
+    Given: The repair service is patched with a deterministic response,
+    When: The command is invoked with an ``--end`` far in the future,
+    Then: The forwarded end is capped to one hour before now and the cap is
+        announced, so unsettled delayed-feed minutes are never repaired.
+    """
+    captured_ends: list[datetime] = []
+
+    class DummyService:
+        """CLI test double for the repair service."""
+
+        def __init__(self, repository: object) -> None:
+            self.repository = repository
+
+        async def repair(
+            self,
+            *,
+            start: datetime,
+            end: datetime,
+            repair_bus_time: datetime,
+            dry_run: bool,
+            batch_size: int,
+            chunk_size: timedelta,
+        ) -> EquityCandleRepairStats:
+            captured_ends.append(end)
+            return EquityCandleRepairStats(
+                dry_run=True,
+                chunks_processed=0,
+                fragmented_minutes_found=0,
+                rows_rewritten=0,
+                unreconstructable_minutes=0,
+                chunk_stats=(),
+            )
+
+    monkeypatch.setattr(
+        app_module, "get_bootstrap_settings", lambda: SimpleNamespace(db_url=ASYNC_MEMORY_DB_URL)
+    )
+    monkeypatch.setattr(app_module, "get_repository", lambda db_url: object())
+    monkeypatch.setattr(app_module, "EquityCandleRepairService", DummyService)
+    lower = datetime.now(UTC) - timedelta(hours=1)
+    result = cli_runner.invoke(
+        app,
+        [
+            "repair-equity-candle-fragmentation",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2099-01-01T00:00:00+00:00",
+        ],
+    )
+    upper = datetime.now(UTC) - timedelta(hours=1)
+    assert result.exit_code == 0
+    assert "end capped to settled horizon" in result.stdout
+    assert captured_ends and lower <= captured_ends[0] <= upper
+
+
+def test_repair_equity_candle_fragmentation_reports_service_errors(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """Test repair command converts service failures to Typer exit.
+
+    Given: The repair service raises during execution,
+    When: The command is invoked,
+    Then: It exits with code one and prints the maintenance error.
+    """
+
+    class FailingService:
+        """CLI test double that fails during repair."""
+
+        def __init__(self, repository: object) -> None:
+            self.repository = repository
+
+        async def repair(
+            self,
+            *,
+            start: datetime,
+            end: datetime,
+            repair_bus_time: datetime,
+            dry_run: bool,
+            batch_size: int,
+            chunk_size: timedelta,
+        ) -> EquityCandleRepairStats:
+            raise RuntimeError("repair failed")
+
+    monkeypatch.setattr(
+        app_module, "get_bootstrap_settings", lambda: SimpleNamespace(db_url=ASYNC_MEMORY_DB_URL)
+    )
+    monkeypatch.setattr(app_module, "get_repository", lambda db_url: object())
+    monkeypatch.setattr(app_module, "EquityCandleRepairService", FailingService)
+    result = cli_runner.invoke(
+        app,
+        [
+            "repair-equity-candle-fragmentation",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-01-02",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "Error repairing Kraken Equities candle fragmentation: repair failed" in result.stdout
 
 
 def test_alembic_cfg_sets_url_and_uses_root_ini() -> None:

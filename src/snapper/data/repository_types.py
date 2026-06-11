@@ -6,6 +6,7 @@ with compile-time type checking — no Pydantic overhead for trusted internal
 data transfer.
 """
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from typing import NotRequired
@@ -121,6 +122,35 @@ class CandleRow(TypedDict):
     timestamp: datetime
     session_id: str
     sequence_id: int
+
+
+@dataclass(frozen=True)
+class EquityCandleRepairRow:
+    """Corrected Kraken Equities one-minute candle rebuilt from raw trades."""
+
+    instrument_public_id: str
+    open_at: datetime
+    timeframe: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    vwap: float | None
+    trades: int
+
+
+@dataclass(frozen=True)
+class EquityCandleRepairBatch:
+    """Repair rows plus unreconstructable-minute count for one read window.
+
+    ``unreconstructable_minutes`` counts fragmented candle minutes that were
+    detected in the window but have no persisted raw trades to rebuild from,
+    so they stay fragmented and must be surfaced rather than silently dropped.
+    """
+
+    repairs: list[EquityCandleRepairRow]
+    unreconstructable_minutes: int
 
 
 class TradeRow(TypedDict):

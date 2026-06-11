@@ -350,6 +350,7 @@ class Trade(TemporalMixin, Base):
         UniqueConstraint("instrument_public_id", "trade_id", name="uq_trade_instrument_trade_id"),
         Index("ix_trade_instrument_ts", "instrument_public_id", "timestamp"),
         Index("ix_trades_timestamp", "timestamp"),
+        Index("ix_trades_executed_at", "executed_at"),
         Index(
             "ix_trades_public_id",
             "public_id",

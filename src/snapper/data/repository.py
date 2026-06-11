@@ -181,6 +181,8 @@ from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import CreateScopeGrantRequest
 from snapper.data.repository_types import DeviceAlertPrefRow
 from snapper.data.repository_types import DeviceAlertPrefUpsertRow
+from snapper.data.repository_types import EquityCandleRepairBatch
+from snapper.data.repository_types import EquityCandleRepairRow
 from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import ExecutionPlanCheckpointRow
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
@@ -413,6 +415,31 @@ class _UserAlertDefaultAttemptResult:
     error: Exception | None
 
 
+@dataclass(frozen=True, slots=True)
+class _EquityTradeForRepair:
+    """Ordered raw trade row used to rebuild one fragmented minute."""
+
+    instrument_public_id: str
+    executed_at: datetime
+    price: float
+    size: float
+
+
+@dataclass(slots=True)
+class _EquityTradeCandleAccumulator:
+    """Mutable OHLCV accumulator for one trade-derived candle."""
+
+    instrument_public_id: str
+    open_at: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    weighted_value: float
+    trades: int
+
+
 _TRADE_COMMAND_TERMINAL_STATUSES: tuple[str, ...] = (
     TradeCommandStatusEnum.FILLED,
     TradeCommandStatusEnum.CANCELLED,
@@ -437,7 +464,10 @@ and re-publishing such a command is the outbox's legitimate retry path
 — including it would strand every retried command.
 """
 _CandleNaturalKey = tuple[str, str, datetime]
+_EquityRepairKey = tuple[str, datetime]
 _CANDLE_LOOKUP_CHUNK_SIZE = 300
+_KRAKEN_EQUITIES_EXCHANGE: Final[str] = "kraken_equities"
+_EQUITY_REPAIR_TIMEFRAME: Final[str] = "1m"
 _CANDLE_ID_CACHE_LOOKBACK: Final[timedelta] = timedelta(days=2)
 """How far back ``get_latest_candle_ids`` looks for the newest candle per
 ``(instrument, timeframe)`` when warming the publisher's startup cache.
@@ -489,6 +519,139 @@ def where_active_now(model: type[Any]) -> tuple[Any, Any]:
         Tuple of two filter clauses: (timestamp <= now, known_to > now).
     """
     return where_active(model, datetime.now(UTC))
+
+
+def _aggregate_equity_trade_repairs(
+    fragmented_keys: set[_EquityRepairKey],
+    trades: list[_EquityTradeForRepair],
+) -> EquityCandleRepairBatch:
+    """Aggregate ordered raw trades for fragmented candle minutes.
+
+    Args:
+        fragmented_keys: Candle minute keys with more than one live-synthesized
+            SCD2 version.
+        trades: Kraken Equities trades ordered by instrument, event time, and
+            database id.
+
+    Returns:
+        Corrected one-minute candle rows derived only from raw trades whose
+        event-time minute is in ``fragmented_keys``, plus the count of
+        detected fragmented minutes that have no raw trades to rebuild from.
+    """
+    accumulators: dict[_EquityRepairKey, _EquityTradeCandleAccumulator] = {}
+    for trade in trades:
+        open_at = _floor_to_utc_minute(trade.executed_at)
+        key = (trade.instrument_public_id, open_at)
+        if key not in fragmented_keys:
+            continue
+        accumulator = accumulators.get(key)
+        if accumulator is None:
+            accumulators[key] = _new_equity_trade_candle_accumulator(trade, open_at)
+            continue
+        _add_equity_trade_to_accumulator(accumulator, trade)
+    return EquityCandleRepairBatch(
+        repairs=[
+            _equity_trade_accumulator_to_repair(accumulator)
+            for accumulator in accumulators.values()
+        ],
+        unreconstructable_minutes=len(fragmented_keys) - len(accumulators),
+    )
+
+
+def _floor_to_utc_minute(value: datetime) -> datetime:
+    """Floor a datetime to its UTC minute bucket.
+
+    Args:
+        value: Event-time datetime to normalize.
+
+    Returns:
+        UTC-aware datetime with seconds and microseconds cleared.
+    """
+    aware_value = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return aware_value.astimezone(UTC).replace(second=0, microsecond=0)
+
+
+def _new_equity_trade_candle_accumulator(
+    trade: _EquityTradeForRepair,
+    open_at: datetime,
+) -> _EquityTradeCandleAccumulator:
+    """Start a candle accumulator from the first event-time trade.
+
+    Args:
+        trade: First ordered trade for the minute.
+        open_at: UTC minute bucket for the trade.
+
+    Returns:
+        New accumulator seeded with the trade values.
+    """
+    return _EquityTradeCandleAccumulator(
+        instrument_public_id=trade.instrument_public_id,
+        open_at=open_at,
+        open=trade.price,
+        high=trade.price,
+        low=trade.price,
+        close=trade.price,
+        volume=trade.size,
+        weighted_value=trade.price * trade.size,
+        trades=1,
+    )
+
+
+def _add_equity_trade_to_accumulator(
+    accumulator: _EquityTradeCandleAccumulator,
+    trade: _EquityTradeForRepair,
+) -> None:
+    """Merge the next event-time-ordered trade into a candle accumulator.
+
+    Args:
+        accumulator: Mutable candle accumulator to update.
+        trade: Next trade for the same instrument and minute.
+    """
+    accumulator.high = max(accumulator.high, trade.price)
+    accumulator.low = min(accumulator.low, trade.price)
+    accumulator.close = trade.price
+    accumulator.volume += trade.size
+    accumulator.weighted_value += trade.price * trade.size
+    accumulator.trades += 1
+
+
+def _equity_trade_accumulator_to_repair(
+    accumulator: _EquityTradeCandleAccumulator,
+) -> EquityCandleRepairRow:
+    """Convert an accumulated trade-derived candle into a repair row.
+
+    Args:
+        accumulator: Completed one-minute trade accumulator.
+
+    Returns:
+        Corrected candle row ready for SCD2 upsert.
+    """
+    return EquityCandleRepairRow(
+        instrument_public_id=accumulator.instrument_public_id,
+        open_at=accumulator.open_at,
+        timeframe=_EQUITY_REPAIR_TIMEFRAME,
+        open=accumulator.open,
+        high=accumulator.high,
+        low=accumulator.low,
+        close=accumulator.close,
+        volume=accumulator.volume,
+        vwap=_equity_trade_vwap(accumulator),
+        trades=accumulator.trades,
+    )
+
+
+def _equity_trade_vwap(accumulator: _EquityTradeCandleAccumulator) -> float | None:
+    """Return volume-weighted trade price when total size is positive.
+
+    Args:
+        accumulator: Completed one-minute trade accumulator.
+
+    Returns:
+        Weighted average price, or ``None`` for zero-size informational fills.
+    """
+    if accumulator.volume <= 0.0:
+        return None
+    return accumulator.weighted_value / accumulator.volume
 
 
 async def close_and_insert(
@@ -4309,6 +4472,36 @@ class Repository(ABC):
         Returns:
             One :class:`MarketDataCoverageRow` per exchange, ordered by
             exchange.
+        """
+        ...
+
+    @abstractmethod
+    async def get_equity_candle_repairs_from_trades(
+        self, *, start: datetime, end: datetime
+    ) -> EquityCandleRepairBatch:
+        """Return raw-trade rebuilt Kraken Equities one-minute candles.
+
+        Finds fragmented live-synthesized ``kraken_equities`` 1m candle
+        minutes in the half-open ``open_at`` range, then rebuilds each
+        detected minute from persisted raw trades using ``executed_at`` as
+        event time. Single-version candle minutes and backfill rows whose
+        ``trades`` value is ``NULL`` do not become repair candidates.
+        Detected fragmented minutes without any raw trades cannot be
+        rebuilt and are reported through the batch's
+        ``unreconstructable_minutes`` counter instead of being silently
+        dropped. Callers must pass minute-aligned bounds: a mid-minute
+        ``end`` would admit a candle via ``open_at < end`` while truncating
+        that minute's trades. :class:`EquityCandleRepairService` floors its
+        window and chunk boundaries to whole minutes before calling this
+        method.
+
+        Args:
+            start: Inclusive UTC ``open_at`` lower bound.
+            end: Exclusive UTC ``open_at`` upper bound.
+
+        Returns:
+            Batch of corrected candle rows ordered by instrument and
+            event-time minute, plus the unreconstructable-minute count.
         """
         ...
 
@@ -15211,6 +15404,95 @@ class SQLAlchemyRepository(Repository):
                 )
                 archivable = int((await s.execute(archivable_stmt)).scalar_one())
             return TableCounters(total=total, current=current, closed=closed, archivable=archivable)
+
+    async def get_equity_candle_repairs_from_trades(
+        self, *, start: datetime, end: datetime
+    ) -> EquityCandleRepairBatch:
+        """Return raw-trade rebuilt bars for fragmented equities 1m minutes.
+
+        The SQL portion stays deliberately portable. It first detects
+        fragmented live-synthesized candle minutes with a plain
+        ``GROUP BY``/``HAVING count(*) > 1`` query, then loads raw Kraken
+        Equities trades ordered by event time. Minute flooring, filtering to
+        detected keys, and OHLCV/VWAP reconstruction happen in Python so the
+        same implementation runs under SQLite tests and PostgreSQL. Detected
+        minutes with no raw trades in the window are counted as
+        unreconstructable in the returned batch rather than silently dropped.
+
+        Args:
+            start: Inclusive UTC ``open_at`` lower bound.
+            end: Exclusive UTC ``open_at`` upper bound.
+
+        Returns:
+            Batch of corrected candle rows for fragmented minutes that have
+            persisted raw trades in the requested event-time range, plus the
+            count of detected minutes that have none.
+        """
+        candle_instrument_exists = (
+            select(Instrument.id)
+            .where(
+                Instrument.public_id == Candle.instrument_public_id,
+                Instrument.exchange == _KRAKEN_EQUITIES_EXCHANGE,
+            )
+            .exists()
+        )
+        fragmented_statement = (
+            select(
+                Candle.instrument_public_id,
+                Candle.open_at,
+            )
+            .where(
+                candle_instrument_exists,
+                Candle.timeframe == _EQUITY_REPAIR_TIMEFRAME,
+                Candle.open_at >= start,
+                Candle.open_at < end,
+                Candle.trades.is_not(None),
+            )
+            .group_by(Candle.instrument_public_id, Candle.open_at)
+            .having(func.count() > 1)
+            .order_by(Candle.instrument_public_id, Candle.open_at)
+        )
+        trade_instrument_exists = (
+            select(Instrument.id)
+            .where(
+                Instrument.public_id == Trade.instrument_public_id,
+                Instrument.exchange == _KRAKEN_EQUITIES_EXCHANGE,
+            )
+            .exists()
+        )
+        trade_statement = (
+            select(
+                Trade.instrument_public_id,
+                Trade.executed_at,
+                Trade.price,
+                Trade.size,
+            )
+            .where(
+                trade_instrument_exists,
+                Trade.executed_at.is_not(None),
+                Trade.executed_at >= start,
+                Trade.executed_at < end,
+            )
+            .order_by(Trade.instrument_public_id, Trade.executed_at, Trade.id)
+        )
+        async with self.session() as s:
+            fragmented_result = await s.execute(fragmented_statement)
+            fragmented_keys = {
+                (row.instrument_public_id, row.open_at) for row in fragmented_result.all()
+            }
+            if not fragmented_keys:
+                return EquityCandleRepairBatch(repairs=[], unreconstructable_minutes=0)
+            trade_result = await s.execute(trade_statement)
+            trades = [
+                _EquityTradeForRepair(
+                    instrument_public_id=row.instrument_public_id,
+                    executed_at=cast(datetime, row.executed_at),
+                    price=float(row.price),
+                    size=float(row.size),
+                )
+                for row in trade_result.all()
+            ]
+        return _aggregate_equity_trade_repairs(fragmented_keys, trades)
 
     async def get_market_data_coverage(
         self,
