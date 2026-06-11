@@ -480,6 +480,17 @@ order = OrderRequestData(
 )
 ```
 
+`order_type` carries the core order-type vocabulary — `market`, `limit`,
+`stop`, or `stop_limit` (the `OrderType` Literal). Venue wire spellings
+such as `stop-loss` / `stop-loss-limit` never appear in
+`orders.commands.*` or `orders.events.*` payloads: the executor
+translates to each venue's wire contract at the venue boundary,
+immediately before the exchange call. `stop_price` is the trigger
+price, required for `stop` / `stop_limit` orders — before any venue
+send, the executor refuses a stop-typed request without a trigger (and
+any order type outside the core vocabulary), publishing a definitive
+`rejected` and recording a durable `order_rejected` venue event.
+
 ### ExecutionData
 
 ```python

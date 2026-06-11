@@ -440,6 +440,49 @@ on the venue — no manual terminal injection is needed, and the 60s
 reconciliation loop converges the pending entry independently once
 the venue answers.
 
+### Stop orders — venue support and pre-send rejects
+
+Order commands speak the core order-type vocabulary end-to-end —
+`market`, `limit`, `stop`, `stop_limit` — across REST, MCP, the
+durable `trade_commands` rows (a stop's trigger is the
+`trade_commands.stop_price` column), and the outbox frames. Venue wire
+names (`stop-loss`, `stop-loss-limit`) appear only at the executor's
+venue boundary, where the request is translated immediately before the
+exchange call — never on the bus or in `trade_commands`. Older
+execution plans may still carry the legacy `venue_order_type` wire
+value in their params; readers normalize it back to the core
+vocabulary. Venue support:
+
+- **Kraken Spot** and **Kraken Futures** accept `stop` and
+  `stop_limit`: the trigger comes from `stop_price`; once triggered,
+  `stop` executes at market and `stop_limit` places a limit order at
+  the command's `price`.
+- **Walutomat** (its FX market API has no stop orders) and **paper
+  trading** (no trigger simulation — a stop would fill immediately,
+  misrepresenting the protective semantics) reject every stop-typed
+  submit.
+
+A stop-typed submit that cannot be sent whole is rejected PRE-SEND:
+the failure is provably-not-placed, so it takes the definitive-reject
+disposition (REJECTED published, durable `order_rejected` venue event,
+engine in-flight intent released) — never an UNKNOWN park, never a
+venue round-trip. The pre-send gates are:
+
+- an order type with no venue wire mapping (vocabulary error);
+- `stop` / `stop_limit` with no `stop_price`;
+- `stop_limit` with no `price` (the limit leg) on the Kraken venues;
+- any stop on Walutomat or paper.
+
+`POST /api/orders` and the MCP `submit_manual_order` tool refuse the
+same malformed shapes up front — unknown `order_type`,
+`limit`/`stop_limit` without `price`, `stop`/`stop_limit` without
+`stop_price` — before any command row is persisted (HTTP 422 on REST;
+the same evaluator rule surfaces as a tool error on MCP). An
+executor-side pre-send stop rejection in the logs
+(`Error processing order ...` followed by the REJECTED publish) is
+therefore safe to act on: nothing reached the venue, engine intent is
+released, and the command can be corrected and resubmitted.
+
 ### Duplicate-dispatch guard and dispatch TTL
 
 Two executor/outbox gates close the remaining order-flow loss windows:

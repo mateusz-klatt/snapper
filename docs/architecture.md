@@ -512,12 +512,13 @@ Authentication system:
 ### MCP (`src/snapper/mcp/`)
 
 Model Context Protocol server mounted at `/api/mcp` as a Starlette
-sub-application. Exposes read/query tools (`tools.py`) consumed by AI
-delegates over Streamable HTTP. The mount re-applies its own middleware
-stack: feature-flag gating, bearer auth (`auth.py`), and per-principal
-rate limiting (`rate_limiting.py`); each tool handler runs output
-sanitization (`output_sanitizer.py`) and returns a structured error
-envelope (`error_envelope.py`). See
+sub-application. Exposes read/query tools plus permission-gated order
+actions (`submit_manual_order`, `cancel_order`) in `tools.py`, consumed
+by AI delegates over Streamable HTTP. The mount re-applies its own
+middleware stack: feature-flag gating, bearer auth (`auth.py`), and
+per-principal rate limiting (`rate_limiting.py`); each tool handler
+runs output sanitization (`output_sanitizer.py`) and returns a
+structured error envelope (`error_envelope.py`). See
 [ai-integration.md](ai-integration.md) for the delegate flow and the
 `@mateusz-klatt/snapper-mcp` client plugin.
 
@@ -742,6 +743,21 @@ Four order-safety layers sit on the dispatch path:
   publishes REJECTED with reason `circuit_breaker_open` so the engine
   releases intent. Any step failing parks the entry and the recon loop
   reruns the sequence until it completes.
+
+The executor also gates order-type vocabulary before any venue send.
+The durable command plane (`trade_commands`, `OrderRequestData`)
+speaks the CORE vocabulary (`market`/`limit`/`stop`/`stop_limit`);
+one shared venue-request builder
+(`_exchange_order_request_from_core` in
+`messaging/executors/base.py`, used by both the submit path and
+ghost-adoption row repair) translates it to the venue wire
+vocabulary (`stop-loss`/`stop-loss-limit` for the stop types). A
+command whose order type has no wire mapping, or a stop-typed
+command without a `stop_price` trigger, raises inside the builder —
+before the network call, so the order is provably not placed — and
+the submit path's definitive-reject branch publishes REJECTED and
+writes the durable `order_rejected` venue event instead of letting a
+half-formed frame reach the venue.
 
 Spot (Kraken) `create_order` is additionally excluded from blind
 network retry — an ambiguous network failure may have placed the
@@ -1099,7 +1115,7 @@ plus the `stop_price` trigger for stop types; translation to the venue
 wire vocabulary (`stop-loss`/`stop-loss-limit`) happens only at the
 executor's venue boundary. Cancel/flatten readers resolve the order type
 through `core_order_type_from_plan_params`, which still normalizes the
-legacy `venue_order_type` param written by pre-fix plans. The
+legacy `venue_order_type` param carried by older plans. The
 `OutboxDispatcher` inside `TraderCoordinator` publishes the command as
 `OrderRequestData` on the `orders.commands.{ex}.{instr}.submit` topic.
 
