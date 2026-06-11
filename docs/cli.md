@@ -739,7 +739,7 @@ snapper archive [OPTIONS]
 | `--table` | TEXT | `candles` | Table to archive. Accepts `candles`, `candles-audit`, any event table (`ticks`, `trades`, `signals`, `executions`, `telemetry`, `control`), or any state table (see the section intro for the full list). |
 | `--exchange` | TEXT | None | Exchange filter (e.g. `polygon`, `kraken`) |
 | `--symbol` | TEXT | None | Native symbol filter (e.g. `BTC-USD`), resolved to stable archive_symbol |
-| `--timeframe` | TEXT | `1m` | Candle timeframe (`1m`, `5m`, `1h`, `1d`) — candles only |
+| `--timeframe` | TEXT | `1m` | Candle timeframe (`1m`, `5m`, `1h`, `1d`) — `candles` and `candles-audit` only |
 | `--day` | str | None | Single day to archive (`YYYY-MM-DD`; parsed in the handler) |
 | `--from` | str | None | Start of date range (`YYYY-MM-DD`; parsed in the handler) |
 | `--to` | str | None | End of date range (`YYYY-MM-DD`; parsed in the handler) |

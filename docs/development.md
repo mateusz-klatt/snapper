@@ -50,12 +50,13 @@ Executes the complete quality gate:
 6.  Canonical `__main__` guards
 7.  Empty `__init__.py` files
 8.  No forbidden temporal mutations
-9.  Egress compose safety check (`check-egress-compose`)
-10. No pragma/noqa/ignore exclusions
-11. Vendor-neutrality check (`check-vendor-neutral`)
-12. Pydantic-only FastAPI I/O (`check-pydantic-routes`)
-13. Tests with 100% coverage
-14. Frontend (`ui-typecheck`, ESLint, Prettier, dead code, i18n checks, tests with coverage)
+9.  Vendor-neutrality check (`check-vendor-neutral`)
+10. Pydantic-only FastAPI I/O (`check-pydantic-routes`)
+11. Egress compose safety check (`check-egress-compose`)
+12. Frontend checks (`ui-typecheck`, ESLint, Prettier, dead code, i18n checks)
+13. No pragma/noqa/ignore exclusions
+14. Backend tests with 100% coverage
+15. Frontend tests with coverage
 
 ### Individual Steps
 

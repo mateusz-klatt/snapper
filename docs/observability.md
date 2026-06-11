@@ -139,9 +139,9 @@ the leading indicator of a thread leak or fd leak.
 
 | Field                       | Type        | Description |
 |-----------------------------|-------------|-------------|
-| `aiosqlite_live_connections`| int         | `len(_live_aiosqlite_connections)` — atomic read; each entry corresponds to one OS thread under NullPool. |
-| `pool_size`                 | int \| null | Reserved for future queue-pool instrumentation. Currently always `null` in Cluster A; will populate once the SQLAlchemy pool reflection helper lands alongside the `DB_POOL_MODE=queue` rollout. |
-| `pool_checked_out`          | int \| null | Reserved for future queue-pool instrumentation. Currently always `null` in Cluster A. |
+| `aiosqlite_live_connections`| int         | `len(_live_aiosqlite_connections)` — atomic read; each live aiosqlite connection runs its own worker OS thread. |
+| `pool_size`                 | int \| null | Reserved for future pool instrumentation. Currently always `null`; the sampler does not yet reflect the SQLAlchemy queue pool. |
+| `pool_checked_out`          | int \| null | Reserved for future pool instrumentation. Currently always `null`. |
 
 ### Top-level flags
 
@@ -255,7 +255,7 @@ curl -fsS \
 The ring buffer is per-process. With `N>1` instances each hosts its own
 buffer; aggregation across instances is out of scope for Cluster A.
 Operators who need cross-instance views should poll each instance
-directly until a downstream collector lands (Cluster B/C territory).
+directly; no cross-instance collector exists.
 
 # Retention
 
@@ -280,8 +280,8 @@ The route returns HTTP `503` with one of three details:
 
 - `"retention scheduler not available"` — singleton failed to start
   at lifespan time (the lifespan hook leaves
-  `app.state.retention_scheduler` absent so the route falls through
-  to 503).
+  `app.state.retention_scheduler` as `None` so the route falls
+  through to 503).
 - `"retention scheduler disabled"` — the operator set
   `RETENTION_DISABLED=true`; the scheduler is parked.
 - `"retention scheduler not yet run"` — eager run did not populate
