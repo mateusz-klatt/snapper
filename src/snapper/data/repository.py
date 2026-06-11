@@ -128,6 +128,7 @@ from snapper.data.models import Execution
 from snapper.data.models import ExecutionPlan
 from snapper.data.models import ExecutionPlanCheckpoint
 from snapper.data.models import ExecutionPlanDecision
+from snapper.data.models import ExecutionPlanDecisionOutbox
 from snapper.data.models import FundingRate
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentFeedHealth
@@ -185,6 +186,8 @@ from snapper.data.repository_types import DeviceAlertPrefUpsertRow
 from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import ExecutionPlanCheckpointRow
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
+from snapper.data.repository_types import ExecutionPlanDecisionOutboxInsertRow
+from snapper.data.repository_types import ExecutionPlanDecisionOutboxRow
 from snapper.data.repository_types import ExecutionPlanDecisionRow
 from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import ExecutionPlanRow
@@ -2179,6 +2182,7 @@ class Repository(ABC):
         bus_time: datetime,
         session_id: str,
         sequence_id: int,
+        outbox_event: ExecutionPlanDecisionOutboxInsertRow | None = None,
     ) -> str:
         """Insert a decision row for audit trail.
 
@@ -2187,6 +2191,8 @@ class Repository(ABC):
             bus_time: Timestamp for SCD2 operations.
             session_id: Producer session identifier.
             sequence_id: Monotonic sequence counter.
+            outbox_event: Optional durable publish event inserted in
+                the same transaction as the decision row.
 
         Returns:
             public_id of the new decision row.
@@ -2214,6 +2220,61 @@ class Repository(ABC):
         Returns:
             Decision rows ordered by decided_at DESC.
         """
+        ...
+
+    @abstractmethod
+    async def list_execution_plan_decision_outbox_ready(
+        self,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[ExecutionPlanDecisionOutboxRow]:
+        """Return pending plan-decision publish rows ready for retry.
+
+        Args:
+            now: Retry eligibility timestamp.
+            limit: Maximum number of rows to return.
+
+        Returns:
+            Active pending outbox rows ordered by retry time and creation time.
+        """
+        ...
+
+    @abstractmethod
+    async def mark_execution_plan_decision_outbox_sent(
+        self,
+        public_id: str,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> bool:
+        """Mark a pending plan-decision outbox row as sent."""
+        ...
+
+    @abstractmethod
+    async def schedule_execution_plan_decision_outbox_retry(
+        self,
+        public_id: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+        next_attempt_at: datetime,
+        error_reason: str,
+    ) -> bool:
+        """Record a failed publish attempt and schedule the next retry."""
+        ...
+
+    @abstractmethod
+    async def mark_execution_plan_decision_outbox_failed(
+        self,
+        public_id: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+        error_reason: str,
+    ) -> bool:
+        """Mark a pending plan-decision outbox row as permanently failed."""
         ...
 
     @abstractmethod
@@ -12213,10 +12274,13 @@ class SQLAlchemyRepository(Repository):
         bus_time: datetime,
         session_id: str,
         sequence_id: int,
+        outbox_event: ExecutionPlanDecisionOutboxInsertRow | None = None,
     ) -> str:
         """Insert a decision row for audit trail."""
+        decision_public_id = row.get("public_id") or str(uuid7())
         async with self.session() as s:
             decision = ExecutionPlanDecision(
+                public_id=decision_public_id,
                 plan_public_id=row["plan_public_id"],
                 decision_type=row["decision_type"],
                 decided_at=row["decided_at"],
@@ -12232,9 +12296,29 @@ class SQLAlchemyRepository(Repository):
                 timestamp=bus_time,
             )
             s.add(decision)
+            if outbox_event is not None:
+                if outbox_event["decision_public_id"] != decision_public_id:
+                    raise ValueError("decision outbox row must reference the inserted decision")
+                outbox = ExecutionPlanDecisionOutbox(
+                    public_id=outbox_event["public_id"],
+                    decision_public_id=outbox_event["decision_public_id"],
+                    plan_public_id=outbox_event["plan_public_id"],
+                    topic=outbox_event["topic"],
+                    payload_json=outbox_event["payload_json"],
+                    status=outbox_event["status"],
+                    attempt_count=outbox_event["attempt_count"],
+                    last_attempt_at=outbox_event["last_attempt_at"],
+                    next_attempt_at=outbox_event["next_attempt_at"],
+                    sent_at=outbox_event["sent_at"],
+                    error_reason=outbox_event["error_reason"],
+                    created_at=outbox_event["created_at"],
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                    timestamp=bus_time,
+                )
+                s.add(outbox)
             await s.commit()
-            await s.refresh(decision)
-            return decision.public_id
+            return decision_public_id
 
     async def list_execution_plan_decisions(
         self,
@@ -12279,6 +12363,175 @@ class SQLAlchemyRepository(Repository):
                 )
                 for d in result.scalars().all()
             ]
+
+    @staticmethod
+    def _execution_plan_decision_outbox_row_from(
+        row: ExecutionPlanDecisionOutbox,
+    ) -> ExecutionPlanDecisionOutboxRow:
+        """Project an ORM outbox row into the typed repository contract."""
+        return ExecutionPlanDecisionOutboxRow(
+            public_id=row.public_id,
+            timestamp=row.timestamp,
+            session_id=row.session_id,
+            sequence_id=row.sequence_id,
+            decision_public_id=row.decision_public_id,
+            plan_public_id=row.plan_public_id,
+            topic=row.topic,
+            payload_json=row.payload_json,
+            status=row.status,
+            attempt_count=row.attempt_count,
+            last_attempt_at=row.last_attempt_at,
+            next_attempt_at=row.next_attempt_at,
+            sent_at=row.sent_at,
+            error_reason=row.error_reason,
+            created_at=row.created_at,
+        )
+
+    async def list_execution_plan_decision_outbox_ready(
+        self,
+        now: datetime,
+        limit: int = 100,
+    ) -> list[ExecutionPlanDecisionOutboxRow]:
+        """Return pending plan-decision outbox rows whose retry time has arrived."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(ExecutionPlanDecisionOutbox)
+                .where(
+                    ExecutionPlanDecisionOutbox.status == "pending",
+                    ExecutionPlanDecisionOutbox.known_to == KNOWN_TO_MAX,
+                    or_(
+                        ExecutionPlanDecisionOutbox.next_attempt_at.is_(None),
+                        ExecutionPlanDecisionOutbox.next_attempt_at <= now,
+                    ),
+                )
+                .order_by(
+                    ExecutionPlanDecisionOutbox.next_attempt_at.asc().nullsfirst(),
+                    ExecutionPlanDecisionOutbox.created_at.asc(),
+                    ExecutionPlanDecisionOutbox.id.asc(),
+                )
+                .limit(limit)
+            )
+            return [
+                self._execution_plan_decision_outbox_row_from(row) for row in result.scalars().all()
+            ]
+
+    async def _transition_execution_plan_decision_outbox(
+        self,
+        public_id: str,
+        *,
+        new_status: str,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+        next_attempt_at: datetime | None,
+        sent_at: datetime | None,
+        error_reason: str | None,
+    ) -> bool:
+        """SCD2-transition one pending decision outbox row."""
+        async with self.session() as s:
+            existing = (
+                await s.execute(
+                    select(ExecutionPlanDecisionOutbox)
+                    .where(
+                        ExecutionPlanDecisionOutbox.public_id == public_id,
+                        ExecutionPlanDecisionOutbox.known_to == KNOWN_TO_MAX,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if existing is None or existing.status != "pending":
+                return False
+            await s.execute(
+                update(ExecutionPlanDecisionOutbox)
+                .where(
+                    ExecutionPlanDecisionOutbox.id == existing.id,
+                    ExecutionPlanDecisionOutbox.known_to == KNOWN_TO_MAX,
+                    ExecutionPlanDecisionOutbox.status == "pending",
+                )
+                .values(known_to=transition_at)
+            )
+            successor = ExecutionPlanDecisionOutbox(
+                public_id=existing.public_id,
+                decision_public_id=existing.decision_public_id,
+                plan_public_id=existing.plan_public_id,
+                topic=existing.topic,
+                payload_json=existing.payload_json,
+                status=new_status,
+                attempt_count=existing.attempt_count + 1,
+                last_attempt_at=transition_at,
+                next_attempt_at=next_attempt_at,
+                sent_at=sent_at,
+                error_reason=error_reason,
+                created_at=existing.created_at,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=transition_at,
+            )
+            s.add(successor)
+            await s.commit()
+            return True
+
+    async def mark_execution_plan_decision_outbox_sent(
+        self,
+        public_id: str,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> bool:
+        """Mark a pending plan-decision outbox row as sent."""
+        return await self._transition_execution_plan_decision_outbox(
+            public_id,
+            new_status="sent",
+            transition_at=transition_at,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            next_attempt_at=None,
+            sent_at=transition_at,
+            error_reason=None,
+        )
+
+    async def schedule_execution_plan_decision_outbox_retry(
+        self,
+        public_id: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+        next_attempt_at: datetime,
+        error_reason: str,
+    ) -> bool:
+        """Record a failed plan-decision publish and schedule retry."""
+        return await self._transition_execution_plan_decision_outbox(
+            public_id,
+            new_status="pending",
+            transition_at=transition_at,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            next_attempt_at=next_attempt_at,
+            sent_at=None,
+            error_reason=error_reason[:512],
+        )
+
+    async def mark_execution_plan_decision_outbox_failed(
+        self,
+        public_id: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+        error_reason: str,
+    ) -> bool:
+        """Mark a pending plan-decision outbox row as permanently failed."""
+        return await self._transition_execution_plan_decision_outbox(
+            public_id,
+            new_status="failed",
+            transition_at=transition_at,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            next_attempt_at=None,
+            sent_at=None,
+            error_reason=error_reason[:512],
+        )
 
     async def revise_execution_plan_params(
         self,

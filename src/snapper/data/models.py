@@ -170,6 +170,7 @@ __all__ = [
     "ExecutionPlan",
     "ExecutionPlanCheckpoint",
     "ExecutionPlanDecision",
+    "ExecutionPlanDecisionOutbox",
     "PositionCycle",
     "UserTradingCaps",
     "UserActiveToken",
@@ -2134,6 +2135,58 @@ class ExecutionPlanDecision(TemporalMixin, Base):
     source_surface: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default="strategy"
     )
+
+
+class ExecutionPlanDecisionOutbox(TemporalMixin, Base):
+    """Durable delivery state for ``plans.decisions.*`` event fanout.
+
+    The decision audit row remains the source of truth, while this table
+    tracks whether the corresponding ZMQ frame has reached the broker.
+    Status transitions are SCD2-versioned so retry history stays
+    inspectable and concurrent drainers can race on the active row
+    without producing multiple active successors.
+    """
+
+    __tablename__ = "execution_plan_decision_outbox"
+    __table_args__ = (
+        Index(
+            "ix_epd_outbox_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_epd_outbox_decision_public_id",
+            "decision_public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_epd_outbox_ready",
+            "next_attempt_at",
+            "created_at",
+            sqlite_where=text("known_to = '9999-12-31 23:59:59.000000' AND status = 'pending'"),
+            postgresql_where=text("known_to = '9999-12-31T23:59:59+00:00' AND status = 'pending'"),
+        ),
+        Index("ix_epd_outbox_plan_public_id", "plan_public_id"),
+        CheckConstraint(
+            "status IN ('pending', 'sent', 'failed')",
+            name="ck_epd_outbox_status",
+        ),
+    )
+    decision_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    plan_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    topic: Mapped[str] = mapped_column(String(256), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_attempt_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    error_reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
 
 
 class PositionCycle(TemporalMixin, Base):

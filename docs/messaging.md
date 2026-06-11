@@ -204,9 +204,12 @@ schema flows through automatically.
 ### Plan Decisions
 
 Bracket / trailing-stop / execution-plan decisions, emitted by the
-`PlanExecutorService` immediately after each `ExecutionPlanDecision`
-SCD2 insert. The notify sidecar subscribes to turn stop-loss / take-profit
-fires into iOS pushes.
+`PlanExecutorService` through a durable outbox written in the same
+transaction as each `ExecutionPlanDecision` SCD2 insert. The service
+attempts the ZMQ publish immediately, marks the outbox row `sent` after
+success, and retries pending rows with exponential backoff from a
+background drain loop after broker outages. The notify sidecar subscribes
+to turn stop-loss / take-profit fires into iOS pushes.
 
 | Topic | Description |
 | ----- | ----------- |

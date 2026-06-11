@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 from typing import cast
@@ -43,6 +44,8 @@ from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
+from snapper.data.repository_types import ExecutionPlanDecisionOutboxInsertRow
+from snapper.data.repository_types import ExecutionPlanDecisionOutboxRow
 from snapper.data.repository_types import ExecutionPlanRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -66,6 +69,12 @@ _EVALUATOR_REGISTRY: dict[str, type[PlanEvaluator]] = {
 
 _CHECKPOINT_INTERVAL_S = 10.0
 _SLOW_JOINER_STABILIZATION_S = 0.5
+_DECISION_OUTBOX_RETRY_INTERVAL_S = 30.0
+_DECISION_OUTBOX_BATCH_SIZE = 100
+_DECISION_OUTBOX_GIVE_UP_AFTER_ATTEMPTS = 3
+_DECISION_OUTBOX_BACKOFF_BASE_S = 30.0
+_DECISION_OUTBOX_BACKOFF_CAP_S = 300.0
+_DECISION_OUTBOX_STREAM = "plan_decisions_outbox"
 _TERMINAL_STATUSES: frozenset[str] = frozenset(
     {
         ExecutionPlanStatusEnum.COMPLETED,
@@ -74,6 +83,13 @@ _TERMINAL_STATUSES: frozenset[str] = frozenset(
         ExecutionPlanStatusEnum.EXPIRED,
     }
 )
+
+
+def _decision_outbox_backoff_seconds(attempt_number: int) -> float:
+    """Return capped exponential backoff for a failed decision publish attempt."""
+    exp = max(attempt_number - 1, 0)
+    scaled: float = _DECISION_OUTBOX_BACKOFF_BASE_S * (2**exp)
+    return min(scaled, _DECISION_OUTBOX_BACKOFF_CAP_S)
 
 
 @register_process(
@@ -132,6 +148,7 @@ class PlanExecutorService(RegisterableProcess):
         self._subscriber: ValidatedSubscriber | None = None
         self._publisher: ValidatedPublisher | None = None
         self._caps_enforcer = caps_enforcer
+        self._decision_outbox_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         """Start the plan executor: set up subscriber, recover plans, run loops.
@@ -150,6 +167,8 @@ class PlanExecutorService(RegisterableProcess):
             self._caps_enforcer = TradingCapsEnforcer(repository=self.repository, pricing=pricing)
         self._setup_subscriber()
         self._setup_publisher()
+        await self._drain_decision_outbox_once()
+        self._start_decision_outbox_drainer()
         if self._subscriber is not None:
             await asyncio.sleep(_SLOW_JOINER_STABILIZATION_S)
         await self._recover_plans()
@@ -158,11 +177,15 @@ class PlanExecutorService(RegisterableProcess):
             "PlanExecutorService started with {} active plans",
             len(self.plans),
         )
-        await self._run_loop()
+        try:
+            await self._run_loop()
+        finally:
+            await self._stop_decision_outbox_drainer()
 
     async def stop(self) -> None:
         """Gracefully stop the plan executor."""
         self._running = False
+        await self._stop_decision_outbox_drainer()
         if self._subscriber is not None:
             with contextlib.suppress(Exception):
                 self._subscriber.close()
@@ -235,6 +258,169 @@ class PlanExecutorService(RegisterableProcess):
             raise
         self._publisher = ValidatedPublisher(raw_pub_socket)
         logger.info("PlanExecutorService: connected publisher to broker {}", broker_addr)
+
+    def _start_decision_outbox_drainer(self) -> None:
+        """Start the background decision outbox retry loop when publishing is wired."""
+        if self._publisher is None:
+            return
+        if self._decision_outbox_task is not None and not self._decision_outbox_task.done():
+            return
+        self._decision_outbox_task = asyncio.create_task(self._process_decision_outbox_loop())
+
+    async def _stop_decision_outbox_drainer(self) -> None:
+        """Cancel the decision outbox retry loop if it is running."""
+        task = self._decision_outbox_task
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._decision_outbox_task = None
+
+    async def _process_decision_outbox_loop(self) -> None:
+        """Retry pending ``plans.decisions.*`` outbox rows until cancelled."""
+        while True:
+            await asyncio.sleep(_DECISION_OUTBOX_RETRY_INTERVAL_S)
+            await self._drain_decision_outbox_once()
+
+    async def _drain_decision_outbox_once(self) -> None:
+        """Publish one batch of retry-ready plan-decision outbox rows."""
+        if self._publisher is None:
+            return
+        now = datetime.now(UTC)
+        try:
+            rows = await self.repository.list_execution_plan_decision_outbox_ready(
+                now,
+                limit=_DECISION_OUTBOX_BATCH_SIZE,
+            )
+        except AttributeError:
+            return
+        except Exception as exc:
+            logger.warning("Plan decision outbox drain read failed: {}", exc)
+            return
+        for row in rows:
+            await self._publish_decision_outbox_row(row)
+
+    async def _publish_decision_outbox_row(
+        self,
+        row: ExecutionPlanDecisionOutboxRow,
+    ) -> None:
+        """Publish one outbox row and transition it to sent or retry/failed."""
+        if self._publisher is None:
+            return
+        try:
+            await self._publisher.send_multipart(
+                topic=row["topic"],
+                payload=row["payload_json"].encode("utf-8"),
+            )
+        except Exception as exc:
+            await self._schedule_decision_outbox_retry(
+                public_id=row["public_id"],
+                decision_public_id=row["decision_public_id"],
+                plan_public_id=row["plan_public_id"],
+                current_attempt_count=row["attempt_count"],
+                error_reason=str(exc),
+            )
+            return
+        await self._mark_decision_outbox_sent(
+            public_id=row["public_id"],
+            decision_public_id=row["decision_public_id"],
+            plan_public_id=row["plan_public_id"],
+        )
+
+    async def _mark_decision_outbox_sent(
+        self,
+        *,
+        public_id: str,
+        decision_public_id: str,
+        plan_public_id: str,
+    ) -> None:
+        """Mark a decision outbox row sent, logging but not raising failures."""
+        now = datetime.now(UTC)
+        try:
+            applied = await self.repository.mark_execution_plan_decision_outbox_sent(
+                public_id=public_id,
+                transition_at=now,
+                session_id=self.tracker.session_id,
+                sequence_id=self.tracker.next_sequence(_DECISION_OUTBOX_STREAM),
+            )
+        except AttributeError:
+            return
+        except Exception as exc:
+            logger.warning(
+                "failed to mark plans.decisions outbox sent"
+                " plan_public_id={plan} decision_public_id={dec} outbox_public_id={outbox}"
+                " err={err}",
+                plan=plan_public_id,
+                dec=decision_public_id,
+                outbox=public_id,
+                err=exc,
+            )
+            return
+        if not applied:
+            logger.info(
+                "plans.decisions outbox sent transition skipped"
+                " plan_public_id={plan} decision_public_id={dec} outbox_public_id={outbox}",
+                plan=plan_public_id,
+                dec=decision_public_id,
+                outbox=public_id,
+            )
+
+    async def _schedule_decision_outbox_retry(
+        self,
+        *,
+        public_id: str,
+        decision_public_id: str,
+        plan_public_id: str,
+        current_attempt_count: int,
+        error_reason: str,
+    ) -> None:
+        """Schedule retry or terminal failure for a failed decision outbox publish."""
+        now = datetime.now(UTC)
+        attempt_number = current_attempt_count + 1
+        try:
+            if attempt_number >= _DECISION_OUTBOX_GIVE_UP_AFTER_ATTEMPTS:
+                applied = await self.repository.mark_execution_plan_decision_outbox_failed(
+                    public_id=public_id,
+                    transition_at=now,
+                    session_id=self.tracker.session_id,
+                    sequence_id=self.tracker.next_sequence(_DECISION_OUTBOX_STREAM),
+                    error_reason=error_reason,
+                )
+            else:
+                next_attempt_at = now + timedelta(
+                    seconds=_decision_outbox_backoff_seconds(attempt_number)
+                )
+                applied = await self.repository.schedule_execution_plan_decision_outbox_retry(
+                    public_id=public_id,
+                    transition_at=now,
+                    session_id=self.tracker.session_id,
+                    sequence_id=self.tracker.next_sequence(_DECISION_OUTBOX_STREAM),
+                    next_attempt_at=next_attempt_at,
+                    error_reason=error_reason,
+                )
+        except AttributeError:
+            return
+        except Exception as exc:
+            logger.warning(
+                "failed to update plans.decisions outbox retry state"
+                " plan_public_id={plan} decision_public_id={dec} outbox_public_id={outbox}"
+                " err={err}",
+                plan=plan_public_id,
+                dec=decision_public_id,
+                outbox=public_id,
+                err=exc,
+            )
+            return
+        if not applied:
+            logger.info(
+                "plans.decisions outbox retry transition skipped"
+                " plan_public_id={plan} decision_public_id={dec} outbox_public_id={outbox}",
+                plan=plan_public_id,
+                dec=decision_public_id,
+                outbox=public_id,
+            )
 
     async def _recover_plans(self) -> None:
         """Load all actionable plans from DB and instantiate evaluators.
@@ -836,7 +1022,25 @@ class PlanExecutorService(RegisterableProcess):
             new_status: Optional new plan status if a transition happened.
         """
         now = datetime.now(UTC)
+        decision_public_id = str(uuid7())
+        decision_sequence_id = self.tracker.next_sequence("plan_decisions")
+        decision_topic = plans_decisions_topic(plan_public_id)
+        event = ExecutionPlanDecisionEventData(
+            decision_public_id=decision_public_id,
+            plan_public_id=plan_public_id,
+            decision_type=decision_type,
+            trigger_type=trigger_type,
+            reason=reason,
+            triggered_at=now,
+            session_id=self.tracker.session_id,
+            sequence_id=decision_sequence_id,
+            public_id=str(uuid7()),
+            timestamp=now,
+        )
+        outbox_public_id = str(uuid7())
+        payload = event.publish_to(decision_topic)
         row = ExecutionPlanDecisionInsertRow(
+            public_id=decision_public_id,
             plan_public_id=plan_public_id,
             decision_type=decision_type,
             decided_at=now,
@@ -848,42 +1052,53 @@ class PlanExecutorService(RegisterableProcess):
             decision_importance=importance,
             source_surface="strategy",
         )
+        outbox_event = ExecutionPlanDecisionOutboxInsertRow(
+            public_id=outbox_public_id,
+            decision_public_id=decision_public_id,
+            plan_public_id=plan_public_id,
+            topic=decision_topic,
+            payload_json=payload.decode("utf-8"),
+            status="pending",
+            attempt_count=0,
+            last_attempt_at=None,
+            next_attempt_at=None,
+            sent_at=None,
+            error_reason=None,
+            created_at=now,
+        )
         try:
-            decision_public_id = await self.repository.insert_execution_plan_decision(
+            persisted_decision_public_id = await self.repository.insert_execution_plan_decision(
                 row=row,
                 bus_time=now,
                 session_id=self.tracker.session_id,
-                sequence_id=self.tracker.next_sequence("plan_decisions"),
+                sequence_id=decision_sequence_id,
+                outbox_event=outbox_event,
             )
         except Exception as exc:
             logger.error("Failed to log decision for plan {}: {}", plan_public_id, exc)
             return
         await self._publish_decision_event(
-            decision_public_id=decision_public_id,
+            outbox_public_id=outbox_public_id,
+            decision_public_id=persisted_decision_public_id,
             plan_public_id=plan_public_id,
-            decision_type=decision_type,
-            trigger_type=trigger_type,
-            reason=reason,
-            triggered_at=now,
+            topic=decision_topic,
+            payload=payload,
         )
 
     async def _publish_decision_event(
         self,
         *,
+        outbox_public_id: str,
         decision_public_id: str,
         plan_public_id: str,
-        decision_type: str,
-        trigger_type: str,
-        reason: str,
-        triggered_at: datetime,
+        topic: str,
+        payload: bytes,
     ) -> None:
-        """Best-effort publish of the ``plans.decisions.{plan_public_id}`` event.
+        """Publish a persisted ``plans.decisions.{plan_public_id}`` outbox row.
 
-        DB insert is the source of truth — publish failure logs
-        ``logger.warning`` and returns without raising so the caller
-        (bracket / trailing-stop firing paths) completes normally.
-        Missed publishes are not replayed; a dropped event is only
-        recoverable by reading the decision row from the DB.
+        DB insert plus outbox insert are the source of truth. Publish
+        failure schedules the outbox row for retry and returns without
+        raising so bracket / trailing-stop firing paths complete normally.
 
         Short-circuits when ``self._publisher is None`` (unit-test
         harness that never called ``_setup_publisher`` or environments
@@ -892,22 +1107,9 @@ class PlanExecutorService(RegisterableProcess):
         if self._publisher is None:
             return
         try:
-            event = ExecutionPlanDecisionEventData(
-                decision_public_id=decision_public_id,
-                plan_public_id=plan_public_id,
-                decision_type=decision_type,
-                trigger_type=trigger_type,
-                reason=reason,
-                triggered_at=triggered_at,
-                session_id=self.tracker.session_id,
-                sequence_id=self.tracker.next_sequence("plan_decisions"),
-                public_id=str(uuid7()),
-                timestamp=triggered_at,
-            )
-            decision_topic = plans_decisions_topic(plan_public_id)
             await self._publisher.send_multipart(
-                topic=decision_topic,
-                payload=event.publish_to(decision_topic),
+                topic=topic,
+                payload=payload,
             )
         except Exception as exc:
             logger.warning(
@@ -917,6 +1119,19 @@ class PlanExecutorService(RegisterableProcess):
                 dec=decision_public_id,
                 err=exc,
             )
+            await self._schedule_decision_outbox_retry(
+                public_id=outbox_public_id,
+                decision_public_id=decision_public_id,
+                plan_public_id=plan_public_id,
+                current_attempt_count=0,
+                error_reason=str(exc),
+            )
+            return
+        await self._mark_decision_outbox_sent(
+            public_id=outbox_public_id,
+            decision_public_id=decision_public_id,
+            plan_public_id=plan_public_id,
+        )
 
     async def _check_capabilities(
         self,
