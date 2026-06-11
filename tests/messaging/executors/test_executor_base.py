@@ -6798,11 +6798,41 @@ class TestDuplicateSubmitGuard:
         ex = self._executor(monkeypatch)
         repo = MagicMock(spec=SQLAlchemyRepository)
         repo.has_order_submit_evidence = AsyncMock(return_value=True)
+        repo.has_venue_event = AsyncMock(return_value=False)
         ex.repository = repo
         order = make_order()
         await ex._process_order(order)
         repo.has_order_submit_evidence.assert_awaited_once_with(order.client_order_id)
         ex._publish_order_status.assert_not_awaited()
+        ex._execute_live_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_breaker_evidence_replay_reruns_disposition(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A replay with breaker-open evidence reruns the terminal release.
+
+        Given: Durable evidence whose breaker probe answers True (an
+            executor crashed between the breaker event write and the
+            REJECTED publish — the in-memory retry queue died with it),
+        When: The redispatched frame arrives,
+        Then: Instead of a silent drop the disposition reruns
+            idempotently — no duplicate event write, the command row
+            CAS-es FAILED, and REJECTED publishes so the engine intent
+            releases deterministically; the venue is never touched.
+        """
+        ex = self._executor(monkeypatch)
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.has_order_submit_evidence = AsyncMock(return_value=True)
+        repo.has_venue_event = AsyncMock(return_value=True)
+        repo.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
+        ex.repository = repo
+        ex._record_venue_event = AsyncMock()
+        order = make_order()
+        await ex._process_order(order)
+        ex._record_venue_event.assert_not_awaited()
+        statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
+        assert statuses == ["rejected"]
         ex._execute_live_order.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -8005,6 +8035,8 @@ class TestRecoveryWatermarkSeeding:
         ex: Any = MergedDummyExecutor()
         ex.running = True
         mock_client = AsyncMock()
+        mock_client.get_order_fill_summary = AsyncMock(return_value=None)
+        mock_client.supports_fill_summary = False
         snap = SimpleNamespace(id="ex-1", filled=snap_filled, price=100.0, status=snap_status)
         if snap_status == ExchangeOrderStatusEnum.OPEN:
             mock_client.get_orders = AsyncMock(return_value=[snap])

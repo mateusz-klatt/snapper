@@ -246,8 +246,11 @@ class TradeService:
         """Apply a venue event to the in-memory projection.
 
         Handles all event types: order_accepted, order_rejected,
-        fill_observed, order_terminal, order_submit_unknown. Updates
-        position, command state, cash, and watermark.
+        fill_observed, order_terminal, order_submit_unknown and
+        order_breaker_open (a rejection-equivalent terminal — the live
+        REJECTED publish released engine intent, so replay and
+        checkpoint recovery must converge to the same terminal state).
+        Updates position, command state, cash, and watermark.
 
         Args:
             event: Venue event row to apply. Must contain shard_key,
@@ -263,7 +266,7 @@ class TradeService:
 
         if event_type == "order_accepted":
             self._apply_order_accepted(shard, event)
-        elif event_type == "order_rejected":
+        elif event_type in ("order_rejected", "order_breaker_open"):
             self._apply_order_terminal(shard, event)
         elif event_type == "fill_observed":
             self._apply_fill(shard, event)

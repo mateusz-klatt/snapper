@@ -39,6 +39,7 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
+from snapper.infrastructure.exchanges.contracts import OrderFillSummary
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -671,20 +672,34 @@ class ExchangeClientBase(ABC):
         """
         ...
 
-    async def get_order_fill_vwap(self, order_id: str) -> tuple[float, float] | None:
-        """Return (VWAP, covered quantity) across an order's own fills, or None.
+    supports_fill_summary: bool = False
+    """Whether :meth:`get_order_fill_summary` has a real venue source.
 
-        Fill-gap reconciliation's last-resort price source: when an order
-        snapshot carries no price (a market order whose venue payload also
-        lacks an executed average), the executor asks the venue for the
-        order's OWN fills and uses their quantity-weighted average price —
-        venue truth, never a local approximation (the executor deliberately
-        has no tick feed; see the fill-gap rationale in the executor base).
-        The covered quantity is returned alongside the price because venues
-        typically page their fills: a VWAP computed over a PARTIAL page must
-        never be trusted as the order's average, so the caller compares the
-        coverage against the order's total filled quantity and falls back to
-        the skip when the page does not cover it.
+    The fill-gap reconciler must distinguish "this venue has no
+    per-order fills lookup" (honest no-source — a corrective may emit
+    fee-less) from "the implemented source returned no usable data YET"
+    (fills page lag — the corrective must DEFER, because its stable
+    exec id would freeze a fee-less emission forever). Implementations
+    overriding the summary set this True.
+    """
+
+    async def get_order_fill_summary(self, order_id: str) -> OrderFillSummary | None:
+        """Return a venue-true price/fee aggregate over an order's own fills.
+
+        Fill-gap reconciliation's last-resort price source AND its fee
+        source (#145 P2-5): when an order snapshot carries no price (a
+        market order whose venue payload also lacks an executed average),
+        the executor asks the venue for the order's OWN fills and uses
+        their quantity-weighted average price — venue truth, never a local
+        approximation (the executor deliberately has no tick feed; see the
+        fill-gap rationale in the executor base). The covered quantity is
+        returned alongside because venues typically page their fills: a
+        VWAP computed over a PARTIAL page must never be trusted as the
+        order's average, so the caller compares the coverage against the
+        order's total filled quantity and falls back to the skip when the
+        page does not cover it. ``fee_total``/``fee_currency`` carry the
+        summed fills fee when the venue reports one consistently —
+        corrective fills then stop fabricating fee=0.
 
         The default returns ``None``: a venue without a usable per-order
         fills lookup keeps reconciliation's documented fail-safe skip. The
@@ -693,11 +708,10 @@ class ExchangeClientBase(ABC):
         through the base type, so the ``async`` signature must stay.
 
         Args:
-            order_id: Exchange order ID whose fills should be averaged.
+            order_id: Exchange order ID whose fills should be aggregated.
 
         Returns:
-            A ``(vwap, covered_quantity)`` tuple over the fills the venue
-            returned for the order, or ``None`` when no usable fills exist.
+            The fills aggregate, or ``None`` when no usable fills exist.
 
         Raises:
             Exception: Implementations may raise on venue/transport errors —

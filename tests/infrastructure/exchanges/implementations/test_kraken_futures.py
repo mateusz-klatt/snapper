@@ -5434,11 +5434,11 @@ class TestFindOrderByClientIdFutures:
             await auth_client.find_order_by_client_id("cid-fut-7")
 
 
-class TestGetOrderFillVwap:
-    """Venue-fills VWAP backfill for priceless futures market orders."""
+class TestGetOrderFillSummary:
+    """Venue-fills price/fee aggregate for priceless futures market orders."""
 
     @pytest.mark.asyncio
-    async def test_vwap_weights_only_this_orders_fills(
+    async def test_summary_weights_only_this_orders_fills(
         self, auth_client: KrakenFuturesExchangeClient
     ) -> None:
         """The VWAP averages only the queried order's fills, quantity-weighted.
@@ -5448,10 +5448,11 @@ class TestGetOrderFillVwap:
             and ``qty`` (110x1) with a foreign order's fill, a price-less
             fill, an unparseable price, a zero-size fill and a malformed
             entry,
-        When: get_order_fill_vwap runs,
+        When: get_order_fill_summary runs,
         Then: duplicate fill_id entries count exactly once and the result is
             ((100*4 + 110*1) / 5, 5.0) — foreign, duplicated, partial and
-            malformed fills never contaminate the average or the coverage.
+            malformed fills never contaminate the average or the coverage;
+            fees degrade to None because not every counted fill reports one.
         """
         assert auth_client._trade_client is not None
         auth_client._trade_client.get_fills = MagicMock(
@@ -5469,11 +5470,89 @@ class TestGetOrderFillVwap:
                 ]
             }
         )
-        result = await auth_client.get_order_fill_vwap("fut-1")
-        assert result is not None
-        vwap, covered = result
-        assert vwap == pytest.approx((100.0 * 4.0 + 110.0 * 1.0) / 5.0)
-        assert covered == pytest.approx(5.0)
+        summary = await auth_client.get_order_fill_summary("fut-1")
+        assert summary is not None
+        assert summary.vwap == pytest.approx((100.0 * 4.0 + 110.0 * 1.0) / 5.0)
+        assert summary.covered_qty == pytest.approx(5.0)
+        assert summary.fee_total is None
+        assert summary.fee_currency is None
+
+    @pytest.mark.asyncio
+    async def test_summary_sums_consistent_fees(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Single-currency fees across every counted fill sum into the total.
+
+        Given: two counted fills both reporting fee_paid in USD,
+        When: get_order_fill_summary runs,
+        Then: fee_total is their sum with the shared currency.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.get_fills = MagicMock(
+            return_value={
+                "fills": [
+                    {
+                        "order_id": "fut-1",
+                        "price": 100.0,
+                        "size": 2.0,
+                        "fee_paid": 0.4,
+                        "fee_currency": "USD",
+                    },
+                    {
+                        "order_id": "fut-1",
+                        "price": 110.0,
+                        "size": 1.0,
+                        "fee_paid": 0.2,
+                        "fee_currency": "USD",
+                    },
+                ]
+            }
+        )
+        summary = await auth_client.get_order_fill_summary("fut-1")
+        assert summary is not None
+        assert summary.fee_total == pytest.approx(0.6)
+        assert summary.fee_currency == "USD"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "fee_fields",
+        [
+            {"fee_paid": 0.4},
+            {"fee_paid": "bad", "fee_currency": "USD"},
+            {"fee_paid": 0.4, "fee_currency": "EUR"},
+        ],
+    )
+    async def test_summary_degrades_fees_honestly(
+        self, auth_client: KrakenFuturesExchangeClient, fee_fields: dict[str, object]
+    ) -> None:
+        """Missing, unparseable or mixed-currency fees yield fee None.
+
+        Given: one USD-fee'd fill plus a second whose fee is missing a
+            currency, unparseable, or in a different currency,
+        When: get_order_fill_summary runs,
+        Then: price/coverage still compute but the fee aggregate is None —
+            a partial or mixed sum would be a fabricated number.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.get_fills = MagicMock(
+            return_value={
+                "fills": [
+                    {
+                        "order_id": "fut-1",
+                        "price": 100.0,
+                        "size": 2.0,
+                        "fee_paid": 0.4,
+                        "fee_currency": "USD",
+                    },
+                    {"order_id": "fut-1", "price": 110.0, "size": 1.0, **fee_fields},
+                ]
+            }
+        )
+        summary = await auth_client.get_order_fill_summary("fut-1")
+        assert summary is not None
+        assert summary.covered_qty == pytest.approx(3.0)
+        assert summary.fee_total is None
+        assert summary.fee_currency is None
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -5485,29 +5564,29 @@ class TestGetOrderFillVwap:
             {"fills": "not-a-list"},
         ],
     )
-    async def test_vwap_none_when_no_usable_fills(
+    async def test_summary_none_when_no_usable_fills(
         self, auth_client: KrakenFuturesExchangeClient, payload: dict[str, object]
     ) -> None:
         """No usable fills for the order yields None (recon keeps its fail-safe).
 
         Given: a fills response that is empty, foreign-only, missing the
             fills key, or malformed,
-        When: get_order_fill_vwap runs,
+        When: get_order_fill_summary runs,
         Then: it returns None rather than guessing a price.
         """
         assert auth_client._trade_client is not None
         auth_client._trade_client.get_fills = MagicMock(return_value=payload)
-        assert await auth_client.get_order_fill_vwap("fut-1") is None
+        assert await auth_client.get_order_fill_summary("fut-1") is None
 
     @pytest.mark.asyncio
-    async def test_vwap_requires_authentication(self) -> None:
+    async def test_summary_requires_authentication(self) -> None:
         """An unauthenticated client refuses the fills lookup.
 
         Given: a client constructed without API credentials,
-        When: get_order_fill_vwap runs,
+        When: get_order_fill_summary runs,
         Then: it raises instead of silently returning None — the recon caller
             logs and skips.
         """
         client = KrakenFuturesExchangeClient(sandbox=True)
         with pytest.raises(RuntimeError):
-            await client.get_order_fill_vwap("fut-1")
+            await client.get_order_fill_summary("fut-1")

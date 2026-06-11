@@ -65,6 +65,7 @@ from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
+from snapper.infrastructure.exchanges.contracts import OrderFillSummary
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
@@ -986,8 +987,10 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             raise ValueError(f"Order {order_id} not found")
         return self._convert_status_entry(orders[0])
 
-    async def get_order_fill_vwap(self, order_id: str) -> tuple[float, float] | None:
-        """Return (VWAP, covered quantity) of an order's recent venue fills.
+    supports_fill_summary: bool = True
+
+    async def get_order_fill_summary(self, order_id: str) -> OrderFillSummary | None:
+        """Return the venue-true price/fee aggregate of an order's recent fills.
 
         Kraken Futures order snapshots carry only ``limitPrice``, so a filled
         MARKET order's snapshot has no price and fill-gap reconciliation
@@ -997,22 +1000,25 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         quantity — venue truth, never a local approximation. The caller
         compares the covered quantity against the order's total filled
         quantity, so a VWAP over a PARTIAL fills page (older fills aged out)
-        is never applied to the whole gap. Per-fill parsing is defensive:
-        the quantity key is ``size`` or ``qty`` (the venue uses both shapes
-        across surfaces), duplicate ``fill_id`` entries are counted once (a
-        retried fetch must not inflate coverage or bias the average), fills
-        are summed with ``math.fsum`` for float robustness, and an
-        unparseable or non-positive fill is skipped rather than aborting the
-        lookup (the venue does not report busts as negative fills here).
-        Returns ``None`` when no usable fills exist for the order, keeping
-        reconciliation's documented fail-safe skip.
+        is never applied to the whole gap. The fills' ``fee_paid`` /
+        ``fee_currency`` are summed into ``fee_total`` ONLY when every
+        counted fill reports a parseable fee in ONE currency — a partial or
+        mixed-currency sum would be a fabricated number, so the aggregate
+        degrades to fee-None honestly (#145 P2-5). Per-fill parsing is
+        defensive: the quantity key is ``size`` or ``qty`` (the venue uses
+        both shapes across surfaces), duplicate ``fill_id`` entries are
+        counted once (a retried fetch must not inflate coverage or bias the
+        average), fills are summed with ``math.fsum`` for float robustness,
+        and an unparseable or non-positive fill is skipped rather than
+        aborting the lookup (the venue does not report busts as negative
+        fills here). Returns ``None`` when no usable fills exist for the
+        order, keeping reconciliation's documented fail-safe skip.
 
         Args:
-            order_id: Exchange order ID whose fills should be averaged.
+            order_id: Exchange order ID whose fills should be aggregated.
 
         Returns:
-            A ``(vwap, covered_quantity)`` tuple over the order's recent
-            fills, or ``None``.
+            The fills aggregate, or ``None``.
 
         Raises:
             RuntimeError: If API credentials are missing.
@@ -1027,6 +1033,9 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             return None
         notionals: list[float] = []
         quantities: list[float] = []
+        fee_amounts: list[float] = []
+        fee_currency: str | None = None
+        fees_consistent = True
         seen_fill_ids: set[str] = set()
         for fill in fills:
             parsed = self._extract_order_fill(fill, order_id, seen_fill_ids)
@@ -1035,10 +1044,33 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             price, size = parsed
             notionals.append(price * size)
             quantities.append(size)
+            if fees_consistent:
+                fee_raw = fill.get("fee_paid")
+                currency_raw = fill.get("fee_currency")
+                try:
+                    fee_value = float(fee_raw) if fee_raw is not None else None
+                except (TypeError, ValueError):
+                    fee_value = None
+                if (
+                    fee_value is None
+                    or not math.isfinite(fee_value)
+                    or not currency_raw
+                    or (fee_currency is not None and currency_raw != fee_currency)
+                ):
+                    fees_consistent = False
+                else:
+                    fee_currency = str(currency_raw)
+                    fee_amounts.append(fee_value)
         quantity = math.fsum(quantities)
         if quantity <= 0.0:
             return None
-        return math.fsum(notionals) / quantity, quantity
+        include_fees = fees_consistent and fee_currency is not None
+        return OrderFillSummary(
+            vwap=math.fsum(notionals) / quantity,
+            covered_qty=quantity,
+            fee_total=math.fsum(fee_amounts) if include_fees else None,
+            fee_currency=fee_currency if include_fees else None,
+        )
 
     @staticmethod
     def _extract_order_fill(

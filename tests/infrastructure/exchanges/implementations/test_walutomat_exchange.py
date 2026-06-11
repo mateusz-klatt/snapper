@@ -1154,7 +1154,8 @@ async def test_subscribe_executions_no_yield_when_no_change() -> None:
 async def test_subscribe_executions_handles_disappeared_filled_order() -> None:
     """Verify CLOSED event when fully filled order disappears.
 
-    Given: A tracked order with filled==amount,
+    Given: A tracked order with filled==amount whose final-state query
+        reports CLOSED,
     When: Order disappears from active orders,
     Then: ExecutionUpdate with CLOSED status and exec_type='trade' is yielded.
     """
@@ -1175,7 +1176,16 @@ async def test_subscribe_executions_handles_disappeared_filled_order() -> None:
         client._running = False
         return []
 
+    async def _mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        return _make_order_snapshot(
+            order_id=order_id,
+            filled=100.0,
+            amount=100.0,
+            status=ExchangeOrderStatusEnum.CLOSED,
+        )
+
     client.get_orders = _mock_get_orders
+    client.get_order = _mock_get_order
 
     results: list[ExecutionUpdate] = []
     async for update in client.subscribe_executions():
@@ -1191,9 +1201,10 @@ async def test_subscribe_executions_handles_disappeared_filled_order() -> None:
 async def test_subscribe_executions_handles_disappeared_partial_order() -> None:
     """Verify CANCELED event when partially filled order disappears.
 
-    Given: A tracked order with 0 < filled < amount,
+    Given: A tracked order with 0 < filled < amount whose final-state
+        query reports CANCELED with no new fill,
     When: Order disappears from active orders,
-    Then: ExecutionUpdate with CANCELED status is yielded and warning is logged.
+    Then: ExecutionUpdate with CANCELED status is yielded.
     """
     client = _build_polling_client()
     poll_count = 0
@@ -1212,7 +1223,15 @@ async def test_subscribe_executions_handles_disappeared_partial_order() -> None:
         client._running = False
         return []
 
+    async def _mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        return _make_order_snapshot(
+            order_id=order_id,
+            filled=30.0,
+            status=ExchangeOrderStatusEnum.CANCELED,
+        )
+
     client.get_orders = _mock_get_orders
+    client.get_order = _mock_get_order
 
     results: list[ExecutionUpdate] = []
     async for update in client.subscribe_executions():
@@ -1228,9 +1247,10 @@ async def test_subscribe_executions_handles_disappeared_partial_order() -> None:
 async def test_subscribe_executions_handles_disappeared_unfilled_order() -> None:
     """Verify CANCELED event when unfilled order disappears.
 
-    Given: A tracked order with filled=0,
+    Given: A tracked order with filled=0 whose final-state query reports
+        CANCELED,
     When: Order disappears from active orders,
-    Then: ExecutionUpdate with CANCELED status is yielded (no warning logged).
+    Then: ExecutionUpdate with CANCELED status is yielded.
     """
     client = _build_polling_client()
     poll_count = 0
@@ -1249,7 +1269,15 @@ async def test_subscribe_executions_handles_disappeared_unfilled_order() -> None
         client._running = False
         return []
 
+    async def _mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        return _make_order_snapshot(
+            order_id=order_id,
+            filled=0.0,
+            status=ExchangeOrderStatusEnum.CANCELED,
+        )
+
     client.get_orders = _mock_get_orders
+    client.get_order = _mock_get_order
 
     results: list[ExecutionUpdate] = []
     async for update in client.subscribe_executions():
@@ -2341,12 +2369,16 @@ async def test_disappeared_order_uses_api_response() -> None:
 
 
 @pytest.mark.asyncio()
-async def test_disappeared_order_fallback_on_error() -> None:
-    """Verify _resolve_disappeared falls back to tracked state on API error.
+async def test_disappeared_order_query_failure_never_guesses() -> None:
+    """A failed final-state query yields NOTHING — no fabricated terminal.
 
-    Given: A tracked order that disappeared and get_order raises,
-    When: _resolve_disappeared is invoked,
-    Then: Fallback event uses tracked snapshot data.
+    Given: A tracked order that disappeared and get_order raising on
+        every attempt,
+    When: _resolve_disappeared is invoked repeatedly (past the
+        escalation threshold),
+    Then: No event is ever fabricated (the old fallback guessed
+        filled-vs-canceled), the retry counter grows, and the order
+        stays resolvable on a later successful query.
     """
     client = _build_polling_client()
 
@@ -2366,11 +2398,23 @@ async def test_disappeared_order_fallback_on_error() -> None:
         price=4.50,
     )
     events: list[ExecutionUpdate] = []
+    for _ in range(11):
+        async for event in client._resolve_disappeared("ord-1", tracked):
+            events.append(event)
+    assert events == []
+    assert client._disappeared_retry_counts["ord-1"] == 11
+
+    async def mock_get_order_ok(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        return _make_order_snapshot(
+            order_id=order_id, filled=30.0, status=ExchangeOrderStatusEnum.CANCELED
+        )
+
+    client.get_order = mock_get_order_ok
     async for event in client._resolve_disappeared("ord-1", tracked):
         events.append(event)
     assert len(events) == 1
-    assert events[0].cum_qty == 30.0
     assert events[0].order_status == ExchangeOrderStatusEnum.CANCELED
+    assert "ord-1" not in client._disappeared_retry_counts
 
 
 @pytest.mark.asyncio()
@@ -2619,7 +2663,9 @@ async def test_active_fill_event_has_fees() -> None:
 
     Given: A tracked order with fee and fee_currency on snapshot,
     When: Fill delta is detected during polling,
-    Then: ExecutionUpdate has fees=[ExecutionFeeBreakdown(asset, quantity)].
+    Then: ExecutionUpdate carries the order's CUMULATIVE commission as
+        cum_fee/cum_fee_currency (the executor's fee watermark turns it
+        into per-emission deltas) and a deterministic wal- exec id.
     """
     client = _build_polling_client()
     poll_count = 0
@@ -2647,10 +2693,11 @@ async def test_active_fill_event_has_fees() -> None:
         results.append(update)
 
     assert len(results) == 1
-    assert results[0].fees is not None
-    assert len(results[0].fees) == 1
-    assert results[0].fees[0].asset == "EUR"
-    assert math.isclose(results[0].fees[0].quantity, 0.06, rel_tol=1e-9)
+    assert results[0].fees is None
+    assert results[0].cum_fee is not None
+    assert math.isclose(results[0].cum_fee, 0.06, rel_tol=1e-9)
+    assert results[0].cum_fee_currency == "EUR"
+    assert results[0].exec_id == "wal-ord-1-c3000000000"
 
 
 @pytest.mark.asyncio()
@@ -2659,7 +2706,7 @@ async def test_disappeared_order_fees_populated() -> None:
 
     Given: A tracked order that disappeared,
     When: API returns order with commission data,
-    Then: ExecutionUpdate has fees from the API response.
+    Then: ExecutionUpdate carries the cumulative commission as cum_fee.
     """
     client = _build_polling_client()
 
@@ -2689,9 +2736,11 @@ async def test_disappeared_order_fees_populated() -> None:
     events: list[ExecutionUpdate] = []
     async for event in client._resolve_disappeared("ord-1", tracked):
         events.append(event)
-    assert events[0].fees is not None
-    assert events[0].fees[0].asset == "EUR"
-    assert math.isclose(events[0].fees[0].quantity, 0.20, rel_tol=1e-9)
+    assert events[0].fees is None
+    assert events[0].cum_fee is not None
+    assert math.isclose(events[0].cum_fee, 0.20, rel_tol=1e-9)
+    assert events[0].cum_fee_currency == "EUR"
+    assert events[0].exec_id == "wal-ord-1-c10000000000-t"
 
 
 @pytest.mark.asyncio()
@@ -2700,7 +2749,8 @@ async def test_disappeared_order_fee_usd_equiv_not_set() -> None:
 
     Given: A tracked order that disappeared with commission data,
     When: _resolve_disappeared emits events,
-    Then: ExecutionFeeBreakdown only has asset and quantity (no usd_equiv).
+    Then: The cumulative commission rides cum_fee and fee_usd_equiv stays
+        unset (nothing fabricates a USD equivalent).
     """
     client = _build_polling_client()
 
@@ -2730,10 +2780,9 @@ async def test_disappeared_order_fee_usd_equiv_not_set() -> None:
     events: list[ExecutionUpdate] = []
     async for event in client._resolve_disappeared("ord-1", tracked):
         events.append(event)
-    assert events[0].fees is not None
-    fee_breakdown = events[0].fees[0]
-    assert fee_breakdown.asset == "PLN"
-    assert fee_breakdown.quantity == 0.15
+    assert events[0].fees is None
+    assert events[0].cum_fee == 0.15
+    assert events[0].cum_fee_currency == "PLN"
     assert events[0].fee_usd_equiv is None
 
 

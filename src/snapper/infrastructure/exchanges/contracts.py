@@ -287,6 +287,25 @@ class ExecutionFeeBreakdown:
 
 
 @dataclass
+class OrderFillSummary:
+    """Venue-true aggregate over an order's own fills.
+
+    Fill-gap reconciliation's price AND fee source for venues whose
+    order snapshots lack them: ``vwap`` over the fills the venue
+    returned, the ``covered_qty`` those fills span (a partial fills
+    page must never price or fee the whole gap), and the summed
+    ``fee_total`` in ``fee_currency`` when every fill reported a
+    parseable single-currency fee (both None otherwise — an honest
+    absence beats a partial sum).
+    """
+
+    vwap: float
+    covered_qty: float
+    fee_total: float | None = None
+    fee_currency: str | None = None
+
+
+@dataclass
 class ExecutionUpdate:
     """Real-time execution update for an order."""
 
@@ -309,6 +328,8 @@ class ExecutionUpdate:
     average_price: float | None = None
     fee_usd_equiv: float | None = None
     fees: list[ExecutionFeeBreakdown] | None = None
+    cum_fee: float | None = None
+    cum_fee_currency: str | None = None
     order_qty: float | None = None
     limit_price: float | None = None
     cash_order_qty: float | None = None

@@ -73,6 +73,7 @@ from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
+from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
 from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenExecutionSubscribeParamsSchema
@@ -2322,7 +2323,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             Exception: If all retries exhausted or unexpected error.
         """
         if time.time() < self._circuit_open_until:
-            raise RuntimeError("Circuit breaker open")
+            raise CircuitBreakerOpenError("Circuit breaker open")
         max_retries = 3
         base_delay = 1.0
         attempt = 0
@@ -2458,6 +2459,11 @@ class KrakenExchangeClient(ExchangeClientBase):
                 ccxt_order["timestamp"] / 1000.0 if ccxt_order.get("timestamp") else time.time()
             ),
             fee=float(ccxt_order["fee"]["cost"]) if ccxt_order.get("fee") else None,
+            fee_currency=(
+                str(ccxt_order["fee"]["currency"])
+                if ccxt_order.get("fee") and ccxt_order["fee"].get("currency")
+                else None
+            ),
         )
 
     def _convert_kraken_native_order(

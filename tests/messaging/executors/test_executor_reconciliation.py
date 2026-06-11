@@ -14,12 +14,16 @@ import pytest
 from loguru import logger
 
 from snapper.application.trade.command_request import order_request_from_command
+from snapper.core.types import OrderEventEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
+from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
+from snapper.infrastructure.exchanges.contracts import OrderFillSummary
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
 from snapper.messaging.executors import base as base_module
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.base import PendingOrderState
@@ -45,6 +49,8 @@ def _make_executor() -> Any:
     ex.settings = MagicMock()
     ex.settings.recon_balance_threshold = 1.0
     ex.exchange_client = AsyncMock()
+    ex.exchange_client.get_order_fill_summary = AsyncMock(return_value=None)
+    ex.exchange_client.supports_fill_summary = False
     ex.repository = MagicMock()
     return ex
 
@@ -127,14 +133,20 @@ class TestReconciliation:
         Then: two calls: first a corrective fill, then a terminal "filled" event.
         """
         ex = _make_executor()
-        ex.pending_orders["cid-1"] = _make_pending(cum_qty=0.0)
+        pending = _make_pending(cum_qty=0.0)
+        ex.pending_orders["cid-1"] = pending
         ex.exchange_client.get_orders = AsyncMock(return_value=[])
         filled_snap = _make_order_snapshot(
             filled=1.0, price=100.0, status=ExchangeOrderStatusEnum.CLOSED
         )
         ex.exchange_client.get_order = AsyncMock(return_value=filled_snap)
         ex.exchange_client.get_balance = AsyncMock(return_value={})
-        ex._process_execution = AsyncMock()
+
+        async def _commit_fill(execution: Any) -> None:
+            if execution.cum_qty is not None:
+                pending.last_seen_cum_qty = execution.cum_qty
+
+        ex._process_execution = AsyncMock(side_effect=_commit_fill)
 
         await ex._reconcile_with_exchange()
 
@@ -162,7 +174,7 @@ class TestReconciliation:
         )
         ex.exchange_client.get_order = AsyncMock(return_value=closed_no_price)
         ex.exchange_client.get_balance = AsyncMock(return_value={})
-        ex.exchange_client.get_order_fill_vwap = AsyncMock(return_value=None)
+        ex.exchange_client.get_order_fill_summary = AsyncMock(return_value=None)
         ex._process_execution = AsyncMock()
 
         await ex._reconcile_with_exchange()
@@ -453,7 +465,7 @@ class TestReconciliation:
         snap = _make_order_snapshot(filled=5.0, price=None)
         ex.exchange_client.get_orders = AsyncMock(return_value=[snap])
         ex.exchange_client.get_balance = AsyncMock(return_value={})
-        ex.exchange_client.get_order_fill_vwap = AsyncMock(return_value=None)
+        ex.exchange_client.get_order_fill_summary = AsyncMock(return_value=None)
         ex._process_execution = AsyncMock()
 
         await ex._reconcile_with_exchange()
@@ -475,12 +487,14 @@ class TestReconciliation:
         snap = _make_order_snapshot(filled=5.0, price=None)
         ex.exchange_client.get_orders = AsyncMock(return_value=[snap])
         ex.exchange_client.get_balance = AsyncMock(return_value={})
-        ex.exchange_client.get_order_fill_vwap = AsyncMock(return_value=(101.5, 5.0))
+        ex.exchange_client.get_order_fill_summary = AsyncMock(
+            return_value=OrderFillSummary(vwap=101.5, covered_qty=5.0)
+        )
         ex._process_execution = AsyncMock()
 
         await ex._reconcile_with_exchange()
 
-        ex.exchange_client.get_order_fill_vwap.assert_awaited_once_with("ex-1")
+        ex.exchange_client.get_order_fill_summary.assert_awaited_once_with("ex-1")
         ex._process_execution.assert_called_once()
         corrective = ex._process_execution.call_args.args[0]
         assert corrective.last_price == 101.5
@@ -500,7 +514,9 @@ class TestReconciliation:
         snap = _make_order_snapshot(filled=5.0, price=None)
         ex.exchange_client.get_orders = AsyncMock(return_value=[snap])
         ex.exchange_client.get_balance = AsyncMock(return_value={})
-        ex.exchange_client.get_order_fill_vwap = AsyncMock(return_value=(101.5, 3.0))
+        ex.exchange_client.get_order_fill_summary = AsyncMock(
+            return_value=OrderFillSummary(vwap=101.5, covered_qty=3.0)
+        )
         ex._process_execution = AsyncMock()
 
         await ex._reconcile_with_exchange()
@@ -524,7 +540,9 @@ class TestReconciliation:
         snap = _make_order_snapshot(filled=5.0, price=None)
         ex.exchange_client.get_orders = AsyncMock(return_value=[snap])
         ex.exchange_client.get_balance = AsyncMock(return_value={})
-        ex.exchange_client.get_order_fill_vwap = AsyncMock(return_value=(101.5, 4.9999999))
+        ex.exchange_client.get_order_fill_summary = AsyncMock(
+            return_value=OrderFillSummary(vwap=101.5, covered_qty=4.9999999)
+        )
         ex._process_execution = AsyncMock()
 
         await ex._reconcile_with_exchange()
@@ -547,7 +565,7 @@ class TestReconciliation:
         snap = _make_order_snapshot(filled=5.0, price=None)
         ex.exchange_client.get_orders = AsyncMock(return_value=[snap])
         ex.exchange_client.get_balance = AsyncMock(return_value={})
-        ex.exchange_client.get_order_fill_vwap = AsyncMock(side_effect=RuntimeError("boom"))
+        ex.exchange_client.get_order_fill_summary = AsyncMock(side_effect=RuntimeError("boom"))
         ex._process_execution = AsyncMock()
 
         await ex._reconcile_with_exchange()
@@ -930,8 +948,9 @@ def _make_sweep_executor() -> Any:
     ex.repository = MagicMock(spec=SQLAlchemyRepository)
     ex.repository.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
     ex.repository.get_unresolved_dispatched_commands = AsyncMock(return_value=[])
-    ex.repository.get_max_cumulative_fill_venue_event = AsyncMock(return_value=None)
-    ex.repository.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
+    ex.repository.get_fill_venue_events_for_order = AsyncMock(return_value=[])
+    ex.repository.get_executions_for_order = AsyncMock(return_value=[])
+    ex.repository.get_order_identity_for_client_order_id = AsyncMock(return_value=None)
     ex.repository.advance_trade_command_lifecycle = AsyncMock(return_value=True)
     ex.exchange_client._log_order_to_db = AsyncMock(return_value=(7, "ord-pub-1"))
     ex._adopt_found_order = AsyncMock()
@@ -1420,13 +1439,24 @@ class TestGhostAdoptionHardening:
         ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
             return_value=_make_cmd_row()
         )
-        ex.repository.get_max_cumulative_fill_venue_event = AsyncMock(
-            return_value={"cum_fill_size": 0.6}
+        ex.repository.get_fill_venue_events_for_order = AsyncMock(
+            return_value=[
+                {"cum_fill_size": 0.4, "fee": 0.01, "exec_id": "e-1", "fee_asset": "EUR"},
+                {"cum_fill_size": 0.6, "fee": 0.02, "exec_id": "e-2", "fee_asset": "EUR"},
+            ]
+        )
+        ex.repository.get_executions_for_order = AsyncMock(
+            return_value=[
+                {"size": 0.4, "fee": 0.01, "fee_asset": "EUR"},
+                {"size": 0.2, "fee": 0.02, "fee_asset": "EUR"},
+            ]
         )
         await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
         pending = ex.pending_orders["cid-1"]
-        assert pending.last_seen_cum_qty == 0.6
+        assert pending.last_seen_cum_qty == pytest.approx(0.6)
         assert pending.last_recorded_cum_qty == 0.6
+        assert pending.last_recorded_fee == {"EUR": pytest.approx(0.03)}
+        assert pending.last_published_fee == {"EUR": pytest.approx(0.03)}
 
     @pytest.mark.asyncio
     async def test_watermark_seed_failure_defers_adoption(self) -> None:
@@ -1442,7 +1472,7 @@ class TestGhostAdoptionHardening:
         ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
             return_value=_make_cmd_row()
         )
-        ex.repository.get_max_cumulative_fill_venue_event = AsyncMock(
+        ex.repository.get_fill_venue_events_for_order = AsyncMock(
             side_effect=RuntimeError("db down")
         )
         await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
@@ -1459,7 +1489,7 @@ class TestGhostAdoptionHardening:
         """
         ex = _make_sweep_executor()
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=_make_order_snapshot())
-        ex.repository.get_max_cumulative_fill_venue_event = AsyncMock(
+        ex.repository.get_fill_venue_events_for_order = AsyncMock(
             side_effect=RuntimeError("db down")
         )
         ex._dispatched_absence_counts["cid-1"] = 1
@@ -1482,7 +1512,7 @@ class TestGhostAdoptionHardening:
         ex = _make_sweep_executor()
         cmd = _make_cmd_row()
         ex._dispatched_absence_counts["cid-1"] = 1
-        ex.repository.get_max_cumulative_fill_venue_event = AsyncMock(
+        ex.repository.get_fill_venue_events_for_order = AsyncMock(
             side_effect=RuntimeError("db down")
         )
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=_make_order_snapshot())
@@ -1650,29 +1680,36 @@ class TestAdoptedOrderRowRepair:
         ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
             return_value=_make_cmd_row()
         )
-        ex.repository.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-1")
+        ex.repository.get_order_identity_for_client_order_id = AsyncMock(
+            return_value=(5, "ord-pub-9", "ex-1")
+        )
         await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
         ex.exchange_client._log_order_to_db.assert_not_awaited()
+        pending = ex.pending_orders["cid-1"]
+        assert pending.db_order_id == 5
+        assert pending.order_public_id == "ord-pub-9"
         ex._adopt_found_order.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_repair_failure_never_blocks_adoption(self) -> None:
-        """A failing row repair is best-effort — adoption proceeds.
+    async def test_repair_failure_defers_adoption(self) -> None:
+        """A failed row repair defers the adoption — FAIL-CLOSED.
 
-        Given: the existence probe raising,
-        When: the ghost sweep adopts,
-        Then: the adoption completes with no db ids.
+        Given: the identity probe raising (no order_public_id available
+            for the dual-plane executions read),
+        When: the ghost sweep runs,
+        Then: no adoption happens this cycle and the next cycle retries.
         """
         ex = _make_sweep_executor()
         ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
             return_value=_make_cmd_row()
         )
-        ex.repository.get_exchange_order_id_for_client_order_id = AsyncMock(
+        ex.repository.get_order_identity_for_client_order_id = AsyncMock(
             side_effect=RuntimeError("db down")
         )
+        ex.exchange_client._log_order_to_db = AsyncMock(return_value=None)
         await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
-        ex._adopt_found_order.assert_awaited_once()
-        assert ex.pending_orders["cid-1"].db_order_id is None
+        ex._adopt_found_order.assert_not_awaited()
+        assert "cid-1" not in ex.pending_orders
 
 
 class TestReconstructionFailureIsolation:
@@ -1693,7 +1730,7 @@ class TestReconstructionFailureIsolation:
         ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
             return_value=_make_cmd_row(public_id="cmd-stop")
         )
-        ex.repository.get_max_cumulative_fill_venue_event = AsyncMock(return_value=None)
+        ex.repository.get_fill_venue_events_for_order = AsyncMock(return_value=[])
         bad = _make_cmd_row(public_id="cmd-stop")
         bad["order_type"] = "stop-loss"
         ex.repository.get_active_create_command_by_client_order_id = AsyncMock(return_value=bad)
@@ -1754,13 +1791,14 @@ class TestPhaseECoverageEdges:
         ex.repository.get_exchange_order_id_for_client_order_id.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_row_repair_logging_miss_leaves_ids_unset(self) -> None:
-        """A None from the order-log seam keeps the entry id-less.
+    async def test_row_repair_logging_miss_defers_adoption(self) -> None:
+        """A None from the order-log seam defers the adoption.
 
-        Given: _log_order_to_db returning None (repository off or write
-            failed inside the never-raises seam),
-        When: the ghost sweep adopts,
-        Then: adoption proceeds with db ids unset.
+        Given: _log_order_to_db returning None (write failed inside the
+            never-raises seam) with no existing row identity,
+        When: the ghost sweep runs,
+        Then: no adoption — without an order_public_id the dual-plane
+            seeding cannot trust the executions plane.
         """
         ex = _make_sweep_executor()
         ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
@@ -1768,8 +1806,8 @@ class TestPhaseECoverageEdges:
         )
         ex.exchange_client._log_order_to_db = AsyncMock(return_value=None)
         await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
-        assert ex.pending_orders["cid-1"].db_order_id is None
-        ex._adopt_found_order.assert_awaited_once()
+        assert "cid-1" not in ex.pending_orders
+        ex._adopt_found_order.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_watermark_seed_with_plain_repository_is_trusted(self) -> None:
@@ -1782,3 +1820,729 @@ class TestPhaseECoverageEdges:
         ex = _make_executor()
         pending = PendingOrderState(request=order_request_from_command(_make_cmd_row()))
         assert await ex._seed_adoption_watermarks(pending, "cid-1") is True
+
+
+class TestCorrectiveFeeFidelity:
+    """Venue-true fees and timestamps on corrective fills (#145 P2-5)."""
+
+    def _snapshot_with_fee(
+        self, fee: float | None, fee_currency: str | None, price: float | None = 100.0
+    ) -> ExchangeOrderSnapshot:
+        """Build a half-filled snapshot carrying order-level commission."""
+        return ExchangeOrderSnapshot(
+            id="ex-1",
+            client_order_id="cid-1",
+            symbol="EUR-PLN",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.LIMIT,
+            amount=1.0,
+            price=price,
+            status=ExchangeOrderStatusEnum.OPEN,
+            filled=0.5,
+            remaining=0.5,
+            timestamp=1750000000.0,
+            fee=fee,
+            fee_currency=fee_currency,
+        )
+
+    @pytest.mark.asyncio
+    async def test_snapshot_commission_rides_cum_fee(self) -> None:
+        """An order-level commission passes through as cumulative fee.
+
+        Given: a fill gap on a snapshot carrying fee 0.2 EUR,
+        When: the corrective is built,
+        Then: it carries cum_fee/cum_fee_currency (the watermark
+            attributes the unattributed remainder) and the snapshot's
+            venue timestamp — never a fabricated zero fee.
+        """
+        ex = _make_sweep_executor()
+        ex._process_execution = AsyncMock()
+        pending = _make_pending()
+        await ex._reconcile_fill_gap("kraken", "ex-1", pending, self._snapshot_with_fee(0.2, "EUR"))
+        corrective = ex._process_execution.await_args.args[0]
+        assert corrective.cum_fee == 0.2
+        assert corrective.cum_fee_currency == "EUR"
+        assert corrective.fees is None
+        assert corrective.timestamp == datetime.fromtimestamp(1750000000.0, tz=UTC)
+
+    @pytest.mark.asyncio
+    async def test_summary_fee_total_rides_cum_fee(self) -> None:
+        """Fills-summary totals pass through as the CUMULATIVE fee.
+
+        Given: a priceless snapshot whose fills summary covers the whole
+            filled quantity with fee_total 0.6 USD,
+        When: the corrective is built,
+        Then: cum_fee carries the cumulative total — the dual fee
+            watermark attributes only the unattributed remainder, so
+            successive gap corrections can never overlap fee fractions
+            and per-fill live fees already charged are never re-charged.
+        """
+        ex = _make_sweep_executor()
+        ex._process_execution = AsyncMock()
+        ex.exchange_client.get_order_fill_summary = AsyncMock(
+            return_value=OrderFillSummary(
+                vwap=101.0, covered_qty=0.5, fee_total=0.6, fee_currency="USD"
+            )
+        )
+        pending = _make_pending(cum_qty=0.25)
+        await ex._reconcile_fill_gap(
+            "kraken", "ex-1", pending, self._snapshot_with_fee(None, None, price=None)
+        )
+        corrective = ex._process_execution.await_args.args[0]
+        assert corrective.fees is None
+        assert corrective.cum_fee == pytest.approx(0.6)
+        assert corrective.cum_fee_currency == "USD"
+
+    @pytest.mark.asyncio
+    async def test_no_fee_source_stays_feeless(self) -> None:
+        """Without any venue fee source the corrective stays honest-empty.
+
+        Given: a priced snapshot with no commission data and no summary,
+        When: the corrective is built,
+        Then: cum_fee and fees are both None.
+        """
+        ex = _make_sweep_executor()
+        ex._process_execution = AsyncMock()
+        pending = _make_pending()
+        await ex._reconcile_fill_gap("kraken", "ex-1", pending, self._snapshot_with_fee(None, None))
+        corrective = ex._process_execution.await_args.args[0]
+        assert corrective.cum_fee is None
+        assert corrective.fees is None
+
+    def test_corrective_fees_prefer_snapshot_over_summary(self) -> None:
+        """The snapshot's own commission outranks the fills summary.
+
+        Given: a snapshot carrying fee 0.2 EUR and a summary with a USD
+            total,
+        When: _corrective_fees runs directly,
+        Then: the snapshot's cumulative wins.
+        """
+        result = ExchangeExecutorService._corrective_fees(
+            self._snapshot_with_fee(0.2, "EUR"),
+            OrderFillSummary(vwap=1.0, covered_qty=0.5, fee_total=0.1, fee_currency="USD"),
+        )
+        assert result == (0.2, "EUR")
+
+
+class TestFeeWatermark:
+    """Cumulative-commission deltas via the executor fee watermark."""
+
+    def _execution(self, cum_fee: float | None, cum_qty: float = 0.5) -> ExecutionUpdate:
+        """Build a cum-carrying execution with optional cumulative fee."""
+        return ExecutionUpdate(
+            order_id="ex-1",
+            exec_type="trade",
+            symbol="EUR-PLN",
+            side=OrderSideEnum.BUY,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.PARTIALLY_FILLED,
+            timestamp=datetime.now(UTC),
+            cum_qty=cum_qty,
+            exec_id=f"wal-ex-1-c{int(cum_qty * 1e8)}",
+            cum_fee=cum_fee,
+            cum_fee_currency="EUR" if cum_fee is not None else None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_tracked_fee_delta_anchors_on_watermark(self) -> None:
+        """A tracked order's fee is the delta from the recorded watermark.
+
+        Given: a pending entry with last_recorded_fee 0.02 and an
+            execution carrying cum_fee 0.05,
+        When: the execution data is built,
+        Then: the published fee is 0.03 in the cumulative currency.
+        """
+        ex = _make_sweep_executor()
+        pending = PendingOrderState(request=order_request_from_command(_make_cmd_row()))
+        pending.exchange_order_id = "ex-1"
+        pending.last_published_fee = {"EUR": 0.02}
+        ex.pending_orders["cid-1"] = pending
+        _topic, fill = ex._build_execution_data(
+            self._execution(0.05), "ex-1", pending.request, "kraken"
+        )
+        assert fill.fee == pytest.approx(0.03)
+        assert fill.fee_asset == "EUR"
+
+    @pytest.mark.asyncio
+    async def test_regressed_cumulative_fee_publishes_signed_rebate(self) -> None:
+        """A cumulative below the watermark publishes a SIGNED rebate.
+
+        Given: a published EUR anchor of 0.05 and an execution whose
+            venue cumulative dropped to 0.02 (maker rebate adjustment),
+        When: the execution data is built,
+        Then: the fee is -0.03 — a nonnegative clamp would silently
+            swallow rebates.
+        """
+        ex = _make_sweep_executor()
+        pending = PendingOrderState(request=order_request_from_command(_make_cmd_row()))
+        pending.exchange_order_id = "ex-1"
+        pending.last_published_fee = {"EUR": 0.05}
+        ex.pending_orders["cid-1"] = pending
+        _topic, fill = ex._build_execution_data(
+            self._execution(0.02), "ex-1", pending.request, "kraken"
+        )
+        assert fill.fee == pytest.approx(-0.03)
+
+    @pytest.mark.asyncio
+    async def test_untracked_cum_fee_attributes_fully(self) -> None:
+        """An untracked order has no watermark — the full cum_fee applies.
+
+        Given: no pending entry for the order,
+        When: the execution data is built with cum_fee 0.05,
+        Then: the fee is 0.05 (best-effort full attribution).
+        """
+        ex = _make_sweep_executor()
+        order = order_request_from_command(_make_cmd_row())
+        _topic, fill = ex._build_execution_data(self._execution(0.05), "ex-1", order, "kraken")
+        assert fill.fee == pytest.approx(0.05)
+
+    @pytest.mark.asyncio
+    async def test_book_advances_fee_watermark_after_record(self) -> None:
+        """The durable write advances the fee watermark.
+
+        Given: a tracked pending entry and a cum-fee execution whose
+            durable write and publish succeed,
+        When: the fill is booked,
+        Then: last_recorded_fee equals the cumulative fee.
+        """
+        ex = _make_sweep_executor()
+        pending = PendingOrderState(request=order_request_from_command(_make_cmd_row()))
+        pending.exchange_order_id = "ex-1"
+        ex.pending_orders["cid-1"] = pending
+        ex._record_venue_event = AsyncMock()
+        ex._publish_execution = AsyncMock(return_value=True)
+        order = pending.request
+        await ex._book_correlated_fill(self._execution(0.05), "ex-1", "cid-1", order, "kraken")
+        assert pending.last_recorded_fee == {"EUR": pytest.approx(0.05)}
+        assert pending.last_published_fee == {"EUR": pytest.approx(0.05)}
+        event = ex._record_venue_event.await_args.args[0]
+        assert event["fee"] == pytest.approx(0.05)
+
+    @pytest.mark.asyncio
+    async def test_publish_failure_keeps_published_fee_anchor(self) -> None:
+        """A failed publish must not advance the PUBLISHED fee watermark.
+
+        Given: a first cum-fee frame whose durable write succeeds but
+            whose publish fails, then a second frame with a higher
+            cumulative,
+        When: both are booked,
+        Then: the second frame's PUBLISHED fee absorbs the unpublished
+            slice (anchored on last_published_fee), while its DURABLE
+            row fee carries only the durable delta.
+        """
+        ex = _make_sweep_executor()
+        pending = PendingOrderState(request=order_request_from_command(_make_cmd_row()))
+        pending.exchange_order_id = "ex-1"
+        ex.pending_orders["cid-1"] = pending
+        ex._record_venue_event = AsyncMock()
+        ex._publish_execution = AsyncMock(return_value=False)
+        order = pending.request
+        await ex._book_correlated_fill(
+            self._execution(0.05, cum_qty=0.5), "ex-1", "cid-1", order, "kraken"
+        )
+        assert pending.last_recorded_fee == {"EUR": pytest.approx(0.05)}
+        assert pending.last_published_fee == {}
+        ex._publish_execution = AsyncMock(return_value=True)
+        await ex._book_correlated_fill(
+            self._execution(0.10, cum_qty=1.0), "ex-1", "cid-1", order, "kraken"
+        )
+        published_fill = ex._publish_execution.await_args.args[1]
+        assert published_fill.fee == pytest.approx(0.10)
+        second_event = ex._record_venue_event.await_args.args[0]
+        assert second_event["fee"] == pytest.approx(0.05)
+        assert pending.last_published_fee == {"EUR": pytest.approx(0.10)}
+
+
+class TestBreakerOpenDisposition:
+    """Distinct, redispatch-safe handling of breaker-refused submits."""
+
+    def _order_executor(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        """Build a sweep executor whose submit raises breaker-open."""
+        ex = _make_sweep_executor()
+        ex.repository.has_order_submit_evidence = AsyncMock(return_value=False)
+        ex.repository.has_venue_event = AsyncMock(return_value=False)
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row()
+        )
+        ex.repository.get_current_trade_command_status = AsyncMock(return_value="failed")
+        ex._execute_live_order = AsyncMock(side_effect=CircuitBreakerOpenError("open"))
+        ex.settings.trade_command_dispatch_ttl_s = 0.0
+        monkeypatch.setattr(base_module, "is_tradeable", lambda _sym, _exch: True)
+        return ex
+
+    @pytest.mark.asyncio
+    async def test_happy_path_records_fails_and_publishes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The full disposition runs record -> CAS FAILED -> REJECTED.
+
+        Given: a submit refused by the open breaker,
+        When: _process_order runs,
+        Then: an order_breaker_open event records with status failed, the
+            command CAS-es to FAILED, REJECTED publishes with the
+            circuit_breaker_open reason, and the pending entry pops.
+        """
+        ex = self._order_executor(monkeypatch)
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        events = [c.args[0] for c in ex._record_venue_event.await_args_list]
+        breaker_events = [e for e in events if e["event_type"] == "order_breaker_open"]
+        assert len(breaker_events) == 1
+        assert breaker_events[0]["status"] == "failed"
+        cas_kwargs = ex.repository.advance_trade_command_lifecycle.await_args_list[0].kwargs
+        assert cas_kwargs["public_id"] == "cmd-1"
+        assert cas_kwargs["new_status"] == "failed"
+        assert cas_kwargs["last_error"] == "circuit_breaker_open"
+        reject_calls = [
+            c
+            for c in ex._publish_order_status.await_args_list
+            if c.args[1] == OrderEventEnum.REJECTED
+        ]
+        assert reject_calls[0].kwargs["reason"] == "circuit_breaker_open"
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_event_write_failure_parks_without_publish(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed durable event write parks the entry — intent stays held.
+
+        Given: the order_breaker_open write raising,
+        When: _process_order runs,
+        Then: no REJECTED publishes and the entry parks with
+            breaker_open_pending.
+        """
+        ex = self._order_executor(monkeypatch)
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        reject_calls = [
+            c
+            for c in ex._publish_order_status.await_args_list
+            if c.args[1] == OrderEventEnum.REJECTED
+        ]
+        assert reject_calls == []
+        assert ex.pending_orders["cid-1"].breaker_open_pending is True
+
+    @pytest.mark.asyncio
+    async def test_lost_cas_with_live_row_parks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A non-terminal row after all CAS attempts parks the entry.
+
+        Given: every FAILED CAS losing while the row reads dispatched,
+        When: _process_order runs,
+        Then: no REJECTED publishes and the entry parks.
+        """
+        ex = self._order_executor(monkeypatch)
+        ex.repository.advance_trade_command_lifecycle = AsyncMock(return_value=False)
+        ex.repository.get_current_trade_command_status = AsyncMock(return_value="dispatched")
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        reject_calls = [
+            c
+            for c in ex._publish_order_status.await_args_list
+            if c.args[1] == OrderEventEnum.REJECTED
+        ]
+        assert reject_calls == []
+        assert ex.pending_orders["cid-1"].breaker_open_pending is True
+
+    @pytest.mark.asyncio
+    async def test_already_terminal_row_counts_as_done(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A row already FAILED (earlier attempt / fold) completes the CAS step.
+
+        Given: all CAS attempts losing while the current status reads failed,
+        When: _process_order runs,
+        Then: the disposition completes and the entry pops.
+        """
+        ex = self._order_executor(monkeypatch)
+        ex.repository.advance_trade_command_lifecycle = AsyncMock(return_value=False)
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_terminal_row_short_circuits_cas(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A row the fold already terminalized needs no CAS attempts.
+
+        Given: the strict lookup returning a FAILED command row,
+        When: _process_order hits breaker-open,
+        Then: no CAS is attempted and the disposition completes.
+        """
+        ex = self._order_executor(monkeypatch)
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row(status="failed")
+        )
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        ex.repository.advance_trade_command_lifecycle.assert_not_awaited()
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_missing_command_row_counts_as_done(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No durable command row means nothing to terminalize.
+
+        Given: the strict lookup returning None (manual/paper flow),
+        When: _process_order hits breaker-open,
+        Then: the disposition completes without any CAS.
+        """
+        ex = self._order_executor(monkeypatch)
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        ex.repository.advance_trade_command_lifecycle.assert_not_awaited()
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_publish_failure_parks_for_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A failed REJECTED publish parks the entry for the recon retry.
+
+        Given: a publisher returning False for the REJECTED,
+        When: _process_order runs,
+        Then: the entry parks with breaker_open_pending.
+        """
+        ex = self._order_executor(monkeypatch)
+
+        async def _publish(order: Any, status: str, *args: Any, **kwargs: Any) -> bool:
+            return status != OrderEventEnum.REJECTED
+
+        ex._publish_order_status = AsyncMock(side_effect=_publish)
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        assert ex.pending_orders["cid-1"].breaker_open_pending is True
+
+    @pytest.mark.asyncio
+    async def test_recon_retry_heals_parked_disposition(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The recon sweep reruns the disposition probe-guarded.
+
+        Given: a parked breaker_open_pending entry whose event already
+            committed (probe True),
+        When: the retry runs,
+        Then: no duplicate event writes, the CAS and publish complete,
+            and the entry pops.
+        """
+        ex = self._order_executor(monkeypatch)
+        order = order_request_from_command(_make_cmd_row())
+        pending = PendingOrderState(request=order)
+        pending.breaker_open_pending = True
+        ex.pending_orders["cid-1"] = pending
+        ex.repository.has_venue_event = AsyncMock(return_value=True)
+        await ex._retry_breaker_open("cid-1")
+        ex._record_venue_event.assert_not_awaited()
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_retry_skips_unflagged_entries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The retry only touches parked breaker entries.
+
+        Given: a normal pending entry without the flag,
+        When: the retry runs,
+        Then: nothing happens.
+        """
+        ex = self._order_executor(monkeypatch)
+        order = order_request_from_command(_make_cmd_row())
+        ex.pending_orders["cid-1"] = PendingOrderState(request=order)
+        await ex._retry_breaker_open("cid-1")
+        assert "cid-1" in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_plain_repository_skips_cas(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without a SQL repository the CAS step is a pass-through.
+
+        Given: a paper/test executor with a plain MagicMock repository,
+        When: _process_order hits breaker-open,
+        Then: the disposition still completes (publish + pop).
+        """
+        ex = self._order_executor(monkeypatch)
+        ex.repository = MagicMock()
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_cas_error_parks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A DB error during the FAILED CAS parks the entry.
+
+        Given: advance_trade_command_lifecycle raising,
+        When: _process_order runs,
+        Then: no REJECTED publishes and the entry parks.
+        """
+        ex = self._order_executor(monkeypatch)
+        ex.repository.advance_trade_command_lifecycle = AsyncMock(
+            side_effect=RuntimeError("db down")
+        )
+        order = order_request_from_command(_make_cmd_row())
+        await ex._process_order(order)
+        assert ex.pending_orders["cid-1"].breaker_open_pending is True
+
+
+class TestBreakerOpenEdges:
+    """Residual coverage edges of the breaker disposition and seeding."""
+
+    @pytest.mark.asyncio
+    async def test_incomplete_disposition_without_pending_parks_fresh_entry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed disposition with no pending entry parks a FRESH one.
+
+        Given: a breaker-open resume invoked while no pending entry
+            exists (the dup-guard replay path after an executor crash)
+            and the disposition failing,
+        When: _handle_breaker_open_submit runs directly,
+        Then: a pending entry is created and parked — the command row
+            may already be terminal FAILED, so without a retry vehicle
+            the REJECTED publish would never happen and the engine
+            intent would wait on its timeout valve.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.has_venue_event = AsyncMock(return_value=False)
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
+        order = order_request_from_command(_make_cmd_row())
+        await ex._handle_breaker_open_submit(order)
+        assert ex.pending_orders["cid-1"].breaker_open_pending is True
+
+    @pytest.mark.asyncio
+    async def test_retry_keeps_parked_entry_on_repeat_failure(self) -> None:
+        """A still-failing retry leaves the entry parked.
+
+        Given: a parked breaker entry whose event write keeps raising,
+        When: the retry runs,
+        Then: the entry stays parked with the flag set.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.has_venue_event = AsyncMock(return_value=False)
+        ex._record_venue_event = AsyncMock(side_effect=RuntimeError("db down"))
+        order = order_request_from_command(_make_cmd_row())
+        pending = PendingOrderState(request=order)
+        pending.breaker_open_pending = True
+        ex.pending_orders["cid-1"] = pending
+        await ex._retry_breaker_open("cid-1")
+        assert ex.pending_orders["cid-1"].breaker_open_pending is True
+
+    @pytest.mark.asyncio
+    async def test_recon_cycle_drives_parked_breaker_retries(self) -> None:
+        """The recon cycle replays parked breaker dispositions.
+
+        Given: a parked breaker entry whose durable event already
+            committed and a healthy repository,
+        When: one reconciliation cycle runs,
+        Then: the disposition completes and the entry pops.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.has_venue_event = AsyncMock(return_value=True)
+        ex.repository.get_current_trade_command_status = AsyncMock(return_value="failed")
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        order = order_request_from_command(_make_cmd_row())
+        pending = PendingOrderState(request=order)
+        pending.breaker_open_pending = True
+        ex.pending_orders["cid-1"] = pending
+        await ex._reconcile_with_exchange()
+        assert "cid-1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_watermark_seed_ignores_cum_less_rows(self) -> None:
+        """Seed rows without a cumulative neither break nor contribute.
+
+        Given: durable fill rows mixing a cum-less row and a redelivered
+            duplicate exec id between cum rows,
+        When: the ghost sweep adopts,
+        Then: the max cum seeds correctly and the fee sum counts the
+            duplicated exec id exactly once.
+        """
+        ex = _make_sweep_executor()
+        ex.repository.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value=_make_cmd_row()
+        )
+        ex.repository.get_fill_venue_events_for_order = AsyncMock(
+            return_value=[
+                {"cum_fill_size": 0.6, "fee": 0.02, "exec_id": "e-1", "fee_asset": "EUR"},
+                {"cum_fill_size": None, "fee": None, "exec_id": None, "fee_asset": None},
+                {"cum_fill_size": 0.4, "fee": 0.01, "exec_id": "e-2", "fee_asset": "EUR"},
+                {"cum_fill_size": 0.6, "fee": 0.02, "exec_id": "e-1", "fee_asset": "EUR"},
+            ]
+        )
+        await ex._adopt_ghost_orders([_make_order_snapshot()], set(), set())
+        pending = ex.pending_orders["cid-1"]
+        assert pending.last_recorded_cum_qty == 0.6
+        assert pending.last_recorded_fee == {"EUR": pytest.approx(0.03)}
+
+
+class TestCorrectiveFeeDeferral:
+    """Transient fee-source failures defer instead of freezing fee-less."""
+
+    @pytest.mark.asyncio
+    async def test_summary_lookup_failure_defers_priced_corrective(self) -> None:
+        """A failed summary lookup defers even when the price is usable.
+
+        Given: a priced snapshot with no commission data and a fills
+            summary lookup that raises,
+        When: the fill-gap pass runs,
+        Then: NO corrective emits — the stable exec id would freeze a
+            fee-less emission; the watermark stays put for a retry.
+        """
+        ex = _make_sweep_executor()
+        ex._process_execution = AsyncMock()
+        ex.exchange_client.get_order_fill_summary = AsyncMock(
+            side_effect=RuntimeError("venue down")
+        )
+        pending = _make_pending()
+        snapshot = _make_order_snapshot(filled=0.5)
+        await ex._reconcile_fill_gap("kraken", "ex-1", pending, snapshot)
+        ex._process_execution.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_partial_coverage_defers_priced_corrective(self) -> None:
+        """A partial fills page defers the fee attribution.
+
+        Given: a priced snapshot with no commission and a summary
+            covering only part of the filled quantity,
+        When: the fill-gap pass runs,
+        Then: NO corrective emits this cycle.
+        """
+        ex = _make_sweep_executor()
+        ex._process_execution = AsyncMock()
+        ex.exchange_client.get_order_fill_summary = AsyncMock(
+            return_value=OrderFillSummary(
+                vwap=100.0, covered_qty=0.1, fee_total=0.01, fee_currency="USD"
+            )
+        )
+        pending = _make_pending()
+        snapshot = _make_order_snapshot(filled=0.5)
+        await ex._reconcile_fill_gap("kraken", "ex-1", pending, snapshot)
+        ex._process_execution.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_implemented_source_returning_none_defers(self) -> None:
+        """None from an IMPLEMENTED summary source defers, not emits.
+
+        Given: a priced snapshot with no commission on a venue whose
+            fills summary IS implemented (supports_fill_summary) but
+            returned None (fills page has no usable rows yet),
+        When: the fill-gap pass runs,
+        Then: NO corrective emits — only a venue with no source at all
+            may emit fee-less.
+        """
+        ex = _make_sweep_executor()
+        ex._process_execution = AsyncMock()
+        ex.exchange_client.supports_fill_summary = True
+        pending = _make_pending()
+        snapshot = _make_order_snapshot(filled=0.5)
+        await ex._reconcile_fill_gap("kraken", "ex-1", pending, snapshot)
+        ex._process_execution.assert_not_awaited()
+
+
+class TestDeferredGapHoldsTerminal:
+    """A deferred corrective blocks the terminal pop until it lands."""
+
+    @pytest.mark.asyncio
+    async def test_disappeared_terminal_held_on_deferred_gap(self) -> None:
+        """The disappeared-order terminal waits for the deferred fee.
+
+        Given: a venue-terminal order with an unpublished fill gap whose
+            fee source transiently failed (summary raises, no snapshot
+            commission, price usable),
+        When: the disappeared-order reconciliation runs,
+        Then: NO terminal emits and the pending entry survives — popping
+            it would orphan the deferred corrective forever.
+        """
+        ex = _make_sweep_executor()
+        ex._process_execution = AsyncMock()
+        ex.exchange_client.get_order_fill_summary = AsyncMock(
+            side_effect=RuntimeError("venue down")
+        )
+        pending = _make_pending()
+        ex.pending_orders["cid-1"] = pending
+        ex.exchange_client.get_order = AsyncMock(
+            return_value=_make_order_snapshot(filled=0.5, status=ExchangeOrderStatusEnum.CLOSED)
+        )
+        await ex._reconcile_disappeared_order("kraken", "ex-1", pending)
+        ex._process_execution.assert_not_awaited()
+        assert "cid-1" in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_disappeared_terminal_held_on_failed_corrective_publish(self) -> None:
+        """A swallowed corrective publish failure also holds the terminal.
+
+        Given: a venue-terminal order whose gap corrective records but
+            fails to publish (committed watermark does not advance),
+        When: the disappeared-order reconciliation runs,
+        Then: NO terminal emits and the entry survives for the retry.
+        """
+        ex = _make_sweep_executor()
+        ex._record_venue_event = AsyncMock()
+        ex._publish_execution = AsyncMock(return_value=False)
+        pending = PendingOrderState(request=order_request_from_command(_make_cmd_row()))
+        pending.exchange_order_id = "ex-1"
+        ex.pending_orders["cid-1"] = pending
+        ex.client_by_exchange["ex-1"] = "cid-1"
+        ex.exchange_client.get_order = AsyncMock(
+            return_value=_make_order_snapshot(
+                filled=0.5, status=ExchangeOrderStatusEnum.CLOSED, price=100.0
+            )
+        )
+        await ex._reconcile_disappeared_order("kraken", "ex-1", pending)
+        assert "cid-1" in ex.pending_orders
+        published_types = [c.args[1].status for c in ex._publish_execution.await_args_list]
+        assert len(published_types) == 1
+
+    @pytest.mark.asyncio
+    async def test_fee_deferral_cap_emits_feeless_with_escalation(self) -> None:
+        """Past the deferral cap the corrective emits fee-less.
+
+        Given: a priced snapshot whose fee source keeps failing for more
+            than the deferral cap,
+        When: the fill-gap pass runs cap+1 times,
+        Then: the first cap attempts defer, the final attempt emits the
+            corrective FEE-LESS (terminal can then project) and clears
+            the counter.
+        """
+        ex = _make_sweep_executor()
+        ex._process_execution = AsyncMock()
+        ex.exchange_client.get_order_fill_summary = AsyncMock(side_effect=RuntimeError("aged out"))
+        pending = _make_pending()
+        snapshot = _make_order_snapshot(filled=0.5)
+        for _ in range(5):
+            result = await ex._reconcile_fill_gap("kraken", "ex-1", pending, snapshot)
+            assert result == "deferred"
+        ex._process_execution.assert_not_awaited()
+
+        async def _commit(execution: Any) -> None:
+            pending.last_seen_cum_qty = execution.cum_qty
+
+        ex._process_execution = AsyncMock(side_effect=_commit)
+        result = await ex._reconcile_fill_gap("kraken", "ex-1", pending, snapshot)
+        assert result == "emitted"
+        corrective = ex._process_execution.await_args.args[0]
+        assert corrective.cum_fee is None
+        assert corrective.fees is None
+        assert "ex-1" not in ex._gap_fee_deferrals
+
+    @pytest.mark.asyncio
+    async def test_priced_snapshot_still_gets_summary_fees(self) -> None:
+        """A usable snapshot price no longer skips the fee summary.
+
+        Given: a priced snapshot without commission data and a
+            coverage-complete fills summary carrying fees,
+        When: the fill-gap pass runs,
+        Then: the corrective keeps the snapshot price AND carries the
+            summary's cumulative fee.
+        """
+        ex = _make_sweep_executor()
+        ex._process_execution = AsyncMock()
+        ex.exchange_client.get_order_fill_summary = AsyncMock(
+            return_value=OrderFillSummary(
+                vwap=99.0, covered_qty=0.5, fee_total=0.6, fee_currency="USD"
+            )
+        )
+        pending = _make_pending()
+        snapshot = _make_order_snapshot(filled=0.5, price=100.0)
+        await ex._reconcile_fill_gap("kraken", "ex-1", pending, snapshot)
+        corrective = ex._process_execution.await_args.args[0]
+        assert corrective.last_price == 100.0
+        assert corrective.cum_fee == pytest.approx(0.6)
+        assert corrective.cum_fee_currency == "USD"

@@ -10035,3 +10035,56 @@ async def test_get_rejected_commands_with_later_live_evidence(tmp_path: Path) ->
     await r.insert_trade_command(_phase_e_command("cmd-live", "cid-live", created_at=old))
     rows = await r.get_rejected_commands_with_later_live_evidence("kraken")
     assert [row["client_order_id"] for row in rows] == ["cid-res", "cid-norej"]
+
+
+@pytest.mark.asyncio
+async def test_get_order_identity_for_client_order_id(tmp_path: Path) -> None:
+    """The identity lookup returns the newest active row's triple.
+
+    Given: an active orders row for the cid,
+    When: get_order_identity_for_client_order_id runs,
+    Then: (id, public_id, exchange_order_id) returns; an unknown cid
+        returns None.
+    """
+    db_path = tmp_path / "order_identity.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Symbol(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=now,
+                timestamp=now,
+                session_id="s1",
+                sequence_id=1,
+            )
+        )
+        await s.commit()
+    spid = await resolve_symbol_public_id(r, "BTC-USD", as_of=now)
+    assert spid is not None
+    _iid, ipid = await r.ensure_instrument(
+        symbol_public_id=spid, exchange="kraken", session_id="s1", sequence_id=2, timestamp=now
+    )
+    oid, opid = await r.insert_order(
+        instrument_public_id=ipid,
+        client_order_id="cid-ident",
+        exchange_order_id="ex-ident",
+        created_at=now,
+        side="buy",
+        order_type="limit",
+        price=100.0,
+        size=1.0,
+        status="open",
+        time_in_force=None,
+        session_id="s1",
+        sequence_id=3,
+        timestamp=now,
+        wallet_public_id="wallet-1",
+    )
+    identity = await r.get_order_identity_for_client_order_id("cid-ident", now)
+    assert identity == (oid, opid, "ex-ident")
+    assert await r.get_order_identity_for_client_order_id("cid-none", now) is None

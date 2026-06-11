@@ -426,8 +426,9 @@ _ORDER_SUBMIT_EVIDENCE_EVENT_TYPES: tuple[str, ...] = (
     "fill_observed",
     "order_terminal",
     "order_submit_unknown",
+    "order_breaker_open",
 )
-"""Venue event types proving an order submit may have reached the venue.
+"""Venue event types proving an order submit must not be re-submitted.
 
 The duplicate-submit guard drops a replayed command whose
 client_order_id carries any of these — the order is or was live (or its
@@ -436,6 +437,11 @@ MARKET position. ``order_rejected`` is deliberately EXCLUDED: a cid
 whose only durable history is a rejection definitively never placed,
 and re-publishing such a command is the outbox's legitimate retry path
 — including it would strand every retried command.
+``order_breaker_open`` IS included although that order never placed
+either: the engine's intent releases on its REJECTED publish, so a
+late redispatched frame submitting after the breaker closes would
+place an order nobody tracks — breaker-open commands must wait for the
+engine to decide anew (#145 P2-5 §2d).
 """
 _ORDER_LIFECYCLE_EVENT_TYPES: tuple[str, ...] = (
     "order_accepted",
@@ -8123,6 +8129,39 @@ class SQLAlchemyRepository(Repository):
             )
             return [self._trade_command_to_row(cmd) for cmd in result.scalars().all()]
 
+    async def get_order_identity_for_client_order_id(
+        self, client_order_id: str, as_of: datetime
+    ) -> tuple[int, str, str | None] | None:
+        """Return the active orders row's identity triple for a client id.
+
+        ``(id, public_id, exchange_order_id)`` of the newest active row —
+        the executor adoption sweeps need the logical order identity to
+        run dual-plane (executions vs venue_events) watermark seeding and
+        to persist status updates, and the venue-id-only lookup cannot
+        provide it.
+
+        Args:
+            client_order_id: Client-side order id.
+            as_of: Temporal point for active-version selection.
+
+        Returns:
+            The identity triple, or None when no active row exists.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(Order.id, Order.public_id, Order.exchange_order_id)
+                .where(
+                    Order.client_order_id == client_order_id,
+                    *where_active(Order, as_of),
+                )
+                .order_by(Order.created_at.desc(), Order.id.desc())
+                .limit(1)
+            )
+            row = result.first()
+            if row is None:
+                return None
+            return cast(tuple[int, str, str | None], tuple(row))
+
     async def insert_venue_event(self, row: VenueEventInsertRow) -> int:
         """Insert a venue event and return its local_seq.
 
@@ -9178,7 +9217,9 @@ class SQLAlchemyRepository(Repository):
             select(VenueEvent.id)
             .where(
                 VenueEvent.client_order_id == client_order_id,
-                VenueEvent.event_type.in_(("order_terminal", "order_rejected")),
+                VenueEvent.event_type.in_(
+                    ("order_terminal", "order_rejected", "order_breaker_open")
+                ),
             )
             .limit(1)
         )

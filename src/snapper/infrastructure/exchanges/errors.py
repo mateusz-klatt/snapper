@@ -47,3 +47,16 @@ class AmbiguousOrderSubmitError(RuntimeError):
         super().__init__(message)
         self.client_order_id = client_order_id
         self.instrument = instrument
+
+
+class CircuitBreakerOpenError(RuntimeError):
+    """Order submit refused locally because the venue circuit breaker is open.
+
+    Raised BEFORE any request leaves the process, so it is an
+    authoritative not-submitted signal — but NOT a venue rejection: the
+    executor gives it a distinct disposition (durable
+    ``order_breaker_open`` event + command FAILED) instead of the
+    ``order_rejected`` path, because a rejected command may legally be
+    re-published by the outbox while a breaker-open one must wait for
+    the engine to decide anew after its intent is released.
+    """

@@ -2838,7 +2838,11 @@ async def test_compensation_reopens_leg_when_current_flatten_fully_fills_with_re
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("event_type", "status"),
-    [("order_terminal", "cancelled"), ("order_rejected", "rejected")],
+    [
+        ("order_terminal", "cancelled"),
+        ("order_rejected", "rejected"),
+        ("order_breaker_open", "failed"),
+    ],
 )
 async def test_compensation_reopens_leg_when_current_flatten_aborts_with_residual(
     _repo: SQLAlchemyRepository, event_type: str, status: str
@@ -4095,7 +4099,13 @@ class TestHasOrderSubmitEvidence:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "event_type",
-        ["order_accepted", "fill_observed", "order_terminal", "order_submit_unknown"],
+        [
+            "order_accepted",
+            "fill_observed",
+            "order_terminal",
+            "order_submit_unknown",
+            "order_breaker_open",
+        ],
     )
     async def test_evidence_event_types_return_true(
         self, _repo: SQLAlchemyRepository, event_type: str

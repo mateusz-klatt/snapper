@@ -52,7 +52,6 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
-from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
@@ -84,6 +83,35 @@ class _RaisingAsyncIterator[T](AsyncIterator[T]):
 
 _NOT_CONNECTED_MSG = "Not connected - call connect() first"
 _AUTH_REQUIRED_MSG = "Trading requires authentication - provide api_key and private_key"
+_DISAPPEARED_RETRY_MAX = 10
+"""Failed final-state queries before the disappeared-order retry escalates.
+
+Escalation is a single CRITICAL log — the retry itself never stops and
+no terminal state is ever fabricated."""
+_EXEC_ID_BASIS_UNITS = 1e8
+
+
+def _walutomat_exec_id(order_id: str, cumulative: float) -> str:
+    """Deterministic execution id for a cumulative-snapshot fill.
+
+    Walutomat reports no per-fill identifiers, only the order's running
+    cumulative — so the identity of an emission IS ``(orderId,
+    cumulative-at-emission)``. Basis-unit integer encoding avoids float
+    repr drift across processes and replays. The disappeared-order
+    TERMINAL emission appends ``-t``: it can legitimately repeat the
+    last active emission's cumulative while carrying the FIRST terminal
+    status, and an identical id would make the executor's dedup drop
+    the status upgrade (its cum-anchored quantity delta is zero either
+    way).
+
+    Args:
+        order_id: Venue order id.
+        cumulative: The order's cumulative filled quantity at emission.
+
+    Returns:
+        A stable ``wal-{oid}-c{basis_units}`` identifier.
+    """
+    return f"wal-{order_id}-c{int(round(cumulative * _EXEC_ID_BASIS_UNITS))}"
 
 
 @dataclass
@@ -217,6 +245,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         self._execution_poll_interval = execution_poll_interval
         self._execution_idle_interval = 30.0
         self._execution_wake: asyncio.Event = asyncio.Event()
+        self._disappeared_retry_counts: dict[str, int] = {}
 
     def _require_connected(self) -> httpx.AsyncClient:
         """Verify HTTP client is connected and return it.
@@ -858,7 +887,17 @@ class WalutomatExchangeClient(ExchangeClientBase):
         return current_ids, updates
 
     def _build_active_execution_update(self, order: ExchangeOrderSnapshot) -> ExecutionUpdate:
-        """Build an execution update for a fill detected on an active order."""
+        """Build an execution update for a fill detected on an active order.
+
+        ``exec_id`` is DETERMINISTIC — ``f(orderId, cumulative)`` in basis
+        units (#145 P2-5) — so a redelivered or replayed poll delta dedupes
+        by identity everywhere downstream instead of leaning on the fragile
+        ``(cid, size, price)`` fallback tuple. The order's commission is
+        passed as the CUMULATIVE ``cum_fee`` (Walutomat snapshots carry the
+        order's running commission, not per-fill fees); the executor's fee
+        watermark turns it into per-emission deltas — attaching the full
+        snapshot fee to every delta used to multi-charge partial fills.
+        """
         return ExecutionUpdate(
             order_id=order.id,
             exec_type="trade",
@@ -868,11 +907,13 @@ class WalutomatExchangeClient(ExchangeClientBase):
             order_status=_active_execution_status(order),
             timestamp=datetime.now(UTC),
             cum_qty=order.filled,
+            exec_id=_walutomat_exec_id(order.id, order.filled),
             cl_ord_id=order.client_order_id or "",
             order_qty=order.amount,
             limit_price=order.price,
             average_price=order.price,
-            fees=self._build_fees(order),
+            cum_fee=order.fee if order.fee and order.fee_currency else None,
+            cum_fee_currency=order.fee_currency if order.fee and order.fee_currency else None,
         )
 
     async def _emit_disappeared_execution_updates(
@@ -903,20 +944,6 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 timeout=self._execution_idle_interval,
             )
 
-    @staticmethod
-    def _build_fees(snapshot: ExchangeOrderSnapshot) -> list[ExecutionFeeBreakdown] | None:
-        """Build fee breakdown from snapshot commission data.
-
-        Args:
-            snapshot: Order snapshot with fee and fee_currency fields.
-
-        Returns:
-            Single-element fee list if commission data available, else None.
-        """
-        if snapshot.fee and snapshot.fee_currency:
-            return [ExecutionFeeBreakdown(asset=snapshot.fee_currency, quantity=snapshot.fee)]
-        return None
-
     async def _resolve_disappeared(
         self,
         oid: str,
@@ -928,7 +955,15 @@ class WalutomatExchangeClient(ExchangeClientBase):
         event before the cancel event when there is an unreported fill delta
         (prevents fill loss when executor short-circuits canceled events).
 
-        Falls back to tracked snapshot if the API query fails.
+        A failed final-state query NEVER guesses (#145 P2-5): the old
+        fallback fabricated filled-vs-canceled from ``math.isclose`` —
+        a wrong FILLED creates phantom position, a wrong CANCELED frees
+        engine intent while the order may have filled. Instead the order
+        stays tracked and the query retries every poll cycle; after
+        ``_DISAPPEARED_RETRY_MAX`` consecutive failures it escalates to a
+        single CRITICAL log and keeps retrying. The executor's own 60s
+        recon converges the pending entry independently through
+        ``get_order``.
 
         Args:
             oid: Exchange order ID that disappeared.
@@ -940,7 +975,8 @@ class WalutomatExchangeClient(ExchangeClientBase):
         try:
             final = await self.get_order(oid)
             has_new_fill = final.filled > tracked.filled
-            fees = self._build_fees(final)
+            cum_fee = final.fee if final.fee and final.fee_currency else None
+            cum_fee_currency = final.fee_currency if cum_fee is not None else None
 
             if final.status == ExchangeOrderStatusEnum.OPEN:
                 logger.warning(
@@ -959,11 +995,13 @@ class WalutomatExchangeClient(ExchangeClientBase):
                     order_status=ExchangeOrderStatusEnum.FILLED,
                     timestamp=datetime.now(UTC),
                     cum_qty=final.filled,
+                    exec_id=_walutomat_exec_id(final.id, final.filled) + "-t",
                     cl_ord_id=final.client_order_id or tracked.cl_ord_id,
                     order_qty=final.amount,
                     limit_price=final.price,
                     average_price=final.price,
-                    fees=fees,
+                    cum_fee=cum_fee,
+                    cum_fee_currency=cum_fee_currency,
                 )
             elif final.status == ExchangeOrderStatusEnum.CANCELED:
                 if has_new_fill:
@@ -976,11 +1014,13 @@ class WalutomatExchangeClient(ExchangeClientBase):
                         order_status=ExchangeOrderStatusEnum.PARTIALLY_FILLED,
                         timestamp=datetime.now(UTC),
                         cum_qty=final.filled,
+                        exec_id=_walutomat_exec_id(final.id, final.filled),
                         cl_ord_id=final.client_order_id or tracked.cl_ord_id,
                         order_qty=final.amount,
                         limit_price=final.price,
                         average_price=final.price,
-                        fees=fees,
+                        cum_fee=cum_fee,
+                        cum_fee_currency=cum_fee_currency,
                     )
                 yield ExecutionUpdate(
                     order_id=final.id,
@@ -995,29 +1035,29 @@ class WalutomatExchangeClient(ExchangeClientBase):
                     order_qty=final.amount,
                     limit_price=final.price,
                 )
-        except Exception:
-            logger.exception(
-                "Failed to query final state for order {}, using tracked snapshot", oid
-            )
-            is_filled = math.isclose(tracked.filled, tracked.amount)
-            yield ExecutionUpdate(
-                order_id=tracked.order_id,
-                exec_type="trade" if is_filled else "canceled",
-                symbol=tracked.symbol,
-                side=tracked.side,
-                order_type=tracked.order_type,
-                order_status=(
-                    ExchangeOrderStatusEnum.FILLED
-                    if is_filled
-                    else ExchangeOrderStatusEnum.CANCELED
-                ),
-                timestamp=datetime.now(UTC),
-                cum_qty=tracked.filled,
-                cl_ord_id=tracked.cl_ord_id,
-                order_qty=tracked.amount,
-                limit_price=tracked.price,
-                average_price=tracked.price if tracked.price else None,
-            )
+            self._disappeared_retry_counts.pop(oid, None)
+        except Exception as exc:
+            count = self._disappeared_retry_counts.get(oid, 0) + 1
+            self._disappeared_retry_counts[oid] = count
+            if count == _DISAPPEARED_RETRY_MAX:
+                logger.critical(
+                    "Walutomat order {} disappeared {} polls ago and the final-state "
+                    "query keeps failing ({}) — NOT guessing a terminal state; the "
+                    "order stays tracked and the query retries every poll until venue "
+                    "truth is available (operator attention required)",
+                    oid,
+                    count,
+                    exc,
+                )
+            else:
+                logger.warning(
+                    "Failed to query final state for disappeared order {} "
+                    "(attempt {}): {} — retrying next poll, never guessing "
+                    "filled-vs-canceled",
+                    oid,
+                    count,
+                    exc,
+                )
 
     def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to instrument/pair information.

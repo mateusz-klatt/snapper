@@ -1462,3 +1462,20 @@ class TestShardStateCycleCache:
         assert shard.position.position_qty == pytest.approx(0.5)
         assert shard.active_cycle_public_id == "cycle-existing"
         assert shard.active_cycle_max_qty == pytest.approx(1.0)
+
+
+def test_apply_breaker_open_is_rejection_equivalent_terminal() -> None:
+    """order_breaker_open clears in-flight like a rejection.
+
+    Given: a TradeService with an in-flight command whose shard then
+        receives an order_breaker_open venue event (status 'failed'),
+    When: the event is applied,
+    Then: in_flight clears and the command status reads 'failed' — replay
+        and checkpoint recovery converge with the live REJECTED publish.
+    """
+    svc = TradeService()
+    event = _make_venue_event(event_id=1, event_type="order_breaker_open", status="failed")
+    svc.apply_venue_event(event)
+    cmd = svc.get_command_state("kraken.BTC-USD.live")
+    assert cmd.in_flight is False
+    assert cmd.status == "failed"

@@ -19,6 +19,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import Any
+from typing import Literal
 from typing import cast
 from uuid import uuid7
 
@@ -53,6 +54,7 @@ from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
+from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import RecordVenueEventParams
 from snapper.data.repository_types import TradeCommandRow
@@ -65,9 +67,11 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecType
 from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
+from snapper.infrastructure.exchanges.contracts import OrderFillSummary
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
+from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.messaging.infrastructure.gap_detector import GapDetector
@@ -218,6 +222,26 @@ commands get WARN-only escalation, never an auto-REJECT."""
 _GHOST_FOREIGN_WARNED_MAX = 512
 """LRU bound on the warned-foreign-order cid set (process-memory cap)."""
 
+_GAP_FEE_DEFERRAL_MAX = 5
+"""Recon cycles a fill-gap corrective may defer on a missing fee source.
+
+Transient failures (transport, fills-page lag) heal within a cycle or
+two; a fills page whose entries AGED OUT never heals — an unbounded
+deferral would hold the terminal projection and the engine's intent
+forever. Past the cap the corrective emits fee-less with a CRITICAL
+manual-reconcile signal."""
+
+_GapResult = Literal["emitted", "no_gap", "deferred", "skipped"]
+"""Outcome of one fill-gap reconciliation attempt.
+
+``deferred`` means a TRANSIENT fee-source failure blocked an emission
+whose stable exec id would otherwise freeze fee-less — terminal paths
+must NOT pop the pending entry on it, or the retry never happens.
+``skipped`` is the documented permanent no-price skip (terminal still
+emits); ``emitted`` is asserted from the COMMITTED watermark (advanced
+only on publish success), so a swallowed corrective publish failure
+also reports ``deferred``; ``no_gap`` is the ordinary clean outcome."""
+
 _COMMAND_TERMINAL_STATUSES = frozenset(
     {
         TradeCommandStatusEnum.FILLED.value,
@@ -300,6 +324,38 @@ class PendingOrderState:
         accept_event_pending: True when the order was accepted by the
             venue but the durable order_accepted venue event failed to
             persist; the recon loop retries the write until it sticks.
+        last_recorded_fee: DURABLE fee watermark PER CURRENCY: the fee
+            attributed into venue_events rows so far, keyed by fee
+            asset (scalar watermarks would subtract USD-equivalent
+            per-fill fees from an EUR cumulative commission). Each
+            cumulative-frame row's fee is the SIGNED delta from this
+            currency's entry (negative = maker rebate; a nonnegative
+            clamp would silently drop rebates); advanced with the
+            durable write like ``last_recorded_cum_qty``. Attaching the
+            full snapshot commission to every poll delta used to
+            multi-charge partial fills (#145 P2-5).
+        last_published_fee: PUBLISHED cumulative fee watermark — what
+            the engine has actually been charged; advanced only on
+            publish success, mirroring ``last_seen_cum_qty``. The
+            published fee delta anchors HERE: when a publish fails
+            after the durable write, the next frame's published
+            quantity absorbs the unpublished span (cum-anchored), so
+            its fee must absorb the unpublished fee slice too — a
+            durable-anchored published fee would silently drop it.
+            BOTH fee watermarks track per-currency
+            fee-attributed-so-far across BOTH attribution channels:
+            cumulative frames (``cum_fee``) SET the currency's entry to
+            the venue cumulative (signed — rebates can shrink it; stale
+            replays are dropped by the exec-id/cum guards, not by a
+            clamp) and per-fill frames ADD onto their asset's entry — a
+            cumulative corrective landing after per-fill live fees must
+            charge only the same-currency remainder, never re-charge
+            what the live frames already attributed.
+        breaker_open_pending: True when a breaker-open submit's durable
+            disposition (order_breaker_open event + command FAILED CAS +
+            REJECTED publish) could not complete; the recon loop reruns
+            the sequence until it sticks — intent must never release
+            before the durable terminal (#145 P2-5 §2d).
         fill_lock: Serializes fill booking for this order across the live
             stream task and the recon task — dedupe gate, delta build,
             durable write, publish, and committed-cumulative advance form
@@ -314,9 +370,12 @@ class PendingOrderState:
     exchange_order_id: str | None = field(default=None)
     last_seen_cum_qty: float = field(default=0.0)
     last_recorded_cum_qty: float = field(default=0.0)
+    last_recorded_fee: dict[str, float] = field(default_factory=dict)
+    last_published_fee: dict[str, float] = field(default_factory=dict)
     submit_ambiguous: bool = field(default=False)
     unknown_published: bool = field(default=False)
     accept_event_pending: bool = field(default=False)
+    breaker_open_pending: bool = field(default=False)
     fill_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -383,6 +442,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._dispatched_absence_counts: dict[str, int] = {}
         self._ghost_foreign_warned: OrderedDict[str, None] = OrderedDict()
         self._pending_rejected_restores: dict[str, TradeCommandRow] = {}
+        self._gap_fee_deferrals: dict[str, int] = {}
         self._verify_unsupported_logged: bool = False
         self._recon_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -666,13 +726,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if seeds is None:
             venue_filled = float(snapshot.filled or 0.0) if snapshot is not None else 0.0
             last_seen, durable_max, fill_rows = venue_filled, venue_filled, []
+            published_fee_seed: dict[str, float] = {}
             logger.error(
                 f"[{exchange_name}] Recovery: durable fill history unreadable for "
                 f"{client_order_id} - falling back to venue-truth seeding "
                 f"(downtime gap for this order will NOT be healed)"
             )
         else:
-            last_seen, durable_max, fill_rows = seeds
+            last_seen, durable_max, fill_rows, published_fee_seed = seeds
         pending = PendingOrderState(
             request=self._build_recovered_request(db_order, client_order_id, exchange_name),
             db_order_id=db_order.get("id"),
@@ -680,6 +741,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             exchange_order_id=exchange_order_id,
             last_seen_cum_qty=last_seen,
             last_recorded_cum_qty=durable_max,
+            last_recorded_fee=self._sum_row_fees(fill_rows),
+            last_published_fee=published_fee_seed,
         )
         self.pending_orders[client_order_id] = pending
         self.client_by_exchange[exchange_order_id] = client_order_id
@@ -721,7 +784,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             live_pending is not None
             and float(snapshot.filled or 0.0) > live_pending.last_seen_cum_qty
         ):
-            await self._reconcile_fill_gap(exchange_name, exchange_order_id, live_pending, snapshot)
+            gap_result = await self._reconcile_fill_gap(
+                exchange_name, exchange_order_id, live_pending, snapshot
+            )
+            if gap_result == "deferred":
+                logger.warning(
+                    f"[{exchange_name}] Recovery: terminal for {exchange_order_id} HELD "
+                    f"— the fill-gap corrective deferred on a transient fee-source "
+                    f"failure; the recon loop retries and projects the terminal after"
+                )
+                return True
         if classification == "terminal":
             terminal_pending = self.pending_orders.get(client_order_id)
             if terminal_pending is not None:
@@ -735,16 +807,83 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return False
         return True
 
+    @staticmethod
+    def _sum_execution_fees(execs: list[ExecutionRow]) -> dict[str, float]:
+        """Sum the published executions plane's fees per currency.
+
+        Args:
+            execs: Execution rows for one order.
+
+        Returns:
+            Signed fee totals keyed by fee asset.
+        """
+        totals: dict[str, float] = {}
+        for execution_row in execs:
+            fee = execution_row.get("fee") or 0.0
+            if not fee:
+                continue
+            asset = execution_row.get("fee_asset") or ""
+            totals[asset] = totals.get(asset, 0.0) + fee
+        return totals
+
+    @staticmethod
+    def _sum_row_fees(fill_rows: list[VenueEventRow]) -> dict[str, float]:
+        """Sum durable fill-row fees PER CURRENCY with exec-id dedupe.
+
+        Watermark seeding input: venue_events is append-only with no
+        exec-id uniqueness — a redelivered fill re-writes its row under
+        the SAME exec id and replay dedupes by that id, so a raw sum
+        would inflate the fee watermark and suppress future
+        cumulative-fee deltas. Id-less rows each count: replay applies
+        them via distinct fallback keys. Keyed by fee asset because the
+        watermarks are per-currency (#145 P2-5: scalar watermarks
+        subtracted USD-equivalent fees from EUR commissions).
+
+        Args:
+            fill_rows: The order's durable fill rows.
+
+        Returns:
+            Deduplicated signed fee totals keyed by fee asset.
+        """
+        seen: set[str] = set()
+        totals: dict[str, float] = {}
+        for row in fill_rows:
+            exec_id = row["exec_id"]
+            if exec_id:
+                if exec_id in seen:
+                    continue
+                seen.add(exec_id)
+            fee = row["fee"] or 0.0
+            if not fee:
+                continue
+            asset = row["fee_asset"] or ""
+            totals[asset] = totals.get(asset, 0.0) + fee
+        return totals
+
     async def _read_recovery_watermarks(
         self,
         client_order_id: str,
         order_public_id: str,
         exchange_name: OrderExchange,
-    ) -> tuple[float, float, list[VenueEventRow]] | None:
+    ) -> tuple[float, float, list[VenueEventRow], dict[str, float]] | None:
         """Read both truth planes and derive honest watermark seeds.
 
         Returns:
-            ``(last_seen_seed, durable_max, fill_rows)`` where
+            ``(last_seen_seed, durable_max, fill_rows, published_fee_seed)``
+            where ``published_fee_seed`` is the EXECUTIONS plane's
+            per-asset signed fee totals VERBATIM — executions rows are
+            written only after a successful publish, so their sum IS
+            what the engine has been charged. No durable capping or
+            netting: net per-asset comparisons lose signed components
+            (a published ``+0.10`` charge plus an unpublished ``-0.15``
+            rebate net to opposite-sign totals, and any netting rule
+            then mis-anchors later cumulative correctives): a row recorded before the crash but never
+            published carries fee the engine was never charged, so
+            seeding the published fee watermark from ALL durable rows
+            would make the republished tail (and any cumulative-fee
+            corrective) silently fee-less. The republish path advances
+            the watermark per successful publish through the normal
+            booking pipeline, and
             ``last_seen_seed = min(executions_sum, durable_max)`` (the
             engine was never told more than what was durably recorded —
             the clamp guards pre-dual-watermark history), or None when
@@ -768,13 +907,15 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             try:
                 execs = await self.repository.get_executions_for_order(order_public_id, now)
                 exec_sum = sum(e["size"] for e in execs)
+                exec_fees = self._sum_execution_fees(execs)
             except Exception as e:
                 logger.warning(
                     f"[{exchange_name}] Recovery: executions unreadable for "
                     f"{client_order_id}: {e}"
                 )
                 exec_sum = 0.0
-            return exec_sum, exec_sum, []
+                exec_fees = {}
+            return exec_sum, exec_sum, [], exec_fees
         try:
             fill_rows = await self.repository.get_fill_venue_events_for_order(client_order_id)
         except Exception as e:
@@ -791,14 +932,15 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         try:
             execs = await self.repository.get_executions_for_order(order_public_id, now)
             exec_sum = sum(e["size"] for e in execs)
+            exec_fees = self._sum_execution_fees(execs)
         except Exception as e:
             logger.warning(
                 f"[{exchange_name}] Recovery: executions unreadable for "
                 f"{client_order_id} - republishing the full durable tail "
                 f"(idempotent via exec-id/fallback dedupe): {e}"
             )
-            return 0.0, durable_max, fill_rows
-        return min(exec_sum, durable_max), durable_max, fill_rows
+            return 0.0, durable_max, fill_rows, {}
+        return min(exec_sum, durable_max), durable_max, fill_rows, exec_fees
 
     async def _resolve_recovery_snapshot(
         self,
@@ -1206,7 +1348,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
            — fresh-process crash-replay where memory is empty but an
            accepted/fill/terminal/unknown row exists. ``order_rejected``
            is excluded there so the outbox's legitimate
-           retry-after-definitive-reject path still flows.
+           retry-after-definitive-reject path still flows. A replay
+           whose evidence includes ``order_breaker_open`` does NOT drop
+           silently: the breaker disposition is rerun idempotently —
+           an executor crash between the evidence write and the
+           REJECTED publish left the intent release incomplete, and the
+           in-memory retry queue died with the process (#145 P2-5 §2d).
 
         A durable-check failure is FAIL-CLOSED: the command is dropped
         as if duplicate. Proceeding on a true duplicate irreversibly
@@ -1241,6 +1388,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if isinstance(self.repository, SQLAlchemyRepository):
             try:
                 if await self.repository.has_order_submit_evidence(cid):
+                    if await self.repository.has_venue_event(cid, "order_breaker_open"):
+                        logger.warning(
+                            f"[{exchange_name}] Replayed submit {cid} carries "
+                            f"breaker-open evidence — rerunning the terminal "
+                            f"disposition instead of a silent drop (an executor "
+                            f"crash mid-disposition would otherwise strand the "
+                            f"engine's intent until its timeout valve)"
+                        )
+                        await self._handle_breaker_open_submit(order)
+                        return True
                     logger.warning(
                         f"[{exchange_name}] Duplicate submit {cid} dropped: durable "
                         f"venue-event evidence exists (crash-replayed dispatch)"
@@ -1421,6 +1578,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except AmbiguousOrderSubmitError as e:
             await self._handle_ambiguous_submit(order, e)
             return
+        except CircuitBreakerOpenError:
+            await self._handle_breaker_open_submit(order)
+            return
         except Exception as e:
             logger.error(f"[{exchange_name}] Error processing order {order.client_order_id}: {e}")
             self.pending_orders.pop(order.client_order_id, None)
@@ -1453,6 +1613,176 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "error": "rejected by exchange",
                     "strategy_tag": order.strategy_tag,
                 }
+            )
+
+    async def _handle_breaker_open_submit(self, order: OrderRequestData) -> None:
+        """Give a breaker-open submit its distinct, redispatch-safe disposition.
+
+        Breaker-open is authoritative not-submitted, but NOT a venue
+        rejection: an ``order_rejected`` row is deliberately excluded
+        from duplicate-submit evidence so the outbox may retry — a
+        breaker-open command must NOT blind-retry (the breaker may have
+        closed; a late redispatched frame would place an order the
+        engine no longer tracks). The sequence is therefore (#145 §2d):
+        durable ``order_breaker_open`` event (IS submit evidence — the
+        dup guard drops any in-flight redispatch), CAS the command row
+        to FAILED (a terminal row can never be re-fetched by the
+        outbox), and ONLY THEN publish REJECTED with the
+        ``circuit_breaker_open`` reason so the engine releases intent.
+        Any step failing parks the entry with ``breaker_open_pending``
+        — intent stays held and the recon loop reruns the sequence.
+
+        Args:
+            order: The order request refused by the open breaker.
+        """
+        exchange_name = self._get_exchange_name()
+        logger.warning(
+            f"[{exchange_name}] Order {order.client_order_id} refused locally: venue "
+            f"circuit breaker OPEN — distinct breaker disposition (no venue rejection "
+            f"fabricated)"
+        )
+        if await self._complete_breaker_open_disposition(order):
+            return
+        pending = self.pending_orders.get(order.client_order_id)
+        if pending is None:
+            pending = PendingOrderState(request=order)
+            self.pending_orders[order.client_order_id] = pending
+        pending.breaker_open_pending = True
+        logger.warning(
+            f"[{exchange_name}] breaker-open disposition incomplete for "
+            f"{order.client_order_id} — entry parked, recon retries (engine intent "
+            f"stays held until the durable terminal lands)"
+        )
+
+    async def _complete_breaker_open_disposition(self, order: OrderRequestData) -> bool:
+        """Run the breaker-open sequence: record, CAS FAILED, publish REJECTED.
+
+        Idempotent for retries: the durable event write is probe-guarded,
+        the lifecycle CAS tolerates an already-FAILED row, and the
+        REJECTED publish is engine-idempotent. The pending entry is
+        popped only on full success.
+
+        Args:
+            order: The breaker-refused order request.
+
+        Returns:
+            True when the full sequence completed.
+        """
+        exchange_name = self._get_exchange_name()
+        cid = order.client_order_id
+        try:
+            already_recorded = isinstance(
+                self.repository, SQLAlchemyRepository
+            ) and await self.repository.has_venue_event(cid, "order_breaker_open")
+            if not already_recorded:
+                await self._record_venue_event(
+                    {
+                        "event_type": "order_breaker_open",
+                        "exchange_name": exchange_name,
+                        "instrument": order.instrument,
+                        "client_order_id": cid,
+                        "side": order.side,
+                        "status": TradeCommandStatusEnum.FAILED.value,
+                        "error": "circuit_breaker_open",
+                        "strategy_tag": order.strategy_tag,
+                    }
+                )
+        except Exception:
+            logger.warning(
+                f"[{exchange_name}] order_breaker_open event write failed for {cid} — "
+                f"retrying via recon"
+            )
+            return False
+        if not await self._fail_command_for_breaker(order):
+            return False
+        if not await self._publish_order_status(
+            order, OrderEventEnum.REJECTED, reason="circuit_breaker_open"
+        ):
+            logger.warning(
+                f"[{exchange_name}] REJECTED publish failed for breaker-open {cid} — "
+                f"retrying via recon (intent must not silently stay held)"
+            )
+            return False
+        self.pending_orders.pop(cid, None)
+        return True
+
+    async def _fail_command_for_breaker(self, order: OrderRequestData) -> bool:
+        """CAS the breaker-refused command row to FAILED.
+
+        Resolves the durable row through the STRICT cid lookup first —
+        ``TradeCommand.public_id`` is generated independently of the
+        client order id, so a cid-keyed CAS would silently miss. Then
+        tries the statuses a breaker-refused command can legally be in
+        (``dispatched``, ``direct_dispatched``, ``created``); a row that
+        is ALREADY terminal counts as done (an earlier attempt or the
+        lifecycle fold landed it), and NO row at all means there is no
+        durable command to terminalize (manual/paper flows). A DB error
+        fails the sequence —
+        publishing REJECTED before the durable terminal would let a
+        still-CREATED row redispatch after the engine released intent.
+
+        Args:
+            order: The breaker-refused order request.
+
+        Returns:
+            True when the row is verifiably terminal (or no SQL
+            repository is wired — paper/test mode has no outbox).
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return True
+        now = datetime.now(UTC)
+        try:
+            cmd = await self.repository.get_active_create_command_by_client_order_id(
+                order.client_order_id, self._get_exchange_name()
+            )
+            if cmd is None:
+                return True
+            if cmd["status"] in _COMMAND_TERMINAL_STATUSES:
+                return True
+            for expected in (
+                TradeCommandStatusEnum.DISPATCHED.value,
+                TradeCommandStatusEnum.DIRECT_DISPATCHED.value,
+                TradeCommandStatusEnum.CREATED.value,
+            ):
+                if await self.repository.advance_trade_command_lifecycle(
+                    public_id=cmd["public_id"],
+                    expected_status=expected,
+                    new_status=TradeCommandStatusEnum.FAILED.value,
+                    bus_time=now,
+                    session_id=cmd["session_id"],
+                    sequence_id=cmd["sequence_id"],
+                    terminal_at=now,
+                    last_error="circuit_breaker_open",
+                ):
+                    return True
+            current = await self.repository.get_current_trade_command_status(cmd["public_id"])
+        except Exception as e:
+            logger.warning(
+                f"[{self._get_exchange_name()}] breaker-open FAILED CAS errored for "
+                f"{order.client_order_id}: {e}"
+            )
+            return False
+        if current is None or current in _COMMAND_TERMINAL_STATUSES:
+            return True
+        logger.warning(
+            f"[{self._get_exchange_name()}] breaker-open CAS lost for "
+            f"{order.client_order_id} (row at {current}) — retrying via recon"
+        )
+        return False
+
+    async def _retry_breaker_open(self, client_order_id: str) -> None:
+        """Rerun one parked breaker-open disposition from the recon loop.
+
+        Args:
+            client_order_id: Key into ``pending_orders``.
+        """
+        pending = self.pending_orders.get(client_order_id)
+        if pending is None or not pending.breaker_open_pending:
+            return
+        if await self._complete_breaker_open_disposition(pending.request):
+            logger.info(
+                f"[{self._get_exchange_name()}] Recon healed the breaker-open "
+                f"disposition for {client_order_id}"
             )
 
     async def _finalize_accepted_submit(
@@ -2118,6 +2448,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         for restore_public_id in tuple(self._pending_rejected_restores):
             await self._retry_rejected_restore(restore_public_id)
 
+        for breaker_cid, breaker_entry in tuple(self.pending_orders.items()):
+            if breaker_entry.breaker_open_pending:
+                await self._retry_breaker_open(breaker_cid)
+
         pending_at_snapshot = set(self.pending_orders)
         exchange_orders = await self.exchange_client.get_orders(status=ExchangeOrderStatusEnum.OPEN)
         exchange_by_id = {o.id: o for o in exchange_orders}
@@ -2298,10 +2632,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 )
                 continue
             pending = PendingOrderState(request=order)
+            await self._repair_adopted_order_row(order, snapshot, pending)
             if not await self._seed_adoption_watermarks(pending, cid):
                 continue
             self.pending_orders[cid] = pending
-            await self._repair_adopted_order_row(order, snapshot, pending)
             logger.warning(
                 f"[{exchange_name}] Recon: ADOPTING ghost venue order {snapshot.id} "
                 f"(cid={cid}, command {cmd['public_id']}, status={snapshot.status}) — "
@@ -2330,9 +2664,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         best-effort and can have failed (that failure is one of the
         ways an order becomes a ghost in the first place). Repairing
         the row at adoption time restores that recovery path and gives
-        the pending entry a ``db_order_id`` so terminal status updates
-        persist. Best-effort like the original write: never raises, a
-        miss is logged and the durable plane stays recon-healed.
+        the pending entry its ``db_order_id``/``order_public_id`` so
+        terminal status updates persist and the dual-plane watermark
+        seeding (which needs the logical order identity for the
+        executions read) can run. Best-effort like the original write:
+        never raises, a miss is logged — the seeding step then defers
+        the adoption rather than guessing watermarks.
 
         Args:
             order: The reconstructed original request.
@@ -2342,10 +2679,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if self.exchange_client is None or not isinstance(self.repository, SQLAlchemyRepository):
             return
         try:
-            existing = await self.repository.get_exchange_order_id_for_client_order_id(
+            existing = await self.repository.get_order_identity_for_client_order_id(
                 order.client_order_id, as_of=datetime.now(UTC)
             )
-            if existing:
+            if existing is not None:
+                pending.db_order_id, pending.order_public_id, _venue_id = existing
                 return
             request = ExchangeOrderRequest(
                 symbol=order.instrument,
@@ -2377,34 +2715,62 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             self._ghost_foreign_warned.popitem(last=False)
 
     async def _seed_adoption_watermarks(self, pending: PendingOrderState, cid: str) -> bool:
-        """Seed an adopted entry's fill watermarks from durable evidence.
+        """Seed an adopted entry's watermarks with full dual-plane recovery rules.
 
-        A fresh ``PendingOrderState`` starts both cumulative watermarks
-        at zero; if the order has durable fill history (a previous
-        incarnation recorded fills before losing the entry), a zero
-        watermark would make the next fill-gap pass re-record and
-        re-emit the FULL venue cumulative — and the engine books
-        corrective deltas, so an already-published fill re-emitted
-        under a fresh recon exec id would DOUBLE exposure. Seeding from
-        the MAX durable cumulative confines correctives to the
-        genuinely-new span; the recorded-but-unpublished tail (if any)
-        stays with P0-3 startup recovery. A failed seed read is
-        FAIL-CLOSED: the caller must skip the adoption this cycle and
-        retry next (adopting at an untrusted zero watermark is the
-        double-booking path).
+        A fresh ``PendingOrderState`` starts every watermark at zero; if
+        the order has durable fill history (a previous incarnation
+        recorded fills before losing the entry), a zero watermark would
+        make the next fill-gap pass re-record and re-emit the FULL venue
+        cumulative — and the engine books corrective deltas, so an
+        already-published fill re-emitted under a fresh recon exec id
+        would DOUBLE exposure. Seeding from durable rows ALONE is the
+        opposite failure: it marks recorded-but-unpublished fills (and
+        their fees) as shown, silencing the fill-gap corrective that
+        would deliver them. So adoption reuses the startup-recovery
+        seeding verbatim (``_read_recovery_watermarks``): committed
+        quantity = min(executions, durable), durable quantity = durable
+        max, published fees = the executions plane verbatim, recorded
+        fees = deduped durable rows — the next recon cycle's fill-gap
+        corrective then delivers any venue-ahead remainder WITH its fee.
+        Requires the repaired ``order_public_id`` (the executions plane
+        is keyed by it); FAIL-CLOSED without it or on a failed read —
+        adopting at untrusted watermarks is the double-booking path.
 
         Args:
-            pending: The freshly-built pending entry being adopted.
+            pending: The freshly-built pending entry being adopted
+                (row repair must have run first).
             cid: The order's client id.
 
         Returns:
-            True when the watermarks are trustworthy (seeded or
-            verified empty); False when the read failed.
+            True when the watermarks are trustworthy; False to defer
+            the adoption to the next cycle.
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
             return True
+        exchange_name = self._get_exchange_name()
+        if pending.order_public_id is None:
+            logger.warning(
+                f"[{exchange_name}] Recon: adoption of {cid} deferred — no orders-row "
+                f"identity available for dual-plane watermark seeding (row repair "
+                f"failed; retrying next cycle)"
+            )
+            return False
+        seeds = await self._read_recovery_watermarks(cid, pending.order_public_id, exchange_name)
+        if seeds is None:
+            logger.warning(
+                f"[{exchange_name}] Recon: durable watermark seed failed for {cid} — "
+                f"deferring adoption to the next cycle (FAIL-CLOSED: a zero watermark "
+                f"could double-book already-published fills)"
+            )
+            return False
+        last_seen, durable_max, fill_rows, exec_fees = seeds
+        pending.last_seen_cum_qty = last_seen
+        pending.last_recorded_cum_qty = durable_max
+        pending.last_recorded_fee = self._sum_row_fees(fill_rows)
+        pending.last_published_fee = exec_fees
+        return True
         try:
-            row = await self.repository.get_max_cumulative_fill_venue_event(cid)
+            fill_rows = await self.repository.get_fill_venue_events_for_order(cid)
         except Exception as e:
             logger.warning(
                 f"[{self._get_exchange_name()}] Recon: durable watermark seed failed "
@@ -2412,9 +2778,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"a zero watermark could double-book already-published fills)"
             )
             return False
-        if row is not None and row["cum_fill_size"]:
-            pending.last_seen_cum_qty = row["cum_fill_size"]
-            pending.last_recorded_cum_qty = row["cum_fill_size"]
+        durable_max = 0.0
+        for row in fill_rows:
+            row_cum = row["cum_fill_size"]
+            if row_cum is not None and row_cum > durable_max:
+                durable_max = row_cum
+        if durable_max > 0.0:
+            pending.last_seen_cum_qty = durable_max
+            pending.last_recorded_cum_qty = durable_max
+        pending.last_recorded_fee = self._sum_row_fees(fill_rows)
+        pending.last_published_fee = dict(pending.last_recorded_fee)
         return True
 
     async def _retry_rejected_restore(self, public_id: str) -> None:
@@ -2595,10 +2968,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             if cid in self.pending_orders:
                 return
             pending = PendingOrderState(request=order)
+            await self._repair_adopted_order_row(order, snapshot, pending)
             if not await self._seed_adoption_watermarks(pending, cid):
                 return
             self.pending_orders[cid] = pending
-            await self._repair_adopted_order_row(order, snapshot, pending)
             logger.warning(
                 f"[{exchange_name}] Recon: unresolved DISPATCHED command "
                 f"{cmd['public_id']} FOUND on venue as {snapshot.id} "
@@ -2744,7 +3117,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
 
         if snapshot.filled > pending.last_seen_cum_qty:
-            await self._reconcile_fill_gap(exchange_name, exchange_oid, pending, snapshot)
+            gap_result = await self._reconcile_fill_gap(
+                exchange_name, exchange_oid, pending, snapshot
+            )
+            if gap_result == "deferred":
+                logger.warning(
+                    f"[{exchange_name}] Recon: terminal for {exchange_oid} HELD — the "
+                    f"fill-gap corrective deferred on a transient fee-source failure "
+                    f"and the terminal would pop the entry before the retry"
+                )
+                return
 
         await self._emit_disappeared_terminal(exchange_name, exchange_oid, pending, snapshot)
 
@@ -2803,7 +3185,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_oid: str,
         pending: PendingOrderState,
         exchange_order: ExchangeOrderSnapshot,
-    ) -> None:
+    ) -> _GapResult:
         """Emit a corrective fill if exchange shows more fills than local.
 
         Uses the exchange order's reported price as the approximate fill
@@ -2859,40 +3241,75 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             approximate inside Snapper — the skip is the correct behaviour.
         """
         if exchange_order.filled <= pending.last_seen_cum_qty:
-            return
+            self._gap_fee_deferrals.pop(exchange_oid, None)
+            return "no_gap"
         gap = exchange_order.filled - pending.last_seen_cum_qty
         fill_price = exchange_order.price
-        if fill_price is None and self.exchange_client is not None:
+        summary: OrderFillSummary | None = None
+        snapshot_has_fee = bool(
+            getattr(exchange_order, "fee", None) and getattr(exchange_order, "fee_currency", None)
+        )
+        summary_unusable = False
+        if (fill_price is None or not snapshot_has_fee) and self.exchange_client is not None:
             try:
-                vwap_result = await self.exchange_client.get_order_fill_vwap(exchange_oid)
+                summary = await self.exchange_client.get_order_fill_summary(exchange_oid)
             except Exception as exc:
                 logger.warning(
-                    f"[{exchange_name}] Recon: fill-VWAP lookup failed for "
+                    f"[{exchange_name}] Recon: fill-summary lookup failed for "
                     f"{exchange_oid}, treating as unresolved: {exc}"
                 )
-                vwap_result = None
-            if vwap_result is not None:
-                vwap, covered_qty = vwap_result
-                if covered_qty >= exchange_order.filled * (1.0 - 1e-6):
-                    fill_price = vwap
+                summary = None
+                summary_unusable = True
+            if summary is not None:
+                if summary.covered_qty >= exchange_order.filled * (1.0 - 1e-6):
+                    if fill_price is None:
+                        fill_price = summary.vwap
                 else:
                     logger.warning(
                         f"[{exchange_name}] Recon: fills page for {exchange_oid} "
-                        f"covers only {covered_qty} of {exchange_order.filled}, "
-                        f"refusing a partial-page VWAP"
+                        f"covers only {summary.covered_qty} of "
+                        f"{exchange_order.filled}, refusing a partial-page aggregate"
                     )
+                    summary = None
+                    summary_unusable = True
+            elif not summary_unusable and getattr(
+                self.exchange_client, "supports_fill_summary", False
+            ):
+                summary_unusable = True
         if fill_price is None:
             logger.error(
                 f"[{exchange_name}] Recon: fill gap for {exchange_oid} "
                 f"but no price on market order, skipping corrective fill"
             )
-            return
+            return "skipped"
+        if not snapshot_has_fee and summary_unusable:
+            deferral_count = self._gap_fee_deferrals.get(exchange_oid, 0) + 1
+            if deferral_count <= _GAP_FEE_DEFERRAL_MAX:
+                self._gap_fee_deferrals[exchange_oid] = deferral_count
+                logger.warning(
+                    f"[{exchange_name}] Recon: deferring the corrective for "
+                    f"{exchange_oid} ({deferral_count}/{_GAP_FEE_DEFERRAL_MAX}) — the "
+                    f"fee source is unavailable (failed lookup, partial fills page, "
+                    f"or an implemented source with no usable rows) and the "
+                    f"corrective's stable exec id would freeze a fee-less emission; "
+                    f"retrying next cycle"
+                )
+                return "deferred"
+            self._gap_fee_deferrals.pop(exchange_oid, None)
+            logger.critical(
+                f"[{exchange_name}] Recon: fee source for {exchange_oid} stayed "
+                f"unavailable for {_GAP_FEE_DEFERRAL_MAX} cycles (fills page likely "
+                f"aged out) — emitting the corrective FEE-LESS so the terminal can "
+                f"project; reconcile the fee manually against the venue's fill "
+                f"history"
+            )
         logger.warning(
             f"[{exchange_name}] Recon: fill gap for {exchange_oid}: "
             f"exchange={exchange_order.filled} "
             f"local={pending.last_seen_cum_qty}, "
             f"corrective delta={gap} at price~{fill_price}"
         )
+        cum_fee, cum_fee_currency = self._corrective_fees(exchange_order, summary)
         recon_exec_id = f"recon-{exchange_oid}-c{exchange_order.filled!r}"
         corrective = ExecutionUpdate(
             order_id=exchange_oid,
@@ -2901,13 +3318,70 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             side=OrderSideEnum(pending.request.side),
             order_type=ExchangeOrderTypeEnum.LIMIT,
             order_status=ExchangeOrderStatusEnum.OPEN,
-            timestamp=datetime.now(UTC),
+            timestamp=(
+                datetime.fromtimestamp(snapshot_ts, tz=UTC)
+                if (snapshot_ts := getattr(exchange_order, "timestamp", None))
+                else datetime.now(UTC)
+            ),
             cum_qty=exchange_order.filled,
             last_qty=gap,
             last_price=fill_price,
             exec_id=recon_exec_id,
+            cum_fee=cum_fee,
+            cum_fee_currency=cum_fee_currency,
         )
         await self._process_execution(corrective)
+        self._gap_fee_deferrals.pop(exchange_oid, None)
+        if exchange_order.filled > pending.last_seen_cum_qty + 1e-12:
+            logger.warning(
+                f"[{exchange_name}] Recon: corrective for {exchange_oid} did not "
+                f"COMMIT (publish failed or the fill was orphan-buffered) — treating "
+                f"as deferred so terminal paths keep the entry for the retry"
+            )
+            return "deferred"
+        return "emitted"
+
+    @staticmethod
+    def _corrective_fees(
+        exchange_order: ExchangeOrderSnapshot,
+        summary: OrderFillSummary | None,
+    ) -> tuple[float | None, str | None]:
+        """Derive venue-true CUMULATIVE fee fields for a corrective fill.
+
+        Correctives used to fabricate fee=0 permanently (their stable
+        exec id makes re-emission a dedup no-op, so fidelity attaches at
+        first emission or never). Two honest sources, in order — BOTH
+        cumulative over the order, BOTH passed through as ``cum_fee``:
+
+        - The snapshot's order-level running commission
+          (spot / walutomat).
+        - The fills-summary total (futures, per-fill fees summed over
+          the order's WHOLE filled quantity — the caller refuses
+          partial pages).
+
+        The executor's dual fee watermark turns the cumulative into the
+        exactly-not-yet-attributed remainder: a per-corrective pro-rata
+        fraction would overlap across successive gap corrections (each
+        recomputed against the then-current filled total) and a
+        watermark-blind passthrough would re-charge fees that live
+        per-fill frames already attributed. Neither source available →
+        both None (the corrective stays fee-less, exactly as honest as
+        before).
+
+        Args:
+            exchange_order: The venue order snapshot driving the gap.
+            summary: Fills aggregate when fetched and coverage-complete.
+
+        Returns:
+            ``(cum_fee, cum_fee_currency)`` for the corrective.
+        """
+        snapshot_fee = getattr(exchange_order, "fee", None)
+        snapshot_fee_currency = getattr(exchange_order, "fee_currency", None)
+        if snapshot_fee and snapshot_fee_currency:
+            return snapshot_fee, snapshot_fee_currency
+        if summary is not None and summary.fee_total is not None and summary.fee_currency:
+            return summary.fee_total, summary.fee_currency
+        return None, None
 
     async def _sleep_with_jitter(self, delay_s: float) -> None:
         """Sleep ``delay_s`` scaled by ±``_EXEC_STREAM_JITTER_FRACTION``.
@@ -3440,11 +3914,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             Tuple of (stream_key, ExecutionData) ready for publishing.
         """
-        fee_amount, fee_asset = self._resolve_fee(execution)
         now = datetime.now(UTC)
         topic = order_event_topic(exchange_name, original_order.instrument, OrderEventEnum.EXECUTED)
         client_id = original_order.client_order_id
         pending = self.pending_orders.get(client_id)
+        cum_fee = getattr(execution, "cum_fee", None)
+        if cum_fee is not None:
+            fee_asset = getattr(execution, "cum_fee_currency", None) or ""
+            anchor = pending.last_published_fee.get(fee_asset, 0.0) if pending is not None else 0.0
+            fee_amount = cum_fee - anchor
+        else:
+            fee_amount, fee_asset = self._resolve_fee(execution)
         prev_cum = pending.last_seen_cum_qty if pending else 0.0
         cum_qty, delta_size, delta_price, avg_price = self._resolve_fill_quantities(
             execution, prev_cum, tracked=pending is not None
@@ -3504,8 +3984,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
           so this guard never misfires there; their replay exposure is
           closed by snapshot suppression at the source plus the exec-id LRU.
 
-        Status-only frames (``last_qty`` is None) always pass — they carry
-        no quantity to double-book.
+        Status-only frames (no ``last_qty`` AND no ``cum_qty``) always
+        pass — they carry no quantity to double-book. CUM-ONLY frames
+        (walutomat polling: ``cum_qty`` without ``last_qty``) get the
+        exec-id LRU check ONLY: their deterministic ``wal-`` ids make
+        redelivery droppable, while an equal-cum frame under a DISTINCT
+        id (the disappeared-order terminal upgrade, suffixed ``-t``)
+        must pass — its cum-anchored delta is zero, so it double-books
+        nothing and carries the terminal status the engine needs.
 
         Args:
             execution: Execution update from the exchange WebSocket.
@@ -3514,12 +4000,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             True when the frame must be dropped without publishing.
         """
-        if execution.last_qty is None:
+        if execution.last_qty is None and execution.cum_qty is None:
             return False
         exec_id = getattr(execution, "exec_id", None)
         if exec_id and exec_id in self._seen_exec_ids:
             logger.debug(f"Skipping duplicate fill {exec_id} for {client_order_id}")
             return True
+        if execution.last_qty is None:
+            return False
         pending = self.pending_orders.get(client_order_id)
         if (
             pending is not None
@@ -3657,6 +4145,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             durable_size = execution.last_qty
         else:
             durable_size = fill.last_size
+        frame_cum_fee = getattr(execution, "cum_fee", None)
+        frame_cum_fee_asset = getattr(execution, "cum_fee_currency", None) or ""
+        if durable_holder is not None and frame_cum_fee is not None:
+            durable_fee = frame_cum_fee - durable_holder.last_recorded_fee.get(
+                frame_cum_fee_asset, 0.0
+            )
+        else:
+            durable_fee = fill.fee
         await self._record_venue_event(
             {
                 "event_type": "fill_observed",
@@ -3669,7 +4165,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 "fill_price": fill.last_price,
                 "fill_size": durable_size,
                 "cum_fill_size": fill.size,
-                "fee": fill.fee,
+                "fee": durable_fee,
                 "fee_asset": fill.fee_asset,
                 "exec_id": getattr(execution, "exec_id", None),
                 "trade_id": str(raw_tid) if raw_tid else None,
@@ -3682,6 +4178,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             durable_holder.last_recorded_cum_qty = max(
                 durable_holder.last_recorded_cum_qty, fill.size
             )
+            if frame_cum_fee is not None:
+                durable_holder.last_recorded_fee[frame_cum_fee_asset] = frame_cum_fee
+            elif durable_fee and durable_size > 0:
+                fee_key = fill.fee_asset or ""
+                durable_holder.last_recorded_fee[fee_key] = (
+                    durable_holder.last_recorded_fee.get(fee_key, 0.0) + durable_fee
+                )
         if not await self._publish_execution(topic, fill):
             return
         committed = self.pending_orders.get(client_order_id)
@@ -3689,7 +4192,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             execution.last_qty is not None or execution.cum_qty is not None
         ):
             committed.last_seen_cum_qty = max(committed.last_seen_cum_qty, fill.size)
-        if execution.last_qty is not None:
+            if frame_cum_fee is not None:
+                committed.last_published_fee[frame_cum_fee_asset] = frame_cum_fee
+            elif fill.fee:
+                fee_key = fill.fee_asset or ""
+                committed.last_published_fee[fee_key] = (
+                    committed.last_published_fee.get(fee_key, 0.0) + fill.fee
+                )
+        if execution.last_qty is not None or execution.cum_qty is not None:
             self._register_seen_exec_id(getattr(execution, "exec_id", None))
         pending = self.pending_orders.get(client_order_id)
         if pending and self.exchange_client is not None:
@@ -3725,6 +4235,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         order: OrderRequestData,
         status: OrderEventType,
         exchange_order_id: str | None = None,
+        *,
+        reason: str | None = None,
     ) -> bool:
         """Publish order status event to the ZMQ topic.
 
@@ -3735,6 +4247,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             order: Order request data containing order details.
             status: Event type for topic suffix and payload status field.
             exchange_order_id: Exchange-assigned order ID (if known).
+            reason: Optional machine-readable disposition detail carried
+                in ``OrderData.reason`` (the schema field exists and was
+                never populated; e.g. ``circuit_breaker_open`` lets
+                consumers distinguish an infra refusal from a venue
+                rejection without a wire-contract change).
 
         Returns:
             True when the event was handed to the publisher without
@@ -3760,6 +4277,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 exchange=exchange_name,
                 side=order.side,
                 status=status,
+                reason=reason,
                 order_type=order.order_type,
                 size=order.quantity,
                 filled_size=0.0,
